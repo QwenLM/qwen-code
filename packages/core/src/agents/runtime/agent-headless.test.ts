@@ -36,7 +36,8 @@ import {
   AuthType,
 } from '../../core/contentGenerator.js';
 import { LlmChat } from '../../core/llm-chat.js';
-import { LlmEventType } from '../../core/turn.js';
+import { LlmEventType, Turn } from '../../core/turn.js';
+import { CoreToolScheduler } from '../../core/coreToolScheduler.js';
 import {
   getToolCallFingerprint,
   normalizeModelToolCallIds,
@@ -62,8 +63,13 @@ import type {
   ToolConfig,
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
+import type { AgentCore } from './agent-core.js';
 import { beginRetryWait } from '../../utils/retry-wait.js';
-import { DEFAULT_STALL_MS, runStallResilient } from './workflow-stall.js';
+import {
+  attachStallWatchdog,
+  DEFAULT_STALL_MS,
+  runStallResilient,
+} from './workflow-stall.js';
 import {
   isWorkflowAgentFailedError,
   WorkflowAgentFailedError,
@@ -72,7 +78,10 @@ import { WriteFileTool } from '../../tools/write-file.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { normalizeToolNameForProvider } from '../../utils/tool-name-utils.js';
 import { LoopDetectionService } from '../../services/loopDetectionService.js';
-import { logSubagentExecution } from '../../telemetry/loggers.js';
+import {
+  logLoopProtection,
+  logSubagentExecution,
+} from '../../telemetry/loggers.js';
 import type { SubagentExecutionEvent } from '../../telemetry/types.js';
 import {
   fnCall,
@@ -129,6 +138,7 @@ vi.mock('../../core/client.js');
 vi.mock('../../telemetry/loggers.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../telemetry/loggers.js')>()),
   logSubagentExecution: vi.fn(),
+  logLoopProtection: vi.fn(),
 }));
 
 vi.mock('../../skills/skill-manager.js', () => {
@@ -175,6 +185,8 @@ async function createMockConfig(
     cwd: process.cwd(),
     // Avoid writing any chat recording records from tests (e.g. via tool-call telemetry).
     chatRecording: false,
+    // The loop tests below pin the stop points; one test switches to `warn`.
+    loopProtection: 'stop',
   });
   await config.initialize();
   await config.refreshAuth(AuthType.USE_GEMINI);
@@ -546,6 +558,21 @@ describe('subagent.ts', () => {
     /** The message parts sent to the model on call `n` (0-based). */
     const sentParts = (n: number) =>
       mockSendMessageStream.mock.calls[n][1].message as Part[];
+    /**
+     * Sets `experimental.unifiedAgentLoop` for the test. The returned check
+     * asserts that the run took the loop it was set to: on the shared loop
+     * each model request goes out on a `Turn`, on the current loop none does.
+     */
+    const useAgentLoop = (shared: boolean) => {
+      vi.spyOn(Config.prototype, 'isUnifiedAgentLoopEnabled').mockReturnValue(
+        shared,
+      );
+      const turn = vi.spyOn(Turn.prototype, 'run');
+      return () =>
+        expect(turn).toHaveBeenCalledTimes(
+          shared ? mockSendMessageStream.mock.calls.length : 0,
+        );
+    };
     const expectExecuteError = async (
       scope: AgentHeadless,
       message: string,
@@ -1666,7 +1693,262 @@ describe('subagent.ts', () => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
         expect(inv.execute).toHaveBeenCalledTimes(4);
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+        // The 3rd identical call's results carry the loop-protection
+        // reminder, after the tool response (#14828).
+        expect(sentParts(3).at(-1)?.text).toContain(
+          '`list_directory` has been called 3 times in a row',
+        );
+        expect(sentParts(3)[0].functionResponse).toBeDefined();
+        expect(
+          [1, 2, 4].some((n) =>
+            sentParts(n).some((part) => part.text?.includes('in a row')),
+          ),
+        ).toBe(false);
       });
+
+      it('reminds without stopping consecutive identical tool calls under warn', async () => {
+        const missingPath = '/workspace/project/missing-directory';
+        const { config, inv, toolConfig } = await setupReadTool(
+          decl('list_directory', 'Lists a directory'),
+          invocation(
+            { path: missingPath },
+            'List directory',
+            toolResult('Error: ENOENT', 'Directory not found'),
+          ),
+          'List Directory',
+          'List directory contents',
+        );
+        vi.spyOn(config, 'getLoopProtection').mockReturnValue('warn');
+        respond(
+          ...rounds(6, 'list_directory', { path: missingPath }, 'call'),
+          'stop',
+        );
+        const scope = await runAgent(config, { tools: toolConfig });
+
+        expect(inv.execute).toHaveBeenCalledTimes(6);
+        expect(scope.getTerminateMode()).not.toBe(
+          AgentTerminateMode.LOOP_DETECTED,
+        );
+        const reminders = [0, 1, 2, 3, 4, 5, 6].filter((n) =>
+          sentParts(n).some((part) => part.text?.includes('in a row')),
+        );
+        expect(reminders).toEqual([3]);
+      });
+
+      it.each([false, true])(
+        'does not credit a prepared reminder when the run ends at maxTurns (unifiedAgentLoop=%s)',
+        async (shared) => {
+          const expectLoop = useAgentLoop(shared);
+          // Negative control: the reminder is taken at the end of round 3
+          // (three identical tool results), and the run exits at the maxTurns
+          // check before a fourth request is attempted. No round then crosses
+          // a model-acceptance boundary, so `reminded` telemetry never credits
+          // a warning the model never saw — the earlier take-time commit is
+          // what this pins against.
+          const missingPath = '/workspace/project/missing-directory';
+          const { config, toolConfig } = await setupReadTool(
+            decl('list_directory', 'Lists a directory'),
+            invocation(
+              { path: missingPath },
+              'List directory',
+              toolResult('Error: ENOENT', 'Directory not found'),
+            ),
+            'List Directory',
+            'List directory contents',
+          );
+          vi.spyOn(config, 'getLoopProtection').mockReturnValue('warn');
+          respond(
+            ...rounds(3, 'list_directory', { path: missingPath }, 'call'),
+          );
+          const takeSpy = vi.spyOn(
+            LoopDetectionService.prototype,
+            'takeLoopReminder',
+          );
+          const scope = await runAgent(config, {
+            tools: toolConfig,
+            run: { max_time_minutes: 5, max_turns: 3 },
+          });
+
+          // Three tool rounds, no fourth model request.
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.MAX_TURNS);
+          // The reminder really was queued and taken at the end of round 3.
+          const taken = takeSpy.mock.results
+            .map((result) => result.value)
+            .filter(Boolean);
+          expect(taken).toHaveLength(1);
+          expect(String(taken[0])).toContain('in a row');
+          // Prepared, not committed: the delivery accounting never credits
+          // `reminded` for the warning that stayed unsent.
+          const decisions = vi
+            .mocked(logLoopProtection)
+            .mock.calls.map(([, event]) => event.decision);
+          expect(decisions).not.toContain('reminded');
+          expectLoop();
+        },
+      );
+
+      it.each([false, true])(
+        'commits the reminder once at the next round model acceptance (positive control) (unifiedAgentLoop=%s)',
+        async (shared) => {
+          const expectLoop = useAgentLoop(shared);
+          // With a genuine next round whose response streams model content,
+          // the reminder rides with that request and its delivery commits
+          // exactly once at the first chunk.
+          const missingPath = '/workspace/project/missing-directory';
+          const { config, toolConfig } = await setupReadTool(
+            decl('list_directory', 'Lists a directory'),
+            invocation(
+              { path: missingPath },
+              'List directory',
+              toolResult('Error: ENOENT', 'Directory not found'),
+            ),
+            'List Directory',
+            'List directory contents',
+          );
+          vi.spyOn(config, 'getLoopProtection').mockReturnValue('warn');
+          respond(
+            ...rounds(3, 'list_directory', { path: missingPath }, 'call'),
+            'stop',
+          );
+          const scope = await runAgent(config, { tools: toolConfig });
+
+          expect(scope.getTerminateMode()).not.toBe(
+            AgentTerminateMode.LOOP_DETECTED,
+          );
+          expect(
+            sentParts(3).some((part) => part.text?.includes('in a row')),
+          ).toBe(true);
+          const decisions = vi
+            .mocked(logLoopProtection)
+            .mock.calls.map(([, event]) => event.decision);
+          expect(decisions.filter((d) => d === 'reminded')).toHaveLength(1);
+          expectLoop();
+        },
+      );
+
+      it.each([false, true])(
+        'abandons the prepared reminder when the reminder-carrying send fails before acceptance (unifiedAgentLoop=%s)',
+        async (shared) => {
+          const expectLoop = useAgentLoop(shared);
+          // Pre-send error control: the request that carries the reminder
+          // rejects before any chunk proves model acceptance. The prepared
+          // delivery is abandoned in the round finally, so `reminded` stays
+          // un-credited even though the text rode in the draft request.
+          const missingPath = '/workspace/project/missing-directory';
+          const { config, toolConfig } = await setupReadTool(
+            decl('list_directory', 'Lists a directory'),
+            invocation(
+              { path: missingPath },
+              'List directory',
+              toolResult('Error: ENOENT', 'Directory not found'),
+            ),
+            'List Directory',
+            'List directory contents',
+          );
+          vi.spyOn(config, 'getLoopProtection').mockReturnValue('warn');
+          const callRounds = rounds(
+            3,
+            'list_directory',
+            { path: missingPath },
+            'call',
+          );
+          let sendIndex = 0;
+          mockSendMessageStream.mockImplementation(async () => {
+            sendIndex += 1;
+            if (sendIndex > callRounds.length) {
+              throw new Error('provider connection reset');
+            }
+            return streamOf(callsChunk(callRounds[sendIndex - 1]!));
+          });
+          const takeSpy = vi.spyOn(
+            LoopDetectionService.prototype,
+            'takeLoopReminder',
+          );
+          const scope = await createAgent(config, { tools: toolConfig });
+          await expect(scope.execute(new ContextState())).rejects.toThrow(
+            'provider connection reset',
+          );
+
+          // The fourth request carried the reminder text and failed pre-send.
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(4);
+          expect(
+            sentParts(3).some((part) => part.text?.includes('in a row')),
+          ).toBe(true);
+          const taken = takeSpy.mock.results
+            .map((result) => result.value)
+            .filter(Boolean);
+          expect(taken).toHaveLength(1);
+          const decisions = vi
+            .mocked(logLoopProtection)
+            .mock.calls.map(([, event]) => event.decision);
+          expect(decisions).not.toContain('reminded');
+          expectLoop();
+        },
+      );
+
+      it.each([false, true])(
+        'abandons the prepared reminder when prepareTools rejects before the send (unifiedAgentLoop=%s)',
+        async (shared) => {
+          const expectLoop = useAgentLoop(shared);
+          // prepareTools rejection control: the reminder is taken at the end
+          // of round 1 (three parallel identical calls), and round 2 fails in
+          // prepareTools() before sendMessageStream is ever reached.
+          const missingPath = '/workspace/project/missing-directory';
+          const { config, toolConfig } = await setupReadTool(
+            decl('list_directory', 'Lists a directory'),
+            invocation(
+              { path: missingPath },
+              'List directory',
+              toolResult('Error: ENOENT', 'Directory not found'),
+            ),
+            'List Directory',
+            'List directory contents',
+          );
+          vi.spyOn(config, 'getLoopProtection').mockReturnValue('warn');
+          vi.spyOn(config, 'getExecutionEnvironment').mockReturnValue(
+            {} as ExecutionEnvironment,
+          );
+          respond([
+            call('list_directory', { path: missingPath }, 'call_1'),
+            call('list_directory', { path: missingPath }, 'call_2'),
+            call('list_directory', { path: missingPath }, 'call_3'),
+          ]);
+          const takeSpy = vi.spyOn(
+            LoopDetectionService.prototype,
+            'takeLoopReminder',
+          );
+          const scope = await createAgent(config, { tools: toolConfig });
+          const core = (scope as unknown as { core: AgentCore }).core;
+          // The loop and the tool-call processor each call prepareTools per
+          // round: rounds one and two succeed (the setup warm-up plus round
+          // one), round two's second call — before the reminder-carrying
+          // send — rejects.
+          let prepareCalls = 0;
+          vi.spyOn(core, 'prepareTools').mockImplementation(async () => {
+            prepareCalls += 1;
+            if (prepareCalls >= 3) {
+              throw new Error('tool preparation failed');
+            }
+            return [decl('list_directory', 'Lists a directory')];
+          });
+
+          await expect(scope.execute(new ContextState())).rejects.toThrow(
+            'tool preparation failed',
+          );
+
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          const taken = takeSpy.mock.results
+            .map((result) => result.value)
+            .filter(Boolean);
+          expect(taken).toHaveLength(1);
+          const decisions = vi
+            .mocked(logLoopProtection)
+            .mock.calls.map(([, event]) => event.decision);
+          expect(decisions).not.toContain('reminded');
+          expectLoop();
+        },
+      );
 
       it('keeps polling task_list while the task board changes (issue #9450)', async () => {
         // Identical task_list arguments do not imply an identical result:
@@ -1728,46 +2010,51 @@ describe('subagent.ts', () => {
         );
       });
 
-      it('counts a provider-duplicate call id once so result evidence stays in sync (issue #9450)', async () => {
-        // A provider can stream the SAME call id twice in one response — the
-        // exact pathology dedupeToolCallsById exists for. Execution collapses
-        // the pair to one call (one recorded result), so the loop guard must
-        // also count one request; otherwise the request counter runs one
-        // ahead of the result evidence and the result-aware exemption
-        // fails safe, halting a fully productive poller.
-        let boardVersion = 0;
-        const { config, inv, toolConfig, args, polls } = await setupTaskList(
-          // Every executed poll returns a changed board.
-          vi.fn(async () => ({
-            llmContent: `#7 [in_progress] @peer-a — task (v${++boardVersion})`,
-            returnDisplay: 'Listed tasks',
-          })),
-        );
-        // Round 1 emits the same call id twice (the provider duplicate); the
-        // remaining rounds emit one call each, the board changing every time.
-        const duplicateId = 'dup_call_0';
-        respond(
-          [
-            call('task_list', args, duplicateId),
-            call('task_list', args, duplicateId),
-          ],
-          ...polls(5),
-          'stop',
-        );
-        const scope = await runAgent(config, {
-          tools: toolConfig,
-          run: { ...defaultRunConfig, max_turns: 20 },
-        });
+      it.each([false, true])(
+        'counts a provider-duplicate call id once so result evidence stays in sync (issue #9450) (unifiedAgentLoop=%s)',
+        async (shared) => {
+          const expectLoop = useAgentLoop(shared);
+          // A provider can stream the SAME call id twice in one response — the
+          // exact pathology dedupeToolCallsById exists for. Execution collapses
+          // the pair to one call (one recorded result), so the loop guard must
+          // also count one request; otherwise the request counter runs one
+          // ahead of the result evidence and the result-aware exemption
+          // fails safe, halting a fully productive poller.
+          let boardVersion = 0;
+          const { config, inv, toolConfig, args, polls } = await setupTaskList(
+            // Every executed poll returns a changed board.
+            vi.fn(async () => ({
+              llmContent: `#7 [in_progress] @peer-a — task (v${++boardVersion})`,
+              returnDisplay: 'Listed tasks',
+            })),
+          );
+          // Round 1 emits the same call id twice (the provider duplicate); the
+          // remaining rounds emit one call each, the board changing every time.
+          const duplicateId = 'dup_call_0';
+          respond(
+            [
+              call('task_list', args, duplicateId),
+              call('task_list', args, duplicateId),
+            ],
+            ...polls(5),
+            'stop',
+          );
+          const scope = await runAgent(config, {
+            tools: toolConfig,
+            run: { ...defaultRunConfig, max_turns: 20 },
+          });
 
-        // The duplicate id executes once (dedupeToolCallsById), so 6 executed
-        // polls across 7 model turns; the changed board must carry the agent
-        // to goal instead of a false loop halt.
-        expect(inv.execute).toHaveBeenCalledTimes(6);
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(7);
-        expect(scope.getTerminateMode()).not.toBe(
-          AgentTerminateMode.LOOP_DETECTED,
-        );
-      });
+          // The duplicate id executes once (dedupeToolCallsById), so 6 executed
+          // polls across 7 model turns; the changed board must carry the agent
+          // to goal instead of a false loop halt.
+          expect(inv.execute).toHaveBeenCalledTimes(6);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(7);
+          expect(scope.getTerminateMode()).not.toBe(
+            AgentTerminateMode.LOOP_DETECTED,
+          );
+          expectLoop();
+        },
+      );
 
       it('does not carry a stale loop attribution into a re-executed run (issue #9450)', async () => {
         const { config, toolConfig, polls } =
@@ -2470,6 +2757,50 @@ describe('subagent.ts', () => {
           return { result, attempts: () => attempts };
         };
 
+        it.each([false, true])(
+          'renews the stall window after preparing a follow-up stream (shared=%s)',
+          async (shared) => {
+            const { scope, emitter } = await createScope({ max_turns: 3 });
+            vi.stubEnv(
+              'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+              shared ? '1' : undefined,
+            );
+            const controller = new AbortController();
+            vi.useFakeTimers();
+            const watchdog = attachStallWatchdog(emitter, controller, 350);
+            try {
+              let startPreparation!: () => void;
+              const preparing = new Promise<void>((resolve) => {
+                startPreparation = resolve;
+              });
+              mockSendMessageStream
+                .mockResolvedValueOnce(
+                  streamOf(callsChunk([call('missing_tool', {}, 'call_1')])),
+                )
+                .mockImplementation(async () => {
+                  startPreparation();
+                  await new Promise((resolve) => setTimeout(resolve, 220));
+                  return (async function* () {
+                    await new Promise((resolve) => setTimeout(resolve, 220));
+                    yield doneChunk;
+                  })();
+                });
+              const run = scope.execute(new ContextState(), controller.signal);
+              await Promise.race([preparing, run]);
+              await vi.advanceTimersByTimeAsync(440);
+              await run;
+              expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+              expect(watchdog.stalled()).toBe(false);
+              expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+              expect(scope.getFinalText()).toBe('Done.');
+            } finally {
+              watchdog.dispose();
+              vi.useRealTimers();
+              vi.unstubAllEnvs();
+            }
+          },
+        );
+
         it('keeps a backoff longer than stallMs on one attempt', async () => {
           vi.useFakeTimers();
           try {
@@ -2992,100 +3323,117 @@ describe('subagent.ts', () => {
         expect(readResult!.success).toBe(true);
       });
 
-      it('should mark truncated subagent write_file calls as output-truncated errors', async () => {
-        const { config, toolConfig } = await setupWriteFile();
-        mockSendMessageStream.mockImplementation(async () =>
-          streamOf<object>(
-            writeCall('call_write', { file_path: '/tmp/truncated.txt' }),
-            partsChunk([], 'MAX_TOKENS'),
-            partsChunk([{ text: 'done' }]),
-          ),
-        );
-        const writeResult = await runWrite(config, toolConfig);
+      describe.each([false, true])(
+        'model rounds with unifiedAgentLoop=%s',
+        (shared) => {
+          let expectLoop: () => void;
+          beforeEach(() => {
+            expectLoop = useAgentLoop(shared);
+          });
+          afterEach(() => expectLoop());
 
-        expect(writeResult.success).toBe(false);
-        expect(writeResult.error).toContain(
-          'truncated due to max_tokens limit',
-        );
-        expect(writeResult.error).toContain(
-          'rejected to prevent writing truncated content',
-        );
-        expect(writeResult.error).not.toContain(
-          "params must have required property 'content'",
-        );
-      });
+          it('should mark truncated subagent write_file calls as output-truncated errors', async () => {
+            const { config, toolConfig } = await setupWriteFile();
+            mockSendMessageStream.mockImplementation(async () =>
+              streamOf<object>(
+                writeCall('call_write', { file_path: '/tmp/truncated.txt' }),
+                partsChunk([], 'MAX_TOKENS'),
+                partsChunk([{ text: 'done' }]),
+              ),
+            );
+            const writeResult = await runWrite(config, toolConfig);
 
-      it('should NOT reject write_file when truncated attempt is followed by successful retry', async () => {
-        const { config, toolConfig } = await setupWriteFile();
-        // First call: truncated (MAX_TOKENS). Retry resets state, second call:
-        // complete write_file. The scheduler should see wasOutputTruncated=false
-        // for the retried response and allow the tool to proceed. The second
-        // round's plain text ends the agent loop.
-        mockSendMessageStream
-          .mockImplementationOnce(async () =>
-            streamOf<object>(
-              // Truncated response with incomplete write_file args
-              writeCall('call_write_truncated', {
-                file_path: '/tmp/retry-test.txt',
-              }),
-              { type: 'retry' },
-              // After retry, complete response with all required args
-              writeCall('call_write_complete', {
-                file_path: '/tmp/retry-test.txt',
-                content: 'hello',
-              }),
-              partsChunk([], 'STOP'),
-            ),
-          )
-          .mockImplementation(async () =>
-            streamOf(partsChunk([{ text: 'done' }], 'STOP')),
-          );
-        const writeResult = await runWrite(config, toolConfig);
-
-        // After retry the wasOutputTruncated flag must have been cleared, so
-        // the call should NOT be rejected with a truncation error — even if
-        // execution fails for unrelated reasons (e.g. mock filesystem).
-        expect(writeResult.error).not.toContain(
-          'truncated due to max_tokens limit',
-        );
-        expect(writeResult.error).not.toContain(
-          'rejected to prevent writing truncated content',
-        );
-      });
-
-      it.each([
-        { retry: { type: 'retry' as const, isContinuation: true } },
-        { retry: { type: 'retry' as const } },
-      ])(
-        'forwards retry events to subagent loop detection',
-        async ({ retry }) => {
-          const loopSpy = vi
-            .spyOn(LoopDetectionService.prototype, 'addAndCheckHeuristicLoops')
-            .mockReturnValue(false);
-
-          const { config } = await createMockConfig();
-          mockSendMessageStream.mockResolvedValue(
-            streamOf<object>(
-              { ...retry },
-              partsChunk([{ text: 'done' }], 'STOP'),
-            ),
-          );
-          await runAgent(config, {
-            tools: { tools: [] },
-            emitter: new AgentEventEmitter(),
+            expect(writeResult.success).toBe(false);
+            expect(writeResult.error).toContain(
+              'truncated due to max_tokens limit',
+            );
+            expect(writeResult.error).toContain(
+              'rejected to prevent writing truncated content',
+            );
+            expect(writeResult.error).not.toContain(
+              "params must have required property 'content'",
+            );
           });
 
-          const retryArg = loopSpy.mock.calls.find(
-            ([event]) => event.type === LlmEventType.Retry,
-          )?.[0] as { type: LlmEventType; isContinuation?: boolean };
-          expect(retryArg).toEqual(
-            expect.objectContaining({ type: LlmEventType.Retry }),
+          it('clears the truncation flag when a retry replaces the attempt', async () => {
+            const { config, toolConfig } = await setupWriteFile();
+            // First call: truncated (MAX_TOKENS). Retry resets state, second call:
+            // complete write_file. The scheduler should see wasOutputTruncated=false
+            // for the retried response and allow the tool to proceed. The second
+            // round's plain text ends the agent loop.
+            mockSendMessageStream
+              .mockImplementationOnce(async () =>
+                streamOf<object>(
+                  // Truncated response with incomplete write_file args
+                  writeCall('call_write_truncated', {
+                    file_path: '/tmp/retry-test.txt',
+                  }),
+                  partsChunk([], 'MAX_TOKENS'),
+                  { type: 'retry' },
+                  // After retry, complete response with all required args
+                  writeCall('call_write_complete', {
+                    file_path: '/tmp/retry-test.txt',
+                    content: 'hello',
+                  }),
+                  partsChunk([], 'STOP'),
+                ),
+              )
+              .mockImplementation(async () =>
+                streamOf(partsChunk([{ text: 'done' }], 'STOP')),
+              );
+            const writeResult = await runWrite(config, toolConfig);
+
+            // After retry the wasOutputTruncated flag must have been cleared, so
+            // the call should NOT be rejected with a truncation error — even if
+            // execution fails for unrelated reasons (e.g. mock filesystem).
+            // The retry also dropped the truncated attempt's call.
+            expect(writeResult.callId).toBe('call_write_complete');
+            expect(writeResult.error).not.toContain(
+              'truncated due to max_tokens limit',
+            );
+            expect(writeResult.error).not.toContain(
+              'rejected to prevent writing truncated content',
+            );
+          });
+
+          it.each([
+            { retry: { type: 'retry' as const, isContinuation: true } },
+            { retry: { type: 'retry' as const } },
+          ])(
+            'forwards retry events to subagent loop detection',
+            async ({ retry }) => {
+              const loopSpy = vi
+                .spyOn(
+                  LoopDetectionService.prototype,
+                  'addAndCheckHeuristicLoops',
+                )
+                .mockReturnValue(false);
+
+              const { config } = await createMockConfig();
+              mockSendMessageStream.mockResolvedValue(
+                streamOf<object>(
+                  { ...retry },
+                  partsChunk([{ text: 'done' }], 'STOP'),
+                ),
+              );
+              await runAgent(config, {
+                tools: { tools: [] },
+                emitter: new AgentEventEmitter(),
+              });
+
+              const retryArg = loopSpy.mock.calls.find(
+                ([event]) => event.type === LlmEventType.Retry,
+              )?.[0] as { type: LlmEventType; isContinuation?: boolean };
+              expect(retryArg).toEqual(
+                expect.objectContaining({ type: LlmEventType.Retry }),
+              );
+              if ('isContinuation' in retry) {
+                expect(retryArg.isContinuation).toBe(true);
+              } else {
+                expect(retryArg).not.toHaveProperty('isContinuation');
+              }
+            },
           );
-          if ('isContinuation' in retry) {
-            expect(retryArg.isContinuation).toBe(true);
-          } else {
-            expect(retryArg).not.toHaveProperty('isContinuation');
-          }
         },
       );
 
@@ -3114,6 +3462,297 @@ describe('subagent.ts', () => {
         expect(
           mockSendMessageStream.mock.calls[1][1].config.maxOutputTokens,
         ).toBe(65_536);
+      });
+    });
+
+    describe('on the shared agent loop (experimental.unifiedAgentLoop)', () => {
+      const EVENTS = [
+        AgentEventType.ROUND_START,
+        AgentEventType.STREAM_TEXT,
+        AgentEventType.ROUND_TEXT,
+        AgentEventType.ROUND_END,
+        AgentEventType.TOOL_CALL,
+        AgentEventType.TOOL_RESULT,
+        AgentEventType.USAGE_METADATA,
+        AgentEventType.FINISH,
+        AgentEventType.ERROR,
+      ] as const;
+      const VOLATILE = new Set([
+        'timestamp',
+        'runId',
+        'subagentId',
+        'durationMs',
+        'startTimeMs',
+        'totalDurationMs',
+        'startedAt',
+        'endedAt',
+        'executionDurationMs',
+        'executionId',
+      ]);
+      /** The agent's id, which each run draws anew, inside prompt ids. */
+      const AGENT_ID = /test-agent-[0-9a-f]+/g;
+      /**
+       * An event with a placeholder for each field that differs between any
+       * two runs, so the field must still be there.
+       */
+      const stable = (event: object) =>
+        JSON.parse(
+          JSON.stringify(event, (key, value) =>
+            VOLATILE.has(key) ? '<volatile>' : value,
+          ).replace(AGENT_ID, 'test-agent-<id>'),
+        );
+      type Outcome = {
+        requests: unknown[];
+        events: Array<[string, unknown]>;
+        terminateMode: AgentTerminateMode;
+        error?: string;
+        turns: number;
+      };
+      /**
+       * Runs `scenario` with the setting off and on: what the model received,
+       * the agent's events and how the run ended.
+       */
+      const onBothPaths = async (
+        scenario: (run: AbortController) => void,
+      ): Promise<Outcome[]> => {
+        const outcomes: Outcome[] = [];
+        try {
+          for (const shared of [false, true]) {
+            vi.stubEnv(
+              'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+              shared ? '1' : undefined,
+            );
+            mockSendMessageStream.mockReset();
+            const run = new AbortController();
+            scenario(run);
+            const { config } = await setupListFiles();
+            const emitter = new AgentEventEmitter();
+            const events: Array<[string, unknown]> = [];
+            for (const type of EVENTS) {
+              emitter.on(type, (event: object) =>
+                events.push([type, stable(event)]),
+              );
+            }
+            const turn = vi.spyOn(Turn.prototype, 'run');
+            const scope = await createAgent(config, {
+              tools: { tools: ['list_files'] },
+              emitter,
+            });
+            let error: string | undefined;
+            await scope
+              .execute(new ContextState(), run.signal)
+              .catch((e: unknown) => {
+                error = e instanceof Error ? e.message : String(e);
+              });
+            expect(turn).toHaveBeenCalledTimes(
+              shared ? mockSendMessageStream.mock.calls.length : 0,
+            );
+            turn.mockRestore();
+            outcomes.push({
+              requests: mockSendMessageStream.mock.calls.map(
+                ([model, params, promptId]) =>
+                  stable({
+                    model,
+                    message: params.message,
+                    tools: params.config.tools,
+                    maxOutputTokens: params.config.maxOutputTokens,
+                    promptId,
+                  }),
+              ),
+              events,
+              terminateMode: scope.getTerminateMode(),
+              ...(error !== undefined ? { error } : {}),
+              turns: mockSendMessageStream.mock.calls.length,
+            });
+          }
+        } finally {
+          vi.unstubAllEnvs();
+        }
+        return outcomes;
+      };
+      const listFiles = (id: string) => call('list_files', { path: '.' }, id);
+      const answer = partsChunk(
+        [{ text: 'Thinking.', thought: true }, { text: 'Done.' }],
+        'STOP',
+      );
+
+      it('sends each round on a Turn with the same requests and events', async () => {
+        const [current, shared] = await onBothPaths(() =>
+          mockSendMessageStream
+            .mockImplementationOnce(async () =>
+              streamOf<object>(
+                partsChunk([{ text: 'Let me look.' }]),
+                callsChunk([listFiles('call_1')], {
+                  usageMetadata: { totalTokenCount: 7 },
+                }),
+              ),
+            )
+            .mockImplementation(async () => streamOf(answer)),
+        );
+        expect(shared.turns).toBe(2);
+        expect(shared).toEqual(current);
+      });
+
+      it('keeps the escalated output limit and drops a retried attempt as before', async () => {
+        const [current, shared] = await onBothPaths(() =>
+          mockSendMessageStream
+            .mockImplementationOnce(async () =>
+              streamOf<object>(
+                callsChunk([listFiles('call_stale')]),
+                { type: 'retry', maxOutputTokensEscalated: 65_536 },
+                callsChunk([listFiles('call_1')]),
+              ),
+            )
+            .mockImplementation(async () => streamOf(answer)),
+        );
+        expect(shared.requests[1]).toMatchObject({ maxOutputTokens: 65_536 });
+        expect(JSON.stringify(shared.requests[1])).not.toContain('call_stale');
+        expect(shared).toEqual(current);
+      });
+
+      it.each([
+        {
+          description: 'a later chunk supplies the ID',
+          chunks: [
+            callsChunk([listFiles('call_1')]),
+            { type: 'chunk', value: { responseId: 'response-1' } },
+          ],
+          responseId: 'response-1',
+        },
+        {
+          description: 'the retried attempt has no ID',
+          chunks: [
+            { type: 'chunk', value: { responseId: 'discarded-response' } },
+            { type: 'retry' },
+            callsChunk([listFiles('call_1')]),
+          ],
+          responseId: undefined,
+        },
+      ])(
+        'correlates tool requests when $description',
+        async ({ chunks, responseId }) => {
+          const schedule = vi.spyOn(CoreToolScheduler.prototype, 'schedule');
+          await onBothPaths(() =>
+            mockSendMessageStream
+              .mockImplementationOnce(async () => streamOf<object>(...chunks))
+              .mockImplementation(async () => streamOf(answer)),
+          );
+          expect(schedule).toHaveBeenCalledTimes(2);
+          for (const [requests] of schedule.mock.calls) {
+            expect(requests).toMatchObject([
+              { callId: 'call_1', response_id: responseId },
+            ]);
+          }
+        },
+      );
+
+      it('ends the run with the failure the request threw', async () => {
+        const [current, shared] = await onBothPaths(() =>
+          mockSendMessageStream.mockImplementation(async () =>
+            (async function* () {
+              yield partsChunk([{ text: 'Partial' }]);
+              throw new Error('upstream exploded');
+            })(),
+          ),
+        );
+        expect(shared).toMatchObject({
+          terminateMode: AgentTerminateMode.ERROR,
+          error: 'upstream exploded',
+        });
+        expect(shared).toEqual(current);
+      });
+
+      it('stops the round at a loop the stream shows, and closes the stream', async () => {
+        const closed: boolean[] = [];
+        const [current, shared] = await onBothPaths(() => {
+          vi.spyOn(
+            LoopDetectionService.prototype,
+            'addAndCheckHeuristicLoops',
+          ).mockImplementation(
+            (event) =>
+              event.type === LlmEventType.Content && event.value === 'again',
+          );
+          mockSendMessageStream.mockImplementation(async () =>
+            (async function* () {
+              try {
+                yield partsChunk([{ text: 'again' }]);
+                yield callsChunk([listFiles('call_after_loop')]);
+              } finally {
+                closed.push(true);
+              }
+            })(),
+          );
+        });
+        expect(shared.terminateMode).toBe(AgentTerminateMode.LOOP_DETECTED);
+        expect(shared.turns).toBe(1);
+        expect(closed).toEqual([true, true]);
+        expect(shared).toEqual(current);
+      });
+
+      it('streams the visible text already received when a thought trips the loop guard', async () => {
+        const thought = {
+          text: 'I need to check the workspace.',
+          thought: true,
+        };
+        const [current, shared] = await onBothPaths(() =>
+          mockSendMessageStream.mockImplementation(async () =>
+            streamOf(
+              partsChunk([thought]),
+              partsChunk([thought]),
+              partsChunk([thought, { text: 'Here is the answer.' }]),
+              partsChunk([{ text: 'Never seen.' }]),
+            ),
+          ),
+        );
+        expect(shared.terminateMode).toBe(AgentTerminateMode.LOOP_DETECTED);
+        expect(shared.events).toContainEqual([
+          AgentEventType.STREAM_TEXT,
+          expect.objectContaining({
+            text: 'Here is the answer.',
+            thought: false,
+          }),
+        ]);
+        expect(shared.events).not.toContainEqual([
+          AgentEventType.STREAM_TEXT,
+          expect.objectContaining({ text: 'Never seen.' }),
+        ]);
+        expect(shared).toEqual(current);
+      });
+
+      it('cancels the run when its signal aborts mid-stream', async () => {
+        const [current, shared] = await onBothPaths((run) =>
+          mockSendMessageStream.mockImplementation(async () =>
+            (async function* () {
+              yield partsChunk([{ text: 'Started.' }]);
+              // The parent cancels the run mid-stream.
+              run.abort();
+              yield partsChunk([{ text: 'Never seen.' }]);
+            })(),
+          ),
+        );
+        expect(shared.terminateMode).toBe(AgentTerminateMode.CANCELLED);
+        expect(shared).toEqual(current);
+      });
+
+      it('drops the calls of a model the fallback replaced (intended difference)', async () => {
+        const [current, shared] = await onBothPaths(() =>
+          mockSendMessageStream
+            .mockImplementationOnce(async () =>
+              streamOf<object>(
+                callsChunk([listFiles('call_failed_model')]),
+                {
+                  type: 'model_fallback',
+                  info: { fromModel: 'a', toModel: 'b' },
+                },
+                callsChunk([listFiles('call_1')]),
+              ),
+            )
+            .mockImplementation(async () => streamOf(answer)),
+        );
+        const sentIds = (outcome: Outcome) =>
+          JSON.stringify(outcome.requests[1]).match(/call_\w+/g);
+        expect(sentIds(current)).toEqual(['call_failed_model', 'call_1']);
+        expect(sentIds(shared)).toEqual(['call_1']);
       });
     });
   });

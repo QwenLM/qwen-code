@@ -11,11 +11,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   daemonDiscoveryFilePath,
   daemonDiscoveryUrl,
+  daemonTokenFilePath,
   isProcessAlive,
   readDaemonDiscoveries,
+  readDaemonToken,
   removeDaemonDiscovery,
+  removeDaemonToken,
+  removeStaleDaemonTokens,
   resolveDaemonDiscoveryDir,
   writeDaemonDiscovery,
+  writeDaemonToken,
   type DaemonDiscoveryRecord,
 } from './daemon-discovery.js';
 
@@ -62,6 +67,30 @@ describe('daemon discovery records', () => {
     expect(fs.statSync(written).mode & 0o777).toBe(0o600);
   });
 
+  it('round-trips a pid-scoped token sidecar with private permissions', () => {
+    const written = writeDaemonToken(4170, process.pid, 'secret', dir);
+    expect(written).toBe(daemonTokenFilePath(4170, process.pid, dir));
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(written).mode & 0o777).toBe(0o600);
+    }
+    expect(readDaemonToken(4170, process.pid, dir)).toBe('secret');
+    expect(removeDaemonToken(4170, process.pid, dir)).toBe(true);
+    expect(readDaemonToken(4170, process.pid, dir)).toBeUndefined();
+  });
+
+  it('removes token sidecars for other instances on the same port', () => {
+    writeDaemonToken(4170, 111, 'old', dir);
+    writeDaemonToken(4170, 222, 'current', dir);
+    writeDaemonToken(4171, 333, 'other-port', dir);
+
+    expect(removeStaleDaemonTokens(4170, 222, dir)).toEqual([
+      'daemon-4170-111.token',
+    ]);
+    expect(fs.existsSync(daemonTokenFilePath(4170, 111, dir))).toBe(false);
+    expect(fs.existsSync(daemonTokenFilePath(4170, 222, dir))).toBe(true);
+    expect(fs.existsSync(daemonTokenFilePath(4171, 333, dir))).toBe(true);
+  });
+
   it('skips malformed records without failing the whole listing', () => {
     writeDaemonDiscovery(record(), dir);
     fs.writeFileSync(path.join(dir, 'daemon-4171.json'), '{not json');
@@ -81,6 +110,7 @@ describe('daemon discovery records', () => {
   it('validates the restart fields while keeping them optional', () => {
     const restartable = record({
       startupWorkspaces: ['/tmp/project'],
+      conversationsDir: path.join(dir, 'Conversations'),
       web: false,
       requireAuth: true,
     });
@@ -106,6 +136,24 @@ describe('daemon discovery records', () => {
       'daemon-4173.json',
     ]);
   });
+
+  it.each(['', '.', 'relative/root', '~/Conversations', '/root\0suffix', 42])(
+    'rejects an invalid Conversations root in a discovery record: %j',
+    (conversationsDir) => {
+      fs.writeFileSync(
+        path.join(dir, 'daemon-4170.json'),
+        JSON.stringify({ ...record(), conversationsDir }),
+      );
+      const { entries, invalid } = readDaemonDiscoveries(dir);
+      expect(entries).toEqual([]);
+      expect(invalid).toEqual([
+        {
+          path: path.join(dir, 'daemon-4170.json'),
+          reason: 'invalid record',
+        },
+      ]);
+    },
+  );
 
   it('removes a record only for the expected process', () => {
     const written = writeDaemonDiscovery(record(), dir);

@@ -725,6 +725,131 @@ test.describe('enhanced table fullscreen', () => {
     });
   }
 
+  for (const shadow of [false, true]) {
+    for (const fullscreen of [false, true]) {
+      test(`keeps table controls nonmodal, shadow=${shadow}, fullscreen=${fullscreen}`, async ({
+        page,
+      }, testInfo) => {
+        await openFixture(page, testInfo, { shadow });
+        if (fullscreen)
+          await page
+            .getByRole('button', { name: 'Fullscreen', exact: true })
+            .click();
+        const pageModality = () =>
+          page.evaluate(() => ({
+            pointerEvents: document.body.style.pointerEvents,
+            scrollLock: document.body.getAttribute('data-scroll-locked'),
+          }));
+        const baseline = await pageModality();
+        expect(baseline.scrollLock).toBe(fullscreen ? '1' : null);
+        const density = page.getByRole('button', { name: 'Table density' });
+        const copy = page
+          .locator('[data-selection-copy-table]')
+          .getByRole('button', { name: 'Copy', exact: true });
+        await copy.click();
+        await expect(page.getByRole('menu', { name: 'Copy' })).toBeVisible();
+        await expect.poll(pageModality).toEqual(baseline);
+        await density.click();
+        await expect(page.getByRole('menu', { name: 'Copy' })).toHaveCount(0);
+        await expect(
+          page.getByRole('menu', { name: 'Table density' }),
+        ).toBeVisible();
+        await expect.poll(pageModality).toEqual(baseline);
+        await page
+          .getByRole('menuitemradio', { name: 'Compact', exact: true })
+          .click();
+        await expect(density).toContainText('Compact density');
+        await density.click();
+        await expect(
+          page.getByRole('menu', { name: 'Table density' }),
+        ).toBeVisible();
+        await page.keyboard.press('Escape');
+        await expect(density).toBeFocused();
+        await expect(page.getByRole('menu')).toHaveCount(0);
+        await copy.click();
+        await page
+          .getByRole('menuitem', { name: 'Copy text', exact: true })
+          .click();
+        await copy.click();
+        await expect(page.getByRole('menu', { name: 'Copy' })).toBeVisible();
+        await page.keyboard.press('Escape');
+        await expect(copy).toBeFocused();
+        await expect(page.getByRole('menu')).toHaveCount(0);
+
+        const columns = page.getByRole('button', {
+          name: 'Custom columns',
+          exact: true,
+        });
+        await columns.click();
+        await expect(
+          page.getByText('Columns shown in the table', { exact: true }),
+        ).toBeVisible();
+        await expect.poll(pageModality).toEqual(baseline);
+        await page.keyboard.press('Escape');
+
+        for (const [column, operatorName, optionName] of [
+          ['Category', 'Text filter for Category', 'Equals'],
+          ['Score', 'Number filter for Score', 'Between'],
+        ]) {
+          await page
+            .getByRole('button', { name: `Filter ${column}`, exact: true })
+            .click();
+          const filter = page.getByRole('dialog', {
+            name: column,
+            exact: true,
+          });
+          await expect(filter).toBeVisible();
+          await expect.poll(pageModality).toEqual(baseline);
+          const operator = filter.getByRole('button', {
+            name: operatorName,
+            exact: true,
+          });
+          await operator.focus();
+          await page.keyboard.press('ArrowDown');
+          await expect(page.getByRole('menu')).toBeVisible();
+          await expect.poll(pageModality).toEqual(baseline);
+          await page.keyboard.press('End');
+          await expect(page.getByRole('menuitemradio').last()).toBeFocused();
+          if (column === 'Category') {
+            await page.keyboard.press('Home');
+            await expect(page.getByRole('menuitemradio').first()).toBeFocused();
+            await page.keyboard.press('ArrowDown');
+          }
+          await expect(
+            page.getByRole('menuitemradio', { name: optionName, exact: true }),
+          ).toBeFocused();
+          await page.keyboard.press('Enter');
+          await expect(operator).toContainText(optionName);
+          await expect(operator).toBeFocused();
+          await expect(filter).toBeVisible();
+          await operator.click();
+          await expect(
+            page.getByRole('menuitemradio', { name: optionName, exact: true }),
+          ).toHaveAttribute('aria-checked', 'true');
+          await page.keyboard.press('Escape');
+          await expect(page.getByRole('menu')).toHaveCount(0);
+          await expect(filter).toBeVisible();
+          await expect(operator).toBeFocused();
+          await operator.click();
+          const input = filter.getByRole('textbox').first();
+          await input.click();
+          await expect(page.getByRole('menu')).toHaveCount(0);
+          await expect(filter).toBeVisible();
+          await expect(input).toBeFocused();
+          await filter
+            .getByRole('button', { name: 'Cancel', exact: true })
+            .click();
+          await expect(filter).toHaveCount(0);
+          await expect.poll(pageModality).toEqual(baseline);
+        }
+        if (fullscreen)
+          await expect(
+            page.getByRole('dialog', { name: 'Fullscreen', exact: true }),
+          ).toBeVisible();
+      });
+    }
+  }
+
   for (const fullscreen of [false, true]) {
     test(`copies through the legacy clipboard fallback, fullscreen=${fullscreen}`, async ({
       page,

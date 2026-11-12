@@ -54,6 +54,13 @@ import {
   type ServerLlmStreamEvent,
   type ToolCallRequestInfo,
 } from '../../core/turn.js';
+import {
+  runModelRound,
+  turnModelRound,
+  type AgentLoopStopReason,
+  type ModelRoundSource,
+} from '../../core/agent-loop.js';
+import { SendMessageType } from '../../core/client.js';
 import { LoopDetectionService } from '../../services/loopDetectionService.js';
 import type { LoopType } from '../../telemetry/types.js';
 import {
@@ -90,7 +97,7 @@ import type {
   FunctionDeclaration,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
-import { LlmChat } from '../../core/llm-chat.js';
+import { LlmChat, type StreamEvent } from '../../core/llm-chat.js';
 import { toolCallArgumentsWereIncomplete } from '../../core/incomplete-tool-call-args.js';
 import { assembleSystemPrompt } from '../../core/prompts.js';
 import {
@@ -281,6 +288,17 @@ export interface ReasoningLoopResult {
    * otherwise). null otherwise.
    */
   loopType?: LoopType | null;
+}
+
+/** What a model round on the shared agent loop leaves for the agent's turn. */
+interface SharedModelRoundResult {
+  functionCalls: FunctionCall[];
+  text: string;
+  thoughtText: string;
+  usageMetadata?: GenerateContentResponseUsageMetadata;
+  responseId?: string;
+  wasOutputTruncated: boolean;
+  stop?: AgentLoopStopReason;
 }
 
 /**
@@ -1035,6 +1053,10 @@ export class AgentCore {
     // provider id would keep deterministic providers in a tool-result loop.
     const duplicateProviderToolCallResponseIds = new Set<string>();
     let stickyMaxOutputTokens: number | undefined;
+    // Whether THIS round's stream produced a chunk (model acceptance). The
+    // round finally uses it to tell a pre-acceptance failure apart from the
+    // round that just took a reminder for the NEXT round.
+    let roundSawModelChunk = false;
     const loopDetector = new LoopDetectionService(this.runtimeContext);
     loopDetector.reset(
       `${this.runtimeContext.getSessionId()}#${this.subagentId}`,
@@ -1048,6 +1070,11 @@ export class AgentCore {
         loopDetector.addAndCheckHeuristicLoops(event)
       );
     };
+
+    // On the shared agent loop (`experimental.unifiedAgentLoop`), each model
+    // round is the loop's round on a `Turn` over this agent's chat.
+    const onSharedLoop =
+      this.runtimeContext.isUnifiedAgentLoopEnabled?.() === true;
 
     while (true) {
       // Check abort before starting a new round — prevents unnecessary API
@@ -1079,6 +1106,7 @@ export class AgentCore {
       try {
         const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${this.promptOrdinal++}`;
         turnCounter += 1;
+        roundSawModelChunk = false;
         retryWaitScope = this.createRetryWaitScope(
           turnCounter,
           promptId,
@@ -1117,6 +1145,25 @@ export class AgentCore {
         };
 
         const roundStreamStart = Date.now();
+        const sharedRound = onSharedLoop
+          ? await this.sendSharedModelRound({
+              chat,
+              messageParams,
+              promptId,
+              round: turnCounter,
+              runId,
+              retryWaitScope,
+              signal: roundAbortController.signal,
+              checkSubagentLoop,
+              onModelAccepted: () => {
+                roundSawModelChunk = true;
+                loopDetector.commitLoopReminderDelivery();
+              },
+              onMaxOutputTokensEscalated: (limit) => {
+                stickyMaxOutputTokens = limit;
+              },
+            })
+          : undefined;
         const sendMessage = () =>
           chat.sendMessageStream(
             this.modelConfig.model ||
@@ -1128,15 +1175,20 @@ export class AgentCore {
         // The request (and any send-time compaction) runs partly before the
         // stream is returned and partly while it is iterated; both belong to
         // this round's retry-wait observer.
-        const responseStream = retryWaitScope
-          ? retryWaitScope.bind(await retryWaitScope.run(sendMessage))
-          : await sendMessage();
-        this.eventEmitter?.emit(AgentEventType.ROUND_START, {
-          subagentId: this.subagentId,
-          round: turnCounter,
-          promptId,
-          timestamp: Date.now(),
-        } as AgentRoundEvent);
+        const responseStream:
+          | AsyncIterable<StreamEvent>
+          | Iterable<StreamEvent> = sharedRound
+          ? []
+          : retryWaitScope
+            ? retryWaitScope.bind(await retryWaitScope.run(sendMessage))
+            : await sendMessage();
+        if (!sharedRound)
+          this.eventEmitter?.emit(AgentEventType.ROUND_START, {
+            subagentId: this.subagentId,
+            round: turnCounter,
+            promptId,
+            timestamp: Date.now(),
+          } as AgentRoundEvent);
 
         const functionCalls: FunctionCall[] = [];
         // callIds already streamed to the loop guard this attempt. Mirrors
@@ -1208,6 +1260,13 @@ export class AgentCore {
 
           // Handle chunk events
           if (streamEvent.type === 'chunk') {
+            // First chunk of the round: the model accepted the request. If
+            // it carries a prepared loop-protection reminder, its delivery
+            // accounting settles here — the same model-acceptance boundary
+            // the core client commits at. Later chunks no-op once the
+            // prepared receipt is consumed.
+            roundSawModelChunk = true;
+            loopDetector.commitLoopReminderDelivery();
             const resp = streamEvent.value;
             // Track the response ID for tool call correlation
             if (resp.responseId) {
@@ -1320,6 +1379,28 @@ export class AgentCore {
           }
         }
 
+        if (sharedRound) {
+          if (sharedRound.stop === 'cancelled') {
+            return {
+              text: finalText,
+              terminateMode: retryWaitScope?.timedOut()
+                ? AgentTerminateMode.TIMEOUT
+                : AgentTerminateMode.CANCELLED,
+              turnsUsed: turnCounter,
+            };
+          }
+          functionCalls.push(...sharedRound.functionCalls);
+          roundText = sharedRound.text;
+          roundThoughtText = sharedRound.thoughtText;
+          lastUsage = sharedRound.usageMetadata;
+          currentResponseId = sharedRound.responseId;
+          wasOutputTruncated = sharedRound.wasOutputTruncated;
+          if (sharedRound.stop === 'loop_detected') {
+            terminateMode = AgentTerminateMode.LOOP_DETECTED;
+            loopDetectedInStream = true;
+          }
+        }
+
         if (loopDetectedInStream) {
           break;
         }
@@ -1386,6 +1467,8 @@ export class AgentCore {
             break;
           }
           currentMessages = toolCallResult.messages;
+          const toolPartCount =
+            currentMessages[currentMessages.length - 1]?.parts?.length ?? 0;
 
           const externalInputs = this.drainExternalInputs(options);
           if (externalInputs.length > 0) {
@@ -1405,6 +1488,24 @@ export class AgentCore {
           if ((currentMessages[0]?.parts?.length ?? 0) === 0) {
             terminateMode = AgentTerminateMode.ERROR;
             break;
+          }
+          // Right after the tool results, before any external input, as in
+          // the core client and the daemon.
+          const loopReminder = loopDetector.takeLoopReminder();
+          if (loopReminder) {
+            currentMessages[currentMessages.length - 1].parts!.splice(
+              toolPartCount,
+              0,
+              { text: loopReminder },
+            );
+            // The reminder text rides in currentMessages toward the next
+            // round's model call, but that round can still exit at the
+            // abort/maxTurns/time checks or fail in prepareTools() before
+            // any request is attempted. Like the core client, the delivery
+            // stays prepared here and only settles when that round crosses
+            // the model-acceptance boundary (first chunk above); a round that
+            // exits before its first chunk abandons it in the round finally,
+            // so `reminded` telemetry credits a warning the model actually saw.
           }
         } else {
           const immediateExternalInputs = this.drainExternalInputs(options);
@@ -1498,6 +1599,16 @@ export class AgentCore {
         }
         throw error;
       } finally {
+        // The round exited without a chunk proving model acceptance
+        // (prepareTools/send rejection, zero-chunk break, abort before the
+        // first chunk): put the prepared reminder delivery back so
+        // `reminded` stays un-credited and the streak's warning stays
+        // eligible for a later round. The round that just TOOK a reminder
+        // for the next one saw its own chunks and skips this; a committed
+        // delivery makes the abandon a no-op.
+        if (!roundSawModelChunk) {
+          loopDetector.abandonLoopReminderDelivery();
+        }
         retryWaitScope?.close();
         // Reverse-cleanup fires whether the iteration ended normally, broke,
         // returned, or threw — preventing parent-listener accumulation on
@@ -1601,6 +1712,220 @@ export class AgentCore {
         active.clear();
       },
     };
+  }
+
+  /**
+   * One model round on the shared agent loop (`experimental.unifiedAgentLoop`):
+   * `runModelRound` sends it on a `Turn` over this agent's chat, so the
+   * stream's chunks are parsed in `turn.ts`, and this maps the round's events
+   * as the current round maps its chunks. The round keeps the raw function
+   * calls for this agent's tool step.
+   */
+  private async sendSharedModelRound(params: {
+    chat: LlmChat;
+    messageParams: {
+      message: Part[];
+      config: Pick<GenerateContentConfig, 'tools' | 'maxOutputTokens'>;
+    };
+    promptId: string;
+    round: number;
+    runId: string;
+    retryWaitScope: RetryWaitScope | undefined;
+    signal: AbortSignal;
+    checkSubagentLoop: (event: ServerLlmStreamEvent) => boolean;
+    onModelAccepted: () => void;
+    onMaxOutputTokensEscalated: (limit: number) => void;
+  }): Promise<SharedModelRoundResult> {
+    const { promptId, round, runId, retryWaitScope, checkSubagentLoop } =
+      params;
+    const { tools, maxOutputTokens } = params.messageParams.config;
+    const result: SharedModelRoundResult = {
+      functionCalls: [],
+      text: '',
+      thoughtText: '',
+      wasOutputTruncated: false,
+    };
+    const emitText = (text: string, thought: boolean) =>
+      this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
+        subagentId: this.subagentId,
+        runId,
+        round,
+        text,
+        thought,
+        timestamp: Date.now(),
+      });
+    const turnRound = turnModelRound(
+      params.chat,
+      this.modelConfig.model ||
+        this.runtimeContext.getModel() ||
+        DEFAULT_QWEN_MODEL,
+      {
+        requestConfig: {
+          tools,
+          ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+        },
+        // A failed request ends the run as it does on the current round.
+        throwErrors: true,
+        onStreamReady: () => {
+          this.eventEmitter?.emit(AgentEventType.ROUND_START, {
+            subagentId: this.subagentId,
+            round,
+            promptId,
+            timestamp: Date.now(),
+          });
+        },
+        onChunk: ({ text, thoughtText, responseId, usageMetadata }) => {
+          params.onModelAccepted();
+          if (responseId) result.responseId = responseId;
+          if (usageMetadata) result.usageMetadata = usageMetadata;
+          // A loop stop on Thought can close the stream before Content.
+          if (thoughtText) {
+            result.thoughtText += thoughtText;
+            emitText(thoughtText, true);
+          }
+          if (text) {
+            result.text += text;
+            emitText(text, false);
+          }
+        },
+      },
+    );
+    // The request and its stream run under this round's retry-wait observer.
+    const source: ModelRoundSource = retryWaitScope
+      ? {
+          sendRound: (request, signal) =>
+            retryWaitScope.bind(turnRound.sendRound(request, signal)),
+        }
+      : turnRound;
+    this.runtimeContext
+      .getDebugLogger()
+      .debug(
+        `[AgentCore] subagent ${this.subagentId} round ${round} on the shared agent loop (prompt ${promptId})`,
+      );
+
+    // callIds already fed to the loop guard this attempt, as on the current
+    // round: a provider may stream one call id twice.
+    const streamedCallIds = new Set<string>();
+    const resetAttempt = () => {
+      result.functionCalls = [];
+      streamedCallIds.clear();
+      result.text = '';
+      result.thoughtText = '';
+      result.usageMetadata = undefined;
+      result.responseId = undefined;
+      result.wasOutputTruncated = false;
+    };
+    const { stop } = await runModelRound(
+      source,
+      {
+        parts: params.messageParams.message,
+        promptId,
+        options: { type: SendMessageType.UserQuery },
+      },
+      params.signal,
+      {
+        onModelEvent: (event): AgentLoopStopReason | void => {
+          switch (event.type) {
+            case LlmEventType.Retry: {
+              if (
+                checkSubagentLoop({
+                  type: LlmEventType.Retry,
+                  ...(event.isContinuation !== undefined
+                    ? { isContinuation: event.isContinuation }
+                    : {}),
+                })
+              )
+                return 'loop_detected';
+              if (event.maxOutputTokensEscalated !== undefined) {
+                params.onMaxOutputTokensEscalated(
+                  event.maxOutputTokensEscalated,
+                );
+              }
+              resetAttempt();
+              return;
+            }
+            case LlmEventType.ModelFallback:
+              // The calls and output of the model that gave up are dropped.
+              resetAttempt();
+              return;
+            case LlmEventType.ChatCompressed:
+              this.runtimeContext
+                .getDebugLogger()
+                .debug(
+                  `[AGENT-COMPACT] subagent=${this.subagentId} round=${round} ` +
+                    `tokens ${event.value?.originalTokenCount} -> ${event.value?.newTokenCount}`,
+                );
+              return;
+            case LlmEventType.Thought:
+              if (
+                checkSubagentLoop({
+                  type: LlmEventType.Thought,
+                  value: event.value,
+                })
+              )
+                return 'loop_detected';
+              return;
+            case LlmEventType.Content:
+              if (
+                event.value &&
+                checkSubagentLoop({
+                  type: LlmEventType.Content,
+                  value: event.value,
+                })
+              )
+                return 'loop_detected';
+              return;
+            case LlmEventType.ToolCallRequest: {
+              const fc = event.functionCall ?? {
+                id: event.value.callId,
+                name: event.value.name,
+                args: event.value.args,
+              };
+              result.functionCalls.push(fc);
+              const toolName = String(fc.name);
+              if (fc.id) {
+                if (streamedCallIds.has(fc.id)) return;
+                streamedCallIds.add(fc.id);
+              }
+              if (
+                checkSubagentLoop({
+                  type: LlmEventType.ToolCallRequest,
+                  value: {
+                    callId: fc.id ?? `${toolName}-${Date.now()}`,
+                    providerCallId: getProviderToolCallId(fc),
+                    name: toolName,
+                    args: (fc.args ?? {}) as Record<string, unknown>,
+                    isClientInitiated: false,
+                    prompt_id: promptId,
+                    response_id: result.responseId,
+                    wasOutputTruncated: result.wasOutputTruncated,
+                  },
+                })
+              )
+                return 'loop_detected';
+              return;
+            }
+            case LlmEventType.Finished: {
+              const { reason, usageMetadata } = event.value;
+              if (reason === FinishReason.MAX_TOKENS) {
+                result.wasOutputTruncated = true;
+              }
+              if (
+                checkSubagentLoop({
+                  type: LlmEventType.Finished,
+                  value: { reason, usageMetadata },
+                })
+              )
+                return 'loop_detected';
+              return;
+            }
+            default:
+              return;
+          }
+        },
+      },
+    );
+    return { ...result, ...(stop ? { stop } : {}) };
   }
 
   private drainExternalInputs(
@@ -2248,6 +2573,12 @@ export class AgentCore {
         clearTimeout(state.retryTimer);
         state.retryTimer = undefined;
       }
+      this.eventEmitter.emit(AgentEventType.TOOL_APPROVAL_RESOLVED, {
+        subagentId: this.subagentId,
+        round: currentRound,
+        callId: state.callId,
+        timestamp: Date.now(),
+      });
     };
     const clearApprovalDeliveries = () => {
       for (const state of currentApprovalDeliveries.values()) {

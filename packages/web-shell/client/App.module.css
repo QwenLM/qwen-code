@@ -720,12 +720,21 @@
   overflow: hidden;
 }
 
-.managedContext {
+/* Host-mounted managed home has no .appChatEmpty ancestor, so give its
+   empty conversation the same shrink-to-content behavior here. Centering
+   uses auto margins on the content wrapper rather than justify-content:
+   centering every in-flow child would float the session header mid-pane
+   and, once the group is taller than the pane, push its top out of reach
+   because overflow scrolling cannot reach negative offsets. */
+.chatPane[data-managed-home][data-managed-empty] .content {
   flex: 0 0 auto;
-  width: min(100%, var(--chat-shell-width));
-  margin: 0 auto;
-  padding: 0 20px;
-  font-size: 12px;
+  margin-top: auto;
+  margin-bottom: auto;
+  overflow: visible;
+}
+
+.chatPane[data-managed-home][data-managed-empty] {
+  overflow-y: auto;
 }
 
 /* The chat view (message list + composer) stays mounted while a panel is shown,
@@ -737,6 +746,10 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.chatViewWithApproval {
+  position: relative;
 }
 
 .chatViewHidden {

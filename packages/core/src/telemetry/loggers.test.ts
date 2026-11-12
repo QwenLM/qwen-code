@@ -65,6 +65,7 @@ import {
   logUserPrompt,
   logToolCall,
   logLoopDetected,
+  logLoopProtection,
   logRepeatedToolFailureGuard,
   logFlashFallback,
   logGoalState,
@@ -126,6 +127,8 @@ import {
   MemoryMigrationEvent,
   MemoryRecallModeTransitionEvent,
   LoopDetectedEvent,
+  LoopProtectionEvent,
+  LoopReason,
   LoopType,
   RepeatedToolFailureGuardEvent,
   WorkflowRunEvent,
@@ -821,6 +824,38 @@ describe('loggers', () => {
           attributes: { 'session.id': 'test-session-id', ...event },
         });
       }));
+  });
+
+  describe('logLoopProtection', () => {
+    it('records the decision in QwenLogger and OTEL', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      const logLoopProtectionEvent = vi.fn();
+      const getInstanceSpy = vi
+        .spyOn(QwenLogger, 'getInstance')
+        .mockReturnValue({ logLoopProtectionEvent } as unknown as QwenLogger);
+      const event = new LoopProtectionEvent({
+        prompt_id: 'prompt-id',
+        loop_type: LoopType.TURN_TOOL_CALL_CAP,
+        decision: 'reminded',
+        mode: 'stop',
+        loop_reason: LoopReason.STUCK_REPETITION,
+      });
+      try {
+        logLoopProtection(config, event);
+      } finally {
+        getInstanceSpy.mockRestore();
+      }
+
+      expect(logLoopProtectionEvent).toHaveBeenCalledWith(event);
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: `Loop protection reminded. Type: ${LoopType.TURN_TOOL_CALL_CAP}.`,
+        attributes: {
+          'session.id': 'test-session-id',
+          ...event,
+          loop_reason: 'stuck_repetition',
+        },
+      });
+    });
   });
 
   describe('logUserPrompt', () => {

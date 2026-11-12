@@ -22,14 +22,17 @@ import {
 import { isOpenRouterHostname } from './openrouter.js';
 import {
   getEffectiveReasoning,
+  resolveReasoningDeclaration,
   resolveReasoningForModel,
 } from '../../reasoning-overrides.js';
 import {
   applyDeepSeekReasoningEffort,
   getBuiltinDeepSeekReasoning,
+  isDeepSeekEstablishedHost,
 } from '../../deepseek-reasoning.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
+import { filterIsolatedModelOverrides } from './utils.js';
 
 const debugLogger = createDebugLogger('DefaultOpenAICompatibleProvider');
 
@@ -131,6 +134,10 @@ export class DefaultOpenAICompatibleProvider
     return new OpenAI({
       apiKey,
       baseURL: baseUrl,
+      ...(this.contentGeneratorConfig.isolatedRoute && {
+        organization: null,
+        project: null,
+      }),
       timeout,
       maxRetries,
       defaultHeaders,
@@ -227,7 +234,9 @@ export class DefaultOpenAICompatibleProvider
     request: OpenAI.Chat.ChatCompletionCreateParams,
     _userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
-    const extraBody = this.contentGeneratorConfig.extra_body;
+    const extraBody = filterIsolatedModelOverrides(
+      this.contentGeneratorConfig.extra_body,
+    );
 
     // Apply output token limits to ensure max_tokens is set appropriately
     // This prevents occupying too much context window with output reservation
@@ -258,6 +267,20 @@ export class DefaultOpenAICompatibleProvider
       !resolved ||
       resolved.toggleOnly ||
       (resolved.profile !== undefined && resolved.profile !== 'deepseek-openai')
+    )
+      return body;
+    // On newly recognized routes (third-party hosts, or new aliases on
+    // established hosts) a profile-less declaration governs the wire shape:
+    // the built-in normalizer must not flatten or re-tier its declared or
+    // static effort. Established model/host pairs keep their shipped
+    // interaction.
+    if (
+      !isDeepSeekEstablishedHost(this.contentGeneratorConfig.baseUrl, model) &&
+      resolveReasoningDeclaration(
+        this.cliConfig,
+        this.contentGeneratorConfig,
+        model,
+      ) !== undefined
     )
       return body;
     const reasoning = getEffectiveReasoning(

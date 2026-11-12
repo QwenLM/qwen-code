@@ -14,6 +14,7 @@ import {
   type SkillDisablement,
   skillToggleBlockForName,
   updateWorkspaceSkillSettingLists,
+  updateUserSkillSettingLists,
 } from './skill-settings.js';
 
 function fakeSettings({
@@ -45,6 +46,63 @@ function fakeSettings({
     }),
   } as never;
 }
+
+describe('updateUserSkillSettingLists', () => {
+  it.each([
+    [{ state: 'enabled' }, 'enabled'],
+    [{ state: 'disabled' }, 'disabled'],
+    [{ state: 'disabled', mode: 'default' }, 'defaultDisabled'],
+  ] as const)('moves only the explicit name for %j', (activation, target) => {
+    const lists = {
+      enabled: ['RUST:PDF', 'other-enabled'],
+      disabled: ['pdf', 'rust:pdf', 'go:pdf'],
+      defaultDisabled: ['rust:pdf', 'other-default'],
+    };
+    const result = updateUserSkillSettingLists(lists, ' rust:PDF ', activation);
+    expect(result.disabled).toContain('pdf');
+    expect(result.disabled).toContain('go:pdf');
+    expect(result.enabled).toContain('other-enabled');
+    expect(result.defaultDisabled).toContain('other-default');
+    for (const key of ['enabled', 'disabled', 'defaultDisabled'] as const) {
+      expect(
+        result[key].filter((name) => name.toLowerCase() === 'rust:pdf'),
+      ).toHaveLength(key === target ? 1 : 0);
+    }
+    expect(lists.enabled).toEqual(['RUST:PDF', 'other-enabled']);
+  });
+
+  it('retains an existing target spelling and supports names not yet installed', () => {
+    const lists = {
+      enabled: ['RUST:PDF'],
+      disabled: ['pdf'],
+      defaultDisabled: [],
+    };
+    expect(
+      updateUserSkillSettingLists(lists, 'rust:pdf', { state: 'enabled' }),
+    ).toEqual(lists);
+    expect(
+      updateUserSkillSettingLists(lists, 'future', { state: 'enabled' }),
+    ).toEqual({ ...lists, enabled: ['RUST:PDF', 'future'] });
+  });
+
+  it('preserves bare-name and System restrictions after a qualified enable', () => {
+    const user = updateUserSkillSettingLists(
+      { enabled: [], disabled: ['pdf', 'rust:pdf'], defaultDisabled: [] },
+      'rust:pdf',
+      { state: 'enabled' },
+    );
+    const resolved = resolveSkillSettings(
+      fakeSettings({
+        merged: { ...user, disabled: [...user.disabled, 'system-skill'] },
+        user,
+        system: { disabled: ['system-skill'] },
+      }),
+    );
+    expect(resolved.disabledNames.has('pdf')).toBe(true);
+    expect(resolved.disabledNames.has('system-skill')).toBe(true);
+    expect(user.disabled).toEqual(['pdf']);
+  });
+});
 
 describe('resolveSkillSettings', () => {
   it('makes Browser Use and Computer Use available by default', () => {

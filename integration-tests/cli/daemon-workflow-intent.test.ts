@@ -127,6 +127,10 @@ describe.skipIf(process.platform === 'win32')(
           QWEN_HOME: home,
           QWEN_RUNTIME_DIR: path.join(root, 'runtime'),
           QWEN_CLI_ENTRY: DEFAULT_CLI_BIN,
+          // The docker E2E leg exports QWEN_SANDBOX=docker; inherited by the
+          // daemon's `qwen --acp` children, it puts them in a container with
+          // no host-loopback route to the fake model server.
+          QWEN_SANDBOX: 'false',
           QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(root, 'system.json'),
           QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(root, 'system.json'),
           QWEN_CODE_TRUSTED_FOLDERS_PATH: path.join(

@@ -20,18 +20,70 @@
  * feature parity + regression are complete.
  */
 
+import {
+  completeRestoreToolResponse,
+  type RestoreToolResponseBinding,
+} from '../utils/restore-tool-response.js';
 import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
+import { t } from '../../i18n/index.js';
+import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import {
   InteractiveModToolScheduler,
   type InteractiveCompletedToolCall,
+  type InteractiveToolCall,
 } from '../../services/interactive-mod-tool-scheduler.js';
+import {
+  createNotStartedToolErrorResponse,
+  LlmEventType,
+  TOOL_LOOP_SKIPPED_MESSAGE,
+  TOOL_LOOP_SKIPPED_METADATA,
+} from '@qwen-code/qwen-code-core/core/turn.js';
+import {
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalPauseReasonForFailure,
+  type GoalTurnPermit,
+} from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
+import {
+  LoopReason,
+  LoopType,
+} from '@qwen-code/qwen-code-core/telemetry/types.js';
+import {
+  endInteractionSpan,
+  getActiveInteractionSpan,
+} from '@qwen-code/qwen-code-core/telemetry/session-tracing.js';
+import { canonicalToolName } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import { clearLoadedSkillTracking } from '@qwen-code/qwen-code-core/tools/skill-utils.js';
+import { FILE_PATH_TOOLS } from '@qwen-code/qwen-code-core/services/microcompaction/microcompact.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
 import { appendFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { mapToDisplay } from '../hooks/useReactToolScheduler.js';
+import { writeToolCheckpoint } from './tool-checkpoint.js';
+import {
+  sharedModelRound,
+  type SharedModelRoundResult,
+} from './shared-model-round.js';
+import { allocateCanonicalHistoryId } from './live-session-model.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import {
+  runToolBatch,
+  type AgentLoopDuplicateState,
+  type AgentLoopSettledCall,
+  type ToolBatchResult,
+} from '@qwen-code/qwen-code-core/core/agent-loop.js';
+import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
+import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
+import { buildPermissionSuggestions } from '../../nonInteractive/permission-suggestions.js';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import type {
   AgentResultDisplay,
   Config,
+  ServerLlmStreamEvent,
+  SteerInput,
   ToolCallConfirmationDetails,
+  ToolCallRequestInfo,
+  ToolCallResponseInfo,
   ToolResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -64,17 +116,51 @@ import {
   createEventMapper,
   extractStructuredResult,
   renderResultDisplay,
+  formatToolArgs,
   toolResultEvent,
   type OpenTuiStreamEvent,
 } from './event-adapter.js';
 import { isAtCommand } from '../utils/commandUtils.js';
 import { handleAtCommand } from '../hooks/atCommandProcessor.js';
-import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
+import {
+  ToolCallStatus,
+  type HistoryItem,
+  type IndividualToolCallDisplay,
+} from '../types.js';
+import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
+import type { OpenTuiInputSubmission } from './input-submission.js';
+
+const checkpointLogger = createDebugLogger('OPENTUI_CHECKPOINT');
+const liveLogger = createDebugLogger('OPENTUI_LIVE');
+
+export interface OpenTuiSteeringSubmission extends OpenTuiInputSubmission {
+  content: PartListUnion;
+}
+
+export interface PreparedLiveRequest {
+  content: PartListUnion;
+  modelOverride?: string;
+  inlineModelOverride: boolean;
+}
 
 /** Options the backend passes through to the live turn. */
 export interface LivePromptOptions {
+  checkpointHistory?: {
+    snapshot: () => HistoryItem[];
+    allocateId: () => number;
+  };
+  dualOutput?: DualOutputBridge | null;
+  isCurrentTurn?: () => boolean;
   /** Per-turn model override (submit_prompt's modelOverride parity). */
   modelOverride?: string;
+  toolCall?: {
+    name: string;
+    args: Record<string, unknown>;
+    restoreResponseBinding?: RestoreToolResponseBinding;
+  };
+  retry?: PreparedLiveRequest;
+  onAcceptedSteering?: (messages: readonly string[]) => void;
+  onPreparedRequest?: (request: PreparedLiveRequest | undefined) => void;
   /**
    * "Enter to steer" parity: called at each tool boundary (after tools ran,
    * before their results go back to the model). Returned texts are resolved
@@ -84,14 +170,14 @@ export interface LivePromptOptions {
    * boundary drain). Skipped when the turn is aborted (messages then stay
    * queued).
    */
-  drainSteering?: () => string[];
+  drainSteering?: () => OpenTuiSteeringSubmission[];
   /**
    * Puts drained steering texts back at the front of the queue (ink's
    * `midTurnRestoreRef`). Resolution is all-or-nothing — an abort anywhere in
    * it sends nothing to the model, so every text that left `drainSteering`
    * comes back here rather than vanishing with the turn.
    */
-  restoreSteering?: (texts: readonly string[]) => void;
+  restoreSteering?: (submissions: readonly OpenTuiSteeringSubmission[]) => void;
   /**
    * Scheduler-level confirmation requests the permission flow did not
    * auto-approve (ask_user_question in every mode; edit/exec in DEFAULT).
@@ -119,12 +205,28 @@ export interface LivePromptOptions {
    */
   submittedPrompt?: string;
   humanInput?: HumanPromptInput;
+  workflowModeEligible?: boolean;
+  /** Context the Mods' `prompt.submit` hooks added; rides the first send. */
+  promptContext?: readonly string[];
+  /**
+   * The prompt a Mod submitted with `$.prompt.submit` that this turn runs.
+   * No `@path` in it is read, the transcript records it as the Mod's, and
+   * the sidecar sees its text rather than the frame the model reads.
+   */
+  modPrompt?: ModQueuedPrompt;
   /**
    * PromptId minted by the backend (`nextLivePromptId`) at submit time so
    * the user item and this request share the checkpoint key. Omitted → one
    * is minted here (first turn of a session, …).
    */
   promptId?: string;
+  /** Called once UserPromptSubmit admits the prompt, before its request. */
+  onPromptAdmitted?: () => void;
+  /** Sees every event of the turn's model streams, as the client sent it. */
+  onStreamEvent?: (event: ServerLlmStreamEvent) => void;
+  /** Called when every tool of a round was cancelled, which ends the turn. */
+  onToolsCancelled?: () => void;
+  onExecutingShells?: (calls: readonly ExecutingShellCall[]) => void;
 }
 
 /**
@@ -144,6 +246,12 @@ export interface WaitingCallInfo {
   callId: string;
   name: string;
   confirmationDetails: ToolCallConfirmationDetails;
+}
+
+export interface ExecutingShellCall {
+  callId: string;
+  pid?: number;
+  promoteAbortController?: AbortController;
 }
 
 // ink useGeminiStream EDIT_TOOL_NAMES parity (AUTO_EDIT auto-approves edits only).
@@ -298,10 +406,32 @@ async function expandAtMentions(
     signal,
   });
   const events = (result.toolDisplays ?? []).flatMap(atMentionCardEvents);
+  if (result.toolDisplays?.length) {
+    const source: HistoryItem = {
+      id: allocateCanonicalHistoryId(),
+      type: 'tool_group',
+      tools: result.toolDisplays,
+    };
+    for (const event of events) {
+      event.historyId = source.id;
+      event.canonicalHistoryItem = source;
+    }
+  }
   if (!result.shouldProceed || result.processedQuery === null) {
     return { parts: query, events, declined: true };
   }
   return { parts: result.processedQuery, events, declined: false };
+}
+
+function retainAttachments(
+  expanded: PartListUnion,
+  original: PartListUnion,
+): PartListUnion {
+  if (typeof original === 'string') return expanded;
+  return [
+    ...normalizeParts(expanded),
+    ...normalizeParts(original).filter((part) => part.text === undefined),
+  ];
 }
 
 /**
@@ -431,6 +561,7 @@ function abortRejection(signal: AbortSignal): Promise<never> {
 const MID_TURN_STEER_READ_TIMEOUT_MS = 10_000;
 
 interface SteeredPromptResolution {
+  declinedEvents: OpenTuiStreamEvent[];
   /** User content for the model, segments joined by a blank line as ink joins them. */
   parts: Part[];
   /**
@@ -451,7 +582,8 @@ interface SteeredPromptResolution {
    * discards the resolved parts when an abort lands, so nothing can go out
    * twice.
    */
-  restore: string[];
+  restore: OpenTuiSteeringSubmission[];
+  accepted: OpenTuiSteeringSubmission[];
 }
 
 interface SteeredMessageRecording {
@@ -464,31 +596,35 @@ interface SteeredMessageRecording {
  * resolved the same way an idle submission is — `@path` expansion, then the
  * prompt-side vision bridge — before it rides to the model as steering.
  *
- * Not ported, on purpose: ink's slash interception at this boundary (its goal
- * command has no OpenTUI counterpart, and with it the goal-permit recording
- * argument) and its two-phase card deferral — ink defers the read cards until
- * the messages are committed; here the cards go out as they are produced, and
- * an abort drops the whole hop instead.
+ * Slash interception and goal-permit recording stay with their command owner.
+ * Successful read cards and echoes commit with core's history acceptance.
+ * Explicit declines publish their notices when resolution consumes them.
  */
 async function resolveSteeredPromptParts(
   config: Config,
-  texts: readonly string[],
+  submissions: readonly OpenTuiSteeringSubmission[],
   signal: AbortSignal,
   turnModel: TurnModelOverride,
 ): Promise<SteeredPromptResolution> {
   const restore = (): SteeredPromptResolution => ({
     parts: [],
     events: [],
+    declinedEvents: [],
     recordings: [],
-    restore: [...texts],
+    restore: [...submissions],
+    accepted: [],
   });
   const events: OpenTuiStreamEvent[] = [];
+  const declinedEvents: OpenTuiStreamEvent[] = [];
   const segments: Part[][] = [];
   const recordings: SteeredMessageRecording[] = [];
+  const accepted: OpenTuiSteeringSubmission[] = [];
 
-  for (const message of texts) {
+  for (const submission of submissions) {
+    const message = submission.text;
+    const messageEvents: OpenTuiStreamEvent[] = [];
     if (signal.aborted) return restore();
-    let resolved: PartListUnion = [{ text: message }];
+    let resolved: PartListUnion = submission.content;
     if (isAtCommand(message)) {
       const deadline = new AbortController();
       const readSignal = AbortSignal.any([signal, deadline.signal]);
@@ -505,7 +641,7 @@ async function resolveSteeredPromptParts(
         const reason = getErrorMessage(error);
         config.getDebugLogger().debug(`Mid-turn @ command failed: ${reason}`);
         if (signal.aborted) return restore();
-        events.push({
+        declinedEvents.push({
           type: 'warning',
           text: `Could not attach file: ${reason}`,
         });
@@ -513,12 +649,13 @@ async function resolveSteeredPromptParts(
       } finally {
         clearTimeout(timer);
       }
-      events.push(...expanded.events);
+      messageEvents.push(...expanded.events);
       if (expanded.declined) {
         if (signal.aborted) return restore();
+        declinedEvents.push(...messageEvents);
         continue;
       }
-      resolved = expanded.parts;
+      resolved = retainAttachments(expanded.parts, submission.content);
     }
 
     const bridged = await applyPromptVisionBridge(
@@ -527,17 +664,20 @@ async function resolveSteeredPromptParts(
       signal,
       turnModel,
     );
-    events.push(...bridged.events);
+    messageEvents.push(...bridged.events);
     if (bridged.parts === null) {
       if (signal.aborted) return restore();
+      declinedEvents.push(...messageEvents);
       continue;
     }
+    events.push(...messageEvents);
     const messageParts = normalizeParts(bridged.parts);
     // U-27 (ink :3313-3327): the steering hop checks the resolved parts too.
     if (hasUnsupportedImageFormat(messageParts)) {
       events.push(imageFormatWarningEvent());
     }
     if (messageParts.length > 0) segments.push(messageParts);
+    accepted.push(submission);
     recordings.push({ message, parts: messageParts });
     // U-12 (ink accept() :3359-3367): `sentToModel: false` — the steer rides
     // the tool boundary, not a standalone user turn. Not coupled to this
@@ -552,19 +692,15 @@ async function resolveSteeredPromptParts(
     if (parts.length > 0) parts.push({ text: '\n\n' });
     parts.push(...segment);
   }
-  return { parts, events, recordings, restore: [] };
+  return { parts, events, declinedEvents, recordings, restore: [], accepted };
 }
 
 /**
  * Single shared `config.initialize()` flight for the OpenTUI app. Core joins
- * callers onto an in-flight initialize and only rejects once initialization
- * has settled ("Config was already initialized"), so plain awaits are safe
- * against a race but can neither own one boot flight nor preserve a failure:
- * the guard gives the entry one flight that command loading and every turn
- * await, and — because a settled failure is never retried by core and the
- * rejected promise stays cached — every later submit surfaces the real cause
- * instead of re-entering, swallowing the re-entry error and degrading into
- * "Chat not initialized".
+ * in-flight callers and reports a settled success as "Config was already
+ * initialized"; failures retain their original rejection. The guard gives
+ * startup, command loading and every turn the same flight and preserves its
+ * result, including Mod readiness, for later awaiters.
  */
 const initializationPromises = new WeakMap<Config, Promise<void>>();
 
@@ -575,13 +711,12 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
     .initialize()
     .catch((err) => {
       // A caller that initialized elsewhere already won: its settled success
-      // reports as core's re-entry error while the chat is ready to send. A
-      // settled failure does not — the real error must surface, and core has
+      // reports as core's re-entry error. A settled failure retains its
+      // original rejection — the real error must surface, and core has
       // no retry either way, so the rejected promise stays cached for awaiters.
       if (
-        config.getGeminiClient()?.isInitialized?.() ||
-        (err instanceof Error &&
-          err.message === 'Config was already initialized')
+        err instanceof Error &&
+        err.message === 'Config was already initialized'
       ) {
         return;
       }
@@ -589,7 +724,15 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
       throw err;
     })
     .then(async () => {
-      await getInteractiveModSession(config)?.initialize();
+      // Every OpenTUI transcript row is drawn again on change, so reply rows
+      // are offered in both screen modes.
+      await getInteractiveModSession(config)?.initialize(
+        ['AbovePrompt', 'AssistantMessage'],
+        {
+          prompts: true,
+          runsPrompts: true,
+        },
+      );
     });
   // Fire-and-forget callers (the entry) must not trip unhandled-rejection
   // handling; awaiters still receive the rejection.
@@ -603,6 +746,87 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
 // initializing still reports its own error instead of hanging the prompt.
 export const STARTUP_CHAT_WAIT_MS = 15_000;
 const STARTUP_CHAT_POLL_MS = 100;
+
+async function finishToolGoalTurn(
+  config: Config,
+  promptId: string,
+  permit: GoalTurnPermit,
+  signal: AbortSignal,
+  isCurrentSession: () => boolean,
+): Promise<ServerLlmStreamEvent[]> {
+  if (!isCurrentSession()) return [];
+  const runtime = config.getGoalRuntime();
+  const ownsPermit = () => {
+    if (!isCurrentSession()) return false;
+    const admitted = runtime.permitForTurn(promptId);
+    return (
+      admitted?.turnId === permit.turnId &&
+      admitted.goalId === permit.goalId &&
+      admitted.revision === permit.revision
+    );
+  };
+  if (!ownsPermit()) return [];
+
+  const events: ServerLlmStreamEvent[] = [];
+  const unsubscribe = runtime.subscribe((value, cause) => {
+    if (
+      value.goal?.goalId === permit.goalId &&
+      value.goal.revision === permit.revision
+    )
+      events.push({ type: LlmEventType.GoalState, value, cause });
+  });
+  let finishing = false;
+  const pauseGoal = async (reason: string) => {
+    try {
+      if (!isCurrentSession()) return;
+      if (!ownsPermit()) {
+        // The runtime releases the permit before awaiting its verifier.
+        if (!finishing) return;
+        const { goal, activity } = runtime.getSnapshot();
+        if (
+          activity !== 'verifying' ||
+          goal?.goalId !== permit.goalId ||
+          goal.revision !== permit.revision
+        )
+          return;
+      }
+      await runtime.dispatch({
+        action: 'pause',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+        reason,
+      });
+    } catch (error) {
+      liveLogger.warn('Failed to pause the interrupted Goal', error);
+    }
+  };
+  let pauseOnAbort: Promise<void> | undefined;
+  const onAbort = () => {
+    pauseOnAbort ??= pauseGoal(GOAL_PAUSE_REASON_USER_INTERRUPT);
+  };
+  signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    if (signal.aborted) onAbort();
+    else {
+      // The verifier reads the recorded tool results from this turn.
+      await config.getChatRecordingService()?.flush();
+      if (!signal.aborted && ownsPermit()) {
+        finishing = true;
+        await runtime.finishTurn(permit);
+      }
+    }
+  } catch (error) {
+    if (!signal.aborted && isCurrentSession()) {
+      await pauseGoal(goalPauseReasonForFailure(getErrorMessage(error)));
+      throw error;
+    }
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+    await pauseOnAbort;
+    unsubscribe();
+  }
+  return events;
+}
 
 /**
  * Sends one user prompt through the real client and yields neutral events.
@@ -654,13 +878,22 @@ export async function* livePromptEvents(
       `Timed out after ${STARTUP_CHAT_WAIT_MS}ms waiting for the startup chat to become ready`,
     );
   }
+  const sessionId = config.getSessionId();
+  const current = () => options?.isCurrentTurn?.() !== false;
+  const isCurrentSession = () =>
+    current() && config.getSessionId() === sessionId;
+  const dualOutput = options?.dualOutput;
   const promptId = options?.promptId ?? nextLivePromptId(config);
   const abort = signal ?? new AbortController().signal;
   // Read per boundary rather than once: the vision bridge can pick a full-turn
   // model mid-turn, and the rest of the turn then stays on it (ink parity).
   const turnModel: TurnModelOverride = {
-    current: options?.modelOverride,
-    inline: options?.modelOverride !== undefined,
+    current: options?.retry
+      ? options.retry.modelOverride
+      : options?.modelOverride,
+    inline: options?.retry
+      ? options.retry.inlineModelOverride
+      : options?.modelOverride !== undefined,
   };
   const map = createEventMapper({
     // ink handleErrorEvent parity: auth-aware formatting. The Ctrl+Y retry
@@ -671,6 +904,7 @@ export async function* livePromptEvents(
         return parseAndFormatApiError(
           error,
           config.getContentGeneratorConfig()?.authType,
+          t,
         );
       } catch {
         return error instanceof Error ? error.message : String(error);
@@ -686,121 +920,308 @@ export async function* livePromptEvents(
   // the tool and submits the functionResponses to continue. Replicate that
   // loop here so tools actually run under OpenTUI (drain -> schedule ->
   // submit results -> drain again).
-  let nextPrompt: PartListUnion = prompt;
+  let nextPrompt: PartListUnion = options?.retry?.content ?? prompt;
   // Provenance marks user-typed text: the composer submit and the follow-on
   // turn built from the mid-turn queue both carry it. A slash command's
   // generated `submit_prompt` payload does not, and ink never expands that
   // one (processQuery returns it before its own isAtCommand check).
+  const typedText =
+    typeof prompt === 'string' ? prompt : collectText(normalizeParts(prompt));
   if (
-    typeof prompt === 'string' &&
+    !options?.toolCall &&
+    !options?.retry &&
+    !options?.modPrompt &&
     options?.submittedPrompt !== undefined &&
-    isAtCommand(prompt)
+    isAtCommand(typedText)
   ) {
-    const expanded = await expandAtMentions(config, prompt, abort);
+    const expanded = await expandAtMentions(config, typedText, abort);
     for (const ev of expanded.events) yield ev;
     // A failed read reports itself on the card above; ink drops the
     // submission rather than sending the unexpanded text to the model.
     if (expanded.declined) return;
-    nextPrompt = expanded.parts;
+    nextPrompt = retainAttachments(expanded.parts, prompt);
   }
   // ink runs the bridge on every query it hands the model
   // (`prepareQueryForLlm`), so an image attached at the composer converts here.
-  const bridged = await applyPromptVisionBridge(
-    config,
-    nextPrompt,
-    abort,
-    turnModel,
-  );
-  for (const ev of bridged.events) yield ev;
-  if (bridged.parts === null) return;
-  nextPrompt = bridged.parts;
-  // U-27 (ink :3834-3850): the fresh hop checks the user-query parts once,
-  // before the send loop — tool-result continuations are never checked.
-  if (hasUnsupportedImageFormat(nextPrompt)) {
-    yield imageFormatWarningEvent();
-  }
-  // R6-7: U-32 recordings are stashed at the sampling boundary and written
-  // only once the continuation send is delivered (ink records from
-  // onDelivered) — a send that throws must not persist a mid-turn user
-  // message the model never saw, and the drained texts go back to the queue
-  // raw so the retried turn re-expands them.
-  let stashedSteeredTexts: readonly string[] | undefined;
-  let stashedRecordings: SteeredMessageRecording[] = [];
-  const flushSteeredStash = (): void => {
-    if (!stashedSteeredTexts) return;
-    const recorder = config.getChatRecordingService?.();
-    for (const recording of stashedRecordings) {
-      recorder?.recordMidTurnUserMessage(recording.parts, recording.message);
+  if (!options?.toolCall && !options?.retry) {
+    const bridged = await applyPromptVisionBridge(
+      config,
+      nextPrompt,
+      abort,
+      turnModel,
+    );
+    for (const ev of bridged.events) yield ev;
+    if (bridged.parts === null) return;
+    nextPrompt = bridged.parts;
+    abort.throwIfAborted();
+    // U-27 (ink :3834-3850): the fresh hop checks the user-query parts once,
+    // before the send loop — tool-result continuations are never checked.
+    if (hasUnsupportedImageFormat(nextPrompt)) {
+      yield imageFormatWarningEvent();
     }
-    stashedRecordings = [];
-    stashedSteeredTexts = undefined;
-  };
-  const restoreSteeredStash = (): void => {
-    if (!stashedSteeredTexts) return;
-    options?.restoreSteering?.(stashedSteeredTexts);
-    stashedRecordings = [];
-    stashedSteeredTexts = undefined;
-  };
+  }
+  if (!current() || abort.aborted) return;
+  if (options?.modPrompt) {
+    // As in a headless run: the Mod's text, then which Mod submitted it; a
+    // retry of it (Ctrl+Y) reads the same, not as the frame the person typed.
+    dualOutput?.emitUserMessage([{ text: options.modPrompt.text }]);
+    dualOutput?.emitSystemMessage('mod_prompt', {
+      mod: options.modPrompt.plugin,
+    });
+  } else if (!options?.toolCall || options.retry)
+    dualOutput?.emitUserMessage(normalizeParts(nextPrompt));
+  // Core settles this carrier at its request-local history push. Neither a
+  // stream event nor a normal empty stream proves that this input was pushed.
+  let pendingSteer: SteerInput | undefined;
+  const acceptedSteerEvents: OpenTuiStreamEvent[] = [];
   let first = true;
   const waitingSeen = new Set<string>();
+  // The calls history and this turn already answered, for the shared tool
+  // batch, which answers a replay of one in place.
+  let duplicates: AgentLoopDuplicateState | undefined;
   for (;;) {
+    if (!current() || abort.aborted) {
+      pendingSteer?.restore();
+      return;
+    }
+    const steerInput = pendingSteer;
+    pendingSteer = undefined;
+    const prepared: PreparedLiveRequest = {
+      content: nextPrompt,
+      modelOverride: turnModel.current,
+      inlineModelOverride: turnModel.inline,
+    };
+    let steerAccepted = false;
+    const carrier: SteerInput | undefined = steerInput && {
+      parts: steerInput.parts,
+      accept: () => {
+        steerAccepted = true;
+        steerInput.accept();
+      },
+      restore: () => {
+        steerInput.restore();
+        if (!steerAccepted && steerInput.parts.length > 0) {
+          prepared.content = normalizeParts(nextPrompt).slice(
+            0,
+            -steerInput.parts.length,
+          );
+        }
+      },
+    };
     const sendOptions = first
       ? {
-          type: SendMessageType.UserQuery,
-          ...(options?.humanInput ? { humanInput: options.humanInput } : {}),
+          type: options?.retry
+            ? SendMessageType.Retry
+            : SendMessageType.UserQuery,
+          ...(!options?.retry && options?.workflowModeEligible === true
+            ? { workflowModeEligible: true }
+            : {}),
+          ...(options?.onPromptAdmitted
+            ? { onPromptAdmitted: options.onPromptAdmitted }
+            : {}),
+          ...(!options?.retry && options?.humanInput
+            ? { humanInput: options.humanInput }
+            : {}),
           ...(turnModel.current ? { modelOverride: turnModel.current } : {}),
-          ...(options?.submittedPrompt
+          ...(!options?.retry && options?.submittedPrompt
             ? { submittedPrompt: options.submittedPrompt }
+            : {}),
+          ...(!options?.retry && options?.promptContext?.length
+            ? { promptContext: options.promptContext }
+            : {}),
+          ...(!options?.retry && options?.modPrompt
+            ? {
+                submittedByMod: options.modPrompt.plugin,
+                ...(options.modPrompt.asUser && {
+                  submittedAsUser: true as const,
+                }),
+                // Recall looks for what the Mod asked, not the frame.
+                memoryRecallQuery: options.modPrompt.text,
+              }
             : {}),
         }
       : {
           type: SendMessageType.ToolResult,
           ...(turnModel.current ? { modelOverride: turnModel.current } : {}),
+          ...(carrier ? { steerInput: carrier } : {}),
         };
+    const initialTool =
+      first && !options?.retry ? options?.toolCall : undefined;
     first = false;
-    const pending: Array<{ callId: string; name: string; args?: unknown }> = [];
-    const stream = client.sendMessageStream(
-      nextPrompt,
-      abort,
-      promptId,
-      sendOptions,
-    );
-    try {
-      for await (const ev of stream) {
-        // First event from this send: the request is out, so a stashed
-        // mid-turn steer is delivered (R6-7).
-        flushSteeredStash();
-        if (dbg) {
-          try {
-            appendFileSync(
-              '/tmp/opentui-events.log',
-              `${(ev as { type?: string }).type}\n`,
-            );
-          } catch {
-            /* ignore */
+    const pending: ToolCallRequestInfo[] = initialTool
+      ? [
+          {
+            callId: `${initialTool.name}-${randomUUID()}`,
+            name: initialTool.name,
+            args: initialTool.args,
+            isClientInitiated: true,
+            prompt_id: promptId,
+            executionOrigin: { kind: 'client' },
+          },
+        ]
+      : [];
+    const initialToolCallId = pending[0]?.callId;
+    if (initialTool?.restoreResponseBinding) {
+      initialTool.restoreResponseBinding.executionCallId = initialToolCallId;
+    }
+    if (initialTool) {
+      const request = pending[0];
+      yield {
+        type: 'tool-start',
+        id: request.callId,
+        tool: request.name,
+        title: request.name,
+      };
+      const args = formatToolArgs(request.args);
+      if (args) yield { type: 'tool-args', id: request.callId, args };
+    }
+    let streamFailed = false;
+    let sharedRound: ReturnType<typeof sharedModelRound> | undefined;
+    if (!initialTool) {
+      let round: SharedModelRoundResult | undefined;
+      options?.onPreparedRequest?.(prepared);
+      dualOutput?.startAssistantMessage();
+      try {
+        // On the shared agent loop (`experimental.unifiedAgentLoop`),
+        // `runModelRound` sends the round and collects its calls.
+        sharedRound = config.isUnifiedAgentLoopEnabled?.()
+          ? sharedModelRound(
+              client,
+              { parts: nextPrompt, promptId, options: sendOptions },
+              abort,
+            )
+          : undefined;
+        // Seeded before the turn's first round is sent, so the calls it
+        // makes are not taken for replays.
+        if (sharedRound && !duplicates)
+          duplicates = {
+            handled: new Map(client.getHistoryToolCallFingerprints()),
+            responded: new Set<string>(),
+          };
+        if (sharedRound)
+          liveLogger.debug(
+            `model round on the shared agent loop (prompt ${promptId})`,
+          );
+        const stream =
+          sharedRound?.events ??
+          client.sendMessageStream(nextPrompt, abort, promptId, sendOptions);
+        for await (const ev of stream) {
+          options?.onStreamEvent?.(ev);
+          if (!current() || abort.aborted) return;
+          dualOutput?.processEvent(ev);
+          for (const event of acceptedSteerEvents.splice(0)) yield event;
+          if (dbg) {
+            try {
+              appendFileSync(
+                '/tmp/opentui-events.log',
+                `${(ev as { type?: string }).type}\n`,
+              );
+            } catch {
+              /* ignore */
+            }
+          }
+          if (!sharedRound) {
+            if (ev.type === 'retry' || ev.type === 'model_fallback') {
+              pending.length = 0;
+            }
+            if ((ev as { type?: string }).type === 'tool_call_request') {
+              pending.push((ev as { value: ToolCallRequestInfo }).value);
+            }
+          }
+          for (const neutral of map(ev)) {
+            if (neutral.type === 'error') streamFailed = true;
+            yield neutral;
           }
         }
-        if ((ev as { type?: string }).type === 'tool_call_request') {
-          pending.push(
-            (ev as { value: { callId: string; name: string; args?: unknown } })
-              .value,
-          );
+        round = sharedRound?.result();
+      } catch (error) {
+        for (const event of acceptedSteerEvents.splice(0)) yield event;
+        throw error;
+      } finally {
+        // Covers a synchronous call failure or an unsettled early exit. A
+        // carrier already accepted/restored by core makes this a no-op.
+        carrier?.restore();
+        if (current()) {
+          dualOutput?.finalizeAssistantMessage();
+          if (round?.stop && round.calls.length > 0) {
+            liveLogger.debug('model round stopped before running tools', {
+              promptId,
+              reason: round.stop,
+              callIds: round.calls.map(({ callId }) => callId),
+            });
+            // Close this attempt's tool uses before yielding the cancelled cards.
+            const message = `Tool skipped because the model round stopped (${round.stop}).`;
+            for (const call of round.calls) {
+              dualOutput?.emitToolResult(
+                call,
+                createNotStartedToolErrorResponse(call, message),
+              );
+            }
+          }
         }
-        for (const neutral of map(ev)) yield neutral;
       }
-    } catch (error) {
-      // The send died before delivering a stashed steer: no recording for
-      // content the model never saw, and the raw texts go back to the queue.
-      restoreSteeredStash();
-      throw error;
+      for (const event of acceptedSteerEvents.splice(0)) yield event;
+      if (!streamFailed) options?.onPreparedRequest?.(undefined);
+      if (round?.stop) {
+        // These calls already have visible cards, but will never be scheduled.
+        for (const { callId } of round.calls) {
+          yield {
+            type: 'tool-end',
+            id: callId,
+            success: false,
+            summary: 'cancelled',
+          };
+        }
+        return;
+      }
+      if (round) pending.push(...round.calls);
     }
-    // A zero-event stream still delivered the request unless it ended on a
-    // dead signal before the request went out.
-    if (stashedSteeredTexts) {
-      if (abort.aborted) restoreSteeredStash();
-      else flushSteeredStash();
+    if (
+      pending.length === 0 ||
+      abort.aborted ||
+      (sharedRound && !isCurrentSession())
+    )
+      return;
+
+    if (duplicates && sendOptions.type === SendMessageType.Retry) {
+      const { handled } = duplicates;
+      const retryIds = normalizeParts(nextPrompt).flatMap(
+        ({ functionResponse }) => {
+          const id = functionResponse?.id;
+          return id && !handled.has(id) ? [id] : [];
+        },
+      );
+      if (retryIds.length > 0) {
+        // A retried continuation can pair a tool result the pre-send snapshot
+        // did not yet see. Only import its real results and their aliases.
+        const repaired = client.getSynthesizedRepairCallIds();
+        const fingerprints = client.getHistoryToolCallFingerprints(
+          new Set(retryIds.filter((id) => !repaired.has(id))),
+        );
+        for (const [id, fingerprint] of fingerprints) {
+          if (!handled.has(id)) handled.set(id, fingerprint);
+        }
+      }
     }
-    if (pending.length === 0 || abort.aborted) return;
+
+    const interactionOwner = sharedRound
+      ? getActiveInteractionSpan(promptId)
+      : undefined;
+    const endBatchInteraction = (
+      status: 'ok' | 'cancelled' | 'error',
+      failure?: { errorMessage: string; errorType: string },
+    ) => {
+      if (
+        !interactionOwner ||
+        getActiveInteractionSpan(promptId) !== interactionOwner
+      )
+        return;
+      if (abort.aborted || !isCurrentSession()) {
+        endInteractionSpan('cancelled', { promptId });
+      } else {
+        endInteractionSpan(status, { promptId, ...failure });
+      }
+    };
 
     // Live output bridge (ink outputUpdateHandler parity): scheduler output
     // chunks are mapped to neutral events and yielded WHILE the tools run.
@@ -870,6 +1291,88 @@ export async function* livePromptEvents(
     // Calls last seen in the scheduler's queued state, so a status only goes
     // out when it changes.
     const queuedSeen = new Set<string>();
+    const permissionRequests = new Map<string, string>();
+    const emitPermissionTransitions = (
+      calls: readonly InteractiveToolCall[],
+    ) => {
+      if (!current() || !dualOutput?.isConnected) return;
+      for (const call of calls) {
+        const { callId } = call.request;
+        const requestId = permissionRequests.get(callId);
+        // MOD hides a completed native attempt behind this placeholder until
+        // middleware settles. It carries no permission decision.
+        if (
+          call.status === 'scheduled' &&
+          call.nativeAttemptsObserved &&
+          !call.invocation
+        )
+          continue;
+        if (call.status === 'awaiting_approval') {
+          if (requestId) continue;
+          const id = randomUUID();
+          permissionRequests.set(callId, id);
+          dualOutput.emitPermissionRequest(
+            id,
+            call.request.name,
+            callId,
+            call.request.args,
+            null,
+            buildPermissionSuggestions(call.confirmationDetails),
+          );
+        } else if (
+          requestId &&
+          (!abort.aborted ||
+            call.status === 'success' ||
+            call.status === 'error' ||
+            call.status === 'cancelled')
+        ) {
+          dualOutput.emitControlResponse(
+            requestId,
+            call.status !== 'cancelled' && call.status !== 'error',
+          );
+          permissionRequests.delete(callId);
+        }
+      }
+    };
+    // Approval may finish during the write; a new entrance replaces its snapshot owner.
+    const checkpointRequests = new Map<
+      string,
+      { request: ToolCallRequestInfo }
+    >();
+    const groupId = options?.checkpointHistory?.allocateId();
+    const batchId = `tool-batch-${randomUUID()}`;
+    const toolHistoryEvent = (
+      calls: InteractiveToolCall[],
+    ): OpenTuiStreamEvent | undefined => {
+      if (groupId === undefined || calls.length === 0) return;
+      return {
+        type: 'tool-history',
+        item: {
+          ...mapToDisplay(calls, config.getProjectRoot()),
+          id: groupId,
+          batchId,
+        },
+        pending: calls.some(
+          (call) =>
+            call.status !== 'success' &&
+            call.status !== 'error' &&
+            call.status !== 'cancelled',
+        ),
+      };
+    };
+    const publishToolHistory = (calls: InteractiveToolCall[]) => {
+      const event = toolHistoryEvent(calls);
+      if (event) live.push(event);
+    };
+    const skippedCalls = (status: 'cancelled' | 'error', message: string) =>
+      pending.map((request) => ({
+        request,
+        status,
+        response: createNotStartedToolErrorResponse(request, message),
+      }));
+    let shellOwnerOpen = true;
+    // Settles the shared batch once the scheduler completed it.
+    let settleBatch: (() => void) | undefined;
     const scheduler = new InteractiveModToolScheduler({
       config,
       onNativeAttempt: (call) =>
@@ -884,6 +1387,24 @@ export async function* livePromptEvents(
         for (const ev of mapOutputChunk(callId, chunk)) live.push(ev);
       },
       onToolCallsUpdate: (calls) => {
+        if (shellOwnerOpen)
+          options?.onExecutingShells?.(
+            current() && !abort.aborted
+              ? calls.flatMap((call) =>
+                  call.status === 'executing' &&
+                  call.request.name === ToolNames.SHELL
+                    ? [
+                        {
+                          callId: call.request.callId,
+                          pid: call.pid,
+                          promoteAbortController: call.promoteAbortController,
+                        },
+                      ]
+                    : [],
+                )
+              : [],
+          );
+        emitPermissionTransitions(calls);
         // Real invocation descriptions (ink mapToDisplay): the card title is
         // the tool's own getDescription() off the tracked call's invocation,
         // not a hand-rolled args guess. Pushed once per callId, as soon as
@@ -913,6 +1434,7 @@ export async function* livePromptEvents(
             description: invocation.getDescription(),
           });
         }
+        publishToolHistory(calls);
         // Mirror the calls still awaiting approval: one that left the state
         // (resolved, or bounced back by a PreToolUse 'ask' hook under the
         // same callId) must be able to surface its dialog again. Each
@@ -948,6 +1470,11 @@ export async function* livePromptEvents(
           const callId = c.request.callId;
           if (waitingSeen.has(callId)) continue;
           waitingSeen.add(callId);
+          if (
+            EDIT_TOOL_NAMES.has(c.request.name) &&
+            !c.request.isClientInitiated
+          )
+            checkpointRequests.set(callId, { request: c.request });
           live.push({
             type: 'confirm',
             id: callId,
@@ -973,20 +1500,33 @@ export async function* livePromptEvents(
         }
       },
       onAllToolCallsComplete: async (calls) => {
+        if (shellOwnerOpen) {
+          shellOwnerOpen = false;
+          options?.onExecutingShells?.([]);
+        }
+        publishToolHistory(calls);
+        emitPermissionTransitions(calls);
         completed = calls.filter(
           (call): call is InteractiveCompletedToolCall =>
             call.status === 'success' ||
             call.status === 'error' ||
             call.status === 'cancelled',
         );
+        settleBatch?.();
         live.close();
       },
     });
-    const scheduled = scheduler.schedule(pending as never, abort);
-    void scheduled.catch((error: unknown) => {
+    const onScheduleFailed = (error: unknown) => {
+      if (shellOwnerOpen) {
+        shellOwnerOpen = false;
+        options?.onExecutingShells?.([]);
+      }
       const cancelled =
         abort.aborted ||
         (error instanceof Error && error.name === 'AbortError');
+      const summary = cancelled ? 'cancelled' : 'error';
+      if (sharedRound)
+        publishToolHistory(skippedCalls(summary, getErrorMessage(error)));
       const ids = new Set([
         ...pending.map((call) => call.callId),
         ...waitingSeen,
@@ -996,39 +1536,260 @@ export async function* livePromptEvents(
       for (const id of ids) {
         live.push({ type: 'tool-queued', id, queued: false });
         live.push({ type: 'confirm-resolved', id, outcome: 'rejected' });
-        live.push({
-          type: 'tool-end',
-          id,
-          success: false,
-          summary: cancelled ? 'cancelled' : 'error',
-        });
+        live.push({ type: 'tool-end', id, success: false, summary });
       }
       live.close();
-    });
+    };
+    // On the shared agent loop (`experimental.unifiedAgentLoop`), the round's
+    // calls run as one batch of the loop on this scheduler: the batch answers
+    // a replay in place, and finalizes, counts and records the results.
+    let scheduled: Promise<unknown>;
+    let batch: Promise<ToolBatchResult> | undefined;
+    // The results the batch answered without running a call.
+    const answered: Array<{
+      request: ToolCallRequestInfo;
+      response: ToolCallResponseInfo;
+    }> = [];
+    if (sharedRound && duplicates) {
+      liveLogger.debug(
+        `tool batch on the shared agent loop (prompt ${promptId}, ${pending.length} call(s))`,
+      );
+      batch = runToolBatch(pending, {
+        config,
+        client,
+        signal: abort,
+        duplicates,
+        // Esc keeps the results, which the turn pairs into history.
+        keepCancelledResults: true,
+        // The turn records the results only while it is current.
+        deferRecording: true,
+        executor: {
+          run: (requests, signal, hooks) => {
+            const launched = requests.filter((request) =>
+              hooks.beforeLaunch(request, []),
+            );
+            if (launched.length === 0) return Promise.resolve([]);
+            publishToolHistory(
+              launched.map((request) => ({ status: 'scheduled', request })),
+            );
+            // The batch settles when the scheduler completes it: `schedule`
+            // returns as soon as a call waits for approval.
+            return new Promise<AgentLoopSettledCall[]>((resolve, reject) => {
+              settleBatch = () =>
+                resolve(
+                  completed.map(
+                    (call): AgentLoopSettledCall => ({
+                      status: call.status,
+                      request: call.request,
+                      response: call.response,
+                      // Check ownership when the shared loop reads the count
+                      // flag, since the session can change after settlement.
+                      get recorded() {
+                        return (
+                          !isCurrentSession() ||
+                          call.nativeAttemptsObserved === true ||
+                          call.status === 'cancelled'
+                        );
+                      },
+                    }),
+                  ),
+                );
+              void scheduler.schedule(launched as never, signal).catch(reject);
+            }).catch((error: unknown) => {
+              onScheduleFailed(error);
+              throw error;
+            });
+          },
+        },
+        host: {
+          onToolResult: ({ request, response, origin }) => {
+            if (origin !== 'executed') answered.push({ request, response });
+          },
+        },
+      });
+      scheduled = batch;
+      // A batch that runs no call never completes the scheduler.
+      void batch.then(
+        () => live.close(),
+        () => live.close(),
+      );
+    } else {
+      publishToolHistory(
+        pending.map((request) => ({ status: 'scheduled', request })),
+      );
+      scheduled = scheduler.schedule(pending as never, abort);
+      void scheduled.catch(onScheduleFailed);
+    }
     for (;;) {
       const ev = await live.next();
       if (ev === undefined) break;
       yield ev;
+      // The consumer has now folded the preceding assistant and tool events.
+      // Capturing inside onToolCallsUpdate would read an undrained live queue.
+      if (ev.type === 'confirm') {
+        const checkpoint = checkpointRequests.get(ev.id);
+        const port = options?.checkpointHistory;
+        const directory =
+          checkpoint && port && config.getFileCheckpointingEnabled()
+            ? config.storage.getProjectTempCheckpointsDir()
+            : undefined;
+        if (checkpoint && port && directory) {
+          try {
+            await writeToolCheckpoint({
+              directory,
+              request: checkpoint.request,
+              isCurrent: () =>
+                current() &&
+                config.getSessionId() === sessionId &&
+                !abort.aborted &&
+                checkpointRequests.get(ev.id) === checkpoint,
+              snapshot: () => {
+                const history = port.snapshot();
+                const clientHistory = client.getHistoryShallow();
+                const promptIds = clientHistory.map(
+                  (content) => getApiHistoryPromptId(content) ?? null,
+                );
+                return {
+                  history,
+                  clientHistory,
+                  ...(promptIds.some(Boolean) ? { promptIds } : {}),
+                };
+              },
+            });
+          } catch (error) {
+            checkpointLogger.debug(
+              'Could not save complete tool checkpoint',
+              error,
+            );
+          }
+        }
+      }
     }
     await scheduled;
+    const shared = batch ? await batch : undefined;
+    if (shared?.stop === 'duplicate_provider_call') {
+      // The batch ran nothing: the model repeated a call id it was already
+      // answered for, which stops the turn as a loop, as Ink does.
+      endBatchInteraction('error', {
+        errorMessage: 'loop detected',
+        errorType: 'loop_detected',
+      });
+      if (!isCurrentSession()) return;
+
+      const skipped = skippedCalls('cancelled', TOOL_LOOP_SKIPPED_MESSAGE);
+      for (const { response } of skipped) {
+        for (const part of response.responseParts) {
+          part.partMetadata = {
+            ...part.partMetadata,
+            [TOOL_LOOP_SKIPPED_METADATA]: true,
+          };
+        }
+      }
+      const last = skipped.at(-1)!;
+      const chat = client.getChat();
+      chat.addHistory({
+        role: 'user',
+        parts: skipped.flatMap(({ response }) => response.responseParts),
+      });
+      chat.setCompletedToolCallIds([
+        ...chat.getCompletedToolCallIds(),
+        last.request.callId,
+      ]);
+      const recorder = config.getChatRecordingService();
+      for (const call of skipped) {
+        const { request, response, status } = call;
+        recorder?.recordToolResult(
+          response.responseParts,
+          {
+            callId: request.callId,
+            status,
+            resultDisplay: response.resultDisplay,
+            error: response.error,
+            errorType: response.errorType,
+            executionStatus: response.executionStatus,
+          },
+          call === last ? { subtype: 'tool_loop_end' } : undefined,
+        );
+      }
+      const loopEvent = {
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          loopReason: LoopReason.PROVIDER_DUPLICATE_ID,
+        },
+      } satisfies ServerLlmStreamEvent;
+      options?.onStreamEvent?.(loopEvent);
+
+      const history = toolHistoryEvent(skipped);
+      if (history) yield history;
+      for (const { request, response } of skipped) {
+        if (isCurrentSession()) dualOutput?.emitToolResult(request, response);
+        yield {
+          type: 'tool-end',
+          id: request.callId,
+          success: false,
+          summary: 'cancelled',
+        };
+      }
+      if (isCurrentSession()) dualOutput?.processEvent(loopEvent);
+      yield* map(loopEvent);
+      return;
+    }
+    const sharedParts = new Map(
+      (shared?.responses ?? []).map(({ callId, parts }) => [callId, parts]),
+    );
+    if (shared && isCurrentSession()) {
+      const clippedTools = new Set<string>();
+      for (const { request, response, tool } of completed) {
+        // The finalizer only replaces parts whose text it shortens, including
+        // error payloads a Mod may have used to return a native result.
+        if (
+          sharedParts
+            .get(request.callId)
+            ?.some((part, index) => part !== response.responseParts[index])
+        ) {
+          clippedTools.add(canonicalToolName(tool?.name ?? request.name));
+        }
+      }
+      if ([...clippedTools].some((name) => FILE_PATH_TOOLS.has(name))) {
+        // Keep prior-read rights while letting the model get the full body.
+        config.getFileReadCache().markAllReadsEvictedFromHistory();
+      }
+      if (
+        clippedTools.has(ToolNames.SKILL) ||
+        clippedTools.has(ToolNames.EXEC)
+      ) {
+        clearLoadedSkillTracking(
+          config.getToolRegistry(),
+          'OpenTUI shared tool-output shrink',
+        );
+      }
+    }
 
     const usesMods = completed.some((call) => call.nativeAttemptsObserved);
-    const finalResponses = usesMods
-      ? await finalizeToolResponses(
-          config,
-          completed.map((call) => ({
-            callId: call.request.callId,
-            toolName: call.request.name,
-            responseParts: call.response?.responseParts ?? [],
-            persistedOutputFiles: call.response?.persistedOutputFiles,
-            artifacts: call.response?.artifacts,
-          })),
-        )
-      : completed.map((call) => ({
-          responseParts: call.response.responseParts,
+    const finalResponses = shared
+      ? completed.map((call) => ({
+          responseParts:
+            sharedParts.get(call.request.callId) ?? call.response.responseParts,
           persistedOutputFiles: call.response.persistedOutputFiles,
           artifacts: call.response.artifacts,
-        }));
+        }))
+      : usesMods
+        ? await finalizeToolResponses(
+            config,
+            completed.map((call) => ({
+              callId: call.request.callId,
+              toolName: call.request.name,
+              responseParts: call.response?.responseParts ?? [],
+              persistedOutputFiles: call.response?.persistedOutputFiles,
+              artifacts: call.response?.artifacts,
+            })),
+          )
+        : completed.map((call) => ({
+            responseParts: call.response.responseParts,
+            persistedOutputFiles: call.response.persistedOutputFiles,
+            artifacts: call.response.artifacts,
+          }));
     const responseParts: Part[] = [];
     for (const [index, call] of completed.entries()) {
       const resp = call.response;
@@ -1049,10 +1810,15 @@ export async function* livePromptEvents(
       if (resp) {
         const final = finalResponses[index];
         responseParts.push(...final.responseParts);
-        if (usesMods)
-          config
-            .getChatRecordingService()
-            ?.recordToolResult(final.responseParts, {
+        if (
+          !shared &&
+          !initialTool &&
+          current() &&
+          config.getSessionId() === sessionId
+        )
+          config.getChatRecordingService()?.recordToolResult(
+            final.responseParts,
+            {
               callId: call.request.callId,
               status: call.status,
               resultDisplay: resp.resultDisplay,
@@ -1061,24 +1827,167 @@ export async function* livePromptEvents(
               executionStatus: resp.executionStatus,
               persistedOutputFiles: final.persistedOutputFiles,
               artifacts: final.artifacts,
-            });
+            },
+            goalToolResultProvenance(call.request, final.responseParts),
+          );
       }
     }
-    // ink use-llm-stream parity (:5328): when every tool in the batch was
-    // cancelled, the cancelled responses go to history only — no follow-up
-    // model request. Checked before the steering drain so surviving steered
-    // texts stay parked for the post-turn queue drain instead of riding a
-    // request that will never be sent.
-    if (completed.every((call) => call.status === 'cancelled')) {
-      if (responseParts.length > 0) {
-        await client.addHistory({ role: 'user', parts: responseParts });
+    // The batch's results: in request order and finalized, with the answers
+    // to the calls it did not run, which close their cards here.
+    const displayed = new Map(
+      completed.map((call) => [call.request.callId, call]),
+    );
+    const answeredOnly = answered.filter(
+      ({ request }) => !displayed.has(request.callId),
+    );
+    if (shared) {
+      if (answeredOnly.length > 0) {
+        for (const { request, response } of answeredOnly) {
+          displayed.set(
+            request.callId,
+            response.error
+              ? { request, response, status: 'error' }
+              : { request, response, status: 'success' },
+          );
+        }
+        const ordered = new Set(
+          pending.map(({ callId }) => displayed.get(callId)),
+        );
+        const history = toolHistoryEvent(
+          [...ordered].filter((call) => call !== undefined),
+        );
+        if (history) yield history;
+      }
+      for (const { request, response } of answeredOnly) {
+        const result = toolResultEvent(request.callId, response.resultDisplay);
+        if (result) yield result;
+        yield {
+          type: 'tool-end',
+          id: request.callId,
+          success: !response.error,
+          summary: response.error ? 'error' : 'ok',
+        };
+      }
+      responseParts.splice(0, responseParts.length, ...shared.parts);
+      if (isCurrentSession()) {
+        for (const response of shared.responses ?? []) response.record?.();
+      }
+    }
+    // Client-initiated slash tools finish locally in Ink. Leave queued user
+    // input for its own turn rather than attaching it to tool responses.
+    if (initialTool) {
+      if (initialTool.restoreResponseBinding) {
+        const index = completed.findIndex(
+          (call) => call.request.callId === initialToolCallId,
+        );
+        if (index !== -1) {
+          await completeRestoreToolResponse(
+            initialTool.restoreResponseBinding,
+            completed[index].request,
+            finalResponses[index].responseParts,
+            () => !abort.aborted && current(),
+            {
+              toolCallResult: {
+                callId: completed[index].request.callId,
+                status: completed[index].status,
+                resultDisplay: completed[index].response.resultDisplay,
+                error: completed[index].response.error,
+                errorType: completed[index].response.errorType,
+                executionStatus: completed[index].response.executionStatus,
+                persistedOutputFiles:
+                  finalResponses[index].persistedOutputFiles,
+                artifacts: finalResponses[index].artifacts,
+              },
+              options: goalToolResultProvenance(
+                completed[index].request,
+                finalResponses[index].responseParts,
+              ),
+            },
+          );
+        }
+      }
+      if (!abort.aborted && current()) {
+        for (const [index, call] of completed.entries()) {
+          dualOutput?.emitToolResult(call.request, {
+            ...call.response,
+            ...finalResponses[index],
+          });
+        }
+      }
+      return;
+    }
+    if (shared && !isCurrentSession()) {
+      endBatchInteraction('cancelled');
+      return;
+    }
+    // Replay answers keep a declined batch going. Esc stops the whole batch
+    // and pairs its retained results without sending another request.
+    const cancelled =
+      (shared !== undefined && abort.aborted) ||
+      (answeredOnly.length === 0 &&
+        completed.every((call) => call.status === 'cancelled'));
+    if (!cancelled && !turnModel.inline && !turnModel.current?.endsWith('\0')) {
+      for (const call of completed) {
+        if ('modelOverride' in call.response)
+          turnModel.current = call.response.modelOverride;
+      }
+    }
+
+    if (!cancelled && !abort.aborted && current()) {
+      for (const [index, call] of completed.entries()) {
+        dualOutput?.emitToolResult(call.request, {
+          ...call.response,
+          ...finalResponses[index],
+        });
+      }
+      for (const { request, response } of answeredOnly)
+        dualOutput?.emitToolResult(request, response);
+    }
+    if (cancelled || shared?.stop === 'tool_ended_turn') {
+      const permit =
+        shared &&
+        completed.find((call) => call.response.terminateTurn)?.request
+          .goalContext;
+      let events: ServerLlmStreamEvent[] = [];
+      try {
+        if (responseParts.length > 0) {
+          await client.addHistory({ role: 'user', parts: responseParts });
+        }
+        if (cancelled && (!shared || isCurrentSession()))
+          options?.onToolsCancelled?.();
+        if (permit) {
+          events = await finishToolGoalTurn(
+            config,
+            promptId,
+            permit,
+            abort,
+            isCurrentSession,
+          );
+        }
+      } catch (error) {
+        endBatchInteraction(
+          'error',
+          permit
+            ? {
+                errorMessage: 'Goal tool continuation could not finish',
+                errorType: 'continuation_goal_finish_failed',
+              }
+            : undefined,
+        );
+        throw error;
+      }
+      endBatchInteraction(cancelled ? 'cancelled' : 'ok');
+      for (const event of events) {
+        if (!isCurrentSession()) return;
+        dualOutput?.processEvent(event);
+        yield* map(event);
       }
       return;
     }
     // Sampling boundary: drained steering rides after the tool responses as
     // genuine user content (original useGeminiStream mid-turn drain).
     if (!abort.aborted) {
-      const texts = (options?.drainSteering?.() ?? []).filter((text) => text);
+      const texts = options?.drainSteering?.() ?? [];
       if (texts.length > 0) {
         const steered = await resolveSteeredPromptParts(
           config,
@@ -1106,15 +2015,37 @@ export async function* livePromptEvents(
         if (steered.restore.length > 0) {
           options?.restoreSteering?.(steered.restore);
         }
-        // U-32 (ink accept() :3352-3358): record each surviving message so a
-        // steer survives /resume as a mid-turn user message. The write is
-        // gated on delivery of the continuation send (R6-7, ink records from
-        // onDelivered): the stash flushes once that send yields or completes
-        // cleanly, and restores the texts when it dies first.
-        stashedRecordings = steered.recordings;
-        stashedSteeredTexts = texts;
-        // Carries the per-message USER echoes too (U-12), in ink accept() order.
-        for (const ev of steered.events) yield ev;
+        for (const event of steered.declinedEvents) yield event;
+        let settled = false;
+        pendingSteer = {
+          parts: steered.parts,
+          accept: () => {
+            if (settled) return;
+            settled = true;
+            if (options?.isCurrentTurn?.() === false) return;
+            acceptedSteerEvents.push(...steered.events);
+            options?.onAcceptedSteering?.(
+              steered.recordings.map((recording) => recording.message),
+            );
+            const recorder = config.getChatRecordingService?.();
+            for (const recording of steered.recordings) {
+              dualOutput?.emitUserMessage(recording.parts);
+              recorder?.recordMidTurnUserMessage(
+                recording.parts,
+                recording.message,
+              );
+            }
+          },
+          restore: () => {
+            if (settled) return;
+            settled = true;
+            if (steered.accepted.length > 0) {
+              options?.restoreSteering?.(steered.accepted);
+            }
+          },
+        };
+        // An attached carrier settles content already in the request; core
+        // does not append its parts a second time.
         responseParts.push(...steered.parts);
       }
     }
@@ -1136,10 +2067,16 @@ export async function* livePromptEvents(
       if (didWriteProjectContextFile(candidates, config.getProjectRoot())) {
         await refreshMemoryInstruction(config, {
           logContext: 'opentui context-file memory tool batch',
+        }).catch((error: unknown) => {
+          pendingSteer?.restore();
+          throw error;
         });
       }
     }
-    if (responseParts.length === 0) return;
+    if (responseParts.length === 0) {
+      pendingSteer?.restore();
+      return;
+    }
     nextPrompt = responseParts;
   }
 }

@@ -14,6 +14,7 @@ import { execFile } from 'node:child_process';
 import { lookup } from 'node:dns/promises';
 import * as fs from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
+import type { ManagedLocalWebOptions } from './managed-local-web.js';
 import * as https from 'node:https';
 import { isIP } from 'node:net';
 import * as path from 'node:path';
@@ -54,6 +55,7 @@ import {
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import {
   DEFAULT_RING_SIZE,
+  normalizeMaxRingBytes,
   type BridgeEvent,
 } from '@qwen-code/acp-bridge/eventBus';
 import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
@@ -139,6 +141,7 @@ import {
   parseAllowOriginPatterns,
 } from './auth.js';
 import type { LocalControlService } from './local-control/index.js';
+import type { RemoteAccessService } from './remote-access.js';
 import {
   createPermissionAuditPublisher,
   PermissionAuditRing,
@@ -155,6 +158,7 @@ import {
   SERVE_CAPABILITY_REGISTRY,
 } from './capabilities.js';
 import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
+import { isGitAvailable } from './git-availability.js';
 import {
   isLocalPathOpenAvailable,
   isLocalTerminalAvailable,
@@ -198,6 +202,7 @@ import {
 } from './managed-scratch-workspace.js';
 import { ConversationRuntimeOwnershipError } from './conversations/conversation-runtime-errors.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
+import { readEnvironmentVariable } from '../config/storage-paths-lite.js';
 import { LIVE_HOST_PROTOCOL_VERSION } from './live/types.js';
 import { ServeAppLifecycleController } from './serve-app-lifecycle.js';
 import {
@@ -302,6 +307,7 @@ import {
   currentPidNamespace,
   daemonDiscoveryUrl,
   removeDaemonDiscovery,
+  removeDaemonToken,
   writeDaemonDiscovery,
 } from './daemon-discovery.js';
 
@@ -514,10 +520,12 @@ type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
   workspace?: string | string[];
   requireWebShell?: boolean;
 };
-type WorkspaceSettingsWrite =
-  import('./workspace-service/types.js').WorkspaceSettingsWrite;
+type WorkspaceSettingsWrites =
+  import('./workspace-service/types.js').WorkspaceSettingsWrites;
 type PersistDisabledSkillsBatchResult =
   import('./workspace-service/types.js').PersistDisabledSkillsBatchResult;
+type PersistUserSkillsActivationResult =
+  import('./workspace-service/types.js').PersistUserSkillsActivationResult;
 type ServeWorkspaceSkillStatus =
   import('@qwen-code/acp-bridge/status').ServeWorkspaceSkillStatus;
 type ChannelWebhookConfigRuntime = {
@@ -1882,6 +1890,32 @@ export function subSessionConcurrencyCapsFromSettings(
 }
 
 /**
+ * Reads the optional `serve.maxSessions` override. A non-negative integer or
+ * `Infinity` is honored; anything else is reported and ignored so a mistyped
+ * cap falls back to the built-in default instead of failing boot or silently
+ * disabling backpressure. Workspace settings never reach here: the key is
+ * workspace-restricted, and the serve fast path skips it structurally.
+ */
+export function maxSessionsFromSettings(
+  serve: { maxSessions?: unknown } | undefined,
+  onWarning: (message: string) => void = writeStderrLine,
+): number | undefined {
+  const value = serve?.maxSessions;
+  if (value === undefined) return undefined;
+  if (
+    value === Number.POSITIVE_INFINITY ||
+    (typeof value === 'number' && Number.isInteger(value) && value >= 0)
+  ) {
+    return value;
+  }
+  onWarning(
+    `qwen serve: ignoring invalid serve.maxSessions (${JSON.stringify(value)}); ` +
+      `expected a non-negative integer (0 = unlimited), falling back to the built-in default.`,
+  );
+  return undefined;
+}
+
+/**
  * Per-workspace promise chain that serializes settings read-modify-write
  * cycles inside this process.
  *
@@ -1904,6 +1938,24 @@ function withSettingsLock<T>(
   const prev = settingsWriteLocks.get(workspace) ?? Promise.resolve();
   const next = prev.then(fn, fn);
   settingsWriteLocks.set(workspace, next);
+  return next;
+}
+
+/**
+ * Per-workspace promise chain that keeps Skill toggle requests in arrival
+ * order. A toggle resolves its catalog identity before taking the settings
+ * lock; without this chain a later toggle could enqueue first and then be
+ * overwritten by the earlier one. It is separate from `withSettingsLock` so
+ * the identity read never blocks unrelated settings writes.
+ */
+const skillToggleChains = new Map<string, Promise<unknown>>();
+function withSkillToggleOrder<T>(
+  workspace: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const prev = skillToggleChains.get(workspace) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  skillToggleChains.set(workspace, next);
   return next;
 }
 
@@ -2119,6 +2171,9 @@ function buildProviderSetupInputs(
 }
 
 export interface RunQwenServeDeps {
+  /** The application launcher owns signals when it supervises other services. */
+  installSignalHandlers?: boolean;
+  managedLocalWeb?: ManagedLocalWebOptions;
   /** Only CLI entrypoints opt into replacing their own daemon process. */
   updateRestartArgv?: readonly string[];
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
@@ -2130,9 +2185,9 @@ export interface RunQwenServeDeps {
     hostname: string,
   ) => Promise<{ address: string; family: number }>;
   /**
-   * Whether to start the real ACP child eagerly after listen. Production
-   * keeps this on; tests can disable it so boot-path assertions do not wait
-   * on a real child bridge.
+   * Whether to start the real ACP child eagerly after listen. The ordinary
+   * CLI keeps this on; the Managed application starts Local ACP on demand.
+   * Tests can disable it to avoid waiting on a real child bridge.
    */
   preheatBridge?: boolean;
   /**
@@ -2430,9 +2485,11 @@ function currentServeFeaturesForRunQwenServe(
       ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
       : {}),
     persistSettingAvailable: true,
+    userSkillActivationAvailable: true,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable: true,
+    sessionBtwStreamAvailable: true,
     currentSessionSchedulingAvailable,
     workspaceGenerationAvailable: true,
     rateLimit: opts.rateLimit === true,
@@ -2442,6 +2499,7 @@ function currentServeFeaturesForRunQwenServe(
     channelManagementAvailable: true,
     persistentWorkspaceRegistrationAvailable: true,
     workspaceRuntimeRemovalAvailable: true,
+    workspaceDirectoriesAvailable: opts.experimentalPairedEngines !== true,
     // Advertise the same host-conditional and WS feature flags as the runtime
     // path (serve-features.ts) so the bootstrap `/capabilities` window doesn't
     // briefly under-report them.
@@ -2454,6 +2512,7 @@ function currentServeFeaturesForRunQwenServe(
     // serves all five once the app is up.
     dynamicWorkspaceRegistrationAvailable: true,
     scratchWorkspaceRegistrationAvailable: true,
+    gitWorkspaceCloneAvailable: isGitAvailable(),
     standaloneSessionsAvailable: true,
     workspaceTrustHotReloadAvailable: true,
     acpHttpEnabled:
@@ -2871,6 +2930,7 @@ function createBootstrapServeApp(input: {
         ),
         listenerMaxConnections: listenerMaxConnections(opts.maxConnections),
         eventRingSize: opts.eventRingSize ?? DEFAULT_RING_SIZE,
+        eventRingMaxBytes: opts.eventRingMaxBytes!,
         compactedReplayMaxBytes:
           opts.compactedReplayMaxBytes ?? DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
         maxJournalEvents: opts.maxJournalEvents ?? DEFAULT_MAX_JOURNAL_EVENTS,
@@ -3439,6 +3499,7 @@ async function runQwenServeImpl(
         'Must be "git-root" or "workspace".',
     );
   }
+  const eventRingMaxBytes = normalizeMaxRingBytes(optsIn.eventRingMaxBytes);
   preResolveServeFastPathHomeEnvOverrides();
   assertExecutionSandboxSupported(
     readOperatorSandboxSettings(),
@@ -3470,6 +3531,14 @@ async function runQwenServeImpl(
     hostedCsiSessionStoreUrl,
   });
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
+  const liveConversationWorkspace =
+    deps.liveConversationWorkspace ??
+    new ConversationWorkspace({
+      rootPath:
+        optsIn.conversationsDir !== undefined
+          ? optsIn.conversationsDir
+          : readEnvironmentVariable(baseEnv, 'QWEN_CONVERSATIONS_DIR'),
+    });
   const launchMemoryProjectScopeValue =
     baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
   const launchMemoryProjectScope = launchMemoryProjectScopeValue?.trim()
@@ -3595,6 +3664,7 @@ async function runQwenServeImpl(
   // resolved below.
   const opts: ServeOptions = {
     ...optsIn,
+    eventRingMaxBytes,
     hostname: bindHostname,
     requireAuth:
       optsIn.profile === 'hosted-harness' ? true : optsIn.requireAuth,
@@ -3906,8 +3976,6 @@ async function runQwenServeImpl(
   // Resolve the bound workspace list. The first explicit workspace remains the
   // primary workspace for legacy APIs; later workspaces are isolated secondary
   // runtimes.
-  const liveConversationWorkspace =
-    deps.liveConversationWorkspace ?? new ConversationWorkspace();
   const isReservedConversationWorkspace = (candidate: string): boolean => {
     const resolvedCandidate = path.resolve(candidate);
     const resolvedRoot = path.resolve(liveConversationWorkspace.rootPath);
@@ -4182,7 +4250,15 @@ async function runQwenServeImpl(
   let sessionArtifactsPersistenceAvailable = true;
   try {
     bootSettings =
-      deps.bootSettings ?? loadServeFastPathSettings(boundWorkspace);
+      deps.bootSettings ??
+      loadServeFastPathSettings(boundWorkspace, {
+        onWorkspaceSettingsError: (error) => {
+          writeStderrLine(
+            `qwen serve: ignoring unreadable workspace settings for ${boundWorkspace} ` +
+              `(${error.message}); operator settings are still applied.`,
+          );
+        },
+      });
     sessionArtifactsPersistenceAvailable =
       sessionArtifactsPersistenceAvailableFromSettings(bootSettings);
     contextFilenameForInit = extractContextFilename(
@@ -4205,12 +4281,18 @@ async function runQwenServeImpl(
     // disk IO) fall back to defaults so the daemon stays bootable.
     writeStderrLine(
       `qwen serve: could not read settings for context.fileName / ` +
-        `policy.* / serve.channels / serve.tokenQr ` +
+        `policy.* / serve.channels / serve.tokenQr / serve.maxSessions ` +
         `(${err instanceof Error ? err.message : String(err)}); ` +
         `falling back to defaults. Restart with a valid settings.json ` +
         `to apply context.fileName / policy.* / serve.channels / ` +
-        `serve.tokenQr overrides.`,
+        `serve.tokenQr / serve.maxSessions overrides.`,
     );
+  }
+  if (opts.maxSessions === undefined) {
+    const settingsMaxSessions = maxSessionsFromSettings(bootSettings?.serve);
+    if (settingsMaxSessions !== undefined) {
+      opts.maxSessions = settingsMaxSessions;
+    }
   }
   assertExecutionSandboxSupported(
     bootSettings ?? {},
@@ -4709,6 +4791,7 @@ async function runQwenServeImpl(
     discoveryRecordPath = undefined;
     try {
       removeDaemonDiscovery(actualPort, { expectedPid: process.pid });
+      removeDaemonToken(actualPort, process.pid);
     } catch {
       // Best-effort: a stale record is pruned by `qwen daemon status`.
     }
@@ -4768,9 +4851,14 @@ async function runQwenServeImpl(
   const restartForUpdate = deps.updateRestartArgv
     ? createDaemonUpdateRestarter({
         argv: deps.updateRestartArgv,
-        env: daemonRuntimeBaseEnv,
+        env: {
+          ...daemonRuntimeBaseEnv,
+          QWEN_CONVERSATIONS_DIR: liveConversationWorkspace.rootPath,
+        },
         token,
         externalToolGuardToken: optsIn.externalToolGuard?.token,
+        managedRuntimeBrokerUrl: opts.managedRuntimeBrokerUrl,
+        managedRuntimeBrokerToken: opts.managedRuntimeBrokerToken,
         getPort: () => actualPort,
         close: () => serveAppLifecycle.close(),
       })
@@ -4823,8 +4911,25 @@ async function runQwenServeImpl(
   // The refresh module loads via dynamic import (see start site) because it
   // pulls the SessionService chain, which must stay out of the pre-listen
   // static closure; the generation guards dispose-vs-async-start races.
-  let sessionPrRefreshTimer: { dispose(): void } | undefined;
+  let sessionPrRefreshTimer:
+    | { dispose(): void; stopWatch(): Promise<void> }
+    | undefined;
   let sessionPrRefreshGeneration = 0;
+  // Kept separately from the timer handle: the event-loop-monitor cleanup
+  // disposes and clears that handle before the lifecycle close runs its drains,
+  // but the watch still has to stop in order (timer, in-flight work, owner
+  // record). The disposed handle's closure stays valid, and disposing twice is
+  // a no-op, so the drain can call it afterwards.
+  //
+  // A buildRuntime re-entry takes the other path — the monitor cleanup disposes
+  // the timer without an ordered stop, so the owner record is left behind. That
+  // is safe, not a hole in the ordering: the claim returns `retained` for a
+  // record whose pid is this process and whose process token verifies, so the
+  // restarted timer re-adopts it and no second process can overlap.
+  let stopPrWatchOnShutdown: (() => Promise<void>) | undefined;
+  serveAppLifecycle.addAppDrain(async () => {
+    await stopPrWatchOnShutdown?.();
+  });
   let runtimeStartupError: string | undefined;
   let runtimeStarting: Promise<void> | undefined;
   let markRuntimeReady!: () => void;
@@ -5149,6 +5254,8 @@ async function runQwenServeImpl(
       stopAgentHostRestore?: () => void;
       stopWebTerminalRegistry?: () => void;
       stopHostedMountHandbacks?: () => void;
+      stopSubscriptionAuth?: () => void;
+      stopWeixinAuth?: () => void;
       subSessionStoppers?: Array<() => void>;
     };
     const stopSafely = (name: string, stop: (() => void) | undefined) => {
@@ -5169,6 +5276,8 @@ async function runQwenServeImpl(
     stopSafely('Agent Host reconnect', locals.stopAgentHostRestore);
     stopSafely('web terminal registry', locals.stopWebTerminalRegistry);
     stopSafely('Hosted mount handbacks', locals.stopHostedMountHandbacks);
+    stopSafely('Subscription authorization', locals.stopSubscriptionAuth);
+    stopSafely('WeChat authorization', locals.stopWeixinAuth);
     stopTrustPolicyMonitor(app);
     for (const stop of locals.subSessionStoppers ?? []) {
       stopSafely('sub-session launcher', stop);
@@ -5199,6 +5308,15 @@ async function runQwenServeImpl(
     // serialized disable runs on the next microtask and wins before further IO;
     // ACP disposal below also removes the upgrade listeners while the daemon
     // mount is being torn down.
+    const remoteAccessService = app.locals?.['remoteAccessService'] as
+      | RemoteAccessService
+      | undefined;
+    if (remoteAccessService) {
+      void remoteAccessService.dispose().catch((error: unknown) => {
+        daemonLog.warn(`Remote access dispose error: ${String(error)}`);
+      });
+    }
+
     const localControlService = app.locals?.['localControlService'] as
       | LocalControlService
       | undefined;
@@ -5818,6 +5936,27 @@ async function runQwenServeImpl(
     const workspaceRegistryForPersistence: {
       current: WorkspaceRegistry | undefined;
     } = { current: undefined };
+    const createRuntimeWorkflowOwnerCheck =
+      (
+        workspaceCwd: string,
+        getBridge: () => AcpSessionBridge | undefined,
+        generationGuard: WorkspaceGenerationGuard,
+      ) =>
+      (sessionId: string): boolean => {
+        const registry = workspaceRegistryForPersistence.current;
+        if (!registry || generationGuard.closed) return false;
+        const owner = registry.resolveLiveSessionOwner(sessionId);
+        const entry = registry.getManagedEntryByWorkspaceCwd(workspaceCwd);
+        return (
+          owner.kind === 'found' &&
+          owner.runtime.trusted &&
+          owner.runtime.workspaceCwd === workspaceCwd &&
+          owner.runtime.bridge === getBridge() &&
+          entry?.state === 'active' &&
+          entry.current?.runtime === owner.runtime &&
+          entry.current.guard === generationGuard
+        );
+      };
     const createRuntimeWorkflowAncestorTrustHandler = (
       workspaceCwd: string,
       getBridge: () => AcpSessionBridge | undefined,
@@ -5829,21 +5968,11 @@ async function runQwenServeImpl(
         admissionPolicy,
         getPublished: () => publishedWorkflowTrustPolicy,
         ideScopeCwd: workflowTrustIdeScopeCwd,
-        isCurrentOwner: (sessionId) => {
-          const registry = workspaceRegistryForPersistence.current;
-          if (!registry) return false;
-          const owner = registry.resolveLiveSessionOwner(sessionId);
-          const entry = registry.getManagedEntryByWorkspaceCwd(workspaceCwd);
-          return (
-            owner.kind === 'found' &&
-            owner.runtime.trusted &&
-            owner.runtime.workspaceCwd === workspaceCwd &&
-            owner.runtime.bridge === getBridge() &&
-            entry?.state === 'active' &&
-            entry.current?.runtime === owner.runtime &&
-            entry.current.guard === generationGuard
-          );
-        },
+        isCurrentOwner: createRuntimeWorkflowOwnerCheck(
+          workspaceCwd,
+          getBridge,
+          generationGuard,
+        ),
       });
     const isWorkspaceTrustedForPersistence = (workspace: string): boolean =>
       workspaceRegistryForPersistence.current?.getByWorkspaceCwd(workspace)
@@ -5868,10 +5997,13 @@ async function runQwenServeImpl(
         const workspaceRuntime =
           workspaceRegistryForPersistence.current?.getByWorkspaceCwd(workspace);
         const status =
-          await workspaceRuntime?.workspaceService.getWorkspaceSkillsStatus({
-            route: 'skill settings persistence',
-            workspaceCwd: workspace,
-          });
+          await workspaceRuntime?.workspaceService.getWorkspaceSkillsStatus(
+            {
+              route: 'skill settings persistence',
+              workspaceCwd: workspace,
+            },
+            { requireFresh: true },
+          );
         if (status?.initialized) skills = status.skills;
       } catch {
         // Preserve the legacy name heuristic when the catalog is unavailable.
@@ -5930,78 +6062,84 @@ async function runQwenServeImpl(
       enabled: boolean,
       assertGenerationOpen?: () => void,
     ) =>
-      withSettingsLock(workspace, async () => {
-        assertGenerationOpen?.();
-        const {
-          skillSettingStrings,
-          skillToggleBlockForName,
-          updateWorkspaceSkillSettingLists,
-        } = await import('../config/skill-settings.js');
-        const fresh = loadSettingsForPersistence(workspace);
-        const workspaceDisabled = skillSettingStrings(
-          fresh,
-          WORKSPACE_SETTING_SCOPE,
-          'disabled',
-        );
-        const workspaceEnabled = skillSettingStrings(
-          fresh,
-          WORKSPACE_SETTING_SCOPE,
-          'enabled',
-        );
-        // A grant a standing entry still forbids is not a write: the picker
-        // locks such rows, and a route that persists anyway reports an
-        // enable the merged config still denies.
-        if (enabled) {
-          const [skillIdentity] = await resolveSkillToggleIdentities(
-            workspace,
-            [skillName],
+      withSkillToggleOrder(workspace, async () => {
+        // Resolving a catalog identity can block on ACP. Do it before taking
+        // the settings write lock so an enable does not serialize every other
+        // settings write for this workspace behind a cold read.
+        const [skillIdentity] = enabled
+          ? await resolveSkillToggleIdentities(workspace, [skillName])
+          : [{ name: skillName }];
+        return withSettingsLock(workspace, async () => {
+          assertGenerationOpen?.();
+          const {
+            skillSettingStrings,
+            skillToggleBlockForName,
+            updateWorkspaceSkillSettingLists,
+          } = await import('../config/skill-settings.js');
+          const fresh = loadSettingsForPersistence(workspace);
+          const workspaceDisabled = skillSettingStrings(
+            fresh,
+            WORKSPACE_SETTING_SCOPE,
+            'disabled',
           );
-          const block = skillToggleBlockForName(fresh, skillIdentity);
-          if (block) {
-            return { changed: false, disabled: workspaceDisabled, block };
+          const workspaceEnabled = skillSettingStrings(
+            fresh,
+            WORKSPACE_SETTING_SCOPE,
+            'enabled',
+          );
+          // A grant a standing entry still forbids is not a write: the picker
+          // locks such rows, and a route that persists anyway reports an
+          // enable the merged config still denies.
+          if (enabled) {
+            const block = skillToggleBlockForName(fresh, skillIdentity);
+            if (block) {
+              return { changed: false, disabled: workspaceDisabled, block };
+            }
           }
-        }
-        const next = updateWorkspaceSkillSettingLists(
-          { disabled: workspaceDisabled, enabled: workspaceEnabled },
-          skillName,
-          enabled,
-        );
-        const settingsChanges: Array<{
-          key: 'skills.disabled' | 'skills.enabled';
-          value: string[] | undefined;
-        }> = [];
-        if (
-          JSON.stringify(next.disabled) !== JSON.stringify(workspaceDisabled)
-        ) {
-          settingsChanges.push({
-            key: 'skills.disabled',
-            value: next.disabled.length > 0 ? next.disabled : undefined,
-          });
-        }
-        if (JSON.stringify(next.enabled) !== JSON.stringify(workspaceEnabled)) {
-          settingsChanges.push({
-            key: 'skills.enabled',
-            value: next.enabled.length > 0 ? next.enabled : undefined,
-          });
-        }
-        if (settingsChanges.length === 0) {
-          return { changed: false, disabled: workspaceDisabled };
-        }
+          const next = updateWorkspaceSkillSettingLists(
+            { disabled: workspaceDisabled, enabled: workspaceEnabled },
+            skillName,
+            enabled,
+          );
+          const settingsChanges: Array<{
+            key: 'skills.disabled' | 'skills.enabled';
+            value: string[] | undefined;
+          }> = [];
+          if (
+            JSON.stringify(next.disabled) !== JSON.stringify(workspaceDisabled)
+          ) {
+            settingsChanges.push({
+              key: 'skills.disabled',
+              value: next.disabled.length > 0 ? next.disabled : undefined,
+            });
+          }
+          if (
+            JSON.stringify(next.enabled) !== JSON.stringify(workspaceEnabled)
+          ) {
+            settingsChanges.push({
+              key: 'skills.enabled',
+              value: next.enabled.length > 0 ? next.enabled : undefined,
+            });
+          }
+          if (settingsChanges.length === 0) {
+            return { changed: false, disabled: workspaceDisabled };
+          }
 
-        assertGenerationOpen?.();
-        fresh.setValues(
-          settingsChanges.map((change) => ({
-            scope: WORKSPACE_SETTING_SCOPE,
-            ...change,
-          })),
-          undefined,
-          assertGenerationOpen,
-        );
-        return {
-          changed: true,
-          disabled: next.disabled,
-          settingsChanges,
-        };
+          assertGenerationOpen?.();
+          fresh.setValues(
+            settingsChanges.map((change) => ({
+              scope: WORKSPACE_SETTING_SCOPE,
+              ...change,
+            })),
+            undefined,
+            assertGenerationOpen,
+          );
+          return {
+            changed: true,
+            disabled: next.disabled,
+            settingsChanges,
+          };
+        });
       });
     const persistDisabledSkillsBatchFn = (
       workspace: string,
@@ -6009,92 +6147,155 @@ async function runQwenServeImpl(
       enabled: boolean,
       assertGenerationOpen?: () => void,
     ): Promise<PersistDisabledSkillsBatchResult> =>
-      withSettingsLock(workspace, async () => {
-        assertGenerationOpen?.();
-        const {
-          skillSettingStrings,
-          skillToggleBlockForName,
-          updateWorkspaceSkillSettingLists,
-        } = await import('../config/skill-settings.js');
-        const fresh = loadSettingsForPersistence(workspace);
-        const initialDisabled = skillSettingStrings(
-          fresh,
-          WORKSPACE_SETTING_SCOPE,
-          'disabled',
-        );
-        const initialEnabled = skillSettingStrings(
-          fresh,
-          WORKSPACE_SETTING_SCOPE,
-          'enabled',
-        );
+      withSkillToggleOrder(workspace, async () => {
+        // Resolve catalog identities before the lock for the same reason as
+        // the single toggle above.
         const skillIdentities = enabled
           ? await resolveSkillToggleIdentities(workspace, skillNames)
           : skillNames.map((name) => ({ name }));
-        let next = { disabled: initialDisabled, enabled: initialEnabled };
-        const outcomes: PersistDisabledSkillsBatchResult['outcomes'] =
-          skillNames.map((skillName) => ({ skillName, changed: false }));
-        let pending = skillNames.map((_, index) => index);
-
-        for (let pass = 0; pass < skillNames.length; pass += 1) {
-          const refused: number[] = [];
-          let listChanged = false;
-          for (const index of pending) {
-            const skillName = skillNames[index];
-            if (enabled) {
-              const block = skillToggleBlockForName(
-                fresh,
-                skillIdentities[index],
-              );
-              if (
-                block &&
-                !(
-                  block.scope === 'Workspace' &&
-                  block.list === 'disabled' &&
-                  !next.disabled.some(
-                    (name) => name.trim().toLowerCase() === block.entry,
-                  )
-                )
-              ) {
-                refused.push(index);
-                continue;
-              }
-            }
-            const updated = updateWorkspaceSkillSettingLists(
-              next,
-              skillName,
-              enabled,
-            );
-            const changed =
-              JSON.stringify(updated.disabled) !==
-                JSON.stringify(next.disabled) ||
-              JSON.stringify(updated.enabled) !== JSON.stringify(next.enabled);
-            next = updated;
-            outcomes[index] = { skillName, changed };
-            listChanged ||= changed;
-          }
-          pending = refused;
-          if (pending.length === 0 || !listChanged) break;
-        }
-
-        const settingsChanges: PersistDisabledSkillsBatchResult['settingsChanges'] =
-          [];
-        if (JSON.stringify(next.disabled) !== JSON.stringify(initialDisabled)) {
-          settingsChanges.push({
-            key: 'skills.disabled',
-            value: next.disabled.length > 0 ? next.disabled : undefined,
-          });
-        }
-        if (JSON.stringify(next.enabled) !== JSON.stringify(initialEnabled)) {
-          settingsChanges.push({
-            key: 'skills.enabled',
-            value: next.enabled.length > 0 ? next.enabled : undefined,
-          });
-        }
-        if (settingsChanges.length > 0) {
+        return withSettingsLock(workspace, async () => {
           assertGenerationOpen?.();
+          const {
+            skillSettingStrings,
+            skillToggleBlockForName,
+            updateWorkspaceSkillSettingLists,
+          } = await import('../config/skill-settings.js');
+          const fresh = loadSettingsForPersistence(workspace);
+          const initialDisabled = skillSettingStrings(
+            fresh,
+            WORKSPACE_SETTING_SCOPE,
+            'disabled',
+          );
+          const initialEnabled = skillSettingStrings(
+            fresh,
+            WORKSPACE_SETTING_SCOPE,
+            'enabled',
+          );
+          let next = { disabled: initialDisabled, enabled: initialEnabled };
+          const outcomes: PersistDisabledSkillsBatchResult['outcomes'] =
+            skillNames.map((skillName) => ({ skillName, changed: false }));
+          let pending = skillNames.map((_, index) => index);
+
+          for (let pass = 0; pass < skillNames.length; pass += 1) {
+            const refused: number[] = [];
+            let listChanged = false;
+            for (const index of pending) {
+              const skillName = skillNames[index];
+              if (enabled) {
+                const block = skillToggleBlockForName(
+                  fresh,
+                  skillIdentities[index],
+                );
+                if (
+                  block &&
+                  !(
+                    block.scope === 'Workspace' &&
+                    block.list === 'disabled' &&
+                    !next.disabled.some(
+                      (name) => name.trim().toLowerCase() === block.entry,
+                    )
+                  )
+                ) {
+                  refused.push(index);
+                  continue;
+                }
+              }
+              const updated = updateWorkspaceSkillSettingLists(
+                next,
+                skillName,
+                enabled,
+              );
+              const changed =
+                JSON.stringify(updated.disabled) !==
+                  JSON.stringify(next.disabled) ||
+                JSON.stringify(updated.enabled) !==
+                  JSON.stringify(next.enabled);
+              next = updated;
+              outcomes[index] = { skillName, changed };
+              listChanged ||= changed;
+            }
+            pending = refused;
+            if (pending.length === 0 || !listChanged) break;
+          }
+
+          const settingsChanges: PersistDisabledSkillsBatchResult['settingsChanges'] =
+            [];
+          if (
+            JSON.stringify(next.disabled) !== JSON.stringify(initialDisabled)
+          ) {
+            settingsChanges.push({
+              key: 'skills.disabled',
+              value: next.disabled.length > 0 ? next.disabled : undefined,
+            });
+          }
+          if (JSON.stringify(next.enabled) !== JSON.stringify(initialEnabled)) {
+            settingsChanges.push({
+              key: 'skills.enabled',
+              value: next.enabled.length > 0 ? next.enabled : undefined,
+            });
+          }
+          if (settingsChanges.length > 0) {
+            assertGenerationOpen?.();
+            fresh.setValues(
+              settingsChanges.map((change) => ({
+                scope: WORKSPACE_SETTING_SCOPE,
+                ...change,
+              })),
+              undefined,
+              assertGenerationOpen,
+            );
+          }
+          return { outcomes, settingsChanges };
+        });
+      });
+    const persistUserSkillsActivationFn = (
+      workspace: string,
+      skillNames: readonly string[],
+      activation: import('../config/skill-settings.js').UserSkillActivation,
+      assertGenerationOpen?: () => void,
+    ): Promise<PersistUserSkillsActivationResult> =>
+      withSettingsLock(workspace, async () => {
+        assertGenerationOpen?.();
+        const { updateUserSkillSettingLists } = await import(
+          '../config/skill-settings.js'
+        );
+        const { SettingScope } = settingsRuntime.settings;
+        const fresh = loadSettingsForPersistence(workspace);
+        const userSkills = fresh.user.originalSettings.skills;
+        const asList = (value: unknown): string[] =>
+          Array.isArray(value)
+            ? value.filter((name): name is string => typeof name === 'string')
+            : [];
+        const initial = {
+          disabled: asList(userSkills?.disabled),
+          defaultDisabled: asList(userSkills?.defaultDisabled),
+          enabled: asList(userSkills?.enabled),
+        };
+        let next = initial;
+        const outcomes = skillNames.map((skillName) => {
+          const updated = updateUserSkillSettingLists(
+            next,
+            skillName,
+            activation,
+          );
+          const changed = JSON.stringify(updated) !== JSON.stringify(next);
+          next = updated;
+          return { skillName, changed };
+        });
+        const settingsChanges: PersistUserSkillsActivationResult['settingsChanges'] =
+          [];
+        for (const key of ['disabled', 'defaultDisabled', 'enabled'] as const) {
+          if (JSON.stringify(next[key]) !== JSON.stringify(initial[key])) {
+            settingsChanges.push({
+              key: `skills.${key}`,
+              value: next[key].length ? next[key] : undefined,
+            });
+          }
+        }
+        if (settingsChanges.length) {
           fresh.setValues(
             settingsChanges.map((change) => ({
-              scope: WORKSPACE_SETTING_SCOPE,
+              scope: SettingScope.User,
               ...change,
             })),
             undefined,
@@ -6119,12 +6320,16 @@ async function runQwenServeImpl(
       });
     const persistSettingsFn = (
       workspace: string,
-      writes: WorkspaceSettingsWrite[],
+      requestedWrites: WorkspaceSettingsWrites,
       assertGenerationOpen?: () => void,
     ): Promise<void> =>
       withSettingsLock(workspace, async () => {
         assertGenerationOpen?.();
         const fresh = loadSettingsForPersistence(workspace);
+        const writes =
+          typeof requestedWrites === 'function'
+            ? requestedWrites(fresh)
+            : requestedWrites;
         const writesByScope = new Map<
           import('../config/settings.js').SettingScope,
           number
@@ -6188,6 +6393,7 @@ async function runQwenServeImpl(
         cron,
         prompt,
         recurring,
+        gate,
         assertCallerPromptActive,
       }) => {
         const targetBridge = getBridge();
@@ -6215,10 +6421,11 @@ async function runQwenServeImpl(
               cron,
               prompt,
               recurring,
+              ...(gate !== undefined ? { gate } : {}),
             },
             { source: 'cron-tool', assertCallerPromptActive },
           );
-        return { id: task.id, cron: task.cron };
+        return { id: task.id, cron: task.cron, gate: task.gate ?? null };
       };
     // Late-binds the bridge (constructed just below) via `() => bridgeRef`. Only
     // wired on the daemon-created bridge — an injected `deps.bridge` (embed/test)
@@ -6238,6 +6445,11 @@ async function runQwenServeImpl(
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
+        isWorkflowModeWriteAllowed: createRuntimeWorkflowOwnerCheck(
+          boundWorkspace,
+          () => bridgeRef,
+          primaryGenerationGuard,
+        ),
         onWorkflowAncestorTrust: createRuntimeWorkflowAncestorTrustHandler(
           boundWorkspace,
           () => bridgeRef,
@@ -6282,6 +6494,7 @@ async function runQwenServeImpl(
         ...(opts.eventRingSize !== undefined
           ? { eventRingSize: opts.eventRingSize }
           : {}),
+        eventRingMaxBytes,
         ...(opts.compactedReplayMaxBytes !== undefined
           ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
           : {}),
@@ -6542,7 +6755,7 @@ async function runQwenServeImpl(
         trustMaterialization: primaryTrustMaterialization,
       },
     ];
-    if (trustedWorkspace) {
+    if (trustedWorkspace && opts.profile !== 'hosted-harness') {
       await recoverBranchWorktreePreparations({
         workspaceCwd: boundWorkspace,
         sessionService: await createBranchRecoverySessionService(
@@ -6884,6 +7097,11 @@ async function runQwenServeImpl(
         secondaryEnv.sessionRuntimeBaseDir,
       );
       const secondaryBridge = runtime.createAcpSessionBridge({
+        isWorkflowModeWriteAllowed: createRuntimeWorkflowOwnerCheck(
+          workspaceInput.cwd,
+          () => secondaryBridgeRef,
+          secondaryGenerationGuard,
+        ),
         onWorkflowAncestorTrust: createRuntimeWorkflowAncestorTrustHandler(
           workspaceInput.cwd,
           () => secondaryBridgeRef,
@@ -6926,6 +7144,7 @@ async function runQwenServeImpl(
         ...(opts.eventRingSize !== undefined
           ? { eventRingSize: opts.eventRingSize }
           : {}),
+        eventRingMaxBytes,
         ...(opts.compactedReplayMaxBytes !== undefined
           ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
           : {}),
@@ -7408,35 +7627,39 @@ async function runQwenServeImpl(
     // closure check forbids in this pre-listen root's static closure.
     sessionPrRefreshTimer?.dispose();
     const refreshGeneration = ++sessionPrRefreshGeneration;
-    void import('./server/session-pr-refresh.js')
-      .then((mod) => {
-        if (refreshGeneration !== sessionPrRefreshGeneration) return;
-        sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
-          workspaceRegistry,
-          // The coordinator lives on the serve app (createServeApp below),
-          // which is built after this timer starts; read it per tick like
-          // the metrics sampler reads `acpHandle`.
-          getArchiveCoordinator: () =>
-            (
-              app.locals as {
-                sessionArchiveCoordinator?: SessionArchiveCoordinator;
-              }
-            ).sessionArchiveCoordinator,
+    if (opts.profile !== 'hosted-harness') {
+      void import('./server/session-pr-refresh.js')
+        .then((mod) => {
+          if (refreshGeneration !== sessionPrRefreshGeneration) return;
+          sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
+            workspaceRegistry,
+            // The coordinator lives on the serve app (createServeApp below),
+            // which is built after this timer starts; read it per tick like
+            // the metrics sampler reads `acpHandle`.
+            getArchiveCoordinator: () =>
+              (
+                app.locals as {
+                  sessionArchiveCoordinator?: SessionArchiveCoordinator;
+                }
+              ).sessionArchiveCoordinator,
+          });
+          const handle = sessionPrRefreshTimer;
+          stopPrWatchOnShutdown = handle ? () => handle.stopWatch() : undefined;
+        })
+        .catch((error) => {
+          // Degrade to "no PR-state sweep" instead of leaking an unhandled
+          // rejection: the serve fast path installs no process-level
+          // unhandledRejection handler before this runs, and Node's default
+          // for one is to exit — a failed chunk load (e.g. an in-place
+          // upgrade replacing dist/ under the running daemon) would take
+          // down every runtime, session, and connection the daemon serves.
+          daemonLog.warn(
+            `session-pr-refresh load failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
         });
-      })
-      .catch((error) => {
-        // Degrade to "no PR-state sweep" instead of leaking an unhandled
-        // rejection: the serve fast path installs no process-level
-        // unhandledRejection handler before this runs, and Node's default
-        // for one is to exit — a failed chunk load (e.g. an in-place
-        // upgrade replacing dist/ under the running daemon) would take
-        // down every runtime, session, and connection the daemon serves.
-        daemonLog.warn(
-          `session-pr-refresh load failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      });
+    }
 
     // Factory for dynamically creating workspace runtimes (POST /workspaces).
     interface WorkspaceRuntimeBuildOptions {
@@ -7615,6 +7838,11 @@ async function runQwenServeImpl(
           wsEnv.sessionRuntimeBaseDir,
         );
         wsBridge = runtime.createAcpSessionBridge({
+          isWorkflowModeWriteAllowed: createRuntimeWorkflowOwnerCheck(
+            cwd,
+            () => wsBridgeRef,
+            generationGuard,
+          ),
           onWorkflowAncestorTrust: createRuntimeWorkflowAncestorTrustHandler(
             cwd,
             () => wsBridgeRef,
@@ -7655,6 +7883,7 @@ async function runQwenServeImpl(
           ...(opts.eventRingSize !== undefined
             ? { eventRingSize: opts.eventRingSize }
             : {}),
+          eventRingMaxBytes,
           ...(opts.compactedReplayMaxBytes !== undefined
             ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
             : {}),
@@ -8019,7 +8248,11 @@ async function runQwenServeImpl(
           });
         }
       }
-      if (wsRuntime.primary && wsRuntime.trusted) {
+      if (
+        wsRuntime.primary &&
+        wsRuntime.trusted &&
+        opts.profile !== 'hosted-harness'
+      ) {
         await recoverBranchWorktreePreparations({
           workspaceCwd: cwd,
           sessionService: await createBranchRecoverySessionService(wsRuntime),
@@ -8520,6 +8753,7 @@ async function runQwenServeImpl(
     };
 
     const app = runtime.createServeApp(opts, () => actualPort, {
+      managedLocalWeb: deps.managedLocalWeb,
       restartForUpdate,
       maxChannelControlWorkspaces: MAX_CHANNEL_CONTROL_WORKSPACES,
       serveAppLifecycle,
@@ -8634,6 +8868,7 @@ async function runQwenServeImpl(
       persistDisabledTools: persistDisabledToolsFn,
       persistDisabledSkills: persistDisabledSkillsFn,
       persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
+      persistUserSkillsActivation: persistUserSkillsActivationFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
       sessionArtifactsPersistenceAvailable:
@@ -8847,6 +9082,10 @@ async function runQwenServeImpl(
           });
         },
         drainRuntime: async (runtimeToDrain) => {
+          const invalidateSkillsConfigStatus = app.locals[
+            'invalidateSkillsConfigStatus'
+          ] as (workspaceCwd: string) => void;
+          invalidateSkillsConfigStatus(runtimeToDrain.workspaceCwd);
           workspaceRuntimeRemoval.beginDrain(runtimeToDrain);
           acpHandle()?.beginWorkspaceDrain(runtimeToDrain.workspaceId);
         },
@@ -10772,6 +11011,7 @@ async function runQwenServeImpl(
             .filter((workspace) => !workspace.removable)
             .map((workspace) => workspace.cwd),
           primaryWorkspace: boundWorkspace,
+          conversationsDir: liveConversationWorkspace.rootPath,
           startedAt: new Date().toISOString(),
           auth: token ? 'bearer' : 'none',
           ...(generatedToken ? { tokenGenerated: true } : {}),
@@ -10915,9 +11155,11 @@ async function runQwenServeImpl(
           `\`qwen daemon stop --port ${actualPort}\`.`,
       );
 
-      process.on('SIGINT', onSignal);
-      process.on('SIGTERM', onSignal);
-      process.on('SIGHUP', onSignal);
+      if (deps.installSignalHandlers !== false) {
+        process.on('SIGINT', onSignal);
+        process.on('SIGTERM', onSignal);
+        process.on('SIGHUP', onSignal);
+      }
       process.on('uncaughtExceptionMonitor', onUncaughtExceptionMonitor);
 
       // The per-attempt boot-error listener was removed by handleListening.
@@ -11281,7 +11523,13 @@ async function runQwenServeImpl(
       const handleError = (err: NodeJS.ErrnoException): void => {
         server.removeListener('listening', handleListening);
         const nextPort = attemptPort + 1;
-        if (
+        // The control plane names the Hosted Harness by its exact port, so a
+        // moved Harness would start while no Session could reach it.
+        if (err.code === 'EADDRINUSE' && opts.profile === 'hosted-harness') {
+          writeStderrLine(
+            `qwen serve: port ${attemptPort} is in use; --profile hosted-harness does not move to another port`,
+          );
+        } else if (
           err.code === 'EADDRINUSE' &&
           opts.port !== 0 &&
           nextPort <= 65535 &&

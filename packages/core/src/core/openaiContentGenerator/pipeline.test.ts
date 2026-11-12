@@ -58,6 +58,7 @@ import {
 } from '../../providers/provider-config.js';
 import { DeepSeekOpenAICompatibleProvider } from './provider/deepseek.js';
 import { fnCall } from '../../test-utils/model-fixtures.js';
+import { retryContext } from '../../utils/retryContext.js';
 
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
 const mockReportOpenAiResponse = vi.hoisted(() => vi.fn());
@@ -898,30 +899,37 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
-    it('never ships the max tier to the tiered DashScope family end to end', async () => {
-      // `/effort max` persists the tier in config, so a raw pass-through 400s
-      // on this and every later request of the session: through the real
-      // provider, the wire body must carry the tier capped at xhigh.
-      const apiCall = await executeWith(
-        {
-          baseUrl: DASHSCOPE_URL,
-          model: 'qwen3.8-max',
-          authType: AuthType.QWEN_OAUTH,
-          reasoning: { effort: 'max' },
-        },
-        userRequest('qwen3.8-max', {
-          thinkingConfig: { includeThoughts: true },
-        }),
-        'prompt-id',
-        DashScopeOpenAICompatibleProvider,
-      );
+    it.each([
+      'qwen3.8-max',
+      'qwen-latest-series-invite-202610-m6',
+      'qwen4-plus',
+    ])(
+      'never ships the max tier to the tiered DashScope family end to end (%s)',
+      async (model) => {
+        // `/effort max` persists the tier in config, so a raw pass-through 400s
+        // on this and every later request of the session: through the real
+        // provider, the wire body must carry the tier capped at xhigh.
+        const apiCall = await executeWith(
+          {
+            baseUrl: DASHSCOPE_URL,
+            model,
+            authType: AuthType.QWEN_OAUTH,
+            reasoning: { effort: 'max' },
+          },
+          userRequest(model, {
+            thinkingConfig: { includeThoughts: true },
+          }),
+          'prompt-id',
+          DashScopeOpenAICompatibleProvider,
+        );
 
-      // The tier ships alone — no competing nested knob.
-      expectFields(apiCall, {
-        reasoning_effort: 'xhigh',
-        reasoning: undefined,
-      });
-    });
+        // The tier ships alone — no competing nested knob.
+        expectFields(apiCall, {
+          reasoning_effort: 'xhigh',
+          reasoning: undefined,
+        });
+      },
+    );
 
     it('never ships the max tier to a generic OpenAI-compatible endpoint end to end', async () => {
       // The same persisted-tier failure through the real default provider.
@@ -1212,6 +1220,103 @@ describe('ContentGenerationPipeline', () => {
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
+    it('returns a required-thinking error on a single attempt', async () => {
+      const model = 'qwen3.8-max-preview';
+      pipelineWith({
+        baseUrl: TOKEN_PLAN_URL,
+        model,
+        extra_body: { enable_thinking: true },
+      });
+      providerAdds({ enable_thinking: true });
+      mockCompletion();
+      const error = requiredThinkingError();
+      createMock().mockRejectedValueOnce(error);
+      const context = {
+        attempt: 1,
+        retryTotalDelayMs: 0,
+        requestSetupMs: 0,
+        singleAttempt: true,
+      };
+
+      await expect(
+        retryContext.run(context, () =>
+          pipeline.execute(sideQuery(model), 'side-query:mod-model-complete'),
+        ),
+      ).rejects.toBe(error);
+      expect(createMock()).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ reasoning_effort: 'none' }),
+        expect.objectContaining({ maxRetries: 0 }),
+      );
+    });
+
+    it.each([
+      ['max_tokens', 111, 8],
+      ['max_completion_tokens', 111, 8],
+      ['max_new_tokens', 4, 4],
+    ])(
+      'keeps the isolated Mod request envelope and bounds %s',
+      async (outputField, configuredLimit, expectedLimit) => {
+        const body = await retryContext.run(
+          {
+            attempt: 1,
+            retryTotalDelayMs: 0,
+            requestSetupMs: 0,
+            singleAttempt: true,
+          },
+          () =>
+            executeWith(
+              {
+                samplingParams: {
+                  messages: [{ role: 'system', content: 'sampling override' }],
+                  enable_search: true,
+                  n: 2,
+                },
+                extra_body: {
+                  model: 'different-model',
+                  messages: [{ role: 'user', content: 'body override' }],
+                  tools: [{ type: 'function' }],
+                  functions: [{ name: 'legacy-function' }],
+                  web_search_options: { search_context_size: 'low' },
+                  search_options: { forced_search: true },
+                  stream: true,
+                  fixture_option: 'preserved',
+                  [outputField]: configuredLimit,
+                },
+              },
+              userRequest('requested-model', { maxOutputTokens: 8 }),
+              'side-query:mod-model-complete',
+              DefaultOpenAICompatibleProvider,
+            ),
+        );
+
+        expectFields(body, {
+          model: 'requested-model',
+          messages: [{ role: 'user', content: 'Hello' }],
+          tools: undefined,
+          functions: undefined,
+          enable_search: undefined,
+          web_search_options: undefined,
+          search_options: undefined,
+          n: undefined,
+          stream: false,
+          fixture_option: 'preserved',
+          max_tokens: undefined,
+          [outputField]: expectedLimit,
+        });
+      },
+    );
+
+    it('keeps configured hosted search options for ordinary requests', async () => {
+      const search = { search_context_size: 'low' };
+      const body = await executeWith(
+        { extra_body: { web_search_options: search } },
+        userRequest(),
+        'normal-prompt',
+        DefaultOpenAICompatibleProvider,
+      );
+      expect(body['web_search_options']).toEqual(search);
+    });
+
     it.each([
       {
         name: 'preserving unrelated chat_template_kwargs',
@@ -1362,7 +1467,9 @@ describe('ContentGenerationPipeline', () => {
     async function executeWithCapability(
       capability: unknown,
       configOverrides: Partial<ContentGeneratorConfig>,
-      model = 'deepseek-v4-pro',
+      // Neutral id: the DeepSeek-V4 prefix now carries a built-in contract on
+      // every host, which would mask the declared-capability path under test.
+      model = 'capability-probe',
     ): Promise<Record<string, unknown>> {
       mockCliConfig = {
         getResolvedModelConfig: vi
@@ -1454,6 +1561,13 @@ describe('ContentGenerationPipeline', () => {
       ],
       [TOKEN_PLAN_URL, 'enable_thinking'],
       [DASHSCOPE_URL, 'enable_thinking'],
+      ['https://model-proxy.alibaba-inc.com/v1', 'enable_thinking'],
+      ['https://model-proxy.aliyun-inc.com/v1', 'enable_thinking'],
+      ['https://model-proxy.alicloudapi.com/v1', 'enable_thinking'],
+      [
+        'https://gateway.cn-shanghai.pai-eas.aliyuncs.com/api/predict/demo/v1',
+        'enable_thinking',
+      ],
     ])(
       'sends built-in DeepSeek selection and defaults through %s',
       async (baseUrl, field) => {
@@ -1490,6 +1604,7 @@ describe('ContentGenerationPipeline', () => {
     it.each([
       ['https://api.deepseek.com/v1', 'thinking'],
       [TOKEN_PLAN_URL, 'enable_thinking'],
+      ['https://model-proxy.alibaba-inc.com/v1', 'enable_thinking'],
     ])(
       'preserves static overrides with built-in and legacy capabilities on %s',
       async (baseUrl, field) => {
@@ -1540,6 +1655,79 @@ describe('ContentGenerationPipeline', () => {
               field === 'thinking' ? { type: 'disabled' } : false,
             );
           }
+        }
+      },
+    );
+
+    it('preserves a declared static effort for a newly recognized MaaS alias', async () => {
+      // The alias was not a known id before prefix recognition, so even on a
+      // MaaS host the declaration governs: the built-in normalizer must not
+      // flatten or re-tier the static nested effort.
+      const wire = await deepSeekWire(
+        {
+          baseUrl:
+            'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          samplingParams: { reasoning: { effort: 'medium' } },
+        },
+        {
+          thinking: true,
+          efforts: ['low', 'medium', 'high'],
+          defaultEffort: 'medium',
+          disableField: 'reasoning_effort',
+        },
+        'deepseek-v4.1-flash-custom',
+      );
+      expect(wire.reasoning).toEqual({ effort: 'medium' });
+      expect(wire.reasoning_effort).toBeUndefined();
+    });
+
+    it('preserves a declared configured effort for a newly recognized MaaS alias', async () => {
+      // A tier outside the declaration is dropped by the declared-capability
+      // path (the pre-PR contract); the new built-in must not normalize it
+      // into a declared tier and ship that instead.
+      const wire = await deepSeekWire(
+        {
+          baseUrl:
+            'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          reasoning: { effort: 'xhigh' },
+        },
+        {
+          thinking: true,
+          efforts: ['low', 'medium', 'high'],
+          defaultEffort: 'medium',
+          disableField: 'reasoning_effort',
+        },
+        'deepseek-v4.1-flash-custom',
+      );
+      expect(wire.reasoning).toBeUndefined();
+      expect(wire.reasoning_effort).toBeUndefined();
+    });
+
+    it.each([
+      [
+        'a toggle-only declaration',
+        {
+          thinking: true,
+          toggleOnly: true,
+          disableField: 'enable_thinking',
+        },
+        false,
+      ],
+      ['no declaration', undefined, true],
+    ] as const)(
+      'disables a qwen4 route with %s using the knob it reads',
+      async (_label, capability, tiered) => {
+        const wire = await deepSeekWire(
+          { baseUrl: DASHSCOPE_URL, reasoning: false },
+          capability,
+          'qwen4-plus',
+        );
+        if (tiered) {
+          expect(wire.reasoning_effort).toBe('none');
+          expect(wire.enable_thinking).toBeUndefined();
+        } else {
+          expect(wire.enable_thinking).toBe(false);
+          expect(wire.reasoning_effort).toBeUndefined();
         }
       },
     );
@@ -1653,21 +1841,28 @@ describe('ContentGenerationPipeline', () => {
       expect(wire.reasoning).toBeUndefined();
     });
 
-    it('keeps explicit other profiles ahead of the built-in DeepSeek serializer', async () => {
-      const wire = await deepSeekWire(
-        {
-          samplingParams: { reasoning: { effort: 'medium' } },
-        },
-        {
-          profile: 'openai-reasoning',
-          efforts: ['low', 'medium', 'high'],
-          defaultEffort: 'medium',
-        },
-      );
-      expect(wire.reasoning).toEqual({ effort: 'medium' });
-      expect(wire.reasoning_effort).toBeUndefined();
-      expect(wire.thinking).toBeUndefined();
-    });
+    it.each([
+      'https://api.deepseek.com/v1',
+      'https://model-proxy.alibaba-inc.com/v1',
+    ])(
+      'keeps explicit profiles ahead of built-in DeepSeek on %s',
+      async (baseUrl) => {
+        const wire = await deepSeekWire(
+          {
+            baseUrl,
+            samplingParams: { reasoning: { effort: 'medium' } },
+          },
+          {
+            profile: 'openai-reasoning',
+            efforts: ['low', 'medium', 'high'],
+            defaultEffort: 'medium',
+          },
+        );
+        expect(wire.reasoning).toEqual({ effort: 'medium' });
+        expect(wire.reasoning_effort).toBeUndefined();
+        expect(wire.thinking).toBeUndefined();
+      },
+    );
 
     it('honors legacy capability tier subsets after normalizing a DeepSeek alias', async () => {
       const wire = await deepSeekWire(
@@ -1708,23 +1903,33 @@ describe('ContentGenerationPipeline', () => {
       ['moonshot', 'kimi-k2.7-code-highspeed', undefined, undefined, true],
       ['moonshot', 'kimi-k2.6', undefined, 'thinking', false],
       ['deepseek', 'deepseek-v4-pro', 'low', 'thinking', false],
-      ['deepseek', 'deepseek-v4-flash', 'low', 'thinking', false],
+      ['deepseek', 'deepseek-flash', 'low', 'thinking', false],
       [std, 'qwen3.8-max', 'low', 'reasoning_effort', false],
       [std, 'qwen3.8-max-0902', 'medium', 'reasoning_effort', false],
       [std, 'qwen3.8-flash', 'xhigh', 'reasoning_effort', false],
       [std, 'qwen3.7-plus', undefined, 'enable_thinking', false],
       [std, 'deepseek-v4-pro', 'high', 'enable_thinking', false],
       [std, 'deepseek-v4-pro', 'max', 'enable_thinking', false],
-      [std, 'deepseek-v4-flash', 'high', 'enable_thinking', false],
+      [std, 'qwen3.8-max', 'max', 'reasoning_effort', false],
+      [std, 'qwen3.8-flash', 'max', 'reasoning_effort', false],
+      [std, 'deepseek-v4.1-flash', 'low', 'enable_thinking', false],
+      [std, 'glm-5.2', undefined, 'enable_thinking', false],
+      [std, 'glm-5.1', undefined, 'enable_thinking', false],
+      [std, 'glm-5.3', undefined, undefined, true],
       [std, 'deepseek-v4-pro-0813', 'low', 'enable_thinking', false],
       [std, 'deepseek-v4-flash-0731', 'low', 'enable_thinking', false],
       [std, 'kimi-k3', 'low', undefined, true],
       [std, 'kimi-k2.7-code', undefined, undefined, true],
       [std, 'kimi-k2.6', undefined, 'enable_thinking', false],
-      ['token-plan', 'qwen3.8-max', 'low', undefined, true],
-      ['token-plan', 'qwen3.8-max-preview', 'medium', undefined, true],
+      ['token-plan', 'qwen3.8-max', 'low', 'reasoning_effort', false],
+      ['token-plan', 'qwen3.8-max', 'max', 'reasoning_effort', false],
       ['token-plan', 'qwen3.8-flash', 'low', 'reasoning_effort', false],
+      ['token-plan', 'qwen3.8-flash', 'max', 'reasoning_effort', false],
       ['token-plan', 'deepseek-v4-pro-0813', 'low', 'enable_thinking', false],
+      ['token-plan', 'deepseek-v4.1-flash', 'low', 'enable_thinking', false],
+      ['token-plan', 'glm-5.2', undefined, 'enable_thinking', false],
+      ['token-plan', 'glm-5.3', undefined, undefined, true],
+      ['token-plan', 'MiniMax-M2.5', undefined, undefined, true],
       ['coding-plan', 'qwen3.5-plus', undefined, 'enable_thinking', false],
       ['coding-plan', 'kimi-k2.5', undefined, 'enable_thinking', false],
     ] as const)(

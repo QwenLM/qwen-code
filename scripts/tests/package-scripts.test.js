@@ -25,6 +25,7 @@ import { parse, stringify } from 'yaml';
 import { hooks as pnpmHooks, workspacePackageNames } from '../../.pnpmfile.mjs';
 import { checkReleaseTarballExecBits } from '../check-release-tarball-exec-bits.mjs';
 import { getPinnedPnpmPackage } from '../pnpm-package.js';
+import { getTestCiWorkspacePackageJsonPaths } from '../workspaces.js';
 import { INDEPENDENT_PACKAGES } from '../release-packages.mjs';
 import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
@@ -51,27 +52,32 @@ const heapCap = (value) => value?.match(/--max-old-space-size=(\d+)/)?.[1];
 
 /**
  * Writes a throwaway package shaped like the generated CLI for the
- * vendored-ripgrep packing cases: `vendor/ripgrep/<platform>/rg` (or `rg.exe`
- * for a `-win32` platform) at the given mode, and the manifest entry that makes
- * a packer pick the tree up.
+ * vendored-binary packing cases: `vendor/ripgrep/<platform>/rg` (or `rg.exe`
+ * for a `-win32` platform) at the given modes, the manifest entry that makes
+ * a packer pick the tree up, and optionally
+ * `vendor/landlock-run/<platform>/qwen-landlock-run` binaries.
  */
-function writeVendoredRipgrepFixture(directory, platforms) {
+function writeVendoredBinaryFixture(directory, platforms, landlock = {}) {
   writeFileSync(
     path.join(directory, 'package.json'),
     JSON.stringify({
-      name: 'vendored-ripgrep-fixture',
+      name: 'vendored-binary-fixture',
       version: '1.0.0',
       files: ['vendor'],
     }),
   );
+  const binaries = [];
   for (const [platform, mode] of Object.entries(platforms)) {
-    const binary = path.join(
-      directory,
-      'vendor',
-      'ripgrep',
-      platform,
-      platform.endsWith('-win32') ? 'rg.exe' : 'rg',
-    );
+    binaries.push([
+      `vendor/ripgrep/${platform}/${platform.endsWith('-win32') ? 'rg.exe' : 'rg'}`,
+      mode,
+    ]);
+  }
+  for (const [platform, mode] of Object.entries(landlock)) {
+    binaries.push([`vendor/landlock-run/${platform}/qwen-landlock-run`, mode]);
+  }
+  for (const [relative, mode] of binaries) {
+    const binary = path.join(directory, relative);
     mkdirSync(path.dirname(binary), { recursive: true });
     writeFileSync(binary, '#!/bin/sh\n');
     chmodSync(binary, mode);
@@ -1134,6 +1140,32 @@ describe('package scripts', () => {
     expect(Number(pnpmCap)).toBeGreaterThanOrEqual(Number(buildCap));
   });
 
+  it('keeps the web-shell build heap cap wrapping the whole build chain', () => {
+    const webshellPkg = JSON.parse(
+      readFileSync(
+        path.join(root, 'packages/web-shell', 'package.json'),
+        'utf8',
+      ),
+    );
+    const { build } = webshellPkg.scripts;
+    const cap = heapCap(build);
+    expect(cap).toBeDefined();
+    // #16859: the v0.27.2 VSCode companion release OOMed on both macOS legs
+    // (run 42884546167) — V8's default heap is 2 GiB on runners below 15 GB
+    // of RAM, while the web-shell build peaks at ~2.05-2.25 GB. Repro
+    // bracketed the minimum viable cap in (2048, 2176] MB; 4096 gives ~2x
+    // headroom.
+    expect(Number(cap)).toBeGreaterThanOrEqual(4096);
+    // The cap must wrap the whole chain: cross-env only on the head of an
+    // `a && b` script drops every later step back to the default heap, so
+    // build must be exactly cross-env wrapping the build:steps delegate —
+    // any inserted or appended step would escape the raised cap.
+    expect(build).toMatch(
+      /^cross-env NODE_OPTIONS="--max-old-space-size=\d+" npm run build:steps$/,
+    );
+    expect(webshellPkg.scripts['build:steps']).toBeDefined();
+  });
+
   it('selects the CLI dependency closure without selecting the same-named root', () => {
     const buildScript = readFileSync(
       path.join(root, 'scripts/build.js'),
@@ -1202,6 +1234,14 @@ describe('package scripts', () => {
     expect(packageJson.scripts['test:ci']).toBe(
       'npm run test:ci:workspaces && npm run test:scripts',
     );
+    // test:scripts passes its args on to the scripts/tests Vitest run, which
+    // CI's side lane runs as its own script.
+    expect(packageJson.scripts['test:scripts']).toBe(
+      'npm run test:standalone:runtimes:ci && npm run test:scripts:unit --',
+    );
+    expect(packageJson.scripts['test:scripts:unit']).toBe(
+      'vitest run --config ./scripts/tests/vitest.config.ts',
+    );
 
     const step = getWorkflowStep(
       getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
@@ -1210,15 +1250,91 @@ describe('package scripts', () => {
     expect(step).toContain(
       'VITEST_RETRY: "${{ vars.QWEN_CI_VITEST_RETRY || \'2\' }}"',
     );
+    // The lane's own retry is a separate lever from --retry above: it re-runs
+    // a whole workspace suite whose every test passed and whose only unhandled
+    // error was Vitest's worker RPC budget. The lane script's tests prove the
+    // script obeys the knob; nothing else proves CI sets it, so dropping this
+    // line while resolving a conflict silently pins the default forever.
+    expect(step).toContain(
+      'QWEN_CI_RPC_RETRY: "${{ vars.QWEN_CI_RPC_RETRY || \'1\' }}"',
+    );
     // 'off' must omit the flag rather than pass --retry=0, which would
     // outrank a workspace's own config-level retry (sdk-typescript).
     expect(step).toContain('[ "${VITEST_RETRY}" != \'off\' ]');
-    expect(step).toContain('retry_arg=(--retry="${VITEST_RETRY}")');
-    expect(step).toContain('npm run test:ci:workspaces -- "${retry_arg[@]}"');
-    expect(step).toContain('npm run test:scripts -- "${retry_arg[@]}"');
+    expect(step).toContain(
+      'retry_arg=(--shard="${UNIT_TEST_SHARD}" --passWithNoTests)',
+    );
+    expect(step).toContain('retry_arg+=(--retry="${VITEST_RETRY}")');
+    // The standalone runtime regression is the one suite that must run on
+    // exactly one shard. The lane script's own test injects the variable into
+    // its stub env, so it proves the script obeys it and nothing else proves
+    // CI sets it: flipping this to a constant, inverting it, or dropping it
+    // while resolving a conflict runs the regression on one wrong shard or
+    // nowhere, and the only CI coverage of that suite goes with it.
+    expect(step).toContain(
+      "QWEN_CI_SKIP_STANDALONE_RUNTIMES: \"${{ matrix.shard != 1 && '1' || '' }}\"",
+    );
+    // The step hands the shard and the retry to the lane script, which
+    // passes them to all three of its Vitest runs: the CLI and core suites in the main lane, and
+    // the other workspaces and scripts/tests in the side lane.
+    expect(step).toContain(
+      '.github/scripts/ci/run-unit-test-lanes.sh "${retry_arg[@]}"',
+    );
+    const lanes = readWorkflow('.github/scripts/ci/run-unit-test-lanes.sh');
+    // Both lanes hand their workspace list to run_lane_suites, which makes
+    // npm's own batched call and re-runs only the workspaces whose report was
+    // all-green but for the worker RPC timeout. The batching is unchanged; the
+    // wrapper is what carries the shard and retry through to every call,
+    // including the retry of a single workspace.
+    expect(lanes).toContain(
+      'run_lane_suites "${main_workspaces[@]/#/--workspace=}"',
+    );
+    expect(lanes).toContain('run_lane_suites "${side_workspaces[@]}"');
+    expect(lanes).toContain(
+      'npm run test:ci "$@" -- "${suite_args[@]}" 2>&1 | tee "$log"',
+    );
+    expect(lanes).toContain(
+      'npm run test:ci "--workspace=${name}" -- "${suite_args[@]}"',
+    );
+    expect(lanes).toContain(
+      'run_suite npm run test:scripts:unit -- "${suite_args[@]}"',
+    );
+    // The args reach every command through one array, so a suite cannot be
+    // re-run with a different shard than it first ran.
+    expect(lanes).toContain('suite_args=("$@")');
   });
 
-  it('drops DAC capabilities for root unit tests on both CI commands', () => {
+  it('prints the side lane of a test step killed before its replay', () => {
+    // The lane script replays the side lane only after the main lane ends,
+    // so a timeout or a cancel would lose every suite but the CLI and core
+    // ones. The step names the log outside the TMPDIR it removes, and the
+    // next step prints whatever is left of it.
+    const job = getWorkflowJob(
+      readWorkflow('.github/workflows/ci.yml'),
+      'test',
+    );
+    const log = '${{ runner.temp }}/side-lane-tests.log';
+    expect(getWorkflowStep(job, 'Run tests and generate reports')).toContain(
+      `SIDE_LANE_LOG: '${log}'`,
+    );
+    const print = getWorkflowStep(
+      job,
+      'Print the side lane of a killed test step',
+    );
+    expect(print).toContain("if: '${{ failure() || cancelled() }}'");
+    expect(print).toContain('side_log="${RUNNER_TEMP}/side-lane-tests.log"');
+    expect(print).toContain('cat "${side_log}"');
+    // The script removes the log after every replay it reaches, so on an
+    // ordinary red test job the guard is what keeps this step quiet.
+    expect(print).toContain('if [ -f "${side_log}" ]; then');
+    expect(
+      job.indexOf("- name: 'Run tests and generate reports'"),
+    ).toBeLessThan(
+      job.indexOf("- name: 'Print the side lane of a killed test step'"),
+    );
+  });
+
+  it('drops DAC capabilities for root unit tests on every CI command', () => {
     // The permission-bit probes in the workspaces and scripts/tests ask the
     // kernel, so on a root lane that keeps these capabilities every case
     // they gate skips, without failing.
@@ -1244,20 +1360,424 @@ describe('package scripts', () => {
       setpriv,
       'fi',
     ]);
-    // Nothing else touches it (no unset, read or reset), and both test
-    // commands run under it, with no unwrapped copy beside them.
+    // Nothing else touches it (no unset, read or reset), and the lane script
+    // runs under it, so every test command it starts inherits the dropped
+    // capabilities; no test command runs beside it unwrapped.
     expect(code.filter((line) => /\btest_runner\b/.test(line))).toEqual([
       'test_runner=()',
       setpriv,
-      '"${test_runner[@]}" npm run test:ci:workspaces -- "${retry_arg[@]}"',
-      '"${test_runner[@]}" npm run test:scripts -- "${retry_arg[@]}"',
+      '"${test_runner[@]}" .github/scripts/ci/run-unit-test-lanes.sh "${retry_arg[@]}"',
     ]);
-    expect(
-      code.filter((line) =>
-        /\bnpm run test:(?:ci:workspaces|scripts)\b/.test(line),
-      ),
-    ).toHaveLength(2);
+    expect(code.filter((line) => /\bnpm run test:/.test(line))).toEqual([]);
   });
+
+  // `tail --pid` is GNU; the script runs only in the Linux test job.
+  it.runIf(process.platform === 'linux')(
+    'runs every other suite beside the CLI and core suites',
+    () => {
+      // The CLI and core suites keep their workers busy for most of the
+      // step, while the other suites are small or wait on a few files and the
+      // standalone regression starts one runtime at a time, so the lane
+      // script runs all of those beside the CLI and core suites. Run it
+      // against a stub npm: each lane runs what it should, beside the other,
+      // every failure reaches the exit code, and the side lane's log comes
+      // out whole after the main lane's.
+      const lanes = path.join(
+        root,
+        '.github/scripts/ci/run-unit-test-lanes.sh',
+      );
+      const heap = heapCap(readPackageJson().scripts['test:ci:workspaces']);
+      expect(heap).toBe('3072');
+
+      const realNpm = spawnSync('sh', ['-c', 'command -v npm'], {
+        encoding: 'utf8',
+      }).stdout.trim();
+      expect(realNpm).not.toBe('');
+
+      const dir = mkdtempSync(path.join(tmpdir(), 'ci-side-lane-'));
+      try {
+        const bin = path.join(dir, 'bin');
+        mkdirSync(bin);
+        writeFileSync(
+          path.join(bin, 'npm'),
+          [
+            '#!/bin/sh',
+            'if [ "$1 $2" = "pkg get" ]; then',
+            '  if [ -n "$STUB_REAL_NPM" ]; then exec "$STUB_REAL_NPM" "$@"; fi',
+            '  printf "%s" "$STUB_WORKSPACES"; exit "$STUB_PKG_GET_RC"',
+            'fi',
+            'echo "npm $* heap=$NODE_OPTIONS workers=$VITEST_MAX_FORKS/$VITEST_MAX_THREADS" >> "$STUB_CALLS"',
+            // The main lane's suites and the side lane's workspaces each wait
+            // for the other to start, so a side lane run before or after the
+            // main lane, rather than beside it, fails here.
+            'meet() {',
+            '  touch "$STUB_CALLS.$1"; i=0',
+            '  while [ ! -e "$STUB_CALLS.$2" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done',
+            '  [ -e "$STUB_CALLS.$2" ] || { echo "$1 lane ran alone"; exit 9; }',
+            '}',
+            'case "$*" in',
+            '  *--workspace=@qwen-code/qwen-code-core*) meet main side ;;',
+            '  *--workspace=@qwen-code/web-shell*) meet side main ;;',
+            'esac',
+            'echo "output of npm $*"',
+            // A suite can be told to emit a real Vitest report shape and a
+            // matching npm failure line, so the retry's evidence rules are
+            // exercised against the text CI actually produces rather than a
+            // paraphrase of it. STUB_REPORT_ONCE makes only the first attempt
+            // report that way, which is how a contention flake behaves.
+            'if [ -n "$STUB_REPORT" ] && echo "$*" | grep -qF -- "$STUB_REPORT_MATCH"; then',
+            // Dedupe on the matched workspace, not the whole command line:
+            // the retry re-runs that workspace alone, so the arguments differ
+            // while the workspace is the one that already reported.
+            '  if [ -z "$STUB_REPORT_ONCE" ] || ! grep -qxF -- "$STUB_REPORT_MATCH" "$STUB_REPORT_SAW" 2>/dev/null; then',
+            '    echo "$STUB_REPORT_MATCH" >> "$STUB_REPORT_SAW"',
+            '    printf "%s\\n" "$STUB_REPORT"',
+            '    exit "${STUB_REPORT_RC:-1}"',
+            '  fi',
+            'fi',
+            'if [ -n "$STUB_FAIL" ] && echo "$*" | grep -qF -- "$STUB_FAIL"; then exit 7; fi',
+            'if [ -n "$STUB_HANG" ] && echo "$*" | grep -qF -- "$STUB_HANG"; then sleep 30; fi',
+            // scripts/tests runs `npm run test:scripts:unit`, the lane script
+            // again, one level deep. Its args mark its output, so a test can
+            // tell the nested lane's lines from the outer one's.
+            'if [ -n "$STUB_NESTED" ] && [ -z "${STUB_NESTED_DONE:-}" ] && echo "$*" | grep -qF "test:scripts:unit"; then',
+            '  printf "%s" "${SIDE_LANE_LOG-<unset>}" > "$STUB_NESTED_SAW"',
+            '  STUB_NESTED_DONE=1 bash "$LANES" --nested',
+            'fi',
+            '',
+          ].join('\n'),
+        );
+        chmodSync(path.join(bin, 'npm'), 0o755);
+        const allWorkspaces = {
+          '@qwen-code/acp-bridge': 'vitest run',
+          '@qwen-code/qwen-code': 'vitest run',
+          '@qwen-code/qwen-code-core': 'vitest run',
+          '@qwen-code/web-shell': 'vitest run --config vitest.config.ts',
+          '@qwen-code/web-templates': {},
+          '@qwen-code/sdk': 'vitest run',
+        };
+        // Kills the script's process group once the side lane has run its
+        // last suite, while the main lane still hangs: a step timeout or
+        // cancel that lands before the replay.
+        const killBeforeReplay = [
+          'setsid bash "$LANES" --retry=2 &',
+          'pid=$!',
+          'i=0',
+          'until grep -q "output of npm run test:scripts:unit" "$SIDE_LANE_LOG" 2>/dev/null || [ "$i" -ge 100 ]; do sleep 0.1; i=$((i + 1)); done',
+          'kill -KILL -- "-$pid"',
+          'wait "$pid"',
+        ].join('\n');
+        const run = (
+          name,
+          {
+            workspaces = allWorkspaces,
+            pkgGet = JSON.stringify(workspaces),
+            pkgGetRc = 0,
+            realListing = false,
+            fail = '',
+            tmp = dir,
+            // ci.yml sets both to the same cap; apart, they show which is which.
+            forks = '4',
+            threads = '6',
+            sideLog = '',
+            killed = false,
+            nested = false,
+            skipStandalone = '',
+            report = '',
+            reportMatch = '--workspace=@qwen-code/web-shell',
+            reportRc = '1',
+            reportOnce = true,
+            rpcRetry = '',
+          } = {},
+        ) => {
+          const calls = path.join(dir, `${name}.calls`);
+          const args = killed ? ['-c', killBeforeReplay] : [lanes, '--retry=2'];
+          const result = spawnSync('bash', args, {
+            cwd: root,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+              TMPDIR: tmp,
+              // The script sets the heap cap itself where it wants one; the
+              // other commands run with no NODE_OPTIONS, not the caller's.
+              NODE_OPTIONS: '',
+              VITEST_MAX_FORKS: forks,
+              VITEST_MAX_THREADS: threads,
+              // In CI this suite runs inside the side lane, whose own log
+              // ci.yml names here: never write to it.
+              SIDE_LANE_LOG: sideLog,
+              // ci.yml sets it on every shard but the first, this suite's
+              // own run included: the passing case needs it unset.
+              QWEN_CI_SKIP_STANDALONE_RUNTIMES: skipStandalone,
+              LANES: lanes,
+              STUB_CALLS: calls,
+              STUB_WORKSPACES: pkgGet,
+              STUB_PKG_GET_RC: String(pkgGetRc),
+              STUB_REAL_NPM: realListing ? realNpm : '',
+              STUB_FAIL: fail,
+              STUB_HANG: killed ? '--workspace=@qwen-code/qwen-code-core' : '',
+              STUB_NESTED: nested ? '1' : '',
+              STUB_NESTED_SAW: path.join(dir, `${name}.nested-saw`),
+              STUB_REPORT: report,
+              STUB_REPORT_MATCH: reportMatch,
+              STUB_REPORT_RC: reportRc,
+              STUB_REPORT_ONCE: reportOnce ? '1' : '',
+              STUB_REPORT_SAW: path.join(dir, `${name}.report-saw`),
+              QWEN_CI_RPC_RETRY: rpcRetry,
+            },
+          });
+          // The replayed side log is removed once printed.
+          expect(
+            readdirSync(dir).filter((f) => f.startsWith('side-lane-tests.')),
+          ).toEqual([]);
+          return {
+            stdout: result.stdout,
+            stderr: result.stderr,
+            rc: String(result.status),
+            calls: existsSync(calls)
+              ? readFileSync(calls, 'utf8').trim().split('\n')
+              : [],
+          };
+        };
+        const mainSuites = `npm run test:ci --workspace=@qwen-code/qwen-code --workspace=@qwen-code/qwen-code-core -- --retry=2 heap=--max-old-space-size=${heap} workers=4/6`;
+        const sideWorkspaces = `npm run test:ci --workspace=@qwen-code/acp-bridge --workspace=@qwen-code/web-shell --workspace=@qwen-code/sdk -- --retry=2 heap=--max-old-space-size=${heap} workers=2/3`;
+        const standalone =
+          'npm run test:standalone:runtimes:ci heap= workers=4/6';
+        const scriptsUnit =
+          'npm run test:scripts:unit -- --retry=2 heap= workers=2/3';
+
+        // The two lanes run at once, so only the side lane's order is fixed.
+        const passing = run('passing');
+        expect(passing.rc).toBe('0');
+        expect([...passing.calls].sort()).toEqual(
+          [mainSuites, sideWorkspaces, standalone, scriptsUnit].sort(),
+        );
+        const order = (calls, line) => calls.indexOf(line);
+        expect(order(passing.calls, sideWorkspaces)).toBeLessThan(
+          order(passing.calls, standalone),
+        );
+
+        // Every shard but one leaves the standalone regression out.
+        const otherShard = run('other-shard', { skipStandalone: '1' });
+        expect(otherShard.rc).toBe('0');
+        expect([...otherShard.calls].sort()).toEqual(
+          [mainSuites, sideWorkspaces, scriptsUnit].sort(),
+        );
+        expect(order(passing.calls, standalone)).toBeLessThan(
+          order(passing.calls, scriptsUnit),
+        );
+        const replay = passing.stdout.indexOf('Side lane output');
+        const mainOutput = passing.stdout.indexOf(
+          'output of npm run test:ci --workspace=@qwen-code/qwen-code ',
+        );
+        expect(mainOutput).toBeGreaterThanOrEqual(0);
+        expect(mainOutput).toBeLessThan(replay);
+        for (const side of [
+          'output of npm run test:ci --workspace=@qwen-code/acp-bridge',
+          'output of npm run test:standalone:runtimes:ci',
+          'output of npm run test:scripts:unit',
+        ]) {
+          expect(replay).toBeLessThan(passing.stdout.indexOf(side));
+        }
+
+        // Each Vitest run applies the worker cap on its own, so the side
+        // lane's runs take half of it, at least 1, beside the main lane's
+        // full cap. With no cap set, as on the hosted runners, they take 2
+        // rather than Vitest's default of all CPUs but one.
+        for (const [cap, side] of [
+          ['', '2'],
+          ['1', '1'],
+        ]) {
+          const capped = run(`cap-${cap || 'unset'}`, {
+            forks: cap,
+            threads: cap,
+          });
+          expect(capped.rc).toBe('0');
+          expect([...capped.calls].sort()).toEqual(
+            [
+              mainSuites.replace('workers=4/6', `workers=${cap}/${cap}`),
+              sideWorkspaces.replace('workers=2/3', `workers=${side}/${side}`),
+              standalone.replace('workers=4/6', `workers=${cap}/${cap}`),
+              scriptsUnit.replace('workers=2/3', `workers=${side}/${side}`),
+            ].sort(),
+          );
+        }
+
+        // Against npm's real listing, the two lanes split every workspace the
+        // release pins select (scripts/workspaces.js) between them, each one
+        // in one lane.
+        const real = run('real-listing', { realListing: true });
+        expect(real.rc, real.stdout).toBe('0');
+        const names = (call) =>
+          call
+            .split(' ')
+            .filter((arg) => arg.startsWith('--workspace='))
+            .map((arg) => arg.slice('--workspace='.length));
+        const realWorkspaces = real.calls.filter((call) =>
+          call.startsWith('npm run test:ci --workspace='),
+        );
+        expect(realWorkspaces).toContain(mainSuites);
+        expect(realWorkspaces).toHaveLength(2);
+        expect(realWorkspaces.flatMap(names).sort()).toEqual(
+          getTestCiWorkspacePackageJsonPaths(root)
+            .map(
+              (packageJsonPath) =>
+                JSON.parse(
+                  readFileSync(path.join(root, packageJsonPath), 'utf8'),
+                ).name,
+            )
+            .sort(),
+        );
+
+        // A failure in one side-lane suite still lets the others run, and a
+        // main-lane failure still waits for the side lane and prints it.
+        for (const [failing, fail] of [
+          ['side-workspace', '--workspace=@qwen-code/web-shell'],
+          ['standalone', 'test:standalone'],
+          ['scripts', 'test:scripts:unit'],
+          ['main', '--workspace=@qwen-code/qwen-code-core'],
+        ]) {
+          const failed = run(`${failing}-fails`, { fail });
+          expect(failed.rc, failing).toBe('7');
+          expect([...failed.calls].sort(), failing).toEqual(
+            [...passing.calls].sort(),
+          );
+          expect(failed.stdout, failing).toContain('Side lane exited with');
+          expect(failed.stdout, failing).toContain(
+            'output of npm run test:scripts:unit',
+          );
+        }
+
+        // With nothing left beside the CLI and core suites, the step fails
+        // rather than fall back to the root's test:ci, which reruns every
+        // suite.
+        const nothingElse = run('nothing-else', {
+          workspaces: {
+            '@qwen-code/qwen-code': 'vitest run',
+            '@qwen-code/qwen-code-core': 'vitest run',
+            '@qwen-code/web-templates': {},
+          },
+        });
+        expect(nothingElse.rc).toBe('1');
+        expect(nothingElse.stdout).toContain(
+          '::error::Found no workspaces to test beside the CLI and core suites.',
+        );
+        expect(nothingElse.calls).toEqual([]);
+
+        // A failed listing says so instead of claiming there is nothing to
+        // test, and runs no suites. A failing `npm pkg get --json` prints an
+        // error object, which parses as a listing with no workspaces in it.
+        const unlisted =
+          '::error::Could not list the workspaces that define test:ci; the error is above.';
+        for (const [name, options] of [
+          [
+            'pkg-get-fails',
+            {
+              pkgGet: JSON.stringify({ error: { code: 'EJSONPARSE' } }),
+              pkgGetRc: 1,
+            },
+          ],
+          ['pkg-get-garbled', { pkgGet: 'not json' }],
+        ]) {
+          const listingFails = run(name, options);
+          expect(listingFails.rc).toBe('1');
+          expect(listingFails.stdout).toContain(unlisted);
+          expect(listingFails.stdout).not.toContain('Found no workspaces');
+          expect(listingFails.calls).toEqual([]);
+        }
+
+        // The side lane's arguments are read one per line, so a workspace
+        // name with a line break in it would split into other arguments,
+        // flags among them.
+        const splitName = run('name-with-newline', {
+          workspaces: {
+            ...allWorkspaces,
+            '@qwen-code/evil\n--workspaces': 'vitest run',
+          },
+        });
+        expect(splitName.rc).toBe('1');
+        expect(splitName.stdout).toContain(unlisted);
+        expect(splitName.stderr).toContain(
+          'A workspace name holds whitespace: "@qwen-code/evil\\n--workspaces"',
+        );
+        expect(splitName.calls).toEqual([]);
+
+        // A log the caller names is removed once replayed, like a temp one.
+        const namedLog = path.join(dir, 'named.log');
+        const named = run('named-log', { sideLog: namedLog });
+        expect(named.rc).toBe('0');
+        expect([...named.calls].sort()).toEqual([...passing.calls].sort());
+        expect(named.stdout).toContain(
+          'output of npm run test:scripts:unit -- --retry=2',
+        );
+        expect(existsSync(namedLog)).toBe(false);
+
+        // scripts/tests runs `npm run test:scripts:unit`, which runs this
+        // script again. A nested run must not inherit the caller's log: it
+        // would truncate the outer side lane's log, replay it and remove it,
+        // leaving the outer replay nothing to print.
+        const nestedLog = path.join(dir, 'nested.log');
+        const nested = run('nested-log', { sideLog: nestedLog, nested: true });
+        expect(nested.rc).toBe('0');
+        expect(
+          nested.calls.filter((call) =>
+            call.startsWith('npm run test:scripts:unit'),
+          ),
+        ).toHaveLength(2);
+        // The nested run does not see the caller's log, so it cannot truncate,
+        // replay or remove it.
+        expect(
+          readFileSync(path.join(dir, 'nested-log.nested-saw'), 'utf8'),
+        ).toBe('<unset>');
+        // The outer side lane's own lines still reached its replay. The
+        // nested run's carry `--nested`, so its identical-looking output
+        // cannot satisfy these.
+        const nestedReplay = nested.stdout.indexOf('Side lane output');
+        expect(nestedReplay).toBeGreaterThanOrEqual(0);
+        for (const side of [
+          'output of npm run test:ci --workspace=@qwen-code/acp-bridge --workspace=@qwen-code/web-shell --workspace=@qwen-code/sdk -- --retry=2',
+          'output of npm run test:scripts:unit -- --retry=2',
+        ]) {
+          expect(nestedReplay).toBeLessThan(nested.stdout.indexOf(side));
+        }
+        expect(existsSync(nestedLog)).toBe(false);
+
+        // A step killed before the replay leaves the named log behind with
+        // everything the side lane ran, for ci.yml's next step to print.
+        const killedLog = path.join(dir, 'killed.log');
+        const killed = run('killed', { sideLog: killedLog, killed: true });
+        expect(killed.stdout).not.toContain('Side lane output');
+        expect(killed.calls).toContain(mainSuites);
+        const leftover = readFileSync(killedLog, 'utf8');
+        for (const side of [
+          'output of npm run test:ci --workspace=@qwen-code/acp-bridge',
+          'output of npm run test:standalone:runtimes:ci',
+          'output of npm run test:scripts:unit',
+        ]) {
+          expect(leftover).toContain(side);
+        }
+
+        // Without a log file for the side lane, nothing runs.
+        const noLog = run('named-log-missing', {
+          sideLog: path.join(dir, 'missing', 'named.log'),
+        });
+        expect(noLog.rc).toBe('1');
+        expect(noLog.stdout).toContain(
+          `::error::Could not create the side lane's log file ${path.join(dir, 'missing', 'named.log')}; running no suites.`,
+        );
+        expect(noLog.calls).toEqual([]);
+        const noTmp = run('no-tmpdir', { tmp: path.join(dir, 'missing') });
+        expect(noTmp.rc).toBe('1');
+        expect(noTmp.stdout).toContain(
+          `::error::Could not create the side lane's log file under ${path.join(dir, 'missing')}; running no suites.`,
+        );
+        expect(noTmp.calls).toEqual([]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('keeps every copy of the permission-bit probe identical', () => {
     // The probe is copied, not shared: each package that uses it keeps its
@@ -1292,15 +1812,689 @@ describe('package scripts', () => {
       });
     }
   });
+  // A lane harness for the retry-evidence cases: one stub npm, one lane run per
+  // call, in its own temp tree. These cases used to share one giant test, so a
+  // single contention stall could push that test toward the worker's 60 s RPC
+  // budget. Each `it` below owns its own harness and stays in single digits of
+  // lane spawns.
+  function laneRetryHarness() {
+    const dir = mkdtempSync(path.join(tmpdir(), 'ci-side-lane-retry-'));
+    const bin = path.join(dir, 'bin');
+    mkdirSync(bin);
+    const lanes = path.join(root, '.github/scripts/ci/run-unit-test-lanes.sh');
+    const allWorkspaces = {
+      '@qwen-code/acp-bridge': 'vitest run',
+      '@qwen-code/qwen-code': 'vitest run',
+      '@qwen-code/qwen-code-core': 'vitest run',
+      '@qwen-code/web-shell': 'vitest run --config vitest.config.ts',
+      '@qwen-code/web-templates': {},
+      '@qwen-code/sdk': 'vitest run',
+    };
+    writeFileSync(
+      path.join(bin, 'npm'),
+      [
+        '#!/bin/sh',
+        'if [ "$1 $2" = "pkg get" ]; then',
+        '  printf "%s" "$STUB_WORKSPACES"; exit 0',
+        'fi',
+        'echo "npm $* heap=$NODE_OPTIONS workers=$VITEST_MAX_FORKS/$VITEST_MAX_THREADS" >> "$STUB_CALLS"',
+        'echo "output of npm $*"',
+        'if [ -n "$STUB_REPORT" ] && echo "$*" | grep -qF -- "$STUB_REPORT_MATCH"; then',
+        '  if [ -z "$STUB_REPORT_ONCE" ] || ! grep -qxF -- "$STUB_REPORT_MATCH" "$STUB_REPORT_SAW" 2>/dev/null; then',
+        '    echo "$STUB_REPORT_MATCH" >> "$STUB_REPORT_SAW"',
+        '    printf "%s\\n" "$STUB_REPORT"',
+        '    exit "${STUB_REPORT_RC:-1}"',
+        '  fi',
+        'fi',
+        'if [ -n "$STUB_FAIL" ] && echo "$*" | grep -qF -- "$STUB_FAIL"; then exit 7; fi',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(path.join(bin, 'npm'), 0o755);
+    const heap = heapCap(readPackageJson().scripts['test:ci:workspaces']);
+    const sideWorkspaces = `npm run test:ci --workspace=@qwen-code/acp-bridge --workspace=@qwen-code/web-shell --workspace=@qwen-code/sdk -- --retry=2 heap=--max-old-space-size=${heap} workers=2/3`;
+    const rpcReport = (workspace, version = '0.27.2') =>
+      [
+        `> ${workspace}@${version} test:ci`,
+        '> vitest run --shard=2/2 --passWithNoTests --retry=2',
+        '',
+        '⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯',
+        'Vitest caught 1 unhandled error during the test run.',
+        '⎯⎯⎯⎯⎯⎯ Unhandled Error ⎯⎯⎯⎯⎯⎯⎯',
+        'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
+        ' ❯ Object.onTimeoutError ../../../node_modules/vitest/dist/chunks/rpc.js:53:10',
+        '',
+        ' Test Files  2 passed (2)',
+        '      Tests  902 passed (902)',
+        '     Errors  1 error',
+        '',
+        'npm error Lifecycle script `test:ci` failed with error:',
+        'npm error code 1',
+        `npm error workspace ${workspace}@${version}`,
+        'npm error command sh -c vitest run --shard=2/2',
+      ].join('\n');
+    const run = (
+      name,
+      {
+        report = '',
+        reportMatch = '--workspace=@qwen-code/web-shell',
+        reportRc = '1',
+        reportOnce = true,
+        rpcRetry = '',
+        fail = '',
+        extraEnv = {},
+      } = {},
+    ) => {
+      const calls = path.join(dir, `${name}.calls`);
+      const result = spawnSync('bash', [lanes, '--retry=2'], {
+        cwd: root,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          TMPDIR: dir,
+          NODE_OPTIONS: '',
+          VITEST_MAX_FORKS: '4',
+          VITEST_MAX_THREADS: '6',
+          SIDE_LANE_LOG: '',
+          QWEN_CI_SKIP_STANDALONE_RUNTIMES: '',
+          STUB_CALLS: calls,
+          STUB_WORKSPACES: JSON.stringify(allWorkspaces),
+          STUB_FAIL: fail,
+          STUB_REPORT: report,
+          STUB_REPORT_MATCH: reportMatch,
+          STUB_REPORT_RC: reportRc,
+          STUB_REPORT_ONCE: reportOnce ? '1' : '',
+          STUB_REPORT_SAW: path.join(dir, `${name}.report-saw`),
+          QWEN_CI_RPC_RETRY: rpcRetry,
+          ...extraEnv,
+        },
+      });
+      return {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        rc: String(result.status),
+        calls: existsSync(calls)
+          ? readFileSync(calls, 'utf8').trim().split('\n')
+          : [],
+      };
+    };
+    const passing = run('passing');
+    return {
+      run,
+      rpcReport,
+      passing,
+      sideWorkspaces,
+      dispose: () => rmSync(dir, { recursive: true, force: true }),
+    };
+  }
+
+  it.runIf(process.platform === 'linux')(
+    'retries a workspace whose only failure is the RPC timeout',
+    () => {
+      const harness = laneRetryHarness();
+      try {
+        const { run, rpcReport, passing, sideWorkspaces } = harness;
+        // A suite whose every test passed can still exit non-zero because
+        // Vitest's worker->main RPC budget expired on a contended host: main
+        // runs 43018456551 and 43016357976 went red with 902 of 902 tests
+        // passing in packages/channels/github. The lane re-runs that one
+        // workspace, and the report shapes below are copied from run
+        // 43016357976's log. The release lane already grants this same pass on
+        // its own shards, so the evidence rules here are the ones
+        // scripts/tests/release-workflow.test.js pins there: a count of
+        // Vitest's own unhandled errors, never a reading of the crash header.
+
+        const retried = run('rpc-retry', {
+          report: rpcReport('@qwen-code/web-shell'),
+        });
+        expect(retried.rc, retried.stdout).toBe('0');
+        expect(retried.stdout).toContain(
+          'Every test passed but Vitest reported the worker RPC timeout',
+        );
+        // The first attempt keeps npm's own batching; only the affected
+        // workspace is re-run, alone.
+        expect(retried.calls.filter((call) => call === sideWorkspaces)).toEqual(
+          [sideWorkspaces],
+        );
+        expect(
+          retried.calls.filter(
+            (call) =>
+              call.startsWith(
+                'npm run test:ci --workspace=@qwen-code/web-shell ',
+              ) && !call.includes('--workspace=@qwen-code/sdk'),
+          ),
+        ).toHaveLength(1);
+        expect([...retried.calls].sort()).toEqual(
+          [
+            ...passing.calls,
+            sideWorkspaces.replace(
+              '--workspace=@qwen-code/acp-bridge --workspace=@qwen-code/web-shell --workspace=@qwen-code/sdk',
+              '--workspace=@qwen-code/web-shell',
+            ),
+          ].sort(),
+        );
+
+        // The same shape in the main lane, whose suites are the long ones.
+        const mainRetried = run('rpc-retry-main', {
+          report: rpcReport('@qwen-code/qwen-code-core'),
+          reportMatch: '--workspace=@qwen-code/qwen-code-core',
+        });
+        expect(mainRetried.rc, mainRetried.stdout).toBe('0');
+        expect(mainRetried.stdout).toContain(
+          'Every test passed but Vitest reported the worker RPC timeout',
+        );
+
+        // An operator can make the first failure stand without a PR.
+        const retryOff = run('rpc-retry-off', {
+          report: rpcReport('@qwen-code/web-shell'),
+          rpcRetry: '0',
+        });
+        expect(retryOff.rc).toBe('1');
+        expect(retryOff.stdout).not.toContain('Every test passed');
+        expect([...retryOff.calls].sort()).toEqual([...passing.calls].sort());
+
+        // `off` is the token the sibling lever in this step uses
+        // (VITEST_RETRY); it must disable exactly like `0`, not fall through
+        // to "enabled" without a word.
+        const retryOffToken = run('rpc-retry-off-token', {
+          report: rpcReport('@qwen-code/web-shell'),
+          rpcRetry: 'off',
+        });
+        expect(retryOffToken.rc).toBe('1');
+        expect(retryOffToken.stdout).not.toContain('Every test passed');
+        expect([...retryOffToken.calls].sort()).toEqual(
+          [...passing.calls].sort(),
+        );
+
+        // A workspace killed by a signal must not be retried on the strength
+        // of a later workspace's status: npm exits with the LAST failing
+        // workspace, so the batch status attributes the kill to the wrong
+        // one. Only the RPC-only workspace is re-run here.
+        const twoBlocks =
+          rpcReport('@qwen-code/web-shell').replace(
+            'npm error code 1',
+            'npm error code 137',
+          ) +
+          '\n' +
+          rpcReport('@qwen-code/sdk');
+        const perWorkspace = run('rpc-retry-per-workspace', {
+          report: twoBlocks,
+        });
+        expect(perWorkspace.rc, perWorkspace.stdout).toBe('1');
+        expect(perWorkspace.stdout).toContain('Every test passed');
+        expect(
+          perWorkspace.calls.filter((call) =>
+            call.includes('--workspace=@qwen-code/web-shell'),
+          ).length,
+        ).toBe(1);
+        expect(
+          perWorkspace.calls.filter((call) =>
+            call.includes('--workspace=@qwen-code/sdk'),
+          ).length,
+        ).toBe(2);
+
+        // npm prints one error stanza per failed script, so a workspace whose
+        // test:ci chains another npm script (integrations/* run
+        // `npm run build && vitest run`) can carry the inner build's stanza
+        // before its own. The workspace's code is the one attached to its
+        // LAST `npm error workspace <name>` line: taking the block's first
+        // code would read 1 here and retry a run that was killed (137).
+        const nestedStanza = [
+          '> @qwen-code/web-shell@0.27.2 test:ci',
+          '> npm run build && vitest run',
+          '',
+          '> @qwen-code/web-shell@0.27.2 build',
+          '',
+          'npm error Lifecycle script `build` failed with error:',
+          'npm error code 1',
+          'npm error workspace @qwen-code/web-shell@0.27.2',
+          '',
+          '⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯',
+          'Vitest caught 1 unhandled error during the test run.',
+          'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
+          '',
+          ' Test Files  2 passed (2)',
+          '      Tests  902 passed (902)',
+          '     Errors  1 error',
+          '',
+          'npm error Lifecycle script `test:ci` failed with error:',
+          'npm error code 137',
+          'npm error workspace @qwen-code/web-shell@0.27.2',
+          'npm error command sh -c npm run build && vitest run',
+        ].join('\n');
+        const nestedStanzaRun = run('rpc-retry-nested-stanza', {
+          report: nestedStanza,
+          reportRc: '137',
+        });
+        expect(nestedStanzaRun.rc, nestedStanzaRun.stdout).toBe('137');
+        expect(nestedStanzaRun.stdout).not.toContain('Every test passed');
+        expect([...nestedStanzaRun.calls].sort()).toEqual(
+          [...passing.calls].sort(),
+        );
+
+        // Only Vitest's own unhandled-error block counts. A test's console
+        // output is echoed at column 0, so a whole-text grep would let a
+        // printed transport line license a retry for an unrelated error.
+        const printedTransport =
+          rpcReport('@qwen-code/web-shell').replace(
+            'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
+            'Error: TypeError: boom',
+          ) + '\n[vitest-worker]: Timeout calling "onTaskUpdate"';
+        const notRetriedPrinted = run('rpc-retry-printed', {
+          report: printedTransport,
+        });
+        expect(notRetriedPrinted.rc).toBe('1');
+        expect(notRetriedPrinted.stdout).not.toContain('Every test passed');
+      } finally {
+        harness.dispose();
+      }
+    },
+  );
+
+  // The two levers this suite owns — how many times the scripts lane re-runs,
+  // and whether that count is validated — are separate cases. They shared one
+  // body while the review measured the whole file at 44 s per worker on the
+  // shared pool; each case here stays in the low single digits of lane spawns,
+  // so a 5x slower host cannot push one past the worker's 60 s RPC budget.
+  //
+  // There is no time condition on a re-run: the guard that skipped one on a
+  // spent step budget was removed (see the script's header).
+  it.runIf(process.platform === 'linux')(
+    'retries the scripts suite the configured number of times',
+    () => {
+      const harness = laneRetryHarness();
+      try {
+        const { run, rpcReport } = harness;
+        // The scripts lane (`run_suite`) gets the same retry and needs its own
+        // evidence: the workspace cases cannot reach it.
+        const scriptsRetried = run('rpc-retry-scripts', {
+          report: rpcReport('@qwen-code/qwen-code-scripts'),
+          reportMatch: 'test:scripts:unit',
+        });
+        expect(scriptsRetried.rc, scriptsRetried.stdout).toBe('0');
+        expect(scriptsRetried.stdout).toContain('Every test passed');
+        expect(
+          scriptsRetried.calls.filter((call) =>
+            call.includes('test:scripts:unit'),
+          ).length,
+        ).toBe(2);
+        const scriptsStuck = run('rpc-retry-scripts-stuck', {
+          report: rpcReport('@qwen-code/qwen-code-scripts'),
+          reportMatch: 'test:scripts:unit',
+          reportOnce: false,
+        });
+        expect(scriptsStuck.rc).toBe('1');
+        expect(scriptsStuck.stdout).toContain('Every test passed');
+        // The lever is a count, like VITEST_RETRY next to it: two re-runs when
+        // set to 2.
+        const scriptsTwo = run('rpc-retry-scripts-two', {
+          report: rpcReport('@qwen-code/qwen-code-scripts'),
+          reportMatch: 'test:scripts:unit',
+          reportOnce: false,
+          rpcRetry: '2',
+        });
+        expect(
+          scriptsTwo.calls.filter((call) => call.includes('test:scripts:unit'))
+            .length,
+        ).toBe(3);
+        const scriptsOff = run('rpc-retry-scripts-off', {
+          report: rpcReport('@qwen-code/qwen-code-scripts'),
+          reportMatch: 'test:scripts:unit',
+          rpcRetry: '0',
+        });
+        expect(scriptsOff.rc).toBe('1');
+        expect(
+          scriptsOff.calls.filter((call) => call.includes('test:scripts:unit'))
+            .length,
+        ).toBe(1);
+      } finally {
+        harness.dispose();
+      }
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'fails when a stall outlives every configured attempt',
+    () => {
+      const harness = laneRetryHarness();
+      try {
+        const { run, rpcReport } = harness;
+        // The retry is a bounded count, not a loop that launders a permanent
+        // break into green: a stall that outlives every attempt still fails.
+        const retryStuck = run('rpc-retry-stuck', {
+          report: rpcReport('@qwen-code/web-shell'),
+          reportOnce: false,
+        });
+        expect(retryStuck.rc).toBe('1');
+        expect(retryStuck.stdout).toContain('Every test passed');
+      } finally {
+        harness.dispose();
+      }
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'rejects an RPC retry count that is neither a count nor off',
+    () => {
+      const harness = laneRetryHarness();
+      try {
+        const { run, rpcReport } = harness;
+        // A configuration error, not a silent fall-through to the default.
+        const retryInvalid = run('rpc-retry-invalid', {
+          report: rpcReport('@qwen-code/web-shell'),
+          rpcRetry: 'false',
+        });
+        expect(retryInvalid.rc).not.toBe('0');
+        expect(retryInvalid.stdout).toContain(
+          'QWEN_CI_RPC_RETRY must be a non-negative integer',
+        );
+      } finally {
+        harness.dispose();
+      }
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'ignores a printed near-miss of the unhandled-error header',
+    () => {
+      const harness = laneRetryHarness();
+      try {
+        const { run, rpcReport } = harness;
+        // A printed near-miss of the section header must not open a
+        // pseudo-section: the opener matches Vitest's ruler-shaped line, not
+        // any line containing the words.
+        const printedHeader = run('rpc-retry-printed-header', {
+          report:
+            rpcReport('@qwen-code/web-shell') +
+            '\nUnhandled Errors: a test printed this\nError: [vitest-worker]: Timeout calling "printed"',
+        });
+        expect(printedHeader.rc, printedHeader.stdout).toBe('0');
+        expect(printedHeader.stdout).toContain('Every test passed');
+      } finally {
+        harness.dispose();
+      }
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'leaves every non-transport failure standing',
+    () => {
+      const harness = laneRetryHarness();
+      try {
+        const { run, rpcReport, passing } = harness;
+        // Every shape below is a real failure that must NOT be retried. The
+        // Linux lanes keep unhandled errors fatal on purpose (#10438), so the
+        // bar is a positive match on an all-green report, not the absence of
+        // a familiar failure.
+        const notRetried = [
+          [
+            'a failed test beside the RPC error',
+            rpcReport('@qwen-code/web-shell').replace(
+              '      Tests  902 passed (902)',
+              '      Tests  1 failed | 901 passed (902)',
+            ),
+          ],
+          [
+            'a failed test file beside the RPC error',
+            rpcReport('@qwen-code/web-shell').replace(
+              ' Test Files  2 passed (2)',
+              ' Test Files  1 failed | 1 passed (2)',
+            ),
+          ],
+          // A truncated or interleaved block can keep Vitest's own `FAIL ` row
+          // while dropping the `Tests N failed` / `Test Files N failed` line
+          // the other checks read. That leaves the FAIL guard as the only
+          // thing between this shape and a retry.
+          [
+            'a FAIL line without a failed count beside an all-green summary',
+            rpcReport('@qwen-code/web-shell').replace(
+              ' Test Files  2 passed (2)',
+              ' FAIL  src/example.test.ts > fails for real\n Test Files  2 passed (2)',
+            ),
+          ],
+          [
+            'a second unhandled error the RPC timeout cannot account for',
+            rpcReport('@qwen-code/web-shell').replace(
+              '     Errors  1 error',
+              '     Errors  2 errors',
+            ),
+          ],
+          [
+            'a different unhandled error',
+            rpcReport('@qwen-code/web-shell').replace(
+              'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
+              'TypeError: cannot read properties of undefined',
+            ),
+          ],
+          // The section's message, stack and code frames are producer-controlled.
+          // A frame that merely quotes the transport prefix used to count as a
+          // timeout, so one real error plus one quoting frame made the two
+          // figures agree and bought a retry. Only the error's own header line
+          // counts now.
+          [
+            'a code frame that quotes the transport prefix',
+            rpcReport('@qwen-code/web-shell')
+              .replace(
+                'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
+                'Error: boom',
+              )
+              .replace(
+                // the stack line under the header, i.e. a frame, not a header
+                ' ❯ Object.onTimeoutError ../../../node_modules/vitest/dist/chunks/rpc.js:53:10',
+                ' ❯ Object.onTimeoutError ../../../node_modules/vitest/dist/chunks/rpc.js:53:10\n   [vitest-worker]: Timeout calling "onTaskUpdate"',
+              ),
+          ],
+          [
+            'a process that died before reporting anything',
+            [
+              '> @qwen-code/web-shell@0.27.2 test:ci',
+              'FATAL ERROR: Ineffective mark-compacts near heap limit',
+              'npm error workspace @qwen-code/web-shell@0.27.2',
+            ].join('\n'),
+          ],
+          [
+            "npm's own failure, with no workspace report at all",
+            'npm error Missing script: "test:ci"',
+          ],
+          // The counts have to agree exactly, not merely be covered: the same
+          // message on two lines against one counted error is an unexplained
+          // failure, whatever the log looks like.
+          [
+            'the transport counted twice against one unhandled error',
+            rpcReport('@qwen-code/web-shell').replace(
+              'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
+              'Error: [vitest-worker]: Timeout calling "onTaskUpdate"\nError: [vitest-worker]: Timeout calling "onTaskUpdate"',
+            ),
+          ],
+          // A signal death is not the transport giving up, however green the
+          // report printed before it. The stanza's code has to agree with the
+          // stub's own 137 (below): the per-workspace extraction reads the
+          // workspace's own code, not the batch status, so a stanza still
+          // saying 1 would make this fixture model a different failure.
+          [
+            'a signal death after an all-green report',
+            rpcReport('@qwen-code/web-shell').replace(
+              'npm error code 1',
+              'npm error code 137',
+            ),
+            '137',
+          ],
+          // Vitest echoes a test's console output at column 0, so a workspace
+          // printing summary-shaped fixture data must not inflate the sum and
+          // refuse a retry the run earned. Anchored on the section-line shape,
+          // this shape still retries.
+          [
+            'the transport beside a summary-shaped line a test printed',
+            rpcReport('@qwen-code/web-shell').replace(
+              ' Test Files  2 passed (2)',
+              'Errors 2 errors occurred in fixture data\n Test Files  2 passed (2)',
+            ),
+            '1',
+            true,
+          ],
+        ];
+        for (const [
+          shape,
+          report,
+          code = '1',
+          expectRetry = false,
+        ] of notRetried) {
+          const failed = run(`no-retry-${shape.replace(/[^a-z]+/g, '-')}`, {
+            report,
+            reportRc: code,
+          });
+          if (expectRetry) {
+            expect(failed.rc, shape).toBe('0');
+            expect(failed.stdout, shape).toContain('Every test passed');
+          } else {
+            expect(failed.rc, shape).toBe(code);
+            expect(failed.stdout, shape).not.toContain('Every test passed');
+            expect([...failed.calls].sort(), shape).toEqual(
+              [...passing.calls].sort(),
+            );
+          }
+        }
+      } finally {
+        harness.dispose();
+      }
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'attributes each workspace its own status and its own report',
+    () => {
+      const harness = laneRetryHarness();
+      try {
+        const { run, rpcReport } = harness;
+        // One workspace's green report must not license another's retry: the
+        // batch log holds every workspace's summary, and npm names the one
+        // that actually failed. Judging per workspace still re-runs the
+        // transport-only one — that retry is its own and cannot turn the lane
+        // green — while the workspace with a real failed test is never re-run
+        // and its failure keeps the lane red.
+        const mixed = run('no-retry-mixed', {
+          report: [
+            rpcReport('@qwen-code/web-shell'),
+            '',
+            '> @qwen-code/sdk@0.27.2 test:ci',
+            ' FAIL  src/index.test.ts > fails for real',
+            ' Test Files  1 failed (1)',
+            '      Tests  1 failed (1)',
+            'npm error workspace @qwen-code/sdk@0.27.2',
+          ].join('\n'),
+        });
+        expect(mixed.rc).toBe('1');
+        expect(mixed.stdout).toContain('Every test passed');
+        expect(
+          mixed.calls.filter((call) =>
+            call.includes('--workspace=@qwen-code/web-shell'),
+          ).length,
+        ).toBe(2);
+        expect(
+          mixed.calls.filter((call) =>
+            call.includes('--workspace=@qwen-code/sdk'),
+          ).length,
+        ).toBe(1);
+
+        // A workspace whose report never arrived must not borrow its
+        // neighbour's: the whole batch log holds the neighbour's all-green
+        // summary, and judging per workspace means the summary-less one is
+        // never re-run while its transport-only neighbour may still be re-run
+        // for itself. The lane stays red on the summary-less failure.
+        const missingBlock = run('no-retry-missing-block', {
+          report: [
+            '> @qwen-code/sdk@0.27.2 test:ci',
+            'FATAL ERROR: Ineffective mark-compacts near heap limit',
+            'npm error workspace @qwen-code/sdk@0.27.2',
+            '',
+            rpcReport('@qwen-code/web-shell'),
+          ].join('\n'),
+        });
+        expect(missingBlock.rc).toBe('1');
+        expect(missingBlock.stdout).toContain('Every test passed');
+        expect(
+          missingBlock.calls.filter((call) =>
+            call.includes('--workspace=@qwen-code/sdk'),
+          ).length,
+        ).toBe(1);
+        expect(
+          missingBlock.calls.filter((call) =>
+            call.includes('--workspace=@qwen-code/web-shell'),
+          ).length,
+        ).toBe(2);
+      } finally {
+        harness.dispose();
+      }
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'runs the workspace retry loop for every configured round',
+    () => {
+      const harness = laneRetryHarness();
+      try {
+        const { run, rpcReport } = harness;
+        // RPC_RETRY is a count: with 2, the affected workspace is attempted
+        // three times (the batch plus two re-runs) and a stall that outlives
+        // them still fails, which is the only shape that reaches the loop's
+        // second round and its status reset.
+        const twoRounds = run('workspace-two-rounds', {
+          report: rpcReport('@qwen-code/web-shell'),
+          reportOnce: false,
+          rpcRetry: '2',
+        });
+        expect(twoRounds.rc, twoRounds.stdout).toBe('1');
+        expect(
+          twoRounds.calls.filter((call) =>
+            call.includes('--workspace=@qwen-code/web-shell'),
+          ).length,
+        ).toBe(3);
+      } finally {
+        harness.dispose();
+      }
+    },
+  );
+
+  it('keeps both copies of the slow-test-host predicate identical', () => {
+    // The predicate is copied, not shared, and each copy's header says to keep
+    // them in sync. The files are not byte-identical (only the cli copy also
+    // exports slowHostBudgetMs), so compare the shared function itself. A
+    // threshold tweak that reaches one copy and not the other silently splits
+    // the suites the two packages put on the raised budgets.
+    const copies = [
+      'packages/cli/src/test-utils/slow-test-host.ts',
+      'packages/core/src/test-utils/slow-test-host.ts',
+    ];
+    const bodies = copies.map((file) => {
+      const text = readFileSync(path.join(root, file), 'utf8');
+      const body = text.match(
+        /export function isSlowTestHost\(\): boolean \{[\s\S]*?\n\}\n/,
+      );
+      expect(body, `${file}: isSlowTestHost not found`).not.toBeNull();
+      return body[0];
+    });
+    const [reference, ...others] = bodies;
+    others.forEach((body, i) => {
+      expect(body, `${copies[i + 1]} vs ${copies[0]}`).toBe(reference);
+    });
+  });
 
   it('bounds the CI unit step so a hang fails instead of stalling', () => {
     // #10490's run 3 was cancelled at ~60 minutes, leaving behind
     // orphaned test processes; a stall reads as a timeout, not a failure.
-    const step = getWorkflowStep(
-      getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
-      'Run tests and generate reports',
+    const job = getWorkflowJob(
+      readWorkflow('.github/workflows/ci.yml'),
+      'test',
     );
-    expect(step).toContain('timeout-minutes: 110');
+    const step = getWorkflowStep(job, 'Run tests and generate reports');
+    expect(step).toContain('timeout-minutes: 45');
+    // The step cap is the one that must fire: it fails the step and leaves
+    // the job alive for the diagnostic steps below it, while a job timeout
+    // cancels the job and skips them.
+    const stepCap = Number(step.match(/timeout-minutes: (\d+)/)?.[1]);
+    const jobCap = Number(job.match(/\n {4}timeout-minutes: (\d+)/)?.[1]);
+    expect(stepCap).toBeLessThan(jobCap);
   });
 
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {
@@ -1740,8 +2934,8 @@ describe('package scripts', () => {
       ) || [];
 
     // The validation jobs reuse the anchored install step; only the anchor
-    // definition plus prepare and publish appear as full textual copies.
-    expect(installSteps.length).toBe(3);
+    // definition plus prepare, build_release, and publish are textual copies.
+    expect(installSteps.length).toBe(4);
     for (const installStep of installSteps.slice(0, 2)) {
       expect(installStep).toContain('npm run generate');
     }
@@ -1782,6 +2976,19 @@ describe('package scripts', () => {
     );
 
     expect(checkoutStep).toContain('persist-credentials: false');
+    // The checkout only reads the release commit; a missing or rejected bot
+    // PAT must not abort the release before the push step that needs it.
+    expect(checkoutStep).not.toContain('CI_BOT_PAT');
+    expect(checkoutStep).toContain("token: '${{ github.token }}'");
+    expect(checkoutStep).not.toContain('secrets.');
+    // Nothing before the push step may reintroduce the bot PAT either: the
+    // job legitimately holds it later, so stop the slice at that step.
+    expect(
+      publishJob.slice(
+        0,
+        publishJob.indexOf("- name: 'Conditionally push release branch'"),
+      ),
+    ).not.toContain('CI_BOT_PAT');
     expect(releaseBranchStep).not.toContain('CI_BOT_PAT');
     expect(pushReleaseBranchStep).toContain(
       "CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'",
@@ -1852,20 +3059,25 @@ describe('package scripts', () => {
   });
 
   it.skipIf(!arePermissionBitsEnforced())(
-    'npm pack keeps the exec bit on every vendored ripgrep in the CLI tarball',
+    'npm pack keeps the exec bit on every spawned vendored binary in the CLI tarball',
     () => {
       // The archive is where the bit is lost (#12668), so assert on its
       // recorded modes rather than on the staged tree. A `-win32` directory
       // ships a 0644 `rg.exe` by design and the gate excludes it structurally.
       const fixture = mkdtempSync(path.join(tmpdir(), 'cli-rg-exec-bit-'));
       try {
-        writeVendoredRipgrepFixture(fixture, {
-          'x64-linux': 0o755,
-          'arm64-darwin': 0o755,
-          'x64-win32': 0o644,
-        });
+        writeVendoredBinaryFixture(
+          fixture,
+          {
+            'x64-linux': 0o755,
+            'arm64-darwin': 0o755,
+            'x64-win32': 0o644,
+          },
+          { 'x64-linux': 0o755 },
+        );
         const { entries } = checkReleaseTarballExecBits(fixture);
         expect(entries.map(([name]) => name)).toEqual([
+          'package/vendor/landlock-run/x64-linux/qwen-landlock-run',
           'package/vendor/ripgrep/arm64-darwin/rg',
           'package/vendor/ripgrep/x64-linux/rg',
         ]);
@@ -1879,24 +3091,50 @@ describe('package scripts', () => {
   );
 
   it.skipIf(!arePermissionBitsEnforced())(
-    'release tarball gate rejects a vendored ripgrep without an exec bit',
+    'release tarball gate rejects a spawned vendored binary without an exec bit',
     () => {
       const fixture = mkdtempSync(path.join(tmpdir(), 'cli-rg-gate-'));
       try {
-        writeVendoredRipgrepFixture(fixture, { 'x64-linux': 0o644 });
+        writeVendoredBinaryFixture(
+          fixture,
+          { 'x64-linux': 0o755 },
+          { 'x64-linux': 0o644 },
+        );
         expect(() => checkReleaseTarballExecBits(fixture)).toThrow(
-          /package\/vendor\/ripgrep\/x64-linux\/rg: 0644 lacks an exec bit/,
+          /package\/vendor\/landlock-run\/x64-linux\/qwen-landlock-run: 0644 lacks an exec bit/,
         );
 
-        // A package whose vendor/ripgrep holds no unix platform must not pass
+        // A platform directory whose binary was dropped during staging must
+        // fail, not silently shrink the expected set.
+        const shrunk = mkdtempSync(path.join(tmpdir(), 'cli-rg-missing-'));
+        try {
+          writeVendoredBinaryFixture(
+            shrunk,
+            { 'arm64-linux': 0o755 },
+            { 'x64-linux': 0o755 },
+          );
+          mkdirSync(path.join(shrunk, 'vendor', 'ripgrep', 'x64-linux'), {
+            recursive: true,
+          });
+          expect(() => checkReleaseTarballExecBits(shrunk)).toThrow(
+            /package\/vendor\/ripgrep\/x64-linux\/rg: missing from the packed tarball/,
+          );
+        } finally {
+          rmSync(shrunk, { force: true, recursive: true });
+        }
+
+        // A package whose vendor trees ship no spawned binary must not pass
         // vacuously: the gate refuses before it ever packs.
         const empty = mkdtempSync(path.join(tmpdir(), 'cli-rg-none-'));
         try {
           mkdirSync(path.join(empty, 'vendor', 'ripgrep'), {
             recursive: true,
           });
+          mkdirSync(path.join(empty, 'vendor', 'landlock-run'), {
+            recursive: true,
+          });
           expect(() => checkReleaseTarballExecBits(empty)).toThrow(
-            /no unix vendored ripgrep under/,
+            /no spawned vendored executables under/,
           );
         } finally {
           rmSync(empty, { force: true, recursive: true });

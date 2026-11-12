@@ -51,9 +51,15 @@ import {
 } from '../openaiContentGenerator/constants.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
 import { buildSessionAwareFetch } from '../outbound-session-id.js';
+import {
+  withDashScopeSourceConfig,
+  withoutDashScopeSourceConfig,
+} from '../dashscope-source-config.js';
 import { createHash } from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { ResponsesHttpError } from '../../utils/responses-http-error.js';
+import { retryContext } from '../../utils/retryContext.js';
+import { filterIsolatedModelOverrides } from '../openaiContentGenerator/provider/utils.js';
 import { applyResponsesPromptCaching } from './prompt-caching.js';
 
 const debugLogger = createDebugLogger('RESPONSES_PIPELINE');
@@ -317,6 +323,7 @@ export class ResponsesPipeline {
     try {
       return await this.connect(apiRequest, signal);
     } catch (error) {
+      if (retryContext.getStore()?.singleAttempt) throw error;
       retryRequest = this.buildReasoningReplayRetry(apiRequest, error);
       if (!retryRequest) throw error;
     }
@@ -497,16 +504,26 @@ export class ResponsesPipeline {
       apiRequest.max_output_tokens = maxOut;
     }
 
-    if (this.config.extra_body) {
+    const extraBody = filterIsolatedModelOverrides(this.config.extra_body);
+    if (extraBody) {
       const thinkingOptOut =
         request.config?.thinkingConfig?.includeThoughts === false;
       const requestRecord = apiRequest as unknown as Record<string, unknown>;
-      for (const [key, value] of Object.entries(this.config.extra_body)) {
+      const singleAttempt = retryContext.getStore()?.singleAttempt;
+      for (const [key, value] of Object.entries(extraBody)) {
         // `enable_thinking` is a DashScope/Qwen-specific knob with no meaning
         // on the Responses API; buildReasoning() above already translates it
         // into `reasoning.effort` when present, so forwarding it verbatim
         // would only add an undefined field to the wire body.
         if (key === 'enable_thinking') continue;
+        if (
+          singleAttempt &&
+          (key === 'max_tokens' ||
+            key === 'max_completion_tokens' ||
+            key === 'max_new_tokens')
+        ) {
+          continue;
+        }
         // An explicit per-send `thinkingConfig.includeThoughts:false` is
         // authoritative for the whole build, not just buildReasoning(): the
         // opt-out is precisely what leaves `reasoning`/`include` off the
@@ -655,7 +672,11 @@ export class ResponsesPipeline {
 
     const fetchOpts: RequestInit & { dispatcher?: unknown } = {
       method: 'POST',
-      headers,
+      headers: withDashScopeSourceConfig(
+        headers,
+        this.config.baseUrl,
+        this.cliConfig.getChannel?.(),
+      ),
       body,
       signal: connectController.signal,
     };
@@ -684,7 +705,7 @@ export class ResponsesPipeline {
     const fetchFn = buildSessionAwareFetch(
       pinnedFetch,
       this.cliConfig,
-      this.config.customHeaders,
+      withoutDashScopeSourceConfig(this.config.customHeaders),
     );
 
     // Connect-phase timeout: fetch() resolves once response headers arrive, so

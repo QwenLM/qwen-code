@@ -75,6 +75,8 @@ vi.mock('../utils/github-prs.js', async (importOriginal) => ({
 import { isCommandAllowed, stripShellWrapper } from '../utils/shell-utils.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import {
+  SHELL_PR_BINDING_DIRECTORY_NOTICE,
+  SHELL_RECORD_ARTIFACT_REMINDER,
   ShellTool,
   type ShellToolInvocation,
   type ShellToolParams,
@@ -359,6 +361,7 @@ describe('ShellTool', () => {
       getPermissionsAsk: vi.fn().mockReturnValue([]),
       getPermissionsDeny: vi.fn().mockReturnValue([]),
       getDebugMode: vi.fn().mockReturnValue(false),
+      isRecordArtifactEnabled: vi.fn().mockReturnValue(true),
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
       getSessionId: vi.fn().mockReturnValue('test-session'),
       getWorkspaceContext: vi
@@ -766,6 +769,9 @@ describe('ShellTool', () => {
       await runShell('gh pr create --help', 'usage: gh pr create\n');
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: URL absent from the command output',
+      );
     });
 
     it('attributes against the execution directory, not the target dir', async () => {
@@ -813,6 +819,11 @@ describe('ShellTool', () => {
       await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      // A merged PR arrives as `status: 'pr'`; the state is what names it.
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: post-run gh resolution',
+        { status: 'pr', state: 'merged' },
+      );
     });
 
     it('does not bind an open PR the branch already had before the run', async () => {
@@ -824,6 +835,10 @@ describe('ShellTool', () => {
       await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: PR already existed before the run',
+        { number: 42 },
+      );
     });
 
     it('does not bind when the pre-run snapshot errored', async () => {
@@ -837,7 +852,132 @@ describe('ShellTool', () => {
       await runShell(CREATE_OR_VIEW, PR_42);
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: pre-run PR snapshot unavailable',
+      );
     });
+
+    it('names the post-run resolution status instead of paraphrasing a cause', async () => {
+      // `none` (gh proved the branch has no PR) and `error` (gh could not
+      // answer at all) are different facts; the log must not report the first
+      // when the second happened.
+      fetchCurrentBranchPullRequestMock
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ status: 'error' });
+      await runShell(CREATE_OR_VIEW, PR_42);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: post-run gh resolution',
+        { status: 'error' },
+      );
+
+      fetchCurrentBranchPullRequestMock
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ status: 'none' });
+      await runShell(CREATE_OR_VIEW, PR_42);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: post-run gh resolution',
+        { status: 'none' },
+      );
+    });
+
+    it('re-points both legs at the launch directory when the create targeted it from a non-repo directory', async () => {
+      // `cd <scratch-nonrepo> && GH_REPO=o/r gh pr create …`: the derived
+      // directory has no git repository, so its snapshot is `error` and both
+      // legs fall back to the launch directory — what the parent commit did.
+      // The stub order is the call order: scratch pre-run, launch pre-run
+      // after re-pointing, launch post-run.
+      fetchCurrentBranchPullRequestMock
+        .mockResolvedValueOnce({ status: 'error' })
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ ...branchPr(77), headRefName: 'main' });
+
+      await runShell(
+        'cd /scratch/norepo && GH_REPO=o/r gh pr create --title t --body b',
+        PR_77,
+      );
+
+      expectBound(77);
+      expect(fetchCurrentBranchNameMock).toHaveBeenCalledWith('/test/dir');
+      // GH_REPO is inline env, so the verification legs receive an env
+      // overlay rather than `undefined`; assert the launch-directory call.
+      expect(fetchAttributionRepoKeysMock).toHaveBeenCalledWith(
+        '/test/dir',
+        expect.any(Object),
+      );
+    });
+
+    it('does not re-point a gh error in a real repo', async () => {
+      // Only a missing repository justifies the launch fallback. This file
+      // auto-mocks fs, so prove git identity through the primitive findGitRoot
+      // actually consumes. A gh flake in a real checkout must still hit the
+      // errored-snapshot gate, not bind an existing launch-branch PR.
+      // findGitRoot resolves before it joins, so the key must be drive-qualified
+      // on Windows — path.resolve, not a drive-less path.join.
+      vi.mocked(fs.existsSync).mockImplementation(
+        (candidate) => candidate === path.resolve('/test/dir', '.git'),
+      );
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'error',
+      });
+      await runShell('cd nested && gh pr create --fill', PR_77);
+
+      expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-points on an explicit --repo flag naming a different repository', async () => {
+      // `cd <another-checkout> && gh pr create --repo o/r`: the other checkout
+      // resolves to a DIFFERENT repo key, so the flag cannot mean that repo.
+      // Attributing there would decline (no PR for its branch), while the
+      // parent commit bound the launch repo's PR. With a same-repo flag the
+      // resolver would instead keep the worktree (pinned by the quoted-title
+      // case).
+      // The resolver hands the helper path.resolve(launchDir, target), so the
+      // stub key must be derived the same way — a POSIX literal would not match
+      // the drive-qualified path on the Windows workspace lane.
+      const otherCheckout = path.resolve('/other/checkout');
+      fetchAttributionRepoKeysMock.mockImplementation((dir) =>
+        dir === otherCheckout
+          ? Promise.resolve({ resolved: 'github.com/other/checkout' })
+          : Promise.resolve({ resolved: 'github.com/o/r' }),
+      );
+      fetchCurrentBranchPullRequestMock
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ status: 'none' })
+        .mockResolvedValueOnce({ ...branchPr(77), headRefName: 'main' });
+
+      await runShell(
+        'cd /other/checkout && gh pr create --repo o/r --head main --title t --body b',
+        PR_77,
+      );
+
+      expectBound(77);
+    });
+
+    it.each(['-R o/r', '-R=o/r', '-Ro/r'])(
+      're-points on the short repo flag %s naming a different repository',
+      async (repoArg) => {
+        // R3-1: gh's short -R flag (separated, equals, attached) must trigger
+        // the same launch re-point as --repo when it names another repository.
+        const otherCheckout = path.resolve('/other/checkout');
+        fetchAttributionRepoKeysMock.mockImplementation((dir) =>
+          dir === otherCheckout
+            ? Promise.resolve({ resolved: 'github.com/other/checkout' })
+            : Promise.resolve({ resolved: 'github.com/o/r' }),
+        );
+        fetchCurrentBranchPullRequestMock
+          .mockResolvedValueOnce({ status: 'none' })
+          .mockResolvedValueOnce({ status: 'none' })
+          .mockResolvedValueOnce({ ...branchPr(77), headRefName: 'main' });
+
+        await runShell(
+          `cd /other/checkout && gh pr create ${repoArg} --head main --title t --body b`,
+          PR_77,
+        );
+
+        expectBound(77);
+      },
+    );
 
     it('does not re-emit when the resolved PR is already bound', async () => {
       // The pre-run snapshot missed the PR (a gh flake), so the resolution
@@ -857,6 +997,10 @@ describe('ShellTool', () => {
         [{ ...prRecord(42), source: 'create' }],
       );
       expect(sessionServiceMock().emitSessionPrBound).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: already bound',
+        { number: 42 },
+      );
     });
 
     it('binds when a promote is refused after the command settled', async () => {
@@ -869,6 +1013,60 @@ describe('ShellTool', () => {
       });
 
       expectBound(77);
+    });
+
+    it('emits the fallback notice when an opaque create is promote-refused', async () => {
+      // The notice condition mirrors the binding gate `(!aborted ||
+      // wasPromoteRefused) && exitCode === 0`. An opaque create that settles
+      // after a refused promote must still be told, or a simplification to
+      // `!aborted && exitCode === 0` would silently drop it.
+      mockCreatedPr(77);
+      const result = await runShell(
+        'cd $WORKTREE && gh pr create --fill',
+        PR_77,
+        0,
+        {
+          result: { aborted: true },
+          promote: (promoteAc) => promoteAc.abort({ kind: 'background' }),
+        },
+      );
+
+      expect(result.llmContent).toContain(SHELL_PR_BINDING_DIRECTORY_NOTICE);
+    });
+
+    it('emits no fallback notice for a promote-refused NON-opaque create', async () => {
+      // The disjunct exists only when the create actually fell back. With a
+      // provable directory, promote-refused runs bind normally and nothing
+      // should be said — a guard that fires unconditionally would spuriously
+      // warn on the happy path.
+      mockCreatedPr(77);
+      const result = await runShell('gh pr create --fill', PR_77, 0, {
+        result: { aborted: true },
+        promote: (promoteAc) => promoteAc.abort({ kind: 'background' }),
+      });
+
+      expect(result.llmContent).not.toContain(
+        SHELL_PR_BINDING_DIRECTORY_NOTICE,
+      );
+      expectBound(77);
+    });
+
+    it('emits no fallback notice for a cancelled create', async () => {
+      // A cancelled run never reached the binding gate, so it must not be
+      // told that binding fell back. Pairs with the promote-refused case to
+      // keep the two disjuncts honest.
+      const result = await runShell(
+        'cd $WORKTREE && gh pr create --fill',
+        PR_77,
+        0,
+        {
+          result: { aborted: true, exitCode: 130 },
+        },
+      );
+
+      expect(result.llmContent).not.toContain(
+        SHELL_PR_BINDING_DIRECTORY_NOTICE,
+      );
     });
 
     it('does not bind when a promote succeeds mid-run (documented scope)', async () => {
@@ -915,6 +1113,10 @@ describe('ShellTool', () => {
       );
 
       expect(upsertSessionPrsMock).not.toHaveBeenCalled();
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'gh pr create not bound: branch mismatch',
+        { created: 'other-branch', expected: 'main' },
+      );
     });
 
     it('does not bind when the pre-run branch could not be captured', async () => {
@@ -983,6 +1185,1130 @@ describe('ShellTool', () => {
         '/test/proj/chats-archived/test-session.pr.json',
         [expect.objectContaining({ number: 77 })],
       );
+    });
+
+    // Both attribution legs must ask gh about the directory the create runs
+    // in. A model-authored `cd <worktree> && gh pr create` without the
+    // `directory` param otherwise snapshots the launch branch — which has no
+    // PR — and declines silently (live incidents: sessions d0911852 / 195215bf).
+    describe('attribution directory resolution', () => {
+      /**
+       * The resolver joins with the platform-native `path.resolve`, so an
+       * expectation for a RESOLVED directory must be derived the same way —
+       * a POSIX literal would not match on the Windows workspace lane, and
+       * mocking `os.platform()` does not change Node's `path` implementation.
+       * Expectations for the LAUNCH directory stay literal: that value is
+       * passed through untouched, never resolved.
+       */
+      const resolved = (...segments: string[]) => path.resolve(...segments);
+
+      /** Asserts both gh legs ran in `dir` and the create bound. */
+      const expectAttributedIn = async (dir: string) => {
+        expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+          dir,
+          undefined,
+        );
+        expect(fetchCurrentBranchNameMock).toHaveBeenCalledWith(dir);
+        expect(fetchAttributionRepoKeysMock).toHaveBeenCalledWith(
+          dir,
+          undefined,
+        );
+        expectBound(77);
+      };
+
+      /** Asserts fallback to the launch directory plus the model notice. */
+      const expectOpaqueFallback = (result: ToolResult) => {
+        expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+          '/test/dir',
+          undefined,
+        );
+        expect(result.llmContent).toContain(SHELL_PR_BINDING_DIRECTORY_NOTICE);
+        expect(result.returnDisplay).toMatchObject({
+          notices: expect.arrayContaining([SHELL_PR_BINDING_DIRECTORY_NOTICE]),
+        });
+      };
+
+      it('attributes a single literal cd in the directory it names', async () => {
+        mockCreatedPr(77);
+        await runShell('cd /test/dir/nested && gh pr create --fill', PR_77);
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
+      });
+
+      it.each(['command printf ok', "sh -c 'echo ok'"])(
+        'keeps an unrelated prefix resolvable: %s',
+        async (prefix) => {
+          mockCreatedPr(77);
+          await runShell(
+            `${prefix} && cd /test/dir/nested && gh pr create --fill`,
+            PR_77,
+          );
+          await expectAttributedIn(resolved('/test/dir/nested'));
+        },
+      );
+
+      it('ignores a same-named function defined after the create', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/nested && gh pr create --fill; cd() { :; }',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('ignores a function scoped to an already-finished subshell', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          '(cd() { :; }) && cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('ignores a function scoped to a pipeline subshell', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; } | cat && cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('resolves a relative cd against the launch directory', async () => {
+        mockCreatedPr(77);
+        await runShell('cd nested && gh pr create --fill', PR_77);
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
+      });
+
+      it('resolves a relative cd against the directory param', async () => {
+        mockCreatedPr(77);
+        await runShell('cd nested && gh pr create --fill', PR_77, 0, {
+          directory: '/test/dir/param',
+        });
+        await expectAttributedIn(resolved('/test/dir/param', 'nested'));
+      });
+
+      it('threads a chained cd through intervening commands, a redirect and a trailing pipe', async () => {
+        // The qwen-code-x9 incident shape verbatim: two cds, unrelated
+        // commands between them, a `>` redirect, and `| tail -5` after the
+        // create. A textual paren/operator scan would bail on the redirect.
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir && tail -n +3 draft.md > /tmp/body.md && head -3 /tmp/body.md && wc -l /tmp/body.md && cd .qwen/worktrees/deflake && gh pr create --title "test(web-shell): let a retry outlast an abort storm" --body-file /tmp/body.md 2>&1 | tail -5',
+          PR_77,
+        );
+        await expectAttributedIn(
+          resolved('/test/dir', '.qwen/worktrees/deflake'),
+        );
+      });
+
+      it('keeps a quoted title containing parentheses from blocking resolution', async () => {
+        // The qwen-code-x4 incident shape: `fix(managed-agent)` in the title.
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/.qwen/worktrees/fix-16712 && gh pr create --repo o/r --base main --head fix/x --title "fix(managed-agent): dedupe the probe case labels" --body-file /tmp/body.md 2>&1 | tail -5',
+          PR_77,
+        );
+        await expectAttributedIn(
+          resolved('/test/dir', '.qwen/worktrees/fix-16712'),
+        );
+      });
+
+      it.each([
+        ["--repo 'o/r'", 'a single-quoted repo flag'],
+        ['--repo "o/r"', 'a double-quoted repo flag'],
+        ['--repo=o/r', 'an equals-form repo flag'],
+        ["--repo='o/r'", 'a single-quoted equals-form repo flag'],
+        ['--repo="o/r"', 'a double-quoted equals-form repo flag'],
+        ['--repo github.com/o/r', 'a host-qualified repo flag'],
+        ['--repo O/R', 'an upper-case repo flag'],
+        ['--repo github.com/O/R', 'a host-qualified upper-case repo flag'],
+        [
+          "--body 'explains --repo someone/else'",
+          'a repo-looking flag inside the PR body',
+        ],
+      ])('keeps %s attribution in the worktree: %s', async (args) => {
+        mockCreatedPr(77);
+        await runShell(`cd /test/dir/nested && gh pr create ${args}`, PR_77);
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('resolves a quoted cd builtin', async () => {
+        // `"cd"` is still the cd builtin in Bash; reading the raw quoted name
+        // dropped the move and attributed both legs to launch with no notice.
+        mockCreatedPr(77);
+        await runShell('"cd" /test/dir/nested && gh pr create --fill', PR_77);
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it.each(["$'cd'", 'c"d"', 'c\\d', '\\cd'])(
+        'decodes every word encoding of the cd builtin: %s',
+        async (prog) => {
+          // ANSI-C quoting, concatenation and unquoted backslash escapes are
+          // all the same cd builtin; an undecoded name fell through and
+          // silently attributed the create to launch with no binding/notice.
+          mockCreatedPr(77);
+          const result = await runShell(
+            `${prog} /test/dir/nested && gh pr create --fill`,
+            PR_77,
+          );
+          await expectAttributedIn(resolved('/test/dir/nested'));
+          expect(result.llmContent).not.toContain(
+            SHELL_PR_BINDING_DIRECTORY_NOTICE,
+          );
+        },
+      );
+
+      it('fails closed for an undecodable program name', async () => {
+        // An expanded program name could be any builtin, including a directory
+        // changer; the walk must not silently attribute the create to the
+        // current directory.
+        mockCreatedPr(77);
+        const result = await runShell(
+          '"$CMD" /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it.each(['/usr/bin/cd', './cd', 'bin/cd', '"/usr/bin/cd"'])(
+        'fails closed for an external path-qualified cd: %s',
+        async (prog) => {
+          // R1-1: a path-qualified program named cd is an external executable
+          // running in a child; it cannot move this shell, so the walk must not
+          // grant it builtin cwd semantics and resolve a directory the create
+          // never ran in.
+          mockCreatedPr(77);
+          const result = await runShell(
+            `${prog} /test/dir/nested && gh pr create --fill`,
+            PR_77,
+          );
+          expectOpaqueFallback(result);
+        },
+      );
+
+      it('keeps a short -R flag naming the worktree repo in the worktree', async () => {
+        // R3-1: -R naming the derived directory's own repo must keep attributing
+        // there (the same-identity rule), not re-point to launch.
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/nested && gh pr create -R o/r --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('fails closed when an explicit repo value cannot be decoded', async () => {
+        // R3-1: `--repo "$R"` is unprovable, not absent — fall back with a notice
+        // instead of silently attributing to the derived directory.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd /test/dir/nested && gh pr create --repo "$R" --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('resolves a path-qualified gh create', async () => {
+        // R3-5: the command_name sanitiser keeps / and \ so a path-qualified gh
+        // still matches the execution gate; pin that it resolves the worktree.
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/nested && /usr/bin/gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('lifts a function shadow after unset -f', async () => {
+        // R3-7: `unset -f cd` restores the builtin, so the later cd is provable
+        // again; a stale shadow would wrongly fall back to launch.
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; }; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it.each([
+        'cd() { :; }; false && unset -f cd; cd /test/dir/nested && gh pr create --fill',
+        'cd() { :; }; true || unset -f cd; cd /test/dir/nested && gh pr create --fill',
+        'cd() { :; }; unset -f cd & cd /test/dir/nested && gh pr create --fill',
+      ])(
+        'keeps the function shadow when the unset may be skipped: %s',
+        async (command) => {
+          // A skipped (`false &&` / `true ||`) or backgrounded (`&`) `unset -f cd`
+          // leaves the no-op function installed, so the later cd does NOT move the
+          // shell; lifting the shadow unconditionally would query a directory the
+          // create never ran in. Keep the shadow and fall back conservatively.
+          mockCreatedPr(77);
+          const result = await runShell(command, PR_77);
+          expectOpaqueFallback(result);
+        },
+      );
+
+      it.each([
+        'cd() { :; }; readonly -f cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+        "cd() { :; }; readonly -f 'cd'; unset -f cd; cd /test/dir/nested && gh pr create --fill",
+        'cd() { :; }; declare -r -f cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+        'cd() { :; }; declare -rf cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+        'cd() { :; }; typeset -fr cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+        'cd() { :; }; if true; then readonly -f cd; fi; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+        'cd() { :; }; unset -f cd > /missing-parent/output; cd /test/dir/nested && gh pr create --fill',
+        // An expanded readonly target cannot be decoded, so the readonly state
+        // is unestablished and the shadow must survive the unset attempt.
+        'NAME=cd; cd() { :; }; readonly -f "$NAME"; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+      ])(
+        'keeps the function shadow when the unset cannot provably succeed: %s',
+        async (command) => {
+          // A readonly function cannot be unset (including clustered options
+          // like `declare -rf`, quoted targets like `readonly -f 'cd'`, and
+          // declarations inside current-shell control flow), and a failed
+          // output redirection means the unset never runs; in all of these the
+          // no-op function survives, so the later cd does NOT move the shell.
+          // Keep the shadow and fall back conservatively instead of clearing it
+          // from the execution-order flag alone.
+          mockCreatedPr(77);
+          const result = await runShell(command, PR_77);
+          expectOpaqueFallback(result);
+        },
+      );
+
+      it('does not leak a pipeline-subshell readonly mark into the parent', async () => {
+        // `readonly -f cd | cat` marks cd readonly only in the pipeline
+        // subshell; the parent function stays mutable, so the later unset
+        // succeeds and the create runs in the worktree. The readonly state must
+        // be restored with the shadow state when leaving the pipeline.
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; }; readonly -f cd | cat; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('isolates non-final pipeline elements even under lastpipe', async () => {
+        // lastpipe runs only the FINAL element in the current shell; the first
+        // element's readonly mark is still subshell-only, so the parent unset
+        // succeeds and the create runs in the worktree.
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; }; shopt -s lastpipe; readonly -f cd | cat; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('keeps the shadow when lastpipe enablement is skipped', async () => {
+        // `false && shopt -s lastpipe` never enables lastpipe, so the piped
+        // `unset -f cd` runs in a child and the no-op cd function survives;
+        // granting the final element current-shell semantics would clear the
+        // shadow and silently query a directory the create never ran in.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd() { :; }; false && shopt -s lastpipe; true | unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('lifts the shadow when lastpipe is provably enabled', async () => {
+        // Control for the skipped-enablement case: a guaranteed `shopt -s
+        // lastpipe` runs the final `unset -f cd` in this shell, so the shadow is
+        // lifted and the create resolves in the worktree.
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; }; shopt -s lastpipe; true | unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('preserves the final-element readonly when lastpipe enablement is uncertain', async () => {
+        // `true && shopt -s lastpipe` may enable lastpipe (the walker cannot
+        // evaluate the `true`), so the state is uncertain, not proven off. The
+        // final `readonly -f cd` may run in this shell; discarding it as
+        // child-only would clear the shadow and silently query the worktree.
+        // Keep the possible parent effect and fall back conservatively.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd() { :; }; true && shopt -s lastpipe; true | readonly -f cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('clears lastpipe on a guaranteed shopt -u', async () => {
+        // `shopt -u lastpipe` proves lastpipe off again; the piped unset then
+        // runs in a child and the no-op cd survives. An add-only flag would
+        // grant the final element current-shell semantics, lift the shadow and
+        // silently query the worktree.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd() { :; }; shopt -s lastpipe; shopt -u lastpipe; true | unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('invalidates proven-on lastpipe on a conditional shopt -u', async () => {
+        // After a guaranteed enable, `true && shopt -u lastpipe` may disable
+        // lastpipe, so the proven-on state must become uncertain. Ignoring the
+        // conditional disable would grant the piped unset parent execution,
+        // lift the shadow and silently query the worktree.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd() { :; }; shopt -s lastpipe; true && shopt -u lastpipe; true | unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('keeps proven-off lastpipe off on a conditional shopt -u', async () => {
+        // lastpipe was never enabled, so a possible disable cannot turn it on;
+        // the state stays proven off. The piped readonly is child-only, the
+        // parent unset succeeds and the create resolves in the worktree. Making
+        // the state uncertain would keep the child readonly mark and fall back.
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; }; shopt -u lastpipe; true && shopt -u lastpipe; true | readonly -f cd; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('ignores readonly inside an uncalled function defined in control flow', async () => {
+        // helper is never called, so `readonly -f cd` in its dormant body never
+        // executes; the unset succeeds and the create runs in the worktree.
+        // Applying the dormant readonly would keep the shadow and fall back.
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; }; if true; then helper() { readonly -f cd; }; fi; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('retains readonly inside a function called in control flow', async () => {
+        // Control for the dormant case: helper IS called, so its `readonly -f
+        // cd` executes in this shell and the later unset is rejected; skipping
+        // the called body would clear the shadow and silently query the worktree.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd() { :; }; if true; then helper() { readonly -f cd; }; helper; fi; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('ignores readonly when the only call site is inside another uncalled function', async () => {
+        // Neither helper nor unused is called; the `helper` call inside unused's
+        // dormant body is not an executable call site, so it must not activate
+        // helper's readonly. The unset succeeds and the create runs in the
+        // worktree.
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; }; if true; then helper() { readonly -f cd; }; unused() { helper; }; fi; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('retains readonly when a called wrapper transitively invokes the function', async () => {
+        // Control: wrapper IS called, so the `helper` call in its body is an
+        // executable call site; helper's readonly executes and the unset is
+        // rejected. The closure must expand through called functions.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd() { :; }; if true; then helper() { readonly -f cd; }; wrapper() { helper; }; wrapper; fi; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('retains a lastpipe readonly mark from a pipeline inside control flow', async () => {
+        // With lastpipe on, the final element of `true | readonly -f cd` inside
+        // the if runs in THIS shell, so cd becomes readonly and the later unset
+        // is rejected; dropping the mark would clear the shadow and silently
+        // query the worktree.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd() { :; }; shopt -s lastpipe; if true; then true | readonly -f cd; fi; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('isolates a non-final lastpipe readonly inside control flow', async () => {
+        // Control: the readonly mark is in the FIRST element (a child), so it
+        // does not reach the parent; the unset succeeds and the create resolves
+        // in the worktree.
+        mockCreatedPr(77);
+        await runShell(
+          'cd() { :; }; shopt -s lastpipe; if true; then readonly -f cd | true; fi; unset -f cd; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('fails closed for a worktree created inside a declaration substitution', async () => {
+        // `export WT="$(git worktree add …)"` creates the worktree before the
+        // snapshot; the declaration arm must keep the subtree worktree guard so
+        // this is opaque (with a notice), not silently resolved.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'export WT_CREATED="$(git worktree add /test/dir/new -b fix/w)" && cd /test/dir/new && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('does not fall back for a child-only cd inside a declaration substitution', async () => {
+        // `export WT_PATH="$(cd … && pwd)"` runs the cd in a child shell; it
+        // cannot move the parent, and the later literal cd determines the create
+        // directory. Only worktree creation (a surviving filesystem effect)
+        // should force a fallback, not a harmless child cd.
+        mockCreatedPr(77);
+        await runShell(
+          'export WT_PATH="$(cd /test/dir/nested && pwd)" && cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('does not fall back for a child-only cd in a bare assignment substitution', async () => {
+        // The bare-assignment twin of the export case: `X=$(cd … && pwd)` runs
+        // the cd in a child and cannot move this shell, so the later literal cd
+        // determines the create directory. Counting the child cd dropped the
+        // binding the export spelling keeps.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'X=$(cd /tmp && pwd) && cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('does not fall back for a subshell cd on the right of ||', async () => {
+        // The right branch is a subshell; its cd cannot move this shell, so the
+        // create provably runs at launch with no spurious fallback notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'test -d /nope || (cd /test/dir/elsewhere && make); gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('does not fall back for a non-final lastpipe element cd', async () => {
+        // Under lastpipe only the final element runs in this shell; element 0's
+        // cd is a child, so the create provably runs at launch with no notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'shopt -s lastpipe; cd /test/dir/nested | cat; gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('binds from launch without a notice when only a subshell cds', async () => {
+        // R3-8: a subshell's cd cannot leak to this shell, so the create
+        // provably runs at launch and binds there — no false "fell back" notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          '(cd /test/dir/nested && true) && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('surfaces a create inside a moving subshell as a visible fallback', async () => {
+        // S1: `(cd WT && gh pr create)` runs the create in the subshell's
+        // directory, which this walk does not attribute; like the brace/if body
+        // siblings it must emit the fallback notice, not stay silent.
+        mockCreatedPr(77);
+        const result = await runShell(
+          '(cd /test/dir/nested && gh pr create --fill)',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('does not flag a moving subshell when the create is outside it', async () => {
+        // S1 control: `(cd WT); gh pr create` — the subshell's cd cannot leak,
+        // so the create provably runs at launch and binds there with no notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          '(cd /test/dir/nested); gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('keeps the fallback notice for a create in a subshell nested in control flow', async () => {
+        // The create runs inside a moving subshell nested in the if body, in a
+        // directory the walk does not attribute. The child-only-cd exemption
+        // must not remove the existing visible fallback signal.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'if true; then (cd /test/dir/nested && gh pr create --fill); fi',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('does not flag a nested subshell cd when the create is outside it', async () => {
+        // Control: the nested subshell only cds; the create is outside it and
+        // provably runs at launch, so no spurious fallback notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'if true; then (cd /test/dir/nested); fi; gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('ignores a moving-child create inside an uncalled function in control flow', async () => {
+        // helper is never called, so the subshell create in its dormant body
+        // does not execute; the sole executed create is the outer one in the
+        // worktree. The moving-child scan must skip dormant bodies like the
+        // other scans, not drop this valid binding.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'if true; then helper() { (cd /test/dir/nested && gh pr create --fill); }; fi; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('flags a moving-child create when the enclosing function is called', async () => {
+        // Control: helper IS called, so its subshell create executes in the
+        // moving child's directory and must surface the fallback notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'if true; then helper() { (cd /test/dir/nested && gh pr create --fill); }; helper; fi; cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('ignores a create inside an uncalled function in a subshell', async () => {
+        // The first subshell only DEFINES helper; its body's create never runs.
+        // The sole executed create is the outer one in the worktree, so counting
+        // the dormant create would wrongly fall back and lose that binding.
+        mockCreatedPr(77);
+        const result = await runShell(
+          '(helper() { cd /test/dir/nested && gh pr create --fill; }); cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('still flags a create inside a subshell function that is called', async () => {
+        // Control: helper IS called in the subshell, so its create executes in
+        // the moving subshell's directory and must surface the fallback notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          '(helper() { cd /test/dir/nested && gh pr create --fill; }; helper); cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('ignores a subshell create when the only call site is inside another uncalled function', async () => {
+        // Neither helper nor unused is called; the `helper` call inside unused's
+        // dormant body is not an executable call site, so helper's create does
+        // not execute. The sole executed create is the outer one in the
+        // worktree, which keeps its binding with no notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          '(helper() { cd /test/dir/nested && gh pr create --fill; }; unused() { helper; }); cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('still flags a subshell create when a called wrapper transitively invokes the function', async () => {
+        // Control: wrapper IS called, so the `helper` call in its body is an
+        // executable call site; helper's create executes in the moving subshell
+        // and must surface the fallback notice.
+        mockCreatedPr(77);
+        const result = await runShell(
+          '(helper() { cd /test/dir/nested && gh pr create --fill; }; wrapper() { helper; }; wrapper); cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it.each([
+        'git "worktree" add /test/dir/new -b fix/w',
+        "git worktree 'add' /test/dir/new -b fix/w",
+        '{ git worktree add /test/dir/new -b fix/w; }',
+        'if true; then git worktree add /test/dir/new -b fix/w; fi',
+        '( git worktree add /test/dir/new -b fix/w )',
+      ])('fails closed for a worktree creation spelled %s', async (prefix) => {
+        // R3-4: quoted subcommands and wrapped (compound/if/subshell) worktree
+        // creation must reach the same fail-closed guard as the plain spelling.
+        mockCreatedPr(77);
+        const result = await runShell(
+          `${prefix} && cd /test/dir/new && gh pr create --fill`,
+          PR_77,
+        );
+        expectOpaqueFallback(result);
+      });
+
+      it('does not stop on a quoted executable that merely names gh pr create', async () => {
+        // `'gh; gh pr create'` is a nonexistent quoted program, not gh. Copying
+        // the command_name verbatim let the quote-blind gate find a create
+        // inside it and stop the walk at launch; the real create in the
+        // worktree then went unbound with no notice.
+        mockCreatedPr(77);
+        await runShell(
+          "'gh; gh pr create' 2>/dev/null; cd /test/dir/nested && gh pr create --fill",
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('keeps a quoted same-repo GH_REPO attribution in the worktree', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          "cd /test/dir/nested && GH_REPO='o/r' gh pr create --fill",
+          PR_77,
+        );
+        expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+          resolved('/test/dir/nested'),
+          expect.any(Object),
+        );
+        expect(fetchAttributionRepoKeysMock).toHaveBeenCalledWith(
+          resolved('/test/dir/nested'),
+          expect.any(Object),
+        );
+        expectBound(77);
+      });
+
+      it('gives an explicit repo flag precedence over GH_REPO', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          "cd /test/dir/nested && GH_REPO='other/r' gh pr create --repo o/r --fill",
+          PR_77,
+        );
+        expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+          resolved('/test/dir/nested'),
+          expect.any(Object),
+        );
+        expectBound(77);
+      });
+
+      it('does not treat GITHUB_REPOSITORY as a gh repo override', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          "cd /test/dir/nested && GITHUB_REPOSITORY='other/r' gh pr create --fill",
+          PR_77,
+        );
+        expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+          resolved('/test/dir/nested'),
+          expect.any(Object),
+        );
+        expectBound(77);
+      });
+
+      it('accepts a parent repo flag in a fork worktree', async () => {
+        // gh attributes fork checkouts to both resolved and parent identities;
+        // an explicit parent --repo is still the same attribution family, not
+        // a reason to re-point at the launch directory.
+        fetchAttributionRepoKeysMock.mockResolvedValue({
+          resolved: 'github.com/fork/r',
+          parent: 'github.com/o/r',
+        });
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/nested && gh pr create --repo o/r --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir/nested'));
+      });
+
+      it('resolves a double-quoted literal path', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          'cd "/test/dir/with space" && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir', 'with space'));
+      });
+
+      it('resolves a single-quoted literal path', async () => {
+        // tree-sitter spells single quotes as `raw_string`, not `string`.
+        // Rejecting it left the ordinary single-quoted spelling of the very
+        // command this PR fixes unbound while the double-quoted one worked.
+        mockCreatedPr(77);
+        await runShell("cd '/test/dir/nested' && gh pr create --fill", PR_77);
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
+      });
+
+      it('resolves a single-quoted literal path containing a space', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          "cd '/test/dir/with space' && gh pr create --fill",
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir', 'with space'));
+      });
+
+      it('ignores a create mentioned inside a quoted argument', async () => {
+        // The execution gate splits on separators without tracking quotes, so
+        // the printf's raw text contains a segment starting `gh pr create`.
+        // Accepting it stopped the walk at the launch directory while the
+        // real create ran in the worktree.
+        mockCreatedPr(77);
+        await runShell(
+          "printf 'example; gh pr create' >/dev/null; cd /test/dir/nested && gh pr create --fill",
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
+      });
+
+      it('ignores a create mentioned inside a quoted assignment value', async () => {
+        // Same forgery through the assignment's own value rather than an
+        // argument: sanitising arguments alone left this path open.
+        mockCreatedPr(77);
+        await runShell(
+          "X='; gh pr create' printf hi >/dev/null; cd /test/dir/nested && gh pr create --fill",
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
+      });
+
+      it('still recognises a create carrying an inline credential', async () => {
+        // Sanitising must not cost the ordinary inline-token spelling: the
+        // assignment has no separator, so it survives as a gate prefix. The
+        // credential also has to reach the verification legs, so the env
+        // argument is an overlay here rather than the usual undefined.
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/nested && GH_TOKEN=abc gh pr create --fill',
+          PR_77,
+        );
+        expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+          resolved('/test/dir', 'nested'),
+          expect.objectContaining({ GH_TOKEN: 'abc' }),
+        );
+        expectBound(77);
+      });
+
+      it('still recognises a create carrying an expanded credential', async () => {
+        // Sanitising the assignment to a bare token produced `X gh pr
+        // create`, which the gate no longer recognises — so an expanded
+        // credential lost a binding the unsanitised text used to make. The
+        // assignment shape has to survive; only its value is replaced.
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/nested && GH_TOKEN=$PR_REVIEW_TEST_TOKEN gh pr create --fill',
+          PR_77,
+        );
+        expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+          resolved('/test/dir', 'nested'),
+          expect.any(Object),
+        );
+        expectBound(77);
+      });
+
+      it('resolves through a comment between the cd and the create', async () => {
+        // tree-sitter keeps the comment as a named child between `&&` and
+        // the command. Treating it as a statement consumed the pending
+        // operator, so the create looked unproven even though bash runs it
+        // under the successful cd.
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/nested && # create the PR below\ngh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
+      });
+
+      it('resolves pushd like cd', async () => {
+        mockCreatedPr(77);
+        await runShell('pushd /test/dir/nested && gh pr create --fill', PR_77);
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
+      });
+
+      it('ignores a cd after the create', async () => {
+        mockCreatedPr(77);
+        await runShell(
+          'cd /test/dir/nested && gh pr create --fill && cd /elsewhere',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
+      });
+
+      it('stops at the first create before a || retry tail', async () => {
+        mockCreatedPr(77);
+        await runShell(`cd /test/dir/nested && ${CREATE_OR_VIEW}`, PR_77);
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
+      });
+
+      it('does not treat a cd inside a pipeline as moving the directory', async () => {
+        // The pipeline arm returns `dir` unchanged because bash runs elements
+        // in subshells. With the create OUTSIDE the element, that return value
+        // is observable: threading the element's result would attribute in the
+        // subshell's directory and lose the launch binding the parent made.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd /test/dir/nested | cat && gh pr create --fill',
+          PR_77,
+        );
+
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('emits no notice when the command never changes directory', async () => {
+        mockCreatedPr(77);
+        const result = await runShell('gh pr create --fill', PR_77);
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('emits no notice when the cd lands back on the launch directory', async () => {
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd /test/dir && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('normalises a trailing slash in the directory param at the separator arms', async () => {
+        // R2-1: `cwd` is the raw directory param, while a literal cd target is
+        // joined with path.resolve. A raw compare at `;` would invent a move
+        // and emit an actionable-looking notice for a same-directory command.
+        // Both gh legs must still receive the parameter exactly as supplied.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd /test/dir; gh pr create --fill',
+          PR_77,
+          0,
+          { directory: '/test/dir/' },
+        );
+
+        await expectAttributedIn('/test/dir/');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('emits no notice for a || branch whose left never moves', async () => {
+        // The create's execution is conditional, but its directory is not:
+        // nothing moved, so it still runs in the launch directory. Calling
+        // this opaque would claim a directory change that never happened.
+        mockCreatedPr(77);
+        const result = await runShell('false || gh pr create --fill', PR_77);
+        await expectAttributedIn('/test/dir');
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it.each([
+        ['an expansion target', 'cd $WORKTREE && gh pr create --fill'],
+        ['a tilde target', 'cd ~/worktree && gh pr create --fill'],
+        ['a bare cd', 'cd && gh pr create --fill'],
+        ['the previous-directory form', 'cd - && gh pr create --fill'],
+        ['a glob target', 'cd /test/dir/* && gh pr create --fill'],
+        ['popd', 'cd /test/dir/nested && popd && gh pr create --fill'],
+        [
+          'a pushd stack rotation',
+          'cd /test/dir/nested && pushd +1 && gh pr create --fill',
+        ],
+        ['a || branch', 'cd /elsewhere || gh pr create --fill'],
+        ['an env --chdir wrapper', 'env -C /elsewhere gh pr create --fill'],
+        ['a sudo --chdir wrapper', 'sudo -D /elsewhere gh pr create --fill'],
+        [
+          'a control-flow body that moves',
+          'if true; then cd /elsewhere; fi; gh pr create --fill',
+        ],
+        // eval/source/. run code in THIS shell, so the directory can move
+        // without a target appearing anywhere in the command text. Found by
+        // the adversarial probe: the create really ran in the worktree while
+        // attribution stayed on the launch repo, with no notice at all.
+        ['an eval that moves', 'eval "cd /elsewhere" && gh pr create --fill'],
+        ['a sourced script', 'source ./move.sh && gh pr create --fill'],
+        ['a dot-sourced script', '. ./move.sh && gh pr create --fill'],
+        [
+          'a function body that evals',
+          'f() { eval "$1"; }; f "cd /elsewhere"; gh pr create --fill',
+        ],
+        // CDPATH reroutes a relative cd through its entries before the
+        // working directory, so `cd sub` need not land in ./sub.
+        [
+          'a CDPATH leading assignment',
+          'CDPATH=/elsewhere cd sub && gh pr create --fill',
+        ],
+        [
+          'a CDPATH export',
+          'export CDPATH=/elsewhere; cd sub && gh pr create --fill',
+        ],
+        // A directory may only be carried across `&&`, which proves the cd
+        // succeeded. These separators all let the create run while the cd
+        // was skipped, failed, or confined to a background subshell — the
+        // parent commit bound them and an unconditional fold stopped doing
+        // so, which is a regression rather than a coverage gap.
+        [
+          'a skipped cd before a semicolon',
+          'false && cd /test/dir/nested; gh pr create --fill',
+        ],
+        [
+          'a cd that may have failed',
+          'cd /test/dir/missing; gh pr create --fill',
+        ],
+        [
+          'a backgrounded cd',
+          'cd /test/dir/nested & wait; gh pr create --fill',
+        ],
+        [
+          'a semicolon-separated cd',
+          'cd /test/dir/nested; gh pr create --fill',
+        ],
+        ['a newline-separated cd', 'cd /test/dir/nested\ngh pr create --fill'],
+        // `||` is ambiguous in both directions: the right branch runs only
+        // when the left failed, so a cd there may never execute. The inner
+        // OR-list succeeds through `true`, the outer `&&` then runs the
+        // create in the launch directory, and carrying the skipped cd would
+        // query the worktree.
+        [
+          'a cd in the right branch of an OR-list',
+          'true || cd /test/dir/nested && gh pr create --fill',
+        ],
+        // bash pushes without moving for `-n`; and a same-named function
+        // shadows the builtin with a no-op, so `cd <wt>` does not move.
+        [
+          'pushd -n which only pushes the stack',
+          'pushd -n /test/dir/nested && gh pr create --fill',
+        ],
+        [
+          'a function that shadows cd',
+          'cd() { :; }; cd /test/dir/nested && gh pr create --fill',
+        ],
+        [
+          'a function that shadows gh itself',
+          'gh() { command gh "$@"; }; cd /test/dir/nested && gh pr create --fill',
+        ],
+        [
+          'a compound-statement function shadow',
+          '{ cd() { :; }; }; cd /test/dir/nested && gh pr create --fill',
+        ],
+        // R1-1: unmodelled execution contexts can move a different shell (or
+        // hide which builtin actually runs), so launch attribution must stay
+        // conservative and visible instead of silently resolving nothing.
+        [
+          'a builtin cd prefix',
+          'builtin cd /test/dir/nested && gh pr create --fill',
+        ],
+        [
+          'a command cd prefix',
+          'command cd /test/dir/nested && gh pr create --fill',
+        ],
+        ['a time cd prefix', 'time cd /test/dir/nested && gh pr create --fill'],
+        [
+          'a command env chdir create',
+          'command env -C /elsewhere gh pr create --fill',
+        ],
+        [
+          'a nested shell create',
+          'bash -c "cd /test/dir/nested && gh pr create --fill"',
+        ],
+        [
+          'a lastpipe cd',
+          'shopt -s lastpipe; echo ok | cd /test/dir/nested; gh pr create --fill',
+        ],
+        [
+          'a DEBUG trap that moves',
+          "trap 'cd /test/dir/nested' DEBUG; :; gh pr create --fill",
+        ],
+        [
+          'a worktree created before its snapshot',
+          'git worktree add /test/dir/new -b fix/w && cd /test/dir/new && gh pr create --fill',
+        ],
+      ])('falls back with a notice for %s', async (_label, command) => {
+        mockCreatedPr(77);
+        const result = await runShell(command, PR_77);
+        expectOpaqueFallback(result);
+      });
+
+      it('still resolves an absolute cd when CDPATH is set', async () => {
+        // CDPATH only affects relative targets; refusing an absolute one
+        // would lose a binding the walk can still prove.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'CDPATH=/elsewhere cd /test/dir/nested && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('does not treat executing a script as moving the directory', async () => {
+        // `./move.sh` runs in a child shell and cannot move us; only sourcing
+        // it can. Flagging execution would emit a notice about a directory
+        // change that cannot happen.
+        mockCreatedPr(77);
+        const result = await runShell(
+          'cd /test/dir/nested && ./move.sh && gh pr create --fill',
+          PR_77,
+        );
+        await expectAttributedIn(resolved('/test/dir', 'nested'));
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
+
+      it('emits no notice when the create failed', async () => {
+        const result = await runShell(
+          'cd $WORKTREE && gh pr create --fill',
+          'error: no commits\n',
+          1,
+        );
+        expect(result.llmContent).not.toContain(
+          SHELL_PR_BINDING_DIRECTORY_NOTICE,
+        );
+      });
     });
   });
 
@@ -1527,6 +2853,48 @@ describe('ShellTool', () => {
 
         expectSedSkipped();
         expect(result.llmContent).toContain('sed edit made no changes');
+      });
+
+      it('does not report a CRLF edit whose only effect is the carriage return', async () => {
+        // `.$` consumes the `\r` under dotAll, but the write path restores CRLF,
+        // so the bytes on disk would be identical to the original.
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'abc\r\n',
+          _meta: { ...sedMeta(), lineEnding: 'crlf' },
+        });
+
+        const result = await applySed("sed -i 's/.$//' file.txt");
+
+        expectSedSkipped();
+        expect(result.llmContent).toContain('sed edit made no changes');
+      });
+
+      it('still skips that CRLF edit when the file carries a BOM', async () => {
+        // The read returns the content without the BOM, so the prediction has
+        // to compare content strings or the BOM bytes make it unequal.
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'abc\r\n',
+          _meta: { ...sedMeta(), bom: true, lineEnding: 'crlf' },
+        });
+
+        const result = await applySed("sed -i 's/.$//' file.txt");
+
+        expectSedSkipped();
+        expect(result.llmContent).toContain('sed edit made no changes');
+      });
+
+      it('writes a CRLF edit whose bytes do change', async () => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\r\n',
+          _meta: { ...sedMeta(), lineEnding: 'crlf' },
+        });
+
+        const result = await applySed("sed -i 's/foo/bar/' file.txt");
+
+        expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith(
+          expect.objectContaining({ content: 'bar\r\n' }),
+        );
+        expect(result.llmContent).toContain('sed edit applied');
       });
 
       it.each([
@@ -2105,6 +3473,33 @@ describe('ShellTool', () => {
       expectSpawned('npm test');
     });
 
+    it('marks a user-cancelled command as interrupted before completion', async () => {
+      const result = await runFg('npm test', {
+        output: 'start',
+        exitCode: null,
+        signal: 15,
+        aborted: true,
+      });
+
+      // The tool returns (rather than throws), so the scheduler needs this
+      // signal to avoid reporting a killed command as already completed.
+      expect(result.interruptedBeforeCompletion).toBe(true);
+      expect(String(result.llmContent)).toContain(
+        'Command was cancelled by user before it could complete.',
+      );
+      // What already ran is part of the interrupted account, not a detail the
+      // cancellation may drop.
+      expect(String(result.llmContent)).toContain(
+        'Below is the output before it was cancelled:\nstart',
+      );
+    });
+
+    it('does not mark a completed command as interrupted', async () => {
+      const result = await runFg('npm test', { output: 'done', exitCode: 0 });
+
+      expect(result.interruptedBeforeCompletion).toBeUndefined();
+    });
+
     it('preserves shell wrapper environment and flags during foreground execution', async () => {
       const command = `FOO=bar bash -e -c 'echo "$FOO"; false; echo bad'`;
       await runFg(command);
@@ -2126,6 +3521,59 @@ describe('ShellTool', () => {
       vi.mocked(os.platform).mockReturnValue('win32');
       await runFg('dir', { output: '' });
       expectSpawned('dir', { cwd: '/test/dir' });
+    });
+
+    it('asks the model to record deliverable files after a successful command', async () => {
+      const result = await runFg('python rewrite.py', {
+        output: 'wrote orders.csv',
+        exitCode: 0,
+      });
+
+      expect(result.llmContent).toContain('call record_artifact');
+      expect(result.llmContent).toContain('workspacePath');
+      expect(result.returnDisplay).toMatchObject({
+        text: 'wrote orders.csv',
+      });
+      expect(
+        (result.returnDisplay as { text?: string }).text ?? '',
+      ).not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact when recording is disabled', async () => {
+      vi.mocked(mockConfig.isRecordArtifactEnabled).mockReturnValue(false);
+
+      const result = await runFg('python rewrite.py', {
+        output: 'wrote orders.csv',
+        exitCode: 0,
+      });
+
+      expect(String(result.llmContent)).not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact after a read-only command', async () => {
+      const result = await runFg('ls', { output: 'orders.csv', exitCode: 0 });
+
+      expect(String(result.llmContent)).not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact when the command exits non-zero', async () => {
+      const result = await runFg('python rewrite.py', {
+        exitCode: 2,
+        output: 'err',
+      });
+
+      expect(result.error?.message ?? '').not.toContain('record_artifact');
+    });
+
+    it('does not ask for record_artifact when the command fails', async () => {
+      const result = await runFg('python rewrite.py', {
+        error: new Error('boom'),
+        exitCode: 1,
+        output: 'err',
+      });
+
+      expect(result.error?.message ?? '').not.toContain('record_artifact');
+      expect(String(result.llmContent)).not.toContain('record_artifact');
     });
 
     it('should format error messages correctly', async () => {
@@ -2938,6 +4386,7 @@ describe('ShellTool', () => {
     describe('output truncation threshold', () => {
       const TRUNCATED = 'Tool output was too large and has been truncated';
       const ADVISORY = 'this foreground command ran for 60s';
+      const recordReminderReserve = 2 + SHELL_RECORD_ARTIFACT_REMINDER.length;
 
       /** Runs `mid-output-cmd` to `output`/`exitCode` after 60s of faked Date/performance (so the advisory appends). */
       const runPastAdvisory = (output: string, exitCode = 0) => {
@@ -2971,7 +4420,9 @@ describe('ShellTool', () => {
           mockConfig,
           ShellTool.Name,
           expect.any(String),
-          expect.objectContaining({ threshold: 30_000 }),
+          expect.objectContaining({
+            threshold: 30_000 - recordReminderReserve,
+          }),
         );
       });
 
@@ -3052,7 +4503,7 @@ describe('ShellTool', () => {
           ShellTool.Name,
           expect.any(String),
           expect.objectContaining({
-            threshold: 10_000,
+            threshold: 10_000 - recordReminderReserve,
             previewChars: 4000,
             lines: Number.POSITIVE_INFINITY,
           }),
@@ -3074,7 +4525,10 @@ describe('ShellTool', () => {
           mockConfig,
           ShellTool.Name,
           expect.any(String),
-          expect.objectContaining({ threshold: 1000, previewChars: 1000 }),
+          expect.objectContaining({
+            threshold: 1000 - recordReminderReserve,
+            previewChars: 1000 - recordReminderReserve,
+          }),
         );
       });
 
@@ -3181,7 +4635,7 @@ describe('ShellTool', () => {
         it('still delivers a band-fitting body whole with the advisory', async () => {
           // Guards against over-shrinking: a body comfortably under
           // budget-minus-advisory is delivered whole, advisory included.
-          const output = 'x'.repeat(29_000);
+          const output = 'x'.repeat(29_000 - recordReminderReserve);
           const result = await runPastAdvisory(output);
 
           expect(result.outputBudgetApplied).toBe(true);
@@ -4328,6 +5782,8 @@ describe('ShellTool', () => {
           ['timed out'],
         );
         expect(result.returnDisplay).toMatchObject({ outcome: 'completed' });
+        // Neither a timeout nor a refused promote is a returned interruption.
+        expect(result.interruptedBeforeCompletion).toBeUndefined();
       });
 
       it('rethrows + kills child when registry.register throws — no orphan zombie', async () => {
@@ -5220,6 +6676,8 @@ describe('ShellTool', () => {
         message: TIMED_OUT,
         type: ToolErrorType.EXECUTION_TIMEOUT,
       });
+      // A timeout is reported as a tool error, never as a returned interruption.
+      expect(result.interruptedBeforeCompletion).toBeUndefined();
     });
 
     it('returns a structured timeout when the command produced no output', async () => {

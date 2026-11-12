@@ -171,7 +171,7 @@ test('branches from an earlier completed Assistant response and resumes the fork
     .filter({ hasText: 'First completed answer' });
   await firstAnswerRow.hover();
   await firstAnswerRow
-    .getByRole('button', { name: 'Branch', exact: true })
+    .getByRole('button', { name: 'New chat from here', exact: true })
     .click();
 
   await expect.poll(() => daemon.branchRequests().length).toBe(1);
@@ -222,7 +222,10 @@ test('branches from an earlier completed Assistant response and resumes the fork
     .filter({ hasText: 'First completed answer' });
   await restoredFirstAnswer.hover();
   await expect(
-    restoredFirstAnswer.getByRole('button', { name: 'Branch', exact: true }),
+    restoredFirstAnswer.getByRole('button', {
+      name: 'New chat from here',
+      exact: true,
+    }),
   ).toBeVisible();
 });
 
@@ -594,7 +597,7 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
   const providersBeforeClear = qualifiedProviderRequestCount();
   await page.keyboard.press('Escape');
   await page
-    .getByRole('button', { name: 'New task', exact: true })
+    .getByRole('button', { name: 'New session', exact: true })
     .first()
     .click();
   await expect.poll(() => new URL(page.url()).pathname).toBe('/');
@@ -1325,6 +1328,57 @@ test('submits permission decisions through the fake daemon @smoke', async ({
   });
 });
 
+test('aligns shell explanation and permission actions @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    events: [
+      permissionRequestEvent('perm-layout', {
+        id: 1,
+        toolCall: {
+          title: 'Shell',
+          kind: 'execute',
+          _meta: { toolName: 'run_shell_command' },
+          rawInput: {
+            command: 'printf web-shell-e2e',
+            description: 'Print a test message',
+          },
+        },
+      }),
+    ],
+  });
+  scenario.capabilities.features.push('session_generation');
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  const panel = page.locator('[data-web-shell-permission-panel]');
+  const explain = panel.getByRole('button', { name: 'Explain', exact: true });
+  const options = panel.getByRole('radiogroup');
+  await expect(explain).toBeVisible();
+  await expect(options).toBeVisible();
+
+  await expect
+    .poll(async () => {
+      const explainBox = (await explain.boundingBox())!;
+      const optionsBox = (await options.boundingBox())!;
+      return Math.abs(
+        explainBox.y +
+          explainBox.height / 2 -
+          (optionsBox.y + optionsBox.height / 2),
+      );
+    })
+    .toBeLessThanOrEqual(2);
+
+  await page.setViewportSize({ width: 600, height: 900 });
+  await expect
+    .poll(async () => {
+      const explainBox = (await explain.boundingBox())!;
+      const optionsBox = (await options.boundingBox())!;
+      return optionsBox.y - (explainBox.y + explainBox.height);
+    })
+    .toBeGreaterThan(0);
+});
+
 test('opens slash menu, resume dialog, model dialog, and theme dialog @smoke', async ({
   page,
 }, testInfo) => {
@@ -1755,6 +1809,49 @@ test('keeps desktop history search reachable in a short window @smoke', async ({
   await expect(editor).toHaveText('working draft');
   await expect(editor).toBeFocused();
   expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('keeps the permission picker compact and marks full access as dangerous @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  await page.locator('[data-web-shell-mode-button]').click();
+  const modeDropdown = page.locator(
+    '[data-web-shell-mode-popover][data-state="open"]',
+  );
+  await expect(modeDropdown).toBeVisible();
+  await expect(modeDropdown).toHaveCSS('width', '400px');
+
+  const labels = modeDropdown.locator('[class*="dropdownItemLabel"]');
+  const descriptions = modeDropdown.locator('[class*="dropdownItemDesc"]');
+  await expect(labels).toHaveCount(4);
+  await expect(descriptions).toHaveCount(4);
+  for (const text of [...(await labels.all()), ...(await descriptions.all())]) {
+    await expect(text).toHaveCSS('font-size', '13px');
+  }
+
+  const fullAccess = modeDropdown.getByRole('button', {
+    name: /Full Access \(yolo\)/,
+  });
+  const dangerColor = await modeDropdown.evaluate((element) => {
+    const probe = document.createElement('span');
+    probe.style.color = 'var(--destructive)';
+    element.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  });
+  for (const selector of [
+    '[class*="dropdownItemIcon"]',
+    '[class*="dropdownItemLabel"]',
+    '[class*="dropdownItemDesc"]',
+  ]) {
+    await expect(fullAccess.locator(selector)).toHaveCSS('color', dangerColor);
+  }
 });
 
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {

@@ -24,6 +24,19 @@ for (const width of [1280, 390]) {
       const request = route.request();
       const path = new URL(request.url()).pathname;
       const body = request.postDataJSON();
+      if (path.endsWith('/user-messages/query'))
+        return route.fulfill({ json: { paused: false, messages: [] } });
+      if (path.endsWith('/workspace-extensions/query'))
+        return route.fulfill({ json: { supported: false, extensions: [] } });
+      if (path.endsWith('/workspaces/worktrees/options'))
+        return route.fulfill({
+          json: {
+            supported: true,
+            baseCommit: 'a'.repeat(40),
+            branches: ['main'],
+            currentBranch: 'main',
+          },
+        });
       if (path.endsWith('/runtime-nodes/query'))
         return route.fulfill({ json: { supported: false, data: [] } });
       if (path.endsWith('/sessions/query'))
@@ -85,7 +98,7 @@ for (const width of [1280, 390]) {
         return route.fulfill({ json: summary });
       if (path.endsWith('/transcript/query'))
         return route.fulfill({
-          json: { events: [], lastSequence: 0, hasMore: false },
+          json: { items: [], events: [], lastSequence: 0, hasMore: false },
         });
       if (path.endsWith('/events/stream'))
         return route.fulfill({ contentType: 'text/event-stream', body: '' });
@@ -111,6 +124,9 @@ for (const width of [1280, 390]) {
           json: {
             sessionId: summary!.sessionId,
             turnId: 'skill-turn',
+            operationId: 'submit-skill-turn',
+            admissionStage: 'java_durable',
+            deliveryState: 'pending',
             status: 'accepted',
             replayed: false,
           },
@@ -250,6 +266,19 @@ test('abandoning an unconfirmed first input warns about execution and refreshes 
   await page.route('**/api/agent/web-shell/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
     const body = route.request().postDataJSON();
+    if (path.endsWith('/user-messages/query'))
+      return route.fulfill({ json: { paused: false, messages: [] } });
+    if (path.endsWith('/workspace-extensions/query'))
+      return route.fulfill({ json: { supported: false, extensions: [] } });
+    if (path.endsWith('/workspaces/worktrees/options'))
+      return route.fulfill({
+        json: {
+          supported: true,
+          baseCommit: 'a'.repeat(40),
+          branches: ['main'],
+          currentBranch: 'main',
+        },
+      });
     if (path.endsWith('/runtime-nodes/query'))
       return route.fulfill({ json: { supported: false, data: [] } });
     if (path.endsWith('/sessions/query')) {
@@ -322,14 +351,14 @@ test('abandoning an unconfirmed first input warns about execution and refreshes 
     page.getByText('may repeat its effects', { exact: false }),
   ).toBeVisible();
   await expect(
-    page.getByRole('button', { name: /Possibly admitted task/ }),
+    page.getByRole('button', { name: /^Possibly admitted task\b/ }),
   ).toHaveCount(0);
   const before = queries;
   await page
     .getByRole('button', { name: 'Abandon local confirmation' })
     .click();
   await expect(
-    page.getByRole('button', { name: /Possibly admitted task/ }),
+    page.getByRole('button', { name: /^Possibly admitted task\b/ }),
   ).toBeVisible();
   expect(queries).toBeGreaterThan(before);
   await expect(editor).toContainText('Inspect README');

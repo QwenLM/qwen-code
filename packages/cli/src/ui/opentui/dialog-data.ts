@@ -23,6 +23,8 @@
  */
 
 import { buildModelIdContext } from '@qwen-code/qwen-code-core/utils/modelId.js';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import {
   checkAdvisorModelAvailability,
   isAdvisorModelEligible,
@@ -63,9 +65,14 @@ import { SettingScope } from '../../config/settings.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { loadMcpApprovals } from '../../config/mcpApprovals.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { switchPrimaryModel } from '../models/primary-model-switch.js';
 import { t } from '../../i18n/index.js';
 import { extensionComponentsSummary } from '../../services/extension-components-summary.js';
 import { publicProviderBaseUrl } from '../../utils/acpModelUtils.js';
+import {
+  filterModelEntriesForDisplay,
+  sortModelEntriesForDisplay,
+} from '../../utils/model-display-order.js';
 import { getErrorMessage } from '../../utils/errors.js';
 import { getMCPServerLastError } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
 import { getToolInvalidReasons, isToolValid } from '../components/mcp/utils.js';
@@ -119,6 +126,7 @@ function advisorSelector(
 export function buildModelEntries(
   config: Config | null | undefined,
   mode: ModelDialogMode,
+  subscriptionSignedIn?: boolean,
 ): OpenTuiModelEntry[] {
   const allModels = config?.getAllConfiguredModels?.() ?? [];
   const authType = config?.getAuthType?.();
@@ -210,7 +218,13 @@ export function buildModelEntries(
       model,
     });
   }
-  return entries;
+  const visibleEntries = filterModelEntriesForDisplay(
+    entries,
+    subscriptionSignedIn,
+  );
+  return mode === 'primary'
+    ? sortModelEntriesForDisplay(visibleEntries)
+    : visibleEntries;
 }
 
 /** Parity of ModelDialog's `resolvePersistScope`. */
@@ -616,7 +630,7 @@ export async function applyModelSelection(
 
   let after: ContentGeneratorConfig | undefined;
   try {
-    await config.switchModel(selectedAuthType, modelId, {
+    await switchPrimaryModel(config, settings, selectedAuthType, modelId, {
       ...(selectedAuthType !== authType &&
       selectedAuthType === AuthType.QWEN_OAUTH
         ? { requireCachedCredentials: true }
@@ -628,6 +642,9 @@ export async function applyModelSelection(
     }
     after = config.getContentGeneratorConfig?.();
   } catch (e) {
+    if (e instanceof SubscriptionOAuthError) {
+      return { ok: false, error: t(subscriptionErrorMessage(e)) };
+    }
     const baseErrorMessage = e instanceof Error ? e.message : String(e);
     // Use parsed modelId for display to avoid showing raw selection key
     // (which contains invisible \0 separator between modelId and baseUrl).
@@ -663,13 +680,15 @@ export async function applyModelSelection(
   return {
     ok: true,
     message:
-      `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
-      `\n` +
-      `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
-      `\n` +
-      `Base URL: ${baseUrl}` +
-      `\n` +
-      `API key: ${maskedKey}`,
+      effectiveAuthType === AuthType.QWEN_SUBSCRIPTION
+        ? t('Model: {{model}}', { model: effectiveModelId }) + scopeSuffix
+        : `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
+          `\n` +
+          `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
+          `\n` +
+          `Base URL: ${baseUrl}` +
+          `\n` +
+          `API key: ${maskedKey}`,
   };
 }
 

@@ -1137,6 +1137,8 @@ export default {
   'disabled (bare mode)': 'отключен (минимальный режим)',
   'disabled (safe mode)': 'отключен (безопасный режим)',
   'disabled (disableAllHooks)': 'отключен (disableAllHooks)',
+  'disabled (not approved)': 'отключен (не одобрен)',
+  'disabled (rejected)': 'отключен (отклонён)',
   'disabled (folder not trusted)': 'отключен (папка не доверенная)',
   'disabled (turned off for this session)': 'отключен (выключен в этой сессии)',
   'Server:': 'Сервер:',
@@ -1443,6 +1445,7 @@ export default {
   Reqs: 'Запросов',
   'Input Tokens': 'Входных токенов',
   'Output Tokens': 'Выходных токенов',
+  'Output (incl. Reasoning)': 'Вывод (с рассуждением)',
   'Savings Highlight:': 'Экономия:',
   'of input tokens were served from the cache, reducing costs.':
     'входных токенов обслужено из кэша, снижая затраты.',
@@ -1824,6 +1827,8 @@ export default {
   'System prompt': 'Системная подсказка',
   'Built-in tools': 'Встроенные инструменты',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Файлы инструкций',
+  'Auto memory': 'Автопамять',
   'Memory files': 'Файлы памяти',
   Skills: 'Навыки',
   Messages: 'Сообщения',
@@ -2037,6 +2042,8 @@ export default {
   'Advisor review failed: {{error}}': 'Ошибка обзора советника: {{error}}',
   'No conversation context available for /advisor':
     'Нет контекста разговора, доступного для /advisor',
+  'No conversation context available for /btw':
+    'Нет контекста разговора, доступного для /btw',
   'Focus too long (max {{max}} chars)':
     'Фокус слишком длинный (макс. {{max}} символов)',
   'Another operation is in progress, wait for it to complete before running /advisor':
@@ -2192,6 +2199,8 @@ export default {
   out: 'вых.',
   'In/Out': 'Вх/Вых',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'Обновление до указанной версии требует автономной установки. Установите версию {{version}} вручную, используя текущий способ установки.',
   'Check for Qwen Code updates and install if available':
     'Проверить обновления Qwen Code и установить при наличии',
   'Qwen Code update available! {{current}} → {{latest}}':

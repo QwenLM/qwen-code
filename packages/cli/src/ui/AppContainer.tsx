@@ -28,7 +28,6 @@ import { ConfigContext } from './contexts/ConfigContext.js';
 import type { Part } from '@google/genai';
 import {
   type HistoryItem,
-  type HistoryItemUser,
   type IndividualToolCallDisplay,
   ToolCallStatus,
   type HistoryItemWithoutId,
@@ -90,9 +89,7 @@ import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
   computeResumedPromptCountSeed,
-  expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
-import { recoalesceFindingsHistoryItems } from './utils/findings-coalescing.js';
 import { buildWakeRepaint } from './utils/terminal-resize-reflow.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
@@ -155,12 +152,11 @@ import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { getInteractiveModSession } from '../services/interactive-mod-session.js';
+import { useModBand } from './hooks/use-mod-band.js';
+import { modBandInput } from './utils/mod-band-tree.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
-import {
-  computeApiTruncationIndex,
-  isIdentifiedRetainedTurn,
-  isRealUserTurn,
-} from './utils/historyMapping.js';
+import { rewindSession } from './utils/session-rewind.js';
+import { isRewindableUserTurn } from './utils/historyMapping.js';
 import { waitForGoalRuntime } from './utils/goal-runtime.js';
 import { sanitizeTerminalLine } from './utils/textUtils.js';
 import {
@@ -213,8 +209,10 @@ import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { keyMatchers, Command } from './keyMatchers.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalProgress } from './hooks/useTerminalProgress.js';
+import { useProgramStatus } from './hooks/use-program-status.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
 import { useMcpApproval } from './hooks/useMcpApproval.js';
+import { useProjectHooksApproval } from './hooks/use-project-hooks-approval.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { type IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from './CommandFormatMigrationNudge.js';
@@ -270,9 +268,11 @@ import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useStatsDialog } from './hooks/useStatsDialog.js';
 import { useMemoryDialog } from './hooks/useMemoryDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import { getPendingBackgroundApprovals } from './components/background-view/BackgroundTasksPill.js';
 import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
+import { shouldShowBtwTip } from './utils/btw-tip.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
 import {
@@ -872,7 +872,7 @@ export const AppContainer = (props: AppContainerProps) => {
     () => props.extensionRefreshState ?? new ExtensionRefreshState(),
     [props.extensionRefreshState],
   );
-  const historyManager = useHistory();
+  const historyManager = useHistory(config.getSessionId());
   const addHistoryItem = historyManager.addItem;
   useEffect(
     () =>
@@ -973,7 +973,7 @@ export const AppContainer = (props: AppContainerProps) => {
     config.getWorkingDir(),
   );
 
-  const { providerUpdateRequest, dismissProviderUpdate } = useProviderUpdates(
+  const { providerUpdateRequest } = useProviderUpdates(
     settings,
     config,
     historyManager.addItem,
@@ -1107,8 +1107,8 @@ export const AppContainer = (props: AppContainerProps) => {
   // exactly that).
   const { loadHistory: rawLoadHistory } = historyManager;
   const loadHistoryWithLatchReconciliation = useCallback(
-    (newHistory: HistoryItem[]) => {
-      rawLoadHistory(newHistory);
+    (newHistory: HistoryItem[], ...owner: [sessionId?: string]) => {
+      rawLoadHistory(newHistory, ...owner);
       contextFilesAnnouncedRef.current = newHistory.some(
         isContextFilesAnnouncement,
       );
@@ -1259,7 +1259,7 @@ export const AppContainer = (props: AppContainerProps) => {
           collapseOnResume,
           collapsePreviewCount,
         );
-        loadHistoryWithLatchReconciliation(historyItems);
+        loadHistoryWithLatchReconciliation(historyItems, config.getSessionId());
 
         // Seed past identities already claimed by the resumed transcript.
         seedPromptCount(
@@ -1271,9 +1271,16 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // Restore the transcript before Mod diagnostics, without making input
-      // or Mod startup wait for asynchronous session recovery.
+      // or Mod startup wait for asynchronous session recovery. Reply rows are
+      // offered only where the viewport can draw a committed row again; the
+      // terminal scrollback cannot.
       void getInteractiveModSession(config)
-        ?.initialize()
+        ?.initialize(
+          useTerminalBuffer
+            ? ['AbovePrompt', 'AssistantMessage']
+            : ['AbovePrompt'],
+          { prompts: true, runsPrompts: true },
+        )
         .catch(() => {});
 
       if (resumedSessionData) {
@@ -1637,6 +1644,25 @@ export const AppContainer = (props: AppContainerProps) => {
   });
   const setBufferText = buffer.setText;
   setBufferTextRef.current = setBufferText;
+  const bufferRef = useRef(buffer);
+  bufferRef.current = buffer;
+  const pendingPastesRef = useRef(pendingPastes);
+  pendingPastesRef.current = pendingPastes;
+  // A typed prompt the Mods did not let in comes back to the composer with
+  // its pastes collapsed, ahead of anything typed since, as typed text whose
+  // provenance is gone.
+  const returnPrompt = useCallback(
+    (text: string, pastes: ReadonlyMap<string, string> = new Map()) => {
+      const draft = restorePasteDraft(text, pastes, pendingPastesRef.current);
+      const current = bufferRef.current.text;
+      invalidateSubmittedPromptProvenance();
+      setPendingPastes(draft.pasteExpansions);
+      bufferRef.current.setText(
+        current ? `${draft.text}\n${current}` : draft.text,
+      );
+    },
+    [invalidateSubmittedPromptProvenance],
+  );
   const restoredPromptStashTargetsRef = useRef(new Set<string>());
   const promptStashTargetDir = config.getTargetDir();
   useEffect(() => {
@@ -1830,17 +1856,30 @@ export const AppContainer = (props: AppContainerProps) => {
     handleOutputStyleSelect,
   } = useOutputStyleCommand(settings, config, historyManager.addItem);
 
+  const handleAuthChange = useCallback(() => {
+    const model = config.getModel();
+    lastNotifiedModelRef.current = model;
+    refreshStatic();
+    setCurrentModel(model);
+  }, [config, refreshStatic]);
+
   const auth = useAuthCommand(
     settings,
     config,
     historyManager.addItem,
-    refreshStatic,
+    handleAuthChange,
+    initializationResult.skipStartupAuthDialog,
   );
   const { state: authState, actions: authActions } = auth;
   const { onAuthError, openAuthDialog, closeAuthDialog } = authActions;
   const { isAuthDialogOpen, isAuthenticating, pendingAuthType } = authState;
 
-  useInitializationAuthError(initializationResult.authError, onAuthError);
+  useInitializationAuthError(
+    initializationResult.skipStartupAuthDialog
+      ? null
+      : initializationResult.authError,
+    onAuthError,
+  );
 
   // Sync user tier from config when authentication changes
   // TODO: Implement getUserTier() method on Config if needed
@@ -1962,6 +2001,52 @@ export const AppContainer = (props: AppContainerProps) => {
     });
   }, [addHistoryItem, config]);
 
+  useEffect(() => {
+    // Surface the fail-closed project-hook gate instead of letting hooks
+    // stop silently after the explicit-trust requirement.
+    if (
+      !config.isInteractive() ||
+      config.isExplicitlyTrustedFolder() ||
+      config.getBareMode() ||
+      config.isSafeMode() ||
+      // With every hook disabled the trust gate is not why they are absent.
+      config.getDisableAllHooks() ||
+      // Warn only when the hooks really are withheld: the execution accessor
+      // serves an approved block despite the trust gate. `pending === false`
+      // alone is not "approved" — it also means "nothing to approve" (an
+      // untrusted folder with the trust feature on), the case this warning
+      // exists for.
+      config.getProjectHooks() !== undefined
+    ) {
+      return;
+    }
+    const projectHooks = settings.workspace?.settings?.hooks;
+    if (
+      !projectHooks ||
+      typeof projectHooks !== 'object' ||
+      Object.keys(projectHooks).length === 0
+    ) {
+      return;
+    }
+    addHistoryItem(
+      {
+        type: MessageType.WARNING,
+        text:
+          config.isProjectHooksApprovalGated() &&
+          config.isProjectHooksPendingApproval()
+            ? t(
+                'Project hooks in .qwen/settings.json were not loaded. Approve them in the dialog, or enable security.folderTrust.enabled and trust the folder.',
+              )
+            : t(
+                'Project hooks in .qwen/settings.json were not loaded: this folder is not explicitly trusted. Enable security.folderTrust.enabled and trust the folder to run them.',
+              ),
+      },
+      Date.now(),
+    );
+    // Startup notice only; later trust changes take effect on restart/reload.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config]);
+
   const clearPendingStateRef = useRef<() => void>(() => {});
   const clearPendingStateFromRef = useCallback(
     () => clearPendingStateRef.current(),
@@ -2019,7 +2104,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const openHelpDialog = useCallback(() => setHelpDialogOpen(true), []);
   const closeHelpDialog = useCallback(() => setHelpDialogOpen(false), []);
 
-  const { vimEnabled, vimMode } = useVimModeState();
+  const { vimEnabled } = useVimModeState();
   const { toggleVimEnabled } = useVimModeActions();
 
   useLayoutEffect(() => {
@@ -2059,7 +2144,9 @@ export const AppContainer = (props: AppContainerProps) => {
   // Ref bridges: these callbacks are defined later, but slashCommandActions
   // needs them now. The refs let the useMemo capture stable function pointers
   // whose implementations are swapped in once the real callbacks exist.
-  const openRewindSelectorRef = useRef<() => void>(() => {});
+  const openRewindSelectorRef = useRef<(origin?: 'slash-command') => void>(
+    () => {},
+  );
   const cancelOngoingRequestRef = useRef<() => void>(() => {});
 
   // /diff opens a per-turn diff dialog. Unlike rewind, no double-press or
@@ -2210,7 +2297,8 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       openStatsDialog,
       openResumeDialog,
-      openRewindSelector: () => openRewindSelectorRef.current(),
+      openRewindSelector: (origin?: 'slash-command') =>
+        openRewindSelectorRef.current(origin),
       openDiffDialog,
       handleResume,
       handleBranch,
@@ -2260,6 +2348,10 @@ export const AppContainer = (props: AppContainerProps) => {
     btwItem,
     setBtwItem,
     cancelBtw,
+    cancelSlashCommand,
+    isCommandCancellationBlocked,
+    isCommandCommitting,
+    commandCancellationBlocked,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
@@ -2273,7 +2365,6 @@ export const AppContainer = (props: AppContainerProps) => {
     loadHistoryWithLatchReconciliation,
     refreshStatic,
     toggleVimEnabled,
-    isProcessing,
     setIsProcessing,
     isIdleRef,
     setMemoryFileCount,
@@ -2557,6 +2648,7 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingResponseLengthRef,
     isReceivingContent,
     workflowKeywordActive,
+    turnCancelledRef,
   } = useLlmStream(
     config.getLlmClient(),
     historyManager.history,
@@ -2583,6 +2675,8 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidthRef,
     midTurnRestoreRef,
     goalQueueRef,
+    returnPrompt,
+    isCommandCancellationBlocked,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;
@@ -2676,6 +2770,14 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, []);
 
+  useEffect(
+    () =>
+      config.onWorkflowModeChange?.(() => {
+        if (config.hasWorkflowModeContext()) abortPromptSuggestion();
+      }),
+    [config, abortPromptSuggestion],
+  );
+
   // Auto-accept indicator — disabled on agent tabs (agents handle their own)
   const llmClient = config.getLlmClient();
 
@@ -2708,7 +2810,11 @@ export const AppContainer = (props: AppContainerProps) => {
     restorePeerMessage,
   } = useMessageQueue();
 
-  midTurnDrainRef.current = drainQueue;
+  // While a Mod hooks prompt.submit, prompts typed during a turn are not
+  // steered into it at a tool boundary: they wait for the turn to end and are
+  // sent, and heard by the hooks, then.
+  midTurnDrainRef.current = (...args) =>
+    getInteractiveModSession(config)?.hearsPrompts ? [] : drainQueue(...args);
   midTurnRestoreRef.current = restoreMessages;
   goalQueueRef.current = {
     peekNextUserBatchKey,
@@ -3464,7 +3570,8 @@ export const AppContainer = (props: AppContainerProps) => {
         spec.status !== 'idle' &&
         spec.suggestion === submittedValue &&
         spec.status === 'completed' &&
-        !needsWorkflowIntent
+        !needsWorkflowIntent &&
+        !config.hasWorkflowModeContext()
       ) {
         // Accept completed speculation: inject messages and apply files
         acceptSpeculation(spec, llmClient)
@@ -3561,7 +3668,11 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // Automatic speculation never received the current human intent.
-      if (spec.status === 'running' || needsWorkflowIntent) {
+      if (
+        spec.status === 'running' ||
+        needsWorkflowIntent ||
+        (spec.status !== 'idle' && config.hasWorkflowModeContext())
+      ) {
         abortSpeculation(spec).catch(() => {});
         speculationRef.current = IDLE_SPECULATION;
       }
@@ -3707,11 +3818,13 @@ export const AppContainer = (props: AppContainerProps) => {
       // so the auto-restore branch below bails out before its orphan strip
       // runs. Strip the orphaned prompt here; otherwise appendCuratedContent
       // merges the user's NEXT real message into the "no new real user input"
-      // preamble. Safe even if the turn already produced a model response:
-      // the strip only pops trailing user entries, and a responded prompt is
-      // not trailing.
-      if (info?.wasGoalTurn) {
-        llmClient?.stripOrphanedUserEntriesFromHistory?.();
+      // preamble. A Mod's own prompt is stripped the same way: the person
+      // stopped it, so the next prompt must not reach the model behind it.
+      // Safe even if the turn already produced a model response: the strip
+      // only pops trailing user entries, and a responded prompt is not
+      // trailing.
+      if (info?.wasGoalTurn || info?.wasModPromptTurn) {
+        llmClient?.stripOrphanedUserEntriesFromHistory?.(true);
       }
 
       // Restore-on-cancel: pull the just-submitted prompt back into the input
@@ -3877,7 +3990,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // contradict what the UI told the user was rewound. Mirrors the
       // existing strip in the Retry submit path
       // (LlmClient.sendMessageStream).
-      llmClient?.stripOrphanedUserEntriesFromHistory?.();
+      llmClient?.stripOrphanedUserEntriesFromHistory?.(true);
       // Also undo the cross-session ↑-history disk entry written by
       // useLlmStream's `logger.logMessage` — otherwise
       // getPreviousUserMessages would resurrect the cancelled prompt next
@@ -3919,6 +4032,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const submitVimPrompt = useCallback(
     (text: string) => {
+      buffer.setText('');
       handleFinalSubmit(text, {
         displayText: text,
         humanInput: {
@@ -3926,11 +4040,32 @@ export const AppContainer = (props: AppContainerProps) => {
         },
       });
     },
-    [handleFinalSubmit, pendingPastes],
+    [buffer, handleFinalSubmit, pendingPastes],
   );
-  const { handleInput: vimHandleInput } = useVim(
+  // Vim's Enter bypasses the composer, so route it through the submit path
+  // the composer registers: large-paste expansion, the submit epoch and the
+  // stash cleanup all live there.
+  const promptSubmitRef = useRef<((value: string) => void) | null>(null);
+  const registerPromptSubmit = useCallback(
+    (handler: ((value: string) => void) | null) => {
+      promptSubmitRef.current = handler;
+    },
+    [],
+  );
+  const handleVimSubmit = useCallback(
+    (value: string) => {
+      const submit = promptSubmitRef.current;
+      if (submit) {
+        submit(value);
+        return;
+      }
+      submitVimPrompt(value);
+    },
+    [submitVimPrompt],
+  );
+  const { handleInput: vimHandleInput, ownsEscape: vimOwnsEscape } = useVim(
     buffer,
-    submitVimPrompt,
+    handleVimSubmit,
     invalidateSubmittedPromptProvenance,
   );
 
@@ -4089,9 +4224,16 @@ export const AppContainer = (props: AppContainerProps) => {
           if (result.suggestion) {
             setPromptSuggestion(result.suggestion);
             // Start speculation if enabled (runs in background)
-            if (settings.merged.ui?.enableSpeculation) {
+            if (
+              settings.merged.ui?.enableSpeculation &&
+              !config.hasWorkflowModeContext()
+            ) {
               startSpeculation(config, result.suggestion, ac.signal)
                 .then((state) => {
+                  if (ac.signal.aborted || config.hasWorkflowModeContext()) {
+                    void abortSpeculation(state).catch(() => {});
+                    return;
+                  }
                   speculationRef.current = state;
                 })
                 .catch(() => {
@@ -4238,6 +4380,13 @@ export const AppContainer = (props: AppContainerProps) => {
     handleMcpApprovalSelect,
   } = useMcpApproval(config);
   const {
+    isProjectHooksApprovalDialogOpen,
+    pendingProjectHooks,
+    handleProjectHooksApprovalSelect,
+  } = useProjectHooksApproval(config, settings, (text) =>
+    addHistoryItem({ type: MessageType.INFO, text }, Date.now()),
+  );
+  const {
     needsRestart: ideNeedsRestart,
     restartReason: ideTrustRestartReason,
   } = useIdeTrustListener(!config.getShellExecutionSandbox?.());
@@ -4260,6 +4409,7 @@ export const AppContainer = (props: AppContainerProps) => {
     shouldShowCommandMigrationNudge ||
     isFolderTrustDialogOpen ||
     isMcpApprovalDialogOpen ||
+    isProjectHooksApprovalDialogOpen ||
     !!shellConfirmationRequest ||
     !!confirmationRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
@@ -4319,6 +4469,29 @@ export const AppContainer = (props: AppContainerProps) => {
     : 'hidden';
   const [controlsHeight, setControlsHeight] = useState(0);
 
+  // The Mods' band above the prompt: its input, and its tree, whose height
+  // the controls measurement below takes in.
+  const modBand = useModBand(config);
+  const isModWorking = streamingState !== StreamingState.Idle;
+  useEffect(() => {
+    getInteractiveModSession(config)?.setRenderInput(
+      modBandInput({
+        columns: terminalWidth,
+        rows: terminalHeight,
+        isFullscreen: useTerminalBuffer,
+        hasSurvey: isFeedbackDialogOpen,
+        isWorking: isModWorking,
+      }),
+    );
+  }, [
+    config,
+    terminalWidth,
+    terminalHeight,
+    useTerminalBuffer,
+    isFeedbackDialogOpen,
+    isModWorking,
+  ]);
+
   // Re-measure the footer whenever the LiveAgentPanel's height can change
   // (agents launching / finishing / focus), so `controlsHeight` — and thus
   // `availableTerminalHeight` — never goes stale below the composer. See
@@ -4366,6 +4539,7 @@ export const AppContainer = (props: AppContainerProps) => {
     embeddedShellFocused,
     messageQueue.length,
     isInputActive,
+    modBand,
   ]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
@@ -4456,23 +4630,34 @@ export const AppContainer = (props: AppContainerProps) => {
   // --- Rewind selector callbacks ---
   // IDE guard here is NOT redundant with the keyboard handler guard (line ~2375):
   // /rewind calls openRewindSelector directly, bypassing the keyboard handler.
-  const openRewindSelector = useCallback(() => {
-    if (streamingState !== StreamingState.Idle) return;
-    if (dialogsVisibleRef.current) return;
-    if (config.getIdeMode()) {
-      historyManager.addItem(
-        {
-          type: 'info',
-          text: 'Rewind is disabled in IDE mode.',
-        },
-        Date.now(),
-      );
-      return;
-    }
-    const hasUserTurns = historyManager.history.some((h) => h.type === 'user');
-    if (!hasUserTurns) return;
-    setIsRewindSelectorOpen(true);
-  }, [streamingState, config, historyManager]);
+  const openRewindSelector = useCallback(
+    (origin?: 'slash-command') => {
+      if (
+        streamingState !== StreamingState.Idle &&
+        !(
+          origin === 'slash-command' &&
+          streamingState === StreamingState.Responding
+        )
+      )
+        return;
+      if (dialogsVisibleRef.current) return;
+      if (config.getIdeMode()) {
+        historyManager.addItem(
+          {
+            type: 'info',
+            text: 'Rewind is disabled in IDE mode.',
+          },
+          Date.now(),
+        );
+        return;
+      }
+      const hasRewindableTurns =
+        historyManager.history.some(isRewindableUserTurn);
+      if (!hasRewindableTurns) return;
+      setIsRewindSelectorOpen(true);
+    },
+    [streamingState, config, historyManager],
+  );
   openRewindSelectorRef.current = openRewindSelector;
 
   const closeRewindSelector = useCallback(() => {
@@ -4481,217 +4666,57 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const handleRewindConfirm = useCallback(
     async (userItem: HistoryItem, option: RestoreOption) => {
+      const snapshot = historyManager.history;
+      const sessionId = config.getSessionId();
+      let loaded: HistoryItem[] | undefined;
+      let noticeId: number | undefined;
+      const isCurrent = () => {
+        const current = historyRef.current;
+        return (
+          config.getSessionId() === sessionId &&
+          isIdleRef.current &&
+          (current === snapshot ||
+            (loaded !== undefined &&
+              (current === loaded ||
+                (current.length === loaded.length + 1 &&
+                  current.at(-1)?.id === noticeId &&
+                  loaded.every((item, index) => item === current[index])))))
+        );
+      };
       try {
-        if (
-          config.getShellExecutionSandbox?.() &&
-          (option === 'code' || option === 'both')
-        ) {
-          historyManager.addItem(
-            {
-              type: 'error',
-              text: 'File restore is unavailable in tool sandbox.',
-            },
-            Date.now(),
-          );
-          return;
-        }
-
-        // For 'both', validate that conversation can be truncated BEFORE
-        // touching files — otherwise we'd roll back the workspace while
-        // the conversation stays at the newer state.
-        const needsConversation =
-          option === 'conversation' || option === 'both';
-        const llmClient = needsConversation ? config.getLlmClient() : null;
-        let apiTruncateIndex = -1;
-        let conversationSkippedNoClient = false;
-        if (needsConversation) {
-          if (!llmClient) {
-            if (option === 'conversation') {
-              historyManager.addItem(
-                {
-                  type: 'error',
-                  text: t(
-                    'Cannot rewind conversation: no active model client.',
-                  ),
-                },
-                Date.now(),
-              );
-              return;
+        const outcome = await rewindSession(
+          config,
+          snapshot,
+          userItem,
+          option,
+          (truncatedUi, draft) => {
+            clearPendingStateRef.current();
+            loaded = truncatedUi;
+            loadHistoryWithLatchReconciliation(truncatedUi);
+            refreshStatic();
+            if (draft) {
+              restoredSubmissionRef.current = null;
+              submittedPromptProvenanceUnavailableRef.current = true;
+              humanInputProvenanceUnavailableRef.current = true;
+              buffer.setText(draft);
             }
-            // 'both' with no client: skip conversation, still try files,
-            // and surface a warning after the restore output.
-            conversationSkippedNoClient = true;
-          } else {
-            apiTruncateIndex = computeApiTruncationIndex(
-              historyManager.history,
-              userItem.id,
-              llmClient.getHistoryShallow(),
+            noticeId = historyManager.addItem(
+              {
+                type: 'info',
+                text: t(
+                  'Conversation rewound. Edit your prompt and press Enter to continue.',
+                ),
+              },
+              Date.now(),
             );
-            if (apiTruncateIndex < 0) {
-              historyManager.addItem(
-                {
-                  type: 'error',
-                  text: isIdentifiedRetainedTurn(
-                    historyManager.history,
-                    userItem.id,
-                  )
-                    ? t(
-                        'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.',
-                      )
-                    : t(
-                        'Cannot rewind to a turn that was compressed. Try a more recent turn.',
-                      ),
-                },
-                Date.now(),
-              );
-              if (option === 'both') {
-                // Abort file restore too — don't create inconsistent state
-                return;
-              }
-              return;
-            }
-          }
-        }
-
-        // Restore code (files on disk). For 'code'-only, don't truncate
-        // the snapshot timeline — the conversation turns remain visible
-        // and their snapshots must stay available for future rewinds.
-        let fileRestoreMessage: string | undefined;
-        let fileRestoreError: string | undefined;
-        let hasRestoreFailure = false;
-        if (option === 'code' || option === 'both') {
-          const promptId = (userItem as HistoryItemUser).promptId;
-          if (promptId) {
-            try {
-              const truncateHistory =
-                option === 'both' && !!llmClient && apiTruncateIndex >= 0;
-              const result = await config
-                .getFileHistoryService()
-                .rewind(promptId, truncateHistory);
-              if (result.filesChanged.length > 0) {
-                fileRestoreMessage = t('Restored {{count}} file(s).', {
-                  count: String(result.filesChanged.length),
-                });
-              } else if (result.filesFailed.length === 0) {
-                fileRestoreMessage = t('No files needed to be restored.');
-              }
-              if (result.filesFailed.length > 0) {
-                hasRestoreFailure = true;
-                fileRestoreError = t(
-                  'Failed to restore {{count}} file(s): {{files}}',
-                  {
-                    count: String(result.filesFailed.length),
-                    files: result.filesFailed
-                      .map((f) => f.split('/').pop())
-                      .join(', '),
-                  },
-                );
-              }
-            } catch (error) {
-              hasRestoreFailure = true;
-              fileRestoreError = t('Failed to restore files: {{error}}', {
-                error: error instanceof Error ? error.message : String(error),
-              });
-            }
-          } else {
-            hasRestoreFailure = true;
-            fileRestoreError = t(
-              'Cannot restore files: this turn was created before file checkpointing was enabled.',
-            );
-          }
-        }
-
-        // Truncate conversation (already validated above).
-        // Skip if file restore had failures in "both" mode to avoid inconsistent state.
-        if (
-          needsConversation &&
-          llmClient &&
-          apiTruncateIndex >= 0 &&
-          !(option === 'both' && hasRestoreFailure)
-        ) {
-          const originalHistory = historyManager.history;
-          const hasSummary = originalHistory.some(
-            (h) => h.display?.kind === 'collapse-summary',
-          );
-          const effectiveLength = hasSummary
-            ? originalHistory.length - 1
-            : originalHistory.length;
-
-          let targetTurnIndex = 0;
-          for (const h of originalHistory) {
-            if (h.id === userItem.id) break;
-            if (isRealUserTurn(h)) targetTurnIndex++;
-          }
-
-          llmClient.truncateHistory(apiTruncateIndex);
-
-          // Strip suppressOnRestore flags and filter out collapse-summary items
-          // so rewound items remain visible without stale summary text
-          const truncatedUi = recoalesceFindingsHistoryItems(
-            expandCollapsedHistory(
-              originalHistory.filter((h) => h.id < userItem.id),
-            ),
-          );
-          clearPendingStateRef.current();
-          loadHistoryWithLatchReconciliation(truncatedUi);
-
-          refreshStatic();
-
-          if (userItem.type === 'user' && userItem.text) {
-            restoredSubmissionRef.current = null;
-            submittedPromptProvenanceUnavailableRef.current = true;
-            humanInputProvenanceUnavailableRef.current = true;
-            buffer.setText(userItem.text);
-          }
-
-          historyManager.addItem(
-            {
-              type: 'info',
-              text: t(
-                'Conversation rewound. Edit your prompt and press Enter to continue.',
-              ),
-            },
-            Date.now(),
-          );
-
-          config.getChatRecordingService()?.rewindRecording(
-            targetTurnIndex,
-            { truncatedCount: effectiveLength - truncatedUi.length },
-            !hasRestoreFailure
-              ? config
-                  .getFileHistoryService()
-                  .getSnapshots()
-                  .slice(0, targetTurnIndex + 1)
-              : undefined,
-          );
-        }
-
-        // Show file restore result after conversation truncation so the
-        // message isn't immediately removed by loadHistory.
-        if (fileRestoreMessage) {
-          historyManager.addItem(
-            { type: 'info', text: fileRestoreMessage },
-            Date.now(),
-          );
-        }
-        if (fileRestoreError) {
-          historyManager.addItem(
-            { type: 'error', text: fileRestoreError },
-            Date.now(),
-          );
-        }
-        if (conversationSkippedNoClient) {
-          historyManager.addItem(
-            {
-              type: 'info',
-              text: t(
-                'Code restored, but conversation could not be rewound (no active client).',
-              ),
-            },
-            Date.now(),
-          );
-        }
+          },
+          isCurrent,
+        );
+        if (!outcome.stale && isCurrent())
+          for (const message of outcome.messages)
+            historyManager.addItem(message, Date.now());
       } catch (error) {
+        if (!isCurrent()) return;
         historyManager.addItem(
           {
             type: 'error',
@@ -4839,6 +4864,20 @@ export const AppContainer = (props: AppContainerProps) => {
     hasExecutingTool,
   );
 
+  const loadingPhrase = shouldShowBtwTip({
+    tipHistory,
+    elapsedTime,
+    streamingState,
+  })
+    ? t(
+        'Tip: Use /btw to ask a quick side question without interrupting the current work',
+      )
+    : currentLoadingPhrase;
+
+  const backgroundApprovals = useMemo(
+    () => getPendingBackgroundApprovals(bgTaskEntries),
+    [bgTaskEntries],
+  );
   useAttentionNotifications({
     isFocused,
     streamingState,
@@ -4847,6 +4886,23 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     terminal,
     pendingToolCalls,
+    backgroundApprovals,
+  });
+
+  // Program status (OSC 7501) for terminal tabs and agent inboxes
+  useProgramStatus({
+    streamingState,
+    pendingToolCalls,
+    history: historyManager.history,
+    pendingHistoryItems,
+    turnCancelledRef,
+    authPending: isAuthDialogOpen || isAuthenticating,
+    shellConfirmationPending: !!shellConfirmationRequest,
+    loopDetectionPending: !!loopDetectionConfirmationRequest,
+    startupApprovalPending:
+      isFolderTrustDialogOpen ||
+      isMcpApprovalDialogOpen ||
+      isProjectHooksApprovalDialogOpen,
   });
 
   // P-notif: terminal-bell when a workflow run finishes (completed / failed),
@@ -4958,15 +5014,29 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // 3. Cancel in-flight btw side-question
-      if (btwItem && btwItem.btw.isPending && !dialogsVisibleRef.current) {
+      if (
+        btwItem &&
+        (btwItem.btw.isPending || btwItem.btw.ownRequestPending) &&
+        !dialogsVisibleRef.current
+      ) {
         cancelBtw();
         return; // Btw cancelled, end processing
       }
 
       // 4. Cancel ongoing requests
-      if (streamingState === StreamingState.Responding) {
+      if (
+        streamingState === StreamingState.Responding &&
+        !isCommandCancellationBlocked()
+      ) {
         cancelOngoingRequest?.();
         return; // Request cancelled, end processing
+      }
+      if (
+        streamingState === StreamingState.Idle &&
+        submissionInFlightRef.current &&
+        cancelOngoingRequest?.()
+      ) {
+        return;
       }
 
       // 5. Clear input buffer (if has content)
@@ -4989,6 +5059,7 @@ export const AppContainer = (props: AppContainerProps) => {
       cancelBtw,
       streamingState,
       cancelOngoingRequest,
+      isCommandCancellationBlocked,
       buffer,
       activeWorktree,
     ],
@@ -5005,6 +5076,23 @@ export const AppContainer = (props: AppContainerProps) => {
       if (keyMatchers[Command.TOGGLE_THINKING_EXPANDED](key)) {
         setThoughtExpanded((prev) => !prev);
         refreshStatic();
+        return;
+      }
+
+      if (
+        isCommandCommitting() &&
+        (keyMatchers[Command.QUIT](key) ||
+          keyMatchers[Command.EXIT](key) ||
+          keyMatchers[Command.ESCAPE](key))
+      ) {
+        return;
+      }
+
+      if (
+        (shellConfirmationRequest || confirmationRequest) &&
+        (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key) ||
+          keyMatchers[Command.TOGGLE_IDE_CONTEXT_DETAIL](key))
+      ) {
         return;
       }
 
@@ -5027,7 +5115,11 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       } else if (keyMatchers[Command.EXIT](key)) {
         // Cancel in-flight btw even when buffer has text (Ctrl+D)
-        if (btwItem && btwItem.btw.isPending && !dialogsVisibleRef.current) {
+        if (
+          btwItem &&
+          (btwItem.btw.isPending || btwItem.btw.ownRequestPending) &&
+          !dialogsVisibleRef.current
+        ) {
           cancelBtw();
           return;
         }
@@ -5043,11 +5135,9 @@ export const AppContainer = (props: AppContainerProps) => {
         if (contextMenuOpenRef.current) {
           return;
         }
-        // In vim INSERT mode, let vim's own handler (in InputPrompt) consume
-        // the Esc to switch to NORMAL mode. Without this guard, both handlers
-        // fire on the same keypress — vim switches mode AND AppContainer
-        // shows "Press Esc again to clear" or cancels the stream.
-        if (vimEnabled && vimMode === 'INSERT') {
+        // Vim may have consumed this same broadcast before this subscriber.
+        // Pending-state cancellation must not also arm or clear the draft.
+        if (vimOwnsEscape(key)) {
           return;
         }
 
@@ -5058,8 +5148,7 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
-        // Skip if shell is focused (to allow shell's own escape handling)
-        if (embeddedShellFocused) {
+        if (embeddedShellFocused || dialogsVisibleRef.current) {
           return;
         }
 
@@ -5079,28 +5168,24 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
-        // Input is empty, cancel request immediately (no double-press needed)
-        // Skip when a dialog (background tasks, etc.) is open — ESC should
-        // close the dialog, not cancel the running request.
-        if (
-          streamingState === StreamingState.Responding &&
-          !dialogsVisibleRef.current
-        ) {
+        const isResponding = streamingState === StreamingState.Responding;
+        const requestCancelled =
+          (isResponding ||
+            (streamingState === StreamingState.Idle &&
+              submissionInFlightRef.current)) &&
+          cancelOngoingRequest?.();
+        const commandCancelled = cancelSlashCommand();
+        if (isResponding || requestCancelled || commandCancelled) {
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
             escapeTimerRef.current = null;
           }
-          cancelOngoingRequest?.();
           setEscapePressedOnce(false);
           return;
         }
 
         // Input is empty and idle — double-ESC opens rewind selector
-        if (
-          streamingState === StreamingState.Idle &&
-          !dialogsVisibleRef.current &&
-          !config.getIdeMode()
-        ) {
+        if (streamingState === StreamingState.Idle && !config.getIdeMode()) {
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
             escapeTimerRef.current = null;
@@ -5117,21 +5202,6 @@ export const AppContainer = (props: AppContainerProps) => {
         }
         setEscapePressedOnce(false);
         return;
-      }
-
-      // Dismiss completed btw side-question on Space or Enter,
-      // but only when btw is visible and the input buffer is empty.
-      if (
-        btwItem &&
-        !btwItem.btw.isPending &&
-        !dialogsVisibleRef.current &&
-        !contextMenuOpenRef.current &&
-        buffer.text.length === 0
-      ) {
-        if (key.name === 'return' || key.sequence === ' ') {
-          setBtwItem(null);
-          return;
-        }
       }
 
       // Note: Ctrl+C/D btw cancellation is handled inside handleExit
@@ -5239,6 +5309,9 @@ export const AppContainer = (props: AppContainerProps) => {
       config,
       ideContextState,
       handleExit,
+      isCommandCommitting,
+      shellConfirmationRequest,
+      confirmationRequest,
       ctrlCPressedOnce,
       setCtrlCPressedOnce,
       ctrlCTimerRef,
@@ -5250,12 +5323,12 @@ export const AppContainer = (props: AppContainerProps) => {
       escapeTimerRef,
       streamingState,
       cancelOngoingRequest,
+      cancelSlashCommand,
       buffer,
       handleSlashCommand,
       activePtyId,
       embeddedShellFocused,
       btwItem,
-      setBtwItem,
       cancelBtw,
       // `settings` is a stable LoadedSettings instance (not recreated on render).
       // ESLint requires it here because the callback calls settings.setValue().
@@ -5265,8 +5338,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setRenderMode,
       refreshStatic,
       handleDoubleEscRewind,
-      vimEnabled,
-      vimMode,
+      vimOwnsEscape,
       setThoughtExpanded,
     ],
   );
@@ -5391,6 +5463,7 @@ export const AppContainer = (props: AppContainerProps) => {
       loopDetectionConfirmationRequest,
       memoryFileCount,
       streamingState,
+      commandCancellationBlocked,
       initError,
       pendingLlmHistoryItems,
       thought,
@@ -5409,6 +5482,8 @@ export const AppContainer = (props: AppContainerProps) => {
       currentMcpApproval,
       pendingMcpApprovals,
       mcpApprovalRemaining,
+      isProjectHooksApprovalDialogOpen,
+      pendingProjectHooks,
       isTrustedFolder,
       constrainHeight,
       ideContextState,
@@ -5418,7 +5493,7 @@ export const AppContainer = (props: AppContainerProps) => {
       showEscapePrompt,
       isFocused,
       elapsedTime,
-      currentLoadingPhrase,
+      currentLoadingPhrase: loadingPhrase,
       historyRemountKey,
       messageQueue,
       showAutoAcceptIndicator,
@@ -5541,6 +5616,7 @@ export const AppContainer = (props: AppContainerProps) => {
       loopDetectionConfirmationRequest,
       memoryFileCount,
       streamingState,
+      commandCancellationBlocked,
       initError,
       pendingLlmHistoryItems,
       thought,
@@ -5559,6 +5635,8 @@ export const AppContainer = (props: AppContainerProps) => {
       currentMcpApproval,
       pendingMcpApprovals,
       mcpApprovalRemaining,
+      isProjectHooksApprovalDialogOpen,
+      pendingProjectHooks,
       isTrustedFolder,
       constrainHeight,
       ideContextState,
@@ -5568,7 +5646,7 @@ export const AppContainer = (props: AppContainerProps) => {
       showEscapePrompt,
       isFocused,
       elapsedTime,
-      currentLoadingPhrase,
+      loadingPhrase,
       historyRemountKey,
       messageQueue,
       showAutoAcceptIndicator,
@@ -5670,7 +5748,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
-      dismissProviderUpdate,
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,
@@ -5679,11 +5756,13 @@ export const AppContainer = (props: AppContainerProps) => {
       handleCommandMigrationComplete,
       handleFolderTrustSelect,
       handleMcpApprovalSelect,
+      handleProjectHooksApprovalSelect,
       setConstrainHeight,
       onEscapePromptChange: handleEscapePromptChange,
       onTabConsumerChange: setHasTabConsumer,
       refreshStatic,
       handleFinalSubmit,
+      registerPromptSubmit,
       handleRetryLastPrompt: retryLastPrompt,
       handleClearScreen,
       popAllQueuedMessages,
@@ -5764,7 +5843,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
-      dismissProviderUpdate,
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,
@@ -5773,10 +5851,12 @@ export const AppContainer = (props: AppContainerProps) => {
       handleCommandMigrationComplete,
       handleFolderTrustSelect,
       handleMcpApprovalSelect,
+      handleProjectHooksApprovalSelect,
       setConstrainHeight,
       handleEscapePromptChange,
       refreshStatic,
       handleFinalSubmit,
+      registerPromptSubmit,
       retryLastPrompt,
       handleClearScreen,
       popAllQueuedMessages,

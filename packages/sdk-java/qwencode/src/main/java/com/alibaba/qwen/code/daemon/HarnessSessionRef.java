@@ -10,6 +10,11 @@ public final class HarnessSessionRef {
     private final Long harnessLastEventId;
     private final String harnessEventEpoch;
     private final String approvalMode;
+    private final boolean recoveryCleanupOnly;
+
+    public boolean isRecoveryCleanupOnly() {
+        return recoveryCleanupOnly;
+    }
 
     public String getApprovalMode() {
         return approvalMode;
@@ -39,6 +44,14 @@ public final class HarnessSessionRef {
             Long harnessLastEventId,
             String harnessEventEpoch,
             String approvalMode) {
+        this(harnessSessionId, harnessClientId, harnessBootId, harnessControlCwd,
+                runtimeRecovery, harnessLastEventId, harnessEventEpoch, approvalMode, false);
+    }
+
+    HarnessSessionRef(String harnessSessionId, String harnessClientId, String harnessBootId,
+            String harnessControlCwd, HarnessRuntimeRecovery runtimeRecovery, Long harnessLastEventId,
+            String harnessEventEpoch, String approvalMode, boolean recoveryCleanupOnly) {
+        this.recoveryCleanupOnly = recoveryCleanupOnly;
         this.approvalMode = approvalMode;
         this.harnessSessionId = harnessSessionId;
         this.harnessClientId = harnessClientId;

@@ -16,11 +16,14 @@ import {
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   isPrivateProvenanceEnvKey,
+  keepsEmptyHomeEnvValue,
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
   reportRejectedLoaderKeys,
   resetLoaderKeyRejectionReportingForTesting,
 } from './shared-env-keys.js';
+import { VERIFY_PR_COORDINATE_ENV } from './verify-pr-coordinates.js';
+import { isWithinRoot } from './path-comparison.js';
 import { publishPendingCompileCache } from './compile-cache.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
@@ -38,11 +41,9 @@ export const SETTINGS_DIRECTORY_NAME = QWEN_DIR;
 
 const RELOAD_EXCLUDED_KEYS = new Set([
   ...PROJECT_ENV_HARDCODED_EXCLUSIONS,
-  // The daemon auth token: the full loader never takes it from
-  // settings.env, and a mid-session .env edit must not rotate it. (The
-  // serve fast path consults only the hardcoded tier, so its documented
-  // workspace-settings.env token feature is unaffected.)
-  'QWEN_SERVER_TOKEN',
+  // QWEN_SERVER_TOKEN is covered by the spread above: the serve daemon bearer
+  // must never come from repository content on any load path — initial or
+  // reload — so it lives in the hardcoded project-.env tier.
   // Loader-class keys are rejected by the isLoaderEnvKey guard before this
   // Set is consulted, so they are not spread here. These three keep their
   // pre-denylist reload-only exclusion: too compatibility-heavy for the
@@ -248,7 +249,11 @@ function readHomeEnvInto(file: string): void {
   try {
     const parsed = dotenv.parse(fs.readFileSync(file, 'utf-8'));
     for (const key of HOME_ENV_BOOTSTRAP_KEYS) {
-      if (parsed[key] && !Object.hasOwn(process.env, key)) {
+      if (
+        (parsed[key] ||
+          (keepsEmptyHomeEnvValue(key) && parsed[key] !== undefined)) &&
+        !Object.hasOwn(process.env, key)
+      ) {
         process.env[key] = parsed[key];
       }
     }
@@ -544,6 +549,57 @@ export interface EnvFileReadFailure {
   readonly error: string;
 }
 
+/**
+ * The parsed `.env` files `loadEnvironment` reads for `startDir` that the
+ * workspace rather than the user controls; `null` for one it cannot read.
+ */
+export function readProjectEnvFiles(
+  settings: Settings,
+  startDir: string,
+  workspaceTrusted?: boolean,
+): Record<string, Record<string, string> | null> {
+  const userLevelPaths = getUserLevelEnvPaths();
+  // `hashProjectHooks` hashes this map, and the sandbox mounts only the
+  // workspace: an ancestor `.env` the host can read does not exist inside the
+  // container, so hashing it made the container-side hash disagree and
+  // withheld hooks the host had approved. Keep the map to files the workspace
+  // itself owns; `findEnvFiles` still discovers ancestors for the runtime env.
+  let workspaceRoot = path.resolve(startDir);
+  try {
+    workspaceRoot = fs.realpathSync(workspaceRoot);
+  } catch {
+    // Match findEnvFiles(): use the resolved path when realpath is unavailable.
+  }
+  const isInsideWorkspace = (filePath: string): boolean => {
+    let resolved: string;
+    try {
+      // Resolve the candidate's link target too: a workspace `.env` symlinked
+      // outside the workspace is hashed on the host and dangles in the sandbox,
+      // which is the same host/container divergence this filter removes.
+      resolved = fs.realpathSync(filePath);
+    } catch {
+      return false;
+    }
+    return isWithinRoot(resolved, workspaceRoot);
+  };
+  const files: Record<string, Record<string, string> | null> = {};
+  for (const file of findEnvFiles(
+    settings,
+    startDir,
+    userLevelPaths,
+    workspaceTrusted,
+  )) {
+    if (userLevelPaths.has(path.normalize(file))) continue;
+    if (!isInsideWorkspace(file)) continue;
+    try {
+      files[file] = dotenv.parse(fs.readFileSync(file, 'utf-8'));
+    } catch {
+      files[file] = null;
+    }
+  }
+  return files;
+}
+
 function parseEnvFiles(
   envFilePaths: readonly string[],
   userLevelPaths: ReadonlySet<string>,
@@ -641,6 +697,25 @@ function reportRejectedSettingsEnv(
   ) {
     writeStderrLineSafe(
       `qwen: ${source} cannot set QWEN_AGENT_EXECUTION_BACKEND; ignored. Export it in the launch environment instead.`,
+    );
+  }
+  // The publishing coordinates are excluded at every settings scope: the
+  // merged map carries a workspace entry indistinguishably from an operator
+  // one, and only the operator may choose where evidence is published. Say so
+  // instead of dropping the entry silently, and name the channel that works.
+  for (const [setting, key] of Object.entries(VERIFY_PR_COORDINATE_ENV)) {
+    // The gate that drops the entry folds case (Windows env lookup does), so
+    // an exact-spelling lookup here would stay silent for the spellings it
+    // rejects. Report whichever spelling was actually written.
+    const entry = Object.entries(env).find(
+      ([candidate, value]) =>
+        candidate.toUpperCase() === key &&
+        typeof value === 'string' &&
+        value.trim() !== '',
+    );
+    if (!entry) continue;
+    writeStderrLineSafe(
+      `qwen: ${source} cannot set ${entry[0]}; ignored. Set verifyPr.${setting} at user scope in settings.json, or export it in the launch environment.`,
     );
   }
 }
@@ -748,7 +823,8 @@ export function loadEnvironment(
 
       const existingValue = process.env[key];
       const isEffectivelyUnset =
-        !Object.hasOwn(process.env, key) || existingValue === '';
+        !Object.hasOwn(process.env, key) ||
+        (existingValue === '' && !keepsEmptyHomeEnvValue(key));
       if (isEffectivelyUnset) {
         process.env[key] = envFile.parsedEnv[key];
         dotEnvSourcedKeys.add(key);

@@ -13,8 +13,12 @@ import {
   currentPidNamespace,
   isProcessAlive,
   readDaemonDiscoveries,
+  readDaemonToken,
   removeDaemonDiscovery,
+  removeDaemonToken,
+  removeStaleDaemonTokens,
   resolveDaemonDiscoveryDir,
+  writeDaemonToken,
   type DaemonDiscoveryEntry,
   type DaemonDiscoveryRecord,
 } from '../serve/daemon-discovery.js';
@@ -85,11 +89,19 @@ interface StartArgs {
   port?: number;
   hostname: string;
   workspace?: string | string[];
+  'conversations-dir'?: string | string[];
   web: boolean;
   'require-auth': boolean;
   token?: string;
+  'save-token'?: boolean;
   wait?: boolean;
   json?: boolean;
+}
+
+interface TokenArgs {
+  port?: number;
+  json?: boolean;
+  remove?: boolean;
 }
 
 function age(iso: string, now = Date.now()): number {
@@ -555,6 +567,7 @@ export function buildDaemonStartArgs(options: {
   port: number;
   hostname: string;
   workspaces: readonly string[];
+  conversationsDir?: string;
   web: boolean;
   requireAuth: boolean;
 }): { command: string; args: string[] } {
@@ -568,6 +581,9 @@ export function buildDaemonStartArgs(options: {
   ];
   if (!options.web) childArgs.push('--no-web');
   if (options.requireAuth) childArgs.push('--require-auth');
+  if (options.conversationsDir !== undefined) {
+    childArgs.push('--conversations-dir', options.conversationsDir);
+  }
   for (const workspace of options.workspaces) {
     childArgs.push('--workspace', workspace);
   }
@@ -706,6 +722,12 @@ async function printStartLogTail(file: string): Promise<void> {
 
 async function handleStart(argv: StartArgs): Promise<void> {
   ignoreBrokenPipe();
+  const conversationsDir = argv['conversations-dir'];
+  if (Array.isArray(conversationsDir)) {
+    writeStderrLine('qwen daemon: pass --conversations-dir once.');
+    process.exitCode = 1;
+    return;
+  }
   const entry = resolveCliEntry();
   if (!entry) {
     writeStderrLine(
@@ -738,6 +760,13 @@ async function handleStart(argv: StartArgs): Promise<void> {
   if (argv['require-auth'] && !token) {
     writeStderrLine(
       'qwen daemon: --require-auth requires --token or QWEN_SERVER_TOKEN.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (argv['save-token'] && !token) {
+    writeStderrLine(
+      'qwen daemon: --save-token requires --token or QWEN_SERVER_TOKEN.',
     );
     process.exitCode = 1;
     return;
@@ -784,6 +813,7 @@ async function handleStart(argv: StartArgs): Promise<void> {
     port,
     hostname,
     workspaces,
+    conversationsDir,
     web: argv.web,
     requireAuth: argv['require-auth'],
   });
@@ -836,6 +866,20 @@ async function handleStart(argv: StartArgs): Promise<void> {
   }
 
   if (record) {
+    removeStaleDaemonTokens(record.port, record.pid);
+    if (argv['save-token']) {
+      try {
+        writeDaemonToken(record.port, record.pid, token!);
+      } catch (error) {
+        writeStderrLine(
+          `qwen daemon: could not persist the token: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+    }
     const ready =
       argv.wait === true ? await waitForDaemonReady(record, token) : undefined;
     const readyFailed = ready !== undefined && !isDaemonReady(ready);
@@ -913,6 +957,8 @@ async function handleStatus(argv: StatusArgs): Promise<void> {
         })
       ) {
         kept.push(row);
+      } else {
+        removeDaemonToken(row.entry.record.port, row.entry.record.pid);
       }
     }
     rows = kept;
@@ -1142,7 +1188,9 @@ async function handleStop(argv: StopArgs): Promise<void> {
     const { record } = entry;
     const health = await probeHealth(record);
     if (health === 'stale') {
-      removeDaemonDiscovery(record.port, { expectedPid: record.pid });
+      if (removeDaemonDiscovery(record.port, { expectedPid: record.pid })) {
+        removeDaemonToken(record.port, record.pid);
+      }
       writeStdoutLine(
         `qwen daemon: removed stale record for port ${record.port} (pid ${record.pid} is gone).`,
       );
@@ -1207,7 +1255,9 @@ async function handleStop(argv: StopArgs): Promise<void> {
     }
     const exited = await waitForExit(record.pid, STOP_TIMEOUT_MS);
     if (exited) {
-      removeDaemonDiscovery(record.port, { expectedPid: record.pid });
+      if (removeDaemonDiscovery(record.port, { expectedPid: record.pid })) {
+        removeDaemonToken(record.port, record.pid);
+      }
       writeStdoutLine(
         `qwen daemon: ${
           process.platform === 'win32' ? 'hard-killed' : 'stopped'
@@ -1223,7 +1273,9 @@ async function handleStop(argv: StopArgs): Promise<void> {
       }
       const forced = await waitForExit(record.pid, STOP_TIMEOUT_MS);
       if (forced) {
-        removeDaemonDiscovery(record.port, { expectedPid: record.pid });
+        if (removeDaemonDiscovery(record.port, { expectedPid: record.pid })) {
+          removeDaemonToken(record.port, record.pid);
+        }
         writeStdoutLine(
           `qwen daemon: force-stopped port ${record.port} (pid ${record.pid}).`,
         );
@@ -1237,6 +1289,57 @@ async function handleStop(argv: StopArgs): Promise<void> {
     failed = true;
   }
   if (failed) process.exitCode = 1;
+}
+
+async function handleToken(argv: TokenArgs): Promise<void> {
+  ignoreBrokenPipe();
+  const { entries } = readDaemonDiscoveries();
+  const error = selectionError(entries, { port: argv.port });
+  if (error) {
+    writeStderrLine(`qwen daemon: ${error}`);
+    process.exitCode = 1;
+    return;
+  }
+  const selected = selectDaemonEntries(entries, { port: argv.port });
+  if (selected.length !== 1) {
+    writeStderrLine(
+      'qwen daemon: token needs exactly one registered daemon; pass --port.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const record = selected[0]!.record;
+  if (argv.remove === true) {
+    const removed = removeDaemonToken(record.port, record.pid);
+    if (!removed) {
+      writeStderrLine(
+        `qwen daemon: no persisted token for port ${record.port}.`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+    writeStdoutLine(
+      argv.json === true
+        ? JSON.stringify({ port: record.port, removed: true })
+        : `qwen daemon: removed persisted token for port ${record.port}.`,
+    );
+    return;
+  }
+
+  const token = readDaemonToken(record.port, record.pid);
+  if (!token) {
+    writeStderrLine(
+      `qwen daemon: no persisted token for port ${record.port}; start with --save-token or use QWEN_SERVER_TOKEN.`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  writeStdoutLine(
+    argv.json === true
+      ? JSON.stringify({ port: record.port, token })
+      : `qwen daemon: token for port ${record.port}: ${token}`,
+  );
 }
 
 export interface DaemonRestartPlan {
@@ -1359,6 +1462,9 @@ export function buildDaemonRestartPlan(
     record.hostname,
     '--wait',
   ];
+  if (record.conversationsDir !== undefined) {
+    startArgs.push('--conversations-dir', record.conversationsDir);
+  }
   for (const workspace of workspaces) {
     startArgs.push('--workspace', workspace);
   }
@@ -1496,6 +1602,11 @@ export async function runDaemonRestart(
     return 1;
   }
 
+  // Preserve an opted-in persisted token across the instance change. The
+  // sidecar belongs to the old pid and is removed by the stop leg; capture it
+  // before stopping, then recreate it for the pid that actually started.
+  const persistedToken = readDaemonToken(record.port, record.pid);
+
   const stopped = deps.run(plan.command!, plan.stopArgs!, plan.env!);
   if (stopped.error) {
     writeStderrLine(
@@ -1530,7 +1641,7 @@ export async function runDaemonRestart(
   // the start leg succeeds wherever it landed.
   const restarted = deps
     .entries()
-    .some(
+    .find(
       (entry) =>
         entry.record.port === record.port &&
         (entry.record.pid !== record.pid ||
@@ -1541,6 +1652,19 @@ export async function runDaemonRestart(
       `qwen daemon: the restarted daemon is not on port ${record.port}; the port may be in use. Run \`qwen daemon status\` to find it.`,
     );
     return 1;
+  }
+  if (persistedToken !== undefined) {
+    const tokenToPersist = plan.env?.['QWEN_SERVER_TOKEN'] ?? persistedToken;
+    try {
+      writeDaemonToken(record.port, restarted.record.pid, tokenToPersist);
+    } catch (error) {
+      writeStderrLine(
+        `qwen daemon: could not persist the token for the restarted daemon: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return 1;
+    }
   }
   return 0;
 }
@@ -1601,6 +1725,12 @@ const startCommand: CommandModule<unknown, StartArgs> = {
         describe:
           'Workspace path; repeat for multiple; defaults to the current directory',
       })
+      .option('conversations-dir', {
+        type: 'string',
+        requiresArg: true,
+        describe:
+          'Absolute Conversations working-directory root (overrides QWEN_CONVERSATIONS_DIR)',
+      })
       .option('web', {
         type: 'boolean',
         default: true,
@@ -1614,6 +1744,11 @@ const startCommand: CommandModule<unknown, StartArgs> = {
       .option('token', {
         type: 'string',
         describe: 'Bearer token for the child; prefer QWEN_SERVER_TOKEN',
+      })
+      .option('save-token', {
+        type: 'boolean',
+        default: false,
+        describe: 'Persist the bearer token in a 0600 sidecar for daemon token',
       })
       .option('wait', {
         type: 'boolean',
@@ -1742,6 +1877,30 @@ const restartCommand: CommandModule<unknown, RestartArgs> = {
   },
 };
 
+const tokenCommand: CommandModule<unknown, TokenArgs> = {
+  command: 'token',
+  describe: 'Show or remove a persisted daemon bearer token',
+  builder: (yargs: Argv) =>
+    yargs
+      .option('port', {
+        type: 'number',
+        describe: 'Daemon port; required when more than one is registered',
+      })
+      .option('json', {
+        type: 'boolean',
+        default: false,
+        describe: 'Output a JSON object',
+      })
+      .option('remove', {
+        type: 'boolean',
+        default: false,
+        describe: 'Remove the persisted token',
+      }),
+  handler: async (argv) => {
+    await handleToken(argv);
+  },
+};
+
 export const daemonCommand: CommandModule = {
   command: 'daemon',
   describe: 'Inspect and control local qwen serve daemons',
@@ -1752,6 +1911,7 @@ export const daemonCommand: CommandModule = {
       .command(logsCommand)
       .command(stopCommand)
       .command(restartCommand)
+      .command(tokenCommand)
       .demandCommand(1, 'You need at least one command before continuing.')
       .version(false),
   handler: () => {},

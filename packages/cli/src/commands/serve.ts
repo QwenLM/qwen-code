@@ -5,6 +5,7 @@
  */
 
 import { parseJoinLink } from '../serve/agent-host-join.js';
+import { listExplicitCandidates } from '../serve/local-control/lan-interfaces.js';
 import type { Argv, CommandModule } from 'yargs';
 import type { ServeChannelSelection } from '../serve/types.js';
 import type { RunHandle } from '../serve/run-qwen-serve.js';
@@ -15,7 +16,11 @@ import { normalizeServeChannelSelection } from '../serve/channel-selection.js';
 // with ~50ms of cold ESM resolution. The runtime import is deferred to the
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
-import { DEFAULT_RING_SIZE } from '@qwen-code/acp-bridge/eventBus';
+import {
+  DEFAULT_RING_SIZE,
+  DEFAULT_RING_MAX_BYTES,
+  normalizeMaxRingBytes,
+} from '@qwen-code/acp-bridge/eventBus';
 import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   DEFAULT_MAX_JOURNAL_BYTES,
@@ -56,6 +61,49 @@ function blockForever(): Promise<never> {
 
 const DEFAULT_SERVE_HOSTNAME = '127.0.0.1';
 
+export function validateManagedLocalFlags(args: readonly string[]): void {
+  const supported = new Set([
+    '--managed',
+    '--managed-data-dir',
+    '--port',
+    '--hostname',
+    '--open',
+    '--no-open',
+    '--open-with-auth',
+    '--no-open-with-auth',
+    '--web',
+    '--require-auth',
+    '--http-bridge',
+  ]);
+  const unsupported = args.find(
+    (arg) => arg.startsWith('--') && !supported.has(arg.split('=')[0]!),
+  );
+  if (unsupported) {
+    throw new Error(
+      `${unsupported.split('=')[0]} is not supported with --managed. Use --port, --managed-data-dir, and --open.`,
+    );
+  }
+}
+
+export function validateManagedWebFlags(args: readonly string[]): void {
+  const supported = new Set([
+    '--managed-web-config',
+    '--hostname',
+    '--port',
+    '--allow-origin',
+    '--token',
+    '--require-auth',
+  ]);
+  const unsupported = args.find(
+    (arg) => arg.startsWith('--') && !supported.has(arg.split('=')[0]!),
+  );
+  if (unsupported) {
+    throw new Error(
+      `${unsupported.split('=')[0]} is not supported with --managed-web-config. Only hostname, port, allow-origin and browser authentication options are supported.`,
+    );
+  }
+}
+
 /**
  * Turn Local Control on through the daemon and print the pairing QR.
  *
@@ -78,16 +126,44 @@ async function startLocalControl(
   }
   let status;
   try {
-    status = await service.enable(address ? { address } : {});
+    status = await service.enable(
+      // The flag is the operator's explicit opt-in: record the named address
+      // as the daemon's standing grant so the HTTP enable route (and the Web
+      // Shell card) can re-enable it, while ungranted non-candidate POSTs
+      // keep failing with unknown_lan_interface.
+      address ? { address, allowExplicitAddress: true } : {},
+    );
   } catch (err) {
     // The service reports ambiguity to its caller rather than picking for
     // them; in a terminal the way to answer is a flag, which only this caller
-    // knows about.
+    // knows about. The same holds for the no-candidate and unknown-address
+    // failures: their messages are rendered verbatim to browser clients, so
+    // the CLI-only remedy hints belong here, not in the shared errors.
     if (
       err instanceof Error &&
       (err as { code?: string }).code === 'ambiguous_lan_interface'
     ) {
       throw new Error(`${err.message}. Pass --local-control-address <ip>.`);
+    }
+    if (
+      err instanceof Error &&
+      (err as { code?: string }).code === 'no_lan_interface'
+    ) {
+      throw new Error(
+        `${err.message} If this host's usable address is outside private/link-local space, or sits on a VPN/tunnel interface, name it: --local-control-address <ip>.`,
+      );
+    }
+    if (
+      err instanceof Error &&
+      (err as { code?: string }).code === 'unknown_lan_interface'
+    ) {
+      // Enumerate the acceptance space, not the automatic-candidate list:
+      // the operator reaches this failure precisely on hosts whose usable
+      // address is one listLanCandidates would never offer (#14136).
+      const candidates = listExplicitCandidates();
+      throw new Error(
+        `${err.message}${candidates.length ? ` This host currently has: ${candidates.map((c) => `${c.interfaceName} (${c.address})`).join(', ')}.` : ''}`,
+      );
     }
     throw err;
   }
@@ -197,17 +273,22 @@ interface ServeArgs {
   port: number;
   hostname: string;
   profile: 'default' | 'hosted-harness';
+  managed: boolean;
+  'managed-data-dir'?: string;
+  'managed-web-config'?: string;
   'hosted-harness-capability-digest'?: string;
   token?: string;
-  'max-sessions': number;
+  'max-sessions'?: number;
   'max-total-sessions'?: number;
   'max-pending-prompts-per-session': number;
   'max-connections': number;
   'event-ring-size': number;
+  'event-ring-max-bytes': number;
   'compacted-replay-max-bytes': number;
   'max-journal-events'?: number;
   'max-journal-bytes'?: number;
   workspace?: string | string[];
+  'conversations-dir'?: string;
   'memory-project-scope'?: MemoryProjectScope;
   'require-auth': boolean;
   'enable-session-shell': boolean;
@@ -300,6 +381,24 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'SHA-256 capability digest for the private Hosted Harness profile. Falls back to QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST.',
       })
+      .option('managed', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Start the daemon and Managed Agent with shared WebShell and embedded storage; downloads the server on first use and requires Java 21.',
+      })
+      .option('managed-data-dir', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Private persistent data directory for --managed; defaults to <Qwen home>/managed-local.',
+      })
+      .option('managed-web-config', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Run only the authenticated Managed Web gateway using a JSON file with apiUrl, tenantId, actorId and signingKeyFile. Requires a non-empty independent browser token via QWEN_SERVER_TOKEN or --token.',
+      })
       .option('token', {
         type: 'string',
         description:
@@ -307,10 +406,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('max-sessions', {
         type: 'number',
-        default: 32,
         description:
           'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
-          'attach to existing sessions still works. Set to 0 to disable.',
+          'attach to existing sessions still works. Set to 0 to disable. ' +
+          'Defaults to 32, or to the serve.maxSessions setting (user, system, and ' +
+          'system-defaults scopes only); the flag wins when passed.',
       })
       .option('max-total-sessions', {
         type: 'number',
@@ -334,6 +434,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'POST /session requests with a mismatched cwd return 400 workspace_mismatch. ' +
           'Defaults to process.cwd() when omitted. ' +
           'Repeat to register isolated workspace runtimes; the first is primary.',
+      })
+      .option('conversations-dir', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Absolute working-directory root shared by standalone and Live Conversations. Overrides QWEN_CONVERSATIONS_DIR; defaults to ~/Documents/Qwen Code/Conversations.',
       })
       .option('memory-project-scope', {
         type: 'string',
@@ -434,7 +540,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('local-control-address', {
         type: 'string',
         description:
-          'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice.',
+          'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice. Naming an address outside RFC 1918/3927 space, or one on a VPN/tunnel interface (e.g. phone and laptop on the same corporate VPN), is accepted as an explicit opt-in; out-of-private-space picks are logged with a warning.',
       })
       .option('join', {
         type: 'string',
@@ -462,12 +568,17 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Allow unencrypted Agent Host HTTP connections outside loopback (trusted demo networks only).',
       })
       .check((argv) => {
-        // A wildcard or LAN primary bind already owns the port Local Control
-        // needs on its selected address. Token and Origin settings remain
-        // independent because the second listener owns those.
+        if (Array.isArray(argv['conversations-dir'])) {
+          throw new Error('pass --conversations-dir once.');
+        }
+        normalizeMaxRingBytes(
+          argv['event-ring-max-bytes'] as number | undefined,
+        );
         if (argv['local-control'] === true && argv['web'] === false) {
           throw new Error('Local Control requires the Web Shell.');
         }
+        // Preserve the documented deployment boundary: Local Control adds its
+        // pairing-scoped LAN listener only to a loopback primary daemon.
         if (
           argv['local-control'] === true &&
           argv.hostname !== DEFAULT_SERVE_HOSTNAME
@@ -519,6 +630,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'that send a `Last-Event-ID: N` header. Larger = more reconnect ' +
           'headroom at the cost of a few hundred KB extra RAM per session. ' +
           'Must be a positive finite integer.',
+      })
+      .option('event-ring-max-bytes', {
+        type: 'number',
+        nargs: 1,
+        default: DEFAULT_RING_MAX_BYTES,
+        description:
+          'Per-session retained SSE replay ring byte cap, including the latest full commands snapshot. Must be a positive safe integer up to 256 MiB; no unlimited sentinel.',
       })
       .option('compacted-replay-max-bytes', {
         type: 'number',
@@ -702,13 +820,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         requiresArg: true,
         description:
-          'Private Broker URL for --profile hosted-harness; required together with token for Workspace tool turns.',
+          'Private Broker URL for --profile hosted-harness; required together with token for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_URL.',
       })
       .option('managed-runtime-broker-token', {
         type: 'string',
         requiresArg: true,
         description:
-          'Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns.',
+          'Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_TOKEN; prefer the variable, since this option puts the credential in the process list.',
       })
       .option('writer-idle-timeout-ms', {
         type: 'number',
@@ -808,6 +926,106 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Requires --rate-limit.',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
+    if (argv['managed-web-config'] !== undefined) {
+      try {
+        const serveIndex = process.argv.indexOf('serve');
+        if (serveIndex >= 0)
+          validateManagedWebFlags(process.argv.slice(serveIndex + 1));
+        if (
+          argv.managed ||
+          argv.profile !== 'default' ||
+          !argv.web ||
+          argv.workspace !== undefined ||
+          argv['conversations-dir'] !== undefined
+        ) {
+          throw new Error(
+            '--managed-web-config cannot be combined with daemon execution or Managed local mode.',
+          );
+        }
+        const { runManagedWebServe } = await import(
+          '../serve/managed-web-serve.js'
+        );
+        const handle = await runManagedWebServe({
+          configFile: argv['managed-web-config'],
+          hostname: argv.hostname,
+          port: argv.port,
+          token: argv.token,
+          allowOrigins: argv['allow-origin'],
+        });
+        writeStdoutLine(`Managed WebShell: ${handle.url}`);
+        process.exit(await handle.finished);
+      } catch (error) {
+        writeStderrLine(
+          `qwen serve: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        process.exit(1);
+      }
+    }
+    if (argv.managed) {
+      try {
+        const serveIndex = process.argv.indexOf('serve');
+        if (serveIndex >= 0)
+          validateManagedLocalFlags(process.argv.slice(serveIndex + 1));
+        if (
+          argv.hostname !== DEFAULT_SERVE_HOSTNAME ||
+          argv.profile !== 'default' ||
+          !argv.web ||
+          argv.workspace !== undefined ||
+          argv['conversations-dir'] !== undefined ||
+          argv.token !== undefined ||
+          argv['tls-cert'] ||
+          argv['tls-key'] ||
+          argv['local-control'] ||
+          argv.join ||
+          argv['agent-host-server'] ||
+          argv.channel !== undefined ||
+          argv['experimental-paired-engines'] ||
+          argv['experimental-managed-agents'] ||
+          argv['experimental-managed-runtime-worker'] ||
+          argv['experimental-managed-runtime-auto-local'] ||
+          argv['experimental-managed-runtime-url'] !== undefined ||
+          argv['managed-runtime-broker-url'] !== undefined ||
+          argv['managed-runtime-broker-token'] !== undefined ||
+          argv['allow-origin']?.length ||
+          argv['enable-session-shell'] ||
+          !argv['http-bridge']
+        ) {
+          throw new Error(
+            '--managed uses its own loopback services, persistent credentials, and application-owned Workspaces. Use --port, --managed-data-dir, and --open; other deployment, workspace-import, or execution modes cannot be combined.',
+          );
+        }
+        const { runManagedLocalServe } = await import(
+          '../serve/managed-local-serve.js'
+        );
+        const handle = await runManagedLocalServe({
+          port: argv.port,
+          dataDirectory: argv['managed-data-dir'],
+        });
+        await maybeOpenWebShellBrowser(
+          handle,
+          argv.open || argv['open-with-auth'],
+          argv['open-with-auth'],
+        );
+        process.exit(await handle.finished);
+      } catch (error) {
+        writeStderrLine(
+          `qwen serve: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        process.exit(1);
+      }
+    }
+    if (argv['managed-data-dir'] !== undefined) {
+      writeStderrLine('qwen serve: --managed-data-dir requires --managed.');
+      process.exit(1);
+    }
+    const managedRuntimeBrokerUrl =
+      argv['managed-runtime-broker-url'] ??
+      process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'];
+    const managedRuntimeBrokerToken =
+      argv['managed-runtime-broker-token'] ??
+      process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'];
+    delete process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'];
+    delete process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'];
     const agentHostEnrollmentToken =
       process.env['QWEN_AGENT_HOST_ENROLLMENT_TOKEN']?.trim();
     delete process.env['QWEN_AGENT_HOST_ENROLLMENT_TOKEN'];
@@ -826,6 +1044,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         'qwen serve: --token is visible in the process command line; ' +
           'prefer the QWEN_SERVER_TOKEN env var for any non-trivial ' +
           'deployment.',
+      );
+    }
+    if (argv['managed-runtime-broker-token'] !== undefined) {
+      // Same exposure for the Broker credential the Harness holds.
+      writeStderrLine(
+        'qwen serve: --managed-runtime-broker-token is visible in the ' +
+          'process command line; prefer the ' +
+          'QWEN_MANAGED_RUNTIME_BROKER_TOKEN env var.',
       );
     }
     let channelSelection: ServeChannelSelection | undefined;
@@ -1005,6 +1231,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         maxPendingPromptsPerSession,
         maxConnections: argv['max-connections'],
         eventRingSize: argv['event-ring-size'],
+        eventRingMaxBytes: argv['event-ring-max-bytes'],
         compactedReplayMaxBytes: argv['compacted-replay-max-bytes'],
         ...(argv['max-journal-events'] !== undefined
           ? { maxJournalEvents: argv['max-journal-events'] }
@@ -1013,6 +1240,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           ? { maxJournalBytes: argv['max-journal-bytes'] }
           : {}),
         workspace: argv.workspace,
+        ...(argv['conversations-dir'] !== undefined
+          ? { conversationsDir: argv['conversations-dir'] }
+          : {}),
         ...(argv['memory-project-scope'] !== undefined
           ? { memoryProjectScope: argv['memory-project-scope'] }
           : {}),
@@ -1064,14 +1294,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
                 argv['experimental-managed-runtime-token'],
             }
           : {}),
-        ...(argv['managed-runtime-broker-url'] !== undefined
+        ...(managedRuntimeBrokerUrl !== undefined
           ? {
-              managedRuntimeBrokerUrl: argv['managed-runtime-broker-url'],
+              managedRuntimeBrokerUrl,
             }
           : {}),
-        ...(argv['managed-runtime-broker-token'] !== undefined
+        ...(managedRuntimeBrokerToken !== undefined
           ? {
-              managedRuntimeBrokerToken: argv['managed-runtime-broker-token'],
+              managedRuntimeBrokerToken,
             }
           : {}),
         ...(argv['hosted-harness-capability-digest'] !== undefined

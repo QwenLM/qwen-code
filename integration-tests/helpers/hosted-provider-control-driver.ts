@@ -17,7 +17,7 @@ import type { ManagedToolInvocationStatus } from '@qwen-code/qwen-code-core/tool
 import {
   ManagedRuntimeBrokerClient,
   MANAGED_RUNTIME_BROKER_ROUTE_PREFIX,
-} from '../../packages/cli/src/serve/broker-managed-runtime-provider.js';
+} from '../../packages/cli/src/serve/managed-runtime-broker-client.js';
 import { waitUntil } from './hosted-harness-process.js';
 import { quotePosix } from './hosted-shell-quote.js';
 

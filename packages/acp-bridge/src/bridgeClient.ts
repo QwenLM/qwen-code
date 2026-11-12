@@ -23,6 +23,7 @@ import { RequestError } from '@agentclientprotocol/sdk';
 import {
   APPROVAL_MODES,
   isValidCronTaskRoutingId,
+  MAX_CRON_GATE_CHARS,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
   SESSION_PR_URL_MAX_LENGTH,
 } from '@qwen-code/qwen-code-core';
@@ -47,6 +48,7 @@ import {
 } from './bridgeTypes.js';
 import type {
   BackgroundNotificationTurn,
+  BridgeSessionState,
   BridgeWorkspaceGenerationNotificationEvent,
   BridgeGenerationNotificationEvent,
   BridgePendingInteraction,
@@ -700,6 +702,7 @@ export interface BridgeClientSessionEntry {
   sourceType?: string;
   sourceId?: string;
   events: EventBus;
+  restoreState?: BridgeSessionState;
   artifacts: SessionArtifactStore;
   artifactWorkspaceReady: boolean;
   prepareArtifactWorkspace?: () => Promise<void>;
@@ -917,6 +920,7 @@ export class BridgeClient implements Client {
       entry: BridgeClientSessionEntry,
       modelId: string,
       originatorClientId: string | undefined,
+      subscriptionSignedOut?: boolean,
     ) => void,
     /**
      * §2.3 / A2 callback: centralised `approval_mode_changed` publish.
@@ -1021,6 +1025,10 @@ export class BridgeClient implements Client {
     /** Invoked after the child reports that it started a Goal turn. */
     private readonly onGoalTurnStart?: (sessionId: string) => void,
     private readonly onWorkflowAncestorTrust?: WorkflowAncestorTrustHandler,
+    private readonly onLastUserPromptRecorded?: (
+      entry: BridgeClientSessionEntry,
+      timestamp: string | undefined,
+    ) => Promise<void>,
   ) {}
 
   async requestPermission(
@@ -1184,6 +1192,12 @@ export class BridgeClient implements Client {
     const events =
       entry?.events ?? this.resolvePendingRestoreEvents(params.sessionId);
     if (!events) return;
+    if (
+      entry?.restoreState &&
+      params.update.sessionUpdate === 'config_option_update'
+    ) {
+      entry.restoreState.configOptions = params.update.configOptions;
+    }
     const prepared = this.prepareSessionUpdateFrames(params, entry);
     for (const frame of prepared.frames) {
       events.publish(frame);
@@ -2369,6 +2383,20 @@ export class BridgeClient implements Client {
         '`recurring` must be a boolean',
       );
     }
+    // Shape only: the daemon route validates the command itself with the
+    // same rule `cron_create` applies.
+    const gate = params['gate'];
+    if (
+      gate !== undefined &&
+      (typeof gate !== 'string' ||
+        gate.trim().length === 0 ||
+        gate.length > MAX_CRON_GATE_CHARS)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`gate\` must be a non-empty string within the ${MAX_CRON_GATE_CHARS}-character limit`,
+      );
+    }
 
     const entry = this.resolveEntry(callerSessionId);
     if (
@@ -2398,6 +2426,7 @@ export class BridgeClient implements Client {
       cron,
       prompt,
       recurring,
+      ...(gate !== undefined ? { gate } : {}),
       assertCallerPromptActive: () => {
         const currentEntry = this.resolveEntry(callerSessionId);
         if (
@@ -2424,7 +2453,11 @@ export class BridgeClient implements Client {
         'Scheduled-task host returned an invalid result',
       );
     }
-    return { id: result.id, cron: result.cron };
+    return {
+      id: result.id,
+      cron: result.cron,
+      ...(result.gate !== undefined ? { gate: result.gate } : {}),
+    };
   }
 
   private async handleLiveScreenContextCapture(
@@ -2710,6 +2743,10 @@ export class BridgeClient implements Client {
         });
         return;
       }
+      if (record['type'] === 'reset') {
+        this.onGenerationEvent?.(sessionId, { type: 'reset', requestId });
+        return;
+      }
       if (record['type'] === 'delta') {
         const seq = record['seq'];
         const text = record['text'];
@@ -2794,6 +2831,27 @@ export class BridgeClient implements Client {
     }
     if (method === 'qwen/notify/session/mode-update') {
       this.handleInSessionModeUpdate(params);
+      return;
+    }
+    if (method === 'qwen/notify/session/last-user-prompt') {
+      const sessionId = params['sessionId'];
+      const timestamp = params['timestamp'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        (timestamp !== null &&
+          (typeof timestamp !== 'string' ||
+            !Number.isFinite(Date.parse(timestamp)) ||
+            new Date(timestamp).toISOString() !== timestamp))
+      )
+        return;
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      try {
+        await this.onLastUserPromptRecorded?.(entry, timestamp ?? undefined);
+      } finally {
+        this.onSessionCatalogChanged?.();
+      }
       return;
     }
     if (method === 'qwen/notify/session/title-update') {
@@ -3183,6 +3241,7 @@ export class BridgeClient implements Client {
         entry,
         currentModelId,
         entry.activePromptOriginatorClientId,
+        params['subscriptionSignedOut'] === true,
       );
     } else {
       // `EventBus.publish` never throws (closed bus → undefined no-op); per
@@ -3190,7 +3249,13 @@ export class BridgeClient implements Client {
       entry.events.publish({
         type: 'model_switched',
         ...currentTurnMetadata(entry),
-        data: { sessionId, modelId: currentModelId },
+        data: {
+          sessionId,
+          modelId: currentModelId,
+          ...(params['subscriptionSignedOut'] === true
+            ? { subscriptionSignedOut: true }
+            : {}),
+        },
       });
     }
     writeStderrLine(

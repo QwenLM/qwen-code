@@ -167,10 +167,10 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('emits scope:"global" on the system text when useGlobalCacheScope is set', () => {
-      // Anthropic-native + caching enabled → the generator passes
-      // `useGlobalCacheScope: true` and the system prefix joins cross-session
-      // caching under the `prompt-caching-scope-2026-01-05` beta. Other
-      // backends pass false (or omit) and get the per-session shape above.
+      // Caching on plus an explicit `forceGlobalCacheScope` opt-in → the
+      // generator passes `useGlobalCacheScope: true`, and the system prefix
+      // joins cross-session caching under the scope beta. Without the opt-in
+      // every backend gets the per-session shape above.
       expect(systemOf('sys', { useGlobalCacheScope: true })).toEqual([
         txt('sys', GLOBAL),
       ]);
@@ -1595,9 +1595,9 @@ describe('AnthropicContentConverter', () => {
 
     it('emits scope:"global" on the last tool when useGlobalCacheScope is set', async () => {
       // Mirror of the system-block scope test: cross-session caching for
-      // tools (the largest, slowest-changing prefix) only fires for
-      // Anthropic-native baseURLs. The generator latches the predicate
-      // once per request and forwards the same value here.
+      // tools (the largest, slowest-changing prefix) only fires under an
+      // explicit `forceGlobalCacheScope` opt-in. The generator latches the
+      // predicate once per request and forwards the same value here.
       const result = await converter.convertLlmToolsToAnthropic(
         toolsOf(weather()),
         { useGlobalCacheScope: true },
@@ -1738,6 +1738,58 @@ describe('AnthropicContentConverter', () => {
 
       const parts = response.candidates?.[0]?.content?.parts || [];
       expect(parts).toEqual([fnCall('tool', { x: 1 }, 't1')]);
+    });
+
+    it('surfaces a refusal stop-details category', () => {
+      const response = respond({
+        stop_reason: 'refusal',
+        stop_details: {
+          type: 'refusal',
+          category: 'reasoning_extraction',
+          explanation: 'Provider-authored explanation',
+        },
+      });
+
+      expect(response.candidates?.[0]).toEqual(
+        expect.objectContaining({
+          finishReason: FinishReason.SAFETY,
+          finishMessage:
+            'Response refused because it requested hidden reasoning.',
+        }),
+      );
+    });
+
+    it.each([
+      ['cyber', 'Response refused due to cyber-related safety policy.'],
+      ['bio', 'Response refused due to biological safety policy.'],
+      [
+        'frontier_llm',
+        'Response refused due to frontier model development policy.',
+      ],
+      ['general_harms', 'Response refused due to a general safety policy.'],
+      // Provider text can be any string, including prototype keys: those must
+      // land on the generic notice instead of leaking `[object Object]`.
+      ['__proto__', 'Response refused due to safety reasons.'],
+      ['unmapped_category', 'Response refused due to safety reasons.'],
+    ])(
+      'maps the %s refusal category to its curated notice',
+      (category, expected) => {
+        const response = respond({
+          stop_reason: 'refusal',
+          stop_details: { type: 'refusal', category },
+        });
+
+        expect(response.candidates?.[0]?.finishMessage).toBe(expected);
+      },
+    );
+
+    it('ignores stop_details that is not a refusal', () => {
+      const response = respond({
+        stop_reason: 'end_turn',
+        stop_details: { type: 'something_else', category: 'cyber' },
+      });
+
+      expect(response.candidates?.[0]?.finishMessage).toBeUndefined();
     });
 
     it('forwards cache_read_input_tokens and cache_creation_input_tokens through to usageMetadata', () => {
@@ -1934,8 +1986,8 @@ describe('AnthropicContentConverter', () => {
 
       it('honors useGlobalCacheScope independently of enableCacheControl source', async () => {
         // Cache on (per-call), scope off (per-call default): the emitted
-        // shape is per-session even though cache_control IS attached —
-        // non-Anthropic baseURL behavior in one call.
+        // shape is per-session even though cache_control IS attached — the
+        // default on every baseURL.
         const { system } = convert(
           'Hello',
           {

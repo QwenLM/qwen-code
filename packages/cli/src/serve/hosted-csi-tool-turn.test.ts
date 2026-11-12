@@ -19,7 +19,14 @@ import { parseHarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runt
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { HostedCsiToolTurn } from './hosted-csi-tool-turn.js';
+import {
+  HostedCsiToolTurn,
+  type HostedCsiTurnCommit,
+} from './hosted-csi-tool-turn.js';
+import {
+  enableManagedExecutionDiagnostics,
+  parseManagedExecutionEvidence,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import * as history from './hosted-csi-file-history.js';
 import type { CsiFileHistoryObservation } from './managed-csi-file-history-protocol.js';
@@ -500,6 +507,78 @@ function batch() {
   return { calls, parts };
 }
 
+it('binds CSI activity diagnostics to native executions and normalized file targets', async () => {
+  await enableManagedExecutionDiagnostics(managed);
+  const persist: HostedCsiTurnCommit = async (
+    type,
+    parts,
+    model,
+    identity,
+    diagnostics,
+  ) => {
+    const uuid =
+      identity?.uuid ?? (type === 'assistant' ? batchId : randomUUID());
+    await managed.sink.write(
+      {
+        ...managed.authority.recordEnvelope,
+        uuid,
+        parentUuid: null,
+        sessionId,
+        timestamp: identity?.timestamp ?? new Date().toISOString(),
+        type,
+        model,
+        message: { role: type === 'assistant' ? 'model' : 'user', parts },
+      },
+      diagnostics,
+    );
+    return uuid;
+  };
+  commit.mockImplementation(persist);
+  const { calls, parts } = batch();
+  await turn.execute(calls, parts, 'unit-model', new AbortController().signal);
+  const events = managed.authority.eventsInSequenceRange(
+    1,
+    managed.authority.committedSequence,
+  );
+  const intents = events.filter((event) => event.kind === 'tool.intent');
+  const facts = await Promise.all(
+    intents.map(async (event) => {
+      const evidence = parseManagedExecutionEvidence(
+        await managed.resources.read(
+          assertManagedSessionDurableRef(
+            event.payload['diagnosticsRef'],
+            'diagnosticsRef',
+          ),
+        ),
+      );
+      expect(evidence.sourceEventId).toBe(event.eventId);
+      expect(evidence.observations[0].executionCallId).toBe(
+        event.payload['executionCallId'],
+      );
+      expect(evidence.observations[0].execution).toBe('unknown');
+      return evidence.observations[0];
+    }),
+  );
+  expect(facts.map((fact) => fact.ordinal)).toEqual([0, 1, 2]);
+  expect(facts.map((fact) => fact.file?.path)).toEqual([
+    'dir/file.txt',
+    'output.txt',
+    'dir/file.txt',
+  ]);
+  expect(events.filter((event) => event.kind === 'tool.receipt')).toHaveLength(
+    3,
+  );
+  expect(
+    events
+      .filter(
+        (event) =>
+          event.kind === 'message.committed' &&
+          event.payload['role'] === 'tool_result',
+      )
+      .every((event) => event.payload['diagnosticsRef'] !== undefined),
+  ).toBe(true);
+});
+
 it('fixes full Parts, original IDs, exact input bytes and final definitions before reservation', async () => {
   const { calls, parts } = batch();
   const originalParts = structuredClone(parts);
@@ -551,7 +630,7 @@ it('fixes full Parts, original IDs, exact input bytes and final definitions befo
   const pinned = JSON.parse(
     await readFile(
       new URL(
-        '../../../managed-agent-server/src/main/resources/csi-native-file-declarations.json',
+        '../../../managed-agent-server/contracts/src/main/resources/csi-native-file-declarations.json',
         import.meta.url,
       ),
       'utf8',
@@ -1241,6 +1320,39 @@ it('cancels an in-flight prepare while reconciling once with an independent live
   expect(commit).toHaveBeenCalledTimes(1);
 });
 
+it('reuses the admitted immutable profile for later history commits', async () => {
+  await history.commitInitialHostedCsiHistory(managed, emptyHistory());
+  const originalRead = managed.resources.read.bind(managed.resources);
+  const read = vi.spyOn(managed.resources, 'read').mockImplementation((ref) => {
+    if (
+      ref.resourceId ===
+      managed.authority.sessionHeader.definitionRef.resourceId
+    )
+      return Promise.reject(
+        new Error('The definition should not be fetched again.'),
+      );
+    return originalRead(ref);
+  });
+  const committed = await history.commitHostedCsiHistory(
+    managed,
+    emptyHistory(),
+    null,
+    null,
+    'cached-profile',
+  );
+  expect(
+    JSON.parse((await managed.resources.read(committed.recordRef)).toString())
+      .profile,
+  ).toBe('csi-files-retirement/1');
+  expect(
+    read.mock.calls.some(
+      ([ref]) =>
+        ref.resourceId ===
+        managed.authority.sessionHeader.definitionRef.resourceId,
+    ),
+  ).toBe(false);
+});
+
 it('refuses nonempty initial history before committing it', async () => {
   const observation = emptyHistory();
   observation.state.files['owned.txt'] = null;
@@ -1753,4 +1865,78 @@ it.each([
   ).rejects.toThrow();
   expect(managed.authority.committedSequence).toBe(sequence);
   expect(await successor.sink.project()).toEqual(before);
+});
+
+it('preserves refusal diagnostics through the production CSI text turn', async () => {
+  await enableManagedExecutionDiagnostics(managed);
+  const text = 'Refuse invalid file';
+  const contentRef = await managed.resources.publish(
+    'managed-input',
+    Buffer.from(JSON.stringify([{ type: 'text', text }])),
+  );
+  const admissionRef = await managed.resources.publish(
+    'managed-admission',
+    Buffer.from('{}'),
+  );
+  await managed.authority.submitInput(
+    {
+      operation: 'submitInput',
+      commandId: promptId,
+      sessionKey: managed.authority.sessionHeader.sessionKey,
+      contentDigest: contentRef.digest,
+    },
+    {
+      inputId: promptId,
+      turnId: promptId,
+      source: 'hosted-harness',
+      contentRef,
+      admissionRef,
+      deadline: null,
+      wakeReason: 'input',
+    },
+  );
+  vi.mocked(runHostedHarnessTextTurn).mockImplementationOnce(async (input) => {
+    const call = { ...batch().calls[0], args: { file_path: '../outside' } };
+    await input.toolTurn!.declarations(input.signal);
+    await input.toolTurn!.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'unit-model',
+      input.signal,
+    );
+    await input.toolTurn!.consumeResults();
+    return { text: 'done', model: 'unit-model' };
+  });
+  await runHostedCsiTextTurn(
+    {
+      managed,
+      cwd: root,
+      files: {
+        broker: { baseUrl: 'http://127.0.0.1:8080', token: 'unit-broker' },
+        runtime: { bindingId, generation: '1' },
+      },
+    },
+    promptId,
+    text,
+    new AbortController(),
+  );
+  const event = managed.authority
+    .eventsInSequenceRange(1, managed.authority.committedSequence)
+    .filter(
+      (e) =>
+        e.kind === 'message.committed' && e.payload['role'] === 'tool_result',
+    )
+    .at(-1)!;
+  const evidence = parseManagedExecutionEvidence(
+    await managed.resources.read(
+      assertManagedSessionDurableRef(
+        event.payload['diagnosticsRef'],
+        'diagnosticsRef',
+      ),
+    ),
+  );
+  expect(evidence.observations[0]).toMatchObject({
+    admission: 'invalid',
+    execution: 'not_started',
+  });
 });

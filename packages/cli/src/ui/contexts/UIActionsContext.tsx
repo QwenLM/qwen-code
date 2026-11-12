@@ -12,6 +12,7 @@ import { type IdeIntegrationNudgeResult } from '../IdeIntegrationNudge.js';
 import { type CommandMigrationNudgeResult } from '../CommandFormatMigrationNudge.js';
 import { type FolderTrustChoice } from '../components/FolderTrustDialog.js';
 import { type McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
+import { type ProjectHooksApprovalChoice } from '../components/hooks/ProjectHooksApprovalDialog.js';
 import {
   type EditorType,
   type ApprovalMode,
@@ -67,7 +68,6 @@ export interface UIActions {
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;
   handleArenaModelsSelected?: (models: string[]) => void;
-  dismissProviderUpdate: () => void;
   closeTrustDialog: () => void;
   closePermissionsDialog: () => void;
   setShellModeActive: (value: boolean) => void;
@@ -76,6 +76,9 @@ export interface UIActions {
   handleCommandMigrationComplete: (result: CommandMigrationNudgeResult) => void;
   handleFolderTrustSelect: (choice: FolderTrustChoice) => void;
   handleMcpApprovalSelect: (choice: McpApprovalChoice) => void;
+  handleProjectHooksApprovalSelect: (
+    choice: ProjectHooksApprovalChoice,
+  ) => void;
   setConstrainHeight: (value: boolean) => void;
   onEscapePromptChange: (show: boolean) => void;
   onTabConsumerChange: (active: boolean) => void;
@@ -90,6 +93,10 @@ export interface UIActions {
       pasteExpansions?: ReadonlyMap<string, string>;
     },
   ) => void;
+  // The composer registers its own submit path (large-paste expansion, epoch
+  // bump, stash cleanup) so the vim-mode Enter can run it instead of calling
+  // handleFinalSubmit directly.
+  registerPromptSubmit?: (handler: ((value: string) => void) | null) => void;
   handleRetryLastPrompt: () => void;
   handleClearScreen: () => void;
   setPendingPastes?: React.Dispatch<React.SetStateAction<Map<string, string>>>;

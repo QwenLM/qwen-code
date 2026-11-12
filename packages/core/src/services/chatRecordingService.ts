@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { userPromptTimestamp } from './last-user-prompt-time.js';
 import { shellResultText } from '../utils/shell-result.js';
 import type { SessionSourcesSnapshot } from './session-sources.js';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
@@ -29,11 +30,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
   PartListUnion,
+  Part,
   Content,
   FunctionDeclaration,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createModelContent, createUserContent } from '../core/genai-compat.js';
+import { getToolCallFingerprint } from '../core/toolCallIdUtils.js';
+import { canonicalToolName } from '../tools/tool-names.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -45,7 +49,13 @@ import {
 import { compactToolResultDisplayForRecording } from '../utils/toolResultDisplayCompaction.js';
 import { stripRuntimeSnapshotPrefix } from '../utils/runtimeModelPrefix.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
-import { tryGenerateSessionTitle } from './sessionTitle.js';
+import { modPromptTitleKey, tryGenerateSessionTitle } from './sessionTitle.js';
+import {
+  readSessionTitleSidecar,
+  sessionTitleSidecarPath,
+  truncateTitleForList,
+  writeSessionTitleSidecar,
+} from './session-title-sidecar.js';
 import type {
   ChatCompressionInfo,
   ToolCallResponseInfo,
@@ -70,8 +80,12 @@ import {
   SessionWriterLease,
 } from './session-writer-lease.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
-import { getApiHistoryPromptId } from '../utils/api-history-metadata.js';
+import {
+  getApiHistoryPromptId,
+  isApiHistoryDirectoryContext,
+} from '../utils/api-history-metadata.js';
 import { getStartupContextLength } from '../core/environmentContext.js';
+import { getRecordRewindId } from './session-api-history.js';
 import { computeInitialTurnFromHistory } from './session-turn-state.js';
 import {
   deleteTranscriptMessageGroups,
@@ -294,10 +308,12 @@ export type ChatRecordProvenance =
   | 'goal_runtime'
   | 'system'
   /** Written on behalf of a workspace agent (session multi-agent). */
-  | 'external_agent';
+  | 'external_agent'
+  /** A prompt a Mod submitted with `$.prompt.submit`, not the person's. */
+  | 'mod_prompt';
 
 export type RecordToolResultOptions = {
-  subtype?: 'code_mode_tool_result';
+  subtype?: 'code_mode_tool_result' | 'tool_loop_end';
 } & (
   | {
       goalContext?: GoalTurnPermit;
@@ -308,6 +324,36 @@ export type RecordToolResultOptions = {
       provenance: 'goal_runtime' | 'execution_output';
     }
 );
+
+// A prompt a Mod submitted keeps its turn's place in the title projection but
+// offers the title nothing, since the user did not type it. It is `null`, not
+// `''`, so it does not switch the title to the projection on its own.
+function titleText(record: ChatRecord): string | null | undefined {
+  if (record.provenance === 'mod_prompt') return null;
+  return (record.systemPayload as UserPromptRecordPayload | undefined)
+    ?.displayText;
+}
+
+/**
+ * The label a transcript's first user turn supports, under the same policy
+ * the list reader uses to derive that label from an intact transcript: an
+ * explicitly empty `displayText` projection offers nothing and lets a later
+ * prompt label the session, a record without a projection falls back to its
+ * own text parts, and a Mod-submitted prompt is not filtered out (the reader
+ * does not filter it either). Both sidecar writers go through this one
+ * function so a live write and a resume seed cannot disagree.
+ */
+function firstPromptLabelText(record: ChatRecord): string | undefined {
+  const payload = record.systemPayload as UserPromptRecordPayload | undefined;
+  if (payload?.displayText !== undefined) {
+    return payload.displayText.trim() || undefined;
+  }
+  return (
+    record.message?.parts
+      ?.find((part): part is { text: string } => 'text' in part)
+      ?.text?.trim() || undefined
+  );
+}
 
 function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
   return {
@@ -384,6 +430,7 @@ export interface ChatRecord {
   /** Optional subtype for distinguishing non-standard records */
   subtype?:
     | 'chat_compression'
+    | 'memory_catalog_snapshot'
     | 'slash_command'
     | 'ui_telemetry'
     | 'at_command'
@@ -399,6 +446,7 @@ export interface ChatRecord {
     | 'omni_recall'
     | 'session_model'
     | 'session_approval_mode'
+    | 'session_workflow_mode'
     | 'rewind'
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
@@ -414,6 +462,7 @@ export interface ChatRecord {
     | 'goal_runtime'
     | 'goal_turn_end'
     | 'code_mode_tool_result'
+    | 'tool_loop_end'
     | 'realtime_message'
     | 'turn_result'
     | 'turn_attempt'
@@ -517,6 +566,7 @@ export interface ChatRecord {
     | SessionModelRecordPayload
     | SessionExecutionEnginePayload
     | SessionApprovalModeRecordPayload
+    | SessionWorkflowModeRecordPayload
     | NotificationRecordPayload
     | UserPromptRecordPayload
     | RewindRecordPayload
@@ -602,6 +652,10 @@ export interface UserPromptRecordPayload {
   displayText: string;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
+  /** The Mod that submitted the prompt; the record's provenance says so too. */
+  mod?: string;
+  /** The Mod sent the prompt as the person's own words, so it is unframed. */
+  asUser?: true;
   /** UI-only annotations; interpreted by transcript consumers, not the model. */
   inputAnnotations?: unknown[];
   /** Daemon-owned attachment references used to restore prompt previews. */
@@ -675,6 +729,8 @@ export interface ChatCompressionRecordPayload {
   summaryPrefixLength?: number;
   /** Prompt identities parallel to compressedHistory. */
   promptIds?: Array<string | null>;
+  /** Internal directory context, without changing the model-facing snapshot. */
+  directoryContextIndices?: number[];
   completedToolCallIds?: string[];
 }
 
@@ -762,6 +818,21 @@ export interface SessionModelRecordPayload {
   authType: string;
   baseUrl?: string;
   isRuntime?: boolean;
+}
+
+export interface SessionWorkflowModeRecordPayload {
+  enabled: boolean;
+}
+
+export function isValidSessionWorkflowModePayload(
+  payload: unknown,
+): payload is SessionWorkflowModeRecordPayload {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    !Array.isArray(payload) &&
+    typeof (payload as SessionWorkflowModeRecordPayload).enabled === 'boolean'
+  );
 }
 
 /** Last-wins approval state a daemon session should restore. */
@@ -1125,6 +1196,8 @@ export interface BranchCheckpointCursor {
 export interface ChatRecordingRestoreState {
   lastCompletedUuid: string;
   turnParentUuids: Array<string | null>;
+  turnPromptIds?: Array<string | undefined>;
+  turnDaemonPromptIds?: Array<string | undefined>;
   customTitle?: string;
   titleSource?: TitleSource;
   parentSessionId?: string;
@@ -1132,6 +1205,7 @@ export interface ChatRecordingRestoreState {
   sourceId?: string;
   sessionModel?: SessionModelRecordPayload;
   sessionApprovalMode?: SessionApprovalModeRecordPayload;
+  sessionWorkflowMode?: SessionWorkflowModeRecordPayload;
 }
 
 /**
@@ -1182,6 +1256,8 @@ export class ChatRecordingService {
    * record).
    */
   private turnParentUuids: Array<string | null> = [];
+  private turnPromptIds: Array<string | undefined> = [];
+  private turnDaemonPromptIds: Array<string | undefined> = [];
   private chatsDirEnsured = false;
   private cachedConversationFile: string | undefined;
   /** Session identity pinned by `pinSessionIdentity` at rotation time. */
@@ -1238,11 +1314,22 @@ export class ChatRecordingService {
   private currentSourceId: string | undefined;
   /** Last-wins daemon session model binding, used to skip duplicate writes. */
   private currentSessionModel: SessionModelRecordPayload | undefined;
+  private currentSessionWorkflowMode: boolean | undefined;
   /** Last-wins daemon session approval state, used to skip duplicate writes. */
   private currentSessionApprovalMode:
     | SessionApprovalModeRecordPayload
     | undefined;
-  private readonly userDisplayTextsForTitle: Array<string | undefined> = [];
+  private readonly userDisplayTextsForTitle: Array<string | null | undefined> =
+    [];
+  /**
+   * Set when the recorder attached through the projected restore, which
+   * carries no record stream. The session's first prompt (if any) is unknown
+   * there, so a later prompt must not become its label.
+   */
+  private firstPromptUnknown = false;
+  // The Mods' prompts as the model read them, which a title drawn from the
+  // conversation leaves out, as the projection does.
+  private readonly modPromptKeysForTitle = new Set<string>();
   /**
    * How many auto-title attempts have been made this process.
    *
@@ -1414,6 +1501,90 @@ export class ChatRecordingService {
     return conversationFile;
   }
 
+  private titleSidecarPath(): string {
+    return sessionTitleSidecarPath(this.ensureChatsDir(), this.getSessionId());
+  }
+
+  /**
+   * Keeps the session list label independent of the transcript's head. A
+   * transcript can be rebuilt without its first records (the writer recreates
+   * a missing file on the next append), and the list otherwise degrades to a
+   * bare session id. Managed logs own their metadata and are skipped.
+   */
+  private persistListTitle(
+    displayName: string,
+    source: 'manual' | 'auto' | 'prompt',
+  ): void {
+    if (this.managedSink) return;
+    try {
+      writeSessionTitleSidecar(this.titleSidecarPath(), displayName, source);
+    } catch {
+      // Best-effort: a missing sidecar must never fail a rename.
+    }
+  }
+
+  private persistPromptDerivedTitle(record: ChatRecord): void {
+    if (this.managedSink) return;
+    // The projected restore carries no record stream, so the session's first
+    // prompt is unknown. Inventing a label from a later prompt would name the
+    // session after the wrong turn as soon as its transcript loses its head.
+    if (this.firstPromptUnknown) return;
+    try {
+      const sidecarPath = this.titleSidecarPath();
+      // Any persisted label wins: a later prompt must not replace the first
+      // prompt's label, a rename, or an auto title. This also lets an
+      // image-only first prompt leave the slot open for the next text prompt.
+      if (readSessionTitleSidecar(sidecarPath)) return;
+      const text = firstPromptLabelText(record);
+      if (!text) return;
+      writeSessionTitleSidecar(
+        sidecarPath,
+        truncateTitleForList(text),
+        'prompt',
+      );
+    } catch {
+      // Best-effort: recording the prompt itself must not depend on the label
+      // sidecar, which can be unwritable (read-only home, partial Config).
+    }
+  }
+
+  /**
+   * Restores the list label from a resolved transcript on resume. Without
+   * this, sessions created before the sidecar existed (or before the current
+   * writer attached) would only gain one on their next prompt, which a resumed
+   * session never gets because the first prompt is already in its history.
+   */
+  private seedTitleSidecar(promptDisplayText?: string): void {
+    if (this.managedSink) return;
+    try {
+      const sidecarPath = this.titleSidecarPath();
+      const existing = readSessionTitleSidecar(sidecarPath);
+      const customTitle = this.currentCustomTitle?.trim();
+      if (customTitle) {
+        const source = this.currentTitleSource ?? 'manual';
+        if (
+          existing?.source === source &&
+          existing.displayName === customTitle
+        ) {
+          return;
+        }
+        writeSessionTitleSidecar(sidecarPath, customTitle, source);
+        return;
+      }
+      // An explicit name already on disk outranks a prompt-derived guess.
+      if (existing && existing.source !== 'prompt') return;
+      const prompt = promptDisplayText?.trim();
+      if (!prompt) return;
+      const label = truncateTitleForList(prompt);
+      if (existing?.source === 'prompt' && existing.displayName === label) {
+        return;
+      }
+      writeSessionTitleSidecar(sidecarPath, label, 'prompt');
+    } catch {
+      // Best-effort: a missing sidecar is a label gap, not a resume failure.
+    }
+  }
+
   private restoreSessionState(
     sessionData?: {
       conversation: { messages: ChatRecord[] };
@@ -1431,18 +1602,24 @@ export class ChatRecordingService {
     this.currentSourceId = undefined;
     this.currentSessionModel = undefined;
     this.currentSessionApprovalMode = undefined;
+    this.currentSessionWorkflowMode = undefined;
     this.activeBranchRecords = [];
     this.activeBranchBaseUuid = null;
     this.pendingBranchToolCalls = [];
     this.userDisplayTextsForTitle.length = 0;
+    this.modPromptKeysForTitle.clear();
+    this.firstPromptUnknown = false;
     if (!sessionData) return;
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
+    // Tracked separately from `userDisplayTextsForTitle`: that buffer keeps
+    // only the newest 20 prompts, so its head is not the session's first turn.
+    let firstPromptText: string | undefined;
     for (const record of sessionData.conversation.messages) {
       if (record.type === 'user' && record.subtype === undefined) {
-        this.trackUserDisplayTextForTitle(
-          (record.systemPayload as UserPromptRecordPayload | undefined)
-            ?.displayText,
-        );
+        this.trackTitleText(record);
+        if (firstPromptText === undefined) {
+          firstPromptText = firstPromptLabelText(record);
+        }
       }
       if (record.type !== 'system') continue;
       if (record.subtype === 'custom_title') {
@@ -1467,6 +1644,10 @@ export class ChatRecordingService {
             record.systemPayload,
           );
         }
+      } else if (record.subtype === 'session_workflow_mode') {
+        if (isValidSessionWorkflowModePayload(record.systemPayload)) {
+          this.currentSessionWorkflowMode = record.systemPayload.enabled;
+        }
       } else if (record.subtype === 'session_approval_mode') {
         if (isValidSessionApprovalModePayload(record.systemPayload)) {
           this.currentSessionApprovalMode = normalizeSessionApprovalModePayload(
@@ -1485,21 +1666,49 @@ export class ChatRecordingService {
     if (this.currentSourceType) {
       this.bytesSinceSourceAnchor = METADATA_REANCHOR_BYTES;
     }
+    this.seedTitleSidecar(firstPromptText);
   }
 
-  private trackUserDisplayTextForTitle(displayText: string | undefined): void {
-    this.userDisplayTextsForTitle.push(displayText);
+  private trackTitleText(record: ChatRecord): void {
+    this.userDisplayTextsForTitle.push(titleText(record));
     if (this.userDisplayTextsForTitle.length > MAX_TITLE_USER_DISPLAY_TEXTS) {
       this.userDisplayTextsForTitle.shift();
+    }
+    // A prompt sent as the person's words reads as theirs to the model too,
+    // and its bare text would also match a prompt the person typed alike.
+    const key =
+      record.provenance === 'mod_prompt' &&
+      !(record.systemPayload as UserPromptRecordPayload | undefined)?.asUser
+        ? modPromptTitleKey(record.message?.parts ?? [])
+        : undefined;
+    if (key?.trim()) {
+      // A key submitted again is the newest, so it is evicted last.
+      this.modPromptKeysForTitle.delete(key);
+      this.modPromptKeysForTitle.add(key);
+      // Only recent messages reach a title.
+      if (this.modPromptKeysForTitle.size > MAX_TITLE_USER_DISPLAY_TEXTS) {
+        const [oldest] = this.modPromptKeysForTitle;
+        this.modPromptKeysForTitle.delete(oldest!);
+      }
     }
   }
 
   private restoreProjectedState(state: ChatRecordingRestoreState): void {
+    // A projection only exists for a transcript that is already on disk, so
+    // the first prompt (if any) predates this recorder. No record stream is
+    // carried here, so the seed cannot recover it.
+    this.firstPromptUnknown = true;
     this.lastRecordUuid = state.lastCompletedUuid;
     this.lastPersistedRecordUuid = state.lastCompletedUuid;
     this.resetExternalRecordIndex();
     this.activeBranchBaseUuid = state.lastCompletedUuid;
     this.turnParentUuids = [...state.turnParentUuids];
+    this.turnPromptIds = state.turnPromptIds
+      ? [...state.turnPromptIds]
+      : Array.from(state.turnParentUuids, () => undefined);
+    this.turnDaemonPromptIds = state.turnDaemonPromptIds
+      ? [...state.turnDaemonPromptIds]
+      : Array.from(state.turnParentUuids, () => undefined);
     this.currentCustomTitle = state.customTitle;
     this.currentTitleSource = state.titleSource;
     this.currentParentSessionId = state.parentSessionId;
@@ -1507,6 +1716,11 @@ export class ChatRecordingService {
     this.currentSourceId = state.sourceId;
     this.currentSessionModel = state.sessionModel
       ? normalizeSessionModelPayload(state.sessionModel)
+      : undefined;
+    this.currentSessionWorkflowMode = isValidSessionWorkflowModePayload(
+      state.sessionWorkflowMode,
+    )
+      ? state.sessionWorkflowMode.enabled
       : undefined;
     this.currentSessionApprovalMode = state.sessionApprovalMode
       ? normalizeSessionApprovalModePayload(state.sessionApprovalMode)
@@ -1517,6 +1731,7 @@ export class ChatRecordingService {
     if (this.currentSourceType) {
       this.bytesSinceSourceAnchor = METADATA_REANCHOR_BYTES;
     }
+    this.seedTitleSidecar();
   }
 
   activate(
@@ -1694,6 +1909,9 @@ export class ChatRecordingService {
     legacyConversationFile?: string,
     updateActiveTail = true,
   ): Promise<void> {
+    const promptTime = userPromptTimestamp(record);
+    const changesPromptTime =
+      promptTime !== undefined || record.subtype === 'rewind';
     const pendingWrite = this.operationTail.then(async () => {
       if (this.writeFailure) throw this.writeFailure;
       const managedSink = this.managedSink;
@@ -1715,6 +1933,9 @@ export class ChatRecordingService {
         }
       } catch (error) {
         throw this.enterWriteFailure(error, record.sessionId);
+      }
+      if (changesPromptTime) {
+        this.notifyLastUserPromptRecorded(promptTime, record.sessionId);
       }
       if (managedSink) await this.anchorManagedMetadata(managedSink);
     });
@@ -2167,13 +2388,12 @@ export class ChatRecordingService {
         const active = prepareTranscriptRecords(records)
           .records as ChatRecord[];
         this.rebuildTurnBoundaries(active);
+        this.notifyLastUserPromptRecorded(undefined, this.getSessionId());
         this.userDisplayTextsForTitle.length = 0;
+        this.modPromptKeysForTitle.clear();
         for (const record of active) {
           if (record.type === 'user' && record.subtype === undefined) {
-            this.trackUserDisplayTextForTitle(
-              (record.systemPayload as UserPromptRecordPayload | undefined)
-                ?.displayText,
-            );
+            this.trackTitleText(record);
           }
         }
         return result;
@@ -2500,10 +2720,11 @@ export class ChatRecordingService {
     daemonPromptId?: string,
   ): void {
     try {
-      this.trackUserDisplayTextForTitle(promptPayload?.displayText);
-      this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
+        ...(promptPayload?.mod !== undefined && {
+          provenance: 'mod_prompt' as const,
+        }),
         executionContext: this.getExecutionContext(),
         ...(daemonPromptId ? { daemonPromptId } : {}),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
@@ -2511,14 +2732,35 @@ export class ChatRecordingService {
         ...(promptPayload ? { systemPayload: promptPayload } : {}),
         ...(promptId ? { promptId } : {}),
       };
+      // Advance rewind associations only after the record is built, so a
+      // rejected message cannot skew the projection.
+      this.trackTitleText(record);
+      this.turnParentUuids.push(record.parentUuid ?? null);
+      this.turnPromptIds.push(getRecordRewindId(record));
+      this.turnDaemonPromptIds.push(record.daemonPromptId);
       this.appendRecord(record);
+      // The sidecar write is best-effort and runs after the transcript
+      // append, so an unwritable label path can never drop the message. It
+      // only fills a missing label: a persisted prompt or custom title is
+      // never replaced by a later prompt.
+      this.persistPromptDerivedTitle(record);
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
     }
   }
 
-  getUserDisplayTextsForTitle(): ReadonlyArray<string | undefined> {
+  getUserDisplayTextsForTitle(): ReadonlyArray<string | null | undefined> {
     return this.userDisplayTextsForTitle;
+  }
+
+  /** The keys of the messages the Mods submitted, which a title leaves out. */
+  getModPromptKeysForTitle(): ReadonlySet<string> {
+    return this.modPromptKeysForTitle;
+  }
+
+  /** User turns in the active transcript: the boundaries `/rewind` uses. */
+  getUserTurnCount(): number {
+    return this.turnParentUuids.length;
   }
 
   recordGoalRuntimeMessage(
@@ -3033,6 +3275,7 @@ export class ChatRecordingService {
           this.config,
           controller.signal,
           this.userDisplayTextsForTitle,
+          this.modPromptKeysForTitle,
         );
         if (!outcome.ok) return;
         if (controller.signal.aborted) return;
@@ -3097,100 +3340,343 @@ export class ChatRecordingService {
     options?: RecordToolResultOptions,
   ): void {
     try {
-      const persistedOutputFiles = toolCallResult?.persistedOutputFiles;
-      const artifacts = [
-        toolResultBoundaryArtifact(
-          persistedOutputFiles,
-          toolCallResult?.artifacts,
-        ),
-      ];
-      const inputDisplay = toolCallResult?.resultDisplay;
-      const inputValues = () => [
-        ...toolResultPartDiagnosticValues(message),
-        ...(shellResultText(inputDisplay) !== undefined
-          ? [
-              {
-                representation: 'display' as const,
-                value: shellResultText(inputDisplay)!,
-              },
-            ]
-          : []),
-      ];
-      let recordingToolCallResult:
-        | (Partial<ToolCallResponseInfo> & { status: Status })
-        | undefined;
-      if (toolCallResult) {
-        const recordableToolCallResult = { ...toolCallResult };
-        delete recordableToolCallResult.persistedOutputFiles;
-        delete recordableToolCallResult.boundaryArtifact;
-        recordingToolCallResult = sanitizeToolCallResultForRecording(
-          recordableToolCallResult,
-        );
-        if (
-          typeof recordingToolCallResult.resultDisplay === 'object' &&
-          recordingToolCallResult.resultDisplay !== null &&
-          'type' in recordingToolCallResult.resultDisplay &&
-          recordingToolCallResult.resultDisplay.type === 'task_execution'
-        ) {
-          const taskResult =
-            recordingToolCallResult.resultDisplay as AgentResultDisplay;
-          recordingToolCallResult = {
-            ...recordingToolCallResult,
-            resultDisplay: { ...taskResult, toolCalls: [] },
-          };
-        }
-      }
-      const outputDisplay = recordingToolCallResult?.resultDisplay;
-      let displayMutated: boolean | undefined;
-      const mutated = () =>
-        (displayMutated ??= !isDeepStrictEqual(inputDisplay, outputDisplay));
-      observeToolResultBoundary({
-        stage: 'recorder_input',
-        sessionId: this.getSessionId(),
-        toolCallId: toolCallResult?.callId,
-        artifacts,
-        mutated,
-        values: inputValues,
-      });
-      observeToolResultBoundary({
-        stage: 'recorder_output',
-        sessionId: this.getSessionId(),
-        toolCallId: toolCallResult?.callId,
-        artifacts,
-        mutated,
-        values: () => [
-          ...toolResultPartDiagnosticValues(message),
-          ...(shellResultText(outputDisplay) !== undefined
-            ? [
-                {
-                  representation: 'display' as const,
-                  value: shellResultText(outputDisplay)!,
-                },
-              ]
-            : []),
-        ],
-      });
-
-      const record: ChatRecord = {
-        ...this.createBaseRecord('tool_result'),
-        ...(options?.subtype ? { subtype: options.subtype } : {}),
-        ...(options?.goalContext
-          ? { goalContext: copyGoalContext(options.goalContext) }
-          : {}),
-        ...(options?.provenance ? { provenance: options.provenance } : {}),
-        message: createUserContent(message),
-      };
-
-      if (recordingToolCallResult) {
-        record.toolCallResult = recordingToolCallResult;
-      }
-
-      if (options?.goalContext && options.provenance !== 'goal_runtime') {
+      const record = this.createToolResultRecord(
+        message,
+        toolCallResult,
+        options,
+      );
+      if (options?.goalContext && options.provenance !== 'goal_runtime')
         this.accumulateGoalTurnToolResult(options.goalContext.turnId);
-      }
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving tool result:', error);
+    }
+  }
+
+  private createToolResultRecord(
+    message: PartListUnion,
+    toolCallResult?: Partial<ToolCallResponseInfo> & { status: Status },
+    options?: RecordToolResultOptions,
+  ): ChatRecord {
+    const persistedOutputFiles = toolCallResult?.persistedOutputFiles;
+    const artifacts = [
+      toolResultBoundaryArtifact(
+        persistedOutputFiles,
+        toolCallResult?.artifacts,
+      ),
+    ];
+    const inputDisplay = toolCallResult?.resultDisplay;
+    const inputValues = () => [
+      ...toolResultPartDiagnosticValues(message),
+      ...(shellResultText(inputDisplay) !== undefined
+        ? [
+            {
+              representation: 'display' as const,
+              value: shellResultText(inputDisplay)!,
+            },
+          ]
+        : []),
+    ];
+    let recordingToolCallResult:
+      | (Partial<ToolCallResponseInfo> & { status: Status })
+      | undefined;
+    if (toolCallResult) {
+      const recordableToolCallResult = { ...toolCallResult };
+      delete recordableToolCallResult.persistedOutputFiles;
+      delete recordableToolCallResult.boundaryArtifact;
+      recordingToolCallResult = sanitizeToolCallResultForRecording(
+        recordableToolCallResult,
+      );
+      if (
+        typeof recordingToolCallResult.resultDisplay === 'object' &&
+        recordingToolCallResult.resultDisplay !== null &&
+        'type' in recordingToolCallResult.resultDisplay &&
+        recordingToolCallResult.resultDisplay.type === 'task_execution'
+      ) {
+        const taskResult =
+          recordingToolCallResult.resultDisplay as AgentResultDisplay;
+        recordingToolCallResult = {
+          ...recordingToolCallResult,
+          resultDisplay: { ...taskResult, toolCalls: [] },
+        };
+      }
+    }
+    const outputDisplay = recordingToolCallResult?.resultDisplay;
+    let displayMutated: boolean | undefined;
+    const mutated = () =>
+      (displayMutated ??= !isDeepStrictEqual(inputDisplay, outputDisplay));
+    observeToolResultBoundary({
+      stage: 'recorder_input',
+      sessionId: this.getSessionId(),
+      toolCallId: toolCallResult?.callId,
+      artifacts,
+      mutated,
+      values: inputValues,
+    });
+    observeToolResultBoundary({
+      stage: 'recorder_output',
+      sessionId: this.getSessionId(),
+      toolCallId: toolCallResult?.callId,
+      artifacts,
+      mutated,
+      values: () => [
+        ...toolResultPartDiagnosticValues(message),
+        ...(shellResultText(outputDisplay) !== undefined
+          ? [
+              {
+                representation: 'display' as const,
+                value: shellResultText(outputDisplay)!,
+              },
+            ]
+          : []),
+      ],
+    });
+
+    const record: ChatRecord = {
+      ...this.createBaseRecord('tool_result'),
+      ...(options?.subtype ? { subtype: options.subtype } : {}),
+      ...(options?.goalContext
+        ? { goalContext: copyGoalContext(options.goalContext) }
+        : {}),
+      ...(options?.provenance ? { provenance: options.provenance } : {}),
+      message: createUserContent(message),
+    };
+
+    if (recordingToolCallResult) {
+      record.toolCallResult = recordingToolCallResult;
+    }
+
+    return record;
+  }
+
+  assertRestoreToolBranchAnchor(input: {
+    sessionId: string;
+    originalCallId: string;
+    name: string;
+    args: Record<string, unknown>;
+    promptId?: string;
+  }): void {
+    if (this.topologyFence)
+      throw new Error('Transcript topology transaction already active');
+    this.resolveRestoreToolBranchAnchor(input);
+  }
+
+  private resolveRestoreToolBranchAnchor(input: {
+    sessionId: string;
+    originalCallId: string;
+    name: string;
+    args: Record<string, unknown>;
+    promptId?: string;
+  }) {
+    if (input.sessionId !== this.getSessionId() || this.managedSink)
+      throw new Error('Restore branch does not own this session recorder');
+    if (this.writeFailure) throw this.writeFailure;
+    if (!this.acceptingWrites || this.state !== 'active')
+      throw new SessionWriterUnavailableError();
+    const matches = this.activeBranchRecords.flatMap((record, index) =>
+      (record.message?.parts ?? []).flatMap((part) =>
+        part.functionCall?.id === input.originalCallId
+          ? [{ record, index, call: part.functionCall }]
+          : [],
+      ),
+    );
+    if (matches.length !== 1)
+      throw new Error('Restore call anchor is missing or ambiguous');
+    const anchor = matches[0];
+    if (
+      anchor.record.type !== 'assistant' ||
+      anchor.record.sessionId !== input.sessionId ||
+      typeof anchor.call.name !== 'string' ||
+      getToolCallFingerprint(
+        canonicalToolName(anchor.call.name),
+        anchor.call.args,
+      ) !== getToolCallFingerprint(canonicalToolName(input.name), input.args) ||
+      (input.promptId !== undefined &&
+        this.activeBranchRecords
+          .slice(0, anchor.index + 1)
+          .findLast(
+            (record) => record.type === 'user' && record.subtype === undefined,
+          )?.promptId !== input.promptId)
+    )
+      throw new Error('Restore call anchor does not match the checkpoint');
+    return anchor;
+  }
+
+  async restoreToolBranch(input: {
+    sessionId: string;
+    originalCallId: string;
+    name: string;
+    args: Record<string, unknown>;
+    promptId?: string;
+    execution: { callId: string; name: string; args: Record<string, unknown> };
+    responseParts: readonly Part[];
+    toolCallResult: Partial<ToolCallResponseInfo> & { status: Status };
+    options?: RecordToolResultOptions;
+    truncatedCount: number;
+    survivingFileHistorySnapshots: readonly FileHistorySnapshot[];
+    isCurrent: () => boolean;
+  }): Promise<boolean> {
+    if (!input.isCurrent()) return false;
+    if (input.sessionId !== this.getSessionId() || this.managedSink)
+      throw new Error('Restore branch does not own this session recorder');
+    if (this.writeFailure) throw this.writeFailure;
+    if (!this.acceptingWrites || this.state !== 'active')
+      throw new SessionWriterUnavailableError();
+    if (this.topologyFence)
+      throw new Error('Transcript topology transaction already active');
+    if (
+      canonicalToolName(input.execution.name) !== canonicalToolName(input.name)
+    )
+      throw new Error('Restore completion does not match the checkpoint tool');
+    const responseParts = structuredClone([...input.responseParts]);
+    const responses = responseParts.filter((part) => part.functionResponse);
+    if (
+      responses.length !== 1 ||
+      responses[0].functionResponse?.id !== input.execution.callId ||
+      typeof responses[0].functionResponse.name !== 'string' ||
+      canonicalToolName(responses[0].functionResponse.name) !==
+        canonicalToolName(input.name) ||
+      input.toolCallResult.callId !== input.execution.callId ||
+      !['success', 'error', 'cancelled'].includes(input.toolCallResult.status)
+    )
+      throw new Error(
+        'Restore completion has no unique real terminal response',
+      );
+    const snapshots =
+      input.survivingFileHistorySnapshots.map(serializeSnapshot);
+    const tail = this.lastRecordUuid;
+    const fence: TranscriptTopologyFence = { buffered: [] };
+    this.topologyFence = fence;
+    const strict = (record: ChatRecord) => {
+      this.topologyFence = undefined;
+      const pending = this.appendRecordStrict(record);
+      this.topologyFence = fence;
+      return pending;
+    };
+    const projectTurns = (records: readonly ChatRecord[]) => {
+      this.turnParentUuids = [];
+      this.turnPromptIds = [];
+      this.turnDaemonPromptIds = [];
+      this.userDisplayTextsForTitle.length = 0;
+      this.modPromptKeysForTitle.clear();
+      for (const record of records) {
+        if (
+          record.type === 'user' &&
+          ![
+            'goal_runtime',
+            'notification',
+            'cron',
+            'mid_turn_user_message',
+            'realtime_message',
+            'agent_mention',
+            'agent_message',
+          ].includes(record.subtype ?? '')
+        ) {
+          this.turnParentUuids.push(record.parentUuid ?? null);
+          this.turnPromptIds.push(getRecordRewindId(record));
+          this.turnDaemonPromptIds.push(record.daemonPromptId);
+        }
+        if (record.type === 'user' && record.subtype === undefined)
+          this.trackTitleText(record);
+      }
+    };
+    let committed = false;
+    try {
+      await this.flush();
+      if (!input.isCurrent() || input.sessionId !== this.getSessionId())
+        return false;
+      if (
+        fence.buffered.some(
+          ({ record }) =>
+            record.type === 'user' ||
+            record.type === 'assistant' ||
+            record.type === 'tool_result' ||
+            record.subtype === 'rewind' ||
+            record.subtype === 'chat_compression',
+        )
+      )
+        throw new Error(
+          'Restore branch received a concurrent conversation write',
+        );
+      if (this.lastRecordUuid !== tail || this.lastPersistedRecordUuid !== tail)
+        throw new Error('Restore branch changed while flushing');
+      const {
+        record: anchor,
+        index,
+        call,
+      } = this.resolveRestoreToolBranchAnchor(input);
+      const retained = this.activeBranchRecords.slice(0, index + 1);
+      const metadataKinds = new Set([
+        'custom_title',
+        'parent_session',
+        'session_source',
+        'session_model',
+        'session_approval_mode',
+        'session_workflow_mode',
+        'attribution_snapshot',
+      ]);
+      const metadata = new Map<string, ChatRecord>();
+      for (const record of this.activeBranchRecords.slice(index + 1)) {
+        if (
+          record.type === 'system' &&
+          record.subtype &&
+          metadataKinds.has(record.subtype)
+        )
+          metadata.set(record.subtype, record);
+      }
+      responses[0].functionResponse!.id = input.originalCallId;
+      responses[0].functionResponse!.name = call.name;
+      const resultRecord = this.createToolResultRecord(
+        responseParts,
+        {
+          ...input.toolCallResult,
+          callId: input.originalCallId,
+        },
+        input.options,
+      );
+      const rewind: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        parentUuid: anchor.uuid,
+        type: 'system',
+        subtype: 'rewind',
+        systemPayload: { truncatedCount: input.truncatedCount },
+      };
+      // The trusted caller owns chat/revision/turn admission; commit has no await gap.
+      if (!input.isCurrent()) return false;
+      const rewindWrite = strict(rewind);
+      committed = true;
+      projectTurns(retained);
+      this.resetExternalRecordIndex();
+      this.lastAttributionSnapshotJson = undefined;
+      await rewindWrite;
+      resultRecord.parentUuid = this.lastRecordUuid;
+      if (
+        input.options?.goalContext &&
+        input.options.provenance !== 'goal_runtime'
+      )
+        this.accumulateGoalTurnToolResult(input.options.goalContext.turnId);
+      await strict(resultRecord);
+      for (const record of metadata.values()) {
+        await strict({
+          ...record,
+          ...this.createBaseRecord('system'),
+          type: 'system',
+          subtype: record.subtype,
+        });
+      }
+      if (snapshots.length) {
+        await strict({
+          ...this.createBaseRecord('system'),
+          type: 'system',
+          subtype: 'file_history_snapshot',
+          systemPayload: { snapshots },
+        });
+      }
+      return true;
+    } finally {
+      this.releaseTopologyFence(fence);
+      if (committed && !this.writeFailure)
+        projectTurns(this.activeBranchRecords);
     }
   }
 
@@ -3236,6 +3722,19 @@ export class ChatRecordingService {
     }
   }
 
+  recordMemoryCatalogSnapshot(snapshot: Part): void {
+    try {
+      this.appendRecord({
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'memory_catalog_snapshot',
+        message: { role: 'user', parts: [snapshot] },
+      });
+    } catch (error) {
+      debugLogger.error('Error saving memory catalog snapshot:', error);
+    }
+  }
+
   /**
    * Records a chat compression checkpoint as a system record. This keeps the UI
    * history immutable while allowing resume/continue flows to reconstruct the
@@ -3243,9 +3742,12 @@ export class ChatRecordingService {
    */
   recordChatCompression(payload: ChatCompressionRecordPayload): void {
     try {
-      // Freeze the array so later live-history mutations cannot desynchronize
-      // entries from the parallel promptIds array.
-      const compressedHistory = [...payload.compressedHistory];
+      // Own the containers before hook rescue replaces parts on live entries;
+      // spread preserves the symbol metadata used to derive prompt identities.
+      const compressedHistory = payload.compressedHistory.map((content) => ({
+        ...content,
+        ...(content.parts ? { parts: [...content.parts] } : {}),
+      }));
       const previous = this.activeBranchRecords.findLast(
         (record) => record.subtype === 'chat_compression',
       )?.systemPayload as ChatCompressionRecordPayload | undefined;
@@ -3262,6 +3764,10 @@ export class ChatRecordingService {
       const promptIds = compressedHistory.map(
         (content) => getApiHistoryPromptId(content) ?? null,
       );
+      const directoryContextIndices = compressedHistory.flatMap(
+        (content, index) =>
+          isApiHistoryDirectoryContext(content) ? [index] : [],
+      );
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
         type: 'system',
@@ -3274,6 +3780,9 @@ export class ChatRecordingService {
           }),
           summaryPrefixLength,
           ...(promptIds.some(Boolean) ? { promptIds } : {}),
+          ...(directoryContextIndices.length
+            ? { directoryContextIndices }
+            : {}),
         },
       };
 
@@ -3303,6 +3812,17 @@ export class ChatRecordingService {
     }
   }
 
+  getRewindTurnIndex(promptId: string): number {
+    const index = this.turnPromptIds.indexOf(promptId);
+    return index === this.turnPromptIds.lastIndexOf(promptId) ? index : -1;
+  }
+
+  getRewindDaemonPromptId(promptId: string): string | undefined {
+    const index = this.getRewindTurnIndex(promptId);
+    const id = index < 0 ? undefined : this.turnDaemonPromptIds[index];
+    return typeof id === 'string' && id.trim() ? id : undefined;
+  }
+
   private isDeletedTelemetry(record: ChatRecord): boolean {
     const { promptId, callId } = telemetryRecordIdentity(record);
     return (
@@ -3320,10 +3840,12 @@ export class ChatRecordingService {
    * This makes all messages after that point sit on a dead branch in the
    * UUID tree, so `reconstructHistory()` will skip them on resume.
    *
-   * @param targetTurnIndex 0-based index of the user turn to rewind to.
-   *   For example, 0 means rewind to the very first user message (keeping
-   *   nothing before it), 1 means keep the first user turn, etc.
+   * @param targetTurnIndex 0-based recorder turn index to rewind to, resolved
+   *   independently of visible UI turns and retained file checkpoint positions.
+   *   For example, 0 keeps no preceding recorded user turns, 1 keeps one, etc.
    * @param payload Additional metadata to persist with the rewind record.
+   * @param survivingFileHistorySnapshots Complete identified checkpoint batch
+   *   surviving the rewind, including the target turn's checkpoint when present.
    */
   rewindRecording(
     targetTurnIndex: number,
@@ -3350,6 +3872,11 @@ export class ChatRecordingService {
       );
       // Trim future boundaries — they no longer exist in the active branch.
       this.turnParentUuids = this.turnParentUuids.slice(0, targetTurnIndex);
+      this.turnPromptIds = this.turnPromptIds.slice(0, targetTurnIndex);
+      this.turnDaemonPromptIds = this.turnDaemonPromptIds.slice(
+        0,
+        targetTurnIndex,
+      );
       // The previous attribution snapshot now sits on the abandoned
       // branch — clear the dedup key so the next snapshot lands on the
       // active branch and `/resume` can find it. Without this, a
@@ -3385,6 +3912,15 @@ export class ChatRecordingService {
         });
       }
 
+      if (this.currentSessionWorkflowMode !== undefined) {
+        this.appendRecord({
+          ...this.createBaseRecord('system'),
+          type: 'system',
+          subtype: 'session_workflow_mode',
+          systemPayload: { enabled: this.currentSessionWorkflowMode },
+        });
+      }
+
       // Re-record surviving file history snapshots on the active branch so
       // they are visible to reconstructHistory on resume.
       if (survivingFileHistorySnapshots?.length) {
@@ -3405,6 +3941,8 @@ export class ChatRecordingService {
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
     this.resetExternalRecordIndex();
     this.turnParentUuids = [];
+    this.turnPromptIds = [];
+    this.turnDaemonPromptIds = [];
     this.activeBranchRecords = [...messages];
     this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;
     this.pendingBranchToolCalls = collectPendingBranchToolCalls(messages);
@@ -3424,12 +3962,38 @@ export class ChatRecordingService {
         // Reconstructed histories can start mid-chain; the persisted edge is
         // the source of truth, not the previous item in this sliced list.
         this.turnParentUuids.push(record.parentUuid ?? null);
+        this.turnPromptIds.push(getRecordRewindId(record));
+        this.turnDaemonPromptIds.push(record.daemonPromptId);
       }
     }
     // Ensure lastRecordUuid points to the end of the reconstructed chain.
     if (messages.length > 0) {
       this.lastRecordUuid = messages[messages.length - 1].uuid;
       this.lastPersistedRecordUuid = this.lastRecordUuid;
+    }
+  }
+
+  private lastUserPromptRecordedCallback?: (
+    timestamp: string | undefined,
+    sessionId: string,
+  ) => void;
+
+  setLastUserPromptRecordedCallback(
+    callback:
+      | ((timestamp: string | undefined, sessionId: string) => void)
+      | undefined,
+  ): void {
+    this.lastUserPromptRecordedCallback = callback;
+  }
+
+  private notifyLastUserPromptRecorded(
+    timestamp: string | undefined,
+    sessionId: string,
+  ): void {
+    try {
+      this.lastUserPromptRecordedCallback?.(timestamp, sessionId);
+    } catch (error) {
+      debugLogger.debug('Last user prompt listener failed:', error);
     }
   }
 
@@ -3517,6 +4081,7 @@ export class ChatRecordingService {
       );
       this.currentCustomTitle = customTitle;
       this.currentTitleSource = titleSource;
+      this.persistListTitle(customTitle, titleSource);
       try {
         this.titleRecordedCallback?.(
           customTitle,
@@ -3683,6 +4248,39 @@ export class ChatRecordingService {
         debugLogger.error('Error saving session model record:', error);
       }
       return false;
+    }
+  }
+
+  restoreSessionWorkflowMode(enabled: boolean | undefined): void {
+    this.currentSessionWorkflowMode = enabled;
+  }
+
+  getSessionWorkflowMode(): boolean | undefined {
+    return this.currentSessionWorkflowMode;
+  }
+
+  async recordSessionWorkflowMode(enabled: boolean): Promise<void> {
+    if (typeof enabled !== 'boolean') {
+      throw new Error('Workflow mode must be a boolean');
+    }
+    // Even a no-op must validate that the recorder still owns a live writer.
+    await this.assertCanStartTurn();
+    if (this.currentSessionWorkflowMode === enabled) return;
+    if (!this.writerLeaseRequired) this.ensureConversationFile();
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'session_workflow_mode',
+      systemPayload: { enabled },
+    };
+    const previous = this.currentSessionWorkflowMode;
+    // A rewind queued during this append must re-anchor the same choice.
+    this.currentSessionWorkflowMode = enabled;
+    try {
+      await this.appendRecordStrict(record);
+    } catch (error) {
+      this.currentSessionWorkflowMode = previous;
+      throw error;
     }
   }
 

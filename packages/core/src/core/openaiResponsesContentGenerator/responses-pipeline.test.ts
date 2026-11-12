@@ -34,6 +34,7 @@ import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { ResponsesApiRequest } from './types.js';
 import { preloadRuntimeFetchModule } from '../../utils/runtimeFetchOptions.js';
 import { classifyRetryError } from '../../utils/retryErrorClassification.js';
+import { retryContext } from '../../utils/retryContext.js';
 import { appendAutoMemoryContext } from '../../memory/request-context.js';
 import {
   collect,
@@ -691,6 +692,49 @@ describe('ResponsesPipeline', () => {
     ],
   ])('%s', expectBody);
 
+  it('keeps isolated Mod requests free of configured tools and server-side history', async () => {
+    const body = await retryContext.run(
+      {
+        attempt: 1,
+        retryTotalDelayMs: 0,
+        requestSetupMs: 0,
+        singleAttempt: true,
+      },
+      () =>
+        sendBody(
+          pipe({
+            extra_body: {
+              instructions: 'configured prompt',
+              prompt: { id: 'pmpt_fixture', variables: { note: 'configured' } },
+              previous_response_id: 'old-response',
+              conversation: 'old-conversation',
+              tools: [{ type: 'web_search' }],
+              tool_choice: 'required',
+              max_tokens: 111,
+              max_output_tokens: 222,
+              service_tier: 'priority',
+            },
+          }),
+          { ...textRequest('hi'), config: { maxOutputTokens: 32 } },
+        ),
+    );
+    expect(body).toMatchObject({
+      max_output_tokens: 32,
+      service_tier: 'priority',
+    });
+    for (const key of [
+      'instructions',
+      'prompt',
+      'previous_response_id',
+      'conversation',
+      'tools',
+      'tool_choice',
+      'max_tokens',
+    ]) {
+      expect(body).not.toHaveProperty(key);
+    }
+  });
+
   describe('tool_choice from toolConfig.functionCallingConfig.mode', () => {
     function requestWithTool(
       mode?: FunctionCallingConfigMode,
@@ -1211,6 +1255,36 @@ describe('ResponsesPipeline', () => {
       expect(sentHeaders().get('user-agent')).toBe(
         `QwenCode/9.9.9-test (${process.platform}; ${process.arch})`,
       );
+    });
+
+    it.each([
+      [undefined, 'qwen-code-cli'],
+      ['CLI', 'qwen-code-cli'],
+      ['desktop', 'qwen-code-desktop'],
+    ])('attributes channel %s on the Token Plan wire', async (channel, t1) => {
+      await executeDone(
+        pipe(
+          {
+            baseUrl: 'https://token-plan.maas.qianwenaiapi.com/compatible-mode',
+            customHeaders: { 'X-DashScope-Source-Config': 'user' },
+          },
+          { ...makeCliConfig(), getChannel: () => channel } as Config,
+        ),
+      );
+
+      expect(sentHeaders().get('x-dashscope-source-config')).toBe(
+        JSON.stringify({
+          channel: 'qianwenai-inner-agents',
+          source: 'model',
+          tags: { t1 },
+        }),
+      );
+    });
+
+    it('sends no source attribution to other endpoints', async () => {
+      await executeDone();
+
+      expect(sentHeaders().get('x-dashscope-source-config')).toBeNull();
     });
 
     it('expands ${session_id} per request when the consent gate is on', async () => {

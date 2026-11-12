@@ -6,11 +6,9 @@
 
 import { useMemo } from 'react';
 import { Box } from 'ink';
-import {
-  AuthType,
-  findProviderByCredentials,
-  resolveMetadataKey,
-} from '@qwen-code/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { findProviderByCredentials } from '@qwen-code/qwen-code-core/providers/all-providers.js';
+import { resolveMetadataKey } from '@qwen-code/qwen-code-core/providers/provider-config.js';
 import { Header, AuthDisplayType } from './Header.js';
 import { Tips } from './Tips.js';
 import { useSettings } from '../contexts/SettingsContext.js';
@@ -40,6 +38,8 @@ function getAuthDisplayType(
   }
 
   switch (authType) {
+    case AuthType.QWEN_SUBSCRIPTION:
+      return 'Qwen Subscription';
     case AuthType.QWEN_OAUTH:
       return AuthDisplayType.QWEN_OAUTH;
     default:
@@ -79,6 +79,11 @@ export const AppHeader = ({ version }: AppHeaderProps) => {
         <Header
           version={version}
           authDisplayType={authDisplayType}
+          subscriptionPlan={
+            authType === AuthType.QWEN_SUBSCRIPTION
+              ? config.getSubscriptionPlan()
+              : undefined
+          }
           model={model}
           workingDirectory={targetDir}
           customAsciiArt={resolvedBanner?.asciiArt}
@@ -86,7 +91,7 @@ export const AppHeader = ({ version }: AppHeaderProps) => {
           customBannerSubtitle={resolvedBanner?.subtitle}
         />
       )}
-      {showTips && <Tips />}
+      {showTips && authType !== AuthType.QWEN_SUBSCRIPTION && <Tips />}
     </Box>
   );
 };
