@@ -649,7 +649,8 @@ public final class JdbcCsiActivationAdmission {
         JsonNode frozen = JSON.valueToTree(ManagedCsiFilesProtocol.parse(frozenBytes, 32 * 1024 * 1024));
         require(frozen.path("commitBodyBase64").isTextual());
         byte[] body = java.util.Base64.getDecoder().decode(frozen.path("commitBodyBase64").textValue());
-        require(java.util.Base64.getEncoder().encodeToString(body).equals(frozen.path("commitBodyBase64").textValue())
+        require(body.length <= CsiNativeActivationProof.TERMINAL_BODY_LIMIT
+                && java.util.Base64.getEncoder().encodeToString(body).equals(frozen.path("commitBodyBase64").textValue())
                 && CsiNativeActivationProof.sha256(body).equals(frozen.path("preparedCommitSha256").textValue()));
         JsonNode metadata = CsiNativeActivationProof.readObject(body);
         long predecessorRevision = CsiNativeActivationProof.number(metadata.get("expectedJournalRevision"));
@@ -657,7 +658,7 @@ public final class JdbcCsiActivationAdmission {
         require(predecessorRevision > 1 && predecessorRevision < MAX_HISTORY);
         var predecessor = activeHistoryThrough(connection, original, predecessorRevision, predecessorSequence,
                 CsiNativeActivationProof.text(metadata, "previousCommitDigest"), CsiNativeActivationProof.text(metadata, "writerId"), read);
-        byte[] raw = com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiApplicationJson.base64(metadata.get("recordBytesBase64"), 128 * 1024);
+        byte[] raw = com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiApplicationJson.base64(metadata.get("recordBytesBase64"), CsiNativeActivationProof.TERMINAL_RECORD_LIMIT);
         CsiNativeActivationProof.TerminalProof proof;
         try (var statement = read.statement(connection,
                 "SELECT * FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"

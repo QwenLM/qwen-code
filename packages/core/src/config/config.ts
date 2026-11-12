@@ -1447,6 +1447,8 @@ export interface ConfigParameters {
   agentTeamEnabled?: boolean;
   /** Experimental: run migrated surfaces on the shared agent loop. */
   unifiedAgentLoopEnabled?: boolean;
+  /** Experimental: run the shared agent loop on the event bus. */
+  eventBusAgentLoopEnabled?: boolean;
   /**
    * Opt-in for persistent workspace Agents answering @-mentions in chat
    * sessions. Separate from `agentTeamEnabled`: neither implies the other.
@@ -3258,6 +3260,7 @@ export class Config {
   private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
   private readonly unifiedAgentLoopEnabled: boolean = false;
+  private readonly eventBusAgentLoopEnabled: boolean = false;
   private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private readonly artifactRecordingSupported: boolean = true;
@@ -3721,6 +3724,7 @@ export class Config {
     this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled ?? false;
+    this.eventBusAgentLoopEnabled = params.eventBusAgentLoopEnabled ?? false;
     this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactRecordingSupported = params.artifactRecordingSupported ?? true;
@@ -10815,6 +10819,13 @@ export class Config {
   isUnifiedAgentLoopEnabled(): boolean {
     if (process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] === '1') return true;
     return this.unifiedAgentLoopEnabled;
+  }
+
+  isEventBusAgentLoopEnabled(): boolean {
+    if (process.env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] === '1') {
+      return true;
+    }
+    return this.eventBusAgentLoopEnabled;
   }
 
   /**
