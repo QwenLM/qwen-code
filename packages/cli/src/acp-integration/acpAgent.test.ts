@@ -28386,6 +28386,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
   let liveAssertCanStartTurn: ReturnType<typeof vi.fn>;
   let liveBeginHistoryMutation: ReturnType<typeof vi.fn>;
   let liveReleaseHistoryMutation: ReturnType<typeof vi.fn>;
+  let liveFlushPendingPeerNotifications: ReturnType<typeof vi.fn>;
 
   // Live session sessionId is whatever `getSessionId()` on the inner config
   // returns; matches the existing test scaffolding.
@@ -28408,6 +28409,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     liveBeginHistoryMutation = vi
       .fn()
       .mockReturnValue(liveReleaseHistoryMutation);
+    liveFlushPendingPeerNotifications = vi.fn();
 
     vi.mocked(AgentSideConnection).mockImplementation((factory: unknown) => {
       capturedAgentFactory = factory as typeof capturedAgentFactory;
@@ -28538,6 +28540,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
           assertCanStartTurn: liveAssertCanStartTurn,
           assertHistoryContextAvailable: vi.fn(),
           beginHistoryMutation: liveBeginHistoryMutation,
+          flushPendingPeerNotifications: liveFlushPendingPeerNotifications,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
@@ -29893,6 +29896,74 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     expect(liveBeginClose).toHaveBeenCalledWith('user');
     expect(admission.signal.reason).toBe('qwen:user-cancel');
     expect(liveCancelPendingPrompt).toHaveBeenCalledOnce();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('lands an undrained teammate report before the recorder stops accepting writes', async () => {
+    const recording = makeRecordingService();
+    // `close()` clears the recorder's write gate, after which `appendRecord`
+    // drops records silently — so preservation only counts ahead of it.
+    let acceptingWrites = true;
+    const landed: string[] = [];
+    recording.close.mockImplementation(async () => {
+      acceptingWrites = false;
+    });
+    liveFlushPendingPeerNotifications.mockImplementation(() => {
+      if (acceptingWrites) landed.push('<teammate_message from="security"/>');
+    });
+    const { agent, agentPromise } = await bootAgent(
+      makeLiveSessionInnerConfig(recording),
+    );
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+        sessionId: liveSessionId,
+      }),
+    ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
+
+    expect(landed).toEqual(['<teammate_message from="security"/>']);
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('awaits the peer flush before the recorder is finalized', async () => {
+    // The flush stops the leader-inbox poll and drains it, which is async: a
+    // writer finalized while that is still settling would drop whatever the
+    // drain delivers, which is the loss the flush exists to prevent.
+    const recording = makeRecordingService();
+    const order: string[] = [];
+    let releaseFlush: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      releaseFlush = resolve;
+    });
+    liveFlushPendingPeerNotifications.mockImplementation(async () => {
+      order.push('flush:start');
+      await held;
+      order.push('flush:settled');
+    });
+    recording.finalize.mockImplementation(() => {
+      order.push('finalize');
+    });
+    const { agent, agentPromise } = await bootAgent(
+      makeLiveSessionInnerConfig(recording),
+    );
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const closing = agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+      sessionId: liveSessionId,
+    });
+    await vi.waitFor(() => expect(order).toContain('flush:start'));
+    expect(order).toEqual(['flush:start']);
+    expect(recording.finalize).not.toHaveBeenCalled();
+
+    releaseFlush();
+    await expect(closing).resolves.toEqual({
+      sessionId: liveSessionId,
+      closed: true,
+    });
+    expect(order).toEqual(['flush:start', 'flush:settled', 'finalize']);
     mockConnectionState.resolve();
     await agentPromise;
   });
@@ -33071,6 +33142,152 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       data: { errorKind: 'session_writer_unavailable' },
     });
     expect(Session).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('lands queued teammate reports before managed shutdown closes the writers', async () => {
+    const innerConfig = makeRestoreInnerConfig();
+    const liveSession = {
+      getId: vi.fn().mockReturnValue('persisted-1'),
+      getConfig: vi.fn().mockReturnValue(innerConfig),
+      beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
+      cancelMcpAppCalls: vi.fn(),
+      cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      flushPendingPeerNotifications: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const { agent, agentPromise } = await spawnAgent('expected-capability');
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      'persisted-1',
+      liveSession,
+    );
+
+    await agent.beginManagedShutdown().writerShutdown;
+
+    // Already marked read on disk: it only counts ahead of the writer loop.
+    expect(liveSession.flushPendingPeerNotifications).toHaveBeenCalledOnce();
+    expect(
+      liveSession.flushPendingPeerNotifications.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(innerConfig.closeSessionWriter).mock.invocationCallOrder[0],
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('awaits the peer flush before managed shutdown closes the writers', async () => {
+    // `writerShutdown` is `Promise.allSettled(peerFlushes)` and then the writer
+    // loop, so an unawaited flush would let the writers close while the
+    // leader-inbox drain is still in flight.
+    const innerConfig = makeRestoreInnerConfig();
+    let releaseFlush: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      releaseFlush = resolve;
+    });
+    const liveSession = {
+      getId: vi.fn().mockReturnValue('persisted-1'),
+      getConfig: vi.fn().mockReturnValue(innerConfig),
+      beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
+      cancelMcpAppCalls: vi.fn(),
+      cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      flushPendingPeerNotifications: vi.fn(() => held),
+      dispose: vi.fn(),
+    };
+    const { agent, agentPromise } = await spawnAgent('expected-capability');
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      'persisted-1',
+      liveSession,
+    );
+
+    const shutdown = agent.beginManagedShutdown().writerShutdown;
+    await vi.waitFor(() =>
+      expect(liveSession.flushPendingPeerNotifications).toHaveBeenCalledOnce(),
+    );
+    expect(innerConfig.closeSessionWriter).not.toHaveBeenCalled();
+
+    releaseFlush();
+    await shutdown;
+    expect(innerConfig.closeSessionWriter).toHaveBeenCalledWith({
+      handoff: true,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('waits for the cancelled turn before landing peer reports', async () => {
+    // Cancelling a delivery turn re-queues its teammate report on a later
+    // microtask, so a flush that runs while the cancel is still pending
+    // iterates a queue the report has already left; the re-queued landing then
+    // hits a closed writer and is silently dropped.
+    let releaseCancel: () => void = () => {};
+    const cancelSettled = new Promise<void>((resolve) => {
+      releaseCancel = resolve;
+    });
+    const innerConfig = makeRestoreInnerConfig();
+    const liveSession = {
+      getId: vi.fn().mockReturnValue('persisted-1'),
+      getConfig: vi.fn().mockReturnValue(innerConfig),
+      beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
+      cancelMcpAppCalls: vi.fn(),
+      cancelPendingPrompt: vi.fn().mockReturnValue(cancelSettled),
+      flushPendingPeerNotifications: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const { agent, agentPromise } = await spawnAgent('expected-capability');
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      'persisted-1',
+      liveSession,
+    );
+
+    const shutdown = agent.beginManagedShutdown();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(liveSession.flushPendingPeerNotifications).not.toHaveBeenCalled();
+    expect(innerConfig.closeSessionWriter).not.toHaveBeenCalled();
+
+    releaseCancel();
+    await shutdown.writerShutdown;
+
+    expect(liveSession.flushPendingPeerNotifications).toHaveBeenCalledOnce();
+    expect(
+      liveSession.flushPendingPeerNotifications.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(innerConfig.closeSessionWriter).mock.invocationCallOrder[0],
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('still closes the writers when a peer flush throws during managed shutdown', async () => {
+    const innerConfig = makeRestoreInnerConfig();
+    const liveSession = {
+      getId: vi.fn().mockReturnValue('persisted-1'),
+      getConfig: vi.fn().mockReturnValue(innerConfig),
+      beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
+      cancelMcpAppCalls: vi.fn(),
+      cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      flushPendingPeerNotifications: vi.fn(() => {
+        throw new Error('mailbox write failed');
+      }),
+      dispose: vi.fn(),
+    };
+    const { agent, agentPromise } = await spawnAgent('expected-capability');
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      'persisted-1',
+      liveSession,
+    );
+
+    // An unguarded throw would abort the session loop before this session's
+    // Config reached the writer-close loop, leaving its writer open.
+    await agent.beginManagedShutdown().writerShutdown;
+
+    expect(innerConfig.closeSessionWriter).toHaveBeenCalledWith({
+      handoff: true,
+    });
 
     mockConnectionState.resolve();
     await agentPromise;

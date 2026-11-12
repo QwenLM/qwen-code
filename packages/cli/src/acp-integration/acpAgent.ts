@@ -4251,6 +4251,11 @@ class QwenAgent implements Agent {
     this.workspaceGenerationControllers.clear();
 
     const configs = new Set<Config>([this.config, ...this.initializingConfigs]);
+    // Landing a peer report must wait for the cancel to settle: cancelling a
+    // delivery turn re-queues its report on a later microtask, so flushing
+    // synchronously would iterate a queue that no longer holds it and the
+    // writer close below would then make the re-queued landing a silent no-op.
+    const peerFlushes: Array<Promise<void>> = [];
     for (const session of this.sessions.values()) {
       try {
         session.beginCloseIfAvailable();
@@ -4262,13 +4267,34 @@ class QwenAgent implements Agent {
         );
       }
       session.cancelMcpAppCalls();
-      void session.cancelPendingPrompt().catch((error) => {
-        debugLogger.debug(
-          `Session ${session.getId()} cancel during managed shutdown failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      });
+      peerFlushes.push(
+        session
+          .cancelPendingPrompt()
+          .catch((error) => {
+            debugLogger.debug(
+              `Session ${session.getId()} cancel during managed shutdown failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          })
+          .then(async () => {
+            try {
+              // Queued teammate reports are already marked read in the on-disk
+              // mailbox, so land them here: the writer-close loop below runs
+              // before `dispose()`, and `appendRecord` is a silent no-op once
+              // it has closed. Awaited, because the flush now stops the
+              // leader-inbox poll and drains it first — sealing before that
+              // intake settles is what lost the report.
+              await session.flushPendingPeerNotifications?.();
+            } catch (error) {
+              debugLogger.debug(
+                `Session ${session.getId()} peer notification flush during managed shutdown failed: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+            }
+          }),
+      );
       configs.add(session.getConfig());
     }
     for (const pending of this.pendingConfigCleanup.values()) {
@@ -4276,32 +4302,35 @@ class QwenAgent implements Agent {
     }
 
     const configList = [...configs];
-    const writerTerminals: Array<Promise<void>> = [];
-    for (const config of configList) {
-      // A Managed session's Runtime worker stops before its log is handed
-      // off, so no call outlives the log; other writers close at once.
-      if (config.getSessionExecutionEngine?.() === 'managed') {
-        writerTerminals.push(
-          Promise.resolve()
-            .then(() => config.closeManagedRuntime())
-            .catch((error: unknown) => {
-              debugLogger.error(
-                '[ACP] Managed Runtime worker shutdown error:',
-                error,
-              );
-            })
-            .then(() => config.closeSessionWriter({ handoff: true })),
-        );
-        continue;
-      }
-      try {
-        writerTerminals.push(config.closeSessionWriter({ handoff: true }));
-      } catch (error) {
-        writerTerminals.push(Promise.reject(error));
-      }
-    }
-    const writerShutdown = Promise.allSettled(writerTerminals).then(
-      (results) => {
+    const writerShutdown = Promise.allSettled(peerFlushes)
+      .then(() => {
+        const writerTerminals: Array<Promise<void>> = [];
+        for (const config of configList) {
+          // A Managed session's Runtime worker stops before its log is handed
+          // off, so no call outlives the log; other writers close at once.
+          if (config.getSessionExecutionEngine?.() === 'managed') {
+            writerTerminals.push(
+              Promise.resolve()
+                .then(() => config.closeManagedRuntime())
+                .catch((error: unknown) => {
+                  debugLogger.error(
+                    '[ACP] Managed Runtime worker shutdown error:',
+                    error,
+                  );
+                })
+                .then(() => config.closeSessionWriter({ handoff: true })),
+            );
+            continue;
+          }
+          try {
+            writerTerminals.push(config.closeSessionWriter({ handoff: true }));
+          } catch (error) {
+            writerTerminals.push(Promise.reject(error));
+          }
+        }
+        return Promise.allSettled(writerTerminals);
+      })
+      .then((results) => {
         const failures = results.flatMap((result) =>
           result.status === 'rejected' ? [result.reason] : [],
         );
@@ -4311,8 +4340,7 @@ class QwenAgent implements Agent {
             'Managed session writer shutdown failed',
           );
         }
-      },
-    );
+      });
     return { configs: configList, writerShutdown };
   }
 
@@ -5150,6 +5178,7 @@ class QwenAgent implements Agent {
           // Session multi-agent records deferred behind the turn that just
           // settled land now, while the recorder still accepts writes.
           await session.flushDeferredExternalRecords?.();
+          await session.flushPendingPeerNotifications?.();
           recorder?.finalize();
           let flushError: unknown;
           try {

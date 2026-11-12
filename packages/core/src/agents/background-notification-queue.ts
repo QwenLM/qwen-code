@@ -47,6 +47,12 @@ export type BackgroundNotificationKind =
 export interface AdmissibleNotification {
   kind: BackgroundNotificationKind;
   /**
+   * Teammate producer identity, when the item carries one. A `peer` item
+   * with a teammate identity is an in-session Agent Team report, not
+   * cross-session traffic, and the dropped summary names it as such.
+   */
+  agent?: { kind: string };
+  /**
    * Registry id (agent / shell / monitor / workflow) or cron job id. Used
    * only to name what was lost in the dropped summary.
    */
@@ -124,11 +130,8 @@ export function decideNotificationAdmission<T extends AdmissibleNotification>(
 }
 
 /** Plural-aware noun for each producer, used in the dropped summary. */
-function droppedNoun(
-  kind: BackgroundNotificationKind,
-  interim: boolean,
-  count: number,
-): string {
+function droppedNoun(item: AdmissibleNotification, count: number): string {
+  const { kind } = item;
   const singular =
     kind === 'agent'
       ? 'agent result'
@@ -139,11 +142,17 @@ function droppedNoun(
           : kind === 'cron'
             ? 'scheduled prompt'
             : kind === 'peer'
-              ? 'cross-session message'
-              : interim
+              ? isTeammateReport(item)
+                ? 'teammate report'
+                : 'cross-session message'
+              : item.interim
                 ? 'monitor pulse'
                 : 'monitor result';
   return count === 1 ? singular : `${singular}s`;
+}
+
+function isTeammateReport(item: AdmissibleNotification): boolean {
+  return item.kind === 'peer' && item.agent?.kind === 'teammate';
 }
 
 /** Ordering of the per-kind clauses in the summary; stable across drains. */
@@ -162,10 +171,13 @@ const MAX_NAMED_IDS_PER_GROUP = 3;
 interface DroppedGroup {
   count: number;
   ids: string[];
+  /** First item of the group; every member shares kind and producer. */
+  sample: AdmissibleNotification;
 }
 
 function groupKey(item: AdmissibleNotification): string {
-  return `${item.persisted ? 'recorded' : 'dropped'}:${item.kind}:${item.kind === 'monitor' && item.interim ? 'interim' : 'terminal'}`;
+  const producer = isTeammateReport(item) ? 'teammate' : item.kind;
+  return `${item.persisted ? 'recorded' : 'dropped'}:${producer}:${item.kind === 'monitor' && item.interim ? 'interim' : 'terminal'}`;
 }
 
 /**
@@ -182,7 +194,7 @@ export class DroppedNotificationTally {
 
   record(item: AdmissibleNotification): void {
     const key = groupKey(item);
-    const group = this.groups.get(key) ?? { count: 0, ids: [] };
+    const group = this.groups.get(key) ?? { count: 0, ids: [], sample: item };
     group.count++;
     if (
       item.taskId &&
@@ -226,32 +238,50 @@ export class DroppedNotificationTally {
     let hasInspectableLoss = false;
     let hasCronLoss = false;
     let hasPeerLoss = false;
+    let hasTeammateLoss = false;
     for (const kind of Object.keys(
       GROUP_ORDER,
     ) as BackgroundNotificationKind[]) {
       for (const interim of GROUP_ORDER[kind]) {
         for (const persisted of [false, true]) {
-          const group = this.groups.get(groupKey({ kind, interim, persisted }));
-          if (!group) continue;
-          const noun = droppedNoun(kind, interim, group.count);
-          const elided = group.count - group.ids.length;
-          const names =
-            group.ids.length > 0
-              ? ` (${group.ids.join(', ')}${elided > 0 ? `, +${elided}` : ''})`
-              : '';
-          if (persisted) {
-            recordedCount += group.count;
-            recordedClauses.push(`${group.count} ${noun}${names}`);
-          } else if (kind === 'monitor' && interim) {
-            supersededPulseCount = group.count;
-            supersededPulseClause = `${group.count} superseded ${noun}${names} ${group.count === 1 ? 'was' : 'were'} not delivered`;
-          } else {
-            clauses.push(`${group.count} ${noun}${names}`);
-            // A cron prompt and a peer message are not tasks: neither has
-            // an entry in the task registry for the model to go and read.
-            hasInspectableLoss ||= kind !== 'cron' && kind !== 'peer';
-            hasCronLoss ||= kind === 'cron';
-            hasPeerLoss ||= kind === 'peer';
+          // `peer` splits into two producer groups: cross-session messages
+          // and in-session teammate reports. Same clause slot for both.
+          const keys = [groupKey({ kind, interim, persisted })];
+          if (kind === 'peer') {
+            keys.push(
+              groupKey({
+                kind,
+                interim,
+                persisted,
+                agent: { kind: 'teammate' },
+              }),
+            );
+          }
+          for (const key of keys) {
+            const group = this.groups.get(key);
+            if (!group) continue;
+            const noun = droppedNoun(group.sample, group.count);
+            const elided = group.count - group.ids.length;
+            const names =
+              group.ids.length > 0
+                ? ` (${group.ids.join(', ')}${elided > 0 ? `, +${elided}` : ''})`
+                : '';
+            if (persisted) {
+              recordedCount += group.count;
+              recordedClauses.push(`${group.count} ${noun}${names}`);
+            } else if (kind === 'monitor' && interim) {
+              supersededPulseCount = group.count;
+              supersededPulseClause = `${group.count} superseded ${noun}${names} ${group.count === 1 ? 'was' : 'were'} not delivered`;
+            } else {
+              clauses.push(`${group.count} ${noun}${names}`);
+              // A cron prompt and a peer message are not tasks: neither has
+              // an entry in the task registry for the model to go and read.
+              hasInspectableLoss ||= kind !== 'cron' && kind !== 'peer';
+              hasCronLoss ||= kind === 'cron';
+              hasPeerLoss ||=
+                kind === 'peer' && !isTeammateReport(group.sample);
+              hasTeammateLoss ||= isTeammateReport(group.sample);
+            }
           }
         }
       }
@@ -307,6 +337,11 @@ export class DroppedNotificationTally {
     if (hasPeerLoss) {
       summaryParts.push(
         'The cross-session messages were not delivered and will not be redelivered.',
+      );
+    }
+    if (hasTeammateLoss) {
+      summaryParts.push(
+        'The teammate reports were not delivered and will not be redelivered.',
       );
     }
     const summary = summaryParts.join(' ');

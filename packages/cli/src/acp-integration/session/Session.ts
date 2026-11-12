@@ -17,6 +17,7 @@ import {
   LoopReason,
 } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
+import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
 import {
   INCOMPLETE_ARGS_EDIT_REJECTION,
   INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE,
@@ -506,11 +507,13 @@ import {
 } from '../../utils/mcp-server-mention.js';
 
 // Import modular session components
-import type {
-  ApprovalModeValue,
-  CumulativeUsage,
-  SessionContext,
-  ToolCallStartParams,
+import {
+  ROOT_AGENT_IDENTITY,
+  type AgentIdentity,
+  type ApprovalModeValue,
+  type CumulativeUsage,
+  type SessionContext,
+  type ToolCallStartParams,
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
@@ -534,6 +537,7 @@ import {
 } from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import { runAcpToolBatch, type AcpToolBatchHost } from './acp-tool-batch.js';
+import { attachTeamSink } from './team-sink.js';
 import {
   buildPermissionRequestContent,
   interactionMetaFields,
@@ -562,6 +566,7 @@ import {
   type RepeatedToolFailureGuardDecision,
   type RepeatedToolFailureGuardState,
 } from './repeated-tool-failure-guard.js';
+import { defangPeerNotificationTags } from './peer-envelope.js';
 import {
   getToolExplorationKind,
   TOOL_EXPLORATION_REMINDER,
@@ -2090,10 +2095,25 @@ export interface BackgroundNotificationQueueItem {
   modelText: string;
   taskId: string;
   status: string;
-  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+  /**
+   * `peer` is a message from another agent — today an Agent Team teammate's
+   * report to its leader. Core models the kind end to end (`GROUP_ORDER.peer`,
+   * `droppedNoun`, the `hasPeerLoss` accounting, and `background-turn-context`);
+   * the user- and model-facing nouns switch on the teammate `agent` identity so
+   * an in-session report is not announced as cross-session traffic. Like `cron`
+   * it names no task the model could go and read, so a dropped one is a real
+   * loss rather than a pointer to a registry entry.
+   */
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
   toolUseId?: string;
   todoWorkChainId?: string;
   label?: string;
+  /**
+   * Producer identity for `peer` items: the teammate whose report this is.
+   * Stamped onto the emitted frame's `_meta.agent` so a client attributes the
+   * message structurally instead of parsing the sender out of the text.
+   */
+  agent?: AgentIdentity;
   /** Structured fields for i18n rendering on the frontend. */
   structured?: {
     description?: string;
@@ -2101,6 +2121,22 @@ export interface BackgroundNotificationQueueItem {
     eventCount?: number;
     droppedLines?: number;
   };
+}
+
+/**
+ * Narrows a notification producer's identity to the kinds persistence keeps.
+ * The root agent never produces a background notification, but the queue's
+ * type is the broad `AgentIdentity`, and `NotificationRecordPayload`'s
+ * `backgroundTask.agent` accepts only the kinds that can be attributed.
+ */
+function persistedNotificationAgent(agent: AgentIdentity): {
+  agentName: string;
+  depth: number;
+  kind: 'teammate' | 'subagent';
+} {
+  return agent.kind === 'teammate'
+    ? { agentName: agent.agentName, depth: agent.depth, kind: 'teammate' }
+    : { agentName: agent.agentName, depth: agent.depth, kind: 'subagent' };
 }
 
 interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
@@ -2127,6 +2163,7 @@ function toAdmissibleNotification(
     taskId: item.taskId,
     interim: item.kind === 'monitor' && item.status === 'running',
     persisted: item.persisted,
+    ...(item.agent ? { agent: { kind: item.agent.kind } } : {}),
   };
 }
 
@@ -2819,6 +2856,12 @@ export class Session implements SessionContext {
   // on a session whose registries are already unregistered.
   private disposed = false;
   private closing = false;
+  /**
+   * Set once the pre-close flush has landed the queue. Nothing may be enqueued
+   * after that point: the recorder stops accepting writes when the writer
+   * terminals start, so a late arrival is neither drained nor durable.
+   */
+  private peerNotificationsSealed = false;
   private closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
   private historyMutationActive = false;
   private pendingDeletedApiPromptIds: Set<string> | undefined;
@@ -2831,6 +2874,17 @@ export class Session implements SessionContext {
   private availableCommandsUpdateTail: Promise<void> = Promise.resolve();
   private lastSuccessfulAvailableCommandsHash?: string;
   private unsubscribeRequestLifecycle?: () => void;
+  /** Detaches the Agent Team leader sink installed by `#registerTeamSink`. */
+  private detachTeamSink?: () => void;
+  /** Session lifetime for an in-flight teammate approval request. */
+  private readonly teamSinkAbort = new AbortController();
+  /**
+   * Task ids are persisted in the transcript and correlated by clients, so a
+   * resumed Session must not re-mint ordinals that transcript already holds.
+   * The per-instance token keeps them collision-free across restarts.
+   */
+  private readonly teammateIdPrefix = randomUUID();
+  private teammateMessageSeq = 0;
   private requestLifecycleSessionId: string;
   private readonly requestLifecycleExecutions = new Set<string>();
   /** The exact status-change callback this Session installed, so dispose can
@@ -3102,6 +3156,7 @@ export class Session implements SessionContext {
 
     this.#bindGoalRuntime();
     this.#registerBackgroundNotificationCallbacks();
+    this.#registerTeamSink();
     this.#registerSubSessionSpawner();
     this.#registerCurrentSessionScheduledTaskCreator();
     this.config
@@ -5079,7 +5134,13 @@ export class Session implements SessionContext {
     }
     const notificationIds = new Set<string>();
     for (const item of this.notificationQueue) {
-      if (item.kind === 'agent' || item.kind === 'workflow') {
+      // `peer` names no registry entry the model could re-read, so an
+      // undrained teammate report held only here would be lost, not deferred.
+      if (
+        item.kind === 'agent' ||
+        item.kind === 'workflow' ||
+        item.kind === 'peer'
+      ) {
         notificationIds.add(item.taskId);
       }
     }
@@ -5226,6 +5287,17 @@ export class Session implements SessionContext {
       if (this.disposed) return;
       this.closing = false;
       this.closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
+      // The close was reversible and just got rolled back, so the session is
+      // live again: un-seal peer intake or every later teammate report takes
+      // the cold-copy branch above, never enters the queue and never reaches
+      // the leader — while its mailbox row is already marked read. The
+      // irreversible managed-shutdown path never runs this closure.
+      this.peerNotificationsSealed = false;
+      // Un-sealing is not enough: the pre-close flush also stopped the
+      // leader-inbox poll, and nothing else restarts it, so the reports would
+      // still never arrive. Resuming is idempotent and a no-op once the team is
+      // gone.
+      this.config.getTeamManager()?.resumeLeaderInboxPolling?.();
       void this.#drainGoalQueue();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
@@ -5318,6 +5390,63 @@ export class Session implements SessionContext {
     );
   }
 
+  /**
+   * Lands the model-visible copy of every queued teammate report that is not
+   * durable yet. A report is consumed from the on-disk mailbox (marked read)
+   * before it is durable anywhere else and `notificationQueue` is its only
+   * carrier, so this has to run while the recorder still accepts writes: on
+   * the stored-session close path `recorder.close()` precedes `dispose()`, and
+   * `appendRecord` is already a no-op by then.
+   */
+  #landUndrainedPeerNotifications(
+    items: readonly QueuedBackgroundNotification[] = this.notificationQueue,
+  ): void {
+    const recording = this.config.getChatRecordingService();
+    if (!recording) return;
+    for (const item of items) {
+      if (item.kind !== 'peer' || item.persisted) continue;
+      // Only cold copies get the task envelope: recovery trims these because
+      // the model was never asked anything. Warm copies keep their peer
+      // envelope so an unanswered delivered turn remains `interrupted_prompt`.
+      recording.recordNotification(
+        [
+          {
+            text: `<task-notification>\n${item.modelText}\n</task-notification>`,
+          },
+        ],
+        item.displayText,
+        {
+          taskId: item.taskId,
+          sourceTurnId: item.sourceTurnId,
+          status: item.status,
+          kind: item.kind,
+          ...(item.agent
+            ? { agent: persistedNotificationAgent(item.agent) }
+            : {}),
+          ...item.structured,
+        },
+      );
+      item.persisted = true;
+    }
+  }
+
+  /**
+   * Pre-close hook for {@link #landUndrainedPeerNotifications}. The
+   * stored-session close sequence awaits this before the recorder is
+   * finalized, which is the last point where the write is both accepted and
+   * then flushed.
+   *
+   * Intake stops before the seal: the leader-inbox poll marks a mailbox row
+   * read as it consumes it, and `notificationQueue` is the report's only
+   * carrier after that, so a report consumed past the seal would be read on
+   * disk, landed into a writer that no longer accepts records, and lost.
+   */
+  async flushPendingPeerNotifications(): Promise<void> {
+    await this.config.getTeamManager()?.quiesceLeaderInbox?.();
+    this.peerNotificationsSealed = true;
+    this.#landUndrainedPeerNotifications();
+  }
+
   dispose(): void {
     this.disposed = true;
     this.closing = true;
@@ -5336,6 +5465,9 @@ export class Session implements SessionContext {
     this.unsubscribeApprovalModeChange = undefined;
     this.unsubscribeRequestLifecycle?.();
     this.unsubscribeRequestLifecycle = undefined;
+    this.detachTeamSink?.();
+    this.detachTeamSink = undefined;
+    this.teamSinkAbort.abort(SESSION_DISPOSE_ABORT_REASON);
     this.requestLifecycleExecutions.clear();
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
@@ -5343,6 +5475,7 @@ export class Session implements SessionContext {
     this.resolveCloseGate = null;
     this.closeGateCompletion = null;
     this.hardSuspendTodoStopGuard();
+    this.#landUndrainedPeerNotifications();
     this.notificationQueue = [];
     this.droppedNotifications.clear();
     this.cronQueue = [];
@@ -13424,6 +13557,213 @@ export class Session implements SessionContext {
     );
   }
 
+  /**
+   * Agent Team: attach the leader sink so teammate reports reach the model and
+   * teammate tool approvals reach the client.
+   *
+   * Team tool registration is gated on `Config.isAgentTeamEnabled()`, which
+   * knows nothing about the host, so without this an ACP-hosted session
+   * advertises `team_create`, a model uses it, and the coordination never comes
+   * back: `TeamManager.pollLeaderInbox()` returns before consuming when no
+   * callback is attached, so the leader is never woken, and
+   * `TEAMMATE_APPROVAL_REQUEST` is emitted with no listener, so a blocked
+   * teammate is neither approved nor cancelled.
+   *
+   * Reports enter the background notification queue as `peer` items, which
+   * reuses the existing idle wake: ACP has no TUI-style idle hook, and
+   * `#enqueueBackgroundNotification` ends by draining. `peer` is deliberately
+   * not given task-registry semantics — like `cron`, it names no task the model
+   * could go and read, so core accounts a dropped one as a real loss.
+   */
+  #registerTeamSink(): void {
+    if (!this.config.isAgentTeamEnabled?.()) return;
+    this.detachTeamSink = attachTeamSink({
+      config: this.config,
+      sessionId: this.sessionId,
+      signal: this.teamSinkAbort.signal,
+      permissionPersistencePolicy: this.requiresManagedConversationBinding
+        ? STANDALONE_PERMISSION_PERSISTENCE_POLICY
+        : undefined,
+      injectLeaderMessage: (modelText, displayText, senders) =>
+        this.#enqueueTeammateMessage(modelText, displayText, senders),
+      injectLeaderNotice: (modelText, displayText) =>
+        this.#enqueueTeamRuntimeNotice(modelText, displayText),
+      reportRosterChange: (change) => this.#enqueueTeamRosterChange(change),
+      // Not `#requestPermissionQueued`: a teammate approval is session-scoped,
+      // so no leader turn ending bounds it — one ignored card left on the
+      // shared tail would wedge every later prompt, including the leader's own.
+      // Skipping the queue costs nothing here: `#withBackgroundPermission`
+      // early-returns on the `permissionScope: 'session'` these params carry.
+      requestPermission: (params, signal) =>
+        requestPermissionWithAbort(this.client, params, signal),
+      retireTeamBinding: (bindingId) =>
+        this.client.extNotification(
+          'qwen/notify/session/teammate-binding-ended',
+          {
+            v: 1,
+            sessionId: this.sessionId,
+            bindingId,
+          },
+        ),
+      retireTeammateApprovals: (teammateName) =>
+        this.client.extNotification('qwen/notify/session/teammate-exited', {
+          v: 1,
+          sessionId: this.sessionId,
+          teammateName,
+        }),
+    });
+  }
+
+  /**
+   * Runtime error/notice text (`<team_error>` / `<team_notice>`) that shares
+   * the leader callback with teammate reports. It names no sender and is not
+   * a message from anyone, so it must not enter the peer queue: that queue
+   * seals on close, lands cold copies as peer records, and renders rows under
+   * the peer label. It splices into the next ordinary turn as runtime context
+   * (the same live-history mechanism external agent records use) and records
+   * as a plain notification with no `backgroundTask`, so neither live nor
+   * reloaded transcripts present it as a peer report.
+   */
+  #enqueueTeamRuntimeNotice(modelText: string, displayText: string): void {
+    if (this.disposed) return;
+    this.pendingExternalAgentContext.push(modelText);
+    // The notice no longer wakes the leader on its own (it is not a peer
+    // report), but if the queue has pending work the drain's turn will splice
+    // the parked text into the model request. Kick it so a queued item does
+    // not wait for a user turn that may never come.
+    void this.#drainNotificationQueue();
+    this.config
+      .getChatRecordingService()
+      ?.recordNotification([{ text: modelText }], displayText);
+    void this.sendUpdate({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: displayText },
+      _meta: {
+        source: 'background_notification',
+        qwenDiscreteMessage: true,
+      },
+    }).catch((error) => {
+      debugLogger.warn(
+        `Failed to publish team runtime notice: ${this.#formatError(error)}`,
+      );
+    });
+  }
+
+  #enqueueTeammateMessage(
+    modelText: string,
+    displayText: string,
+    senders?: readonly string[],
+  ): void {
+    // Only `disposed` may drop a report. `TeamManager.pollLeaderInbox()`
+    // consumes the mailbox and marks it read *before* invoking this callback,
+    // so returning on `closing` would turn "retained, undelivered" into
+    // "consumed, lost" — the exact state `team-sink.ts`'s `injectLeaderMessage`
+    // contract forbids. Enqueueing is safe during a reversible close:
+    // `#drainNotificationQueue` has its own `closing` gate, and `beginClose`'s
+    // release drains the queue, so the report still reaches the leader.
+    if (this.disposed) return;
+    // A single-sender batch is attributable; a mixed batch is not, so it stays
+    // unattributed rather than naming one teammate for several reports.
+    const sender = senders?.length === 1 ? senders[0] : undefined;
+    this.#enqueueBackgroundNotification({
+      kind: 'peer',
+      // Unique per message: the public `enqueueBackgroundNotification` dedupes
+      // on `taskId`, and teammate reports must never collapse into one another.
+      taskId: `teammate-message-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
+      status: 'message',
+      modelText: `<peer-notification>\n${defangPeerNotificationTags(modelText)}\n</peer-notification>`,
+      displayText,
+      ...(sender
+        ? {
+            agent: {
+              agentName: `${ROOT_AGENT_IDENTITY.agentName}/${sender}`,
+              depth: 1,
+              kind: 'teammate' as const,
+            },
+            // The turn-start row renders `label ?? kind`, so a teammate
+            // report without a label reads as the generic "peer" after
+            // reload; the sender names it.
+            label: sender,
+          }
+        : {}),
+      continuesTodoStopGuardWorkChain: false,
+    });
+  }
+
+  /**
+   * Roster membership as wire-visible events, so a client reconstructs who is
+   * on the team from joins and exits without a roster route. Status changes
+   * and idle pulses are deliberately not projected: they fire on every
+   * transition and each would wake the leader into an automatic turn for noise.
+   */
+  #pendingTeardownExits: Array<{ name: string; status?: string }> = [];
+  #teardownFlushScheduled = false;
+
+  #flushTeardownRosterExits(): void {
+    this.#teardownFlushScheduled = false;
+    const exits = this.#pendingTeardownExits.splice(0);
+    if (exits.length === 0 || this.disposed) return;
+    const names = exits.map((exit) => exit.name);
+    const head =
+      names.length === 1
+        ? `Teammate ${names[0]}`
+        : `Teammates ${names.join(', ')}`;
+    const tail = `left the team (${exits[0]?.status ?? 'cancelled'})`;
+    this.#enqueueBackgroundNotification({
+      kind: 'peer',
+      taskId: `teammate-roster-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
+      status: 'exited',
+      modelText: `<peer-notification>\n${escapeXml(`${head} ${tail}.`)}\n</peer-notification>`,
+      displayText: `teammate ${names.join(', ')} ${tail}`,
+      label: names.length === 1 ? names[0] : 'team',
+      continuesTodoStopGuardWorkChain: false,
+    });
+  }
+
+  #enqueueTeamRosterChange(change: {
+    type: 'joined' | 'exited';
+    name: string;
+    status?: string;
+    teardown?: boolean;
+  }): void {
+    // Same reasoning as `#enqueueTeammateMessage`: a reversible close must not
+    // swallow the notice, since the queue is drained when the gate releases.
+    if (this.disposed) return;
+    if (change.type === 'exited' && change.teardown) {
+      // One `cleanup()` publishes an exit per surviving teammate (up to ten),
+      // and every queued peer item drains as its own automatic leader turn.
+      // Collect the synchronous burst and enqueue a single item instead; the
+      // per-teammate events still reach the wire and the approval retirement.
+      this.#pendingTeardownExits.push({
+        name: change.name,
+        status: change.status,
+      });
+      if (!this.#teardownFlushScheduled) {
+        this.#teardownFlushScheduled = true;
+        queueMicrotask(() => this.#flushTeardownRosterExits());
+      }
+      return;
+    }
+    const joined = change.type === 'joined';
+    const tail = joined
+      ? 'joined the team'
+      : `left the team${change.status ? ` (${change.status})` : ''}`;
+    this.#enqueueBackgroundNotification({
+      kind: 'peer',
+      taskId: `teammate-roster-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
+      status: change.type,
+      modelText: `<peer-notification>\n${escapeXml(`Teammate ${change.name} ${tail}.`)}\n</peer-notification>`,
+      displayText: `teammate ${change.name} ${tail}`,
+      agent: {
+        agentName: `${ROOT_AGENT_IDENTITY.agentName}/${change.name}`,
+        depth: 1,
+        kind: 'teammate',
+      },
+      label: change.name,
+      continuesTodoStopGuardWorkChain: false,
+    });
+  }
+
   #registerBackgroundNotificationCallbacks(): void {
     const backgroundRegistry = this.config.getBackgroundTaskRegistry();
     // Single-slot setter, so remember exactly what we installed and only ever
@@ -13632,6 +13972,16 @@ export class Session implements SessionContext {
   }
 
   #enqueueBackgroundNotification(item: QueuedBackgroundNotification): void {
+    // The pre-close flush already ran, so this queue will never be drained
+    // again. Land the copy while the recorder still accepts writes rather than
+    // parking it in a queue whose contents become unpersistable moments later.
+    // Peer reports only: a shell/monitor/agent/workflow completion still owes
+    // the client its display frame and `recordBackgroundTaskCompleted`, and
+    // the cold-copy branch below records neither.
+    if (this.peerNotificationsSealed && item.kind === 'peer') {
+      this.#landUndrainedPeerNotifications([item]);
+      return;
+    }
     while (this.notificationQueue.length >= MAX_BACKGROUND_NOTIFICATION_QUEUE) {
       // While the todo-stop guard defers unrelated automatic turns, a queued
       // notification that continues the current work chain is the one thing
@@ -13665,6 +14015,7 @@ export class Session implements SessionContext {
             ? `Notification queue overflow: dropping related task=${item.taskId} kind=${item.kind} because all queued items are related`
             : `Notification queue overflow: dropping unrelated task=${item.taskId} kind=${item.kind} while automatic work is deferred`,
         );
+        this.#landUndrainedPeerNotifications([item]);
         this.droppedNotifications.record(toAdmissibleNotification(item));
         return;
       }
@@ -13674,6 +14025,7 @@ export class Session implements SessionContext {
         `Notification queue overflow: evicting task=${evicted?.taskId ?? 'unknown'} kind=${evicted?.kind ?? 'unknown'}`,
       );
       if (evicted) {
+        this.#landUndrainedPeerNotifications([evicted]);
         this.droppedNotifications.record(toAdmissibleNotification(evicted));
       }
     }
@@ -13686,6 +14038,9 @@ export class Session implements SessionContext {
         status: item.status,
         kind: item.kind,
         toolUseId: item.toolUseId,
+        ...(item.agent
+          ? { agent: persistedNotificationAgent(item.agent) }
+          : {}),
         ...item.structured,
       },
     });
@@ -14038,6 +14393,9 @@ export class Session implements SessionContext {
             kind: item.kind,
             toolUseId: item.toolUseId,
             sourceTurnId: item.sourceTurnId,
+            ...(item.agent
+              ? { agent: persistedNotificationAgent(item.agent) }
+              : {}),
             ...item.structured,
           });
       }
@@ -14439,6 +14797,9 @@ export class Session implements SessionContext {
                 status: item.status,
                 kind: item.kind,
                 toolUseId: item.toolUseId,
+                ...(item.agent
+                  ? { agent: persistedNotificationAgent(item.agent) }
+                  : {}),
                 ...item.structured,
               },
             );
@@ -14775,6 +15136,7 @@ export class Session implements SessionContext {
       _meta: {
         source,
         qwenDiscreteMessage: true,
+        ...(item.agent ? { agent: item.agent } : {}),
         backgroundTask: {
           taskId: item.taskId,
           sourceTurnId: item.sourceTurnId,
@@ -15006,6 +15368,7 @@ export class Session implements SessionContext {
   #withBackgroundPermission(
     params: RequestPermissionRequest,
   ): RequestPermissionRequest {
+    if (params._meta?.['permissionScope'] === 'session') return params;
     const execution = backgroundTurnContext.getStore();
     return execution?.active && execution.sessionId === this.sessionId
       ? {

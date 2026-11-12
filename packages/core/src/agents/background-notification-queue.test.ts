@@ -349,6 +349,29 @@ describe('DroppedNotificationTally', () => {
     expect(summary?.modelText).not.toContain('/tasks');
   });
 
+  it('names a lost teammate report as a teammate report, not cross-session traffic', () => {
+    // An Agent Team report reuses the `peer` kind, but its producer is a
+    // teammate in THIS session; telling the model a peer session messaged
+    // it names a sender that does not exist.
+    const summary = tallyOf(
+      {
+        kind: 'peer',
+        taskId: 'teammate-message-1',
+        agent: { kind: 'teammate' },
+      },
+      { kind: 'peer', taskId: 'msg_1' },
+    ).take();
+    expect(summary?.displayText).toBe(
+      'Dropped 2 background notifications (queue full): 1 cross-session ' +
+        'message (msg_1), 1 teammate report (teammate-message-1).',
+    );
+    expect(summary?.modelText).toContain(
+      'The teammate reports were not delivered and will not be redelivered.',
+    );
+    expect(summary?.modelText).toContain(PEER_NOT_REDELIVERED);
+    expect(summary?.modelText).not.toContain('/tasks');
+  });
+
   it('still points at /tasks when a task was lost alongside a peer message', () => {
     const summary = tallyOf(
       { kind: 'peer', taskId: 'msg_1' },

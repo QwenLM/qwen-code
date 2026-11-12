@@ -279,6 +279,14 @@ export class TeamManager {
   private pollingInterval: ReturnType<typeof setInterval> | null = null;
 
   /**
+   * The poll currently in flight, if any. Clearing the interval cannot recall
+   * a consume that already started, and a consume marks its mailbox rows read
+   * as it goes — so a caller that is about to stop accepting writes has to
+   * wait this out instead of racing it.
+   */
+  private inFlightLeaderPoll: Promise<void> | null = null;
+
+  /**
    * Callback to inject teammate messages into the leader. Receives the
    * full model-bound text (the `<teammate_message>` envelope) and a
    * compact, human-readable `display` line for the leader's UI — the
@@ -286,7 +294,7 @@ export class TeamManager {
    * model still gets the whole report.
    */
   private leaderMessageCallback:
-    | ((message: string, display: string) => void)
+    | ((message: string, display: string, senders?: readonly string[]) => void)
     | null = null;
 
   /**
@@ -788,14 +796,18 @@ export class TeamManager {
     summary?: string,
     automatic = false,
   ): Promise<void> {
+    const sender = from
+      ? findMemberByName(this.teamFile.members, from)
+      : undefined;
+    const fromName =
+      this.getSenderPriority(from) === MessagePriority.LEADER
+        ? LEADER_NAME
+        : (sender?.name ?? 'unknown');
     // Messages addressed to the leader go to leader's mailbox.
     if (
       toName.toLowerCase() === LEADER_NAME ||
       toName === this.teamFile.leadAgentId
     ) {
-      const sender = from
-        ? findMemberByName(this.teamFile.members, from)
-        : undefined;
       const responseCandidate =
         sender && !automatic ? classifyShutdownResponse(message) : undefined;
       const shutdownReservation =
@@ -809,7 +821,7 @@ export class TeamManager {
 
       try {
         await writeMessage(this.teamFile.name, LEADER_NAME, {
-          from: from ?? 'unknown',
+          from: fromName,
           text: message,
           summary,
           timestamp: new Date().toISOString(),
@@ -834,7 +846,7 @@ export class TeamManager {
       }
       try {
         this.teamEventEmitter.emit(TeamEventType.MESSAGE_SENT, {
-          from: from ?? 'unknown',
+          from: fromName,
           to: LEADER_NAME,
           message,
           timestamp: Date.now(),
@@ -880,11 +892,11 @@ export class TeamManager {
           `through its backlog before sending more.`,
       );
     }
-    queue.push({ text: message, from: from ?? '', priority });
+    queue.push({ text: message, from: fromName, priority });
 
     this.teamEventEmitter.emit(TeamEventType.MESSAGE_SENT, {
-      from: from ?? 'unknown',
-      to: toName,
+      from: fromName,
+      to: member.name,
       message,
       timestamp: Date.now(),
     });
@@ -1069,10 +1081,17 @@ export class TeamManager {
    * Pass `null` to detach a previously-installed callback.
    */
   setLeaderMessageCallback(
-    cb: ((message: string, display: string) => void) | null,
+    cb:
+      | ((
+          message: string,
+          display: string,
+          senders?: readonly string[],
+        ) => void)
+      | null,
   ): void {
     this.leaderMessageCallback = cb
-      ? (message, display) => runOutsideAgentContext(() => cb(message, display))
+      ? (message, display, senders) =>
+          runOutsideAgentContext(() => cb(message, display, senders))
       : null;
   }
 
@@ -1182,10 +1201,17 @@ export class TeamManager {
    */
   private ensureLeaderInboxPolling(): void {
     if (this.pollingInterval) return;
-    this.pollingInterval = setInterval(
-      () => this.fireAndForget('pollLeaderInbox', this.pollLeaderInbox()),
-      500,
-    );
+    this.pollingInterval = setInterval(() => {
+      const poll = this.pollLeaderInbox();
+      this.inFlightLeaderPoll = poll;
+      const settle = () => {
+        if (this.inFlightLeaderPoll === poll) this.inFlightLeaderPoll = null;
+      };
+      // fireAndForget owns the rejection handling and the error report; this
+      // second derivation only clears the in-flight marker.
+      void poll.then(settle, settle);
+      this.fireAndForget('pollLeaderInbox', poll);
+    }, 500);
   }
 
   /**
@@ -1207,6 +1233,42 @@ export class TeamManager {
    */
   async drainLeaderInbox(): Promise<void> {
     await this.pollLeaderInbox();
+  }
+
+  /**
+   * Stop leader-inbox intake, then deliver whatever is still on disk.
+   *
+   * A session close seals its notification queue right after this, and a poll
+   * marks each mailbox row read as it consumes it — so a report consumed after
+   * the seal is read on disk, landed into a writer that has stopped accepting
+   * records, and lost. Quiescing first makes "consumed" and "durable" line up:
+   * stop the interval, wait out a poll already in flight, then drain once more
+   * for anything a teammate wrote in between.
+   */
+  async quiesceLeaderInbox(): Promise<void> {
+    this.stopLeaderInboxPolling();
+    const inFlight = this.inFlightLeaderPoll;
+    if (inFlight) await inFlight.catch(() => undefined);
+    await this.drainLeaderInbox();
+  }
+
+  /**
+   * Resume leader-inbox intake after a caller quiesced it and then decided to
+   * keep going. A rolled-back session close is the live case: it clears its
+   * seal, but `ensureLeaderInboxPolling()` otherwise runs only when a teammate
+   * is spawned, so the session would stay deaf for the rest of its life to
+   * reports that are already marked read in the mailbox.
+   *
+   * Idempotent — `ensureLeaderInboxPolling()` returns while the interval lives,
+   * so a poll already in flight is never doubled. It stays a no-op when there
+   * is nothing left to listen for: no leader callback attached, or every
+   * teammate already terminal, where restarting would only re-publish
+   * ALL_TEAMMATES_TERMINATED for a team that is gone.
+   */
+  resumeLeaderInboxPolling(): void {
+    if (!this.leaderMessageCallback) return;
+    if (this.allTeammatesTerminated()) return;
+    this.ensureLeaderInboxPolling();
   }
 
   /**
@@ -1235,9 +1297,22 @@ export class TeamManager {
       return;
     }
 
+    const senders = newMessages.map(({ from }) =>
+      !from ||
+      from === 'unknown' ||
+      from.toLowerCase() === LEADER_NAME ||
+      from === this.teamFile.leadAgentId
+        ? undefined
+        : findMemberByName(this.teamFile.members, from)?.name,
+    );
     callback(
       this.formatLeaderEnvelope(newMessages).join('\n\n'),
       this.formatLeaderDisplay(newMessages),
+      // Senders travel with the batch so a host can attribute the report
+      // structurally instead of parsing it out of the formatted envelope.
+      senders.every((sender) => sender !== undefined)
+        ? [...new Set(senders)]
+        : undefined,
     );
   }
 
@@ -1743,6 +1818,15 @@ export class TeamManager {
     this.taskUpdateUnsubscribe?.();
     this.taskUpdateUnsubscribe = undefined;
 
+    // A teammate that never reported a terminal status still holds a bridge
+    // entry. `backend.cleanup()` terminates it later, when the STATUS_CHANGE
+    // bridge is detached and this emitter has no listeners, so the sole
+    // TEAMMATE_EXITED site cannot fire for it. Publish those exits here, while
+    // listeners are still attached: a client that reconstructs roster
+    // membership from joins and exits would otherwise keep a deleted team's
+    // teammates for the rest of the session.
+    const survivingAgentIds = [...this.eventBridgeCleanups.keys()];
+
     for (const cleanup of this.eventBridgeCleanups.values()) {
       cleanup();
     }
@@ -1750,6 +1834,18 @@ export class TeamManager {
 
     while (this.pendingAsyncWork.size > 0) {
       await Promise.allSettled([...this.pendingAsyncWork]);
+    }
+
+    for (const agentId of survivingAgentIds) {
+      this.teamEventEmitter.emit(TeamEventType.TEAMMATE_EXITED, {
+        agentId,
+        name: this.agentIdentities.get(agentId)?.agentName ?? agentId,
+        // The team is being torn down; `backend.cleanup()` below is what ends
+        // them, so the terminal status is a cancellation, not a completion.
+        status: AgentStatus.CANCELLED,
+        timestamp: Date.now(),
+        teardown: true,
+      });
     }
 
     this.pendingMessages.clear();
