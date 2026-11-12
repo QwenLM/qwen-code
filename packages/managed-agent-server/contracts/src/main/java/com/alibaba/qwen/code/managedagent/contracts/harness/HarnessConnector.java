@@ -56,6 +56,22 @@ public interface HarnessConnector extends AutoCloseable {
 
     public default boolean supportsContextCompression() { return false; }
 
+    public default boolean supportsSideQueries() { return false; }
+
+    /** Selects an instance without acquiring or changing Session placement. */
+    public default SideQueryTarget prepareSideQuery() {
+        throw new UnsupportedOperationException("Side queries are unavailable");
+    }
+
+    public interface SideQueryTarget extends AutoCloseable {
+        public String instanceId();
+        public String bootId();
+        public Map<String, Object> submit(Map<String, Object> body);
+        public Map<String, Object> status(String queryId, Map<String, Object> claim);
+        public void cancel(String queryId, Map<String, Object> claim);
+        @Override public void close();
+    }
+
     @FunctionalInterface
     public interface ContextCompressionSubmission {
         public Map<String, Object> submit();

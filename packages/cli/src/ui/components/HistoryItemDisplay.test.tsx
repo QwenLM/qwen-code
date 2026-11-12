@@ -26,6 +26,7 @@ import { LoadedSettings } from '../../config/settings.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
 import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
+import * as modRowHooks from '../hooks/use-mod-row.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import {
   layoutRowForEvent,
@@ -132,6 +133,62 @@ describe('<HistoryItemDisplay />', () => {
 
       expect(lastFrame()).toContain('MockTerminalImage:image/png');
       expect(lastFrame()).toContain('[+2 more images]');
+    },
+  );
+
+  it.each([
+    { type: 'gemini' as const, offset: 0 },
+    { type: 'gemini_content' as const, offset: 2 },
+  ])(
+    'keeps only original source hints for rewritten $type rows',
+    ({ type, offset }) => {
+      const latex = (source: string) => `$$\n${source}\n$$`;
+      const mermaid = (source: string) =>
+        `\`\`\`mermaid\nflowchart LR\n  ${source}\n\`\`\``;
+      const keptMath = latex('y = 22');
+      const keptDiagram = mermaid('B[Middle] --> C[End]');
+      const duplicate = latex('z = 33');
+      const addedDiagram = mermaid('C[End] --> D[Added]');
+      const item: HistoryItem = {
+        type,
+        id: 1,
+        text: [
+          mermaid('A[Start] --> B[Middle]'),
+          latex('x = 11'),
+          keptDiagram,
+          keptMath,
+          duplicate,
+          duplicate,
+        ].join('\n\n'),
+      };
+      const modRow = vi.spyOn(modRowHooks, 'useModRow').mockReturnValue({
+        text: [keptMath, keptDiagram, duplicate, addedDiagram].join('\n\n'),
+        isFirstOfReply: type === 'gemini',
+      });
+      try {
+        const { lastFrame } = renderWithProviders(
+          <HistoryItemDisplay
+            item={item}
+            terminalWidth={100}
+            isPending={false}
+            modSessionId="session"
+            sourceCopyIndexOffsets={{
+              codeBlockLanguageCounts: new Map([['mermaid', offset]]),
+              mathBlockCount: offset,
+            }}
+          />,
+        );
+        const output = lastFrame() ?? '';
+        expect(output).toContain('y = 22');
+        expect(output).toContain('z = 33');
+        expect(output).toContain('Added');
+        expect(output.match(/source: \/copy (?:latex|mermaid) \d+/g)).toEqual([
+          `source: /copy latex ${offset + 2}`,
+          `source: /copy mermaid ${offset + 2}`,
+        ]);
+      } finally {
+        modRow.mockRestore();
+      }
     },
   );
 

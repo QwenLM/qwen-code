@@ -2,14 +2,12 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHostedRecoveryRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitReceipt;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiApplicationJson;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
@@ -17,6 +15,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiActivationAdmission;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -45,6 +44,8 @@ final class JournalCommit {
     private final JournalEventTransport journalEventTransport;
     private final JdbcManagedExtensionRecordStore extensionRecords;
     private final JdbcManagedActionStore actions;
+    private final JournalCheckpointValidation checkpoints;
+    private final JdbcJournalPacks packs;
 
     JournalCommit(JournalFencing fencing,
             JournalLifecycleAuthorization lifecycleAuthorization,
@@ -55,7 +56,8 @@ final class JournalCommit {
             JdbcManagedToolResultStore toolResults,
             JournalEventTransport journalEventTransport,
             JdbcManagedExtensionRecordStore extensionRecords,
-            JdbcManagedActionStore actions) {
+            JdbcManagedActionStore actions,
+            JdbcJournalPacks packs) {
         this.fencing = fencing;
         this.lifecycleAuthorization = lifecycleAuthorization;
         this.resourceWrites = resourceWrites;
@@ -66,6 +68,8 @@ final class JournalCommit {
         this.journalEventTransport = journalEventTransport;
         this.extensionRecords = extensionRecords;
         this.actions = actions;
+        this.packs = packs;
+        this.checkpoints = new JournalCheckpointValidation(jdbc);
     }
 
     CommitReceipt commit(String tenantId, String sessionId, String writerToken,
@@ -137,7 +141,8 @@ final class JournalCommit {
                                             csiHead.journalRevision(),
                                             csiHead.committedSequence(),
                                             csiHead.lastCommitDigest(),
-                                            csiHead.writerId());
+                                            csiHead.writerId(),
+                                            packs);
                                     return null;
                                 });
                 fencing.requireCsiCurrentTime(continuation);
@@ -191,7 +196,8 @@ final class JournalCommit {
                                         head.journalRevision(),
                                         head.committedSequence(),
                                         head.lastCommitDigest(),
-                                        head.writerId());
+                                        head.writerId(),
+                                        packs);
                                 return null;
                             });
             fencing.requireWriter(
@@ -224,7 +230,7 @@ final class JournalCommit {
 
             @Override
             public void checkpointHistory(JsonNode ref) {
-                validateCheckpointHistory(ref, tenantId, request.workspaceId(), sessionId,
+                checkpoints.validateCheckpointHistory(ref, tenantId, request.workspaceId(), sessionId,
                         head.journalRevision(), declaredResources, reader);
             }
         };
@@ -234,7 +240,7 @@ final class JournalCommit {
                 ref.remove("bytesBase64");
                 closureReader.checkpointHistory(ref);
             } else if ("managed-checkpoint".equals(resource.kind())) {
-                validatePagedCheckpoint(closureReader.apply(resource.resourceId()), tenantId, request.workspaceId(), sessionId, closureReader);
+                checkpoints.validatePagedCheckpoint(closureReader.apply(resource.resourceId()), tenantId, request.workspaceId(), sessionId, closureReader);
             }
             if (ManagedHostedRecoveryRecords.KINDS.contains(resource.kind()) || "managed-action-options".equals(resource.kind())) {
                 ManagedHostedRecoveryRecords.validateResource(closureReader.apply(resource.resourceId()), tenantId,
@@ -313,7 +319,8 @@ final class JournalCommit {
                                         head.lastCommitDigest(),
                                         head.writerId(),
                                         now.toInstant().toEpochMilli(),
-                                        continuation.progress());
+                                        continuation.progress(),
+                                        packs);
                                 return null;
                             });
             fencing.requireWriter(
@@ -405,7 +412,7 @@ final class JournalCommit {
                         : Long.valueOf(activation.epoch()),
                 activation == null ? head.activationExpiresAt()
                         : activation.expiresAt(),
-                activationHeadRevision, Math.max(head.storageVersion(), storageFloor), now.getTime(), JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId);
+                activationHeadRevision, Math.max(head.storageVersion(), storageFloor), now.getTime(), RuntimeAdmissionFences.harnessDrainKey(tenantId), RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId, sessionId);
         if (toolResults != null && csiOriginal == null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }
@@ -482,7 +489,7 @@ final class JournalCommit {
         if (!org.springframework.jdbc.datasource.DataSourceUtils.isConnectionTransactional(
                 org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(target), jdbc.getDataSource())
                 || bindings == null || !bindings.usesDataSource(jdbc.getDataSource())
-                || exactBody == null || exactBody.length == 0 || exactBody.length > 128 * 1024) {
+                || exactBody == null || exactBody.length == 0 || exactBody.length > com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TERMINAL_BODY_LIMIT) {
             throw JournalFencing.nativeReadConflict();
         }
         var original = authority.original();
@@ -498,7 +505,7 @@ final class JournalCommit {
         JournalFencing.requireCsiWriter(original, head);
         fencing.requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, storeRows.databaseNow(), true);
         validateHead(head, request);
-        var proof = JdbcCsiActivationAdmission.terminalPreflight(target, authority, JournalStoreRows.CSI_JSON.valueToTree(request), bindings);
+        var proof = JdbcCsiActivationAdmission.terminalPreflight(target, authority, JournalStoreRows.CSI_JSON.valueToTree(request), bindings, true, packs);
         return new JdbcManagedSessionStore.TerminalCandidate(request, proof, head.leaseTokenHash());
     }
 
@@ -509,8 +516,8 @@ final class JournalCommit {
         if (authority.stage() != com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiApplicationRetirement.Stage.FROZEN) {
             throw JournalFencing.nativeReadConflict();
         }
-        var frozen = WorkspaceCsiApplicationJson.object(authority.frozenBytes(), WorkspaceCsiApplicationInventory.MAX_BYTES);
-        byte[] saved = WorkspaceCsiApplicationJson.base64(frozen.path("commitBodyBase64"), 128 * 1024);
+        var frozen = WorkspaceCsiApplicationJson.object(authority.frozenBytes(), WorkspaceCsiApplicationStore.FROZEN_LIMIT);
+        byte[] saved = WorkspaceCsiApplicationJson.base64(frozen.path("commitBodyBase64"), com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TERMINAL_BODY_LIMIT);
         if (!java.util.Arrays.equals(saved, exactBody)
                 || !com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.sha256(saved)
                         .equals(frozen.path("preparedCommitSha256").textValue())) {
@@ -543,7 +550,7 @@ final class JournalCommit {
                         + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND state = 'ACTIVE'"
                         + " AND journal_revision = ? AND committed_sequence = ? AND last_commit_digest = ?",
                 revision, head.journalRevision(), revision, candidate.proof().terminalSequence(), request.commitDigest(), revision, now.getTime(),
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenant), JdbcRuntimeBindingRepository.harnessDrainKey(session), tenant, session,
+                RuntimeAdmissionFences.harnessDrainKey(tenant), RuntimeAdmissionFences.harnessDrainKey(session), tenant, session,
                 head.journalRevision(), head.committedSequence(), head.lastCommitDigest());
         if (changed != 1) {
             throw JournalFencing.nativeReadConflict();
@@ -553,7 +560,7 @@ final class JournalCommit {
     }
 
     static CommitTransactionRequest csiTerminalRequest(byte[] bytes) {
-        WorkspaceCsiApplicationJson.object(bytes, 128 * 1024);
+        WorkspaceCsiApplicationJson.object(bytes, com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.TERMINAL_BODY_LIMIT);
         try {
             return JournalStoreRows.CSI_TERMINAL_JSON.readValue(bytes, CommitTransactionRequest.class);
         } catch (IOException malformed) {
@@ -565,114 +572,6 @@ final class JournalCommit {
         var request = csiTerminalRequest(bytes);
         validateCommit(request);
         return request;
-    }
-
-    void validatePagedCheckpoint(StoredResource stored, String tenant, String workspace, String session,
-            ManagedHostedRecoveryRecords.HistoricalResources resources) {
-        JsonNode body = ManagedExtensionRecordStore.parse(new String(stored.bytes(), StandardCharsets.UTF_8));
-        if (body == null || !ManagedCheckpointHistory.paged(body)) {
-            return;
-        }
-        if (!ManagedCheckpointHistory.PROFILE.equals(body.path("storageProfile").asText())) {
-            throw JournalStoreRows.invalid("Unsupported checkpoint storage profile.");
-        }
-        JsonNode history = body.path("history");
-        ManagedExtensionRecords.closed(history, Set.of("ref", "toolCount", "bindingCount"), "checkpoint history");
-        resources.checkpointHistory(history.path("ref"));
-        StoredResource page = resources.apply(history.path("ref").path("resourceId").asText());
-        JsonNode saved = ManagedCheckpointHistory.page(page.bytes());
-        if (!saved.path("sessionKey").equals(body.path("identity").path("sessionKey"))
-                || !saved.path("turnId").equals(body.path("identity").path("turnId"))
-                || !saved.path("promptId").equals(body.path("identity").path("promptId"))
-                || !saved.path("toolCount").equals(history.path("toolCount"))
-                || !saved.path("bindingCount").equals(history.path("bindingCount"))) {
-            throw JournalStoreRows.invalid("Checkpoint history identity or coverage conflicts.");
-        }
-    }
-
-    void validateCheckpointHistory(JsonNode ref, String tenant, String workspace, String session,
-            long previousRevision, Set<String> declared, java.util.function.Function<String, StoredResource> resources) {
-        try {
-            ManagedCheckpointHistory.pageRef(ref);
-            StoredResource stored = resources.apply(ref.path("resourceId").asText());
-            requireCheckpointResource(ref, stored);
-            JsonNode page = ManagedCheckpointHistory.page(stored.bytes());
-            JsonNode key = page.path("sessionKey");
-            if (!tenant.equals(key.path("tenantId").asText()) || !workspace.equals(key.path("workspaceId").asText())
-                    || !session.equals(key.path("sessionId").asText())) {
-                throw JournalStoreRows.invalid("Checkpoint history belongs to another Session.");
-            }
-            Long origin = priorCheckpointResourceRevision(tenant, workspace, session, stored.resourceId(), previousRevision);
-            long ceiling = origin == null ? previousRevision : origin;
-            for (JsonNode nested : checkpointReferences(page)) {
-                StoredResource dependency = resources.apply(nested.path("resourceId").asText());
-                requireCheckpointResource(nested, dependency);
-                Long owned = priorCheckpointResourceRevision(tenant, workspace, session, dependency.resourceId(), ceiling);
-                if (owned == null && (origin != null || !declared.contains(dependency.resourceId()))) {
-                    throw JournalStoreRows.invalid("Checkpoint history dependency has no committed owner.");
-                }
-            }
-            long tools = page.path("toolCount").longValue() - page.path("items").size();
-            long bindings = page.path("bindingCount").longValue() - page.path("bindings").size();
-            JsonNode previous = page.path("previous");
-            if (tools < 0 || bindings < 0) {
-                throw JournalStoreRows.invalid("Checkpoint history count conflicts.");
-            }
-            if (previous.isNull()) {
-                if (tools != 0 || bindings != 0) {
-                    throw JournalStoreRows.invalid("Checkpoint history predecessor is missing.");
-                }
-            } else {
-                JsonNode predecessor = ManagedCheckpointHistory.page(resources.apply(previous.path("resourceId").asText()).bytes());
-                if (!predecessor.path("sessionKey").equals(key)
-                        || !predecessor.path("turnId").equals(page.path("turnId"))
-                        || !predecessor.path("promptId").equals(page.path("promptId"))
-                        || predecessor.path("toolCount").longValue() != tools
-                        || predecessor.path("bindingCount").longValue() != bindings) {
-                    throw JournalStoreRows.invalid("Checkpoint history predecessor conflicts.");
-                }
-            }
-        } catch (IllegalArgumentException | com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException error) {
-            throw JournalStoreRows.invalid("Invalid checkpoint history page.");
-        }
-    }
-
-    static void requireCheckpointResource(JsonNode ref, StoredResource stored) {
-        ManagedExtensionRecords.durableRef(ref, "checkpoint history dependency");
-        if (!stored.kind().equals(ref.path("kind").asText())
-                || stored.schemaVersion() != ref.path("schemaVersion").intValue()
-                || stored.byteLength() != ref.path("byteLength").longValue()
-                || !stored.digest().equals(ref.path("digest").asText())
-                || stored.bytes() == null || stored.bytes().length != stored.byteLength()
-                || !ToolPublicationContract.sha256(stored.bytes()).equals(stored.digest())) {
-            throw JournalStoreRows.invalid("Checkpoint history resource metadata conflicts.");
-        }
-    }
-
-    static List<JsonNode> checkpointReferences(JsonNode value) {
-        List<JsonNode> result = new ArrayList<>();
-        if (value.isObject() && value.has("resourceId")) {
-            result.add(value);
-        } else if (value.isContainerNode()) {
-            for (JsonNode child : value) {
-                result.addAll(checkpointReferences(child));
-            }
-        }
-        return result;
-    }
-
-    Long priorCheckpointResourceRevision(String tenant, String workspace, String session,
-            String resourceId, long maximum) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        List<Long> origins = jdbc.query("SELECT x.owner_revision FROM ma_resource_ref x JOIN ma_session_journal_tx t"
-                        + " ON t.tenant_id = x.tenant_id AND t.workspace_id = x.workspace_id AND t.session_id = x.session_id"
-                        + " AND t.journal_revision = x.owner_revision WHERE x.resource_key = ? AND x.session_scope_key = ?"
-                        + " AND x.tenant_id = ? AND x.workspace_id = ? AND x.session_id = ? AND x.resource_id = ?"
-                        + " AND x.owner_kind = 'JOURNAL' AND x.owner_key = ? AND x.owner_revision = x.journal_revision"
-                        + " AND x.owner_revision <= ? ORDER BY x.owner_revision LIMIT 1",
-                (row, index) -> row.getLong(1), ManagedSessionStore.resourceKey(scope, resourceId), scope, tenant, workspace, session,
-                resourceId, scope, maximum);
-        return origins.isEmpty() ? null : origins.getFirst();
     }
 
     static ValidatedCommit validateCommit(
@@ -761,9 +660,10 @@ final class JournalCommit {
                 throw JournalStoreRows.invalid("Resource version or length is invalid.");
             }
             int maxResourceBytes = ManagedSessionStoreModels.inlineResourceBytes(resource.kind());
-            if (resource.byteLength() > maxResourceBytes
-                    && !("managed-tool-outcome".equals(resource.kind())
-                    && resource.bytesBase64() == null)) {
+            // Over-cap bodies must arrive as external references (bytesBase64 null);
+            // admission of the referenced allocation happens in commitResources against
+            // the finalized ma_resource row, never from this static validation.
+            if (resource.byteLength() > maxResourceBytes && resource.bytesBase64() != null) {
                 throw new ManagedAgentException(501,
                         ManagedSessionStoreModels.ERROR_OSS_DISABLED,
                         "Resources larger than " + (maxResourceBytes / 1024) + " KiB require the disabled"
