@@ -8785,7 +8785,7 @@ export class Session implements SessionContext {
                         pendingSend.signal,
                       ),
                     };
-                    this.#recordPromptCompletionEffects(
+                    await this.#recordPromptCompletionEffects(
                       result,
                       responseCapture,
                       isFreshUserTurn,
@@ -8859,7 +8859,7 @@ export class Session implements SessionContext {
                     goalTurn,
                     channelTurn,
                   );
-              this.#recordPromptCompletionEffects(
+              await this.#recordPromptCompletionEffects(
                 result,
                 responseCapture,
                 isFreshUserTurn,
@@ -11650,12 +11650,15 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Schedules the managed skill review on a legacy ACP turn.
+   * Schedules the managed skill review on a legacy ACP turn and returns the
+   * drain of the promise it queued.
    *
    * The review promise is queued on the client, so take it back the same way
    * the shared round does: retaining every promise for the life of a
    * long-running `qwen serve` process is a leak, and ACP has nothing to report
-   * them to.
+   * them to. The caller awaits the returned promise at the end of the turn, so
+   * the drain really does delay completion instead of discarding what it
+   * awaited.
    */
   async #runManagedAutoSkillReview(): Promise<void> {
     const llmClient = this.config.getLlmClient();
@@ -11686,7 +11689,7 @@ export class Session implements SessionContext {
       // stopped.
       memoryTasksRanInClient?: boolean;
     },
-  ): void {
+  ): Promise<void> | undefined {
     if (result.stopReason !== 'cancelled') {
       responseCapture.agentOutput.writeToSpan(getActiveInteractionSpan());
     }
@@ -11715,9 +11718,9 @@ export class Session implements SessionContext {
     // tool turns too. The legacy round only reaches this ACP-side branch, so
     // without this call `toolCallCount` would accumulate unread and `qwen
     // serve` would never produce an auto-skill candidate.
-    void this.#runManagedAutoSkillReview();
+    const skillReview = this.#runManagedAutoSkillReview();
     if (!this.config.getManagedAutoMemoryEnabled()) {
-      return;
+      return skillReview;
     }
     this.config.getLlmClient().captureCacheSafeParams();
     const memoryManager = this.config.getMemoryManager();
@@ -11739,7 +11742,7 @@ export class Session implements SessionContext {
     }
     // As the client does for a shared round's channel turn.
     if (channelTurn) {
-      return;
+      return skillReview;
     }
     void memoryManager
       .scheduleExtract({
@@ -11774,6 +11777,7 @@ export class Session implements SessionContext {
           error,
         );
       });
+    return skillReview;
   }
 
   async #buildNextMessageAfterToolRun(
