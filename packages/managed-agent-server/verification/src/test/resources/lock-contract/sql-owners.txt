@@ -327,8 +327,6 @@ com/alibaba/qwen/code/managedagent/persistence/ToolPublicationStore.java|THEN 1 
 com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationHistory.java|SELECT workspace_generation, workspace_storage_id, cwd_relative, context_config_ref, context_revision FROM ma_session WHERE tenant_id = ? AND session_id = ? AND workspace_id = ?
 com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationStore.java|SELECT lease_token_hash FROM ma_session_head WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?
 com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiApplicationStore.java|SELECT workspace_generation, workspace_storage_id, cwd_relative, context_config_ref, context_revision FROM ma_session WHERE tenant_id = ? AND session_id = ? AND workspace_id = ?
-com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiCheckpointSnapshotStore.java|FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?
-com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiCheckpointSnapshotStore.java|ma_session_head
 com/alibaba/qwen/code/managedagent/persistence/WorkspaceFileStore.java|SELECT * FROM ma_session WHERE tenant_id = ? AND session_id = ? AND status <> 'DELETED' AND (owner_only = 0 OR COALESCE(owner_actor_key, creator_actor_key) = ?)
 com/alibaba/qwen/code/managedagent/persistence/WorkspaceFileUploadStore.java|SELECT 1 FROM ma_session WHERE tenant_id = ? AND session_id = ? AND status <> 'DELETED'
 com/alibaba/qwen/code/managedagent/persistence/WorkspaceMigrationAdmission.java|SELECT tenant_id, session_id, workspace_id FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION'
