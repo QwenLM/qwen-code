@@ -62,7 +62,10 @@ import {
   itemOffsets,
   type TranscriptWindow,
 } from './transcript-window.js';
-import { assistantMarkdownForRender } from './markdown-heal.js';
+import {
+  splitMarkdownBlocks,
+  streamingMarkdownForRender,
+} from './markdown-heal.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { ModAssistantMessageInput } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { useModRow } from '../hooks/use-mod-row.js';
@@ -84,6 +87,17 @@ import {
   isCollapsibleTool,
   isSubagentToolEntry,
 } from '../utils/tool-group-summary.js';
+
+// Coalesced mode folds every non-code block into one markdown block and
+// previews it with a block-unaware inline lexer, so ATX markers flip
+// against the tree-sitter rendering on each streaming chunk. Top-level
+// keeps each block's preview token-aligned; grid preserves the table
+// style coalesced mode uses by default. (Bare-URL preview duplication is
+// separate: fixed upstream by OpenTUI 0.8.4, not by block mode.)
+const STREAMING_MARKDOWN_OPTIONS = {
+  internalBlockMode: 'top-level',
+  tableOptions: { style: 'grid' },
+} as const;
 
 /** ink HistoryItemDisplay picks between two hints by whether the card is
  *  clickable; `ui.mouseTracking: false` hands the pointer back to the
@@ -860,7 +874,7 @@ function AssistantRow({
   );
   const modProps = useModRow(modRows?.config, modRows?.sessionId, modInput);
   const content = sanitizeTerminalText(
-    assistantMarkdownForRender(modProps?.text ?? text, streaming),
+    streamingMarkdownForRender(modProps?.text ?? text, streaming),
   );
   // The two shapes differ, and `output.showTimestamps` is a setting the dialog
   // can flip mid-session: without keys the stamped branch's second child would
@@ -875,6 +889,7 @@ function AssistantRow({
           content={content}
           syntaxStyle={SYNTAX}
           streaming={streaming}
+          {...STREAMING_MARKDOWN_OPTIONS}
         />
       </box>
     </box>
@@ -908,6 +923,19 @@ function ThinkingRow({
     (item.startedAt === undefined ? undefined : Date.now() - item.startedAt);
   const meta = thinkingMeta(item.done, expanded, durationMs, mouseTracking);
   const body = item.text.trimEnd();
+  // Re-rendering one tall markdown buffer repaints the whole thought on
+  // every line. Streaming renders each completed block on its own so only
+  // the trailing block is re-rasterized; the settled render stays single.
+  const streamingBlocks = useMemo(
+    () => (item.done ? [] : splitMarkdownBlocks(body)),
+    [item.done, body],
+  );
+  // The split arm heals each block separately, so the whole-body heal would
+  // be discarded work on every streaming render.
+  const content =
+    streamingBlocks.length > 1
+      ? ''
+      : sanitizeTerminalText(streamingMarkdownForRender(body, !item.done));
   return (
     <box
       flexDirection="column"
@@ -925,12 +953,36 @@ function ThinkingRow({
         <box flexDirection="row">
           <box width={STATUS_INDICATOR_WIDTH} />
           <box flexGrow={1}>
-            <markdown
-              content={sanitizeTerminalText(body)}
-              syntaxStyle={SYNTAX_DIM}
-              streaming={!item.done}
-              fg={C.dim}
-            />
+            {streamingBlocks.length > 1 ? (
+              <box flexDirection="column">
+                {streamingBlocks.map((block, index) => {
+                  const isTail = index === streamingBlocks.length - 1;
+                  return (
+                    <markdown
+                      key={index}
+                      content={sanitizeTerminalText(
+                        isTail
+                          ? streamingMarkdownForRender(block, true)
+                          : block,
+                      )}
+                      syntaxStyle={SYNTAX_DIM}
+                      streaming={isTail}
+                      fg={C.dim}
+                      marginTop={index === 0 ? 0 : 1}
+                      {...STREAMING_MARKDOWN_OPTIONS}
+                    />
+                  );
+                })}
+              </box>
+            ) : (
+              <markdown
+                content={content}
+                syntaxStyle={SYNTAX_DIM}
+                streaming={!item.done}
+                fg={C.dim}
+                {...STREAMING_MARKDOWN_OPTIONS}
+              />
+            )}
           </box>
         </box>
       ) : null}

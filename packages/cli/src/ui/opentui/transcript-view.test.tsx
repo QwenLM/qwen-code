@@ -898,6 +898,25 @@ describe('OpenTuiTranscriptView', () => {
     expect(expanded.container.textContent).toContain('ctrl+o to collapse');
   });
 
+  it('renders a streaming thought as stable per-paragraph blocks', () => {
+    const items: LiveThinkingItem[] = [
+      {
+        kind: 'thinking',
+        id: 'th1',
+        text: 'FIRST_BLOCK\n\nSECOND_BLOCK',
+        done: false,
+        startedAt: Date.now(),
+      },
+    ];
+    const { container } = render(
+      <OpenTuiTranscriptView items={items} thoughtsExpanded />,
+    );
+    const blocks = [...container.querySelectorAll('markdown')].map((element) =>
+      element.getAttribute('content'),
+    );
+    expect(blocks).toEqual(['FIRST_BLOCK', 'SECOND_BLOCK']);
+  });
+
   it('drops the click affordance from both hints when ui.mouseTracking is off (#172)', () => {
     const thought: LiveThinkingItem[] = [
       {
