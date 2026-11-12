@@ -26,6 +26,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -172,7 +174,10 @@ class TerminalRelayHandlerTest {
 
         verify(broker).abandonTerminalHold(
                 "session-a", "term-1", "terminal-attach:term-1:process");
-        verify(session).close(CloseStatus.SERVER_ERROR);
+        // Worker loss is terminal: the relay maps it to the non-retryable
+        // terminal-lost code (4003, in the Web Shell NON_RETRYABLE_CLOSE_CODES)
+        // so the panel renders the lost notice instead of reconnecting forever.
+        verify(session).close(new CloseStatus(4003));
     }
 
     @Test
@@ -199,7 +204,7 @@ class TerminalRelayHandlerTest {
         handler.afterConnectionEstablished(session);
 
         verify(broker, never()).abandonTerminalHold(anyString(), anyString(), anyString());
-        verify(session).close(CloseStatus.SERVER_ERROR);
+        verify(session).close(new CloseStatus(4003));
     }
 
     private static ToolExecutionRecord hold(String executionCallId) {
@@ -319,6 +324,87 @@ class TerminalRelayHandlerTest {
         // panel's non-retryable policy stops reconnecting (not a rewritten 1000).
         attached.relay.onClose(worker, 4001, "fatal");
         verify(attached.browser).close(argThat(status -> status.getCode() == 4001));
+    }
+
+    @Test
+    void mapsIrretrievableWorkerLossToTheNonRetryableTerminalLostCode() throws Exception {
+        // The JDK client reports reserved codes when the worker dies without a
+        // Close frame; forwarding them verbatim would make the panel reconnect
+        // forever into a replacement worker's empty PTY. Each must map to the
+        // relay-owned terminal-lost code (4003, in NON_RETRYABLE_CLOSE_CODES).
+        for (int reserved : new int[] {1005, 1006, 1015}) {
+            WebSocket worker = mock(WebSocket.class);
+            Attached attached = attach(worker);
+            attached.relay.onClose(worker, reserved, "");
+            verify(attached.browser).close(argThat(status -> status.getCode() == 4003));
+        }
+        // A transport error is likewise terminal, not a retryable SERVER_ERROR.
+        WebSocket worker = mock(WebSocket.class);
+        Attached attached = attach(worker);
+        attached.relay.onError(worker, new IllegalStateException("worker gone"));
+        verify(attached.browser).close(argThat(status -> status.getCode() == 4003));
+    }
+
+    @Test
+    void browserCloseRacingWorkerRegistrationNeverOrphansTheWorkerSocket() throws Exception {
+        RuntimeBrokerOperations broker = mock(RuntimeBrokerOperations.class);
+        when(broker.admitTerminalHold("session-a", "term-1"))
+                .thenReturn(CompletableFuture.completedFuture(
+                        new TerminalHoldAdmission(
+                                hold("terminal-attach:term-1:process"), true)));
+        HttpClient client = mock(HttpClient.class);
+        WebSocket.Builder builder = mock(WebSocket.Builder.class);
+        when(client.newWebSocketBuilder()).thenReturn(builder);
+        when(builder.header(anyString(), anyString())).thenReturn(builder);
+        when(builder.connectTimeout(any())).thenReturn(builder);
+        WebSocket worker = mock(WebSocket.class);
+        AtomicReference<WebSocket.Listener> relayRef = new AtomicReference<>();
+        when(builder.buildAsync(any(URI.class), any(WebSocket.Listener.class)))
+                .thenAnswer(invocation -> {
+                    relayRef.set(invocation.getArgument(1));
+                    return CompletableFuture.completedFuture(worker);
+                });
+        // Park the browser liveness probe to widen the window between the probe
+        // and the worker registration, so a concurrent browser close can land
+        // inside it.
+        CountDownLatch probeEntered = new CountDownLatch(1);
+        CountDownLatch releaseProbe = new CountDownLatch(1);
+        WebSocketSession browser = session();
+        // The admission's browser-gone check calls isOpen() first and must not
+        // block; only the onOpen liveness probe (the second call) parks.
+        java.util.concurrent.atomic.AtomicInteger openCalls =
+                new java.util.concurrent.atomic.AtomicInteger();
+        when(browser.isOpen()).thenAnswer(invocation -> {
+            if (openCalls.incrementAndGet() == 1) {
+                return true;
+            }
+            probeEntered.countDown();
+            assertThat(releaseProbe.await(10, TimeUnit.SECONDS)).isTrue();
+            return true;
+        });
+        TerminalRelayHandler handler = new TerminalRelayHandler(broker, client);
+        handler.afterConnectionEstablished(browser);
+        WebSocket.Listener relay = relayRef.get();
+
+        Thread opener = new Thread(() -> relay.onOpen(worker), "relay-onopen");
+        opener.start();
+        assertThat(probeEntered.await(10, TimeUnit.SECONDS)).isTrue();
+        // The browser closes while the probe is parked. With the probe and the
+        // registration sharing one monitor, closeWorker waits and then closes the
+        // registered worker; with the probe outside the monitor it would see no
+        // worker yet and orphan the socket the registration is about to store.
+        Thread closer = new Thread(
+                () -> handler.afterConnectionClosed(browser, CloseStatus.NORMAL),
+                "relay-close");
+        closer.start();
+        // Let the closer reach closeWorker (it parks on the monitor when the
+        // probe and registration are atomic) before the probe is released.
+        closer.join(500);
+        releaseProbe.countDown();
+        opener.join(10_000);
+        closer.join(10_000);
+
+        verify(worker).sendClose(eq(WebSocket.NORMAL_CLOSURE), anyString());
     }
 
     @Test

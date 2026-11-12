@@ -10,7 +10,15 @@ export const CONTROL_FRAME_PREFIX = '\x00';
 /** Exponential backoff bounds for automatic WebSocket reconnection. */
 export const RECONNECT_INITIAL_MS = 500;
 export const RECONNECT_MAX_MS = 10_000;
-export const NON_RETRYABLE_CLOSE_CODES = new Set([4000, 4001, 4002, 4004]);
+/**
+ * Close codes that end the terminal instead of reconnecting. 4003 is the
+ * Managed relay's synthesized "worker lost" code (TerminalRelayHandler
+ * TERMINAL_LOST_CLOSE_CODE); the daemon's own terminal never sends it, so the
+ * shared local panel is unaffected. Keep the two sides in sync.
+ */
+export const NON_RETRYABLE_CLOSE_CODES = new Set([
+  4000, 4001, 4002, 4003, 4004,
+]);
 
 export const WS_AUTH_SUBPROTOCOL = 'qwen-ws';
 export const WS_BEARER_SUBPROTOCOL_PREFIX = 'qwen-bearer.';

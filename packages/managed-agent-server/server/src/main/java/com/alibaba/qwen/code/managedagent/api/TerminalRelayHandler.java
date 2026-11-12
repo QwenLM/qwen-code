@@ -40,6 +40,16 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
     private static final String RELAY_ATTRIBUTE =
             TerminalRelayHandler.class.getName() + ".relay";
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
+    /**
+     * The relay-owned non-retryable close code for irretrievable worker loss.
+     * Kept in sync with NON_RETRYABLE_CLOSE_CODES in the Web Shell's
+     * terminal-protocol.ts; the daemon's own terminal never sends 4003, so the
+     * shared local panel is unaffected. Reserved wire codes (1005/1006/1015)
+     * and transport errors map here so the panel renders the terminal-lost
+     * notice instead of reconnecting forever into a replacement worker's empty
+     * PTY.
+     */
+    private static final int TERMINAL_LOST_CLOSE_CODE = 4003;
 
     private final HttpClient client;
     private final RuntimeBrokerOperations broker;
@@ -123,13 +133,13 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
                         if (error != null) {
                             relay.fail();
                             abandonHold(sessionId, terminalId, createdHold, holdCallId);
-                            closeQuietly(session, CloseStatus.SERVER_ERROR);
+                            closeQuietly(session, new CloseStatus(TERMINAL_LOST_CLOSE_CODE));
                         }
                     });
         } catch (RuntimeException error) {
             relay.fail();
             abandonHold(sessionId, terminalId, createdHold, holdCallId);
-            closeQuietly(session, CloseStatus.SERVER_ERROR);
+            closeQuietly(session, new CloseStatus(TERMINAL_LOST_CLOSE_CODE));
         }
     }
 
@@ -200,6 +210,17 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
 
     private static Relay relay(WebSocketSession session) {
         return (Relay) session.getAttributes().get(RELAY_ATTRIBUTE);
+    }
+
+    /** Maps a worker close code to the browser leg. Reserved codes that RFC
+     * 6455 forbids on the wire (the JDK client reports them when the worker dies
+     * without a Close frame) become the relay-owned terminal-lost code; genuine
+     * peer codes pass through verbatim. */
+    private static CloseStatus browserCloseFor(int workerCode) {
+        if (workerCode == 1005 || workerCode == 1006 || workerCode == 1015) {
+            return new CloseStatus(TERMINAL_LOST_CLOSE_CODE);
+        }
+        return new CloseStatus(workerCode);
     }
 
     private static void closeQuietly(WebSocketSession session, CloseStatus status) {
@@ -311,18 +332,21 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
         @Override
         public CompletionStage<?> onClose(WebSocket webSocket, int statusCode,
                 String reason) {
-            // Forward the worker's close code: the panel's non-retryable policy
-            // keys on it (e.g. 4001 fatal failure). Rewriting every close to
-            // 1000 would make a fatally failed terminal reconnect forever.
+            // Forward genuine peer close codes: the panel's non-retryable policy
+            // keys on them (e.g. 4001 fatal failure). Rewriting every close to
+            // 1000 would make a fatally failed terminal reconnect forever. But
+            // the reserved codes the JDK client reports when the worker dies
+            // without a Close frame (1005/1006/1015) must map to the relay-owned
+            // terminal-lost code, or the panel would retry forever.
             fail();
-            closeQuietly(browser, new CloseStatus(statusCode));
+            closeQuietly(browser, browserCloseFor(statusCode));
             return null;
         }
 
         @Override
         public void onError(WebSocket webSocket, Throwable error) {
             fail();
-            closeQuietly(browser, CloseStatus.SERVER_ERROR);
+            closeQuietly(browser, new CloseStatus(TERMINAL_LOST_CLOSE_CODE));
         }
 
         void toWorkerText(String payload) {
