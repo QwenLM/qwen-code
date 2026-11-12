@@ -18,7 +18,11 @@ unset RUNNER_JIT_CONFIG
 if [ -n "${QWEN_CI_BAKED_RUNTIME_CACHE:-}" ] &&
   [ -d "${QWEN_CI_BAKED_RUNTIME_CACHE}" ]; then
   runtime_cache="${HOME}/.cache/qwen-code/standalone-runtimes"
-  if mkdir -p "$runtime_cache" 2>/dev/null; then
+  # No `2>/dev/null` here either, for the reason the copy below spells out:
+  # this branch is the one an unwritable $HOME takes, and mkdir's own error is
+  # what tells a permission problem, a read-only layer and a full disk apart.
+  # Our sentence says only that the job will download.
+  if mkdir -p "$runtime_cache"; then
     # Both suffixes, spelled out: Node's archive is `.tar.gz` and Bun's is
     # `.tgz`, and `*.tgz` does not match the former. A single pattern here
     # seeded Bun only and left every job downloading Node — silently, since a

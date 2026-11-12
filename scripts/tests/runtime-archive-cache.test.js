@@ -506,6 +506,11 @@ describe('the ephemeral image seeds the runtime archives', () => {
     );
     expect(entrypoint).toContain('mkdir -p "$runtime_cache"');
     expect(entrypoint).toContain('[ -e "$target" ] && continue');
+    // Same rule on the mkdir, which is the branch an unwritable $HOME takes:
+    // its error is the only thing naming permission versus a read-only layer
+    // versus a full disk, and our sentence carries none of the three.
+    expect(entrypoint).toContain('if mkdir -p "$runtime_cache"; then');
+    expect(entrypoint).not.toContain('mkdir -p "$runtime_cache" 2>/dev/null');
     // No `2>/dev/null` on the copy: cp's own message is the only thing that
     // tells a full writable layer apart from an unreachable registry, and those
     // two need opposite responses. `||` must stay — under `set -euo pipefail`
@@ -685,6 +690,12 @@ describe('the archive selectors match both real filenames', () => {
         const { result } = seedInto(home);
         expect(result.status).toBe(0);
         expect(result.stderr).toContain('the job will download');
+        // mkdir's diagnostic, not ours: with `2>/dev/null` restored the job
+        // still starts and still says it will download, but the reader loses
+        // the one line that says why.
+        expect(result.stderr).toMatch(
+          /Permission denied|Operation not permitted|Read-only file system/,
+        );
       } finally {
         fs.chmodSync(blocker, 0o700);
         fs.rmSync(home, { recursive: true, force: true });
@@ -692,10 +703,9 @@ describe('the archive selectors match both real filenames', () => {
     },
   );
 
-  // The `.cache`-level case above fails at `mkdir -p`, so the copy never runs
-  // and both branches print the same sentence. This one creates the destination
-  // first and makes only the write fail, which is the branch the message is
-  // supposed to distinguish — and cp's own error must survive to stderr.
+  // The `.cache`-level case above fails at `mkdir -p`, so the copy never runs.
+  // This one creates the destination first and makes only the write fail, which
+  // is the other branch — and cp's own error must survive to stderr there too.
   it.skipIf(!arePermissionBitsEnforced())(
     'says the copy failed, with the reason, when only the copy fails',
     () => {
