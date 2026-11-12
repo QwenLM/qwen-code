@@ -358,7 +358,6 @@ com/alibaba/qwen/code/runtimebroker/persistence/JdbcCsiExecutionAdmission.java|S
 com/alibaba/qwen/code/runtimebroker/persistence/JdbcCsiFilesRetirementGuard.java|SELECT is_csi_guard, tool_profile FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE
 com/alibaba/qwen/code/runtimebroker/persistence/JdbcCsiFilesRetirementGuard.java|SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ?
 com/alibaba/qwen/code/runtimebroker/persistence/JdbcCsiFilesRetirementGuard.java|SELECT tenant_id, session_id, agent_id, tool_profile, runtime_request_key, workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE
-com/alibaba/qwen/code/runtimebroker/persistence/JdbcCsiFilesRetirementGuard.java|ma_session
 com/alibaba/qwen/code/runtimebroker/persistence/JdbcRuntimeBindingRepository.java|INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING',
 com/alibaba/qwen/code/runtimebroker/persistence/JdbcRuntimeBindingRepository.java|SELECT phase FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?
 com/alibaba/qwen/code/runtimebroker/persistence/JdbcRuntimeBindingRepository.java|SELECT tenant_id, harness_session_id, phase FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? FOR UPDATE

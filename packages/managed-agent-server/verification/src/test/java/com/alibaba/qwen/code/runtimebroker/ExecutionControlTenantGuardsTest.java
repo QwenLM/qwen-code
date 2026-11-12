@@ -8,11 +8,18 @@ import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.datasource.DelegatingDataSource;
 
 import javax.sql.DataSource;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.SQLException;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
@@ -124,6 +131,49 @@ class ExecutionControlTenantGuardsTest {
         bindings.releaseOperation(fixture.binding.getBindingId(), "recovery", fixture.binding.getOperationGeneration());
         var released = whileGuardsHeld(fixture.id, true, () -> leaseRound(fixture));
         assertEquals(null, released.getOperationOwner());
+    }
+
+    @Test
+    void sessionIsolatedRenewalLocksTheRootOnceWithoutACatalogProbe() throws Exception {
+        // A heartbeat on an ordinary binding needs one locking read of its
+        // Session root for the pin; the validated catalog always has the table.
+        var fixture = sessionFixture(true);
+        bindings.releaseOperation(fixture.binding.getBindingId(), "recovery", fixture.binding.getOperationGeneration());
+        var claimed = bindings.claimOperation(fixture.binding.getBindingId(), "control", Duration.ofMinutes(1));
+        var calls = new ArrayList<String>();
+        var traced = new JdbcRuntimeBindingRepository(recording(source, calls),
+                new AesGcmSecretProtector("test", new byte[32]));
+        assertEquals(claimed.getOperationGeneration(), traced.renewOperation(claimed.getBindingId(), "control",
+                claimed.getOperationGeneration(), Duration.ofMinutes(1)).getOperationGeneration());
+        assertEquals(List.of(), calls.stream().filter(call -> call.startsWith("getTables")).toList());
+        assertEquals(1, calls.stream().filter(call -> call.contains(" FROM ma_session WHERE")
+                && call.endsWith(" FOR UPDATE")).count(), calls.toString());
+    }
+
+    /** Records prepared SQL and catalog table probes without changing either. */
+    private static DataSource recording(DataSource source, List<String> calls) {
+        return new DelegatingDataSource(source) {
+            @Override
+            public Connection getConnection() throws SQLException {
+                return record(Connection.class, super.getConnection(), calls);
+            }
+        };
+    }
+
+    private static <T> T record(Class<T> type, T target, List<String> calls) {
+        return type.cast(Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[] {type}, (proxy, method, args) -> {
+            if (method.getName().equals("prepareStatement") || method.getName().equals("getTables")) {
+                calls.add(method.getName().equals("getTables") ? "getTables " + args[2] : (String) args[0]);
+            }
+            Object result;
+            try {
+                result = method.invoke(target, args);
+            } catch (InvocationTargetException failure) {
+                throw failure.getCause();
+            }
+            return method.getName().equals("getMetaData")
+                    ? record(DatabaseMetaData.class, (DatabaseMetaData) result, calls) : result;
+        }));
     }
 
     @Test
