@@ -47,7 +47,7 @@ public final class WorkspaceCsiApplicationStore {
     private static final String FORMAT = "qwen-csi-application-retirement/1";
     private static final int RECEIPT_LIMIT = 64 * 1024;
     static final int FROZEN_LIMIT = 32 * 1024 * 1024;
-    private static final int BODY_LIMIT = 128 * 1024;
+    private static final int BODY_LIMIT = CsiNativeActivationProof.TERMINAL_BODY_LIMIT;
     private static final Set<String> ENVELOPE_FIELDS = Set.of("format", "retirementId", "bindingId", "requestKey",
             "sealedBindingVersion", "bootSha256", "writerTokenSha256", "commitBodyBase64", "preparedCommitSha256",
             "preCutObservationBase64", "preCutObservationSha256", "workerObserveRequest");
@@ -79,7 +79,7 @@ public final class WorkspaceCsiApplicationStore {
     }
 
     public Status command(String tenant, String session, String token, String action, byte[] bytes) {
-        JsonNode request = WorkspaceCsiApplicationJson.object(bytes, 192 * 1024);
+        JsonNode request = WorkspaceCsiApplicationJson.object(bytes, CsiNativeActivationProof.TERMINAL_COMMAND_LIMIT);
         String argument = switch (action) {
             case "freeze" -> "commitBodyBase64";
             case "cut" -> "frozenRequestSha256";
@@ -93,7 +93,7 @@ public final class WorkspaceCsiApplicationStore {
         String retirement = request.path("retirementId").textValue();
         return switch (action) {
             case "freeze" -> freeze(tenant, session, workspace, retirement, token,
-                    WorkspaceCsiApplicationJson.base64(request.path(argument), 128 * 1024));
+                    WorkspaceCsiApplicationJson.base64(request.path(argument), BODY_LIMIT));
             case "cut" -> cut(tenant, session, workspace, retirement, token, request.path(argument).textValue());
             case "finalize" -> finalizeApplication(tenant, session, workspace, retirement, token, request.path(argument).textValue());
             default -> throw new IllegalArgumentException("Unknown CSI retirement command");

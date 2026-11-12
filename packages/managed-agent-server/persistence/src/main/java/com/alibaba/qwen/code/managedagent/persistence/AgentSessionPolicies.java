@@ -406,9 +406,6 @@ final class AgentSessionPolicies {
                 + " AND operation_kind IN " + AgentStoreRows.SESSION_OPERATION_KINDS
                 + " AND (state IN ('PENDING', 'RUNNING', 'UNKNOWN') OR state='RECOVERY_BLOCKED' AND operation_kind <> 'TASK_CANCEL')"
                 + " LIMIT 1 FOR UPDATE", ManagedSessionStore.sessionScopeKey(tenantId, sessionId), AgentStoreRows.sessionOperationTarget(sessionId)).isEmpty()
-                || !jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE operation_kind='RENAME'"
-                        + " AND target_key=? AND tenant_id=? AND session_id=? AND state IN ('PENDING', 'RUNNING') LIMIT 1 FOR UPDATE",
-                        AgentStoreRows.renameTarget(tenantId, sessionId), tenantId, sessionId).isEmpty()
                 || !jdbc.queryForList("SELECT receipt_key FROM ma_request_receipt WHERE namespace='SESSION_COMMAND'"
                         + " AND tenant_key=? AND tenant_id=? AND session_id=? AND state='PENDING' LIMIT 1 FOR UPDATE",
                         com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenantId), tenantId, sessionId).isEmpty()) {
@@ -428,21 +425,6 @@ final class AgentSessionPolicies {
         return definitions
                 .find(tenantId, agentId, Long.parseLong(requested))
                 .orElseThrow(ManagedAgentDefinitionStore::notFound);
-    }
-
-    // A parked title (RECOVERY_BLOCKED) is not
-    // pending: nothing sends it again, and the reconciler settles it in any
-    // Session status, so it never holds the lifecycle (D7-2).
-    boolean hasPendingRenameDelivery(String tenantId, String sessionId) {
-        return jdbc.queryForObject(
-                        "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND"
-                            + " target_key = ? AND tenant_id = ? AND session_id = ? AND state IN"
-                            + " ('PENDING', 'RUNNING')",
-                        Integer.class,
-                        AgentStoreRows.renameTarget(tenantId, sessionId),
-                        tenantId,
-                        sessionId)
-                > 0;
     }
 
     boolean workspaceFilesEnabled() {
@@ -720,7 +702,6 @@ final class AgentSessionPolicies {
             throw new ManagedAgentException(409, "turn_active", "The Session has an active Turn or approval");
         }
         if ((live ? hasOpenExecutionOperation(tenantId, sessionId) : hasOpenOperation(tenantId, sessionId))
-                || hasPendingRenameDelivery(tenantId, sessionId)
                 || !live && hasRetainedRuntimeSession(tenantId, sessionId)
                 || !jdbc.queryForList("SELECT 1 FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
                         + " AND (status IN ('RECOVERY_BLOCKED', 'CANCELLING') OR status IN ('ACCEPTED', 'RUNNING')"
