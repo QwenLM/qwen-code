@@ -2,7 +2,7 @@
 
 [English](2026-11-09-daemon-pr-watch-enablement.md) | [简体中文](2026-11-09-daemon-pr-watch-enablement.zh-CN.md)
 
-状态：proposed（2026-11-09），部分已落地（#16732 与本增量）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md)（下称「主设计」）中继 [投递 drain](2026-11-08-daemon-pr-watch-drain.md)（已合入 #16656）之后的增量，覆盖 drain 增量延后到启用的四项：共享 restore（§1）、resume 后 drain 钩子（§2）、lifecycle close 重排（§3）、daemon 级 deps 填充（§4）。**已落地：完整的 §3 与 §4 中的 host 枚举器（#16732）；§1 共享 restore（#16810）；§5 listing 写入与 `listedKeys`。**§2 与 §4 的其余部分仍在后面，且两者一起落地——因为 §4 提供 §2 所需的消费者；下文各节均按此标注。**off 开关仍为 `false`，`sessionPrWatch` 设置仍不读取**——配置（§6）、channel 别名与打开开关（§7）仍属 PR B。任何构建都绝不能同时跑两个 poller。
+状态：proposed（2026-11-09），部分已落地（#16732 与本增量）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md)（下称「主设计」）中继 [投递 drain](2026-11-08-daemon-pr-watch-drain.md)（已合入 #16656）之后的增量，覆盖 drain 增量延后到启用的四项：共享 restore（§1）、resume 后 drain 钩子（§2）、lifecycle close 重排（§3）、daemon 级 deps 填充（§4）。**已落地：完整的 §3 与 §4 中的 host 枚举器（#16732）；§1 共享 restore（#16810）；§5 listing 写入与 `listedKeys`（#16847）；以及本增量的 §2 与 §4 其余部分。**§2 与 §4 一起落地——因为 §4 提供 §2 所需的消费者；下文各节均按此标注。**off 开关仍为 `false`，`sessionPrWatch` 设置仍不读取**——配置（§6）、channel 别名与打开开关（§7）仍属 PR B。任何构建都绝不能同时跑两个 poller。
 
 ## 问题
 
@@ -84,7 +84,7 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 
 「不拥有」按 **claim 自己的身份规则**判定，且次序相同：先 `isLocalIdentity`，再 `isSameProcess`。两侧共用同一个谓词（`isOwnedByThisProcess`），因此将来扩展判别式不会只落在其中一侧。释放返回原因（`released` / `absent` / `foreign` / `unreadable` / `lock`）而非裸布尔，关停对除 `absent` 外的每种拒绝都记一行——`absent` 是「从未 claim」的常态，保持静默。PID 号相同并不授权删除来自共享同一 home 的另一次启动、另一台机器或另一个 PID namespace 的记录；而单靠 `isSameProcess` 在读不到 process token 的平台（macOS/Windows）会退化为 PID 存活检查——那就会删掉 claim 明确拒绝认领的记录。
 
-### 4. deps 填充（host 枚举器已落地于 #16732，其余尚未）
+### 4. deps 填充（已落地）
 
 `run-qwen-serve.ts` 在 `getArchiveCoordinator` 旁经 late-bound getter 填充两个接缝：
 
@@ -109,26 +109,31 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 
 ## 涉及文件
 
-| 文件                                                             | 改动                                                                                                               |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `packages/cli/src/serve/server/session-restore.ts`（新）         | 共享 restore 核心、typed error、必填 `isCancelled`、可选 telemetry sink；worktree 复挂与它的两个锁 helper 搬移至此 |
-| `packages/cli/src/serve/routes/session.ts`                       | 路由委托给共享核心；保留解析、runtime 解析、virtual-subagent 与 legacy standalone 分支、telemetry、脱敏、错误映射  |
-| `packages/cli/src/serve/server/worktree-ownership-op.test.ts`    | 改从新家导入锁 key 别名；断言不变                                                                                  |
-| `packages/cli/src/serve/server/session-restore.test.ts`（新）    | 核心直调用例，钉住两条取消臂、telemetry sink 与 reservation 释放                                                   |
-| `packages/cli/src/serve/server/worktree-ownership-op.ts`         | 锁 key 的反向引用改为指向真正拥有该推导的模块                                                                      |
-| `packages/cli/src/serve/server.test.ts`                          | worktree double 移到 core 深模块，barrel mock 重导出它们；断言、标题与计数均不变                                   |
-| `packages/cli/src/serve/routes/session-worktree-reset.test.ts`   | sidecar spy 同样重指，并改在该处捕获真实实现                                                                       |
-| `packages/cli/src/serve/server/pr-watch-drain.ts`                | drain state 上的 `idle()` 落定信号，以及 `stopPrWatch`（停止、等待、再释放）                                       |
-| `packages/cli/src/serve/server/pr-watch-store.ts`                | `releaseOwnedPrWatchSync`：只释放本进程持有的记录                                                                  |
-| `packages/cli/src/serve/server/pr-watch-gh-hosts.ts`（新）       | 枚举 daemon 的 `gh` 已配置 hosts                                                                                   |
-| `packages/cli/src/serve/server/pr-watch-deps.ts`（新）           | 构建观测与 drain 的 deps：hosts、准入、restore 映射、账本                                                          |
-| `packages/cli/src/serve/run-qwen-serve.ts`                       | 经 late-bound getter 填充两个接缝；注册关停 drain                                                                  |
-| `packages/cli/src/serve/serve-app-lifecycle.ts`                  | 形状不变；新 drain 经既有 `addAppDrain` 注册                                                                       |
-| `packages/cli/src/serve/server/pr-watch-observation.ts`          | 按 workspace 把 listing 的键带进轮转决策的 tick 选项（已落地）                                                     |
-| `packages/cli/src/serve/server/session-pr-refresh.ts`            | listing→watch 写入与 `listedKeys`（已落地）；`stopWatch` 与 tick 落定信号（#16732）。无需 `partial` 透传，见 §5    |
-| `docs/design/2026-11-09-daemon-pr-watch-enablement.md`（+zh-CN） | 本设计                                                                                                             |
+| 文件                                                              | 改动                                                                                                                                                       |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/cli/src/serve/server/session-restore.ts`（新）          | 共享 restore 核心、typed error、必填 `isCancelled`、可选 telemetry sink；worktree 复挂与它的两个锁 helper 搬移至此                                         |
+| `packages/cli/src/serve/routes/session.ts`                        | 路由委托给共享核心；保留解析、runtime 解析、virtual-subagent 与 legacy standalone 分支、telemetry、脱敏、错误映射                                          |
+| `packages/cli/src/serve/server/worktree-ownership-op.test.ts`     | 改从新家导入锁 key 别名；断言不变                                                                                                                          |
+| `packages/cli/src/serve/server/session-restore.test.ts`（新）     | 核心直调用例，钉住两条取消臂、telemetry sink 与 reservation 释放                                                                                           |
+| `packages/cli/src/serve/server/worktree-ownership-op.ts`          | 锁 key 的反向引用改为指向真正拥有该推导的模块                                                                                                              |
+| `packages/cli/src/serve/server.test.ts`                           | worktree double 移到 core 深模块，barrel mock 重导出它们；断言、标题与计数均不变                                                                           |
+| `packages/cli/src/serve/routes/session-worktree-reset.test.ts`    | sidecar spy 同样重指，并改在该处捕获真实实现                                                                                                               |
+| `packages/cli/src/serve/server/pr-watch-drain.ts`                 | drain state 上的 `idle()` 落定信号，以及 `stopPrWatch`（停止、等待、再释放）                                                                               |
+| `packages/cli/src/serve/server/pr-watch-store.ts`                 | `releaseOwnedPrWatchSync`：只释放本进程持有的记录                                                                                                          |
+| `packages/cli/src/serve/server/pr-watch-gh-hosts.ts`（新）        | 枚举 daemon 的 `gh` 已配置 hosts                                                                                                                           |
+| `packages/cli/src/serve/server/pr-watch-deps.ts`（新）            | 构建观测与 drain 的 deps：hosts、准入、restore 映射、账本（已落地）                                                                                        |
+| `packages/cli/src/serve/run-qwen-serve.ts`                        | 经 late-bound getter 填充两个接缝（hosted channel 变化时重建）；注册关停 drain 与 resume 钩子                                                              |
+| `packages/cli/src/serve/server.ts`                                | 把路由的 session-id 准入与 live-conversation materialize 共享给进程内 wake                                                                                 |
+| `packages/cli/src/serve/process-env-guard.test.ts`                | 登记 deps 模块那处 process-scoped 的 `gh` 配置读取                                                                                                         |
+| `packages/cli/src/serve/server/pr-watch-deps.test.ts`（新）       | 逐接缝用例：允许集、wake 映射、release、准入与账本                                                                                                         |
+| `packages/cli/src/serve/server/session-pr-refresh.test.ts`        | `drainNow` 用例：覆盖声明、关闭开关、信任过滤、惰性                                                                                                        |
+| `packages/cli/src/serve/run-qwen-serve.pr-watch-shutdown.test.ts` | timer 替身补上 `drainNow`；断言不变                                                                                                                        |
+| `packages/cli/src/serve/serve-app-lifecycle.ts`                   | 形状不变；新 drain 经既有 `addAppDrain` 注册                                                                                                               |
+| `packages/cli/src/serve/server/pr-watch-observation.ts`           | 按 workspace 把 listing 的键带进轮转决策的 tick 选项（已落地）                                                                                             |
+| `packages/cli/src/serve/server/session-pr-refresh.ts`             | listing→watch 写入与 `listedKeys`（#16847）；`stopWatch` 与 tick 落定信号（#16732）；`drainNow` 受同一开关与信任过滤门控（§2）。无需 `partial` 透传，见 §5 |
+| `docs/design/2026-11-09-daemon-pr-watch-enablement.md`（+zh-CN）  | 本设计                                                                                                                                                     |
 
-`session-restore.ts`、`routes/session.ts`、`worktree-ownership-op.ts` 与四个测试文件的行不属于 #16732——它们随 §1 在本增量落地。`pr-watch-deps.ts` 随 §4 的其余部分落地。`session-pr-refresh.ts` 就 §5 而言已完整：`stopWatch` 与 tick 落定信号随 #16732 落地，listing 写入与 `listedKeys` 随本片落地，且不需要 `partial` 透传。`run-qwen-serve.ts` 仍是部分的——已落地关停 drain 注册，但两个接缝尚未。
+`session-restore.ts`、`worktree-ownership-op.ts` 与四个 §1 测试文件的行不属于 #16732——它们随 §1 落地（#16810）。`pr-watch-deps.ts`、`run-qwen-serve.ts` 的两个接缝、`drainNow` 句柄与路由的 `onSessionRestored` 接缝随本片落地（§2 与 §4）。`server.ts` 把路由的 session-id 准入与 live-conversation materialize 共享给进程内 wake；`process-env-guard.test.ts` 登记新模块那处 process-scoped 的 `gh` 配置读取。
 
 ## 关键设计决策
 
