@@ -431,8 +431,8 @@ importers:
         specifier: ^3.1.1
         version: 3.2.7(@types/debug@4.1.13)(@types/node@22.20.1)(jiti@2.7.0)(jsdom@26.1.0(supports-color@7.2.0))(lightningcss@1.32.0)(msw@2.10.4(@types/node@22.20.1)(typescript@5.8.3))(supports-color@7.2.0)(tsx@4.20.3)(yaml@2.9.0)
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: ^4.6.6
+        version: 4.6.6
 
   packages/channels/base:
     dependencies:

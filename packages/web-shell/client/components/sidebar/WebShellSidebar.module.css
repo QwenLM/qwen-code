@@ -2110,6 +2110,51 @@ button.livePendingSession:hover {
   margin-left: 0;
 }
 
+.sidebar:not(.railLayout) > .footer {
+  position: relative;
+  right: auto;
+  bottom: auto;
+  left: auto;
+  width: 100%;
+  margin-top: auto;
+}
+
+.sidebar:not(.railLayout) .body {
+  margin-bottom: 8px;
+}
+
+.sidebar.withVersion:not(.railLayout):not(.collapsed) .body {
+  margin-bottom: 40px;
+}
+
+.sidebar:not(.railLayout):not(.collapsed) > .footer > .footerActions {
+  flex: 1 1 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.sidebar:not(.railLayout).collapsed > .footer {
+  flex-shrink: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+.sidebar:not(.railLayout).collapsed > .footer > .footerVersion {
+  position: static;
+  min-height: 0;
+}
+
+.sidebar:not(.railLayout).collapsed
+  > .footer
+  > .footerActions
+  > [data-web-shell-sidebar-collapse] {
+  position: sticky;
+  bottom: 0;
+  background: var(--sidebar-background);
+}
+
 .resizeHandle {
   position: absolute;
   top: 0;

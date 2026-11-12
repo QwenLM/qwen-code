@@ -116,7 +116,7 @@ loop 是一个异步函数。每个模型事件都通过回调原样交给入口
 3. client 的终止事件都会转成停止原因，入口因此无法再丢弃它们：`MaxSessionTurns`、`SessionTokenLimitExceeded`、`UserPromptSubmitBlocked`、`LoopDetected` 和 `Error`。
 4. 如果本轮结束时没有工具调用，loop 以 `completed` 停止。此时 Stop hook、steering 与 next-speaker 续发都已在 `LlmClient` 内部执行完毕。
 
-主会话的模型轮就是 `LlmClient.sendMessageStream`。AgentCore 和 speculation 需要在各自的 `LlmChat` 上运行模型轮，这由 PR 5 基于 `Turn` 加入，届时 chunk 只在 `turn.ts` 中解析。loop 与模型轮之间的接口等到出现第二种实现时，在那个 PR 中引入。
+主会话的模型轮就是 `LlmClient.sendMessageStream`。AgentCore 和 speculation 需要在各自的 `LlmChat` 上运行模型轮，这由 PR 5a 基于 `Turn` 加入，届时 chunk 只在 `turn.ts` 中解析；loop 与模型轮之间的接口 `ModelRoundSource` 也随之引入，因为模型轮有了第二种实现。
 
 ### 工具批
 
@@ -476,6 +476,30 @@ PR 4c 覆盖轮次的其余部分。实时轮次已经会发出工具批接着�
 
 因此轮次的代码不变。PR 4c 在共享路径上为这些情况加入单测；新轮次和重试用例对照两条路径，其余用例只检查共享路径。对拍套件已经在 OpenTUI 上运行它的重试场景和工具运行期间排队输入的场景。
 
+### AgentCore 迁到共享 loop（PR 5）
+
+AgentCore 的推理循环（`agent-core.ts` 中的 `runReasoningLoop`）在每个入口下运行所有子代理、后台和 fork agent、workflow agent 以及进程内 teammate。它在 agent 自己的 `LlmChat` 上发出每一轮并自己解析流的 chunk，在新的 `CoreToolScheduler` 上运行这一轮的调用，把父 agent 的消息加在结果之后，一轮没有调用工具时等待消息或要求给出最终结果，并把各种停止映射到 `terminateMode`。它分以下几步迁移：
+
+| 步骤 | 内容                                                                                                                                        |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| 5a   | 每个模型轮走 loop 的 `runModelRound`，在 agent 自己 `LlmChat` 上的 `Turn` 上发出；agent 保留自己的工具步骤；对拍套件加入子代理场景          |
+| 5b   | 一轮的调用作为一个共享工具批，在 agent 的 scheduler 上运行，连同它的延后审批                                                                |
+| 5c   | 整个运行走 loop：父 agent 的消息经 loop 的下一轮发出，循环提醒和按结果判断的循环守卫、等待和要求最终结果，以及映射到 `terminateMode` 的停止 |
+| 5d   | 默认开启，然后移除现有 loop                                                                                                                 |
+
+PR 5a 让 `runModelRound` 有了第二种模型轮。它接收主会话的 `LlmClient` 或一个 `ModelRoundSource`，`turnModelRound(chat, model, options)` 在 agent 的 chat 上用 `Turn` 发出一轮。`Turn` 接收可选的工具和输出上限请求字段，在流准备完成时通知调用方，并在产出每个 chunk 的事件前提供其文本、响应 ID 和用量。`Retry` 事件可以携带提高后的输出上限。Agent 可以让 `Turn` 原样抛出请求错误。入口的模型事件回调可以返回停止原因，在那里结束这一轮并关闭它的流。
+
+AgentCore 像现在映射 chunk 那样映射这一轮的事件，并为自己的工具步骤保留原始的 function call。迁移的部分：
+
+| AgentCore 现在                                           | 开启设置后                                                   |
+| -------------------------------------------------------- | ------------------------------------------------------------ |
+| 用 `LlmChat.sendMessageStream` 发出每一轮并解析 chunk    | `runModelRound` 在 `Turn` 上发出，AgentCore 映射这一轮的事件 |
+| 在流中检测到循环时跳出流                                 | 事件回调返回 `loop_detected`，结束这一轮并关闭流             |
+| 模型回退时保留失败模型已流出的内容：调用、正文和思考文本 | 丢弃这些内容，这一轮只带回退模型的输出，与其他入口相同       |
+| 每个文本 part 一个流式文本事件                           | 每个 chunk 一组：先是思考文本，再是正文                      |
+
+两条路径都在流准备完成后发出 `ROUND_START`，让 workflow 的停滞检测为模型响应重新计时。Agent 在循环检查前发出当前 chunk 中已收到的全部文本，并按尝试记录响应 ID。请求失败、取消以及重试等待被时间上限打断时，运行的结束方式与现在相同。开启设置的套件在调试日志中统计在共享 loop 上发出的子代理轮次。TUI 套件通过另一条日志统计主会话的轮次。
+
 ## 迁移计划
 
 | PR    | 内容                                                                                                      |
@@ -502,11 +526,14 @@ PR 4c 覆盖轮次的其余部分。实时轮次已经会发出工具批接着�
 | 4b    | OpenTUI：一轮的工具调用作为一个共享工具批                                                                 |
 | 4c    | OpenTUI：验证 4b 后已有的轮次行为，包括工具边界的 steering 输入和重试                                     |
 | 4d    | OpenTUI：默认开启，然后删除其现有 loop                                                                    |
-| 5     | AgentCore 改用基于 `Turn` 的模型轮（subagent、后台与 fork agent、workflow）                               |
+| 5a    | AgentCore：每个模型轮走 loop 的模型轮，在 agent 自己 chat 上的 `Turn` 上发出；agent 保留自己的工具步骤    |
+| 5b    | AgentCore：一轮的调用作为一个共享工具批，连同它的延后审批                                                 |
+| 5c    | AgentCore：整个运行走 loop，父 agent 的消息经下一轮发出；停止映射到 `terminateMode`                       |
+| 5d    | AgentCore：默认开启，然后移除现有 loop                                                                    |
 | 6     | speculation                                                                                               |
 | —     | Hosted Harness：单独评估                                                                                  |
 
-PR 5 和 6 每一项之后，同样各自跟随默认开启和删除旧 loop 两步。
+PR 6 之后同样跟随默认开启和删除旧 loop 两步。
 
 一个入口在设置开启时通过它的对拍测试，并列出了已知差异，才算完成迁移。之后每个入口各自修改默认值，不必等其他入口。修改默认值需要同时满足：
 
@@ -545,6 +572,13 @@ PR 5 和 6 每一项之后，同样各自跟随默认开启和删除旧 loop 两
 - 跨两条 stream-json 消息的 `--max-session-turns`；
 - 带同批调用的 structured output；
 - 合并进工具结果轮的 teammate 消息。
+
+**子代理场景**（在 headless 套件中，从 PR 5a 起），每个都经由 `agent` 工具，子代理的请求与主会话的请求按发出顺序一起比较：
+
+- 读取一个文件的子代理；
+- 流断开一次后恢复的子代理。测试检查两次请求，并确认恢复后的回答出现在父会话的工具结果中。
+- 在轮数上限处停止的子代理；
+- 模型失败的子代理。
 
 **ACP 场景**（`integration-tests/cli/acp-agent-loop-parity.test.ts`）：
 
@@ -650,6 +684,10 @@ PR 5 和 6 每一项之后，同样各自跟随默认开启和删除旧 loop 两
   - 从 PR 4b 起，完成的工具调用计入会话的工具调用数，自动 skill review 和记忆召回会读取它；
   - 从 PR 4b 起，结束轮次的工具会结束轮次，结果写入 history。
 
+- 设置开启后，AgentCore 与现在有以下预期差异：
+  - 从 PR 5a 起，模型回退时丢弃失败模型已流出的调用、正文和思考文本，这一轮的回答只带回退模型的输出，与其他入口相同（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）。
+  - 从 PR 5a 起，一个流式文本事件承载一个 chunk 的思考文本或正文（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）。
+
 - 之后迁移的入口会带来各自的修复：#15324（ACP）、#15326（OpenTUI）、#14114 与 #12209（ACP）。
 
 - 不删除任何设置、协议字段或文件格式。
@@ -660,7 +698,7 @@ PR 5 和 6 每一项之后，同样各自跟随默认开启和删除旧 loop 两
 | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | 整批调度改变 headless 的帧顺序或 `--max-tool-calls` 的精确计数                      | 按序流式输出结果；`beforeToolLaunch`；在预算边界上设对拍场景                                                         |
 | ACP 改走 `LlmClient` 后会多出一些行为（上限、启发式、提醒），并可能让 hook 执行两次 | ACP 自己的那份实现不进入共享路径；对拍测试列出每一项新增行为；单独成 PR                                              |
-| AgentCore 的延迟审批需要恢复四个 async-local 上下文帧                               | 把现有的契约测试随代码一起迁移；在 TUI 的 agent 视图中做一次真实的延迟审批（PR 5）                                   |
+| AgentCore 的延迟审批需要恢复四个 async-local 上下文帧                               | 把现有的契约测试随代码一起迁移；在 TUI 的 agent 视图中做一次真实的延迟审批（PR 5b）                                  |
 | 设置存在期间两套实现并存，新的 loop 层行为需要在两边都接一次                        | 每个入口准备好后立即修改默认值并删除现有 loop，不必等所有入口完成迁移；在此期间不重构现有 loop；对拍测试在 CI 中运行 |
 | 大 PR 会改动 core                                                                   | 每个 PR 只迁移一个入口；PR 1 是位于默认关闭设置之后的功能 PR                                                         |
 

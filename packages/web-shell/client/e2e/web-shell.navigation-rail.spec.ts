@@ -368,10 +368,9 @@ test('Home-only hosts retain secondary collapse and hosts with another item show
   await page.getByTestId('host-shell').evaluate((element) => {
     element.style.width = '1100px';
   });
-  await expect(rail).toBeVisible();
-  await rail.getByRole('button', { name: 'More', exact: true }).click();
+  await expect(page.locator(railSelector)).toHaveCount(0);
   await expect(
-    page.getByRole('button', { name: 'Split View', exact: true }),
+    sidebar.getByRole('button', { name: 'Split View', exact: true }),
   ).toBeVisible();
 });
 
