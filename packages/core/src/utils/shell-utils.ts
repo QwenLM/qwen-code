@@ -747,6 +747,21 @@ export function decodeAnsiCBytes(bytes: number[]): string {
   return text;
 }
 
+export function concatAnsiCText(prefix: string, decoded: string): string {
+  const previous = prefix.charCodeAt(prefix.length - 1);
+  const first = decoded.charCodeAt(0);
+  if (
+    previous >= 0xd800 &&
+    previous <= 0xdbff &&
+    first >= 0xdc00 &&
+    first <= 0xdfff
+  ) {
+    // A raw high surrogate must not hide an undecodable byte by pairing.
+    prefix = prefix.slice(0, -1) + String.fromCharCode(previous + 0x400);
+  }
+  return prefix + decoded;
+}
+
 /** True when a string cannot round-trip through Node's UTF-8 path encoding. */
 export function hasUnpairedSurrogate(text: string): boolean {
   return /[\uD800-\uDFFF]/u.test(text);
@@ -827,7 +842,7 @@ function shellWordQuoteRemoval(
         j++;
       }
       if (j >= n) return null;
-      out += decodeAnsiCWord(body);
+      out = concatAnsiCText(out, decodeAnsiCWord(body));
       i = j + 1;
       continue;
     }

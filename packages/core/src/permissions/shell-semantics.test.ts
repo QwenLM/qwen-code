@@ -925,6 +925,13 @@ describe('ANSI-C bytes that are not valid UTF-8', () => {
     ]);
   });
 
+  it('does not pair a raw lone high surrogate across a wrapper byte boundary', () => {
+    const command = "sh -c 'cat \uD800'" + String.raw`$'\xff'`;
+    expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+      { ...read('/repo/\uDC00\uDCFF'), pathUnknown: true },
+    ]);
+  });
+
   it('marks a redirect-only undecodable target unresolved', () => {
     expect(extractShellOperations(String.raw`> $'\xff'`, '/repo')).toEqual([
       { ...write('/repo/\udcff'), pathUnknown: true },
@@ -936,6 +943,7 @@ describe('ANSI-C wrapper payloads', () => {
   it.each([
     [String.raw`cat $'\xc3\xa9'`, [read('/repo/é')]],
     [String.raw`cat $'\xc3'$'\xa9'`, [read('/repo/é')]],
+    ["sh -c 'cat 😀'$'\\x41'", [read('/repo/😀A')]],
     [String.raw`cat $'a\c\\tb'`, [read('/repo/a\x1ctb')]],
     [String.raw`cat $'\c?'`, [read('/repo/\x7f')]],
     [String.raw`cat $'\x3e'/etc/passwd`, [read('/repo/>/etc/passwd')]],

@@ -34,6 +34,7 @@
 import nodePath from 'node:path';
 import os from 'node:os';
 import {
+  concatAnsiCText,
   decodeAnsiCBytes,
   decodeAnsiCEscape,
   hasUnpairedSurrogate,
@@ -121,20 +122,7 @@ function tokenize(
   const flushAnsiC = () => {
     if (ansiCBytes.length === 0) return;
     const text = decodeAnsiCBytes(ansiCBytes);
-    const previous = current.charCodeAt(current.length - 1);
-    const decoded = text.charCodeAt(0);
-    if (
-      previous >= 0xd800 &&
-      previous <= 0xdbff &&
-      decoded >= 0xdc00 &&
-      decoded <= 0xdfff
-    ) {
-      // A raw lone high surrogate and a surrogateescape byte must not combine
-      // into an apparently valid pair. Remap the already-unrepresentable raw
-      // code unit into low-surrogate space, preserving length and separation.
-      current = current.slice(0, -1) + String.fromCharCode(previous + 0x400);
-    }
-    current += text;
+    current = concatAnsiCText(current, text);
     bare += '0'.repeat(text.length);
     ansiCBytes = [];
   };

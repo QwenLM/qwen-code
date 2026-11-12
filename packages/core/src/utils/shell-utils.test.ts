@@ -779,6 +779,15 @@ describe('stripShellWrapper', () => {
     );
   });
 
+  it('does not pair a raw lone high surrogate across a wrapper byte boundary', () => {
+    const command = "sh -c 'cat \uD800'" + String.raw`$'\xff'`;
+    expect(stripShellWrapper(command)).toEqual('cat \uDC00\uDCFF');
+  });
+
+  it('keeps valid surrogate pairs beside decoded ASCII in a wrapper', () => {
+    expect(stripShellWrapper("sh -c 'cat 😀'$'\\x41'")).toEqual('cat 😀A');
+  });
+
   it.each(RESOLVED_PAYLOADS)(
     'unwraps %s to the resolved script',
     (_what, command) => {
