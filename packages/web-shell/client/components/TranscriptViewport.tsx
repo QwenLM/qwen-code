@@ -75,10 +75,14 @@ export function followRangeFromRows(
   return { start, end, current: current ?? firstVisible! };
 }
 
+export interface TranscriptViewportProps extends MessageListProps {
+  approvalOverlayActive?: boolean;
+}
+
 export const TranscriptViewport = forwardRef<
   MessageListHandle,
-  MessageListProps
->(function TranscriptViewport(props, ref) {
+  TranscriptViewportProps
+>(function TranscriptViewport({ approvalOverlayActive, ...props }, ref) {
   const { onCanScrollToBottomChange } = props;
   const { t } = useI18n();
   const viewport = useTranscriptViewport(props.messages, t);
@@ -461,7 +465,7 @@ export const TranscriptViewport = forwardRef<
   return (
     <div
       ref={root}
-      className={`${styles.root} ${globalNavigation && props.pendingApproval ? 'static' : 'relative'} flex min-h-0 flex-1`}
+      className={`${styles.root} ${globalNavigation && (approvalOverlayActive ?? props.pendingApproval) ? 'static' : 'relative'} flex min-h-0 flex-1`}
       data-history-viewport={historical ? 'historical' : 'live'}
     >
       {!props.hideSessionTimeline &&
