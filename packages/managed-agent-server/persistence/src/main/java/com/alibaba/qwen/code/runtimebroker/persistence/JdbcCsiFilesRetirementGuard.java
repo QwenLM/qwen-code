@@ -176,7 +176,12 @@ public final class JdbcCsiFilesRetirementGuard {
             // root takes only a gap lock, which does not exclude binding control.
             // Same refusals as lockManagedSession for an ordinary binding: a pinned
             // Session, a pinned request key, or a leftover profile slot or binding.
-            // The one locking read of the root decides the first two.
+            // The one locking read of the root decides the first two because
+            // is_csi_guard is generated as (tool_profile = 'csi-files-retirement/1'
+            // OR runtime_request_key IS NOT NULL): the flag already subsumes the
+            // request-key pin, so no separate cross-check is needed.
+            // ManagedSchemaCatalog.validateGeneratedColumns enforces that exact
+            // expression at startup; do not copy this trust where it does not hold.
             if (!Boolean.FALSE.equals(lockRootPin(connection, tenant, session))
                     || hasCsiRuntimeMarker(connection, tenant, session)) {
                 throw unavailable();

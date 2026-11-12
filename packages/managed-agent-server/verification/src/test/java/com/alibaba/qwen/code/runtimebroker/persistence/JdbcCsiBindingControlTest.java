@@ -31,8 +31,10 @@ class JdbcCsiBindingControlTest {
     private static final String RESERVATION = "cfd417c7-f9dc-450d-b880-5667c7a5b029";
     private static final Duration LEASE = Duration.ofSeconds(30);
 
+    // The catalog probe is gone; the decoy table now only pins that ordinary
+    // controls never reach into another schema's ma_session.
     @Test
-    void ordinarySessionControlsUseOnlyTheConfiguredBareSchema() throws Exception {
+    void ordinarySessionControlsIgnoreADecoySessionTableInAnotherSchema() throws Exception {
         var source = source();
         try (var connection = source.getConnection()) {
             sql(connection, "CREATE SCHEMA other");
