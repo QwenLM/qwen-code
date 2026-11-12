@@ -50,10 +50,17 @@ keeps them, and still fails those two branches.
 
 What the earlier sample did not cover is the plumbing class, which is what this
 change addresses. Measured over the thirteen most recent `ci.yml` commits rather
-than two branches, six are plumbing-only and now pass. One of them, #16551, was
+than two branches, seven are plumbing-only and now pass. One of them, #16551, was
 also among the nine reds in that sample — so "0 of 9" was a property of the two
 branches chosen, not of the approach. The dominant trigger in that sample,
 `#16200`'s global ignore addition, remains the other design's subject.
+
+That count is a measurement at a named revision, not a constant: the window
+slides as `main` moves. At `22ed7e77ca385` it is seven pass / six stale, where the
+earlier revision measured six / seven — #16945's RPC-retry commit entered the
+window and is plumbing-only, while #16351's corepack-cache commit left it. Both
+totals are reported with the revision they were taken at rather than carried
+forward.
 
 ## Current state
 
@@ -416,16 +423,20 @@ head commit` stay outside the slice. A `ref:` edit on its own is caught: the
 5. Slice completeness against the real workflow: every `scripts/lint.js` lane
    flag must survive in the slice.
 6. Live API, thirteen historical base tips with a fork point one commit behind
-   each, content read at real refs: six plumbing-only commits must pass and
-   seven gate-changing commits must stay stale.
+   each, content read at real refs. At `22ed7e77ca385`: seven plumbing-only
+   commits pass and six gate-changing commits stay stale. The split moves with
+   the window — an earlier revision measured six / seven — so the check is that
+   every plumbing-only commit passes and every gate-changing one stays stale,
+   not that the totals match a number written down earlier.
 7. Live API on the branch that motivated the report (#16939 at `07d89196bd21`):
    it must stay stale, because #16920 really did change the Prettier lane.
 
 ## Acceptance criteria
 
 - The suite passes, and all eight mutations redden it.
-- Six of the thirteen most recent `ci.yml` commits no longer ask for a rebase;
-  the other seven still do.
+- Seven of the thirteen most recent `ci.yml` commits no longer ask for a rebase
+  at `22ed7e77ca385`; the other six still do. Every one of the seven is
+  plumbing-only and every one of the six changes the gate.
 - #16939's red is preserved.
 - No `ci.yml` edit, no `.size-baseline` change, no workflow meta-test change.
 
