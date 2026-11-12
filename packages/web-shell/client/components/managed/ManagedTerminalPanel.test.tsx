@@ -202,6 +202,25 @@ describe('ManagedTerminalPanel', () => {
     ]);
   });
 
+  it('stops with a lost notice on the relay terminal-lost close code (4003)', async () => {
+    // 4003 is the Managed relay's synthesized worker-lost code; it is in
+    // NON_RETRYABLE_CLOSE_CODES, so the panel must end, not reconnect forever.
+    const ticketFn = vi
+      .fn()
+      .mockResolvedValue({ ticket: 'ticket-one', expiresInSeconds: 30 });
+    await render(ticketFn);
+    const ws = FakeWebSocket.instances[0]!;
+    ws.open();
+    ws.closeWith(4003);
+    expect(terminalMock.writeln).toHaveBeenCalledWith(
+      expect.stringContaining('This terminal is no longer available.'),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(ticketFn).toHaveBeenCalledTimes(1);
+  });
+
   it('stops with a lost notice when ticket admission is refused', async () => {
     const ticketFn = vi
       .fn()
@@ -234,6 +253,47 @@ describe('ManagedTerminalPanel', () => {
     });
     expect(ticketFn).toHaveBeenCalledTimes(2);
     expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it('retries an expired credential (401) instead of going terminal', async () => {
+    // The ticket POST re-derives its headers per attempt, so a 401 during a
+    // token refresh admits on the next try — it must never end the surface.
+    const ticketFn = vi
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(new Error('expired'), { status: 401 }),
+      )
+      .mockResolvedValueOnce({ ticket: 'ticket-two', expiresInSeconds: 30 });
+    await render(ticketFn);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(ticketFn).toHaveBeenCalledTimes(2);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(terminalMock.writeln).not.toHaveBeenCalledWith(
+      expect.stringContaining('This terminal is no longer available.'),
+    );
+  });
+
+  it('ends on a permanent 409 that is not workspace_unavailable', async () => {
+    // A closed Session answers 409 session_operation_active: a permanent
+    // answer, not a bootstrapping hiccup, so it must not retry forever.
+    const ticketFn = vi.fn().mockRejectedValue(
+      Object.assign(new Error('closed'), {
+        status: 409,
+        code: 'session_operation_active',
+      }),
+    );
+    await render(ticketFn);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(terminalMock.writeln).toHaveBeenCalledWith(
+      expect.stringContaining('This terminal is no longer available.'),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(ticketFn).toHaveBeenCalledTimes(1);
   });
 
   it('shows the lost notice even after a reconnect notice', async () => {

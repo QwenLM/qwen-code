@@ -40,11 +40,22 @@ interface ManagedTerminalSurfaceProps {
 function admissionRefused(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false;
   const status = (error as { status?: unknown }).status;
+  // 401 is a credential refresh, not a refusal: the ticket POST re-derives its
+  // headers on every attempt, so an expired short-lived token admits on the
+  // next try once the host refreshes — never a terminal condition (the same
+  // contract isAuthFailure documents in managed-request-error.ts).
+  if (status === 401) return false;
+  // 403 is a permanent role refusal (only a Workspace operator may open a
+  // terminal) and 404 a gone Session/terminal; both are terminal.
+  if (status === 403 || status === 404) return true;
   // 409 workspace_unavailable is deliberately retryable: it also answers a
   // binding that is not READY yet (bootstrapping or being replaced), which is
-  // transient. Treating it as permanent would kill the panel for a terminal
-  // that is fine seconds later.
-  return status === 401 || status === 403 || status === 404;
+  // transient. Any other 409 (e.g. session_operation_active on a closed
+  // Session) is a permanent answer, not a hiccup, so it must not retry forever.
+  if (status === 409) {
+    return (error as { code?: unknown }).code !== 'workspace_unavailable';
+  }
+  return false;
 }
 
 function ManagedTerminalSurface({
