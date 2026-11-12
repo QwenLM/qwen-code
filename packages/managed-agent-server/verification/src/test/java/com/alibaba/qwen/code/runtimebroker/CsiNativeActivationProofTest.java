@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.function.Function;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -44,22 +45,56 @@ class CsiNativeActivationProofTest {
 
     @Test
     void canonicalBase64HonoursItsDeclaredLimitInsteadOfTheShortTextCap() {
-        byte[] payload = new byte[4000];
-        java.util.Arrays.fill(payload, (byte) 'x');
+        byte[] payload = payload(CsiNativeActivationProof.TERMINAL_CANDIDATE_LIMIT);
         String encoded = Base64.getEncoder().encodeToString(payload);
         assertTrue(encoded.length() > 4096, "the payload must encode past the short-text cap");
         ObjectNode value = JSON.createObjectNode().put("bytesBase64", encoded);
 
-        assertEquals(payload.length, CsiNativeActivationProof.canonicalBase64(value, "bytesBase64", 16 * 1024).length);
+        assertArrayEquals(payload, CsiNativeActivationProof.canonicalBase64(value, "bytesBase64",
+                CsiNativeActivationProof.TERMINAL_CANDIDATE_LIMIT));
     }
 
     @Test
     void canonicalBase64StillRefusesAPayloadPastItsDeclaredLimit() {
-        byte[] payload = new byte[17 * 1024];
-        ObjectNode value = JSON.createObjectNode().put("bytesBase64", Base64.getEncoder().encodeToString(payload));
+        ObjectNode value = JSON.createObjectNode().put("bytesBase64",
+                Base64.getEncoder().encodeToString(payload(CsiNativeActivationProof.TERMINAL_CANDIDATE_LIMIT + 1)));
 
-        assertThrows(RuntimeBrokerException.class,
-                () -> CsiNativeActivationProof.canonicalBase64(value, "bytesBase64", 16 * 1024));
+        assertThrows(RuntimeBrokerException.class, () -> CsiNativeActivationProof.canonicalBase64(value, "bytesBase64",
+                CsiNativeActivationProof.TERMINAL_CANDIDATE_LIMIT));
+    }
+
+    @Test
+    void canonicalBase64RefusesAnAbsentFieldAsAnUnavailableProof() {
+        assertThrows(RuntimeBrokerException.class, () -> CsiNativeActivationProof.canonicalBase64(
+                JSON.createObjectNode(), "bytesBase64", CsiNativeActivationProof.TERMINAL_CANDIDATE_LIMIT));
+    }
+
+    @Test
+    void canonicalBase64RefusesANonTextualFieldAsAnUnavailableProof() {
+        ObjectNode value = JSON.createObjectNode().put("bytesBase64", 42);
+
+        assertThrows(RuntimeBrokerException.class, () -> CsiNativeActivationProof.canonicalBase64(value, "bytesBase64",
+                CsiNativeActivationProof.TERMINAL_CANDIDATE_LIMIT));
+    }
+
+    @Test
+    void terminalBase64BoundsFitInsideTheirEnclosingBudgets() {
+        int recordChars = ((CsiNativeActivationProof.TERMINAL_RECORD_LIMIT + 2) / 3) * 4;
+        int candidateChars = ((CsiNativeActivationProof.TERMINAL_CANDIDATE_LIMIT + 2) / 3) * 4;
+        int bodyChars = ((CsiNativeActivationProof.TERMINAL_BODY_LIMIT + 2) / 3) * 4;
+
+        assertTrue(recordChars + candidateChars < CsiNativeActivationProof.TERMINAL_BODY_LIMIT,
+                "both terminal base64 fields must fit the commit body, leaving room for its other fields");
+        assertTrue(bodyChars < CsiNativeActivationProof.TERMINAL_COMMAND_LIMIT,
+                "the body's own base64 must fit the command envelope that carries it");
+    }
+
+    private static byte[] payload(int length) {
+        byte[] bytes = new byte[length];
+        for (int index = 0; index < length; index++) {
+            bytes[index] = (byte) (index % 251);
+        }
+        return bytes;
     }
 
     @Test
