@@ -1001,6 +1001,7 @@ function compressionFor(session: HostedSession): HostedContextCompression {
             runHostedLifecycleHook(session, event, operationId, { ...fields }),
         }
       : {}),
+    onCompactionCommitted: () => session.loops?.resetResolverCache(),
   }));
 }
 

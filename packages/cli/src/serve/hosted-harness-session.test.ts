@@ -9244,6 +9244,10 @@ describe('Hosted Harness no-tool session', () => {
         Date.now() - 1_000,
         'hosted-workspace-shell/3',
       );
+      // shell/3 reads the live approval selection (like shell/1); the staged
+      // legacy-yolo Session must carry a matching selection row or the wake
+      // turn's live read fails closed before it can arm the successor.
+      state.approvalSelections.set(SESSION_ID, { mode: 'yolo', revision: 0 });
       mockBrokerBroker();
       state.model.mockReset();
       state.model.mockImplementation(async (input) => {
