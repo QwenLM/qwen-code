@@ -64,8 +64,6 @@
 ---
 /** The actor-carrying twin of {@link #insertTurnCommand}. */
 ---
-/** The actor-carrying twin: the recorded rename answers its recorder. */
----
 /**
 * Retires the command row of a Session mutation the Harness refused
 * before completion, so the refusal does not leave the Session's
@@ -159,21 +157,6 @@
 * D7-2: what the Session journal proves about a parked Turn input whose
 * submission no Harness answered: committed once the journal holds its
 * prompt's admission, not committed once no writer can still commit it.
-*/
----
-/**
-* D7-2: what the Session journal proves about a parked Session title, or
-* empty when its delivery is no longer parked: committed once the journal
-* holds its revision's title, not committed once no writer can still
-* commit it.
-*/
----
-/**
-* D7-2: settles a parked Session title, only while it is still parked.
-* Committed completes its command and shows the title; not committed
-* fails it; unknown parks it again until {@code retryAt}.
-*
-* @return false when the title is no longer parked
 */
 ---
 /** A task cancel's recorded outcome: its public status and code. */
