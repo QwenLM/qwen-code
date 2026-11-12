@@ -1369,6 +1369,14 @@ jobs:
           # contention flake pass; a real break still fails all three
           # attempts. Operators can retune or disable ('off') without a PR.
           VITEST_RETRY: "${{ vars.QWEN_CI_VITEST_RETRY || '2' }}"
+          # --retry above re-runs a failed TEST. This re-runs a whole workspace
+          # suite whose every test passed and whose only failure was Vitest's
+          # worker->main RPC budget expiring on a contended host: main runs
+          # 43018456551 and 43016357976 went red with 902 of 902 tests passing.
+          # The Linux lanes keep unhandled errors fatal on purpose (#10438), so
+          # the lane script reads the report and re-runs only that shape. '0'
+          # disables it without a PR.
+          QWEN_CI_RPC_RETRY: "${{ vars.QWEN_CI_RPC_RETRY || '1' }}"
           # Coverage is collected only on the post-merge main run: nothing
           # read the pull-request reports, and v8 instrumentation cost about
           # a fifth of the suite's wall time on every push. The vitest configs

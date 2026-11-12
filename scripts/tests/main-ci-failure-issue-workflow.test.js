@@ -2635,6 +2635,21 @@ printf '%s\\n' '{"jobs":[]}'
       }
     });
 
+    it('recognises the CI configuration errors as infrastructure', () => {
+      // A mistyped repository variable fails before any suite runs. Both
+      // classifiers must see it as infrastructure, or a variable typo files a
+      // code-failure issue and sends autofix after the wrong thing. The
+      // annotations are the strings the scripts actually emit.
+      const annotation =
+        "::error::QWEN_CI_RPC_RETRY must be a non-negative integer or 'off', got 'false'";
+      expect(
+        new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(
+          annotation,
+        ),
+        annotation,
+      ).toBe(true);
+    });
+
     it('classifies per failed job and only when EVERY one is infrastructure', () => {
       // The annotation read is per check-run id taken from the jobs payload's
       // own check_run_url, and the match is the same grep the PR scan uses.
