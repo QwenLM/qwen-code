@@ -56,7 +56,10 @@ import {
 } from '../../core/turn.js';
 import {
   runModelRound,
+  runToolBatch,
   turnModelRound,
+  type AgentLoopDuplicateState,
+  type AgentLoopSettledCall,
   type AgentLoopStopReason,
   type ModelRoundSource,
 } from '../../core/agent-loop.js';
@@ -289,6 +292,23 @@ export interface ReasoningLoopResult {
    */
   loopType?: LoopType | null;
 }
+
+/** What the agent's tool step leaves for the next round. */
+interface ToolStepResult {
+  messages: Content[];
+  repeatedDuplicateProviderToolCall: boolean;
+  /** Executed calls with their model-visible results, in call order.
+   * Consumed by the loop detector for result-aware stateful-read guards
+   * (issue #9450). */
+  results: Array<{
+    toolName: string;
+    args: Record<string, unknown>;
+    responseParts: Part[];
+  }>;
+}
+
+/** A call of a batch that settled, or that an abort cut off. */
+type SettledToolCall = AgentLoopSettledCall & { durationMs: number };
 
 /** What a model round on the shared agent loop leaves for the agent's turn. */
 interface SharedModelRoundResult {
@@ -1052,6 +1072,10 @@ export class AgentCore {
     // Scoped to this reasoning loop. A second duplicate response for the same
     // provider id would keep deterministic providers in a tool-result loop.
     const duplicateProviderToolCallResponseIds = new Set<string>();
+    const refusedDuplicates: AgentLoopDuplicateState = {
+      handled: new Map(),
+      responded: new Set(),
+    };
     let stickyMaxOutputTokens: number | undefined;
     // Whether THIS round's stream produced a chunk (model acceptance). The
     // round finally uses it to tell a pre-acceptance failure apart from the
@@ -1443,6 +1467,7 @@ export class AgentCore {
             wasOutputTruncated,
             handledToolCallFingerprints,
             duplicateProviderToolCallResponseIds,
+            refusedDuplicates,
           );
           if (toolCallResult.repeatedDuplicateProviderToolCall) {
             terminateMode = AgentTerminateMode.LOOP_DETECTED;
@@ -2343,23 +2368,32 @@ export class AgentCore {
     wasOutputTruncated = false,
     handledToolCallFingerprints = new Map<string, string>(),
     duplicateProviderToolCallResponseIds = new Set<string>(),
-  ): Promise<{
-    messages: Content[];
-    repeatedDuplicateProviderToolCall: boolean;
-    /** Executed calls with their model-visible results, in call order.
-     * Consumed by the loop detector for result-aware stateful-read guards
-     * (issue #9450). */
-    results: Array<{
-      toolName: string;
-      args: Record<string, unknown>;
-      responseParts: Part[];
-    }>;
-  }> {
+    refusedDuplicates: AgentLoopDuplicateState = {
+      handled: new Map(),
+      responded: new Set(),
+    },
+  ): Promise<ToolStepResult> {
     if (
       this.codeModeAllowedToolNames === undefined &&
       this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
     ) {
       await this.prepareTools();
+    }
+    if (this.runtimeContext.isUnifiedAgentLoopEnabled?.() === true) {
+      return this.runSharedToolBatch({
+        functionCalls,
+        abortController,
+        promptId,
+        currentRound,
+        toolsList,
+        responseId,
+        wasOutputTruncated,
+        duplicates: {
+          handled: handledToolCallFingerprints,
+          responded: duplicateProviderToolCallResponseIds,
+        },
+        refusedDuplicates,
+      });
     }
     const responseByCallId = new Map<
       string,
@@ -2426,19 +2460,7 @@ export class AgentCore {
       const toolName = String(fc.name);
       const args = (fc.args ?? {}) as Record<string, unknown>;
 
-      let errorMessage: string | undefined;
-      if (!declaredToolNames.has(fc.name)) {
-        errorMessage = isPlanLifecycleToolUnavailableInSubagent(toolName)
-          ? getSubagentPlanToolUnavailableMessage(toolName)
-          : isLeaderOnlyToolUnavailableInSubagent(toolName)
-            ? getLeaderOnlyToolUnavailableMessage(toolName)
-            : `Tool "${toolName}" not found. Tools must use the exact names provided.`;
-      } else if (!this.isToolExecutionAllowed(toolName)) {
-        errorMessage =
-          this.executionAllowlistErrorSummary !== undefined
-            ? `Tool "${toolName}" is not allowed by this agent's execution allowlist. Allowed entries: ${this.executionAllowlistErrorSummary}.`
-            : `Tool "${toolName}" is not allowed by this agent's execution allowlist. No tools are allowed.`;
-      }
+      const errorMessage = this.toolCallRefusal(fc.name, declaredToolNames);
 
       if (errorMessage) {
         const functionResponsePart = {
@@ -2523,6 +2545,338 @@ export class AgentCore {
       authorizedCalls.push(fc);
     }
 
+    const requests = authorizedCalls.map((fc) =>
+      this.buildToolCallRequest(
+        fc,
+        callIdByFunctionCall.get(fc)!,
+        promptId,
+        responseId,
+        wasOutputTruncated,
+      ),
+    );
+    await this.scheduleToolCalls({
+      requests,
+      abortController,
+      currentRound,
+      declaredToolNames,
+      onSettled: ({ request, response, durationMs }) =>
+        responseByCallId.set(response.callId, {
+          toolName: request.name,
+          responseParts: response.responseParts,
+          persistedOutputFiles: response.persistedOutputFiles,
+          artifacts: response.artifacts,
+          durationMs,
+        }),
+    });
+
+    const orderedResponses: ToolResponseBudgetEntry[] =
+      uniqueFunctionCalls.flatMap((fc) => {
+        const callId = callIdByFunctionCall.get(fc) ?? fc.id ?? '';
+        const response = responseByCallId.get(callId);
+        if (!response) return [];
+        return [
+          {
+            callId,
+            toolName: response.toolName,
+            responseParts: response.responseParts,
+            persistedOutputFiles: response.persistedOutputFiles,
+            artifacts: response.artifacts,
+          },
+        ];
+      });
+    if (functionCalls.length > 0 && orderedResponses.length === 0) {
+      orderedResponses.push({
+        callId: 'tool-call-batch',
+        toolName: 'tool-call-batch',
+        responseParts: [
+          {
+            text: 'All tool calls failed. Please analyze the errors and try an alternative approach.',
+          },
+        ],
+        persistedOutputFiles: [],
+      });
+    }
+    const finalizedResponses = await finalizeToolResponses(
+      this.runtimeContext,
+      orderedResponses,
+      new Map(orderedResponses.map((response) => [response.callId, promptId])),
+    );
+    const toolResponseParts = finalizedResponses.flatMap(
+      (response) => response.responseParts,
+    );
+    this.eventEmitter?.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
+      subagentId: this.subagentId,
+      round: currentRound,
+      responses: finalizedResponses.map((response) => {
+        const collected = responseByCallId.get(response.callId);
+        return {
+          callId: response.callId,
+          responseParts: response.responseParts,
+          ...(collected?.durationMs !== undefined
+            ? { durationMs: collected.durationMs }
+            : {}),
+        };
+      }),
+      timestamp: Date.now(),
+    });
+
+    // Pair each executed call with its model-visible (finalized) result so
+    // the reasoning loop can feed the loop detector's result-aware guards.
+    const finalizedByCallId = new Map(
+      finalizedResponses.map((response) => [response.callId, response]),
+    );
+    const results: Array<{
+      toolName: string;
+      args: Record<string, unknown>;
+      responseParts: Part[];
+    }> = [];
+    for (const fc of uniqueFunctionCalls) {
+      const callId = callIdByFunctionCall.get(fc) ?? fc.id ?? '';
+      const finalized = finalizedByCallId.get(callId);
+      if (!finalized) continue;
+      results.push({
+        toolName: String(fc.name ?? ''),
+        args: (fc.args ?? {}) as Record<string, unknown>,
+        responseParts: finalized.responseParts,
+      });
+    }
+
+    return {
+      messages: [{ role: 'user', parts: toolResponseParts }],
+      repeatedDuplicateProviderToolCall: false,
+      results,
+    };
+  }
+
+  /**
+   * A round's calls as one batch of the shared agent loop
+   * (`experimental.unifiedAgentLoop`) on this agent's scheduler. The batch
+   * answers a provider replay in place and orders and finalizes the results;
+   * the agent keeps its events, approvals and hooks. The results go to the
+   * agent's chat only: the batch neither records them in the session's
+   * transcript nor counts the calls toward the session's tool calls.
+   */
+  private async runSharedToolBatch(params: {
+    functionCalls: FunctionCall[];
+    abortController: AbortController;
+    promptId: string;
+    currentRound: number;
+    toolsList: FunctionDeclaration[];
+    responseId?: string;
+    wasOutputTruncated: boolean;
+    duplicates: AgentLoopDuplicateState;
+    refusedDuplicates: AgentLoopDuplicateState;
+  }): Promise<ToolStepResult> {
+    const { abortController, promptId, currentRound } = params;
+    const debugLogger = this.runtimeContext.getDebugLogger();
+    const declaredToolNames = new Set(params.toolsList.map((t) => t.name));
+    // A provider may stream one call id twice; the agent runs it once and
+    // answers it once.
+    const generatedCallIdBase = randomUUID();
+    const refusals = new Map<ToolCallRequestInfo, string>();
+    const requests = dedupeToolCallsById(params.functionCalls).map(
+      (fc, index) => {
+        const refusal = this.toolCallRefusal(fc.name, declaredToolNames);
+        const request = this.buildToolCallRequest(
+          fc,
+          fc.id ?? `${fc.name ?? 'tool'}-${generatedCallIdBase}-${index}`,
+          promptId,
+          params.responseId,
+          params.wasOutputTruncated,
+        );
+        if (refusal) refusals.set(request, refusal);
+        return request;
+      },
+    );
+    debugLogger.debug(
+      `[AgentCore] subagent ${this.subagentId} round ${currentRound} tool batch on the shared loop (prompt ${promptId}, ${requests.length} call(s))`,
+    );
+
+    const durations = new Map<string, number>();
+    let replayIndex = 0;
+    const batch = await runToolBatch(requests, {
+      config: this.runtimeContext,
+      signal: abortController.signal,
+      duplicates: params.duplicates,
+      duplicateStateForCall: (request) =>
+        refusals.has(request) ? params.refusedDuplicates : params.duplicates,
+      // The results of an aborted batch stay; the run ends at the next
+      // round's abort check, as on the current tool step.
+      keepCancelledResults: true,
+      // Results are left unrecorded: they belong to the agent's chat.
+      deferRecording: true,
+      executor: {
+        run: async (calls, _signal, hooks) => {
+          const settled = new Map<string, AgentLoopSettledCall>();
+          const launched: ToolCallRequestInfo[] = [];
+          for (const request of calls) {
+            const { callId, name, args } = request;
+            const refusal = refusals.get(request);
+            if (!refusal) {
+              if (hooks.beforeLaunch(request, [])) launched.push(request);
+              continue;
+            }
+            const responseParts: Part[] = [
+              {
+                functionResponse: {
+                  id: callId,
+                  name,
+                  response: { error: refusal },
+                },
+              },
+            ];
+            this.emitSyntheticToolError({
+              callId,
+              name,
+              args,
+              errorMessage: refusal,
+              responseParts,
+              resultDisplay: refusal,
+              currentRound,
+            });
+            settled.set(callId, {
+              status: 'error',
+              request,
+              response: {
+                callId,
+                responseParts,
+                resultDisplay: refusal,
+                error: new Error(refusal),
+                errorType: undefined,
+                executionStatus: 'not_started',
+              },
+            });
+            durations.set(callId, 0);
+          }
+          if (launched.length > 0) {
+            await this.scheduleToolCalls({
+              requests: launched,
+              abortController,
+              currentRound,
+              declaredToolNames,
+              onSettled: (call) => {
+                settled.set(call.response.callId, call);
+                durations.set(call.response.callId, call.durationMs);
+              },
+            });
+          }
+          return calls.flatMap(({ callId }) => settled.get(callId) ?? []);
+        },
+      },
+      host: {
+        // The agent's run does not end on a tool that ends the turn.
+        endsOnTerminateTurn: () => false,
+        onToolResult: ({ request, response, origin }) => {
+          if (origin !== 'replayed') return;
+          const errorMessage =
+            response.error?.message ??
+            'Duplicate provider tool call was ignored.';
+          debugLogger.debug(
+            `[processFunctionCalls] Suppressing duplicate provider tool-call id: ${request.providerCallId ?? request.callId} (tool: ${request.name}, round: ${currentRound})`,
+          );
+          this.emitSyntheticToolError({
+            callId: `${request.callId}:duplicate:${currentRound}:${replayIndex++}`,
+            name: request.name,
+            args: request.args,
+            errorMessage,
+            responseParts: response.responseParts,
+            resultDisplay: response.resultDisplay,
+            currentRound,
+          });
+          durations.set(request.callId, 0);
+        },
+      },
+    });
+
+    if (batch.stop === 'duplicate_provider_call') {
+      debugLogger.debug(
+        `[processFunctionCalls] Dropping batch after a repeated duplicate provider tool-call id (round: ${currentRound})`,
+      );
+      return {
+        messages: [{ role: 'user', parts: [] }],
+        repeatedDuplicateProviderToolCall: true,
+        results: [],
+      };
+    }
+    const responses = batch.responses ?? [];
+    this.eventEmitter?.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
+      subagentId: this.subagentId,
+      round: currentRound,
+      responses: responses.map(({ callId, parts }) => {
+        const durationMs = durations.get(callId);
+        return {
+          callId,
+          responseParts: parts,
+          ...(durationMs !== undefined ? { durationMs } : {}),
+        };
+      }),
+      timestamp: Date.now(),
+    });
+    const requestByCallId = new Map(
+      requests.map((request) => [request.callId, request]),
+    );
+    return {
+      messages: [{ role: 'user', parts: batch.parts }],
+      repeatedDuplicateProviderToolCall: false,
+      results: responses.flatMap(({ callId, parts }) => {
+        const request = requestByCallId.get(callId);
+        return request
+          ? [
+              {
+                toolName: request.name,
+                args: request.args,
+                responseParts: parts,
+              },
+            ]
+          : [];
+      }),
+    };
+  }
+
+  /**
+   * Why the agent cannot run a call it was sent: a tool it did not declare,
+   * or one outside its execution allowlist.
+   */
+  private toolCallRefusal(
+    declaredName: string | undefined,
+    declaredToolNames: ReadonlySet<string | undefined>,
+  ): string | undefined {
+    const toolName = String(declaredName);
+    if (!declaredName || !declaredToolNames.has(declaredName)) {
+      return isPlanLifecycleToolUnavailableInSubagent(toolName)
+        ? getSubagentPlanToolUnavailableMessage(toolName)
+        : isLeaderOnlyToolUnavailableInSubagent(toolName)
+          ? getLeaderOnlyToolUnavailableMessage(toolName)
+          : `Tool "${toolName}" not found. Tools must use the exact names provided.`;
+    }
+    if (!this.isToolExecutionAllowed(toolName)) {
+      return this.executionAllowlistErrorSummary !== undefined
+        ? `Tool "${toolName}" is not allowed by this agent's execution allowlist. Allowed entries: ${this.executionAllowlistErrorSummary}.`
+        : `Tool "${toolName}" is not allowed by this agent's execution allowlist. No tools are allowed.`;
+    }
+    return undefined;
+  }
+
+  /**
+   * Runs one batch of calls on a new scheduler: their events, approvals and
+   * hooks. It returns when every call settled or the round was aborted;
+   * `onSettled` gets each call's result, including the synthetic one of a
+   * call the abort cut off.
+   */
+  private async scheduleToolCalls(params: {
+    requests: ToolCallRequestInfo[];
+    abortController: AbortController;
+    currentRound: number;
+    declaredToolNames: ReadonlySet<string | undefined>;
+    onSettled: (call: SettledToolCall) => void;
+  }): Promise<void> {
+    const {
+      requests,
+      abortController,
+      currentRound,
+      declaredToolNames,
+      onSettled,
+    } = params;
     // Build scheduler
     let resolveBatch: (() => void) | null = null;
     const emittedCallIds = new Set<string>();
@@ -2784,11 +3138,10 @@ export class AgentCore {
             timestamp: Date.now(),
           });
 
-          responseByCallId.set(call.request.callId, {
-            toolName,
-            responseParts: call.response.responseParts,
-            persistedOutputFiles: call.response.persistedOutputFiles,
-            artifacts: call.response.artifacts,
+          onSettled({
+            status: call.status,
+            request: call.request,
+            response: call.response,
             durationMs: duration,
           });
         }
@@ -2947,37 +3300,10 @@ export class AgentCore {
       onEditorClose: () => {},
     });
 
-    // Prepare requests. Bridge events wait for scheduler resolution; ordinary
-    // tool events retain their existing pre-schedule timing.
-    const requests: ToolCallRequestInfo[] = authorizedCalls.map((fc) => {
-      const toolName = String(fc.name || 'unknown');
-      const callId = callIdByFunctionCall.get(fc)!;
-      const providerCallId = getProviderToolCallId(fc) ?? fc.id;
-      const args = (fc.args ?? {}) as Record<string, unknown>;
-      const request: ToolCallRequestInfo = {
-        callId,
-        ...(providerCallId ? { providerCallId } : {}),
-        name: toolName,
-        args,
-        isClientInitiated: true,
-        prompt_id: promptId,
-        response_id: responseId,
-        wasOutputTruncated,
-        // Mirror `turn.ts`: the data-loss guard keys on the fact that the
-        // arguments arrived unterminated, which is independent of whether the
-        // output token limit was what cut them (QwenLM/qwen-code#12970).
-        ...(toolCallArgumentsWereIncomplete(fc)
-          ? { hadIncompleteArguments: true }
-          : {}),
-        ...((toolName === ToolNames.EXEC ||
-          toolName === ToolNames.TOOL_SEARCH) &&
-        this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
-          ? {
-              codeModeAllowedToolNames: this.codeModeAllowedToolNames ?? [],
-            }
-          : {}),
-      };
-
+    // Bridge events wait for scheduler resolution; ordinary tool events
+    // retain their existing pre-schedule timing.
+    for (const request of requests) {
+      const { callId, name: toolName } = request;
       if (canonicalToolName(toolName) !== ToolNames.TODO_WRITE) {
         toolLifecycles.set(
           callId,
@@ -2992,9 +3318,7 @@ export class AgentCore {
       } else {
         emitToolCallStart(request);
       }
-
-      return request;
-    });
+    }
 
     if (requests.length > 0) {
       // Create a per-batch completion promise
@@ -3068,9 +3392,17 @@ export class AgentCore {
             durationMs: 0,
             timestamp: Date.now(),
           } as AgentToolResultEvent);
-          responseByCallId.set(req.callId, {
-            toolName,
-            responseParts,
+          onSettled({
+            status: 'cancelled',
+            request: executionRequest ?? req,
+            response: {
+              callId: req.callId,
+              responseParts,
+              resultDisplay: errorMessage,
+              error: new Error(errorMessage),
+              errorType: undefined,
+              executionStatus: execution?.status ?? 'not_started',
+            },
             durationMs: 0,
           });
         }
@@ -3094,83 +3426,40 @@ export class AgentCore {
         abortController.signal.removeEventListener('abort', onAbort);
       }
     }
+  }
 
-    const orderedResponses: ToolResponseBudgetEntry[] =
-      uniqueFunctionCalls.flatMap((fc) => {
-        const callId = callIdByFunctionCall.get(fc) ?? fc.id ?? '';
-        const response = responseByCallId.get(callId);
-        if (!response) return [];
-        return [
-          {
-            callId,
-            toolName: response.toolName,
-            responseParts: response.responseParts,
-            persistedOutputFiles: response.persistedOutputFiles,
-            artifacts: response.artifacts,
-          },
-        ];
-      });
-    if (functionCalls.length > 0 && orderedResponses.length === 0) {
-      orderedResponses.push({
-        callId: 'tool-call-batch',
-        toolName: 'tool-call-batch',
-        responseParts: [
-          {
-            text: 'All tool calls failed. Please analyze the errors and try an alternative approach.',
-          },
-        ],
-        persistedOutputFiles: [],
-      });
-    }
-    const finalizedResponses = await finalizeToolResponses(
-      this.runtimeContext,
-      orderedResponses,
-      new Map(orderedResponses.map((response) => [response.callId, promptId])),
-    );
-    const toolResponseParts = finalizedResponses.flatMap(
-      (response) => response.responseParts,
-    );
-    this.eventEmitter?.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
-      subagentId: this.subagentId,
-      round: currentRound,
-      responses: finalizedResponses.map((response) => {
-        const collected = responseByCallId.get(response.callId);
-        return {
-          callId: response.callId,
-          responseParts: response.responseParts,
-          ...(collected?.durationMs !== undefined
-            ? { durationMs: collected.durationMs }
-            : {}),
-        };
-      }),
-      timestamp: Date.now(),
-    });
-
-    // Pair each executed call with its model-visible (finalized) result so
-    // the reasoning loop can feed the loop detector's result-aware guards.
-    const finalizedByCallId = new Map(
-      finalizedResponses.map((response) => [response.callId, response]),
-    );
-    const results: Array<{
-      toolName: string;
-      args: Record<string, unknown>;
-      responseParts: Part[];
-    }> = [];
-    for (const fc of uniqueFunctionCalls) {
-      const callId = callIdByFunctionCall.get(fc) ?? fc.id ?? '';
-      const finalized = finalizedByCallId.get(callId);
-      if (!finalized) continue;
-      results.push({
-        toolName: String(fc.name ?? ''),
-        args: (fc.args ?? {}) as Record<string, unknown>,
-        responseParts: finalized.responseParts,
-      });
-    }
-
+  /** The request of a call the model made, as the scheduler runs it. */
+  private buildToolCallRequest(
+    fc: FunctionCall,
+    callId: string,
+    promptId: string,
+    responseId: string | undefined,
+    wasOutputTruncated: boolean,
+  ): ToolCallRequestInfo {
+    const toolName = String(fc.name);
+    const providerCallId = getProviderToolCallId(fc) ?? fc.id;
+    const args = (fc.args ?? {}) as Record<string, unknown>;
     return {
-      messages: [{ role: 'user', parts: toolResponseParts }],
-      repeatedDuplicateProviderToolCall: false,
-      results,
+      callId,
+      ...(providerCallId ? { providerCallId } : {}),
+      name: toolName,
+      args,
+      isClientInitiated: true,
+      prompt_id: promptId,
+      response_id: responseId,
+      wasOutputTruncated,
+      // Mirror `turn.ts`: the data-loss guard keys on the fact that the
+      // arguments arrived unterminated, which is independent of whether the
+      // output token limit was what cut them (QwenLM/qwen-code#12970).
+      ...(toolCallArgumentsWereIncomplete(fc)
+        ? { hadIncompleteArguments: true }
+        : {}),
+      ...((toolName === ToolNames.EXEC || toolName === ToolNames.TOOL_SEARCH) &&
+      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
+        ? {
+            codeModeAllowedToolNames: this.codeModeAllowedToolNames ?? [],
+          }
+        : {}),
     };
   }
 

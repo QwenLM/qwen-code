@@ -111,6 +111,8 @@ import {
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
 } from '../tools/tool-call.js';
 import {
+  getChannelWorkflowOrigin,
+  isBackgroundWorkflowBlocked,
   getInvocationContext,
   runWithInvocationContext,
   type InvocationContextV1,
@@ -2343,81 +2345,104 @@ describe('CoreToolScheduler', () => {
     }
   });
 
-  it('restores the invocation context when a delayed confirmation executes', async () => {
-    const hookOwner = {
-      runtimeId: 'runtime',
-      sessionId: 'session-context',
-      agentId: 'A',
-    };
-    const invocationContext: InvocationContextV1 = {
-      version: 1,
-      sessionId: 'session-context',
-      promptId: 'prompt-context',
-    };
-    const unrelatedContext: InvocationContextV1 = {
-      ...invocationContext,
-      sessionId: 'unrelated-session',
-      promptId: 'unrelated-prompt',
-    };
-    let observedContext: InvocationContextV1 | undefined;
-    let observedPromptId: string | undefined;
-    let observedTodoWorkChainId: string | undefined;
-    const tool = new MockTool({
-      name: 'approval-context-tool',
-      getDefaultPermission: async () => 'ask',
-      getConfirmationDetails: async () => ({
-        type: 'info' as const,
-        title: 'Confirm context tool',
-        prompt: 'Run context tool?',
-        onConfirm: vi.fn().mockResolvedValue(undefined),
-      }),
-      execute: async () => {
-        expect(getHookExecutionOwner()).toEqual(hookOwner);
-        observedContext = getInvocationContext();
-        observedPromptId = promptIdContext.getStore();
-        observedTodoWorkChainId = todoWorkChainContext.getStore();
-        return textResult('ok');
-      },
-    });
-    const { scheduler, onToolCallsUpdate } = createSchedulerForLegacyToolTests({
-      toolsByName: toolMap(tool),
-      approvalMode: ApprovalMode.DEFAULT,
-      hookSystem: {
-        runtimeId: hookOwner.runtimeId,
-        firePermissionDeniedEvent: vi.fn(),
-      },
-      getActiveTodoWorkChainOwner: () => 'mapped-work-chain',
-    });
+  it.each([false, true])(
+    'restores a Channel launch after delayed confirmation (daemon: %s)',
+    async (daemon) => {
+      const hookOwner = {
+        runtimeId: 'runtime',
+        sessionId: 'session-context',
+        agentId: 'A',
+      };
+      const invocationContext: InvocationContextV1 | undefined = daemon
+        ? {
+            version: 1,
+            sessionId: 'session-context',
+            promptId: 'prompt-context',
+          }
+        : undefined;
+      const workflowOrigin = {
+        channelName: 'telegram',
+        chatId: 'launch-chat',
+        threadId: 'launch-thread',
+        senderId: 'launch-user',
+        userInitiated: true as const,
+      };
+      const unrelatedContext: InvocationContextV1 = {
+        version: 1,
+        sessionId: 'unrelated-session',
+        promptId: 'unrelated-prompt',
+      };
+      let observedContext: InvocationContextV1 | undefined;
+      let observedWorkflowOrigin: ReturnType<typeof getChannelWorkflowOrigin>;
+      let observedBackgroundWorkflowBlocked: boolean | undefined;
+      let observedPromptId: string | undefined;
+      let observedTodoWorkChainId: string | undefined;
+      const tool = new MockTool({
+        name: 'approval-context-tool',
+        getDefaultPermission: async () => 'ask',
+        getConfirmationDetails: async () => ({
+          type: 'info' as const,
+          title: 'Confirm context tool',
+          prompt: 'Run context tool?',
+          onConfirm: vi.fn().mockResolvedValue(undefined),
+        }),
+        execute: async () => {
+          expect(getHookExecutionOwner()).toEqual(hookOwner);
+          observedContext = getInvocationContext();
+          observedWorkflowOrigin = getChannelWorkflowOrigin();
+          observedBackgroundWorkflowBlocked = isBackgroundWorkflowBlocked();
+          observedPromptId = promptIdContext.getStore();
+          observedTodoWorkChainId = todoWorkChainContext.getStore();
+          return textResult('ok');
+        },
+      });
+      const { scheduler, onToolCallsUpdate } =
+        createSchedulerForLegacyToolTests({
+          toolsByName: toolMap(tool),
+          approvalMode: ApprovalMode.DEFAULT,
+          hookSystem: {
+            runtimeId: hookOwner.runtimeId,
+            firePermissionDeniedEvent: vi.fn(),
+          },
+          getActiveTodoWorkChainOwner: () => 'mapped-work-chain',
+        });
 
-    await runWithHookExecutionOwner(hookOwner, () =>
-      runWithInvocationContext(invocationContext, () =>
-        scheduleBatch(
-          scheduler,
-          toolRequest(
-            'approval-context-call',
-            tool.name,
-            {},
-            invocationContext.promptId,
+      await runWithHookExecutionOwner(hookOwner, () =>
+        runWithInvocationContext(
+          invocationContext,
+          () =>
+            scheduleBatch(
+              scheduler,
+              toolRequest(
+                'approval-context-call',
+                tool.name,
+                {},
+                'prompt-context',
+              ),
+            ),
+          workflowOrigin,
+          true,
+        ),
+      );
+      const waiting = await waitForApproval(onToolCallsUpdate);
+
+      await runWithHookExecutionOwner({ ...hookOwner, agentId: 'B' }, () =>
+        todoWorkChainContext.run('stale-work-chain', () =>
+          runWithInvocationContext(unrelatedContext, () =>
+            waiting.confirmationDetails.onConfirm(
+              ToolConfirmationOutcome.ProceedOnce,
+            ),
           ),
         ),
-      ),
-    );
-    const waiting = await waitForApproval(onToolCallsUpdate);
+      );
 
-    await runWithHookExecutionOwner({ ...hookOwner, agentId: 'B' }, () =>
-      todoWorkChainContext.run('stale-work-chain', () =>
-        runWithInvocationContext(unrelatedContext, () =>
-          waiting.confirmationDetails.onConfirm(
-            ToolConfirmationOutcome.ProceedOnce,
-          ),
-        ),
-      ),
-    );
-
-    expect(observedContext).toEqual(invocationContext);
-    expect(observedPromptId).toBe(invocationContext.promptId);
-    expect(observedTodoWorkChainId).toBe('mapped-work-chain');
-  });
+      expect(observedContext).toEqual(invocationContext);
+      expect(observedWorkflowOrigin).toEqual(workflowOrigin);
+      expect(observedBackgroundWorkflowBlocked).toBe(true);
+      expect(observedPromptId).toBe('prompt-context');
+      expect(observedTodoWorkChainId).toBe('mapped-work-chain');
+    },
+  );
 
   it('isolates enter_plan_mode as a batch boundary and preserves its full reminder', async () => {
     const reminder = getPlanModeSystemReminder(false);

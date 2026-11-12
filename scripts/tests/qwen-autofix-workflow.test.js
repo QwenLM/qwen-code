@@ -24,6 +24,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 import { getWorkflowJob } from './workflow-helpers.js';
 import {
@@ -52,6 +53,24 @@ const fixedRulingShape =
 // than a code line) read it here.
 const designDoc = readFileSync('.github/workflows/qwen-autofix.md', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
+// The built-tree handoff steps by name from ci.yml: the signature admits exactly
+// one of them, so a rename there has to move the cases below with it rather
+// than leave a hand-typed copy asserting a name no run reports.
+const handoffStepNames = [
+  ...new Set(
+    Object.values(parse(ciWorkflow).jobs)
+      .flatMap((job) => job.steps ?? [])
+      .filter(
+        (step) =>
+          /download-artifact/i.test(String(step.uses ?? '')) &&
+          /built tree/i.test(String(step.name ?? '')),
+      )
+      .map((step) => step.name),
+  ),
+];
+const firstDownloadStep = handoffStepNames.find(
+  (name) => !/^Retry\b/i.test(name),
+);
 const releaseStepScript = readFileSync(
   '.github/scripts/run-release-step.sh',
   'utf8',
@@ -1336,17 +1355,29 @@ describe('qwen-autofix workflow', () => {
 
     // Single-source the signature list from the workflow rather than re-typing
     // it here, so the production value and this test can never drift out of
-    // sync (same extract-from-source idiom as NON_BLOCKING_CHECKS above). The
-    // toContain guard fails loudly if the env is renamed or the regex breaks —
-    // otherwise an empty pattern would match every line and silently pass.
-    const INFRA_SIGNATURES =
-      workflow.match(/INFRA_FAILURE_SIGNATURES: '([^']*)'/)?.[1] ?? '';
+    // sync (same extract-from-source idiom as NON_BLOCKING_CHECKS above). Read
+    // it through the YAML parser, not a quote-shaped regex: the handoff
+    // signature contains apostrophes, so Prettier renders this scalar
+    // double-quoted, and a single-quote-only pattern extracts '' from it. The
+    // toContain guards then fail loudly instead of driving the block below
+    // with an empty pattern, which matches every annotation and would pass
+    // every "this reruns" case while asserting nothing.
+    const workflowEnv = parse(workflow).env ?? {};
+    const INFRA_SIGNATURES = workflowEnv.INFRA_FAILURE_SIGNATURES ?? '';
     expect(INFRA_SIGNATURES).toContain('lost communication with the server');
+    // The retry only: the first download's timeout is continue-on-error, so
+    // its annotation can survive on a check run the retry already recovered.
+    expect(INFRA_SIGNATURES).toContain(
+      "The action 'Retry downloading the built tree' has timed out",
+    );
+    expect(firstDownloadStep, 'no first-download step in ci.yml').toBeTruthy();
+    expect(INFRA_SIGNATURES).not.toContain(
+      `The action '${firstDownloadStep}' has timed out`,
+    );
     // The deterministic configuration class is a separate list: its members
     // must be absent from the rerun class, and an empty extraction would make
     // the skip branch match every annotation, so guard it here too.
-    const CONFIG_SIGNATURES =
-      workflow.match(/CONFIG_FAILURE_SIGNATURES: '([^']*)'/)?.[1] ?? '';
+    const CONFIG_SIGNATURES = workflowEnv.CONFIG_FAILURE_SIGNATURES ?? '';
     expect(CONFIG_SIGNATURES).toContain('HOST_LOAD_MAX_RATIO');
     for (const token of CONFIG_SIGNATURES.split('|')) {
       expect(INFRA_SIGNATURES).not.toContain(token);
@@ -1462,6 +1493,34 @@ describe('qwen-autofix workflow', () => {
           '::error::Host load gate breached on ecs-qwen-hk1-4: five-minute load 145.00 on 64 CPUs',
       }),
     ).toEqual({ reran: true, continued: true });
+    // The disk floor gate is the same class, and was missing while its
+    // sibling was here. Measured 2026-11-12: /tmp on the host behind
+    // ecs-qwen-hz3-10/hz3-12 was at 10,3xx free inodes against the 100,000
+    // floor, failing `web-shell E2E Smoke` at the gate on #17022 and #17011
+    // with every later step skipped. The inode arm is the one that reads as
+    // code: 105 GiB still free at 15% used, so no ENOSPC text appears at all
+    // and only the gate's own phrase identifies it. An agent cannot fix
+    // another host's inode count; a re-run can land elsewhere.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          '::error::Disk floor breached on ecs-qwen-hz3-12: /tmp has 10300 free inodes, below the 100000 floor. Failing before the heavy step instead of dying on ENOSPC mid-run — re-run the job to land on a host with headroom.',
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // …but its OWN malformed floor is deterministic, like the host load
+    // gate's: the variable cannot change between attempts, so this is a
+    // human's configuration fix and never a rerun.
+    for (const annotation of [
+      '::error::DISK_FLOOR_MIN_FREE_KB must be a non-negative integer of at most 18 digits',
+      '::error::DISK_FLOOR_MIN_FREE_INODES must be a non-negative integer of at most 18 digits',
+      '::error::DISK_FLOOR_MAX_USED_PCT must be a percentage between 1 and 100',
+    ]) {
+      expect(run({ checks: [FAIL], annotations: annotation })).toEqual({
+        reran: false,
+        continued: true,
+      });
+    }
     // A REAL failure (no infra signature in the annotation) → never rerun; the
     // agent/human handles it. This is the gate that stops masking real bugs.
     expect(
@@ -1545,6 +1604,47 @@ describe('qwen-autofix workflow', () => {
         annotations: 'The job has exceeded the maximum execution time of 20m0s',
       }),
     ).toEqual({ reran: false, continued: false });
+    // #16927: the built-tree handoff is the ONE step timeout admitted, and by
+    // name. The artifact fetch can expire at its 15-minute cap with zero tests
+    // run, and what makes the transfer stall is OPEN — #16927's 09:26:51Z
+    // measurements retract the earlier proxy theory, so this classifies the
+    // failure without diagnosing it (see af-076). The scan must rerun it rather
+    // than hand a transport fault to an agent.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          "The action 'Retry downloading the built tree' has timed out after 15 minutes.",
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // …but ONLY the retry. The first download carries
+    // `continue-on-error: true`, so its timeout cannot end the job and its
+    // annotation stays on the check run after the retry recovers — a blob of
+    // that stale line beside a real failure must not read as infrastructure,
+    // or the loop reruns a genuine regression and never addresses it.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: [
+          `The action '${firstDownloadStep}' has timed out after 15 minutes.`,
+          "The action 'Run tests and generate reports' has timed out after 15 minutes.",
+        ].join('\n'),
+      }),
+    ).toEqual({ reran: false, continued: false });
+    // …and the name anchor is what keeps the rule above intact: every OTHER
+    // step timeout still falls through to the agent. Widening the signature to
+    // the bare phrase would rerun a genuinely hung suite into silence.
+    for (const msg of [
+      "The action 'Run tests and generate reports' has timed out after 45 minutes.",
+      "The action 'Run required no-AK integration gate' has timed out after 20 minutes.",
+      "The action 'Run web-shell browser smoke' has timed out after 30 minutes.",
+      "The action 'Install Dependencies' has timed out after 30 minutes.",
+    ]) {
+      expect(run({ checks: [FAIL], annotations: msg })).toEqual({
+        reran: false,
+        continued: false,
+      });
+    }
     // Self-trigger guard: a "Qwen Autofix" workflow's own failed check must NOT
     // be rerun (prevents the autofix from re-triggering itself), UNLESS the
     // check is a review-address job (the exception carved out in the jq filter).
