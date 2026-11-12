@@ -25,6 +25,7 @@ import type { ModelStreamResponse } from '../../provider/modelStreamResponse.js'
 import type { ModelTransport } from '../../provider/transport/modelTransport.js';
 import type { ModelTransportManager } from '../../provider/transport/modelTransportManager.js';
 import { OPENAI_CHAT_COMPLETIONS } from '../../provider/transport/modelProtocol.js';
+import { ModelThinkingUtils } from '../../provider/utils/modelThinkingUtils.js';
 import { runLogger } from '../../utils/runLogger.js';
 import { createQwenSubscriptionModelResolver } from './model-resolver.js';
 import {
@@ -35,6 +36,14 @@ import {
   QWEN_SUBSCRIPTION_SIGNED_OUT_HINT,
   QwenSubscriptionSession,
 } from './session.js';
+
+const QWEN_SUBSCRIPTION_THINKING_BUDGETS: Readonly<Record<string, number>> = {
+  low: 4_096,
+  medium: 16_384,
+  high: 32_768,
+  xhigh: 32_768,
+  max: 32_768,
+};
 
 /**
  * Endpoint/auth binding for the membership provider. The bearer token is a
@@ -148,7 +157,7 @@ export class QwenSubscriptionProvider implements ModelProvider {
     const response = createRetryingCustomInference(
       this.transport,
       this.client,
-      request,
+      resolveQwenSubscriptionStreamRequest(request),
       (error) => this.classifyError(error),
       { firstPayloadTimeoutMs: this.config.firstPayloadTimeoutMs },
     );
@@ -160,11 +169,68 @@ export class QwenSubscriptionProvider implements ModelProvider {
     return Promise.resolve(response);
   }
 
-  /** Rejected credentials surface the same recovery hint as the session. */
+  /**
+   * Rejected credentials surface the same recovery hint as the session, while
+   * preserving 403 server business messages (e.g. model/plan access denied).
+   */
   private classifyError(error: unknown): ModelInferenceErrorDetail {
     const detail = classifyClientError(error);
-    return detail.kind === 'auth'
-      ? { ...detail, message: QWEN_SUBSCRIPTION_SIGNED_OUT_HINT }
-      : detail;
+    if (
+      detail.status === 401 ||
+      (detail.kind === 'auth' && !detail.message)
+    ) {
+      return { ...detail, message: QWEN_SUBSCRIPTION_SIGNED_OUT_HINT };
+    }
+    return detail;
   }
+}
+
+/**
+ * Translate abstract reasoning effort tiers into the explicit thinking budget
+ * contract expected by the Qwen Subscription gateway before handing the
+ * request to the generic Chat Completions transport.
+ */
+export function resolveQwenSubscriptionStreamRequest(
+  request: ModelStreamRequest,
+): ModelStreamRequest {
+  const { model, config } = request.resolution;
+  if (!model.capabilities.reasoning.supported) return request;
+  const reasoning = config.reasoning;
+  if (ModelThinkingUtils.isDisabled(config)) {
+    return {
+      ...request,
+      resolution: {
+        model,
+        config: {
+          ...config,
+          reasoning: {
+            ...(reasoning?.preserve !== undefined
+              ? { preserve: reasoning.preserve }
+              : {}),
+            thinking: { type: 'disabled' },
+          },
+        },
+      },
+    };
+  }
+  const budgetTokens =
+    reasoning?.thinking?.type === 'enabled'
+      ? reasoning.thinking.budgetTokens
+      : QWEN_SUBSCRIPTION_THINKING_BUDGETS[reasoning?.effort ?? 'medium'];
+  if (budgetTokens === undefined) return request;
+  return {
+    ...request,
+    resolution: {
+      model,
+      config: {
+        ...config,
+        reasoning: {
+          ...(reasoning?.preserve !== undefined
+            ? { preserve: reasoning.preserve }
+            : {}),
+          thinking: { type: 'enabled', budgetTokens },
+        },
+      },
+    },
+  };
 }

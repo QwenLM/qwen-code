@@ -7,7 +7,11 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
-import type { Config } from '@qwen-code/core';
+import {
+  QWEN_SUBSCRIPTION_MODELS_UNAVAILABLE,
+  QwenSubscriptionOAuthError,
+  type Config,
+} from '@qwen-code/core';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { AuthDialog } from './AuthDialog.js';
@@ -215,6 +219,110 @@ describe('AuthDialog Qwen account', () => {
       expect(view.lastFrame()).toContain('Qwen Code requires Plus or Pro');
       expect(view.lastFrame()).toContain('View Plans');
       expect(config.setModel).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it('shows the server error message when /models returns a 403 description', async () => {
+    subscription.signIn.mockImplementation(
+      async (onDevice: (device: unknown) => void) => {
+        onDevice({
+          device_code: 'device-1',
+          user_code: 'USER-1',
+          verification_uri: 'https://chat.qwen.ai/device',
+          verification_uri_complete:
+            'https://chat.qwen.ai/device?user_code=USER-1',
+          expires_in: 60,
+          interval: 0.01,
+          expiresAt: Date.now() + 60_000,
+        });
+        return {
+          sub: 'user-1',
+          name: 'Ada',
+          email: 'ada@example.com',
+          member_type: 'plus',
+        };
+      },
+    );
+    subscription.getModels.mockRejectedValue(
+      new QwenSubscriptionOAuthError(
+        'plan_required',
+        403,
+        'Your account cannot access this model catalog.',
+      ),
+    );
+    const view = await renderWithProviders(
+      <AuthDialog
+        config={createConfig()}
+        settings={createSettings()}
+        canClose
+        onClose={vi.fn()}
+        onDone={vi.fn()}
+      />,
+      { width: 120 },
+    );
+    await view.waitUntilReady();
+
+    try {
+      await press(view, '\u001b[B');
+      await press(view, '\r');
+      await flush();
+
+      expect(view.lastFrame()).toContain(
+        'Your account cannot access this model catalog.',
+      );
+    } finally {
+      view.unmount();
+    }
+  });
+
+  it('shows the models_unavailable copy when the catalog cannot be loaded', async () => {
+    subscription.signIn.mockImplementation(
+      async (onDevice: (device: unknown) => void) => {
+        onDevice({
+          device_code: 'device-1',
+          user_code: 'USER-1',
+          verification_uri: 'https://chat.qwen.ai/device',
+          verification_uri_complete:
+            'https://chat.qwen.ai/device?user_code=USER-1',
+          expires_in: 60,
+          interval: 0.01,
+          expiresAt: Date.now() + 60_000,
+        });
+        return {
+          sub: 'user-1',
+          name: 'Ada',
+          email: 'ada@example.com',
+          member_type: 'plus',
+        };
+      },
+    );
+    subscription.getModels.mockRejectedValue(
+      new QwenSubscriptionOAuthError(
+        'models_unavailable',
+        undefined,
+        QWEN_SUBSCRIPTION_MODELS_UNAVAILABLE,
+      ),
+    );
+    const view = await renderWithProviders(
+      <AuthDialog
+        config={createConfig()}
+        settings={createSettings()}
+        canClose
+        onClose={vi.fn()}
+        onDone={vi.fn()}
+      />,
+      { width: 120 },
+    );
+    await view.waitUntilReady();
+
+    try {
+      await press(view, '\u001b[B');
+      await press(view, '\r');
+      await flush();
+
+      expect(view.lastFrame()).toContain(QWEN_SUBSCRIPTION_MODELS_UNAVAILABLE);
     } finally {
       view.unmount();
     }

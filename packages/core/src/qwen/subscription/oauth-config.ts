@@ -37,21 +37,34 @@ export function getQwenOAuthConfig(): QwenOAuthConfig {
   };
 }
 
-/** Membership plans page shared by `/upgrade` and the purchase guidance. */
-export function getQwenSubscriptionPlansUrl(): string {
-  const url = new URL('/', getQwenOAuthConfig().webOrigin);
-  url.searchParams.set('memberPlan', 'qwen_code');
+export type QwenPaywallScene = 'cli' | 'desktop' | 'plugin';
+
+function formatQwenChatUrl(url: URL, scene: QwenPaywallScene): string {
+  url.searchParams.set('entry', 'qwen_code');
+  url.searchParams.set('paywallScene', scene);
   return url.toString();
 }
 
+/** Membership plans page shared by `/upgrade` and the purchase guidance. */
+export function getQwenSubscriptionPlansUrl(
+  scene: QwenPaywallScene = 'cli',
+): string {
+  const url = new URL('/', getQwenOAuthConfig().webOrigin);
+  url.searchParams.set('memberPlan', 'qwen_code');
+  return formatQwenChatUrl(url, scene);
+}
+
 /** Browser authorization page for a device code. */
-export function getQwenSubscriptionAuthorizationUrl(device: {
-  readonly user_code: string;
-}): string {
+export function getQwenSubscriptionAuthorizationUrl(
+  device: {
+    readonly user_code: string;
+  },
+  scene: QwenPaywallScene = 'cli',
+): string {
   const url = new URL('/authorize', getQwenOAuthConfig().webOrigin);
   url.searchParams.set('user_code', device.user_code);
-  url.searchParams.set('client', 'qwen-code');
-  return url.toString();
+  url.searchParams.set('client', scene);
+  return formatQwenChatUrl(url, scene);
 }
 
 export function getQwenSubscriptionCredentialsPath(): string {

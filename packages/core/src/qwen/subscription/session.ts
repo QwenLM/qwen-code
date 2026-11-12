@@ -26,13 +26,32 @@ import {
   QWEN_SUBSCRIPTION_BASE_URL,
 } from './oauth-config.js';
 import {
+   QWEN_SUBSCRIPTION_MODELS_UNAVAILABLE,
+  type QwenSubscriptionModelCatalog,
+  type QwenSubscriptionModelMetadata,
+} from './models.js';
+import {
   QwenSubscriptionOAuthClient,
   QwenSubscriptionOAuthError,
+  retryAfterMs,
   toSubscriptionOAuthError,
   type QwenSubscriptionDeviceAuthorization,
   type QwenSubscriptionTokens,
   type QwenSubscriptionUserInfo,
 } from './oauth-client.js';
+
+const modelMetadataSchema = z.object({
+  id: z.string().min(1),
+  modalities: z
+    .object({
+      image: z.boolean().optional(),
+      video: z.boolean().optional(),
+      audio: z.boolean().optional(),
+      pdf: z.boolean().optional(),
+    })
+    .optional(),
+  contextWindowSize: z.number().int().positive().finite().optional(),
+});
 
 const credentialSchema = z.object({
   revision: z.string().min(1),
@@ -40,6 +59,7 @@ const credentialSchema = z.object({
   baseUrl: z.string(),
   clientId: z.string(),
   models: z.array(z.string().min(1)).optional(),
+  modelMetadata: z.array(modelMetadataSchema).optional(),
   tokens: z
     .object({
       access_token: z.string().min(1),
@@ -58,8 +78,16 @@ const CREDENTIAL_DIR_MODE = 0o700;
 const REFRESH_LEEWAY_MS = 30_000;
 const MODELS_TIMEOUT_MS = 5_000;
 const MODELS_MAX_BYTES = 1024 * 1024;
+const ERROR_MAX_BYTES = 64 * 1024;
 const LOCK_RETRIES = 350;
 const LOCK_RETRY_DELAY_MS = 100;
+const SUPPORTED_MODALITIES = new Set([
+  'text',
+  'image',
+  'video',
+  'audio',
+  'pdf',
+]);
 export const QWEN_SUBSCRIPTION_SIGNED_OUT_HINT =
   'Your login credentials are no longer valid. Run /auth to sign in again.';
 
@@ -89,15 +117,26 @@ export class QwenSubscriptionSession {
 
   /** Last successfully loaded catalog, read without touching the network. */
   getCachedModels(): string[] {
+    return this.getCachedCatalog().models;
+  }
+
+  /** Last successfully loaded catalog and metadata, read without touching the network. */
+  getCachedCatalog(): QwenSubscriptionModelCatalog {
     try {
       const credentials = credentialSchema.parse(
         JSON.parse(readCredentialsSync(this.filePath)),
       );
-      return credentials.tokens && this.matches(credentials)
-        ? [...(credentials.models ?? [])]
-        : [];
+      if (!credentials.tokens || !this.matches(credentials)) {
+        return { models: [] };
+      }
+      return {
+        models: [...(credentials.models ?? [])],
+        ...(credentials.modelMetadata?.length
+          ? { modelMetadata: [...credentials.modelMetadata] }
+          : {}),
+      };
     } catch {
-      return [];
+      return { models: [] };
     }
   }
 
@@ -218,7 +257,7 @@ export class QwenSubscriptionSession {
   /** Account model catalog; falls back to the cached list on transport errors. */
   async getModels(
     signal?: AbortSignal,
-  ): Promise<{ models: string[]; cached: boolean }> {
+  ): Promise<QwenSubscriptionModelCatalog & { cached: boolean }> {
     const snapshot = await this.locked(async (assertCanCommit) => {
       const credentials = await this.read();
       if (!credentials?.tokens || !this.matches(credentials)) {
@@ -235,6 +274,7 @@ export class QwenSubscriptionSession {
         revision: credentials.revision,
         token: credentials.tokens!.access_token,
         cachedModels: credentials.models,
+        cachedModelMetadata: credentials.modelMetadata,
       };
     }, signal);
 
@@ -268,21 +308,27 @@ export class QwenSubscriptionSession {
       }
       signal?.throwIfAborted();
       if (response.status !== 200) {
-        throw new QwenSubscriptionOAuthError(
-          'models_request_failed',
-          response.status,
-        );
+        throw await parseModelsError(response);
       }
-      const models = parseModelIds(await response.text());
-      if (models.length === 0) {
-        throw new QwenSubscriptionOAuthError('models_unavailable');
+      const catalog = parseModelCatalog(await response.text());
+      if (catalog.models.length === 0) {
+        throw new QwenSubscriptionOAuthError(
+          'models_unavailable',
+          undefined,
+          QWEN_SUBSCRIPTION_MODELS_UNAVAILABLE,
+        );
       }
       await this.locked(async (assertCanCommit) => {
         const credentials = await readCurrent();
-        credentials.models = models;
+        credentials.models = catalog.models;
+        if (catalog.modelMetadata) {
+          credentials.modelMetadata = catalog.modelMetadata;
+        } else {
+          delete credentials.modelMetadata;
+        }
         await this.write(credentials, assertCanCommit);
       }, signal);
-      return { models, cached: false };
+      return { ...catalog, cached: false };
     } catch (error) {
       signal?.throwIfAborted();
       if (
@@ -292,11 +338,21 @@ export class QwenSubscriptionSession {
         throw error;
       }
       if (snapshot.cachedModels?.length) {
-        return { models: [...snapshot.cachedModels], cached: true };
+        return {
+          models: [...snapshot.cachedModels],
+          ...(snapshot.cachedModelMetadata?.length
+            ? { modelMetadata: [...snapshot.cachedModelMetadata] }
+            : {}),
+          cached: true,
+        };
       }
       throw error instanceof QwenSubscriptionOAuthError
         ? error
-        : new QwenSubscriptionOAuthError('models_unavailable');
+        : new QwenSubscriptionOAuthError(
+            'models_unavailable',
+            undefined,
+            QWEN_SUBSCRIPTION_MODELS_UNAVAILABLE,
+          );
     }
   }
 
@@ -346,7 +402,14 @@ export class QwenSubscriptionSession {
         error.code === 'invalid_grant'
       ) {
         assertCanCommit();
-        await fs.rm(this.filePath, { force: true }).catch(() => undefined);
+        if (credentials.signInAttempt) {
+          delete credentials.tokens;
+          delete credentials.models;
+          delete credentials.modelMetadata;
+          await this.write(credentials, assertCanCommit).catch(() => undefined);
+        } else {
+          await fs.rm(this.filePath, { force: true }).catch(() => undefined);
+        }
       }
       throw error;
     }
@@ -502,34 +565,123 @@ function composeSignals(
   };
 }
 
-function parseModelIds(text: string): string[] {
-  if (text.length > MODELS_MAX_BYTES) return [];
+function parseModelCatalog(text: string): QwenSubscriptionModelCatalog {
+  if (text.length > MODELS_MAX_BYTES) return { models: [] };
   let body: unknown;
   try {
     body = JSON.parse(text);
   } catch {
-    return [];
+    return { models: [] };
   }
   if (
     typeof body !== 'object' ||
     body === null ||
     !Array.isArray((body as { data?: unknown }).data)
   ) {
-    return [];
+    return { models: [] };
   }
-  const ids: string[] = [];
+  const models: string[] = [];
+  const modelMetadata: QwenSubscriptionModelMetadata[] = [];
   const seen = new Set<string>();
   for (const item of (body as { data: unknown[] }).data) {
-    if (typeof item !== 'object' || item === null) return [];
+    if (typeof item !== 'object' || item === null) return { models: [] };
     const id = (item as { id?: unknown }).id;
-    if (typeof id !== 'string') return [];
+    if (typeof id !== 'string') return { models: [] };
     const trimmed = id.trim();
     if (trimmed && !seen.has(trimmed)) {
       seen.add(trimmed);
-      ids.push(trimmed);
+      models.push(trimmed);
+      const metadata = parseModelItemMetadata(
+        trimmed,
+        item as Record<string, unknown>,
+      );
+      if (metadata) modelMetadata.push(metadata);
     }
   }
-  return ids;
+  return {
+    models,
+    ...(modelMetadata.length > 0 ? { modelMetadata } : {}),
+  };
+}
+
+function parseModelItemMetadata(
+  id: string,
+  item: Record<string, unknown>,
+): QwenSubscriptionModelMetadata | undefined {
+  const modalities = parseInputModalities(item['input_modalities']);
+  const contextWindowSize = parsePositiveInt(item['context_window_tokens']);
+  if (!modalities && contextWindowSize === undefined) return undefined;
+  return {
+    id,
+    ...(modalities ? { modalities } : {}),
+    ...(contextWindowSize !== undefined ? { contextWindowSize } : {}),
+  };
+}
+
+function parseInputModalities(
+  value: unknown,
+): QwenSubscriptionModelMetadata['modalities'] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const recognized: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string') continue;
+    const normalized = entry.trim().toLowerCase();
+    if (SUPPORTED_MODALITIES.has(normalized)) recognized.push(normalized);
+  }
+  if (recognized.length === 0) return undefined;
+  const set = new Set(recognized);
+  return {
+    image: set.has('image'),
+    video: set.has('video'),
+    audio: set.has('audio'),
+    pdf: set.has('pdf'),
+  };
+}
+
+function parsePositiveInt(value: unknown): number | undefined {
+  return typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value > 0
+    ? value
+    : undefined;
+}
+
+async function parseModelsError(
+  response: Response,
+): Promise<QwenSubscriptionOAuthError> {
+  const retryAfter = retryAfterMs(response.headers.get('Retry-After'));
+  const text = await response.text().catch(() => '');
+  let code = 'models_request_failed';
+  let description: string | undefined;
+  if (text && text.length <= ERROR_MAX_BYTES) {
+    try {
+      const body = JSON.parse(text) as unknown;
+      if (typeof body === 'object' && body !== null) {
+        const record = body as Record<string, unknown>;
+        const nested =
+          typeof record['error'] === 'object' && record['error'] !== null
+            ? (record['error'] as Record<string, unknown>)
+            : undefined;
+        const rawCode = nested?.['code'] ?? nested?.['type'] ?? record['error'];
+        const rawDescription =
+          nested?.['message'] ?? record['error_description'] ?? record['message'];
+        if (typeof rawCode === 'string' && rawCode.trim()) {
+          code = rawCode.trim();
+        }
+        if (typeof rawDescription === 'string' && rawDescription.trim()) {
+          description = rawDescription.trim();
+        }
+      }
+    } catch {
+      // Keep the HTTP status error when the response body is not JSON.
+    }
+  }
+  return new QwenSubscriptionOAuthError(
+    code,
+    response.status,
+    description,
+    retryAfter,
+  );
 }
 
 async function atomicWriteFile(

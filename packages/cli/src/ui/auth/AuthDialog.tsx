@@ -18,6 +18,7 @@ import {
   AuthType,
   QODER_ENV_ACCOUNT_REGION,
   QODER_PROVIDER_ID,
+  QWEN_SUBSCRIPTION_MODELS_UNAVAILABLE,
   QWEN_SUBSCRIPTION_PROVIDER_ID,
   QwenSubscriptionOAuthError,
   QwenSubscriptionSession,
@@ -2547,6 +2548,12 @@ function subscriptionErrorPatch(
   error: unknown,
 ): Partial<QwenAccountState> {
   const failure = toSubscriptionOAuthError(error, 'exchange');
+  if (failure.code === 'models_unavailable') {
+    return {
+      phase: 'error',
+      message: failure.description || QWEN_SUBSCRIPTION_MODELS_UNAVAILABLE,
+    };
+  }
   if (failure.code === 'expired_token' && failure.stage === 'exchange') {
     return {
       phase: 'error',
@@ -2564,6 +2571,21 @@ function subscriptionErrorPatch(
       phase: 'error',
       message:
         'Your login credentials are no longer valid. Run /auth to sign in again.',
+    };
+  }
+  if (failure.status && failure.status >= 400 && failure.description) {
+    return {
+      phase: 'error',
+      message: failure.description,
+    };
+  }
+  if (failure.code === 'models_request_failed') {
+    return {
+      phase: 'error',
+      message:
+        failure.status === 429
+          ? 'Too many requests. Please try again later.'
+          : `Qwen request failed${failure.status ? ` (HTTP ${failure.status})` : ''}.`,
     };
   }
   const messages: Record<string, string> = {

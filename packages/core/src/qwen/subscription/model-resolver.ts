@@ -11,7 +11,11 @@ import type {
   ModelResolver,
 } from '../../provider/model/modelResolver.js';
 import { runLogger } from '../../utils/runLogger.js';
-import { orderSubscriptionModels, qwenSubscriptionModel } from './models.js';
+import {
+  orderSubscriptionModels,
+  qwenSubscriptionModel,
+  type QwenSubscriptionModelMetadata,
+} from './models.js';
 import type { QwenSubscriptionSession } from './session.js';
 
 const CATALOG_TTL_MS = 60_000;
@@ -37,9 +41,11 @@ export function createQwenSubscriptionModelResolver(
       if (fresh) return Promise.resolve([...models]);
       if (models.length === 0) {
         // Seed from the last successful catalog without touching the network.
-        const cached = session.isSignedIn() ? session.getCachedModels() : [];
-        if (cached.length > 0) {
-          writeModels(models, toModels(cached));
+        const cached = session.isSignedIn()
+          ? session.getCachedCatalog()
+          : { models: [] };
+        if (cached.models.length > 0) {
+          writeModels(models, toModels(cached.models, cached.modelMetadata));
           void refresh();
           return Promise.resolve([...models]);
         }
@@ -59,8 +65,8 @@ export function createQwenSubscriptionModelResolver(
         if (!session.isSignedIn()) {
           writeModels(models, []);
         } else {
-          const { models: ids } = await session.getModels();
-          writeModels(models, toModels(ids));
+          const { models: ids, modelMetadata } = await session.getModels();
+          writeModels(models, toModels(ids, modelMetadata));
         }
       } catch (error) {
         runLogger.warn(
@@ -93,8 +99,14 @@ export function createQwenSubscriptionModelResolver(
   };
 }
 
-function toModels(ids: readonly string[]): Model[] {
-  return orderSubscriptionModels(ids).map(qwenSubscriptionModel);
+function toModels(
+  ids: readonly string[],
+  modelMetadata?: readonly QwenSubscriptionModelMetadata[],
+): Model[] {
+  const byId = new Map(modelMetadata?.map((entry) => [entry.id, entry]));
+  return orderSubscriptionModels(ids).map((id) =>
+    qwenSubscriptionModel(id, byId.get(id)),
+  );
 }
 
 function writeModels(target: Model[], next: readonly Model[]): void {
