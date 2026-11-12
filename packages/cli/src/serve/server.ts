@@ -3694,6 +3694,20 @@ export function createServeApp(
       requestedSessionIdAdmission?: RequestedSessionIdAdmission;
     }
   ).requestedSessionIdAdmission = requestedSessionIdAdmission;
+  // Same reason: a live-conversation restore throws without this, so the wake
+  // would report every session in such a workspace unavailable.
+  if (liveConversationWorkspaceForRoutes) {
+    (
+      app.locals as {
+        materializeLiveConversationDirectory?: (
+          sessionId: string,
+        ) => Promise<string>;
+      }
+    ).materializeLiveConversationDirectory = (sessionId: string) =>
+      liveConversationWorkspaceForRoutes.materializeConversationDirectory(
+        sessionId,
+      );
+  }
 
   if (standaloneSessionService) {
     registerStandaloneSessionRoutes(app, {

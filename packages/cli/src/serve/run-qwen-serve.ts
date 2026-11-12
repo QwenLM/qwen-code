@@ -7716,7 +7716,13 @@ async function runQwenServeImpl(
                     assertRuntimeGenerationOpen: () =>
                       input.runtime.generationGuard?.assertOpen(),
                     daemonLog,
-                    materializeLiveConversationDirectory: undefined,
+                    materializeLiveConversationDirectory: (
+                      app.locals as {
+                        materializeLiveConversationDirectory?: (
+                          sessionId: string,
+                        ) => Promise<string>;
+                      }
+                    ).materializeLiveConversationDirectory,
                     historyPageSize: undefined,
                     liveReplayMode: undefined,
                     compactedReplayMode: undefined,
