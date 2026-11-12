@@ -172,9 +172,21 @@ test('ci.yml runs the check in lint_and_static on pull requests', () => {
   const step = job.indexOf("- name: 'Report test growth'");
   assert.ok(step > 0, 'test growth step missing');
   const stepBlock = job.slice(step, job.indexOf('\n      - name:', step + 1));
+  // Whole literal, not the `pull_request`/`skip_ci` substrings this used to
+  // check: appending `&& ... != 'docs_only'` keeps both tokens in place while
+  // narrowing the gate, and no suite asserted the literal (#16991, the third
+  // step sharing it after #16918). No profile arm: the report is meant to
+  // cover every PR, so keying this gate on the profile could only narrow it.
+  assert.equal(
+    stepBlock.match(/^ {8}if: "(.*)"$/m)?.[1],
+    "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}",
+    'test growth gate drifted',
+  );
+  // Advisory by contract (see the script header): the step reports and never
+  // blocks. Dropping `continue-on-error` would leave the gate literal above
+  // intact while turning a summary into a required-check failure.
+  assert.match(stepBlock, /^ {8}continue-on-error: true$/m);
   for (const expected of [
-    "github.event_name == 'pull_request'",
-    "skip_ci != 'true'",
     'github.event.pull_request.base.sha',
     'github.event.pull_request.head.sha',
     'node .github/scripts/check-test-growth.mjs',
