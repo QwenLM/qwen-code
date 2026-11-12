@@ -23,6 +23,35 @@ import {
   testKey,
 } from '../../.github/scripts/ci/main-failure-signature.mjs';
 
+// Placeholder values for the shell variables inside an emitted annotation. Only
+// the message text decides the signature match, so these just have to be
+// plausible.
+const ANNOTATION_SAMPLES = { value: '0', RPC_RETRY: 'false' };
+
+/**
+ * Every `::error::` annotation a shell script can emit, with its `${...}`
+ * placeholders filled in.
+ *
+ * The gate's own suite runs `check-host-load.sh` and matches what it prints, so
+ * that file needs no help here. The unit-lane script is not executable from
+ * this suite — it needs the workspace tree, a pnpm install and Linux — so its
+ * configuration error is read from the script instead of copied into this file:
+ * a copy keeps matching its own signature after the message is reworded, which
+ * leaves both workflows claiming a string no run can emit, and the repository
+ * variable typo these entries exist for is classified as a code failure again.
+ */
+function emittedErrorAnnotations(script) {
+  const fill = (template) =>
+    template.replace(
+      /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g,
+      (_, variable, fallback) =>
+        ANNOTATION_SAMPLES[variable] ?? fallback ?? 'x',
+    );
+  return [...script.matchAll(/::error::([^"\n]*)/g)].map((match) =>
+    fill(match[1]),
+  );
+}
+
 describe('main CI failure issue workflow', () => {
   const workflow = readFileSync(
     '.github/workflows/main-ci-failure-issue.yml',
@@ -2638,16 +2667,24 @@ printf '%s\\n' '{"jobs":[]}'
     it('recognises the CI configuration errors as infrastructure', () => {
       // A mistyped repository variable fails before any suite runs. Both
       // classifiers must see it as infrastructure, or a variable typo files a
-      // code-failure issue and sends autofix after the wrong thing. The
-      // annotations are the strings the scripts actually emit.
-      const annotation =
-        "::error::QWEN_CI_RPC_RETRY must be a non-negative integer or 'off', got 'false'";
-      expect(
-        new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(
+      // code-failure issue and sends autofix after the wrong thing. The lanes
+      // script also reports ordinary runtime failures, so this checks the
+      // configuration-error shape — an all-caps variable name followed by
+      // "must be" — and reads the wording from the script, so a reworded
+      // message reddens here instead of silently leaving both workflows with a
+      // signature no run can emit.
+      const annotations = emittedErrorAnnotations(
+        readFileSync('.github/scripts/ci/run-unit-test-lanes.sh', 'utf8'),
+      ).filter((annotation) => /^[A-Z][A-Z0-9_]+ must be\b/.test(annotation));
+      expect(annotations.length).toBeGreaterThanOrEqual(1);
+      for (const annotation of annotations) {
+        expect(
+          new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(
+            annotation,
+          ),
           annotation,
-        ),
-        annotation,
-      ).toBe(true);
+        ).toBe(true);
+      }
     });
 
     it('classifies per failed job and only when EVERY one is infrastructure', () => {
