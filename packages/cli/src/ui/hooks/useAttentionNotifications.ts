@@ -12,7 +12,11 @@ import { captureHookExecutionOwner } from '@qwen-code/qwen-code-core/hooks/hook-
 import { fireNotificationHook } from '@qwen-code/qwen-code-core/core/toolHookTriggers.js';
 import { NotificationType } from '@qwen-code/qwen-code-core/hooks/types.js';
 import type { TerminalNotification } from './useTerminalNotification.js';
-import type { TrackedToolCall } from './useReactToolScheduler.js';
+import type {
+  TrackedExecutingToolCall,
+  TrackedToolCall,
+} from './useReactToolScheduler.js';
+import type { PendingBackgroundApproval } from '../components/background-view/BackgroundTasksPill.js';
 import { sendNotification } from '../../services/notificationService.js';
 
 export const LONG_TASK_NOTIFICATION_THRESHOLD_SECONDS = 20;
@@ -38,6 +42,8 @@ interface UseAttentionNotificationsOptions {
   config?: Config;
   terminal: TerminalNotification;
   pendingToolCalls?: TrackedToolCall[];
+  /** Approvals parked by background agents and workflows, oldest first. */
+  backgroundApprovals?: readonly PendingBackgroundApproval[];
 }
 
 export const useAttentionNotifications = ({
@@ -48,6 +54,7 @@ export const useAttentionNotifications = ({
   config,
   terminal,
   pendingToolCalls,
+  backgroundApprovals,
 }: UseAttentionNotificationsOptions) => {
   const terminalBellEnabled: boolean =
     (settings?.merged?.general?.terminalBell as boolean) ?? true;
@@ -71,8 +78,87 @@ export const useAttentionNotifications = ({
     const awaitingTool = pendingToolCalls?.find(
       (tc) => tc.status === 'awaiting_approval',
     );
-    return awaitingTool?.request.name;
+    if (awaitingTool) return awaitingTool.request.name;
+    // A foreground subagent's prompt rides on the executing Agent call's live
+    // output. Only name a tool if the active prompt is unambiguous.
+    let subagentToolName: string | undefined;
+    for (const tc of pendingToolCalls ?? []) {
+      if (tc.status !== 'executing') continue;
+      const liveOutput = (tc as TrackedExecutingToolCall).liveOutput;
+      if (
+        typeof liveOutput === 'object' &&
+        liveOutput !== null &&
+        'type' in liveOutput &&
+        liveOutput.type === 'task_execution' &&
+        liveOutput.pendingConfirmation != null
+      ) {
+        if (subagentToolName !== undefined) return undefined;
+        const awaitingCalls = liveOutput.toolCalls?.filter(
+          (call) => call.status === 'awaiting_approval',
+        );
+        if (awaitingCalls?.length !== 1) return undefined;
+        subagentToolName = awaitingCalls[0].name;
+      }
+    }
+    return subagentToolName;
   }, [pendingToolCalls]);
+
+  // Approvals parked by background agents and workflows never put the main
+  // session into WaitingForConfirmation, so they need their own trigger.
+  // Each one notifies once per unfocused stretch, keyed by a primitive
+  // signature so array identity changes don't re-run the effect.
+  const backgroundApprovalSignature = useMemo(
+    () =>
+      JSON.stringify(
+        (backgroundApprovals ?? []).map((approval) => [
+          approval.key,
+          approval.toolName,
+        ]),
+      ),
+    [backgroundApprovals],
+  );
+  const notifiedBackgroundApprovalsRef = useRef(new Set<string>());
+
+  useEffect(() => {
+    const pending = (
+      JSON.parse(backgroundApprovalSignature) as Array<[string, string]>
+    ).map(([key, toolName]) => ({ key, toolName }));
+    const notified = notifiedBackgroundApprovalsRef.current;
+    const pendingKeys = new Set(pending.map((approval) => approval.key));
+    for (const key of notified) {
+      if (!pendingKeys.has(key)) notified.delete(key);
+    }
+    if (isFocused) {
+      // Re-arm, like the main prompt: losing focus again with an approval
+      // still parked notifies again.
+      notified.clear();
+      return;
+    }
+    // Defer these alerts until the main prompt clears.
+    if (streamingState === StreamingState.WaitingForConfirmation) return;
+    if (!terminalBellEnabled || !approvalNotificationsEnabled) return;
+    for (const { key, toolName } of pending) {
+      if (notified.has(key)) continue;
+      sendNotification(
+        {
+          message: toolName
+            ? `Qwen Code needs your permission to use ${toolName}`
+            : 'Qwen Code is waiting for your input',
+          title: NOTIFICATION_TITLE,
+        },
+        terminal,
+        terminalBellEnabled,
+      );
+      notified.add(key);
+    }
+  }, [
+    backgroundApprovalSignature,
+    isFocused,
+    streamingState,
+    terminalBellEnabled,
+    approvalNotificationsEnabled,
+    terminal,
+  ]);
 
   useEffect(() => {
     if (
