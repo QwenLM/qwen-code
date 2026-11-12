@@ -31,6 +31,27 @@ const PIN = { digest: sha256, expected: sha256(ARCHIVE) };
 const DAY_MS = 24 * 60 * 60 * 1000;
 const ROOT = path.resolve(import.meta.dirname, '../..');
 
+// The cache directory is spelled out in three files that cannot import each
+// other, so each site pinning only its own spelling proves nothing about the
+// others: move it in either workflow and the image's seed fills a directory no
+// job reads, every job quietly downloads again, and every assertion still
+// passes. This reads it from the workflow that exports it.
+const CACHE_STEP =
+  'Configure persistent standalone runtime cache (self-hosted)';
+const exportedCacheDir = (job) => {
+  const step = getWorkflowStep(job, CACHE_STEP);
+  const declared = /^\s*cache_dir="(.+)"$/m.exec(step);
+  expect(declared, 'the step must declare the cache directory').not.toBe(null);
+  return declared[1];
+};
+const ciCacheDir = () =>
+  exportedCacheDir(
+    getWorkflowJob(
+      fs.readFileSync(path.join(ROOT, '.github/workflows/ci.yml'), 'utf8'),
+      'test',
+    ),
+  );
+
 describe('fetchVerifiedArchive', () => {
   let root;
   let fetchImpl;
@@ -284,14 +305,12 @@ describe('fetchVerifiedArchive', () => {
 });
 
 describe('standalone runtime cache wiring', () => {
-  const CACHE_STEP =
-    'Configure persistent standalone runtime cache (self-hosted)';
   const read = (file) => fs.readFileSync(path.join(ROOT, file), 'utf8');
   const expectCacheExportedBefore = (job, consumer) => {
     const step = getWorkflowStep(job, CACHE_STEP);
     expect(step).toMatch(/^\s+if: .*runner\.environment == 'self-hosted'/m);
-    expect(step).toContain(
-      'cache_dir="${HOME}/.cache/qwen-code/standalone-runtimes"',
+    expect(exportedCacheDir(job)).toBe(
+      '${HOME}/.cache/qwen-code/standalone-runtimes',
     );
     expect(step).toContain(
       'echo "QWEN_STANDALONE_RUNTIME_CACHE=${cache_dir}" >> "${GITHUB_ENV}"',
@@ -330,6 +349,24 @@ describe('standalone runtime cache wiring', () => {
     expect(script.indexOf('sweepRuntimeCache(cacheDir, used)')).toBeGreaterThan(
       script.lastIndexOf('await fetchArchive('),
     );
+  });
+
+  it('seeds into the directory both workflows export', () => {
+    const exported = [
+      ciCacheDir(),
+      exportedCacheDir(
+        getWorkflowJob(
+          read('.github/workflows/release.yml'),
+          'quality_scripts',
+        ),
+      ),
+    ];
+    const entrypoint = read('scripts/ci/ephemeral-runner/entrypoint.sh');
+    const seeded = /^\s*runtime_cache="(.+)"$/m.exec(entrypoint);
+    expect(seeded, 'the entrypoint must name the cache directory').not.toBe(
+      null,
+    );
+    for (const dir of exported) expect(seeded[1]).toBe(dir);
   });
 });
 
@@ -577,7 +614,9 @@ describe('the archive selectors match both real filenames', () => {
     );
     return {
       result,
-      dir: path.join(home, '.cache/qwen-code/standalone-runtimes'),
+      // Where the job will look, taken from the workflow that exports it and
+      // with ${HOME} bound to the fixture — not a fourth copy of the path.
+      dir: path.join(home, ciCacheDir().replace('${HOME}/', '')),
     };
   };
 
@@ -637,7 +676,7 @@ describe('the archive selectors match both real filenames', () => {
   it('leaves an archive the cache already holds', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-home-'));
     try {
-      const dir = path.join(home, '.cache/qwen-code/standalone-runtimes');
+      const { dir } = seedInto(home, path.join(seed, 'absent'));
       fs.mkdirSync(dir, { recursive: true });
       const [nodeArchive] = filenames('arm64');
       fs.writeFileSync(path.join(dir, nodeArchive), 'already verified\n');
