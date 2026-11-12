@@ -3300,6 +3300,32 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it('keeps the event-bus agent loop disabled by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventBusAgentLoopEnabled: false,
+      }),
+    );
+  });
+
+  it('propagates the event-bus agent loop opt-in', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({ experimental: { eventBusAgentLoop: true } }, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventBusAgentLoopEnabled: true,
+      }),
+    );
+  });
+
   it('should not enable the session writer lease for invalid truthy values', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

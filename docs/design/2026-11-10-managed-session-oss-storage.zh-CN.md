@@ -5,6 +5,8 @@
 状态：提案，仅设计。本文不实现任何代码、schema 或 wire 变更。
 基线：`main @ 488845a4a8`（2026-11-10）。所有 `file:line` 引用均在该基线实读；实现前须重核（并行工作会移动 main）。
 
+> **实现后说明（2026-11-12）。** S1a/S1b 已在 #16868 落地，并在 #16910（「scope CSI retirement evidence to its own session」）**删除 CSI application inventory/image 机制**（`WorkspaceCsiApplicationInventory`、`CsiActivityDiagnosticProjection`、`CsiModelDiagnosticProjection`、各 `*Image`/`*Identities` 类）之后与 main 整合。因此下文所有 `WorkspaceCsiApplicationInventory` 引用均为**历史性**——该类已不存在，它点名的 pack-aware inventory 读取方随之移除，核心（journal compaction、资源外置、非 CSI 的 pack-aware 读取方）保持不变。两项后果仍开放：(1) 幸存的 `record_bytes` 直读方 `JournalStoreRows.activationLeaseRow`、`JdbcCsiActivationAdmission`、`JdbcCsiExecutionAdmission` **尚未 pack-aware**，覆盖区间被 EVICTED 后即失败关闭——它们是启用 `deletion-enabled` 的前提（见 §5.4）；早期版本点名的 `WorkspaceCsiCheckpointSnapshotStore` 已被 #16957 移除；(2) compaction job 的并发控制（§5.3「claim/lease」）已实现为 BUILDING 行上 replica 范围的 `builder_id` lease，加上 `publish()` 的行数断言（被取代的构建者回滚，而非把水位推进到没有已发布 pack 的区间）。`ck_ma_request_namespace` 的 `RESOURCE_ALLOCATE` 臂为 **17**，非 16。
+
 ## 1. 问题与范围
 
 私有 Hosted Managed Session 的资源体与 journal 事务字节目前内联在 MySQL。超过 per-kind 内联上限的资源被 HTTP 501 `managed_session_oss_disabled` 拒绝（`JournalCommit.java:762-772`）；README 明示 OSS-backed 资源 pending，"until the immutable OSS path is implemented"（README §655-657）。内联 journal 字节无界累积（单事务至多 8 MiB），这正是大对象测试要求 `max_allowed_packet >= 128MB`（模块 AGENTS.md）、读者携带 `OCTET_LENGTH` 守卫（`CancelEvidence.java:75`）与 inventory 8 MiB 上限（`WorkspaceCsiApplicationInventory.java:1257`）的原因。
@@ -88,7 +90,7 @@ schema COMMENT 称 `compacted_through_revision` 为「compaction 覆盖的最高
 
 ### 4.2 Schema
 
-零新列零新表。一处 V1 原地编辑：`ck_ma_request_namespace` 增加 `WHEN 'RESOURCE_ALLOCATE' THEN 16`。应用层枚举扩展：`storage_kind='OSS_OBJECT'`、`state='ALLOCATED'`。须核对 Java 行校验器（`JournalStoreRows` resource mapper、`WorkspaceCsiApplicationInventory` 列映射）接受新取值；Broker projection 只带列清单、无取值白名单（已核验：`runtimebroker/managedschema` 包无 `MYSQL_INLINE`/`TOOL_PUBLICATION` 字符串）。
+零新列零新表。一处 V1 原地编辑：`ck_ma_request_namespace` 增加 `WHEN 'RESOURCE_ALLOCATE' THEN 17`。应用层枚举扩展：`storage_kind='OSS_OBJECT'`、`state='ALLOCATED'`。须核对 Java 行校验器（`JournalStoreRows` resource mapper、`WorkspaceCsiApplicationInventory` 列映射）接受新取值；Broker projection 只带列清单、无取值白名单（已核验：`runtimebroker/managedschema` 包无 `MYSQL_INLINE`/`TOOL_PUBLICATION` 字符串）。
 
 ### 4.3 读取、GC、配置、客户端
 

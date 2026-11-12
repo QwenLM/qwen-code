@@ -652,6 +652,27 @@ describe('no-AK integration CI wiring', () => {
       "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen'",
     );
     expect(gateStep).toContain('timeout-minutes: 20');
+    // The typecheck carries no heap cap of its own, unlike the workspace test
+    // scripts, so it inherits Node's default old-space — sized from the memory
+    // Node can see, not from the container's limit. On 2026-11-11 it died at
+    // ~2040 MB on a disposable runner whose host reported 181 GB available
+    // (job 130506292678), so Node's own default was the cap and no host pressure
+    // was involved. The containers get 8 GiB (config.example.json), enough for
+    // 4096; the hosted lane keeps the default it has always passed with, under
+    // the same fleet predicate as the worker caps.
+    //
+    // Through `env` on that one command, NOT the step's env block: the
+    // zero-secrets contract above requires every value there but QWEN_HOME to
+    // be the empty string, and is enforced by value on purpose so a credential
+    // under an unanticipated name cannot ship green. A heap flag has no
+    // business joining that exemption list.
+    expect(gateStep).toContain(
+      "ecs-qwen-*) typecheck_heap=('NODE_OPTIONS=--max-old-space-size=4096') ;;",
+    );
+    expect(gateStep).toContain(
+      'env "${typecheck_heap[@]}" npm run typecheck:integration',
+    );
+    expect(gateStep).not.toContain('\n          NODE_OPTIONS: ');
     // HOME/USERPROFILE are job-wide now (first-step GITHUB_ENV), so the
     // gate must not re-pin them step-locally.
     expect(gateStep).not.toContain('\n          HOME: ');
@@ -1155,6 +1176,15 @@ describe('no-AK integration CI wiring', () => {
         "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",
       );
       expect(step).toContain('node "${nested_cli}" install chromium webkit');
+      // The disposable pool image bakes Chromium and its system libraries and
+      // is what sets PLAYWRIGHT_BROWSERS_PATH; its root-owned tree cannot even
+      // be verified by a job's own install (playwright writes a lock and a
+      // `.links` entry before it checks what is present), so every install
+      // site skips on that env instead of failing.
+      expect(step).toContain('if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then');
+      expect(step).toContain(
+        "echo 'browsers baked into the image, skipping install'",
+      );
     }
   });
 
