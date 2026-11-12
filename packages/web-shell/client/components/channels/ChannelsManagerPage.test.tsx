@@ -25,6 +25,7 @@ const {
         type: string;
         displayName: string;
         manageable: boolean;
+        outboundOnly?: boolean;
         fields: Array<{
           key: string;
           label: string;
@@ -258,6 +259,103 @@ afterEach(() => {
 });
 
 describe('ChannelsManagerPage', () => {
+  const webhookType = {
+    type: 'dingtalk-webhook',
+    displayName: 'DingTalk Webhook',
+    manageable: true,
+    outboundOnly: true,
+    fields: [
+      {
+        key: 'webhookUrl',
+        label: 'Webhook URL',
+        kind: 'secret' as const,
+        required: true,
+      },
+    ],
+  };
+
+  it('groups DingTalk methods and opens an outbound editor without receive policies', async () => {
+    channelState.current.catalog.push(webhookType);
+    await renderPage();
+    expect(
+      container.querySelectorAll('[data-testid^="channel-platform-"]'),
+    ).toHaveLength(3);
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="channel-platform-dingtalk"]',
+        )
+        ?.click();
+    });
+    expect(document.body.textContent).toContain('Choose a DingTalk connection');
+    expect(document.body.textContent).toContain('Application bot');
+    const webhookMethod = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Webhook (send only)'),
+    );
+    await act(async () => {
+      webhookMethod?.click();
+    });
+    expect(inputByLabel('Webhook URL')).not.toBeNull();
+    expect(
+      document.querySelector('[role="dialog"]')?.textContent,
+    ).not.toContain('Access control');
+    expect(
+      document.querySelector('[role="dialog"]')?.textContent,
+    ).not.toContain('Conversation management');
+  });
+
+  it('describes outbound readiness without claiming remote credential validation', async () => {
+    channelState.current.catalog.push(webhookType);
+    channelState.current.channels = {
+      webhook: channel('webhook', 'dingtalk-webhook', 'connected'),
+    };
+    await renderPage();
+    expect(container.textContent).toContain('Ready to send');
+    expect(container.textContent).toContain(
+      'Remote credentials are checked when sending',
+    );
+  });
+
+  it.each(['stopped', 'starting', 'partial', 'error'] as const)(
+    'does not claim outbound readiness while %s',
+    async (state) => {
+      channelState.current.catalog.push(webhookType);
+      channelState.current.channels = {
+        webhook: channel('webhook', 'dingtalk-webhook', state),
+      };
+      await renderPage();
+      expect(container.textContent).toContain(
+        'Not ready to send notifications.',
+      );
+      expect(container.textContent).not.toContain(
+        'Sends notifications to the configured destination.',
+      );
+      expect(container.textContent).not.toContain('Ready to send');
+    },
+  );
+
+  it('opens the application bot editor from the DingTalk method chooser', async () => {
+    channelState.current.catalog.push(webhookType);
+    await renderPage();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="channel-platform-dingtalk"]',
+        )!
+        .click();
+    });
+    const appMethod = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Application bot'),
+    )!;
+    expect(appMethod).toBeDefined();
+    await act(async () => appMethod.click());
+    expect(inputByLabel('Client ID (AppKey)')).not.toBeNull();
+    expect(inputByLabel('Webhook URL')).toBeNull();
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'Access control',
+    );
+  });
+
   it('shows only the three enabled platforms and configured instances', async () => {
     await renderPage();
 
