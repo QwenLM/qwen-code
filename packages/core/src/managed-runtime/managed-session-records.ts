@@ -920,7 +920,9 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         contentRef: 'ref',
         deadline: 'timeOrNull',
         admissionRef: 'ref',
+        notBefore: 'timeOrNull',
       },
+      optional: ['notBefore'],
     },
     'wake.requested': {
       fields: {

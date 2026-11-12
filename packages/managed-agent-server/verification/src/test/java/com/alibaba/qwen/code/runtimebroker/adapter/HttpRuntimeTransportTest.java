@@ -16,9 +16,10 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocolTest;
@@ -1140,9 +1141,14 @@ class HttpRuntimeTransportTest {
         RuntimeScope scope = session.getScope();
         RuntimeLease lease = toolLease(server.getAddress().getPort());
         var clock = java.time.Clock.systemUTC();
-        var bindings = new InMemoryRuntimeBindingRepository(clock, () -> "size-probe-binding");
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository(clock);
+        var sizeSource = new org.h2.jdbcx.JdbcDataSource();
+        sizeSource.setURL("jdbc:h2:mem:size-probe-" + java.util.UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(sizeSource);
+        var bindings = new JdbcRuntimeBindingRepository(sizeSource,
+                new AesGcmSecretProtector("test", new byte[32]), () -> "size-probe-binding");
+        var sessions = new JdbcRuntimeSessionRepository(sizeSource);
+        var executions = new JdbcToolExecutionRepository(sizeSource);
         RuntimeProvisioner provisioner = request -> CompletableFuture.completedFuture(lease);
         try (var service = RuntimeBrokerTestAccess.service(harness -> CompletableFuture.completedFuture(scope),
                 provisioner, transport, bindings, sessions, executions, "size-probe",
