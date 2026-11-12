@@ -490,12 +490,12 @@ PR 5a gives `runModelRound` a second kind of round. It takes the main session's 
 
 AgentCore maps the round's events as it maps its chunks today and keeps the raw function calls for its tool step. What moves:
 
-| AgentCore today                                                          | With the setting on                                                                      |
-| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
-| it sends each round on `LlmChat.sendMessageStream` and parses its chunks | `runModelRound` sends it on a `Turn`, and AgentCore maps the round's events              |
-| a loop it detects in the stream breaks out of the stream                 | the event's callback returns `loop_detected`, which ends the round and closes the stream |
-| a model fallback keeps the calls the failed model made                   | they are dropped, as on the other surfaces                                               |
-| a streamed text event per text part                                      | per chunk: its thought text, then its text                                               |
+| AgentCore today                                                                         | With the setting on                                                                               |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| it sends each round on `LlmChat.sendMessageStream` and parses its chunks                | `runModelRound` sends it on a `Turn`, and AgentCore maps the round's events                       |
+| a loop it detects in the stream breaks out of the stream                                | the event's callback returns `loop_detected`, which ends the round and closes the stream          |
+| a model fallback keeps what the failed model streamed: its calls, text and thought text | they are dropped, so the round carries only the fallback model's output, as on the other surfaces |
+| a streamed text event per text part                                                     | per chunk: its thought text, then its text                                                        |
 
 Both paths emit `ROUND_START` after stream preparation so the workflow watchdog gives the model response a fresh stall window. The agent emits text from the entire received chunk before its loop checks and tracks response IDs per attempt. A failed request, a cancel and a retry wait cut off by the time limit end the run as today. The suite with the setting on counts each subagent round sent on the shared loop in the debug log. The TUI suite counts main-session rounds using a separate log entry.
 
@@ -684,7 +684,7 @@ The suites run in the integration job, the TUI suite on Ink; the OpenTUI interac
   - from PR 4b, a tool that ends the turn ends it, with the results in history.
 
 - With the setting on, AgentCore differs from today in these intended ways:
-  - from PR 5a, a model fallback drops the calls the failed model made, as on the other surfaces ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
+  - from PR 5a, a model fallback drops what the failed model streamed, its calls, text and thought text, so the round's answer carries only the fallback model's output, as on the other surfaces ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
   - from PR 5a, a streamed text event carries a chunk's thought text or its visible text ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
 
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
