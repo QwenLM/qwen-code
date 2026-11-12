@@ -15,7 +15,9 @@ import { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-w
 import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import {
+  CHANNEL_CAPACITY_NOTICE,
   CHANNEL_TRUNCATION_NOTICE,
+  MANAGED_CHANNEL_LIMITS,
   channelInputId,
   channelRouteId,
   encodeChannelReply,
@@ -700,19 +702,64 @@ describe('HostedChannelSession outbound', () => {
       await settleInJournal(harness, authority, inputId);
       const planned = (await channels.planReply(inputId))!;
       expect(planned.segments).toHaveLength(64);
+      // The claim is bounded by the transport budget, so it carries only the
+      // leading segments; read the plan's resources for the full picture.
       const claimed = await channels.claim(planned.deliveryId);
-      expect(claimed.segments).toHaveLength(64);
-      const last = claimed.segments[63]!;
-      expect(last.text.endsWith(CHANNEL_TRUNCATION_NOTICE)).toBe(true);
+      expect(claimed.segments.length).toBeGreaterThan(0);
+      expect(claimed.segments.length).toBeLessThan(64);
+      const texts = await Promise.all(
+        planned.segments.map(async (segment) =>
+          (await harness.store.read(segment.contentRef)).toString('utf8'),
+        ),
+      );
+      expect(texts[63]!.endsWith(CHANNEL_CAPACITY_NOTICE)).toBe(true);
       // The overflow is visible, never silent: the join is a strict prefix
       // of the answer plus the notice.
-      const join = claimed.segments.map((segment) => segment.text).join('');
-      const kept = join.slice(
-        0,
-        join.length - CHANNEL_TRUNCATION_NOTICE.length,
-      );
+      const join = texts.join('');
+      const kept = join.slice(0, join.length - CHANNEL_CAPACITY_NOTICE.length);
       expect(text.startsWith(kept)).toBe(true);
       expect(kept.length).toBeLessThan(text.length);
+    });
+  });
+
+  it('bounds a claim to the transport budget and resumes the rest by re-claim', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (channels, authority) => {
+      const inputId = (await channels.submitInput(inbound())).inputId;
+      // ~1.5 MiB: well past the 1 MiB control-plane JSON cap if every segment
+      // were carried in one claim, but plan-able as ordered segments.
+      const text = 'x'.repeat(1_572_864);
+      settleTurn(harness, inputId, text);
+      await settleInJournal(harness, authority, inputId);
+      const planned = (await channels.planReply(inputId))!;
+      expect(planned.segments.length).toBeGreaterThan(1);
+      const collected: string[] = [];
+      let delivery = planned;
+      let claims = 0;
+      while (claims++ < 64) {
+        const claimed = await channels.claim(delivery.deliveryId);
+        expect(claimed.segments.length).toBeGreaterThan(0);
+        const claimBytes = claimed.segments.reduce(
+          (sum, segment) =>
+            sum + Buffer.byteLength(JSON.stringify(segment.text), 'utf8'),
+          0,
+        );
+        expect(claimBytes).toBeLessThanOrEqual(
+          MANAGED_CHANNEL_LIMITS.maxClaimTextBytes,
+        );
+        for (const segment of claimed.segments) {
+          collected[segment.ordinal] = segment.text;
+          delivery = await channels.receipt(
+            delivery.deliveryId,
+            segment.ordinal,
+            RECEIPT,
+          );
+        }
+        if (delivery.run.delivery?.state === 'delivered') break;
+      }
+      expect(delivery.run.delivery?.state).toBe('delivered');
+      expect(claims).toBeGreaterThan(1);
+      expect(collected.join('')).toBe(text);
     });
   });
 

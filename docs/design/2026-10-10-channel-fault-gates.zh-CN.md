@@ -18,7 +18,7 @@ Issue #13802 是 #12380 中 F 阶段的下一片：为 **channel 域**补 FG6 �
 
 1. **FG7e 改范围：没有可门禁的 SSE 面。** channel 不发布任何事件（`ManagedChannelService` 不向任何流追加）；投递只通过游标分页的 REST 台账只读暴露（`GET /v1/agent-channels/{id}/deliveries`，Base64 `createdAt:id` 游标），外加一条按投递的单条读取（`GET /v1/agent-channels/{id}/deliveries/{deliveryId}`）——台账行在领取后才铸出，因此一条 `planned` 投递根本不可读。「断开事件流、用 `Last-Event-ID` 续传、断言不重复不缺失」今天写不出来（triage 评论的选项 B）。因此 FG7e 改为门禁**读台账连续性**：跨客户端中断与跨投递状态推进的游标稳定、不重复、不缺失的分页 —— 这正是 SSE 续传本应作出的断言，只是对准真实存在的面。它刻意不挂 SSE 的名字。
 
-2. **FG7f 门禁 `unknown` 族；`partial` 在 v1 没有生产者。** email 计划是单分段（`planChannelSegments` 恒返回一段，`managed-channel-operations.ts:556`），而 `partial` 要求 `settled > 0 && settled < segments.length` —— 单分段下不可达。`partial` 的后继规则见证存在于契约层（`managed-channel-record.ts:458`）；多进程 `partial` 门禁需要 H5d 的多段计划，属于那一片。本门禁在全链路上证明的是 v1 可达的那段诚实投递线：提供方回答含糊 → `unknown`；回执始终不到 → 租约结算 `unknown`（绝不自动重发）；计划外 ordinal → 被拒且投递不前进；恢复重读原身份（绝不重发）；显式 resend 链只带未发送分段并携带重复警告。
+2. **FG7f 门禁 `unknown` 族；多进程 `partial` 门禁移至适配器/传输切片。** 多分段生产者此后已落地（多分段生产者设计，2026-11-12），`planChannelSegments` 如今返回有序分段，`partial`（`settled > 0 && settled < segments.length`）可达。`partial` 的后继规则见证存在于契约层（`managed-channel-record.ts:458`）；多进程 `partial` 门禁需要真实的多分段适配器发送，属于适配器/传输切片，而非生产者。本门禁在全链路上证明的是 v1 可达的那段诚实投递线：提供方回答含糊 → `unknown`；回执始终不到 → 租约结算 `unknown`（绝不自动重发）；计划外 ordinal → 被拒且投递不前进；恢复重读原身份（绝不重发）；显式 resend 链只带未发送分段并携带重复警告。
 
 3. **FG7d 经生产连接器中继驱动取消。** adapter 面没有 cancel 动词（正确地 —— 没有 Java 调用者）；漏斗的 `cancel` 可经 Harness operations 路由到达，该路由按 Harness 签发的 `X-Qwen-Client-Id` 鉴权。IT 直接调用 `spring.getBean(HarnessConnector.class).runChannelOperation(tenant, sessionId, {kind:"cancel_delivery", ...})` —— 与 `ManagedChannelService` 使用的同一个通用中继 —— 因此门禁以正确鉴权驱动精确的生产路径，且不新增任何生产面（也无需探针 bean）。
 
@@ -79,11 +79,11 @@ Spring 跑在由 IT 杀死的子 JVM 里；adapter 驱动是可杀/可停进程�
 
 ### FG7f —— 部分与未知投递（决定 2）
 
-| 用例                    | 注入                                                               | 期望                                                                                                                                                     |
-| ----------------------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `provider-ambiguous`    | 假 SMTP 接受字节，然后以非 5xx 的方式失败应答（超时）              | adapter 分类 `unknown` 并上报；一次发送，不重试发送；记录与台账结算 `unknown`                                                                            |
-| `receipt-never-arrived` | 假 SMTP 接受；adapter 在上报前冷死（驱动进程被杀，不再重启其回执） | 租约清扫结算 `unknown`；之后的 adapter（全新冷启动）不自动重发；显式 resend 只带未发送分段并送达                                                         |
-| `out-of-plan-ordinal`   | 在 adapter 泊停于发送中时，驱动对单分段投递提交 ordinal 1 的回执   | 确定性拒绝：漏斗的 `has no segment` 落地为 409 `channel_operation_conflict`；投递既不前进也不重发；随后正确的 ordinal 0 回执结算 `delivered` —— 一次发送 |
+| 用例                    | 注入                                                                           | 期望                                                                                                                                                     |
+| ----------------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `provider-ambiguous`    | 假 SMTP 接受字节，然后以非 5xx 的方式失败应答（超时）                          | adapter 分类 `unknown` 并上报；一次发送，不重试发送；记录与台账结算 `unknown`                                                                            |
+| `receipt-never-arrived` | 假 SMTP 接受；adapter 在上报前冷死（驱动进程被杀，不再重启其回执）             | 租约清扫结算 `unknown`；之后的 adapter（全新冷启动）不自动重发；显式 resend 只带未发送分段并送达                                                         |
+| `out-of-plan-ordinal`   | 在 adapter 泊停于发送中时，驱动对一个单分段（短回复）投递提交 ordinal 1 的回执 | 确定性拒绝：漏斗的 `has no segment` 落地为 409 `channel_operation_conflict`；投递既不前进也不重发；随后正确的 ordinal 0 回执结算 `delivered` —— 一次发送 |
 
 ## 夹具设计
 

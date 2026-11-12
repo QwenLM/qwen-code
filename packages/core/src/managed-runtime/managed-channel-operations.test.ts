@@ -33,6 +33,7 @@ import {
   channelRouteId,
   channelRouteOpenBody,
   channelRouteRolloverBody,
+  CHANNEL_CAPACITY_NOTICE,
   CHANNEL_TRUNCATION_NOTICE,
   channelSessionCreationKey,
   decodeChannelInputEnvelope,
@@ -396,6 +397,21 @@ describe('channel policy and envelopes', () => {
     expect(pieces[pieces.length - 1]!).not.toContain(CHANNEL_TRUNCATION_NOTICE);
   });
 
+  it('does not cut a lone newline into its own segment at the window start', () => {
+    const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
+    // A full segment of y, a newline, then just over a segment of b: the
+    // newline lands at the start of the second window. Without the fill
+    // floor it is cut alone (a 1-byte segment = its own publish / claim /
+    // provider message); the floor absorbs it into a full-width piece.
+    const text = 'y'.repeat(maxBytes) + '\n' + 'b'.repeat(maxBytes + 1);
+    const pieces = planChannelSegments(text);
+    expect(pieces.join('')).toBe(text);
+    expect(pieces).toHaveLength(3);
+    for (const piece of pieces) {
+      expect(piece).not.toBe('\n');
+    }
+  });
+
   it('bounds the visible loss when mixed widths sit exactly at the capacity', () => {
     const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
     const capacity = maxBytes * MANAGED_CHANNEL_LIMITS.maxSegments;
@@ -414,15 +430,15 @@ describe('channel policy and envelopes', () => {
       expect(piece).not.toContain(REPLACEMENT_CHARACTER);
     }
     const join = pieces.join('');
-    expect(join.endsWith(CHANNEL_TRUNCATION_NOTICE)).toBe(true);
-    const kept = join.slice(0, join.length - CHANNEL_TRUNCATION_NOTICE.length);
+    expect(join.endsWith(CHANNEL_CAPACITY_NOTICE)).toBe(true);
+    const kept = join.slice(0, join.length - CHANNEL_CAPACITY_NOTICE.length);
     expect(text.startsWith(kept)).toBe(true);
     const lost =
       Buffer.byteLength(text, 'utf8') - Buffer.byteLength(kept, 'utf8');
     expect(lost).toBeGreaterThan(0);
     expect(lost).toBeLessThanOrEqual(
       3 * MANAGED_CHANNEL_LIMITS.maxSegments +
-        Buffer.byteLength(CHANNEL_TRUNCATION_NOTICE, 'utf8'),
+        Buffer.byteLength(CHANNEL_CAPACITY_NOTICE, 'utf8'),
     );
   });
 
@@ -439,14 +455,14 @@ describe('channel policy and envelopes', () => {
     expect(
       pieces
         .slice(0, -1)
-        .every((piece) => !piece.includes(CHANNEL_TRUNCATION_NOTICE)),
+        .every((piece) => !piece.includes(CHANNEL_CAPACITY_NOTICE)),
     ).toBe(true);
     const last = pieces[pieces.length - 1]!;
-    expect(last.endsWith(CHANNEL_TRUNCATION_NOTICE)).toBe(true);
+    expect(last.endsWith(CHANNEL_CAPACITY_NOTICE)).toBe(true);
     // The join is the kept prefix plus the notice — a strict prefix of the
     // input, never a silent loss and never a mid-code-point cut.
     const join = pieces.join('');
-    const kept = join.slice(0, join.length - CHANNEL_TRUNCATION_NOTICE.length);
+    const kept = join.slice(0, join.length - CHANNEL_CAPACITY_NOTICE.length);
     expect(text.startsWith(kept)).toBe(true);
     expect(kept.length).toBeLessThan(text.length);
     expect(join).not.toContain(REPLACEMENT_CHARACTER);

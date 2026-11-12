@@ -39,6 +39,15 @@ export const MANAGED_CHANNEL_LIMITS = Object.freeze({
   maxReplyContextBytes: 8 * 1024,
   maxSegmentBytes: 48 * 1024,
   maxSegments: CHANNEL_DELIVERY_MAX_SEGMENTS,
+  /**
+   * The segment-text budget one `claim_delivery` answer may carry. The
+   * control plane reads that answer through a 1 MiB JSON response cap, so a
+   * claim returns only the leading unreceipted segments that fit this budget
+   * (with room left for the reply and the delivery record) and the adapter
+   * re-claims the rest after each receipt. Kept well under the cap even for
+   * escape-heavy text; a single segment always fits.
+   */
+  maxClaimTextBytes: 512 * 1024,
   maxSubjectChars: 200,
 } as const);
 
@@ -528,25 +537,33 @@ const TRUNCATION_NOTICE =
 /** The notice a truncation appends, exported so further shrinks keep it. */
 export const CHANNEL_TRUNCATION_NOTICE = TRUNCATION_NOTICE;
 
+const CAPACITY_NOTICE =
+  '\n\n[Reply truncated because it exceeded the channel delivery segment capacity.]';
+
+/**
+ * The notice the segment-count overflow appends: the answer exceeded the
+ * whole delivery's capacity, not any one segment's size. Exported so the
+ * reply envelope-shrink recognizes and strips it like the size notice.
+ */
+export const CHANNEL_CAPACITY_NOTICE = CAPACITY_NOTICE;
+
 /**
  * Cuts text at a code-point boundary under a UTF-8 byte budget and keeps
- * the truncation notice; within the budget the text returns unchanged.
+ * the given notice; within the budget the text returns unchanged.
  */
 export function truncateChannelTextUtf8(
   text: string,
   maxBytes: number,
+  notice: string = TRUNCATION_NOTICE,
 ): string {
   const bytes = Buffer.from(text, 'utf8');
   if (bytes.byteLength <= maxBytes) {
     return text;
   }
-  const limit = Math.max(
-    0,
-    maxBytes - Buffer.byteLength(TRUNCATION_NOTICE, 'utf8'),
-  );
+  const limit = Math.max(0, maxBytes - Buffer.byteLength(notice, 'utf8'));
   let end = limit;
   while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
-  return bytes.subarray(0, end).toString('utf8') + TRUNCATION_NOTICE;
+  return bytes.subarray(0, end).toString('utf8') + notice;
 }
 
 /**
@@ -580,14 +597,20 @@ export function planChannelSegments(text: string): readonly string[] {
     }
     let end = offset + maxBytes;
     const newline = bytes.lastIndexOf(0x0a, end - 1);
-    // A line-end cut is taken only when the bytes after it still fit the
-    // remaining segment budget. Long lines put the window's last newline
-    // far below the byte bound; cutting there unconditionally would spend
-    // the 64-segment count at a fraction of the nominal capacity and drop
-    // a tail that fits. Falling back to the full-width cut keeps the whole
+    // A line-end cut is taken only when it is worth a segment slot and the
+    // bytes after it still fit the remaining segment budget. The fill floor
+    // rejects a newline at (or a couple of bytes past) the window start, which
+    // would otherwise emit a 1-2 byte segment — its own publish, claim entry
+    // and provider message. The capacity check rejects a cut that would spend
+    // the 64-segment count below the nominal byte capacity on long-line input.
+    // Either failure falls back to the full-width cut, which keeps the whole
     // byte capacity reachable.
+    const fill = newline + 1 - offset;
     const roomForRest = (maxSegments - pieces.length - 1) * maxBytes;
-    if (newline >= offset && bytes.byteLength - (newline + 1) <= roomForRest) {
+    if (
+      fill > maxBytes / 2 &&
+      bytes.byteLength - (newline + 1) <= roomForRest
+    ) {
       end = newline + 1;
     } else {
       while (end > offset && (bytes[end]! & 0xc0) === 0x80) end -= 1;
@@ -598,8 +621,9 @@ export function planChannelSegments(text: string): readonly string[] {
   if (offset < bytes.byteLength) {
     const last = pieces.length - 1;
     pieces[last] = truncateChannelTextUtf8(
-      pieces[last]! + TRUNCATION_NOTICE,
+      pieces[last]! + CAPACITY_NOTICE,
       maxBytes,
+      CAPACITY_NOTICE,
     );
   }
   return Object.freeze(pieces);

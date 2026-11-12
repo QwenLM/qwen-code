@@ -171,8 +171,10 @@ OpenAPI change, the contract version, and the WebShell type regeneration.
 
 - No change to the journal record contract, the Harness funnel, the trusted
   wire surface, the email adapter, or the public API shape.
-- No second adapter and no multi-segment producer: the email plan stays one
-  segment. Multi-segment behavior is exercised through the recording Harness
+- No second adapter; the multi-segment producer was out of scope for this
+  ledger slice and has since landed (multi-segment producer design,
+  2026-11-12), so the email plan now splits long replies into ordered
+  segments. Multi-segment behavior is exercised through the recording Harness
   and the repository contract, not a live provider.
 - No public `segments` projection, no OpenAPI / WebShell change.
 
@@ -186,7 +188,9 @@ OpenAPI change, the contract version, and the WebShell type regeneration.
 - Repository contract (H2, rerun on MySQL): plan idempotency, write-once
   receipt (a second receipt for the same segment does not overwrite), ordered
   listing, tenant/channel isolation.
-- The existing single-segment suites stay green unchanged.
+- The existing single-segment suites stay green unchanged at this slice; the
+  later multi-segment producer slice (2026-11-12) retargets the long-reply
+  pins to ordered segments.
 - Real MySQL evidence for the new table's write-once and concurrency behavior
   through a repository-level MySQL IT that extends the H2 repository test
   (the `ManagedSideQueryStoreMySqlIT` pattern), including two concurrent

@@ -41,6 +41,13 @@ are three separate concerns:
   builds the `segments` array with `segmentId` `deliveryId:i` in ordinal order,
   replacing the hard-coded single element. The dispatcher, receipts and recovery
   are unchanged: they already operate per segment.
+- **Claim transport.** The control plane reads a `claim_delivery` answer through
+  a 1 MiB JSON response cap, so a claim carries only the leading unreceipted
+  segments that fit a safe text budget (`maxClaimTextBytes`, well under the cap
+  with room for the reply and the delivery record); the adapter re-claims the
+  rest after each receipt via the existing partial/resume protocol. Returning
+  every outstanding segment in one body would push a >1 MiB answer past the cap
+  and strand it in `sending`.
 - **Representative reply.** The delivery's `contentRef` reply resource keeps the
   existing envelope-fitting loop (the inline reply must still satisfy
   `maxEnvelopeBytes`), so the public read model's representative reply keeps the
