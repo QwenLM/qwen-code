@@ -35,6 +35,7 @@ import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 // runtime side effects, so a static value import is fine.
 import { connectionIdOf } from './mcp-pool-key.js';
 import type { ConnectionId } from './mcp-pool-events.js';
+import type { PooledConnection } from './mcp-pool-entry.js';
 import {
   McpBudgetWouldExceedError,
   McpServerSpawnFailedError,
@@ -534,10 +535,8 @@ export class McpClientManager {
    * `discoverMcpToolsForServer` keeps the legacy path for SDK MCP.
    */
   private readonly pool?: import('./mcp-transport-pool.js').McpTransportPool;
-  private readonly pooledConnections = new Map<
-    string,
-    import('./mcp-pool-entry.js').PooledConnection
-  >();
+  private readonly pooledConnections = new Map<string, PooledConnection>();
+  private catalogReplaysInFlight = 0;
   /**
    * re-entrancy guard
    * for `discoverAllMcpToolsViaPool`. Two passes interleaving (full
@@ -1078,12 +1077,18 @@ export class McpClientManager {
       const retained = replayExisting
         ? new Map(this.pooledConnections)
         : undefined;
-      await this.discoverAllMcpToolsViaPool(cliConfig);
-      for (const [name, connection] of retained ?? []) {
-        if (this.pooledConnections.get(name) === connection) {
-          connection.replaySnapshot();
+      if (replayExisting) this.catalogReplaysInFlight++;
+      try {
+        await this.discoverAllMcpToolsViaPool(cliConfig);
+        for (const [name, connection] of retained ?? []) {
+          if (this.pooledConnections.get(name) === connection) {
+            this.replayPooledSnapshot(name, connection);
+          }
         }
+      } finally {
+        if (replayExisting) this.catalogReplaysInFlight--;
       }
+      if (replayExisting) this.warnOnUnmatchedTools(cliConfig);
       return;
     }
     await this.stop();
@@ -1266,19 +1271,25 @@ export class McpClientManager {
     }
     if (this.pool && !isSdkMcpServerConfig(serverConfig)) {
       const previous = this.pooledConnections.get(serverName);
-      await this.discoverAllMcpToolsViaPool(cliConfig);
-      if (previous && this.pooledConnections.get(serverName) === previous) {
-        if (reconnect) {
-          const [result] = await this.pool.restartByName(serverName, {
-            entryIndex: previous.entryIndex,
-          });
-          if (!result?.restarted) {
-            throw new Error(`Failed to reconnect MCP server '${serverName}'`);
+      this.catalogReplaysInFlight++;
+      try {
+        await this.discoverAllMcpToolsViaPool(cliConfig);
+        if (previous && this.pooledConnections.get(serverName) === previous) {
+          if (reconnect) {
+            const [result] = await this.pool.restartByName(serverName, {
+              entryIndex: previous.entryIndex,
+            });
+            if (!result?.restarted) {
+              throw new Error(`Failed to reconnect MCP server '${serverName}'`);
+            }
+          } else {
+            this.replayPooledSnapshot(serverName, previous);
           }
-        } else {
-          previous.replaySnapshot();
         }
+      } finally {
+        this.catalogReplaysInFlight--;
       }
+      this.warnOnUnmatchedTools(cliConfig);
       return;
     }
 
@@ -1714,34 +1725,6 @@ export class McpClientManager {
               promptRegistry,
               resourceRegistry,
             );
-            //
-            // subscribe to entry-level events so a `'failed'` event
-            // (entry's restart hit reconnect-budget exhaustion →
-            // terminal failure → entry removed from `pool.entries`)
-            // evicts our stale handle.
-            //
-            // Keep a NAMED listener and unregister it on
-            // 'failed' BEFORE deleting from `pooledConnections`. Pre-
-            // fix the anonymous arrow stayed attached to the entry's
-            // EventEmitter even after we deleted from
-            // `pooledConnections` — the listener's closure pinned
-            // `this` (manager) and `conn` (PooledConnection wrapper),
-            // making cleanup depend on whole-object GC. With named +
-            // self-unregister, the listener detaches as soon as the
-            // 'failed' event fires.
-            //
-            // Idempotent — a second 'failed' event on the same id
-            // is a no-op via `get(name) === conn` guard;
-            // `releaseAllPooledConnections` / `stop` also call
-            // `conn.release()` independently.
-            const onFailed = (e: import('./mcp-pool-events.js').PoolEvent) => {
-              if (e.kind !== 'failed') return;
-              if (this.pooledConnections.get(name) === conn) {
-                this.pooledConnections.delete(name);
-              }
-              conn.off('event', onFailed);
-            };
-            conn.on('event', onFailed);
             // skip
             // the set if shutdown already passed its 5s grace cap and
             // released pool connections. A late-resolving pool.acquire
@@ -1760,7 +1743,7 @@ export class McpClientManager {
               }
               return;
             }
-            this.pooledConnections.set(name, conn);
+            this.trackPooledConnection(name, conn);
           } catch (err) {
             // Pool acquire failure for one server is non-fatal for
             // siblings (matches the legacy `discoverMcpToolsForServer`
@@ -1802,8 +1785,51 @@ export class McpClientManager {
       this.eventEmitter?.emit('mcp-client-update', this.clients);
     }
     // Same settled-registry report as the per-session bulk pass (#12435).
+    this.warnOnUnmatchedTools(cliConfig);
+  }
+
+  private warnOnUnmatchedTools(cliConfig: Config): void {
+    // Joined explicit discoveries may still be restoring their catalogs.
+    if (this.catalogReplaysInFlight > 0) return;
     warnOnUnmatchedEagerToolEntries(cliConfig);
     warnOnUnmatchedDisabledToolEntries(cliConfig);
+  }
+
+  private trackPooledConnection(
+    name: string,
+    connection: PooledConnection,
+  ): void {
+    const onTerminated = (event: import('./mcp-pool-events.js').PoolEvent) => {
+      // Restart disconnects keep the handle; only terminal events evict it.
+      if (
+        event.kind !== 'failed' &&
+        !(event.kind === 'disconnected' && event.reason === 'transport_closed')
+      ) {
+        return;
+      }
+      if (this.pooledConnections.get(name) === connection) {
+        this.pooledConnections.delete(name);
+      }
+      connection.off('event', onTerminated);
+    };
+    connection.on('event', onTerminated);
+    this.pooledConnections.set(name, connection);
+  }
+
+  private replayPooledSnapshot(
+    name: string,
+    connection: PooledConnection,
+  ): void {
+    try {
+      connection.replaySnapshot();
+    } catch (err) {
+      debugLogger.error(
+        `Pool catalog replay failed for ${name}: ${getErrorMessage(err)}`,
+      );
+      if (this.pooledConnections.get(name) === connection) {
+        this.pooledConnections.delete(name);
+      }
+    }
   }
 
   private releaseAllPooledConnections(): void {
@@ -3199,7 +3225,7 @@ export class McpClientManager {
           promptRegistry,
           resourceRegistry,
         );
-        this.pooledConnections.set(name, conn);
+        this.trackPooledConnection(name, conn);
         toolCount = conn.toolsSnapshot.length;
       } else {
         // Standalone mode: create a per-session McpClient
