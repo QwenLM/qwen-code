@@ -59,60 +59,69 @@ public final class WorkspaceMigrationMain {
         properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount(request.path("tenantId").asText(),
                 request.path("storageId").asText(), request.path("sourceRoot").asText())));
-        var bindings = "inspect".equals(args[0]) ? null : new JdbcRuntimeBindingRepository(source,
-                AesGcmSecretProtector.fromBase64(required("W1_RUNTIME_CREDENTIAL_KEY_ID"), required("W1_RUNTIME_CREDENTIAL_KEY")));
-        var store = new WorkspaceMigrationStore(jdbc, manager, new WorkspaceStorageGuard(jdbc, manager, properties, new com.alibaba.qwen.code.runtimebroker.provisioning.NativeStorageIdentityReader()),
-                bindings, bytes, "retire".equals(args[0]), new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker());
-        if ("inspect".equals(args[0])) {
-            System.out.println(store.inspect());
-            return;
-        }
+        var oss = "inspect".equals(args[0]) ? null : MaintenanceObjectStores.w1Oss();
         try {
-            switch (args[0]) {
-                case "abort" -> store.abort();
-                case "prepare" -> store.verify(false);
-                case "promote" -> store.verify(true);
-                case "retire" -> {
-                    var sessions = new JdbcRuntimeSessionRepository(source);
-                    var executions = new JdbcToolExecutionRepository(source);
-                    var ownership = new JdbcWorkspaceExecutionStore(jdbc, manager);
-                    var http = new HttpRuntimeTransport();
-                    Path stateDirectory = Path.of(request.path("stateDirectory").asText());
-                    if (!Files.isDirectory(stateDirectory, LinkOption.NOFOLLOW_LINKS)
-                            || !stateDirectory.equals(stateDirectory.toRealPath())) {
-                        throw new IllegalStateException("Original Runtime state directory is unavailable");
-                    }
-                    properties.getRuntimeBroker().setStateDirectory(stateDirectory.toString());
-                    properties.getRuntimeBroker().setTrustedLocalRebootRecovery(false);
-                    var local = localFactory.createForMaintenance(properties.getRuntimeBroker(), http);
-                    var transport = new WorkspaceRuntimeTransport(http, ownership, bindings, sessions, sessionId -> {
-                        var found = jdbc.query("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session WHERE session_kind = 'PUBLIC' AND tenant_id = ? AND session_id = ?",
-                                (row, index) -> ManagedAgentStore.readBinding(row),
-                                request.path("tenantId").asText(), sessionId);
-                        if (found.size() != 1 || found.getFirst() == null) {
-                            throw WorkspaceExecutionStore.unavailable();
-                        }
-                        return found.getFirst();
-                    });
-                    try (var broker = new RuntimeBrokerService(session -> CompletableFuture.failedFuture(
-                            new IllegalStateException("Maintenance never resolves active Sessions")),
-                            new WorkspaceRuntimeProvisioner(local, null, ownership), transport,
-                            bindings, sessions, executions, UUID.randomUUID().toString(), Duration.ofSeconds(30),
-                            Duration.ofSeconds(30))) {
-                        store.retire(broker);
-                    }
-                }
-                default -> throw new IllegalArgumentException("Unknown migration command");
+            var objects = oss == null ? null : oss.objects(required("W1_OSS_BUCKET"));
+            var bindings = "inspect".equals(args[0]) ? null : new JdbcRuntimeBindingRepository(source,
+                    AesGcmSecretProtector.fromBase64(required("W1_RUNTIME_CREDENTIAL_KEY_ID"), required("W1_RUNTIME_CREDENTIAL_KEY")),
+                    MaintenanceObjectStores.readPacks(jdbc, objects));
+            var store = new WorkspaceMigrationStore(jdbc, manager, new WorkspaceStorageGuard(jdbc, manager, properties, new com.alibaba.qwen.code.runtimebroker.provisioning.NativeStorageIdentityReader()),
+                    bindings, bytes, "retire".equals(args[0]), new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker());
+            if ("inspect".equals(args[0])) {
+                System.out.println(store.inspect());
+                return;
             }
-        } catch (Exception error) {
             try {
-                store.failed(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.errorCode(error));
-            } catch (Exception recordingFailure) {
-                error.addSuppressed(recordingFailure);
+                switch (args[0]) {
+                    case "abort" -> store.abort();
+                    case "prepare" -> store.verify(false);
+                    case "promote" -> store.verify(true);
+                    case "retire" -> {
+                        var sessions = new JdbcRuntimeSessionRepository(source);
+                        var executions = new JdbcToolExecutionRepository(source, bindings);
+                        var ownership = new JdbcWorkspaceExecutionStore(jdbc, manager);
+                        var http = new HttpRuntimeTransport();
+                        Path stateDirectory = Path.of(request.path("stateDirectory").asText());
+                        if (!Files.isDirectory(stateDirectory, LinkOption.NOFOLLOW_LINKS)
+                                || !stateDirectory.equals(stateDirectory.toRealPath())) {
+                            throw new IllegalStateException("Original Runtime state directory is unavailable");
+                        }
+                        properties.getRuntimeBroker().setStateDirectory(stateDirectory.toString());
+                        properties.getRuntimeBroker().setTrustedLocalRebootRecovery(false);
+                        var local = localFactory.createForMaintenance(properties.getRuntimeBroker(), http);
+                        var transport = new WorkspaceRuntimeTransport(http, ownership, bindings, sessions, sessionId -> {
+                            var found = jdbc.query("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session WHERE session_kind = 'PUBLIC' AND tenant_id = ? AND session_id = ?",
+                                    (row, index) -> ManagedAgentStore.readBinding(row),
+                                    request.path("tenantId").asText(), sessionId);
+                            if (found.size() != 1 || found.getFirst() == null) {
+                                throw WorkspaceExecutionStore.unavailable();
+                            }
+                            return found.getFirst();
+                        });
+                        try (var broker = new RuntimeBrokerService(session -> CompletableFuture.failedFuture(
+                                new IllegalStateException("Maintenance never resolves active Sessions")),
+                                new WorkspaceRuntimeProvisioner(local, null, ownership), transport,
+                                bindings, sessions, executions, UUID.randomUUID().toString(), Duration.ofSeconds(30),
+                                Duration.ofSeconds(30))) {
+                            store.retire(broker);
+                        }
+                    }
+                    default -> throw new IllegalArgumentException("Unknown migration command");
+                }
+            } catch (Exception error) {
+                try {
+                    store.failed(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.errorCode(error));
+                } catch (Exception recordingFailure) {
+                    error.addSuppressed(recordingFailure);
+                }
+                throw error;
             }
-            throw error;
+            System.out.println(store.inspect());
+        } finally {
+            if (oss != null) {
+                oss.shutdown();
+            }
         }
-        System.out.println(store.inspect());
     }
 
     private static String required(String name) {
