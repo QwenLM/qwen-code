@@ -47,7 +47,9 @@ Web Shell 的使用者依赖树，GHSA-mrhx-c7xc-m3w5（high，影响 `zod < 4.6
 
 - 不改动 locator schema 的结构。提前构造的深度链已经限定了计算量，上述实测表明递归
   形状本身不是缺陷。
-- 不改动 command schema、dispatch 或面向模型的契约。
+- 不改动 command schema 与 dispatch。面向模型的错误载荷仍保持 `code`、`path`、
+  `message` 三个键，但 `code` 的取值随 Zod 4 改名（见「风险」段），因此按
+  `details.issues[].code` 分支的消费者需要相应适配。
 - 经由 `shadcn`（Web Shell 的 devDependency）及其 `@modelcontextprotocol/sdk` peer
   到达的 `zod@3.25.76` 副本保持原样。它属于开发工具路径而非发布产物，不在本次改动范围内。
 - 仓库层的 `uuid` 问题仍由 #10850 / #10985 跟踪。
@@ -126,9 +128,12 @@ scripts/tests/browser-use-assets.test.js` 验证新增的 pin 断言，并确认
 - `packages/browser-use` 中 `tsc --noEmit`：无报错。
 - `pnpm install --filter @qwen-code/browser-use --frozen-lockfile`：成功；从本包
   `require.resolve('zod/package.json')` 解析到 4.6.6。
-- 一份 106 条断言的行为验证脚本，覆盖深度、广度、strict、regex/`exact` 门禁、matcher
-  flags、嵌套往返、每个 command-schema refinement 以及 issue 映射，在 `zod@3.25.76` 与
-  `zod@4.6.6` 上结果完全一致，确认本次升级保持行为不变。
+- 一份 106 条断言的行为验证脚本，由作者在本地运行、不在本仓库中，评审无法复跑。它覆盖
+  深度、广度、strict、regex/`exact` 门禁、matcher flags、嵌套往返以及每个
+  command-schema refinement，其「通过/拒绝」判定在 `zod@3.25.76` 与 `zod@4.6.6` 上
+  一致。issue 映射并不一致：可触达的 `code` 取值按「风险」段所述已改名，这是已记录的
+  契约变更，而非行为保持不变的证据。该脚本只作为它所覆盖的校验语义的支撑性证据，不应
+  视为行为不变的笼统结论。
 - `node build.mjs` 成功。在生成的 `dist/index.js` 中，Zod 3 的标记
   `invalid_union_discriminator`、`invalid_enum_value`、`ZodParsedType`、`arrayToEnum`
   均已消失，而 Zod 4 的 `$ZodString`、`ZodRealError` 以及该公告对应的 `capSize` 防护均

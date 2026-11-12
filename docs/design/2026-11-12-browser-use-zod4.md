@@ -56,7 +56,10 @@ nothing structural keeps it in place.
 - No change to the locator schema's structure. The eager depth chain already
   bounds the work, and the measurements above show the recursive shape is not
   the defect.
-- No change to command schemas, dispatch, or the model-facing contract.
+- No change to command schemas or dispatch. The model-facing error payload keeps
+  its three keys — `code`, `path`, `message` — but the `code` values follow Zod
+  4's renamed set (see Risks), so a consumer that branches on
+  `details.issues[].code` has to be adapted.
 - The `zod@3.25.76` copy reached through `shadcn` (a Web Shell devDependency) and
   its `@modelcontextprotocol/sdk` peer stays as it is. It is a development tool
   path, not a shipped artifact, and is outside this change.
@@ -156,10 +159,15 @@ scripts/tests/browser-use-assets.test.js` for the new pin assertion, and
 - `tsc --noEmit` in `packages/browser-use`: clean.
 - `pnpm install --filter @qwen-code/browser-use --frozen-lockfile`: succeeds;
   `require.resolve('zod/package.json')` from the package resolves 4.6.6.
-- A 106-assertion behavioral harness covering depth, breadth, strictness, the
-  regex/`exact` gate, matcher flags, nested round-trips, every command-schema
-  refinement, and the issue mapping passes identically on `zod@3.25.76` and
-  `zod@4.6.6`, establishing the upgrade as behavior-preserving.
+- A 106-assertion behavioral harness, run by the author locally and not in this
+  repository, so reviewers cannot re-run it. It exercises depth, breadth,
+  strictness, the regex/`exact` gate, matcher flags, nested round-trips, and
+  every command-schema refinement, and its accept/reject verdicts match on
+  `zod@3.25.76` and `zod@4.6.6`. Its issue mapping does not: reachable `code`
+  values differ as described under Risks, which is a documented contract change
+  rather than evidence of preserved behavior. Treat the harness as supporting
+  evidence for the validation semantics it covers, not as a blanket claim that
+  behavior is unchanged.
 - `node build.mjs` succeeds. In the resulting `dist/index.js`, the Zod 3 markers
   `invalid_union_discriminator`, `invalid_enum_value`, `ZodParsedType`, and
   `arrayToEnum` are absent, while Zod 4's `$ZodString`, `ZodRealError`, and the
