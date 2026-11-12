@@ -26954,6 +26954,83 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('replays an undrained injection to its own chat when another chat parked', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const resolvers = resolvablePrompts();
+      // `single` scope collapses both chats into one shared session; the
+      // operator list admits the sender to that shared session.
+      const ch = createChannel({
+        dispatchMode: 'inject',
+        sessionScope: 'single',
+        operators: ['user1'],
+      });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-route-1', chatId: 'chatA' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        // Chat A owns the running turn: admitted mid-turn, never drained.
+        await ch.handleInbound(
+          envelope({
+            text: 'A injected',
+            messageId: 'm-route-2',
+            chatId: 'chatA',
+          }),
+        );
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(1);
+
+        // Chat B cannot ride A's turn, so it parks for the next turn.
+        await ch.handleInbound(
+          envelope({
+            text: 'B parked',
+            messageId: 'm-route-3',
+            chatId: 'chatB',
+          }),
+        );
+        // Same collapsed session: B parked in the session-keyed buffer.
+        const parked = collectBuffers(ch).get(sessionId) ?? [];
+        expect(parked).toHaveLength(1);
+        expect((parked[0] as { text: string }).text).toContain('B parked');
+
+        (
+          bridge as unknown as {
+            takeUndrainedMidTurnMessages: ReturnType<typeof vi.fn>;
+          }
+        ).takeUndrainedMidTurnMessages.mockReturnValueOnce(['A injected']);
+
+        resolvers[0]!('done');
+        await running;
+
+        // A's injection replays first, attributed to chat A — it must not ride
+        // the route of the later chat-B message.
+        const promptText = (index: number) =>
+          String(
+            (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[index]?.[1],
+          );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        expect(ch.promptStarts[1]?.chatId).toBe('chatA');
+        expect(promptText(1)).toContain('A injected');
+        expect(promptText(1)).not.toContain('B parked');
+
+        // The parked chat-B message replays next, under chat B's own route.
+        resolvers[1]?.('replay a done');
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(3));
+        expect(ch.promptStarts[2]?.chatId).toBe('chatB');
+        expect(promptText(2)).toContain('B parked');
+        expect(promptText(2)).not.toContain('A injected');
+
+        resolvers[2]?.('replay b done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(3));
+      } finally {
+        stderr.mockRestore();
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
     it('replays only the undrained tail of the accepted injections', async () => {
       const queueMidTurnMessage = enableInjection();
       const resolvers = resolvablePrompts();

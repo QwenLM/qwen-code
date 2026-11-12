@@ -2421,6 +2421,36 @@ export abstract class ChannelBase {
       return;
     }
     this.collectBuffers.delete(sessionId);
+    // A session-scoped session can hold buffered messages from more than one
+    // route: a message whose chat/thread does not own the running turn parks
+    // here. The replay is attributed to the LAST entry's route, so coalescing
+    // two routes into one turn would answer one of them in the wrong chat —
+    // the exact harm `runningTurnOwnsEnvelope` prevents for mid-turn
+    // injections. Replay each route's slice as its own turn, in arrival order.
+    const byRoute = new Map<string, CollectBufferEntry[]>();
+    for (const entry of buffer) {
+      const key = this.routeKey(entry.envelope);
+      const slice = byRoute.get(key);
+      if (slice) {
+        slice.push(entry);
+      } else {
+        byRoute.set(key, [entry]);
+      }
+    }
+    const slices = [...byRoute.values()].sort(
+      (a, b) => a[0]!.sequence - b[0]!.sequence,
+    );
+    for (const slice of slices) {
+      this.replayCollectedEntries(sessionId, slice, taskLabel);
+    }
+  }
+
+  /** Replay one route's buffered messages as a single turn. */
+  private replayCollectedEntries(
+    sessionId: string,
+    buffer: CollectBufferEntry[],
+    taskLabel: string,
+  ): void {
     const lost = buffer.length;
     const coalesced = buffer.map((b) => b.text).join('\n\n');
     const lastEnvelope = buffer[buffer.length - 1]!.envelope;
@@ -3278,15 +3308,20 @@ export abstract class ChannelBase {
       .filter((id): id is string => typeof id === 'string' && id.length > 0);
   }
 
+  /** Route identity of a chat/thread pair; comparisons stay in one place. */
+  private routeKey(target: {
+    chatId: string;
+    threadId?: string | undefined;
+  }): string {
+    return `${target.chatId}\u0000${target.threadId ?? ''}`;
+  }
+
   /** The running turn's output route is bound to its originating chat/thread. */
   private runningTurnOwnsEnvelope(
     active: ActivePrompt,
     envelope: Envelope,
   ): boolean {
-    return (
-      active.chatId === envelope.chatId &&
-      (active.threadId ?? undefined) === (envelope.threadId ?? undefined)
-    );
+    return this.routeKey(active) === this.routeKey(envelope);
   }
 
   private nextInboundOrdinal(): number {
