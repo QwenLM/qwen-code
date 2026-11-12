@@ -191,11 +191,24 @@ test('ci.yml wires the check into lint_and_static before the lint lanes', () => 
   );
   // The gate must stay fatal: `continue-on-error` would leave the literal
   // above intact while the freshness check stops blocking the required
-  // check (#16918).
-  assert.equal(
-    stepBlock.match(/^ {8}continue-on-error:/m),
-    null,
-    'freshness gate must stay fatal',
+  // check (#16918). Read the key through the parser, not by matching a line:
+  // `continue-on-error : true` (space before the colon), a quoted key and flow
+  // style are all legal YAML that silences the step, and a line-shaped pattern
+  // finds none of them — it reads the edit as an absent key and stays green
+  // while the gate stops blocking. This file already parses ci.yml with `yaml`
+  // below, so the model costs nothing here. The same class bit the autofix
+  // signature extractor in #17011, where a Prettier re-quote silently emptied a
+  // pattern that every behavioural assertion then matched trivially.
+  // One call covers all three pins that used to live here: this step, the
+  // freshness suite step further down, and the JOB level — the last of which no
+  // slice could ever see, since a job-level key sits above `steps:` and outside
+  // every step block, while silencing every step in the job including this one.
+  // It reads the whole workflow rather than the slice above for that reason.
+  assertNoContinueOnError(
+    ci,
+    'lint_and_static',
+    'Check lint gate freshness',
+    'Run lint gate freshness tests',
   );
   // Nor may the run line swallow the exit code. Mutation witness: `run: 'node
   // .github/scripts/check-lint-gate-freshness.mjs || true'` keeps the `if`
@@ -213,14 +226,6 @@ test('ci.yml wires the check into lint_and_static before the lint lanes', () => 
     stepBlock,
     /\|\|\s*(true|:)(\s|'|$)/,
     'the freshness run must not swallow its exit code',
-  );
-  // Checked across the whole job, not just the head above `steps:`: a
-  // job-level key sits outside every step slice and swallows every step's
-  // failure, including this gate's.
-  assert.equal(
-    job.match(/^ {4}continue-on-error:/m),
-    null,
-    'a job-level continue-on-error would swallow the freshness failure too',
   );
   assert.ok(
     stepBlock.includes('node .github/scripts/check-lint-gate-freshness.mjs'),
@@ -266,12 +271,8 @@ test('ci.yml wires the check into lint_and_static before the lint lanes', () => 
     ),
     'the step must run this suite',
   );
-  assert.equal(
-    suiteBlock.match(/^ {8}continue-on-error:/m),
-    null,
-    'the freshness suite must stay fatal',
-  );
-  // The body half of the same pair the gate's own step is pinned for above:
+  // This step's fatality is pinned by the same parsed reading as the gate's
+  // above. The body half of that pair still needs its own assertion here:
   // `|| true` (or `|| :`) leaves the profile arm, the run-line containment and
   // the continue-on-error pin all intact while the suite exits 0 on a failure.
   // This step is the only reason the suite runs on github_ci_only at all, so a
@@ -1120,6 +1121,37 @@ function lintJobEdit(edit) {
   );
 }
 
+/**
+ * Assert that neither the job nor any named step carries `continue-on-error`,
+ * reading the parsed document rather than matching lines.
+ *
+ * A line-shaped pattern only recognises `continue-on-error:` spelled one way.
+ * `continue-on-error : true`, a quoted key and flow style are equally legal and
+ * equally silencing, and against those the pattern finds nothing — so the
+ * assertion passes while the gate it guards stops failing the job. The truthy
+ * comparison is deliberate: `continue-on-error: false` is the default and must
+ * stay allowed, while `${{ ... }}` is a non-empty string and is refused because
+ * this gate has no business being conditional.
+ */
+function assertNoContinueOnError(text, jobName, ...stepNames) {
+  const document = parseDocument(text, { uniqueKeys: true });
+  assert.equal(document.errors.length, 0, 'ci.yml must parse');
+  const job = document.toJS().jobs?.[jobName];
+  assert.ok(job, `job ${jobName} not found`);
+  assert.ok(
+    !job['continue-on-error'],
+    `a job-level continue-on-error would swallow every step's failure in ${jobName}`,
+  );
+  for (const name of stepNames) {
+    const steps = (job.steps ?? []).filter((step) => step?.name === name);
+    assert.equal(steps.length, 1, `step ${name} must appear exactly once`);
+    assert.ok(
+      !steps[0]['continue-on-error'],
+      `${name} must stay fatal: continue-on-error stops it failing the job`,
+    );
+  }
+}
+
 // Every step name in the two gate jobs, plumbing included — the pruned
 // document cannot answer this, because plumbing is what it removes.
 function gateJobStepNames(text) {
@@ -1398,6 +1430,251 @@ test('a duplicated job key refuses the narrowing', () => {
     realCi.slice(0, end) + realCi.slice(start, end) + realCi.slice(end);
   assert.notEqual(duplicated, realCi, 'the fixture did not apply');
   assert.equal(extractLintGateSlice(duplicated), null);
+});
+
+test('every legal spelling of continue-on-error is refused', () => {
+  // The three fatality pins used to match `^ {8}continue-on-error:` against a
+  // text slice. Each spelling below is legal YAML that the runner honours and
+  // that pattern does not see, so all three assertions passed while the gate
+  // stopped failing the job — the post-merge stale-lint class (#16872, #16918)
+  // silently re-opened. Measured on the merged head: the canonical spelling was
+  // the only one the old patterns caught. The parsed reading refuses them all.
+  const gateStep = "      - name: 'Check lint gate freshness'\n";
+  const suiteStep = "      - name: 'Run lint gate freshness tests'\n";
+  const variants = [
+    ['step, canonical', gateStep, '        continue-on-error: true\n'],
+    [
+      'step, space before colon',
+      gateStep,
+      '        continue-on-error : true\n',
+    ],
+    [
+      'step, double-quoted key',
+      gateStep,
+      '        "continue-on-error": true\n',
+    ],
+    [
+      'step, single-quoted key',
+      gateStep,
+      "        'continue-on-error': true\n",
+    ],
+    [
+      'suite, space before colon',
+      suiteStep,
+      '        continue-on-error : true\n',
+    ],
+    ['suite, quoted key', suiteStep, '        "continue-on-error": true\n'],
+  ];
+  for (const [label, anchor, line] of variants) {
+    const patched = lintJobEdit((job) => job.replace(anchor, anchor + line));
+    assert.notEqual(patched, realCi, `${label}: fixture did not apply`);
+    assert.throws(
+      () =>
+        assertNoContinueOnError(
+          patched,
+          'lint_and_static',
+          'Check lint gate freshness',
+          'Run lint gate freshness tests',
+        ),
+      /must stay fatal/,
+      label,
+    );
+  }
+  // Flow style: the whole step becomes one mapping on one line, so there is no
+  // `        continue-on-error:` line to find at any indentation.
+  // The whole step has to become the flow mapping: folding just the header
+  // leaves the block keys below it and the document stops parsing, which would
+  // trip the parse guard instead of the fatality pin this case is about. Scoped
+  // through the job's own span so a moved step reddens rather than yielding a
+  // no-op fixture.
+  const flow = lintJobEdit((job) => {
+    const at = job.indexOf("      - name: 'Check lint gate freshness'");
+    assert.ok(at > 0, 'the gate step must be present');
+    const next = job.indexOf("\n      - name: '", at + 1);
+    assert.ok(next > at, 'the gate step must be followed by another step');
+    return (
+      job.slice(0, at) +
+      "      - { name: 'Check lint gate freshness', continue-on-error: true, run: 'true' }" +
+      job.slice(next)
+    );
+  });
+  assert.notEqual(flow, realCi, 'flow-style fixture did not apply');
+  // The fixture must be legal YAML with the key actually set, or the case would
+  // pass by tripping the parse guard while proving nothing about flow style.
+  const flowDocument = parseDocument(flow, { uniqueKeys: true });
+  assert.equal(flowDocument.errors.length, 0, 'the flow fixture must parse');
+  assert.equal(
+    flowDocument
+      .toJS()
+      .jobs.lint_and_static.steps.find(
+        (step) => step.name === 'Check lint gate freshness',
+      )['continue-on-error'],
+    true,
+    'the flow fixture must really carry the key',
+  );
+  assert.throws(
+    () =>
+      assertNoContinueOnError(
+        flow,
+        'lint_and_static',
+        'Check lint gate freshness',
+      ),
+    /must stay fatal/,
+    'flow style',
+  );
+  // Job level: outside every step slice, so slicing alone cannot see it at all.
+  for (const line of [
+    '    continue-on-error: true\n',
+    '    continue-on-error : true\n',
+    '    "continue-on-error": true\n',
+    // An expression is a non-empty string, so it must be refused as set. A pin
+    // that only rejects the literal `true` accepts this one — and a job-level
+    // expression is exactly the conditional gate the check forbids.
+    "    continue-on-error: ${{ github.actor == 'bot' }}\n",
+  ]) {
+    const patched = realCi.replace(
+      '\n  lint_and_static:\n',
+      `\n  lint_and_static:\n${line}`,
+    );
+    assert.notEqual(patched, realCi, 'job-level fixture did not apply');
+    assert.throws(
+      () => assertNoContinueOnError(patched, 'lint_and_static'),
+      /job-level continue-on-error/,
+      line.trim(),
+    );
+  }
+  // An expression is refused too: this gate is not allowed to be conditional,
+  // and a truthy string would otherwise read as "set" only by accident.
+  const conditional = lintJobEdit((job) =>
+    job.replace(
+      gateStep,
+      gateStep + "        continue-on-error: ${{ github.actor == 'bot' }}\n",
+    ),
+  );
+  assert.notEqual(conditional, realCi, 'the expression fixture did not apply');
+  assert.throws(
+    () =>
+      assertNoContinueOnError(
+        conditional,
+        'lint_and_static',
+        'Check lint gate freshness',
+      ),
+    /must stay fatal/,
+  );
+});
+
+test('an explicitly fatal gate still passes', () => {
+  // The negative control for the pin above: `false` is the default and must not
+  // be refused, or the assertion would be demanding the key's absence rather
+  // than the behaviour it names. The untouched workflow is the other half.
+  assertNoContinueOnError(
+    realCi,
+    'lint_and_static',
+    'Check lint gate freshness',
+    'Run lint gate freshness tests',
+  );
+  for (const anchor of [
+    "      - name: 'Check lint gate freshness'\n",
+    "      - name: 'Run lint gate freshness tests'\n",
+  ]) {
+    const patched = lintJobEdit((job) =>
+      job.replace(anchor, anchor + '        continue-on-error: false\n'),
+    );
+    assert.notEqual(patched, realCi, 'fixture did not apply');
+    assertNoContinueOnError(
+      patched,
+      'lint_and_static',
+      'Check lint gate freshness',
+      'Run lint gate freshness tests',
+    );
+  }
+  // The key's presence at job level is not itself the offence: `false` is the
+  // default there too, so a pin that refused the key rather than its truth
+  // would demand its absence instead of the behaviour it names.
+  const jobLevel = realCi.replace(
+    '\n  lint_and_static:\n',
+    '\n  lint_and_static:\n    continue-on-error: false\n',
+  );
+  assert.notEqual(jobLevel, realCi, 'job-level fixture did not apply');
+  assertNoContinueOnError(
+    jobLevel,
+    'lint_and_static',
+    'Check lint gate freshness',
+    'Run lint gate freshness tests',
+  );
+});
+
+test('a renamed or duplicated gate step is refused, not skipped', () => {
+  // Without the exactly-once reading, renaming the step would leave the filter
+  // matching nothing and the fatality loop would assert nothing at all — the
+  // same vacuous-pass shape this fix exists to remove, one level up.
+  const renamed = lintJobEdit((job) =>
+    job.replace(
+      "      - name: 'Check lint gate freshness'",
+      "      - name: 'Check lint gate freshness (advisory)'",
+    ),
+  );
+  assert.notEqual(renamed, realCi, 'fixture did not apply');
+  assert.throws(
+    () =>
+      assertNoContinueOnError(
+        renamed,
+        'lint_and_static',
+        'Check lint gate freshness',
+      ),
+    /must appear exactly once/,
+  );
+  const doubled = lintJobEdit((job) =>
+    job.replace(
+      "      - name: 'Check lint gate freshness'\n",
+      "      - name: 'Check lint gate freshness'\n        run: 'true'\n      - name: 'Check lint gate freshness'\n",
+    ),
+  );
+  assert.notEqual(doubled, realCi, 'fixture did not apply');
+  assert.throws(
+    () =>
+      assertNoContinueOnError(
+        doubled,
+        'lint_and_static',
+        'Check lint gate freshness',
+      ),
+    /must appear exactly once/,
+  );
+});
+
+test('an unparseable workflow is refused rather than read last-one-wins', () => {
+  // `uniqueKeys` reports a duplicated key as an error, but toJS() still returns
+  // the last copy. With `continue-on-error: true` followed by `false` the
+  // parsed value is `false`, so without the parse-error assertion this reads as
+  // a fatal gate while the document is one the runner may reject or resolve
+  // differently. Fail closed on the error, not on the surviving value.
+  const patched = lintJobEdit((job) =>
+    job.replace(
+      "      - name: 'Check lint gate freshness'\n",
+      "      - name: 'Check lint gate freshness'\n        continue-on-error: true\n        continue-on-error: false\n",
+    ),
+  );
+  assert.notEqual(patched, realCi, 'fixture did not apply');
+  const document = parseDocument(patched, { uniqueKeys: true });
+  assert.ok(document.errors.length > 0, 'the fixture must be a parse error');
+  assert.equal(
+    document
+      .toJS()
+      .jobs.lint_and_static.steps.find(
+        (step) => step.name === 'Check lint gate freshness',
+      )['continue-on-error'],
+    false,
+    'last-one-wins would hide the first copy',
+  );
+  assert.throws(
+    () =>
+      assertNoContinueOnError(
+        patched,
+        'lint_and_static',
+        'Check lint gate freshness',
+      ),
+    /must parse/,
+  );
 });
 
 test('a missing gate job refuses the narrowing', () => {
