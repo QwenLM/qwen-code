@@ -18005,7 +18005,9 @@ export class Session implements SessionContext {
               (outcome.reason === 'classifier_unavailable' ||
                 outcome.reason === 'external_write' ||
                 outcome.reason === 'external_directory' ||
-                isDenialFallbackReason(outcome.reason))
+                isDenialFallbackReason(outcome.reason) ||
+                (outcome.reason === 'safety_check' &&
+                  outcome.requiresHumanDecision === true))
             ) {
               autoModeFallback = {
                 reason: outcome.reason,
