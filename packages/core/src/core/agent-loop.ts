@@ -385,7 +385,11 @@ export async function runModelRound(
 
 export interface ToolBatchOptions {
   config: Config;
-  client: LlmClient;
+  /**
+   * Counts the executed calls toward the session's tool calls. An agent with
+   * its own chat leaves it out.
+   */
+  client?: Pick<LlmClient, 'recordCompletedToolCall'>;
   /** Cancels the batch, as the loop's signal does. */
   signal: AbortSignal;
   /** The signal tools run under, when it differs from `signal`. */
@@ -563,7 +567,7 @@ export async function runToolBatch(
       !call.recorded &&
       (planModeEntry === undefined || index === planModeEntry)
     ) {
-      client.recordCompletedToolCall(
+      client?.recordCompletedToolCall(
         call.request.name,
         call.request.args as Record<string, unknown>,
       );
