@@ -20,9 +20,11 @@ of 1–64 segments:
   `ManagedChannelRecords`) carries a stable `segmentId`/`ordinal` plan with a
   write-once receipt per segment.
 - The Harness funnel (`hosted-channel-session.ts`) answers a claim with
-  **every outstanding segment**, accepts a receipt **per ordinal**
-  (`partial` while segments remain, `delivered` with the last), and a resend
-  carries only the segments proven unsent.
+  **the leading unreceipted segments that fit the claim text budget**
+  (`maxClaimTextBytes`), accepts a receipt **per ordinal**
+  (`partial` while segments remain, `delivered` with the last), re-claims the
+  remainder after each receipt, and a resend carries only the segments proven
+  unsent.
 - The trusted adapter surface (`ChannelAdapterModels`) already exposes
   `ClaimedDelivery.segments[]` and `ReceiptRequest.ordinal`.
 - The email adapter (`managed-email-adapter.ts`) already loops over every

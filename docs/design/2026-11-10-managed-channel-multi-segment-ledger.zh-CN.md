@@ -9,7 +9,7 @@
 Java 控制面台账之上的每一层都已支持 1–64 段的交付：
 
 - H5a 记录契约（`managed-channel-record.ts`，由 `ManagedChannelRecords` 镜像）携带稳定的 `segmentId`/`ordinal` 计划，每段一个写一次的回执。
-- Harness 漏斗（`hosted-channel-session.ts`）对 claim 应答**全部未结分段**，**按 ordinal** 接受回执（仍有分段时为 `partial`，最后一段为 `delivered`），重发只携带已证明未发送的分段。
+- Harness 漏斗（`hosted-channel-session.ts`）对 claim 应答**装进领取文本预算（`maxClaimTextBytes`）的前若干个未回执分段**，**按 ordinal** 接受回执（仍有分段时为 `partial`，最后一段为 `delivered`），每次回执后重新领取其余，重发只携带已证明未发送的分段。
 - 可信适配器面（`ChannelAdapterModels`）已暴露 `ClaimedDelivery.segments[]` 与 `ReceiptRequest.ordinal`。
 - email 适配器（`managed-email-adapter.ts`）已遍历每个被认领的分段、逐段发送、按 ordinal 逐段回执。
 

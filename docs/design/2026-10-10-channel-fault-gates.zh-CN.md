@@ -112,7 +112,7 @@ Spring 跑在由 IT 杀死的子 JVM 里；adapter 驱动是可杀/可停进程�
 9. FG7e —— 游标决胜比较弱化为包含游标行：`delivery-page-resume` 红（页界处重复）。
 10. FG7f —— 含糊 SMTP 失败被分类为 `accepted`：`provider-ambiguous` 红（记录无回执证据而声称 `delivered`；健全形态应保持 `unknown`）。
 
-两个设计的变异在 v1 下可证不可分辨，**不执行**：把漏斗 `claim` 对 `sending` 改拒（对首个应答已死的 adapter 来说重复 claim 应答不可见 —— 它只持有一份拷贝）；以及让 `resend` 携带全部分段而非仅未发送集合（v1 email 计划为单分段，过滤与否的产物完全相同）。两者都需要 H5d 的多段计划，正是 `partial` 所等待的同一个前提（决定 2）。
+两个设计的变异**不执行**。把漏斗 `claim` 对 `sending` 改拒，对首个应答已死的 adapter 不可见（它只持有一份拷贝），故仍不可分辨。让 `resend` 携带全部分段而非仅未发送集合，在 email 计划为单分段时不可分辨；多分段生产者此后已落地，多分段 resend 夹具如今能区分二者——但本门禁的 `receipt-never-arrived` 夹具是短（单分段）回复，过滤与否的产物仍相同。执行该变异需要多分段适配器发送夹具，属于适配器/传输切片（决定 2），正是 `partial` 所等待的同一个见证。
 
 ## 验证与验收
 

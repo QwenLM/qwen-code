@@ -510,17 +510,19 @@ export class HostedChannelSession {
       ) {
         break;
       }
-      // Strip whichever notice the planned text carries (the size notice or
-      // the capacity notice) before re-cutting, so it is never re-cut
-      // mid-wording; the shrink re-appends the size notice.
+      // Strip the notice the planned text carries before re-cutting, so it is
+      // never re-cut mid-wording, and re-append that same notice: an
+      // over-capacity answer keeps the capacity wording on the reply too,
+      // while an envelope-only shrink keeps the size wording.
+      const planNotice = replyText.endsWith(CHANNEL_CAPACITY_NOTICE)
+        ? CHANNEL_CAPACITY_NOTICE
+        : CHANNEL_TRUNCATION_NOTICE;
       let core = replyText;
-      if (core.endsWith(CHANNEL_CAPACITY_NOTICE)) {
-        core = core.slice(0, core.length - CHANNEL_CAPACITY_NOTICE.length);
-      } else if (core.endsWith(CHANNEL_TRUNCATION_NOTICE)) {
-        core = core.slice(0, core.length - CHANNEL_TRUNCATION_NOTICE.length);
+      if (core.endsWith(planNotice)) {
+        core = core.slice(0, core.length - planNotice.length);
       }
       if (core.length === 0) return undefined;
-      replyText = truncateChannelTextUtf8(core, budget);
+      replyText = truncateChannelTextUtf8(core, budget, planNotice);
       budget = Math.floor(budget / 2);
     }
     if (replyText.length === 0) return undefined;

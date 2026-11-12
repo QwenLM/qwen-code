@@ -601,16 +601,14 @@ export function planChannelSegments(text: string): readonly string[] {
     // bytes after it still fit the remaining segment budget. The fill floor
     // rejects a newline at (or a couple of bytes past) the window start, which
     // would otherwise emit a 1-2 byte segment — its own publish, claim entry
-    // and provider message. The capacity check rejects a cut that would spend
-    // the 64-segment count below the nominal byte capacity on long-line input.
-    // Either failure falls back to the full-width cut, which keeps the whole
-    // byte capacity reachable.
+    // and provider message — but stays low enough to accept a real paragraph
+    // break a KiB or more into the window instead of cutting mid-word. The
+    // capacity check rejects a cut that would spend the 64-segment count below
+    // the nominal byte capacity on long-line input. Either failure falls back
+    // to the full-width cut, which keeps the whole byte capacity reachable.
     const fill = newline + 1 - offset;
     const roomForRest = (maxSegments - pieces.length - 1) * maxBytes;
-    if (
-      fill > maxBytes / 2 &&
-      bytes.byteLength - (newline + 1) <= roomForRest
-    ) {
+    if (fill > 1024 && bytes.byteLength - (newline + 1) <= roomForRest) {
       end = newline + 1;
     } else {
       while (end > offset && (bytes[end]! & 0xc0) === 0x80) end -= 1;

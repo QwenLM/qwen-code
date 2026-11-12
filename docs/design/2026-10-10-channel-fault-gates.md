@@ -354,14 +354,18 @@ the FG6 documented manual procedure:
     `provider-ambiguous` red (the record claims `delivered` without a
     proven receipt; the record/ledger stay `unknown` in the sane shape).
 
-Two designed mutations are provably indistinguishable in v1 and are
-**not** executed: making the funnel `claim` refuse `sending` (the
-duplicate claim answer is invisible to an adapter whose first answer
-died, because it only ever holds one copy), and making `resend` carry
-all segments instead of the unsent-only set (the v1 email plan is one
-segment, so the filtered and unfiltered resends are identical). Both
-need the multi-segment plans of H5d, the same witness `partial` waits
-for (decision 2).
+Two designed mutations are **not** executed. Making the funnel `claim`
+refuse `sending` is invisible to an adapter whose first answer died (it
+only ever holds one copy), so it stays indistinguishable. Making
+`resend` carry all segments instead of the unsent-only set was
+indistinguishable while the email plan was one segment; the
+multi-segment producer has since landed, so a multi-segment resend
+fixture would now distinguish them — but this gate's
+`receipt-never-arrived` fixture is a short (one-segment) reply, where
+the filtered and unfiltered resends are still identical. Executing that
+mutation needs a multi-segment adapter-send fixture, which belongs to
+the adapter/transport slice (decision 2), the same witness `partial`
+waits for.
 
 ## Validation and acceptance
 

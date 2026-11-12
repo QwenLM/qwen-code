@@ -412,6 +412,20 @@ describe('channel policy and envelopes', () => {
     }
   });
 
+  it('takes a paragraph break a KiB into the window instead of cutting mid-word', () => {
+    // A 10 KiB paragraph then a 50 KiB line then the paragraph again: the
+    // first window's last newline is 10,001 bytes in. A half-segment fill
+    // floor would refuse that clean break and cut the long line mid-word;
+    // the low floor accepts it while still rejecting a window-start newline.
+    const paragraph = 'p'.repeat(10_000) + '\n';
+    const longLine = 'q'.repeat(50_000) + '\n';
+    const text = paragraph + longLine + paragraph;
+    const pieces = planChannelSegments(text);
+    expect(pieces[0]).toBe(paragraph);
+    expect(pieces[0]!.endsWith('\n')).toBe(true);
+    expect(pieces.join('')).toBe(text);
+  });
+
   it('bounds the visible loss when mixed widths sit exactly at the capacity', () => {
     const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
     const capacity = maxBytes * MANAGED_CHANNEL_LIMITS.maxSegments;

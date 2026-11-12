@@ -707,6 +707,9 @@ describe('HostedChannelSession outbound', () => {
       const claimed = await channels.claim(planned.deliveryId);
       expect(claimed.segments.length).toBeGreaterThan(0);
       expect(claimed.segments.length).toBeLessThan(64);
+      // The representative reply keeps the capacity wording too — the shrink
+      // must not swap it for the per-segment size notice.
+      expect(claimed.reply.text.endsWith(CHANNEL_CAPACITY_NOTICE)).toBe(true);
       const texts = await Promise.all(
         planned.segments.map(async (segment) =>
           (await harness.store.read(segment.contentRef)).toString('utf8'),
@@ -726,9 +729,10 @@ describe('HostedChannelSession outbound', () => {
     const harness = await createHarness();
     await withSession(harness, async (channels, authority) => {
       const inputId = (await channels.submitInput(inbound())).inputId;
-      // ~1.5 MiB: well past the 1 MiB control-plane JSON cap if every segment
-      // were carried in one claim, but plan-able as ordered segments.
-      const text = 'x'.repeat(1_572_864);
+      // Escape-heavy so raw bytes and serialized bytes diverge ~2x: a raw-byte
+      // cost model would over-pack a claim past the transport bound, while the
+      // escaped-cost model keeps each answer under it.
+      const text = '\n"'.repeat(250_000);
       settleTurn(harness, inputId, text);
       await settleInJournal(harness, authority, inputId);
       const planned = (await channels.planReply(inputId))!;
@@ -747,6 +751,13 @@ describe('HostedChannelSession outbound', () => {
         expect(claimBytes).toBeLessThanOrEqual(
           MANAGED_CHANNEL_LIMITS.maxClaimTextBytes,
         );
+        // The answer the control plane actually reads must stay under its
+        // 1 MiB JSON cap (HttpSupport.MAXIMUM_JSON_BYTES) — measured on the
+        // whole serialized claim, independent of the implementation's cost
+        // formula.
+        expect(
+          Buffer.byteLength(JSON.stringify(claimed), 'utf8'),
+        ).toBeLessThanOrEqual(1024 * 1024);
         for (const segment of claimed.segments) {
           collected[segment.ordinal] = segment.text;
           delivery = await channels.receipt(
@@ -759,7 +770,7 @@ describe('HostedChannelSession outbound', () => {
       }
       expect(delivery.run.delivery?.state).toBe('delivered');
       expect(claims).toBeGreaterThan(1);
-      expect(collected.join('')).toBe(text);
+      expect(collected.join('')).toBe(text.trim());
     });
   });
 
