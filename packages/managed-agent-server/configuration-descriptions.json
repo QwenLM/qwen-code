@@ -99,8 +99,8 @@
       "zh": "后台清扫任务是否为符合条件的 Session 构建并发布不可变 journal pack。需要开启 `qwen.managed-agent.session-resources.enabled`。构建 pack 绝不删除 SQL 正文。"
     },
     "qwen.managed-agent.session-resources.deletion-enabled": {
-      "en": "Whether covered SQL journal bodies may be evicted after the deletion grace period. Requires pack-only mode to be qualified first; eviction is fenced by the head watermark and grace period.",
-      "zh": "是否允许在删除宽限期后腾空被 pack 覆盖的 SQL journal 正文。需先完成只打包模式的资格验证；腾空受 head 水位与宽限期围栏保护。"
+      "en": "Whether covered SQL journal bodies may be evicted after the deletion grace period. Requires pack-only mode to be qualified first; eviction is fenced by the head watermark and grace period. Precondition: the direct record_bytes readers JournalStoreRows.activationLeaseRow, WorkspaceCsiCheckpointSnapshotStore, JdbcCsiActivationAdmission and JdbcCsiExecutionAdmission are not yet pack-aware and fail closed once a covered range is evicted; migrate them to pack resolution (or confirm they never read an evicted range) before enabling.",
+      "zh": "是否允许在删除宽限期后腾空被 pack 覆盖的 SQL journal 正文。需先完成只打包模式的资格验证；腾空受 head 水位与宽限期围栏保护。前提：直读 record_bytes 的 JournalStoreRows.activationLeaseRow、WorkspaceCsiCheckpointSnapshotStore、JdbcCsiActivationAdmission、JdbcCsiExecutionAdmission 尚未 pack-aware，覆盖区间被腾空后即失败关闭；启用前须将其迁移到 pack 解析（或确认不会读到被腾空的区间）。"
     },
     "qwen.managed-agent.session-resources.pack-target-bytes": {
       "en": "Target compressed size of a single journal pack; the pack range shrinks adaptively to stay within it.",
