@@ -201,7 +201,8 @@ class ManagedApprovalChangeTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1"})
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1",
+            "hosted-workspace-shell/3"})
     void persistsPlanIndependentlyAndFreezesItWithTheTurnPolicy(String profile) throws Exception {
         when(harness.supportsPlanMode()).thenReturn(true);
         session = customSession(profile, "default");
@@ -765,7 +766,8 @@ class ManagedApprovalChangeTest {
     private ManagedAgentStore store() {
         var properties = new ManagedAgentProperties();
         properties.setDefinitionToolProfiles(List.of("hosted-workspace-files/1", "hosted-workspace-shell/1",
-                "hosted-workspace-files/2", "hosted-workspace-files/3", "hosted-workspace-read/1"));
+                "hosted-workspace-shell/3", "hosted-workspace-files/2", "hosted-workspace-files/3",
+                "hosted-workspace-read/1"));
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setWorkspaceShellEnabled(true);
         properties.getHarness().setApprovalMode("default");
