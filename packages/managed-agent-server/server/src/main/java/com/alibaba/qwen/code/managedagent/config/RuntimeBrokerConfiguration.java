@@ -33,12 +33,13 @@ public class RuntimeBrokerConfiguration {
     public com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationStore workspaceCsiApplicationStore(
             @Qualifier("managedJdbcTemplate") org.springframework.jdbc.core.JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") org.springframework.transaction.PlatformTransactionManager manager,
             JdbcManagedSessionStore nativeStore,
-            RuntimeBindingRepository bindings, RuntimeSessionRepository sessions) {
+            RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
+            org.springframework.beans.factory.ObjectProvider<com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore> objects) {
         if (!(bindings instanceof JdbcRuntimeBindingRepository jdbcBindings)
                 || !(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)) {
             throw new IllegalStateException("Original JDBC repositories are required for CSI retirement");
         }
-        return new com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationStore(jdbc, manager, nativeStore, jdbcBindings, jdbcSessions, new com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport());
+        return new com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiApplicationStore(jdbc, manager, nativeStore, jdbcBindings, jdbcSessions, new com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport(), objects.getIfAvailable());
     }
 
     @Bean
@@ -61,8 +62,17 @@ public class RuntimeBrokerConfiguration {
     @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker",
             name = "enabled", havingValue = "true")
     public RuntimeBindingRepository runtimeBindingRepository(
-            @Qualifier("managedAgentDataSource") DataSource dataSource, SecretProtector secretProtector) {
-        return new JdbcRuntimeBindingRepository(dataSource, secretProtector);
+            @Qualifier("managedAgentDataSource") DataSource dataSource, SecretProtector secretProtector,
+            @Qualifier("managedJdbcTemplate") org.springframework.jdbc.core.JdbcTemplate jdbc,
+            org.springframework.beans.factory.ObjectProvider<com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore> objects,
+            org.springframework.beans.factory.ObjectProvider<com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings> settings) {
+        // Same bundle construction as JdbcManagedSessionStore: without session-resource
+        // settings the bundle stays null and CSI admission keeps its fail-closed behavior.
+        var sessionResourceSettings = settings.getIfAvailable();
+        return new JdbcRuntimeBindingRepository(dataSource, secretProtector,
+                sessionResourceSettings == null ? null
+                        : new com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks(
+                                jdbc, objects.getIfAvailable(), sessionResourceSettings));
     }
 
     @Bean

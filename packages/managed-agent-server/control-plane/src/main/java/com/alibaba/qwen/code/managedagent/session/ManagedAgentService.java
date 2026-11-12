@@ -585,7 +585,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
         Admission admission;
         Set<String> extensionLifecycleProfiles = extensionPins == null ? Set.of()
-                : java.util.stream.Stream.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP)
+                : java.util.stream.Stream.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.SHELL_V3, WorkspaceToolProfiles.MCP)
                         .filter(harness::supportsLifecycle).collect(java.util.stream.Collectors.toSet());
         if (worktree != null && sessionWorktrees == null) {
             throw new ManagedAgentException(409, "worktree_unavailable", "Session worktrees are unavailable.");

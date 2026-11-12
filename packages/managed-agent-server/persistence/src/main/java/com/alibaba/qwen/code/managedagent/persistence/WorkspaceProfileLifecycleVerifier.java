@@ -88,7 +88,7 @@ public class WorkspaceProfileLifecycleVerifier {
         if (WorkspaceToolProfiles.MCP.equals(profile)) {
             return;
         }
-        if (!WorkspaceToolProfiles.SHELL.equals(profile)) {
+        if (!WorkspaceToolProfiles.isPublicShell(profile)) {
             unsettled();
         }
         verifyShellResources(operation);

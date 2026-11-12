@@ -56,6 +56,10 @@
       "en": "Opt-in personal MemoryStores: server-side Mem0 access for explicitly bound, owner-only Sessions.",
       "zh": "显式启用的个人 MemoryStore：由服务端访问 Mem0，供明确绑定且仅所属用户可见的 Session 使用。"
     },
+    "qwen.managed-agent.object-storage": {
+      "en": "The generic Aliyun OSS object store shared by tool publication and Session resource / journal cold storage.",
+      "zh": "tool publication 与 Session 资源 / journal 冷存储共用的通用 Aliyun OSS 对象存储。"
+    },
     "qwen.managed-agent.runtime-broker": {
       "en": "The embedded Runtime Broker: its private HTTP listener for the Hosted Harness, the provisioner that places and recovers the Runtime workers that run Hosted tools, their Workspace mounts and isolation, and the keys that encrypt the Runtime credentials it persists.",
       "zh": "内嵌 Runtime Broker：包括面向 Hosted Harness 的私有 HTTP 监听器、放置并恢复执行 Hosted 工具的 Runtime worker 的 provisioner、worker 的 Workspace 挂载与隔离方式，以及加密其持久化 Runtime 凭据的密钥。"
@@ -82,6 +86,10 @@
     }
   },
   "properties": {
+    "qwen.managed-agent.object-storage.enabled": {
+      "en": "Whether the generic Aliyun OSS object-store auto-configuration is active. Defaults to follow `qwen.managed-agent.tool-publication.enabled`; set it true with tool publication disabled to back Session resources and journal cold storage without enabling publication. The OSS endpoint, region and bucket are still read from `qwen.managed-agent.tool-publication.oss-*`.",
+      "zh": "通用 Aliyun OSS 对象存储自动装配是否启用。默认跟随 `qwen.managed-agent.tool-publication.enabled`；在关闭 tool publication 时设为 true，可在不启用发布的情况下支撑 Session 资源与 journal 冷存储。OSS endpoint、region、bucket 仍从 `qwen.managed-agent.tool-publication.oss-*` 读取。"
+    },
     "qwen.managed-agent.session-resources.enabled": {
       "en": "Whether oversized private Session resources may be externalized to immutable object storage (allocate/upload/finalize before journal commit). While false, over-cap resources are refused with HTTP 501 `managed_session_oss_disabled`; already-externalized resources remain readable.",
       "zh": "是否允许把超大的私有 Session 资源外置到不可变对象存储（journal 提交前 allocate/upload/finalize）。为 false 时超上限资源返回 HTTP 501 `managed_session_oss_disabled`；已外置资源仍可读取。"
@@ -95,8 +103,8 @@
       "zh": "后台清扫任务是否为符合条件的 Session 构建并发布不可变 journal pack。需要开启 `qwen.managed-agent.session-resources.enabled`。构建 pack 绝不删除 SQL 正文。"
     },
     "qwen.managed-agent.session-resources.deletion-enabled": {
-      "en": "Whether covered SQL journal bodies may be evicted after the deletion grace period. Requires pack-only mode to be qualified first; eviction is fenced by the head watermark and grace period. Precondition: the direct record_bytes readers JournalStoreRows.activationLeaseRow, JdbcCsiActivationAdmission and JdbcCsiExecutionAdmission are not yet pack-aware and fail closed once a covered range is evicted; migrate them to pack resolution (or confirm they never read an evicted range) before enabling.",
-      "zh": "是否允许在删除宽限期后腾空被 pack 覆盖的 SQL journal 正文。需先完成只打包模式的资格验证；腾空受 head 水位与宽限期围栏保护。前提：直读 record_bytes 的 JournalStoreRows.activationLeaseRow、JdbcCsiActivationAdmission、JdbcCsiExecutionAdmission 尚未 pack-aware，覆盖区间被腾空后即失败关闭；启用前须将其迁移到 pack 解析（或确认不会读到被腾空的区间）。"
+      "en": "Whether covered SQL journal bodies may be evicted after the deletion grace period. Requires pack-only mode to be qualified first; eviction is fenced by the head watermark and grace period. The direct record_bytes readers JournalStoreRows.activationLeaseRow, JdbcCsiActivationAdmission and JdbcCsiExecutionAdmission are pack-aware (#17047): they resolve an evicted range from the published journal pack and re-verify it against the surviving SQL digest. Precondition: every process that serves these reads must have the tool-publication object store configured (the Spring broker and the hand-constructed CSI/maintenance entry points alike); without a store an evicted read still fails closed, so confirm OSS is configured everywhere before enabling.",
+      "zh": "是否允许在删除宽限期后腾空被 pack 覆盖的 SQL journal 正文。需先完成只打包模式的资格验证；腾空受 head 水位与宽限期围栏保护。直读 record_bytes 的 JournalStoreRows.activationLeaseRow、JdbcCsiActivationAdmission、JdbcCsiExecutionAdmission 已 pack-aware（#17047）：被腾空的区间会从已发布的 journal pack 解析，并对照留存的 SQL 摘要重新校验。前提：任何承载这些读取的进程都必须配置 tool-publication 对象存储（Spring broker 与手工构造的 CSI/维护入口皆然）；缺少对象存储时被腾空的读取仍会失败关闭，因此启用前须确认所有相关进程均已配置 OSS。"
     },
     "qwen.managed-agent.session-resources.pack-target-bytes": {
       "en": "Target compressed size of a single journal pack; the pack range shrinks adaptively to stay within it.",
@@ -230,8 +238,8 @@
       "zh": "存储的 AgentDefinition 可在 `model.id` 中指定的模型 ID，以逗号分隔；定义中指定其他模型的 Session 会在准入时被拒绝。每个 ID 应对应 Harness 中配置的一个模型提供方路由。为空时只接受未指定模型的定义。"
     },
     "qwen.managed-agent.definition-tool-profiles": {
-      "en": "The hosted tool profiles a stored AgentDefinition may select in `tools`, as a comma-separated list (such as `hosted-workspace-files/1`, `hosted-workspace-shell/1` or `hosted-workspace-mcp/1`); a Session whose definition selects another profile is refused at admission. `hosted-workspace-team-lead/1` and Shell profiles other than `hosted-workspace-shell/1` are always refused, as is a Shell profile whose approval mode is `yolo`. Preflight checks that the Harness supports each listed profile.",
-      "zh": "存储的 AgentDefinition 可在 `tools` 中选择的托管工具配置，以逗号分隔（如 `hosted-workspace-files/1`、`hosted-workspace-shell/1` 或 `hosted-workspace-mcp/1`）；定义选择其他配置的 Session 会在准入时被拒绝。`hosted-workspace-team-lead/1` 以及 `hosted-workspace-shell/1` 以外的 Shell 配置始终被拒绝，审批模式为 `yolo` 的 Shell 配置同样被拒绝。预检会确认 Harness 支持所列的每个配置。"
+      "en": "The hosted tool profiles a stored AgentDefinition may select in `tools`, as a comma-separated list (such as `hosted-workspace-files/1`, `hosted-workspace-shell/1`, `hosted-workspace-shell/3` or `hosted-workspace-mcp/1`); a Session whose definition selects another profile is refused at admission. `hosted-workspace-team-lead/1` and Shell profiles other than `hosted-workspace-shell/1` and `hosted-workspace-shell/3` are always refused, as is a Shell profile whose approval mode is `yolo`. Preflight checks that the Harness supports each listed profile.",
+      "zh": "存储的 AgentDefinition 可在 `tools` 中选择的托管工具配置，以逗号分隔（如 `hosted-workspace-files/1`、`hosted-workspace-shell/1`、`hosted-workspace-shell/3` 或 `hosted-workspace-mcp/1`）；定义选择其他配置的 Session 会在准入时被拒绝。`hosted-workspace-team-lead/1` 以及 `hosted-workspace-shell/1`、`hosted-workspace-shell/3` 以外的 Shell 配置始终被拒绝，审批模式为 `yolo` 的 Shell 配置同样被拒绝。预检会确认 Harness 支持所列的每个配置。"
     },
     "qwen.managed-agent.dispatch.lease-duration": {
       "en": "How long a node's lease on dispatched work (a Turn, Session lifecycle operation, Action response, task cancel, rename or context compression) lasts before another node may take it over; Turn, lifecycle operation, Action response and task cancel holders renew it while working, but a rename or context compression does not. Startup refuses a value below twice `qwen.managed-agent.dispatch.lease-renew-interval`. A plain number is seconds.",
@@ -610,8 +618,8 @@
       "zh": "Node.js 可执行文件的路径，用于运行本地 Runtime worker（`qwen.managed-agent.runtime-broker.worker-entry`）以及本地 Workspace 文件读取和上传的辅助进程。使用 `local-process` provisioner 时必填，留空时启动时拒绝。预检会检查它是否可执行。"
     },
     "qwen.managed-agent.runtime-broker.operator-recovery-enabled": {
-      "en": "Whether the offline operator-recovery command (`bin/qwen-managed-agent-operator-recovery`) may run its `inspect`, `prepare` and `complete` steps for a Hosted Shell capture that kept a Workspace lease. Set it for that maintenance process: the command refuses to run unless it is on with `qwen.managed-agent.runtime-broker.durable-local-process`, the `local-process` provisioner and `qwen.managed-agent.runtime-broker.state-directory`. The server refuses it at startup with an external provisioner.",
-      "zh": "是否允许离线的运维恢复命令（`bin/qwen-managed-agent-operator-recovery`）对仍占用 Workspace 租约的 Hosted Shell 捕获执行 `inspect`、`prepare` 与 `complete` 步骤。请在该维护进程中设置：除非此项开启，且同时开启 `qwen.managed-agent.runtime-broker.durable-local-process`、使用 `local-process` provisioner 并配置 `qwen.managed-agent.runtime-broker.state-directory`，否则该命令拒绝运行。使用外部 provisioner 时，服务端启动时拒绝此项。"
+      "en": "Whether the offline operator-recovery command (`bin/qwen-managed-agent-admin operator-recovery`) may run its `inspect`, `prepare` and `complete` steps for a Hosted Shell capture that kept a Workspace lease. Set it for that maintenance process: the command refuses to run unless it is on with `qwen.managed-agent.runtime-broker.durable-local-process`, the `local-process` provisioner and `qwen.managed-agent.runtime-broker.state-directory`. The server refuses it at startup with an external provisioner.",
+      "zh": "是否允许离线的运维恢复命令（`bin/qwen-managed-agent-admin operator-recovery`）对仍占用 Workspace 租约的 Hosted Shell 捕获执行 `inspect`、`prepare` 与 `complete` 步骤。请在该维护进程中设置：除非此项开启，且同时开启 `qwen.managed-agent.runtime-broker.durable-local-process`、使用 `local-process` provisioner 并配置 `qwen.managed-agent.runtime-broker.state-directory`，否则该命令拒绝运行。使用外部 provisioner 时，服务端启动时拒绝此项。"
     },
     "qwen.managed-agent.runtime-broker.port": {
       "en": "The TCP port of the embedded Runtime Broker's HTTP listener; the Hosted Harness's `QWEN_MANAGED_RUNTIME_BROKER_URL` must reach it, directly on a loopback address or through the TLS-terminating proxy in front of a non-loopback bind. Startup fails when the listener cannot bind it. Preflight checks that the port is free, or listening with `--online`, and compares it with the Broker URL in the Harness credentials file.",
