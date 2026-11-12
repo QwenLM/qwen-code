@@ -292,6 +292,11 @@ class GlobToolInvocation extends BaseToolInvocation<
       // need to honour path-scoped Read deny rules. Filter before sorting and
       // counting so denied names cannot leak in result metadata either.
       const permissionManager = this.config.getPermissionManager?.();
+      const permissionFilteringActive = Boolean(
+        permissionManager &&
+          typeof permissionManager.hasDenyOrAskRuleForTool === 'function' &&
+          permissionManager.hasDenyOrAskRuleForTool(ToolNames.GLOB),
+      );
       const filteredEntries: GlobPath[] = [];
       for (const entry of allFilteredEntries) {
         signal.throwIfAborted();
@@ -323,7 +328,7 @@ class GlobToolInvocation extends BaseToolInvocation<
           };
         }
         return {
-          llmContent: `No files found matching pattern "${this.params.pattern}" ${searchLocationDescription}. Matching files were excluded by permission rules.`,
+          llmContent: `No files found matching pattern "${this.params.pattern}" ${searchLocationDescription}. Results may be omitted by permission rules.`,
           returnDisplay: `No files found (permission-filtered)`,
         };
       }
@@ -363,19 +368,19 @@ class GlobToolInvocation extends BaseToolInvocation<
 
       // Add truncation notice if needed
       if (hitCollectionLimit) {
-        resultMessage += `\n---\n[Results truncated after collecting ${allFilteredEntries.length} matching files${withheldFileCount ? `; ${withheldFileCount} excluded by permission rules` : ''}. Narrow the pattern or path.]`;
+        resultMessage += `\n---\n[Results truncated after scanning ${allFilteredEntries.length} matching files. Results may be omitted by permission rules. Narrow the pattern or path.]`;
       } else if (truncated) {
         const omittedFiles = totalFileCount - fileLimit;
         const fileTerm = omittedFiles === 1 ? 'file' : 'files';
         resultMessage += `\n---\n[${omittedFiles} ${fileTerm} truncated] ...`;
       }
-      if (withheldFileCount > 0 && !hitCollectionLimit) {
-        resultMessage += `\n---\n[${withheldFileCount} matching file(s) excluded by permission rules.]`;
+      if (permissionFilteringActive && !hitCollectionLimit) {
+        resultMessage += `\n---\n[Results may be omitted by permission rules.]`;
       }
 
       return {
         llmContent: resultMessage,
-        returnDisplay: `${hitCollectionLimit ? 'Found at least' : 'Found'} ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}`,
+        returnDisplay: `${hitCollectionLimit ? 'Found at least' : 'Found'} ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}${permissionFilteringActive ? ' (permission-filtered)' : ''}`,
         resultFilePaths: sortedAbsolutePaths,
         // The certified count covers the collected set, not the display
         // slice — containment consumers must check this, never the slice.

@@ -107,9 +107,9 @@ export function buildPermissionCheckContext(
  * Check whether a path-bearing search result is blocked by a Read rule.
  *
  * Search tools are allowed to scan a workspace by default, but their result
- * sets must still honour path-scoped `Read(...)` deny rules.  Evaluating the
- * result as the canonical read tool also applies the Read meta-category to
- * grep/glob/list-directory callers.
+ * sets must still honour path-scoped `Read(...)`, `Grep(...)`, and `Glob(...)`
+ * rules. The caller's canonical tool name is used so tool-specific rules apply
+ * to individual result paths.
  */
 export async function isPathDeniedByReadRule(
   pm: PermissionManager | null | undefined,

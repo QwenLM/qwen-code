@@ -172,6 +172,11 @@ class GrepToolInvocation extends BaseToolInvocation<
       // from being returned. Filter complete files before truncation so a
       // denied file cannot leak through the line or character limits.
       const permissionManager = this.config.getPermissionManager?.();
+      const permissionFilteringActive = Boolean(
+        permissionManager &&
+          typeof permissionManager.hasDenyOrAskRuleForTool === 'function' &&
+          permissionManager.hasDenyOrAskRuleForTool(ToolNames.GREP),
+      );
       let withheldMatchCount = 0;
       if (permissionManager) {
         const deniedPaths = new Set<string>();
@@ -207,13 +212,13 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Check if we have any matches
       if (rawMatches.length === 0) {
-        const permissionNote = withheldMatchCount
-          ? ` Some matching results were withheld by permission rules.`
+        const permissionNote = permissionFilteringActive
+          ? ` Results may be omitted by permission rules.`
           : '';
         const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.${permissionNote}`;
         return {
           llmContent: noMatchMsg,
-          returnDisplay: `No matches found${withheldMatchCount ? ' (permission-filtered)' : ''}`,
+          returnDisplay: `No matches found${permissionFilteringActive ? ' (permission-filtered)' : ''}`,
         };
       }
 
@@ -298,8 +303,8 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Build result
       let llmContent = header + grepOutput;
-      if (withheldMatchCount > 0) {
-        llmContent += `\n---\n[${withheldMatchCount} matching result(s) withheld by permission rules.]`;
+      if (permissionFilteringActive) {
+        llmContent += `\n---\n[Results may be omitted by permission rules.]`;
       }
 
       // Add truncation notice if needed
@@ -310,8 +315,8 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Build display message
       let displayMessage = `Found ${totalMatches} ${matchTerm}`;
-      if (withheldMatchCount > 0) {
-        displayMessage += ` (${withheldMatchCount} permission-filtered)`;
+      if (permissionFilteringActive) {
+        displayMessage += ` (permission-filtered)`;
       }
       if (truncatedByLineLimit || truncatedByCharLimit) {
         displayMessage += ` (truncated)`;
