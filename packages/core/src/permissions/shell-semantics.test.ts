@@ -905,6 +905,24 @@ describe('extractShellOperationsAcrossCommand', () => {
       "cd .qwen && echo '{}' >| settings.json",
       [write(REPO_SETTINGS)],
     ],
+    // A lone CR right after the clobber operator is the whole redirect target:
+    // bash writes a file named `\r`, so it must not be trimmed as a line
+    // ending. `1>|` and `2>|` name it exactly as `>|` does.
+    [
+      'reports the CR target behind `>|` as a write',
+      'cat >|\r\necho hi',
+      [write('/repo/\r')],
+    ],
+    [
+      'reports the CR target behind `1>|` as a write',
+      'cat 1>|\r\necho hi',
+      [write('/repo/\r')],
+    ],
+    [
+      'reports the CR target behind `2>|` as a write',
+      'cat 2>|\r\necho hi',
+      [write('/repo/\r')],
+    ],
     [
       'still splits the real pipe that follows a clobber redirect',
       'echo hi >| out.txt | cat',
