@@ -160,7 +160,7 @@ class ManagedStoreDecompositionTest {
                 publishToolResult/5::REQUIRED:DEFAULT:false toolResultLimit/1:- requireCsiApplicationCredential/3:-
                 requireCsiHistoricalCredential/5:- preflightCsiTerminal/5:- commitCsiTerminal/5:-
                 validateCsiTerminalBytes/1:- lockCsiOriginal/2:- hasLiveWriter/2::REQUIRED:DEFAULT:false
-                commandKeyHash/2:- journalCorrupt/0:-
+                commandKeyHash/2:- journalCorrupt/0:- journalPacks/0:-
                 """);
     }
 

@@ -11445,7 +11445,12 @@ class QwenAgent implements Agent {
         ) {
           throw RequestError.invalidParams(undefined, 'Invalid scope');
         }
-        if (!this.config.isManagedMemoryAvailable()) {
+        if (
+          this.config.getBareMode() ||
+          this.config.getShellExecutionSandbox() ||
+          (this.managedToolInvocationGuard &&
+            this.externalToolGuardProviderAttached)
+        ) {
           throw new RequestError(
             -32009,
             'Managed memory is unavailable for this daemon workspace',

@@ -110,14 +110,14 @@ test('bulk collapse/expand retains headers and five-session previews', async ({
   await page.screenshot({ path: testInfo.outputPath('expanded.png') });
 });
 
-test('drag sorts, temporarily collapses and restores mixed expansion and Show all @smoke', async ({
+test('drag sorts, temporarily collapses and restores mixed expansion and Show more @smoke', async ({
   page,
 }, testInfo) => {
   await workspaceRow(page, 0)
-    .getByRole('button', { name: 'Show all', exact: true })
+    .getByRole('button', { name: 'Show 2 more', exact: true })
     .click();
   await workspaceRow(page, 1)
-    .getByRole('button', { name: 'Show all', exact: true })
+    .getByRole('button', { name: 'Show 2 more', exact: true })
     .click();
   await expect(
     workspaceRow(page, 0).locator('[data-web-shell-session-title]'),

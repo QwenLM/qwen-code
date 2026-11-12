@@ -878,20 +878,19 @@ describe('credential-free jobs on the disposable pool', () => {
     );
   });
 
-  it('web-shell-visuals.yml capture: untrusted renders ride the disposable pool', () => {
+  it('web-shell-visuals.yml capture: all PR renders ride the disposable pool', () => {
     // The capture builds and renders untrusted PR code with a read-only
     // token and no secrets — the disposable pool's exact security model.
-    // The pool exists for untrusted fork PRs only: same-repo PRs stay on
-    // the hosted lane, where this job ran before the migration.
+    // Same-repo and fork PRs use the same isolated execution boundary.
     const doc = parse(
       readFileSync(join(workflowsDir, 'web-shell-visuals.yml'), 'utf8'),
     );
     const runsOn = String(doc.jobs.capture['runs-on']);
     assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
-    assert.match(
+    assert.doesNotMatch(
       runsOn,
-      /github\.event\.pull_request\.head\.repo\.full_name != github\.repository/,
-      'capture must keep the fork clause: only fork PRs route to the disposable pool',
+      /github\.event\.pull_request\.head\.repo\.full_name/,
+      'capture must not exclude same-repository PRs from the disposable pool',
     );
     for (const assoc of ASSOCIATIONS) {
       // Fork PR: the disposable pool, whoever authored it.
@@ -905,20 +904,27 @@ describe('credential-free jobs on the disposable pool', () => {
         EPHEMERAL,
         `capture fork assoc='${assoc}'`,
       );
-      // Same-repo PR: stays hosted — the disposable pool must never serve
-      // trusted runs, and the kill-switch question never arises there.
-      for (const ecsDisabled of [false, true]) {
-        assert.deepEqual(
-          evalRunsOn(runsOn, {
-            ecsDisabled,
-            eventName: 'pull_request',
-            sameRepo: true,
-            assoc,
-          }),
-          JSON.parse(HOSTED),
-          `capture same-repo assoc='${assoc}' ecsDisabled=${ecsDisabled}`,
-        );
-      }
+      // Same-repo PR: uses the disposable pool while the switch is enabled.
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          ecsDisabled: false,
+          eventName: 'pull_request',
+          sameRepo: true,
+          assoc,
+        }),
+        EPHEMERAL,
+        `capture same-repo assoc='${assoc}'`,
+      );
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          ecsDisabled: true,
+          eventName: 'pull_request',
+          sameRepo: true,
+          assoc,
+        }),
+        JSON.parse(HOSTED),
+        `kill-switch must revert same-repo capture to hosted assoc='${assoc}'`,
+      );
       // Kill-switch reverts fork runs to hosted too.
       assert.deepEqual(
         evalRunsOn(runsOn, {
@@ -931,6 +937,22 @@ describe('credential-free jobs on the disposable pool', () => {
         `kill-switch must revert fork capture to hosted assoc='${assoc}'`,
       );
     }
+    // The pool image bakes Chromium and its system libraries, and it keeps the
+    // tree root-owned so a job cannot rewrite a browser. A job's own
+    // `playwright install` cannot even verify there: playwright writes a lock
+    // and a `.links` entry into the registry before it checks what is present.
+    // The pool image is what sets PLAYWRIGHT_BROWSERS_PATH, so the install step
+    // must skip on it.
+    const install = doc.jobs.capture.steps.find(
+      (step) => step.name === 'Install Playwright Chromium',
+    );
+    assert.ok(install, 'the capture job must keep its browser install step');
+    assert.ok(
+      String(install.run).includes(
+        'if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then',
+      ),
+      'the browser install must skip on the pool image',
+    );
     // Only the event-scoped read-only GITHUB_TOKEN may reach the disposable
     // pool through this workflow; any other secret reference breaks the
     // pool's no-long-lived-secrets boundary. Walk every parsed ${{ … }}
@@ -1017,14 +1039,14 @@ describe('credential-free jobs on the disposable pool', () => {
       Number(diskFloor?.env?.DISK_FLOOR_MAX_USED_PCT) < 89,
       'the ceiling must refuse the measured 89%-used failure slot',
     );
-    // The fork pool pays two cold installs (measured: 22m18s install,
+    // The pool pays two cold installs (measured: 22m18s install,
     // Chromium still downloading at 36m48s), so the hosted 45-minute cap
     // cancels the job before any render. The ceiling is routed like
     // runs-on — runner.environment is not available in timeout-minutes —
-    // keyed off the same fork term: pool (fork, not disabled) 90, else 45.
+    // keyed off the same switch term: pool (not disabled) 90, else 45.
     assert.equal(
       String(doc.jobs.capture['timeout-minutes']),
-      "${{ (github.event.pull_request.head.repo.full_name != github.repository && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && 90 || 45 }}",
+      "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && 90 || 45 }}",
     );
     // Unpinned workers size Chromium from the HOST's cores inside a 4-CPU
     // container: the first pooled run lost its runner to CPU/memory
@@ -1071,6 +1093,52 @@ describe('credential-free jobs on the disposable pool', () => {
       String(fonts.run),
       /(?:else\s*\n\s*|\|\|\s*)echo "::warning::/,
     );
+  });
+
+  it('web-shell-managed-host.yml build: only PR events ride the disposable pool', () => {
+    // Same credential-free boundary as the capture, but this lane also runs on
+    // post-merge push and manual dispatch, and those witnesses must stay
+    // hosted. Assert the effect per event rather than comparing the selector
+    // text to a copy of itself: flipping the event term and updating a pinned
+    // literal in the same commit leaves a text-only pin green. The pool label
+    // comes from the same config the capture case reads, so a config-only
+    // rename reds this lane too instead of leaving it requesting a label no
+    // runner advertises.
+    const doc = parse(
+      readFileSync(join(workflowsDir, 'web-shell-managed-host.yml'), 'utf8'),
+    );
+    const runsOn = String(doc.jobs.build['runs-on']);
+    for (const eventName of ['push', 'workflow_dispatch', 'merge_group']) {
+      for (const ecsDisabled of [false, true]) {
+        assert.deepEqual(
+          evalRunsOn(runsOn, { eventName, ecsDisabled, sameRepo: true }),
+          JSON.parse(HOSTED),
+          `managed-host ${eventName} must stay hosted ecsDisabled=${ecsDisabled}`,
+        );
+      }
+    }
+    // The selector carries no sameRepo term: same-repository and fork PRs are
+    // both PR events, so pin both arms instead of only the same-repo one.
+    for (const sameRepo of [true, false]) {
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          eventName: 'pull_request',
+          ecsDisabled: false,
+          sameRepo,
+        }),
+        EPHEMERAL,
+        `managed-host PR builds ride the disposable pool sameRepo=${sameRepo}`,
+      );
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          eventName: 'pull_request',
+          ecsDisabled: true,
+          sameRepo,
+        }),
+        JSON.parse(HOSTED),
+        `kill-switch must revert managed-host PR builds to hosted sameRepo=${sameRepo}`,
+      );
+    }
   });
 });
 

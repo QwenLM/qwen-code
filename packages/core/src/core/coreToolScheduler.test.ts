@@ -3219,6 +3219,82 @@ describe('CoreToolScheduler', () => {
     expectNotInPlanModeGuidance(calls);
   });
 
+  describe('AUTO_EDIT and permissions.ask rules (#16795)', () => {
+    /** A PermissionManager whose verdict is `ask`, from a rule or not. */
+    const askingPm = (fromAskRule: boolean) => ({
+      isToolEnabled: vi.fn().mockResolvedValue(true),
+      findMatchingDenyRule: vi.fn(),
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('ask' as PermissionDecision),
+      hasMatchingAskRule: vi.fn().mockReturnValue(fromAskRule),
+    });
+    const askingInfoTool = (execute: Mock) =>
+      new MockTool({
+        name: 'guarded_read',
+        getDefaultPermission: async () => 'ask',
+        getConfirmationDetails: async () =>
+          infoConfirmation('Read guarded file', 'Allow?'),
+        execute,
+      });
+
+    it('asks instead of auto-approving a call that matches an ask rule', async () => {
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const { onToolCallsUpdate } = await runLoneTool(
+        askingInfoTool(execute),
+        'ask-rule-read',
+        'prompt-ask-rule-read',
+        {
+          approvalMode: ApprovalMode.AUTO_EDIT,
+          permissionManager: askingPm(true),
+        },
+      );
+
+      expect(
+        reportedCalls(onToolCallsUpdate).some(
+          (call) => call.status === 'awaiting_approval',
+        ),
+      ).toBe(true);
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('still auto-approves an ask that comes from no rule', async () => {
+      // Edits and many reads default to `ask` on their own; AUTO_EDIT exists
+      // to approve exactly those, so only a matching rule may stop it.
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const { calls } = await runLoneTool(
+        askingInfoTool(execute),
+        'no-rule-read',
+        'prompt-no-rule-read',
+        {
+          approvalMode: ApprovalMode.AUTO_EDIT,
+          permissionManager: askingPm(false),
+          waitForCompletion: true,
+        },
+      );
+
+      expect(calls[0].status).toBe('success');
+      expect(execute).toHaveBeenCalledOnce();
+    });
+
+    it('denies an ask-rule match when no one can be asked', async () => {
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const { calls } = await runLoneTool(
+        askingInfoTool(execute),
+        'headless-ask-rule-read',
+        'prompt-headless-ask-rule-read',
+        {
+          approvalMode: ApprovalMode.AUTO_EDIT,
+          permissionManager: askingPm(true),
+          isInteractive: false,
+          waitForCompletion: true,
+        },
+      );
+
+      expect(calls[0].status).toBe('error');
+      expect(execute).not.toHaveBeenCalled();
+    });
+  });
+
   it('does not let AUTO_EDIT approve an interaction-required info tool', async () => {
     const execute = vi.fn().mockResolvedValue(textResult('executed'));
     const tool = new MockTool({
