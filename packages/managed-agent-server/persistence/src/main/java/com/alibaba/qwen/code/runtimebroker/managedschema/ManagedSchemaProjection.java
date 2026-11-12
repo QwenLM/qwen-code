@@ -21,7 +21,7 @@ public enum ManagedSchemaProjection {
     DELIVERY(
             "delivery_key, delivery_kind, tenant_id, channel_id, delivery_id, source_session_id, "
                     + "target_session_id, source_scope_key, source_record_key, source_revision, "
-                    + "segment_id, segment_ordinal, creation_key, provider_id, provider_receipt_json, "
+                    + "segment_id, segment_ordinal, segment_count, creation_key, provider_id, provider_receipt_json, "
                     + "request_digest, payload_version, payload_json, transport_state, reception_state, "
                     + "consumption_state, claimed_at, reconcile_operation_id, claim_owner, "
                     + "claim_generation, claim_until, attempt_count, available_at, last_error, "
@@ -31,6 +31,10 @@ public enum ManagedSchemaProjection {
                     + "replay_floor_sequence, covered_sequence, wake_covered_sequence, projection_version, "
                     + "artifact_refs_resource_key, "
                     + "output_ranges_json, is_projection_pending, gmt_modified"),
+    JOURNAL_PACK(
+            "pack_id, session_scope_key, tenant_id, workspace_id, session_id, from_revision, "
+                    + "through_revision, manifest_resource_key, object_key, state, byte_length, sha256, "
+                    + "builder_id, gmt_create, gmt_modified"),
     MESSAGE(
             "tenant_id, session_id, item_id, turn_id, item_type, item_role, item_status, "
                     + "attributes_json, first_sequence, last_sequence, gmt_create, gmt_modified, revision, "
@@ -45,7 +49,7 @@ public enum ManagedSchemaProjection {
                     + "payload_version, request_json, result_json, state, phase, admission_stage, "
                     + "delivery_state, session_status_before, receipt_id, claim_owner, claim_generation, "
                     + "claim_until, available_at, attempt_count, budget_exempt_attempt, deadline, "
-                    + "recovery_deadline, execution_mode, verification_request_json, is_verification_ready, "
+                    + "recovery_deadline, verification_request_json, is_verification_ready, "
                     + "verification_next_at, publication_id, publication_command_id, slot_key, "
                     + "execution_key, item_id, policy_version, failure_status, failure_code, gmt_create, "
                     + "gmt_modified, completed_at, progress_format, progress_version, progress_stage, "
@@ -129,6 +133,7 @@ public enum ManagedSchemaProjection {
                     + "tool_profile, creator_actor_key, owner_actor_key, memory_store_id, owner_only, parent_session_id, "
                     + "root_session_id, parent_child_run_id, child_depth, agent_definition_digest, "
                     + "session_kind, tenant_key, session_key, session_scope_key, title_revision, "
+                    + "preview, preview_revision, "
                     + "retirement_operation_id, retirement_generation, retired_at, is_recovery_protected, "
                     + "is_resource_gc_completed, runtime_request_key, is_csi_guard, model_id, model_revision, "
                     + "model_config_digest, model_config_key_id, model_config_ciphertext, "
@@ -138,7 +143,7 @@ public enum ManagedSchemaProjection {
             "tenant_id, workspace_id, session_id, storage_version, state, writer_generation, "
                     + "writer_id, writer_lease_until, lease_token_hash, journal_revision, "
                     + "committed_sequence, last_commit_digest, activation_epoch, "
-                    + "latest_checkpoint_resource_id, compacted_through_revision, recovery_status, "
+                    + "latest_checkpoint_resource_id, compacted_through_revision, packed_through_revision, recovery_status, "
                     + "recovery_detail_code, gmt_create, gmt_modified, activation_id, "
                     + "activation_phase, activation_event_epoch, activation_expires_at, "
                     + "activation_head_revision, tenant_key, harness_key, harness_session_id, head_kind, "

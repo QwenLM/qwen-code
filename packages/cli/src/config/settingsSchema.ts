@@ -4592,7 +4592,17 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The Ink TUI runs its turns on it and OpenTUI sends its model requests and runs its tool batches through it, while subagents keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.',
+          'Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The Ink TUI and OpenTUI run their turns on it, and subagents send their model requests through it. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.',
+        showInDialog: true,
+      },
+      eventBusAgentLoop: {
+        type: 'boolean',
+        label: 'Event-Bus Agent Loop',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Run the shared agent loop on the event-bus architecture (experimental). Applies to headless sessions (`-p` and stream-json) when experimental.unifiedAgentLoop is also enabled; other surfaces keep their current loop internals. Can also be enabled via QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1 environment variable.',
         showInDialog: true,
       },
       agentCollaboration: {

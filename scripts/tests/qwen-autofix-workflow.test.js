@@ -96,6 +96,20 @@ const routeJob =
 const reviewScanJob =
   workflow.match(/\n {2}review-scan:[\s\S]*?(?=\n[ ]{2}# ==========)/)?.[0] ??
   '';
+// The command lane (af-163): each of these steps is the visible half of a
+// command route already accepted, and each carries CI_DEV_BOT_PAT on the
+// persistent pool. Each is its job's only step, so the slice bounds on the
+// GENERIC next job-level line rather than on whichever job follows today.
+const commandStepOf = (name) =>
+  workflow.match(
+    new RegExp(`- name: '${name}'[\\s\\S]*?(?=\\n {2}\\S|$)`),
+  )?.[0] ?? '';
+const commandStepNames = [
+  'Toggle takeover label',
+  'Post re-arm marker',
+  'Acknowledge takeover state change',
+];
+const commandSteps = commandStepNames.map(commandStepOf);
 const issueAutofixJob =
   workflow.match(/\n {2}issue-autofix:[\s\S]*?(?=\n[ ]{2}# ==========)/)?.[0] ??
   '';
@@ -1328,6 +1342,15 @@ describe('qwen-autofix workflow', () => {
     const INFRA_SIGNATURES =
       workflow.match(/INFRA_FAILURE_SIGNATURES: '([^']*)'/)?.[1] ?? '';
     expect(INFRA_SIGNATURES).toContain('lost communication with the server');
+    // The deterministic configuration class is a separate list: its members
+    // must be absent from the rerun class, and an empty extraction would make
+    // the skip branch match every annotation, so guard it here too.
+    const CONFIG_SIGNATURES =
+      workflow.match(/CONFIG_FAILURE_SIGNATURES: '([^']*)'/)?.[1] ?? '';
+    expect(CONFIG_SIGNATURES).toContain('HOST_LOAD_MAX_RATIO');
+    for (const token of CONFIG_SIGNATURES.split('|')) {
+      expect(INFRA_SIGNATURES).not.toContain(token);
+    }
 
     const run = ({
       checks,
@@ -1386,6 +1409,7 @@ describe('qwen-autofix workflow', () => {
             REVIEW_PR_LIVE: reviewLive ? 'true' : 'false',
             CHECKS_JSON: JSON.stringify(checks),
             INFRA_FAILURE_SIGNATURES: INFRA_SIGNATURES,
+            CONFIG_FAILURE_SIGNATURES: CONFIG_SIGNATURES,
             PATH: `${bin}:${process.env.PATH}`,
           },
           encoding: 'utf8',
@@ -1417,6 +1441,25 @@ describe('qwen-autofix workflow', () => {
       run({
         checks: [FAIL],
         annotations: 'sdk-java host lock not acquired within 40 minutes',
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // A malformed repository variable is deterministic: a re-run fails
+    // identically, so the scan must not rerun it — and must not spend an agent
+    // round on a typo no branch can fix either. It skips the PR for a human
+    // while the gate's own refusal, which a re-run can move off the host,
+    // stays in the rerun class (#16987 R1-1).
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          "::error::HOST_LOAD_MAX_RATIO must be a positive number or 'off', got '0'",
+      }),
+    ).toEqual({ reran: false, continued: true });
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          '::error::Host load gate breached on ecs-qwen-hk1-4: five-minute load 145.00 on 64 CPUs',
       }),
     ).toEqual({ reran: true, continued: true });
     // A REAL failure (no infra signature in the annotation) → never rerun; the
@@ -7913,6 +7956,9 @@ exit 1
         env: {
           ...process.env,
           PATH: `${bin}:${process.env.PATH}`,
+          // The step mints its hermetic gh config dir under RUNNER_TEMP
+          // (af-163); the runner always provides it, so the fixture must.
+          RUNNER_TEMP: dir,
           GITHUB_TOKEN: 'pat',
           AUTOFIX_BOT: 'qwen-code-dev-bot',
           REPO: 'QwenLM/qwen-code',
@@ -7926,6 +7972,14 @@ exit 1
         },
         encoding: 'utf8',
       });
+      // af-163: nothing reclaims RUNNER_TEMP on the persistent pool, so the
+      // step must take its gh config dir with it on EVERY exit path. This
+      // runs inside the helper so every vector below is covered, including
+      // the early-return refusals a trailing rm would have missed.
+      expect(
+        readdirSync(dir).filter((n) => n.startsWith('autofix-gh-config.')),
+        'the ack step left its gh config dir behind on the pool',
+      ).toEqual([]);
       const commentPath = join(dir, 'comment.md');
       const callsPath = join(dir, 'calls.log');
       const result = {
@@ -12077,12 +12131,15 @@ exit 1
       expect(step).toContain('sudo -n apt-get install');
       expect(step).not.toContain('sudo apt-get');
     }
-    // "Short jobs stay hosted" is the design rule — the carve-out is the
-    // scan lane: route and review-scan gate the WHOLE fan-out, and a
+    // "Short jobs stay hosted" is the design rule, with two carve-outs.
+    // The scan lane: route and review-scan gate the WHOLE fan-out, and a
     // hosted-runner backlog queued route past the cron period so the cron
-    // supersede rule starved every scan round (2026-08-25). They share the
-    // heavy jobs' exact expression, fork-trust clause and kill-switch
-    // included. The command jobs stay hosted.
+    // supersede rule starved every scan round (2026-08-25). The command
+    // lane (af-163): route accepting a command in seconds is invisible
+    // while its only visible half waits for a hosted runner — on
+    // 2026-11-08 an accepted /takeover left its PR unlabeled and unacked
+    // behind a 39-49 minute hosted queue. Both lanes share the heavy
+    // jobs' exact expression, fork-trust clause and kill-switch included.
     expect(routeJob).toContain(ecsRunsOn);
     expect(reviewScanJob).toContain(ecsRunsOn);
     // af-148 carve-out premise: neither job checks code out, so the shared
@@ -12110,10 +12167,34 @@ exit 1
     expect(reviewScanJob).toContain('FLEET_FILE="${WORKDIR}/fleet.tsv"');
     expect(reviewScanJob).not.toContain('FLEET_FILE="$(mktemp)"');
     // The EXIT trap is the in-step cleanup twin of the always() step; it
-    // must remove both the fleet file and the per-run dir.
+    // must remove the fleet file, the per-run dir AND the gh config dir.
+    // bash keeps one EXIT handler per shell, so af-163's cleanup joins this
+    // line instead of a second `trap … EXIT` that would replace it. The
+    // `:-` defaults are load-bearing: the trap is installed at the mint, so
+    // it also fires on the empty-PAT and WORKDIR-pre-clean exits, where
+    // FLEET_FILE does not exist yet (R3-1).
     expect(reviewScanJob).toContain(
-      'trap \'rm -f "${FLEET_FILE}"; rm -rf "${WORKDIR}"\' EXIT',
+      'trap \'rm -f "${FLEET_FILE:-}" || true; rm -rf "${WORKDIR:-}" || true; rm -rf "${GH_CONFIG_DIR}" || true\' EXIT',
     );
+    // Installed at the mint, ahead of every early exit in the step — not
+    // down by FLEET_FILE, where two exit paths precede it and leak the dir.
+    const scanMint = reviewScanJob.indexOf('export GH_CONFIG_DIR');
+    const scanTrap = reviewScanJob.indexOf("trap 'rm -f");
+    expect(scanMint).toBeGreaterThan(-1);
+    expect(scanTrap).toBeGreaterThan(scanMint);
+    expect(reviewScanJob.indexOf('CI_DEV_BOT_PAT is empty')).toBeGreaterThan(
+      scanTrap,
+    );
+    expect(reviewScanJob.indexOf('(umask 077; mkdir -p')).toBeGreaterThan(
+      scanTrap,
+    );
+    // One handler per step, everywhere a cleanup trap was added (R3-3): a
+    // second `trap … EXIT` silently REPLACES the first, and neither the
+    // census (substring presence) nor the lazy preamble match would notice.
+    expect(reviewScanJob.match(/trap [^\n]*EXIT/g) ?? []).toHaveLength(1);
+    for (const step of [...commandSteps, routeStep]) {
+      expect(step.match(/trap [^\n]*EXIT/g) ?? []).toHaveLength(1);
+    }
     // Pin the cleanup step's command inside its own slice, not job-wide: a
     // no-op cleanup with the right name and if: shipped green before.
     const scanCleanupStep =
@@ -12128,7 +12209,12 @@ exit 1
           new RegExp(`\\n {2}${name}:[\\s\\S]*?(?=\\n {2}[a-z][a-z0-9-]*:\\n)`),
         )?.[0] ?? '';
       expect(job, `job slice missing: ${name}`).toBeTruthy();
-      expect(job).toContain("runs-on: 'ubuntu-latest'");
+      expect(job).toContain(ecsRunsOn);
+      // Same af-148 premise as the scan lane, and it is what lets these
+      // jobs skip the workspace restore/wipe hygiene: no checkout, so no
+      // PR code ever lands in the reused workspace. Adding one forces a
+      // deliberate update of that requirement.
+      expect(job).not.toContain('actions/checkout');
     }
     // issue-autofix, build-cli, and review-address each stage the qwen shim
     // against the workspace bundle.
@@ -12900,7 +12986,9 @@ exit 1
     // (af-148), so route and review-scan carry the same reroute hardening
     // in the same loop — one preamble shape, one edit site: a planted
     // ~/.config/gh there would send the scan's CI_DEV_BOT_PAT or route's
-    // collaborator-permission lookups into a local socket.
+    // collaborator-permission lookups into a local socket. The command
+    // lane joins that pool for the same reason and pays the same price
+    // (af-163): its identity check is what gates the label write.
     for (const [step, firstGh, configMint] of [
       [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user', 'export'],
       [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user', 'export'],
@@ -12912,6 +13000,11 @@ exit 1
       [postStatusCommentStep, 'JOB_ID="$(hermetic_gh api', 'wrapper'],
       [routeStep, 'gh api "repos/${REPO}/collaborators', 'guarded'],
       [reviewScanJob, 'gh pr view', 'guarded'],
+      ...commandSteps.map((step) => [
+        step,
+        'GH_TOKEN="${GITHUB_TOKEN}" gh api user',
+        'guarded',
+      ]),
     ]) {
       const ghPin = step.indexOf('export GH_HOST=github.com');
       expect(ghPin).toBeGreaterThan(-1);
@@ -12939,6 +13032,33 @@ exit 1
       expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
       expect(ghPin).toBeLessThan(step.indexOf(firstGh));
     }
+    // These four preambles are hand-copied, and the per-step loop above only
+    // pins that four tokens are present and ordered — a later hardening edit
+    // (a reworded abort, one more unset) could land on one copy and leave the
+    // others behind with every assertion green. Pin them identical, the way
+    // the sanitize lane already does. route joins the command lane here
+    // (R2-1): it mints the same dir on the same pool, so leaving it out of
+    // the pin was the drift channel one lane over. The block runs through
+    // the EXIT trap so the cleanup is covered too, and the non-empty guard
+    // matters: four empty slices would also collapse to a Set of size 1.
+    // review-scan is deliberately NOT in this family — its cleanup rides the
+    // merged fleet/WORKDIR trap pinned above, a different shape by necessity.
+    // Compare CODE with comment lines stripped: route explains the mint
+    // guard inline where the command steps explain it above the block, and
+    // that prose is not behaviour. Every drift this pin exists to catch —
+    // a reworded abort, an extra unset, the guard, the trap — is code.
+    const commandPreambles = [routeStep, ...commandSteps].map((step) =>
+      (
+        step.match(
+          /export GH_HOST=github\.com[\s\S]*?trap 'rm -rf "\$\{GH_CONFIG_DIR\}" \|\| true' EXIT\n/,
+        )?.[0] ?? ''
+      )
+        .split('\n')
+        .filter((line) => line.trim() && !line.trimStart().startsWith('#'))
+        .join('\n'),
+    );
+    expect(commandPreambles[0]).toBeTruthy();
+    expect(new Set(commandPreambles).size).toBe(1);
     // post_status mints hermetically PER CALL (R11-1): RUNNER_TEMP is
     // same-UID-writable, so a dir minted once and reused across the step's
     // gh calls is plantable — a config.yml carrying http_unix_socket
@@ -13267,7 +13387,7 @@ exit 1
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('aborts route and review-scan before any gh call when the gh config dir cannot be minted', () => {
+  it('aborts the scan and command lanes before any gh call when the gh config dir cannot be minted', () => {
     // Behavioural witness for the guarded-mint pin above: without the guard,
     // `export VAR="$(mktemp ...)"` reports export's status, not the
     // substitution's, so a failing mktemp sails through bash -e with an
@@ -13276,8 +13396,9 @@ exit 1
     // step under a mktemp that refuses ONLY the gh-config template (later
     // plain mktemp calls must keep working so the unguarded mutant provably
     // reaches gh) and a gh stub that records every call: the step must fail
-    // loud before the first record. Probed: restoring the unguarded export
-    // makes both cases record a gh call and drop the ::error abort.
+    // loud before the first record. Probed on all five cases: restoring the
+    // unguarded export makes each record a gh call and drop the ::error
+    // abort — the command steps get as far as the PAT identity check.
     const realMktemp = spawnSync('bash', ['-c', 'command -v mktemp'], {
       encoding: 'utf8',
     }).stdout.trim();
@@ -13311,6 +13432,19 @@ exit 1
           GITHUB_TOKEN: 'pat',
         },
       },
+      // The command lane (af-163) carries the same PAT onto the same pool.
+      // Its first gh call is the bot-identity check that gates the label
+      // write, so the abort has to land in front of that too.
+      ...commandStepNames.map((name, i) => ({
+        name,
+        block: commandSteps[i].match(/run: \|-\n([\s\S]*)$/)?.[1],
+        env: {
+          REPO: 'QwenLM/qwen-code',
+          PR: '1234',
+          GITHUB_TOKEN: 'pat',
+          AUTOFIX_BOT: 'qwen-code-dev-bot',
+        },
+      })),
     ];
     for (const { name, block, env } of cases) {
       expect(block, name).toBeTruthy();
@@ -13370,6 +13504,210 @@ exit 1
         rmSync(dir, { recursive: true, force: true });
       }
     }
+  });
+
+  it('takes the command lane gh config dir off the pool on every exit path', () => {
+    // af-163 / R1-1: nothing reclaims RUNNER_TEMP on this persistent pool
+    // and the /tmp age sweep cannot reach it, so a dir left behind accrues
+    // forever. The ack and re-arm replays assert this over their whole step
+    // bodies; takeover-command has no such replay, so run each preamble on
+    // its own and prove the trap fires on a normal end AND on the early
+    // `exit 0` refusal paths these steps are full of. Probed: dropping the
+    // trap line leaves the directory behind and reds this test.
+    for (const [i, name] of commandStepNames.entries()) {
+      // Stop at the mint, then take any trailing comment/trap lines. Making
+      // the trap itself part of the required match would turn a removed
+      // trap into an extraction failure — the residue assertion below has
+      // to be what reds, so the block must stay runnable without it.
+      const preamble = commandSteps[i].match(
+        /export GH_HOST=github\.com[\s\S]*?export GH_CONFIG_DIR\n(?:[ \t]*#[^\n]*\n|[ \t]*trap[^\n]*\n)*/,
+      )?.[0];
+      expect(preamble, name).toBeTruthy();
+      for (const tail of ['', 'exit 0', 'exit 1']) {
+        const dir = mkdtempSync(join(tmpdir(), 'autofix-ghcfg-exit-'));
+        try {
+          const proc = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', `${preamble}${tail}\n`],
+            { env: { ...process.env, RUNNER_TEMP: dir }, encoding: 'utf8' },
+          );
+          expect(proc.status, `${name} (${tail || 'normal end'})`).toBe(
+            tail === 'exit 1' ? 1 : 0,
+          );
+          expect(
+            readdirSync(dir).filter((n) => n.startsWith('autofix-gh-config.')),
+            `${name} (${tail || 'normal end'}) left its gh config dir behind`,
+          ).toEqual([]);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    }
+  });
+
+  it('takes the scan gh config dir off the pool on its early exit paths', () => {
+    // af-163 / R3-1: the scan's merged trap used to be installed down by
+    // FLEET_FILE, ~30 lines after the mint. Two paths exit before that point
+    // — the empty-PAT guard and the WORKDIR pre-clean under bash -e — and
+    // each left the dir on a pool that reclaims nothing there. The trap now
+    // sits at the mint. Probed: with the trap moved back down, the empty-PAT
+    // arm leaves a directory behind and this test reds.
+    const block = reviewScanJob.match(
+      /- name: 'Scan for PRs with new feedback'[\s\S]*?run: \|-\n([\s\S]*?)(?=\n {6}- name: ')/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const cases = [
+      { name: 'empty PAT', env: { GITHUB_TOKEN: '' }, workdir: null },
+      {
+        name: 'WORKDIR pre-clean failure',
+        env: { GITHUB_TOKEN: 'pat' },
+        // mkdir -p cannot create this, so the step aborts under bash -e.
+        workdir: '/proc/no-such-dir/workdir',
+      },
+    ];
+    for (const { name, env, workdir } of cases) {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-scan-exit-'));
+      try {
+        // The step runs a host-wide `find /tmp … -exec rm -rf {} +` age sweep
+        // before the pre-clean. Stub ONLY find: with the real one this test
+        // would delete the developer's own /tmp/autofix* entries. mktemp, rm
+        // and mkdir stay real so the residue assertion still means something.
+        const bin = join(dir, 'bin');
+        mkdirSync(bin);
+        writeFileSync(join(bin, 'find'), '#!/bin/bash\nexit 0\n');
+        chmodSync(join(bin, 'find'), 0o755);
+        const proc = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', block.replace(/^ {10}/gm, '')],
+          {
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              RUNNER_TEMP: dir,
+              WORKDIR: workdir ?? join(dir, 'workdir'),
+              GITHUB_OUTPUT: join(dir, 'github-output'),
+              EVENT_NAME: 'schedule',
+              REPO: 'QwenLM/qwen-code',
+              FORCED_PR: '',
+              ...env,
+            },
+            encoding: 'utf8',
+          },
+        );
+        expect(proc.status, name).not.toBe(0);
+        expect(
+          readdirSync(dir).filter((n) => n.startsWith('autofix-gh-config.')),
+          `${name} left its gh config dir behind on the pool`,
+        ).toEqual([]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('makes every gh config mint site either self-cleaning or a recorded leak', () => {
+    // af-163. This census grew a sibling finding per round (R2-1 -> R3-2 ->
+    // R4-2 -> R5-1) because each fix widened one hand-maintained list. The
+    // shape it settles on removes the lists instead of extending them:
+    //   - match the mint by SHAPE, not by one RUNNER_TEMP spelling, so
+    //     `$RUNNER_TEMP`, `${RUNNER_TEMP}` and `${RUNNER_TEMP:-/tmp}` all land;
+    //     the literal `autofix-gh-config.XXXXXX` keeps unrelated temp dirs
+    //     (weaken.*, qwen-font-probe.*) out of scope;
+    //   - DISCOVER the script sources by scanning .github/scripts/*.sh rather
+    //     than naming two of them;
+    //   - judge each site on its own region AND require the cleanup to remove
+    //     that site's OWN variable, so an unrelated later `rm` cannot vouch
+    //     for it.
+    // Both lists stay exact: an unrecognised site lands in `leaking` and
+    // forces a recorded decision.
+    const MINT = /mktemp[^\n]*autofix-gh-config\.XXXXXX/g;
+    const jobStarts = [...workflow.matchAll(/\n {2}([a-z][a-z0-9-]*):\n/g)];
+    const stepStarts = [...workflow.matchAll(/\n {6}- name: '([^']+)'/g)];
+    const ownerOf = (starts, pos) => {
+      let current = '(none)';
+      for (const m of starts) {
+        if (m.index <= pos) current = m[1];
+        else break;
+      }
+      return current;
+    };
+    const lineAt = (text, pos) =>
+      text.slice(
+        text.lastIndexOf('\n', pos) + 1,
+        text.indexOf('\n', pos) === -1 ? text.length : text.indexOf('\n', pos),
+      );
+    const variableOf = (text, pos) =>
+      /(\w+)="\$\(mktemp/.exec(lineAt(text, pos))?.[1] ?? null;
+    const cleaned = [];
+    const leaking = [];
+    const record = (key, region, variable) =>
+      (variable !== null &&
+      new RegExp(`rm -rf "\\$\\{${variable}\\}"`).test(region)
+        ? cleaned
+        : leaking
+      ).push(key);
+    // Workflow: the mint's own step is the region.
+    for (const m of workflow.matchAll(MINT)) {
+      const pos = m.index;
+      const before = stepStarts.filter((x) => x.index <= pos);
+      expect(
+        before.length,
+        `mint at ${pos} has no enclosing step`,
+      ).toBeGreaterThan(0);
+      const after = [...stepStarts, ...jobStarts]
+        .map((x) => x.index)
+        .filter((i) => i > pos);
+      record(
+        `${ownerOf(jobStarts, pos)} · ${ownerOf(stepStarts, pos)}`,
+        workflow.slice(
+          before[before.length - 1].index,
+          after.length ? Math.min(...after) : workflow.length,
+        ),
+        variableOf(workflow, pos),
+      );
+    }
+    // Scripts: discovered, not named. Each site owns the span up to the next
+    // mint (or EOF) and is keyed by variable and form.
+    const scriptDir = '.github/scripts';
+    for (const file of readdirSync(scriptDir).filter((f) =>
+      f.endsWith('.sh'),
+    )) {
+      const text = readFileSync(join(scriptDir, file), 'utf8');
+      const sites = [...text.matchAll(MINT)];
+      for (const [i, m] of sites.entries()) {
+        const variable = variableOf(text, m.index);
+        const form = lineAt(text, m.index).trimStart().startsWith('if !')
+          ? 'guarded'
+          : 'export';
+        const end = i + 1 < sites.length ? sites[i + 1].index : text.length;
+        record(
+          `${file} · ${variable} ${form}`,
+          text.slice(m.index, end),
+          variable,
+        );
+      }
+    }
+    expect(cleaned.sort()).toEqual(
+      [
+        'route · Decide phases',
+        'takeover-command · Toggle takeover label',
+        'retry-command · Post re-arm marker',
+        'takeover-ack · Acknowledge takeover state change',
+        'review-scan · Scan for PRs with new feedback',
+        'review-address · Post autofix status comment',
+        'autofix-status-heartbeat.sh · gh_config_dir guarded',
+      ].sort(),
+    );
+    expect(leaking.sort()).toEqual(
+      [
+        'issue-autofix · Publish PR',
+        'review-address · Prepare branch and feedback',
+        'review-address · Report dry-run / failure',
+        'review-address · Finalize autofix status comment',
+        'autofix-push-and-report.sh · GH_CONFIG_DIR export',
+        'autofix-push-and-report.sh · GH_CONFIG_DIR guarded',
+      ].sort(),
+    );
   });
 
   it('runs both verification gates under a throwaway global git config', () => {
@@ -21255,6 +21593,9 @@ exit 1
           env: {
             ...process.env,
             PATH: `${dir}:${process.env.PATH}`,
+            // The step mints its hermetic gh config dir under RUNNER_TEMP
+            // (af-163); the runner always provides it, so the fixture must.
+            RUNNER_TEMP: dir,
             GITHUB_TOKEN: 'x',
             PR: '7354',
             REPO: 'QwenLM/qwen-code',
@@ -21265,6 +21606,12 @@ exit 1
           },
           encoding: 'utf8',
         });
+        // af-163: the re-arm step must take its gh config dir with it on
+        // every exit path — RUNNER_TEMP is not reclaimed on this pool.
+        expect(
+          readdirSync(dir).filter((n) => n.startsWith('autofix-gh-config.')),
+          'the re-arm step left its gh config dir behind on the pool',
+        ).toEqual([]);
         return {
           status: res.status,
           stdout: res.stdout ?? '',

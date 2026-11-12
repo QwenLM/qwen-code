@@ -47,7 +47,15 @@ interface Scenario {
   /** The approval mode; YOLO by default. */
   approvalMode?: 'default';
   /** Answers each tool approval the prompt asks for, in order. */
-  approvals?: Array<'allow' | 'deny'>;
+  approvals?: Array<{
+    answer: 'allow' | 'deny';
+    /**
+     * Evidence the answer took effect, in place of watching the dialog
+     * close: a renderer that paints the close and the next approval's
+     * entrance in one frame never shows the gap between them.
+     */
+    settled?: (workspace: string) => boolean;
+  }>;
   /** Presses Esc once this text is on screen. */
   cancelOn?: string;
   /** Disconnects the first response once this text is visible. */
@@ -153,10 +161,12 @@ async function until(
   check: () => boolean | Promise<boolean>,
   reason: string,
   timeout = 30_000,
+  context?: () => Promise<string>,
 ) {
   const deadline = Date.now() + timeout;
   while (!(await check())) {
-    if (Date.now() > deadline) throw new Error(reason);
+    if (Date.now() > deadline)
+      throw new Error(context ? `${reason}\n${await context()}` : reason);
     await sleep(100);
   }
 }
@@ -170,6 +180,11 @@ function files(directory: string): string[] {
 
 const RANDOM_ID =
   /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+
+// The startup context's date, in `formatDateForContext`'s format. Runs that
+// straddle midnight render it a day apart.
+const CONTEXT_DATE =
+  /\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (?:January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}\b/g;
 
 // Fields that differ between two runs of the same scenario.
 const VOLATILE_KEYS = new Set([
@@ -231,6 +246,7 @@ function normalize(
         .split(scratch)
         .join('<SCRATCH>')
         .replace(RANDOM_ID, '<ID>')
+        .replace(CONTEXT_DATE, '<DATE>')
         // A shell command's result names its process group.
         .replace(/Process Group PGID: \d+/g, 'Process Group PGID: <PGID>'),
     ),
@@ -254,6 +270,37 @@ function normalize(
   };
   return strip(replaced);
 }
+
+describe('normalize', () => {
+  const startupContext = (today: string) => ({
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            text: `<system-reminder>\nThis is the Qwen Code. We are setting up the context for our chat.\nToday's date is ${today}.\n</system-reminder>`,
+          },
+        ],
+      },
+    ],
+  });
+
+  it('normalizes the date the startup context renders', () => {
+    expect(
+      normalize(
+        startupContext('Wednesday, November 11, 2026'),
+        '/workspace',
+        '/scratch',
+      ),
+    ).toEqual(
+      normalize(
+        startupContext('Thursday, November 12, 2026'),
+        '/workspace',
+        '/scratch',
+      ),
+    );
+  });
+});
 
 /**
  * Each request body as the client sent it, without the date reminder: every
@@ -490,18 +537,25 @@ describeTui(SUITE, () => {
           firstChunkRead.resolve();
         }
       }
-      for (const answer of scenario.approvals ?? []) {
+      for (const { answer, settled } of scenario.approvals ?? []) {
         // The viewport, not the whole output, which still holds the
         // previous approval.
         await until(
           async () => (await session!.viewport()).includes(APPROVAL_PROMPT),
           'the approval opens',
+          30_000,
+          () => session!.viewport(),
         );
         await session.idle(500, 10_000);
         session.pressKey(answer === 'allow' ? '\r' : '\x1b');
         await until(
-          async () => !(await session!.viewport()).includes(APPROVAL_PROMPT),
+          settled
+            ? () => settled(workspace)
+            : async () =>
+                !(await session!.viewport()).includes(APPROVAL_PROMPT),
           'the approval closes',
+          30_000,
+          () => session!.viewport(),
         );
       }
       if (scenario.cancelOn) {
@@ -695,7 +749,15 @@ describeTui(SUITE, () => {
       rounds: 2,
       batches: 2,
       approvalMode: 'default',
-      approvals: ['allow', 'deny'],
+      approvals: [
+        {
+          answer: 'allow',
+          settled: (dir) =>
+            existsSync(join(dir, 'a.txt')) &&
+            readFileSync(join(dir, 'a.txt'), 'utf8') === 'a body\n',
+        },
+        { answer: 'deny' },
+      ],
       prompts: ['Write a, then b.'],
       recorded: 'a body',
       reply: (messages, dir) =>
