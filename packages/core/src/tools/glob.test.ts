@@ -212,6 +212,12 @@ describe('GlobTool', () => {
 
       expect(byName.resultFilePaths).toEqual(byPath.resultFilePaths);
       expect(byName.resultFilePaths).toEqual([path.join(tempRootDir, 'sub')]);
+      // The location phrase is part of the tool contract: a path-scoped call
+      // names the directory it searched, a path-less one never claims to.
+      expect(partListUnionToString(byPath.llmContent)).toContain(
+        `within ${path.join(tempRootDir)}`,
+      );
+      expect(partListUnionToString(byName.llmContent)).not.toContain('within');
     });
 
     it('should find files with special characters in the name', async () => {
