@@ -32,6 +32,7 @@ import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
+import * as stdioHelpers from '../utils/stdioHelpers.js';
 import {
   HostedModelRoundLimitError,
   applyHostedPublicChildModelPin,
@@ -3648,6 +3649,21 @@ describe('createHostedLoopFireClassifier', () => {
     const verdict = await classifyFire(fireInput);
     expect(verdict.allowed).toBe(false);
     expect(verdict.unavailable).toBe(true);
+  });
+
+  it('logs the cause when the fire classifier cannot be built (N-3)', async () => {
+    const log = vi
+      .spyOn(stdioHelpers, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    vi.mocked(loadCliConfig).mockRejectedValueOnce(new Error('config boom'));
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.unavailable).toBe(true);
+    // A persistent build/auth failure must be diagnosable, not silent (N-3).
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('config boom'));
   });
 
   it('forwards the classifier unavailable flag on the success path (M13)', async () => {

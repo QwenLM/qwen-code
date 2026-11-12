@@ -352,10 +352,18 @@ export function createHostedLoopFireClassifier(deps: {
         // tick and the loop survives to retry, instead of settling dead.
         unavailable: result.unavailable,
       };
-    } catch {
+    } catch (cause) {
       // Fail closed without throwing into the pump's pick, but treat a
       // classifier that cannot be built as a transient outage (no-op re-arm),
-      // not a permanent denial that would end the loop.
+      // not a permanent denial that would end the loop. Surface the cause so a
+      // persistent config/auth failure is diagnosable instead of silently
+      // looping on no-op ticks (N-3).
+      writeStderrLineSafe(
+        'qwen serve: Loop fire-time classifier unavailable for Session ' +
+          deps.sessionId +
+          ': ' +
+          String(cause),
+      );
       return {
         allowed: false,
         unavailable: true,
