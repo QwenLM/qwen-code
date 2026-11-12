@@ -3,7 +3,9 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
 import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -18,6 +20,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.sql.Connection;
 import java.time.Clock;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -124,6 +127,52 @@ class ManagedLegacySessionGuardMySqlIT {
                 probe.rollback();
             }
             assertThat(creation.get(5, TimeUnit.SECONDS)).isNotBlank();
+        }
+    }
+
+    @Test
+    void collectorSeesALeaseCommittedWhileItWaitsOnTheRoot() throws Exception {
+        // R2-1: the collector's pin probe must not fix its REPEATABLE READ view
+        // before lockSessionHead, or a lease committed while it waits on the head
+        // lock is invisible and the body under that live lease is collected.
+        String tenant = "guard-collector-tenant";
+        String session = createSession(tenant);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        String resourceKey = ManagedSessionStore.resourceKey(scope, "inline-body");
+        byte[] body = {1, 2, 3};
+        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id,"
+                        + " resource_id, kind, schema_version, byte_length, sha256, storage_kind,"
+                        + " inline_bytes, state, gmt_create, retention_until)"
+                        + " VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 0, 0)",
+                resourceKey, scope, tenant, session, "inline-body", "managed-message-parts",
+                body.length, ToolPublicationContract.sha256(body), body);
+        var collector = new ManagedProjectionResourceCollector(jdbc,
+                new DataSourceTransactionManager(database.source()));
+        try (Connection holder = database.source().getConnection();
+                var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            holder.setAutoCommit(false);
+            JdbcTemplate holderJdbc = onto(holder);
+            // The lease writer holds root and head, as ToolPublicationRetentionStore.read does.
+            ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(holderJdbc, tenant, session);
+            Future<Boolean> collected = executor.submit(collector::runOnce);
+            // The collector blocks on the root: with the consistent fast path its
+            // view is already fixed here; with the current read it is not.
+            MySqlLockProbe.awaitLockWaits(jdbc, jdbc.queryForObject("SELECT DATABASE()", String.class), 1,
+                    "the collector behind the lease writer's root lock");
+            long generation = holderJdbc.queryForObject(
+                    "SELECT retirement_generation FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                    Long.class, tenant, session);
+            holderJdbc.update("INSERT INTO ma_read_lease (lease_id, tenant_key, session_key,"
+                            + " retirement_generation, expires_at) VALUES (?, ?, ?, ?, ?)",
+                    UUID.randomUUID().toString(), ToolPublicationRetentionStore.hash(tenant),
+                    ToolPublicationRetentionStore.hash(session), generation,
+                    ToolPublicationRetentionStore.now(holderJdbc) + 120_000);
+            holder.commit();
+            assertThat(collected.get(10, TimeUnit.SECONDS)).isFalse();
+            assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE resource_key = ?",
+                    byte[].class, resourceKey)).as("the body under a live read lease").isNotNull();
+            assertThat(jdbc.queryForObject("SELECT state FROM ma_resource WHERE resource_key = ?",
+                    String.class, resourceKey)).isEqualTo("REFERENCED");
         }
     }
 

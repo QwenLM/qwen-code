@@ -26,6 +26,20 @@ final class ManagedLegacySessionGuard {
                 Boolean.TRUE.equals(pin(jdbc, tenantId, sessionId, true)));
     }
 
+    /**
+     * A current-read variant for a caller that already holds placement and takes
+     * the Session root and head next (the projection collector). The consistent
+     * fast path in {@link #isPrivate} would fix the caller's REPEATABLE READ view
+     * before those locks, hiding a lease committed while the caller waits on the
+     * head lock (R2-1). A primary-key locking read decides the pin without fixing
+     * the view, keeps root-before-head, and leaves no cross-tenant pin-index gap
+     * (#13996).
+     */
+    static boolean isPrivateCurrentRead(JdbcTemplate jdbc, String tenantId, String sessionId) {
+        return JdbcManagedSessionStore.namedRootDeadlock(() ->
+                Boolean.TRUE.equals(pin(jdbc, tenantId, sessionId, true)));
+    }
+
     /** The root's pin, or null without a root. */
     private static Boolean pin(JdbcTemplate jdbc, String tenantId, String sessionId, boolean locking) {
         return jdbc.execute((ConnectionCallback<Boolean>) connection -> {
