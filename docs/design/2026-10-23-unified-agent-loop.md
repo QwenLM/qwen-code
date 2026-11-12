@@ -2,7 +2,7 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip waits on the nightly unified-loop E2E gate (#16192). PR 5 (AgentCore, #16880) is in progress.
+- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip waits on the nightly unified-loop E2E gate (#16192). PR 5 (AgentCore) is in progress: 5a (#16880) is merged.
 - **Date**: 2026-10-23, against upstream `779a4d5d0d`.
 - **Related**:
   - tracking issue #15327;
@@ -500,6 +500,16 @@ AgentCore maps the round's events as it maps its chunks today and keeps the raw 
 
 Both paths emit `ROUND_START` after stream preparation so the workflow watchdog gives the model response a fresh stall window. The agent emits text from the entire received chunk before its loop checks and tracks response IDs per attempt. A failed request, a cancel and a retry wait cut off by the time limit end the run as today. The suite with the setting on counts each subagent round sent on the shared loop in the debug log. The TUI suite counts main-session rounds using a separate log entry.
 
+PR 5b runs a round's calls as one batch of the loop's `runToolBatch` on the agent's own scheduler, as the Ink TUI and OpenTUI run theirs on their own schedulers. The batch's `client` becomes optional: it counts the executed calls toward the main session's tool calls, which an agent's calls do not count toward today. What moves:
+
+| AgentCore today                                                       | With the setting on                                                                               |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| it answers a provider replay and stops at a repeated one              | the batch does, and the agent emits the replay's events from its result                           |
+| it refuses a call it did not declare or may not run before scheduling | its executor refuses the call with the same error, after the batch remembered the call as handled |
+| it orders and finalizes the results                                   | the batch does, and the agent emits `TOOL_RESPONSES_FINALIZED` from them                          |
+
+The scheduler, with its events, approvals and hooks, stays the agent's own, so a deferred approval restores the agent's four async-local frames as it does today. The batch leaves the results unrecorded, since they go to the agent's chat and not to the session's transcript. It keeps the results of an aborted batch, so the run ends at the next round's abort check as it does today. A call id the stream repeats still runs and is answered once. The headless suite counts each subagent batch on the shared loop in the debug log, and the TUI suite answers a subagent's approval in the TUI.
+
 ## Migration
 
 | PR    | Content                                                                                                                                             |
@@ -578,6 +588,7 @@ A difference fails the scenario unless it is listed with a linked issue.
 - a subagent that reads a file;
 - a subagent that recovers after one disconnect. The test checks for two requests and the recovered answer in the parent tool result.
 - a subagent stopped at its turn limit;
+- a subagent's call of a tool it may not use beside a read, in one response (PR 5b);
 - a subagent whose model fails.
 
 **ACP scenarios** (`integration-tests/cli/acp-agent-loop-parity.test.ts`):
@@ -608,6 +619,7 @@ A continuation's request runs under a prompt id of its own on the current loop a
 - one tool, and two reads in one response;
 - a replayed call next to a fresh one, which the batch answers;
 - an approved write, then a declined one, in the default approval mode;
+- a subagent's write approved in the TUI, in the default approval mode (PR 5b);
 - a shell command cancelled with Esc while it runs;
 - an edit cut off by the output limit;
 - a stream that drops and is retried;
@@ -629,7 +641,7 @@ The suites run in the integration job, the TUI suite on Ink; the OpenTUI interac
 
 ## Compatibility
 
-- With the setting off, no surface changes. The shared code that changes is additive: the scheduler's optional `beforeToolLaunch`, from PR 2a the `Turn` event fields and send options above, from PR 2b the exported `runToolBatch` and the scheduler's `refuseToolCall` and `onPermissionPromptTerminalSequence`, from PR 2c-1 `stopPolicies`, and from PR 3b-1 a settled call's `recorded`, a batch's `responses` and the batch option `deferRecording`, which change nothing for a caller that does not use them.
+- With the setting off, no surface changes. The shared code that changes is additive: the scheduler's optional `beforeToolLaunch`, from PR 2a the `Turn` event fields and send options above, from PR 2b the exported `runToolBatch` and the scheduler's `refuseToolCall` and `onPermissionPromptTerminalSequence`, from PR 2c-1 `stopPolicies`, from PR 3b-1 a settled call's `recorded`, a batch's `responses` and the batch option `deferRecording`, and from PR 5b the batch's optional `client`, which change nothing for a caller that does not use them.
 - With the setting on, headless differs from today in these intended ways. Most follow from scheduling a batch as one unit, as the TUI already does:
   - a stream-json message past `--max-session-turns` ends the run at the session turn limit, as `-p` does (the error on stderr, exit code 53), instead of a success that repeats the previous answer (#15325);
   - a notification turn (cron, monitor and other queued items) counts each of its model rounds toward `--max-session-turns`, as the main turn does, instead of one turn for the whole item, so a run whose notification turns call tools can reach the limit sooner;
@@ -687,6 +699,7 @@ The suites run in the integration job, the TUI suite on Ink; the OpenTUI interac
 - With the setting on, AgentCore differs from today in these intended ways:
   - from PR 5a, a model fallback drops what the failed model streamed, its calls, text and thought text, so the round's answer carries only the fallback model's output, as on the other surfaces ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
   - from PR 5a, a streamed text event carries a chunk's thought text or its visible text ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
+  - from PR 5b, a call the agent may not run is remembered as handled, so a replay of its id is answered as a duplicate instead of refused again, and a replay's events come before the refusals in its batch ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
 
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 

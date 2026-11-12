@@ -2,7 +2,7 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）与 OpenTUI（PR 4，#16743–#16820）的迁移均已合入；各 surface 的默认开启等待 nightly 统一 loop E2E 门控（#16192）。PR 5（AgentCore，#16880）正在进行。
+- **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）与 OpenTUI（PR 4，#16743–#16820）的迁移均已合入；各 surface 的默认开启等待 nightly 统一 loop E2E 门控（#16192）。PR 5（AgentCore）正在进行：5a（#16880）已合入。
 - **日期**：2026-10-23，基于 upstream `779a4d5d0d`。
 - **相关**：
   - tracking issue #15327；
@@ -500,6 +500,16 @@ AgentCore 像现在映射 chunk 那样映射这一轮的事件，并为自己的
 
 两条路径都在流准备完成后发出 `ROUND_START`，让 workflow 的停滞检测为模型响应重新计时。Agent 在循环检查前发出当前 chunk 中已收到的全部文本，并按尝试记录响应 ID。请求失败、取消以及重试等待被时间上限打断时，运行的结束方式与现在相同。开启设置的套件在调试日志中统计在共享 loop 上发出的子代理轮次。TUI 套件通过另一条日志统计主会话的轮次。
 
+PR 5b 把一轮的调用作为 loop 的 `runToolBatch` 的一个工具批，在 agent 自己的 scheduler 上运行，就像 Ink TUI 和 OpenTUI 在各自的 scheduler 上运行它们的工具批。工具批的 `client` 变为可选：它把执行的调用计入主会话的工具调用数，而 agent 的调用现在并不计入。迁移的部分：
+
+| AgentCore 现在                               | 开启设置后                                                           |
+| -------------------------------------------- | -------------------------------------------------------------------- |
+| 自己应答 provider 重放，遇到重复的重放时停止 | 由工具批完成，agent 根据它的结果发出重放的事件                       |
+| 在调度前拒绝未声明或不允许运行的调用         | 它的 executor 以同样的错误拒绝该调用，此前工具批已把该调用记为已处理 |
+| 自己排序并收尾结果                           | 由工具批完成，agent 据此发出 `TOOL_RESPONSES_FINALIZED`              |
+
+scheduler 及其事件、审批和 hook 仍是 agent 自己的，因此延后审批照旧恢复 agent 的四个 async-local 上下文帧。工具批不记录结果，因为结果进入 agent 的 chat，而不是会话记录。它保留被中止的工具批的结果，让运行像现在一样在下一轮的中止检查处结束。流中重复的调用 ID 仍只运行并应答一次。headless 套件在调试日志中统计共享 loop 上的子代理工具批，TUI 套件在 TUI 中应答子代理的审批。
+
 ## 迁移计划
 
 | PR    | 内容                                                                                                      |
@@ -578,6 +588,7 @@ PR 6 之后同样跟随默认开启和删除旧 loop 两步。
 - 读取一个文件的子代理；
 - 流断开一次后恢复的子代理。测试检查两次请求，并确认恢复后的回答出现在父会话的工具结果中。
 - 在轮数上限处停止的子代理；
+- 在一次响应中，子代理在一次读取之外调用了它不能使用的工具（PR 5b）；
 - 模型失败的子代理。
 
 **ACP 场景**（`integration-tests/cli/acp-agent-loop-parity.test.ts`）：
@@ -608,6 +619,7 @@ PR 6 之后同样跟随默认开启和删除旧 loop 两步。
 - 一个工具，以及一次响应中的两次读取；
 - 重放的调用和一个新调用在同一批，由工具批应答重放；
 - 默认审批模式下，先批准一次写入，再拒绝一次；
+- 默认审批模式下，在 TUI 中批准子代理的一次写入（PR 5b）；
 - 运行中按 Esc 取消的 shell 命令；
 - 被输出上限截断的编辑；
 - 断开后重试的流；
@@ -629,7 +641,7 @@ PR 6 之后同样跟随默认开启和删除旧 loop 两步。
 
 ## 兼容性
 
-- 设置关闭时，任何入口都不变。共享代码的改动都是增量的：scheduler 的可选项 `beforeToolLaunch`、从 PR 2a 起上文所列的 `Turn` 事件字段和发送选项，从 PR 2b 起导出的 `runToolBatch` 和 scheduler 的 `refuseToolCall`、`onPermissionPromptTerminalSequence`，从 PR 2c-1 起的 `stopPolicies`，以及从 PR 3b-1 起已完成调用的 `recorded`、工具批的 `responses` 和工具批选项 `deferRecording`，不使用它们的调用方不受影响。
+- 设置关闭时，任何入口都不变。共享代码的改动都是增量的：scheduler 的可选项 `beforeToolLaunch`、从 PR 2a 起上文所列的 `Turn` 事件字段和发送选项，从 PR 2b 起导出的 `runToolBatch` 和 scheduler 的 `refuseToolCall`、`onPermissionPromptTerminalSequence`，从 PR 2c-1 起的 `stopPolicies`，从 PR 3b-1 起已完成调用的 `recorded`、工具批的 `responses` 和工具批选项 `deferRecording`，以及从 PR 5b 起工具批可选的 `client`，不使用它们的调用方不受影响。
 - 设置开启时，headless 与现在相比有以下有意的差异。其中大多数源于把一批调用作为一个整体调度，这也是 TUI 现在的做法：
   - 在 stream-json 中，超过 `--max-session-turns` 的消息会在会话轮数上限处结束运行，与 `-p` 相同（错误写到 stderr，退出码 53），而不是返回一个重复上一条回答的成功结果（#15325）；
   - 通知轮次（cron、monitor 等排队条目）的每一轮模型调用都计入 `--max-session-turns`，与主轮次相同，而不是整个条目只计一轮，因此通知轮次中调用工具的运行可能更早到达上限；
@@ -687,6 +699,7 @@ PR 6 之后同样跟随默认开启和删除旧 loop 两步。
 - 设置开启后，AgentCore 与现在有以下预期差异：
   - 从 PR 5a 起，模型回退时丢弃失败模型已流出的调用、正文和思考文本，这一轮的回答只带回退模型的输出，与其他入口相同（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）。
   - 从 PR 5a 起，一个流式文本事件承载一个 chunk 的思考文本或正文（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）。
+  - 从 PR 5b 起，agent 不能运行的调用会被记为已处理，因此重放它的 ID 时得到的是重复调用的应答，而不是再次被拒绝；同一工具批中，重放的事件排在被拒绝调用的事件之前（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）。
 
 - 之后迁移的入口会带来各自的修复：#15324（ACP）、#15326（OpenTUI）、#14114 与 #12209（ACP）。
 
