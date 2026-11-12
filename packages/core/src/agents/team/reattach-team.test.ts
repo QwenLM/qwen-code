@@ -229,23 +229,55 @@ describe('reattachTeamForSession', () => {
     expect(task).not.toHaveProperty('owner');
   });
 
-  it('skips a member without an agentId instead of failing the takeover', async () => {
+  it('releases a member without an agentId by name and skips one with neither', async () => {
     const team = makeTeam();
-    team.members.push({ name: 'ghost' } as TeamFile['members'][number]);
+    team.members.push(
+      { name: 'ghost' } as TeamFile['members'][number],
+      {} as TeamFile['members'][number],
+    );
     await writeTeamFile('crew', team);
     await createTask('crew', { subject: 's', description: 'd' });
     await updateTask('crew', '1', { status: 'in_progress', owner: 'worker' });
+    await createTask('crew', { subject: 's2', description: 'd2' });
+    await updateTask('crew', '2', { status: 'in_progress', owner: 'ghost' });
     const { config, state } = makeConfig();
 
     expect(await reattachTeamForSession(config)).toEqual({
       status: 'reattached',
       teamName: 'crew',
-      deadMembers: ['worker', 'ghost'],
-      unassignedTaskCount: 1,
+      deadMembers: ['worker', 'ghost', undefined],
+      unassignedTaskCount: 2,
     });
     expect((await readTeamFile('crew'))!.members).toEqual([]);
-    expect((await listTasks('crew'))[0]).toMatchObject({ status: 'pending' });
+    for (const task of await listTasks('crew')) {
+      expect(task).toMatchObject({ status: 'pending' });
+    }
     expect(state.manager).toBeInstanceOf(TeamManager);
+  });
+
+  it('backs off when a reclaim replaces the config during cleanup', async () => {
+    await writeTeamFile('crew', makeTeam());
+    await createTask('crew', { subject: 's', description: 'd' });
+    await updateTask('crew', '1', { status: 'in_progress', owner: 'worker' });
+    const competitor = makeTeam({
+      leadPid: process.ppid,
+      leadSessionId: 'session-2',
+      members: [],
+      description: 'competitor',
+    });
+    let raced = false;
+    fsHooks.readFile = async (p) => {
+      if (!raced && p.startsWith(getTasksDir('crew'))) {
+        raced = true;
+        await writeTeamFile('crew', competitor);
+      }
+    };
+    const { config, mocks } = makeConfig();
+
+    expect(await reattachTeamForSession(config)).toBeNull();
+    expect(raced).toBe(true);
+    expect(mocks.setTeamManager).not.toHaveBeenCalled();
+    expect(await readTeamFile('crew')).toEqual(competitor);
   });
 
   it('takes over a team recorded with this process pid', async () => {

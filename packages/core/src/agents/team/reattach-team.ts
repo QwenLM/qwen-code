@@ -103,12 +103,18 @@ export async function reattachTeamForSession(
   const currentRaw = await fs.readFile(configPath, 'utf-8').catch(() => null);
   if (currentRaw !== inspectedRaw) return null;
   let release: (() => Promise<void>) | undefined;
+  // A compromised lock means another actor may now own the file, so the
+  // takeover must not write. Throwing here (the library default) would
+  // crash the process from a timer callback.
+  let compromised = false;
   try {
     release = await lockfile.lock(configPath, {
       retries: 0,
       stale: 5000,
       realpath: false,
-      onCompromised: () => {},
+      onCompromised: () => {
+        compromised = true;
+      },
     });
   } catch (err) {
     if (isNodeError(err) && (err.code === 'ELOCKED' || err.code === 'ENOENT')) {
@@ -121,12 +127,22 @@ export async function reattachTeamForSession(
     const lockedRaw = await fs.readFile(configPath, 'utf-8').catch(() => null);
     if (lockedRaw !== inspectedRaw) return null;
     // Preserve members on disk until cleanup succeeds so a failed takeover can retry.
-    // A member without an agentId owns no task we could match, and letting
-    // it throw here would leave the takeover failing on every resume.
+    // Auto-claimed tasks record the bare name as owner, so a member without
+    // an agentId is released by name. Members with neither are skipped, since
+    // letting them throw would fail the takeover on every resume.
     released = await Promise.all(
       teamFile.members
-        .filter((m) => typeof m.agentId === 'string')
-        .map((m) => unassignTeammateTasks(teamName, m.agentId)),
+        .filter(
+          (m) =>
+            typeof m.agentId === 'string' ||
+            (typeof m.name === 'string' && m.name.length > 0),
+        )
+        .map((m) =>
+          unassignTeammateTasks(
+            teamName,
+            typeof m.agentId === 'string' ? m.agentId : m.name,
+          ),
+        ),
     );
     // A respawned teammate reuses the name, so it must not inherit mail that
     // was addressed to the one that died. The leader inbox is left intact.
@@ -141,6 +157,11 @@ export async function reattachTeamForSession(
         )
         .map((m) => clearInbox(teamName, m.name)),
     );
+    // The cleanup above awaits several times, and team_create's reclaim
+    // deletes by name without this lock. Re-check right before the write so
+    // a generation created meanwhile is never overwritten.
+    const finalRaw = await fs.readFile(configPath, 'utf-8').catch(() => null);
+    if (compromised || finalRaw !== inspectedRaw) return null;
     await atomicWriteJSON(configPath, reattached);
   } finally {
     await release?.().catch(() => {});
