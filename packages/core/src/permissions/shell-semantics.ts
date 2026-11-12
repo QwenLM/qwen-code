@@ -626,7 +626,11 @@ function extractRedirects(
         if (bares !== undefined) bares[i] = tokBare!.slice(0, split);
         continue;
       }
-      const matchText = split > 0 ? redirectText : syntax;
+      // Match the operator on the masked spelling after the quoted word too:
+      // in `'>'>"|"file` the redirect is a plain `>` and the quoted `|` starts
+      // the file name, so `>|` must not claim the target's first character.
+      // The length is unchanged, so the target is still sliced from `tok`.
+      const matchText = split > 0 ? syntax.slice(split) : syntax;
       const m = matchText.match(
         /^(<<-?|1>\||2>\||>\||1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
       );

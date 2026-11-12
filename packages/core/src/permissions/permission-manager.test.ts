@@ -3502,6 +3502,22 @@ describe('PermissionManager — compound shell write attribution', () => {
     expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
   });
 
+  // The same filename rule with the other spellings: a single-quoted or escaped
+  // `|`, and a quoted word ending in `>` running straight into the redirect
+  // (`'>'>"|/../"…`), where the operator match must use the masked spelling so
+  // a literal `|` cannot be read as the clobber.
+  it.each<[title: string, command: string]>([
+    ['single-quoted', "echo '{}' >'|/../'.qwen/settings.json"],
+    ['escaped', "echo '{}' >\\|/../.qwen/settings.json"],
+    ['quoted word before', "echo '{}' '>'>\"|/../\".qwen/settings.json"],
+  ])(
+    'a %s pipe is not a clobber: the protected write is denied',
+    async (_title, command) => {
+      const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+    },
+  );
+
   it('deny rule matches a redirect on the `cd` segment itself', async () => {
     const ctx = sh('cd .qwen > .qwen/settings.json', '/repo');
     expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');

@@ -256,6 +256,19 @@ describe('extractShellOperations', () => {
       'echo \'{}\' >"|/../".qwen/settings.json',
       [write(SETTINGS)],
     ],
+    // The other spellings: a single-quoted `|` keeps `|x/` in the resolved
+    // path, and a quoted word ending in `>` must not turn the plain redirect
+    // that follows it into a clobber.
+    [
+      'redirect: a single-quoted pipe is part of the filename',
+      "echo '{}' >'|x/'.qwen/settings.json",
+      [write(`${CWD}/|x/.qwen/settings.json`)],
+    ],
+    [
+      'redirect: a quoted word before the redirect does not invent a clobber',
+      'echo hi \'>\'>"|/../".qwen/settings.json',
+      [write(SETTINGS)],
+    ],
     [
       'curl: extracts domain',
       'curl https://api.example.com/data',
