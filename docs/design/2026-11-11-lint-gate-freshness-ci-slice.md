@@ -561,7 +561,10 @@ model, which `main` does not have.
 
    The env rows are pinned as whole lines rather than as keys or values because
    the script returns early — one warning, exit 0, no summary — when any of the
-   three names is absent. A key-only pin accepts an empty value and a value-only
+   names it reads is absent. It reads four, not three: `GITHUB_REPOSITORY` as
+   well, which is a default environment variable the runner injects, so the
+   workflow never spells it and there is no fourth line to pin.
+   A key-only pin accepts an empty value and a value-only
    pin accepts a renamed key; either leaves the report a permanent no-op behind
    a green check, since the step is `continue-on-error`. The commented-out gate
    is caught even though the identical literal survives in the step's trailing

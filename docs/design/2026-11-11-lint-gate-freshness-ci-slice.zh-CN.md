@@ -261,7 +261,7 @@ merge base 取自该检查**已经做过**的包含比较，因此 narrowing 不
    | 把 `GITHUB_TOKEN`、`BASE_SHA` 或 `HEAD_SHA` 置空（3 次） | `test growth step must pass …`         |
    | 给这三个 key 加 `TEST_GROWTH_` 前缀改名（3 次）          | `test growth step must pass …`         |
 
-   env 三行按整行钉住、而不是按 key 或 value，是因为只要这三个名字缺任何一个，脚本就提前返回——一条 warning、exit 0、没有摘要。只钉 key 会接受空值，只钉 value 会接受被改名的 key；两种情况都会让这份报告在一个绿勾后面永久空转，因为这一步是 `continue-on-error`。gate 被注释掉仍会被抓到——即使完全相同的字面量还留在该步骤后面的说明文字里，因为正则锚的是字段的缩进而不是文本。
+   env 三行按整行钉住、而不是按 key 或 value，是因为只要脚本读的名字缺任何一个，它就提前返回——一条 warning、exit 0、没有摘要。它读的是四个而不是三个：还有 `GITHUB_REPOSITORY`，那是 runner 注入的默认环境变量，workflow 从不写它，因此没有第四行可钉。只钉 key 会接受空值，只钉 value 会接受被改名的 key；两种情况都会让这份报告在一个绿勾后面永久空转，因为这一步是 `continue-on-error`。gate 被注释掉仍会被抓到——即使完全相同的字面量还留在该步骤后面的说明文字里，因为正则锚的是字段的缩进而不是文本。
 
    这里的严重性刻意低于 freshness 闸门：这一步按约定是 advisory，且不发布任何被其他步骤或 job 消费的输出，报告也只统计 `packages/{core,cli,web-shell}/` 内的路径。钉住它的理由是：这个 gate 有意不带 profile 条件，所以追加一个 profile 子句只能收窄它；而在这一步不再是 advisory、或者长出一个输出的那天，那种收窄就开始有意义，却不会有任何测试变红。
 
