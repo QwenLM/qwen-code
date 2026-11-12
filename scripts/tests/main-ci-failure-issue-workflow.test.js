@@ -2628,6 +2628,54 @@ printf '%s\\n' '{"jobs":[]}'
       ).toBe(true);
     });
 
+    it('recognises the built-tree handoff expiring as infrastructure', () => {
+      // #16927: the artifact fetch runs over a host route that forgets to
+      // tunnel it, so both attempts expire at their 15-minute cap and the job
+      // reddens the required check having executed no test at all. Measured on
+      // one failing job: ~100 KB/s on the hz fleet against 19 seconds for the
+      // identical blob on hk, where a re-run of the same head passed. That is
+      // infrastructure by the same rule as a lost runner — it clears when the
+      // re-run lands elsewhere — and leaving it unclassified spends a pool
+      // runner for half an hour and then files a code-failure issue for a
+      // commit that never ran.
+      //
+      // These are the annotations the two steps actually emit, captured from
+      // job 131012882515.
+      for (const annotation of [
+        "The action 'Download the built tree' has timed out after 15 minutes.",
+        "The action 'Retry downloading the built tree' has timed out after 15 minutes.",
+      ]) {
+        expect(
+          new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(
+            annotation,
+          ),
+          annotation,
+        ).toBe(true);
+      }
+    });
+
+    it('does not let the handoff signature swallow a hung test or install step', () => {
+      // The signature is anchored to the two handoff step names, not to
+      // 'has timed out after'. Widening it to the bare phrase would reclassify
+      // every step timeout as infrastructure: a test that genuinely hangs
+      // would be re-run instead of reported, and on a PR autofix would chase a
+      // rerun that can never go green. These must stay code failures.
+      for (const annotation of [
+        "The action 'Run tests and generate reports' has timed out after 45 minutes.",
+        "The action 'Run required no-AK integration gate' has timed out after 20 minutes.",
+        "The action 'Run web-shell browser smoke' has timed out after 30 minutes.",
+        "The action 'Install Dependencies' has timed out after 30 minutes.",
+        'Error: The operation was canceled.',
+      ]) {
+        expect(
+          new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(
+            annotation,
+          ),
+          annotation,
+        ).toBe(false);
+      }
+    });
+
     it('classifies per failed job and only when EVERY one is infrastructure', () => {
       // The annotation read is per check-run id taken from the jobs payload's
       // own check_run_url, and the match is the same grep the PR scan uses.
