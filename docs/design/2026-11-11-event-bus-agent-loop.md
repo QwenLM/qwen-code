@@ -164,13 +164,32 @@ Each slice keeps the parity suites green and changes no surface default.
 - Parity: the unified-loop suites (headless merged; ACP round merged) run unchanged against PR 2 — they are the proof that surfaces notice nothing.
 - E2E: a plan under `.qwen/e2e-tests/` covering headless and ACP prompt turns with the setting on and off, per the feat-dev workflow; baseline dry-run before implementation.
 
+### Real-scenario evidence (PR 4)
+
+Headless runs against a deterministic mock OpenAI endpoint (real tool execution, real retry, real SIGINT cancellation): off = procedural shared loop, on = bus shared loop, both with `experimental.unifiedAgentLoop` enabled. The bus path is confirmed by the adapter's `[EVENT_BUS] runAgentLoopOnBus started` debug marker (`QWEN_DEBUG_LOG_FILE=1`) — every off run logs 0 markers, every on run at least one — so the parity is not a false green. Outputs are identical after normalizing per-run identity and timing fields.
+
+| Scenario                              | Result (off = on)                 | Markers off/on |
+| ------------------------------------- | --------------------------------- | -------------- |
+| G1 single turn                        | MOCK_OK                           | 0 / 1          |
+| G2 tool loop (glob)                   | TOOL_LOOP_DONE, 1 tool result     | 0 / 2          |
+| G3 retry (500 → ok)                   | RETRY_OK                          | 0 / 1          |
+| G4 cancel during model stream         | exit 130, no hang                 | 0 / 1          |
+| G5 settings-file enablement (no env)  | MOCK_OK                           | 0 / 1          |
+| G6 multi-tool batch + two tool rounds | MULTI_ROUND_DONE, 3 tool results  | 0 / 3          |
+| G7 tool error finalization            | TOOL_ERROR_DONE, error result     | 0 / 2          |
+| G8 stream-json output                 | identical envelope stream         | 0 / 1          |
+| G9 cancel during tool execution       | exit 130, no hang                 | 0 / 1          |
+| G10 same-batch duplicate calls        | DUPLICATE_DONE, replayed response | 0 / 2          |
+
+G5 enables both flags through an isolated user settings file with no environment variables, proving the settings-to-flag chain. G9 cancels while a foreground tool runs (the toolSignal path), complementing G4's mid-stream cancel. Marker counts above 1 reflect headless invoking the loop once per round.
+
 ## Acceptance criteria
 
 - PR 1 (primitives): the bus/state/events module lands with unit tests, no runtime consumer, and zero behaviour change (the loop path is unchanged while nothing consumes it); `tsc --build`, ESLint and Prettier are clean.
 - PR 2 (handlers, opt-in): the equivalence suite proves identical results and ordered callback logs between the bus and procedural paths across the scripted scenarios, and the existing agent-loop tests stay green; the flag defaults off so no surface's behaviour changes; `tsc --build`, ESLint and Prettier are clean.
 - Each slice lands its implementation and its tests in the same PR, and the bilingual design doc stays synchronized (structure, decisions, constraints, and this acceptance-criteria section).
 - PR 4 (headless opt-in): the setting defaults off and changes no surface default; with both experimental flags on, the headless run takes the bus path, confirmed by the adapter's `[EVENT_BUS]` debug marker; the real-scenario parity below holds; `tsc --build`, ESLint and Prettier are clean.
-- Real headless scenarios (single turn, tool loop, retry, cancellation) produce parity between the procedural and bus paths with the flag on and off, with the bus path confirmed by an execution marker rather than assumed. PR 4 delivers the enablement and the marker; the scenario evidence is recorded in the E2E plan under `.qwen/e2e-tests/`.
+- Real headless scenarios (single turn, tool loop, retry, cancellation) produce parity between the procedural and bus paths with the flag on and off, with the bus path confirmed by an execution marker rather than assumed. PR 4 delivers the enablement and the marker; the scenario evidence is summarized in the Testing section above (full logs live in the local E2E plan under `.qwen/e2e-tests/`).
 
 ## Risks and open questions
 
