@@ -28,7 +28,8 @@ import {
   findModelInferenceError,
   type ModelInferenceErrorKind,
 } from '../provider/modelInferenceError.js';
-import { getContentFilterMessage } from '../provider/qoder/qoderContentFilterText.js';
+import { CONTENT_FILTERED_MESSAGE } from '../core/query-event.js';
+import { getI18nService } from '../i18n/index.js';
 import {
   MAX_OUTPUT_TOKENS_ERROR_CODE,
   MAX_OUTPUT_TOKENS_MESSAGE,
@@ -70,7 +71,7 @@ const ERROR_FALLBACK_MESSAGES: Readonly<Record<number, string>> = {
   400: REQUEST_REJECTED_MESSAGE,
   401: 'Your authentication has expired. Please sign in again.',
   403: 'You do not have access to this model service. Please check your account permissions.',
-  406: getContentFilterMessage(),
+  406: CONTENT_FILTERED_MESSAGE,
   408: 'The model service did not respond in time. Please try again.',
   416: 'The model service could not process this request.',
   429: 'The request limit has been reached. Please try again later.',
@@ -131,7 +132,8 @@ export function getErrorCodeFallbackMessage(
   if (kind === 'protocol') return INVALID_MODEL_RESPONSE_MESSAGE;
   if (details?.providerSource === QODER_PROVIDER_ID) {
     const qoderMessage = (value: ResultErrorCode | undefined) =>
-      getQoderErrorText(value) ?? ERROR_FALLBACK_MESSAGES[Number(value)];
+      getQoderErrorText(value, getI18nService()?.locale) ??
+      ERROR_FALLBACK_MESSAGES[Number(value)];
     const codeMessage =
       qoderMessage(code) ?? qoderMessage(getErrorDisplayCode({ code }));
     if (codeMessage !== undefined) return codeMessage;
@@ -153,7 +155,7 @@ export function getErrorCodeFallbackMessage(
     return ERROR_FALLBACK_MESSAGES[403];
   }
   if (kind === 'invalid_request' && details?.status === 406) {
-    return getContentFilterMessage();
+    return CONTENT_FILTERED_MESSAGE;
   }
   if (
     details?.status === 408 ||
@@ -246,7 +248,10 @@ export function resolveErrorPresentation(
     code !== undefined && code !== 500 ? code : Number(displayErrorCode);
   const fallbackMessage =
     (typeof fallbackCode === 'number'
-      ? getQoderErrorText(fallbackCode) ?? ERROR_FALLBACK_MESSAGES[fallbackCode]
+      // Legacy 406 also represents model refusal; Qoder's guidance requires
+      // the Provider-aware path above rather than the numeric code alone.
+      ? (fallbackCode !== 406 ? getQoderErrorText(fallbackCode) : undefined) ??
+        ERROR_FALLBACK_MESSAGES[fallbackCode]
       : undefined) ?? REQUEST_FAILED_MESSAGE;
   return { displayErrorCode, fallbackMessage };
 }
