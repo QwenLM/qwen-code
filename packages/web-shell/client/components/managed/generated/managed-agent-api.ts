@@ -1394,7 +1394,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Registers the calling actor's client directory grant into the Session and issues the one-time relay credential for the Runtime MCP leg. Requires the deployment opt-in and current execution authority on the bound ACTIVE Workspace. Registration is ephemeral session state: the bounded TTL queue holds the size-bounded JSON-RPC bodies (which may include file content) only until they settle or expire, no credential or directory path is persisted, and no file content enters the journal or public events beyond the normal durable tool-result policy. */
+        /** @description Registers the calling actor's client directory grant into the Session and dispatches the one-time relay credential to the Harness server-side for the Runtime MCP leg; the credential is never part of the browser response. Requires the deployment opt-in and current execution authority on the bound ACTIVE Workspace. Registration is ephemeral session state: the bounded TTL queue holds the size-bounded JSON-RPC bodies (which may include file content) only until they settle or expire, no credential or directory path is persisted, and no file content enters the journal or public events beyond the normal durable tool-result policy. */
         post: operations["registerWebShellClientFiles"];
         delete?: never;
         options?: never;
@@ -3911,11 +3911,10 @@ export interface components {
             responseJson?: string;
             errorCode?: string;
         };
+        /** @description The browser-facing registration ack. The relay credential is dispatched server-to-harness and is never part of this response; the bridge correlates on generation, toolCount and connectionId. */
         WebShellClientFilesRegistration: {
             serverId: string;
             generation: number;
-            /** @description The one-time relay credential for the Runtime MCP leg; never persisted. */
-            token: string;
             /**
              * Format: int64
              * @description Binding deadline in Unix epoch milliseconds.
@@ -6807,7 +6806,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The registration with its one-time relay credential. */
+            /** @description The registration ack (generation, toolCount, connectionId); the relay credential stays on the server-to-harness path. */
             200: {
                 headers: {
                     [name: string]: unknown;

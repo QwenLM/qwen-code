@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.QueuedRequest;
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.RegisterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.Registration;
+import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.RegistrationAck;
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.RespondRequest;
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.Status;
 import com.alibaba.qwen.code.managedagent.contracts.clientfiles.ClientFilesModels.StatusRequest;
@@ -46,10 +47,14 @@ public class ClientFilesController {
     }
 
     @PostMapping("/register")
-    public ResponseEntity<Registration> register(TenantContext tenant,
+    public ResponseEntity<RegistrationAck> register(TenantContext tenant,
             @RequestBody RegisterRequest request) {
-        return noStore(service.register(tenant.tenantId(), tenant.requireActorId(),
-                request.sessionId(), request.connectionId()));
+        Registration registration = service.register(tenant.tenantId(), tenant.requireActorId(),
+                request.sessionId(), request.connectionId());
+        // The relay token stays on the server-to-harness path; the browser ack
+        // carries only the fields the bridge correlates on.
+        return noStore(new RegistrationAck(registration.serverId(), registration.generation(),
+                registration.expiresAt(), registration.toolCount(), registration.connectionId()));
     }
 
     @PostMapping("/unregister")

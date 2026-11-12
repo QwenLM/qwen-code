@@ -66,7 +66,14 @@ class HostedClientFilesRelayIT {
     private JdbcTemplate jdbc;
     private Process harness;
     private com.sun.net.httpserver.HttpServer model;
+    private com.sun.net.httpserver.HttpServer relayProxy;
+    private int relayProxyPort;
     private ExecutorService modelExecutor;
+    // The relay credential never reaches the browser ack, so the only place the
+    // test can observe the plaintext is the Harness's MCP leg. The relay-url
+    // points at a forwarding proxy that records each Bearer token on its way to
+    // the control plane, keeping the digest/rotation/fence evidence intact.
+    private final List<String> capturedTokens = new CopyOnWriteArrayList<>();
     private final List<Drain> drains = new CopyOnWriteArrayList<>();
     private final List<String> callArgs = new CopyOnWriteArrayList<>();
     private final List<String> modelToolMessages = new CopyOnWriteArrayList<>();
@@ -89,11 +96,17 @@ class HostedClientFilesRelayIT {
         var draining = beginAsync(drain);
         JsonNode registration = settled(registering, 200);
         draining.get(30, java.util.concurrent.TimeUnit.SECONDS);
-        String token = registration.path("token").asText();
+        // The browser ack must not carry the relay credential: it is dispatched
+        // server-to-harness only. Re-adding the field to the response reds this.
+        assertThat(registration.has("token")).isFalse();
         assertThat(registration.path("serverId").asText())
                 .isEqualTo("local-files");
         assertThat(registration.path("generation").asLong()).isEqualTo(1L);
         assertThat(registration.path("toolCount").asInt()).isEqualTo(1);
+        // The plaintext is observable only on the Harness MCP leg (captured by
+        // the relay proxy), never in the browser response.
+        await().atMost(Duration.ofSeconds(10)).until(() -> !capturedTokens.isEmpty());
+        String token = capturedTokens.get(0);
         assertThat(token).isNotBlank();
         // The Harness presented the registered credential on its MCP leg:
         // a wrong token would have 403'd the leg and failed the register.
@@ -117,7 +130,13 @@ class HostedClientFilesRelayIT {
         JsonNode replaced = settled(replacing, 200);
         drainingSecond.get(30, java.util.concurrent.TimeUnit.SECONDS);
         assertThat(replaced.path("generation").asLong()).isEqualTo(2L);
-        assertThat(replaced.path("token").asText()).isNotEqualTo(token);
+        assertThat(replaced.has("token")).isFalse();
+        // Rotation is witnessed on the MCP leg: a credential different from the
+        // gen-1 token is presented once the second registration installs.
+        await().atMost(Duration.ofSeconds(10))
+                .until(() -> !capturedTokens.get(capturedTokens.size() - 1).equals(token));
+        String rotatedToken = capturedTokens.get(capturedTokens.size() - 1);
+        assertThat(rotatedToken).isNotEqualTo(token);
         assertThat(browserMethods.stream().filter("tools/list"::equals).count())
                 .isGreaterThanOrEqualTo(2L);
         second.stop();
@@ -135,7 +154,7 @@ class HostedClientFilesRelayIT {
                         + "/internal/managed-client-files/v1/sessions/"
                         + session + "/mcp"))
                         .timeout(Duration.ofSeconds(10))
-                        .header("Authorization", "Bearer " + replaced.path("token").asText())
+                        .header("Authorization", "Bearer " + rotatedToken)
                         .header("Content-Type", "application/json")
                         .POST(HttpRequest.BodyPublishers.ofString(
                                 "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/list\"}"))
@@ -375,6 +394,12 @@ class HostedClientFilesRelayIT {
         model.setExecutor(modelExecutor);
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
+        relayProxyPort = reservePort();
+        relayProxy = com.sun.net.httpserver.HttpServer.create(
+                new InetSocketAddress("127.0.0.1", relayProxyPort), 0);
+        relayProxy.setExecutor(modelExecutor);
+        relayProxy.createContext("/", this::relayProxyForward);
+        relayProxy.start();
         startHarness(node, cli, "http://127.0.0.1:" + model.getAddress().getPort() + "/v1");
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
                 ManagedAgentServerApplication.class)
@@ -412,7 +437,7 @@ class HostedClientFilesRelayIT {
                         "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root="
                                 + workspace.getParent(),
                         "--qwen.managed-agent.client-files.enabled=true",
-                        "--qwen.managed-agent.client-files.relay-url=http://127.0.0.1:" + port,
+                        "--qwen.managed-agent.client-files.relay-url=http://127.0.0.1:" + relayProxyPort,
                         "--qwen.managed-agent.client-files.request-ttl=5s");
         jdbc = spring.getBean(JdbcTemplate.class);
         spring.getBean(WorkspaceStorageGuard.class)
@@ -673,6 +698,50 @@ class HostedClientFilesRelayIT {
     }
 
     /**
+     * Forwarding proxy for the Harness MCP leg: records the Bearer credential
+     * (the browser ack no longer carries it) and passes the JSON-RPC exchange
+     * through to the control plane unchanged, so the relay loop still runs
+     * end-to-end while the test can observe the plaintext token.
+     */
+    private void relayProxyForward(com.sun.net.httpserver.HttpExchange exchange)
+            throws IOException {
+        try {
+            String authorization = exchange.getRequestHeaders().getFirst("Authorization");
+            if (authorization != null && authorization.startsWith("Bearer ")) {
+                capturedTokens.add(authorization.substring("Bearer ".length()).trim());
+            }
+            byte[] body = exchange.getRequestBody().readAllBytes();
+            String method = exchange.getRequestMethod();
+            HttpRequest.BodyPublisher publisher =
+                    "GET".equals(method) || "DELETE".equals(method)
+                            ? HttpRequest.BodyPublishers.noBody()
+                            : HttpRequest.BodyPublishers.ofByteArray(body);
+            HttpRequest.Builder forward = HttpRequest.newBuilder(URI.create(
+                    "http://127.0.0.1:" + port + exchange.getRequestURI()))
+                    .timeout(Duration.ofSeconds(60))
+                    .header("Content-Type", "application/json")
+                    .method(method, publisher);
+            if (authorization != null) {
+                forward.header("Authorization", authorization);
+            }
+            HttpResponse<String> response = http.send(forward.build(),
+                    HttpResponse.BodyHandlers.ofString());
+            byte[] responseBody = response.body().getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(response.statusCode(),
+                    responseBody.length == 0 ? -1 : responseBody.length);
+            if (responseBody.length > 0) {
+                exchange.getResponseBody().write(responseBody);
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            exchange.sendResponseHeaders(502, -1);
+        } finally {
+            exchange.close();
+        }
+    }
+
+    /**
      * The scripted model: calls the advertised mcp_* tool while the prompt
      * marker is unanswered, then completes once the tool result arrives.
      */
@@ -740,6 +809,9 @@ class HostedClientFilesRelayIT {
         } finally {
             if (model != null) {
                 model.stop(0);
+            }
+            if (relayProxy != null) {
+                relayProxy.stop(0);
             }
             if (modelExecutor != null) {
                 modelExecutor.shutdownNow();

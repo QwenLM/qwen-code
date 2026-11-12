@@ -48,6 +48,16 @@ public final class ClientFilesModels {
     }
 
     /**
+     * Browser-facing registration ack. The relay token is the only admission on
+     * the internal MCP leg and is dispatched server-to-harness inside
+     * {@code register}; the browser never reads it, so the HTTP answer projects
+     * the correlation fields without the credential rather than serializing the
+     * credential-bearing {@link Registration} into every body-capturing surface.
+     */
+    public record RegistrationAck(String serverId, long generation, long expiresAt,
+            int toolCount, String connectionId) {}
+
+    /**
      * Binding summary without the credential. The connection identity is the
      * fence for the downlink and settlement, so {@code generation} and
      * {@code connectionId} are echoed only when the caller proved it already
