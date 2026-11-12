@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
@@ -1221,9 +1221,19 @@ test('lists a configured Email channel and hides its inert group controls @smoke
   ).toHaveCount(0);
 });
 
-test('configures and starts a DingTalk webhook method in the selected workspace', async ({
-  page,
-}, testInfo) => {
+async function configureWebhook(
+  page: Page,
+  testInfo: TestInfo,
+  platform: { type: 'dingtalk' | 'feishu'; displayName: string },
+) {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text());
+  });
+  const webhookType = `${platform.type}-webhook`;
+  const webhookUrl = `$${platform.type.toUpperCase()}_WEBHOOK_URL`;
+  const signingSecret = `$${platform.type.toUpperCase()}_SIGNING_SECRET`;
   const primaryWorkspaceCwd = '/tmp/qwen-web-shell-e2e';
   const workspaceCwd = '/tmp/qwen-outbound-webhook-secondary';
   const scenario = createWebShellDaemonScenario({
@@ -1254,14 +1264,14 @@ test('configures and starts a DingTalk webhook method in the selected workspace'
     },
     channelTypes: [
       {
-        type: 'dingtalk',
-        displayName: 'DingTalk',
+        type: platform.type,
+        displayName: platform.displayName,
         manageable: true,
         fields: [],
       },
       {
-        type: 'dingtalk-webhook',
-        displayName: 'DingTalk Webhook',
+        type: webhookType,
+        displayName: `${platform.displayName} Webhook`,
         manageable: true,
         outboundOnly: true,
         defaultDeliveryTarget: {
@@ -1290,6 +1300,9 @@ test('configures and starts a DingTalk webhook method in the selected workspace'
   const daemon = await installMockDaemon(page, scenario, {
     baseURL: String(testInfo.project.use.baseURL),
   });
+  await page.route('**/workspace/models', (route) =>
+    route.fulfill({ json: { models: [] } }),
+  );
   await page.addInitScript(() => {
     window.sessionStorage.setItem('qwen-daemon-token', 'e2e-token');
   });
@@ -1308,18 +1321,25 @@ test('configures and starts a DingTalk webhook method in the selected workspace'
     },
   );
   await page.route(
-    /\/workspaces\/[^/]+\/channels\/notices\/start$/,
+    /\/workspaces\/[^/]+\/channels\/notices\/(start|stop)$/,
     async (route) => {
-      expect(new URL(route.request().url()).pathname).toBe(
-        `/workspaces/${encodeURIComponent(workspaceCwd)}/channels/notices/start`,
+      const path = new URL(route.request().url()).pathname;
+      expect(path).toMatch(
+        new RegExp(
+          `^/workspaces/${encodeURIComponent(workspaceCwd)}/channels/notices/(start|stop)$`,
+        ),
       );
       const instance = scenario.channels.instances['notices'];
-      instance.runtime = { state: 'connected' };
+      instance.runtime = {
+        state: path.endsWith('/start') ? 'connected' : 'stopped',
+      };
       await route.fulfill({ json: { snapshot: scenario.channels, instance } });
     },
   );
 
   await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  await expect(page).toHaveTitle('Qwen Code Web chat');
+  await expect(page).toHaveURL(new RegExp(`/session/${scenario.sessionId}$`));
   await expect(
     page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
   ).toBeVisible();
@@ -1329,15 +1349,23 @@ test('configures and starts a DingTalk webhook method in the selected workspace'
   );
   await expect(page.getByText('Loading...')).toHaveCount(0);
   await page.getByRole('button', { name: 'Channels', exact: true }).click();
-  await expect(page.getByTestId('channel-platform-dingtalk')).toBeVisible();
-  await expect.poll(() => primarySnapshotRequests).toBeGreaterThan(0);
   await expect(
-    page.getByTestId('channel-platform-dingtalk-webhook'),
-  ).toHaveCount(0);
+    page.getByTestId(`channel-platform-${platform.type}`),
+  ).toBeVisible();
+  await expect.poll(() => primarySnapshotRequests).toBeGreaterThan(0);
+  await expect(page.getByTestId(`channel-platform-${webhookType}`)).toHaveCount(
+    0,
+  );
   await page
-    .getByRole('button', { name: 'Configure DingTalk', exact: true })
+    .getByRole('button', {
+      name: `Configure ${platform.displayName}`,
+      exact: true,
+    })
     .click();
   const methodDialog = page.getByRole('dialog');
+  await expect(methodDialog.getByRole('heading')).toHaveText(
+    'Choose a connection method',
+  );
   await expect(
     methodDialog.getByRole('button', { name: /^Application bot/ }),
   ).toBeVisible();
@@ -1346,7 +1374,9 @@ test('configures and starts a DingTalk webhook method in the selected workspace'
     .click();
   const editor = page.getByRole('dialog');
   await expect(
-    editor.getByRole('heading', { name: 'Configure DingTalk Webhook' }),
+    editor.getByRole('heading', {
+      name: `Configure ${platform.displayName} Webhook`,
+    }),
   ).toBeVisible();
   await expect(editor.getByText('Access control', { exact: true })).toHaveCount(
     0,
@@ -1361,12 +1391,10 @@ test('configures and starts a DingTalk webhook method in the selected workspace'
     'Notification workspace',
   );
   await editor.getByLabel('Instance name').fill('notices');
-  await editor
-    .getByLabel('Webhook URL', { exact: false })
-    .fill('$DINGTALK_WEBHOOK_URL');
+  await editor.getByLabel('Webhook URL', { exact: false }).fill(webhookUrl);
   await editor
     .getByLabel('Signing secret', { exact: false })
-    .fill('$DINGTALK_SIGNING_SECRET');
+    .fill(signingSecret);
   await page.screenshot({
     path: testInfo.outputPath('outbound-channel-editor.png'),
   });
@@ -1381,18 +1409,57 @@ test('configures and starts a DingTalk webhook method in the selected workspace'
   );
   expect(upsert?.body).toEqual({
     expectedRevision: '7',
-    config: { type: 'dingtalk-webhook' },
+    config: { type: webhookType },
     secrets: {
-      webhookUrl: { operation: 'replace', value: '$DINGTALK_WEBHOOK_URL' },
+      webhookUrl: { operation: 'replace', value: webhookUrl },
       signingSecret: {
         operation: 'replace',
-        value: '$DINGTALK_SIGNING_SECRET',
+        value: signingSecret,
       },
     },
   });
   const card = page
     .locator('[data-slot="card"]')
     .filter({ has: page.getByText('notices', { exact: true }) });
+  await card.getByRole('button', { name: 'Edit notices', exact: true }).click();
+  await expect(editor.getByLabel('Webhook URL', { exact: false })).toHaveCount(
+    0,
+  );
+  await expect(
+    editor.getByLabel('Signing secret', { exact: false }),
+  ).toHaveCount(0);
+  await editor.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  const updates = () =>
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'PUT' && request.path.endsWith('/channels/notices'),
+    );
+  expect(updates().at(-1)?.body).toMatchObject({
+    config: { type: webhookType },
+    secrets: {
+      webhookUrl: { operation: 'preserve' },
+      signingSecret: { operation: 'preserve' },
+    },
+  });
+  await card.getByRole('button', { name: 'Edit notices', exact: true }).click();
+  await editor
+    .getByRole('button', { name: 'Replace', exact: true })
+    .first()
+    .click();
+  await editor
+    .getByLabel('Webhook URL', { exact: false })
+    .fill(`${webhookUrl}_V2`);
+  await editor.getByRole('button', { name: 'Clear', exact: true }).click();
+  await editor.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  expect(updates().at(-1)?.body).toMatchObject({
+    config: { type: webhookType },
+    secrets: {
+      webhookUrl: { operation: 'replace', value: `${webhookUrl}_V2` },
+      signingSecret: { operation: 'clear' },
+    },
+  });
   await card.getByRole('button', { name: 'Start', exact: true }).click();
   await expect(card.getByText('Ready to send', { exact: true })).toBeVisible();
   expect(
@@ -1410,4 +1477,22 @@ test('configures and starts a DingTalk webhook method in the selected workspace'
   await page.screenshot({
     path: testInfo.outputPath('outbound-channel-mobile.png'),
   });
-});
+  await card.getByRole('button', { name: 'Stop', exact: true }).click();
+  await expect(
+    card.getByText('Not ready to send notifications.', { exact: true }),
+  ).toBeVisible();
+  await expect(card.getByText('Ready to send', { exact: true })).toHaveCount(0);
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0);
+  expect(errors).toEqual([]);
+}
+
+for (const platform of [
+  { type: 'dingtalk', displayName: 'DingTalk' },
+  { type: 'feishu', displayName: 'Feishu' },
+] as const) {
+  test(`configures and starts a ${platform.displayName} webhook method in the selected workspace`, async ({
+    page,
+  }, testInfo) => {
+    await configureWebhook(page, testInfo, platform);
+  });
+}

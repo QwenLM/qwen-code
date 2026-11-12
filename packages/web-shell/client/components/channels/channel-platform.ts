@@ -14,6 +14,7 @@ export const PLATFORM_MARKS: Record<string, string> = {
   wecom: 'W',
   'wecom-callback': 'WC',
   feishu: 'F',
+  'feishu-webhook': 'F',
   github: 'GH',
   gitlab: 'GL',
   email: 'E',
@@ -28,6 +29,7 @@ const SUPPORTED_CHANNEL_TYPES = new Set([
   'wecom',
   'wecom-callback',
   'feishu',
+  'feishu-webhook',
   'github',
   'gitlab',
   'email',
@@ -44,6 +46,7 @@ export function isSupportedChannelType(
   | 'wecom'
   | 'wecom-callback'
   | 'feishu'
+  | 'feishu-webhook'
   | 'github'
   | 'gitlab'
   | 'email'

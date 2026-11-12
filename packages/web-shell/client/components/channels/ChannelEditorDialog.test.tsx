@@ -556,6 +556,80 @@ afterEach(() => {
 });
 
 describe('ChannelEditorDialog', () => {
+  it.each([
+    {
+      language: 'en' as const,
+      nameLabel: 'Instance name',
+      urlLabel: 'Webhook URL',
+      secretLabel: 'Signing secret',
+      description: 'The secret webhook address of your custom robot.',
+      saveLabel: 'Save',
+      hidden: ['Access control', 'Conversation management', 'Pairing'],
+    },
+    {
+      language: 'zh-CN' as const,
+      nameLabel: '实例名称',
+      urlLabel: 'Webhook 地址',
+      secretLabel: '加签密钥',
+      description: '自定义机器人的私密 Webhook 地址。',
+      saveLabel: '保存',
+      hidden: ['访问控制', '会话管理', '配对'],
+    },
+  ])('saves a localized send-only Feishu editor in $language', async (copy) => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'feishu-webhook',
+      displayName: 'Feishu Webhook',
+      manageable: true,
+      outboundOnly: true,
+      fields: [
+        {
+          key: 'webhookUrl',
+          label: 'Endpoint (descriptor)',
+          kind: 'secret',
+          required: true,
+          envResolvable: true,
+        },
+        {
+          key: 'signingSecret',
+          label: 'Signature (descriptor)',
+          kind: 'secret',
+          envResolvable: true,
+        },
+      ],
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, language: copy.language, onSave });
+    expect(document.body.textContent).toContain(copy.description);
+    expect(document.body.textContent).not.toContain('(descriptor)');
+    for (const hidden of copy.hidden) {
+      expect(
+        document.querySelector('[role="dialog"]')?.textContent,
+      ).not.toContain(hidden);
+    }
+    expect(inputByLabel(copy.urlLabel)?.type).toBe('password');
+    expect(inputByLabel(copy.secretLabel)?.type).toBe('password');
+    await act(async () => {
+      setInputValue(inputByLabel(copy.nameLabel)!, 'feishu-notices');
+      setInputValue(inputByLabel(copy.urlLabel)!, '$FEISHU_WEBHOOK_URL');
+      setInputValue(inputByLabel(copy.secretLabel)!, '$FEISHU_SIGNING_SECRET');
+    });
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === copy.saveLabel,
+    )!;
+    await act(async () => save.click());
+    expect(onSave).toHaveBeenCalledWith('feishu-notices', {
+      expectedRevision: 'revision-1',
+      config: { type: 'feishu-webhook' },
+      secrets: {
+        webhookUrl: { operation: 'replace', value: '$FEISHU_WEBHOOK_URL' },
+        signingSecret: {
+          operation: 'replace',
+          value: '$FEISHU_SIGNING_SECRET',
+        },
+      },
+    });
+  });
+
   it('shows the default output mode for an existing unconfigured channel and saves a changed mode', async () => {
     const descriptor: DaemonChannelTypeDescriptor = {
       ...DINGTALK,

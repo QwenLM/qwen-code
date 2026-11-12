@@ -127,10 +127,10 @@ const OUTBOUND_CHANNEL_KEYS = [
   'statusDescription.readyToSend',
   'statusDescription.notReadyToSend',
   'statusDescription.outbound',
-  'editor.field.dingtalkWebhook.webhookUrl',
-  'editor.field.dingtalkWebhook.webhookUrl.description',
-  'editor.field.dingtalkWebhook.signingSecret',
-  'editor.field.dingtalkWebhook.signingSecret.description',
+  'editor.field.webhook.webhookUrl',
+  'editor.field.webhook.webhookUrl.description',
+  'editor.field.webhook.signingSecret',
+  'editor.field.webhook.signingSecret.description',
 ].map((suffix) => `channels.${suffix}`);
 
 describe('web-shell i18n catalog', () => {
@@ -177,6 +177,24 @@ describe('web-shell i18n catalog', () => {
       expect(zh(key)).not.toBe(en(key));
     }
   });
+
+  it.each(WEB_SHELL_LANGUAGES)(
+    'keeps shared connection and webhook copy platform-neutral in %s',
+    (language) => {
+      const t = getTranslator(language);
+      for (const key of [
+        'channels.method.title',
+        'channels.method.description',
+        'channels.editor.field.webhook.webhookUrl.description',
+      ]) {
+        expect(t(key)).not.toBe(key);
+        expect(t(key)).not.toMatch(/DingTalk|钉钉|Feishu|飞书/i);
+      }
+      if (language === 'ru') {
+        expect(t('channels.method.title')).toBe('Choose a connection method');
+      }
+    },
+  );
 
   it('keeps the channel range message spacing in both locales', () => {
     const en = getTranslator('en');

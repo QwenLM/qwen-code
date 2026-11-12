@@ -325,7 +325,11 @@ export function ChannelsManagerPage({
     >();
     for (const descriptor of availablePlatforms) {
       const type =
-        descriptor.type === 'dingtalk-webhook' ? 'dingtalk' : descriptor.type;
+        descriptor.type === 'dingtalk-webhook'
+          ? 'dingtalk'
+          : descriptor.type === 'feishu-webhook'
+            ? 'feishu'
+            : descriptor.type;
       const group = groups.get(type);
       if (group) {
         group.methods.push(descriptor);
@@ -333,7 +337,11 @@ export function ChannelsManagerPage({
         groups.set(type, {
           type,
           displayName:
-            type === 'dingtalk' ? 'DingTalk' : descriptor.displayName,
+            type === 'dingtalk'
+              ? 'DingTalk'
+              : type === 'feishu'
+                ? 'Feishu'
+                : descriptor.displayName,
           methods: [descriptor],
         });
       }

@@ -55,6 +55,21 @@ Starting the Channel makes it locally ready to send; it does not send a test
 message or verify remote credentials. Stopping cancels in-flight sends. Restart
 or reload applies saved configuration changes.
 
+## Use Web Shell
+
+In Channels, choose Feishu and then Webhook (send only). Select the workspace,
+save the webhook URL and optional signing secret, and start the Channel.
+Receiving, pairing and agent-session settings do not apply to this method.
+The application-bot method remains available under the same Feishu platform.
+
+In Scheduled Tasks, choose a persistent task session and select this Channel
+as the delivery destination. Web Shell fills its configured group automatically;
+no observed contacts or manually entered chat ID are needed. Existing per-run
+and manual-trigger delivery restrictions remain in effect.
+
+The same controls are available through `WebShellWithProviders` when the host
+enables Channels and Scheduled Tasks and supplies a daemon workspace.
+
 ## Explicit API delivery
 
 Notify and explicit prompt/scheduled delivery use the existing Channel target
