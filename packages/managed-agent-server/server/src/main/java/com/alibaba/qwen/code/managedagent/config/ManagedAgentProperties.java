@@ -320,6 +320,23 @@ public class ManagedAgentProperties
         if (!clientFiles.isEnabled()) {
             return;
         }
+        // Range-check the numeric settings at boot: a zero queue-depth would
+        // otherwise refuse every admission and silently disable the feature,
+        // and a non-positive TTL or payload bound breaks the relay's lifecycle.
+        if (clientFiles.getQueueDepth() < 1) {
+            throw new IllegalStateException("client-files.queue-depth must be at least 1");
+        }
+        if (clientFiles.getMaxPayloadBytes() < 1) {
+            throw new IllegalStateException("client-files.max-payload-bytes must be at least 1");
+        }
+        if (clientFiles.getRequestTtl() == null || clientFiles.getRequestTtl().isNegative()
+                || clientFiles.getRequestTtl().isZero()) {
+            throw new IllegalStateException("client-files.request-ttl must be positive");
+        }
+        if (clientFiles.getBindingTtl() == null || clientFiles.getBindingTtl().isNegative()
+                || clientFiles.getBindingTtl().isZero()) {
+            throw new IllegalStateException("client-files.binding-ttl must be positive");
+        }
         if (StringUtils.isBlank(clientFiles.getRelayUrl()) && environment != null) {
             clientFiles.setRelayUrl(localStoreBaseUrl());
         }

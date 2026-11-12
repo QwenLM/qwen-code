@@ -62,7 +62,8 @@ public class ClientFilesController {
     @PostMapping("/status")
     public ResponseEntity<Status> status(TenantContext tenant,
             @RequestBody StatusRequest request) {
-        return noStore(service.status(tenant.tenantId(), tenant.requireActorId(), request.sessionId()));
+        return noStore(service.status(tenant.tenantId(), tenant.requireActorId(),
+                request.sessionId(), request.connectionId()));
     }
 
     @PostMapping(value = "/requests/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)

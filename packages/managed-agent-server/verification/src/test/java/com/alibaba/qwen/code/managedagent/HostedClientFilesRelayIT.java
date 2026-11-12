@@ -164,6 +164,11 @@ class HostedClientFilesRelayIT {
         // The browser actually refused tools/list during the pending register,
         // so a regression treating a refusal as an empty catalog turns this red.
         assertThat(offline.refusedMethods).contains("tools/list");
+        // The evidence line's discoveryRefusalClosed also claims the binding is
+        // left closed: a refused first registration must not keep serving.
+        assertThat(jdbc.queryForObject(
+                "SELECT state FROM ma_client_files_binding WHERE session_id = ?",
+                String.class, refused)).isEqualTo("closed");
         offline.stop();
         offlineDraining.cancel(true);
 
@@ -312,9 +317,12 @@ class HostedClientFilesRelayIT {
 
     private void awaitBinding(String session, long generation) {
         await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
+            // Prove the registration identity: status echoes the generation only
+            // to a caller that already knows the connection identity.
             JsonNode status = webShell("POST", "/status",
-                    Map.of("sessionId", session), 200);
+                    Map.of("sessionId", session, "connectionId", "conn-it"), 200);
             assertThat(status.path("state").asText()).isEqualTo("active");
+            assertThat(status.path("owned").asBoolean()).isTrue();
             assertThat(status.path("generation").asLong()).isEqualTo(generation);
         });
     }

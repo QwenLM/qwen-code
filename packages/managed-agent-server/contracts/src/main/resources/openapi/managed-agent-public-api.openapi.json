@@ -23497,6 +23497,11 @@
         "properties": {
           "sessionId": {
             "type": "string"
+          },
+          "connectionId": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "The caller's own registration identity. The response echoes the live generation and identity only when this matches the binding; a merely readable session learns that a binding exists, not how to attach to it."
           }
         }
       },
@@ -23592,14 +23597,15 @@
       "WebShellClientFilesStatus": {
         "type": "object",
         "additionalProperties": false,
-        "description": "The binding summary. Every field is optional because an absent binding answers 200 with an empty body, which a client reads as an empty object; when a binding is present all fields are populated.",
+        "description": "The binding summary. Every field is optional because an absent binding answers 200 with an empty body, which a client reads as an empty object. The generation and connectionId are the fence for the downlink and settlement, so they are echoed only when the request's connectionId proves the caller owns the binding (owned=true); otherwise they are 0 / absent and only the non-secret summary is returned.",
         "properties": {
           "serverId": {
             "type": "string"
           },
           "generation": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 0,
+            "description": "The binding generation, echoed only when owned; 0 otherwise."
           },
           "state": {
             "enum": ["active", "closed"]
@@ -23611,7 +23617,11 @@
           },
           "connectionId": {
             "type": "string",
-            "description": "The current binding's registration identity, for downlink correlation."
+            "description": "The binding's registration identity, echoed only when the request proved it (owned=true); absent otherwise."
+          },
+          "owned": {
+            "type": "boolean",
+            "description": "Whether the request's connectionId matched the live binding, gating the generation/connectionId echo."
           }
         }
       },

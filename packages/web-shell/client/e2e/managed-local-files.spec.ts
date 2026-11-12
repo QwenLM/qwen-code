@@ -24,11 +24,13 @@ function startPeer(clientFilesEnabled: boolean): Promise<{
   registered: Record<string, unknown>[];
   responses: Record<string, unknown>[];
   unregistered: Record<string, unknown>[];
+  summaryReads: number;
 }> {
   const registered: Record<string, unknown>[] = [];
   const responses: Record<string, unknown>[] = [];
   const unregistered: Record<string, unknown>[] = [];
   let relayConnectionId: unknown;
+  let summaryReads = 0;
   const heartbeats = new Set<NodeJS.Timeout>();
   const summary = {
     sessionId: 's1',
@@ -79,9 +81,14 @@ function startPeer(clientFilesEnabled: boolean): Promise<{
         res.end(JSON.stringify(data));
       };
       const parsed = body ? (JSON.parse(body) as Record<string, unknown>) : {};
-      if (path.endsWith('/sessions/query'))
+      if (path.endsWith('/sessions/query')) {
+        summaryReads += 1;
         return json(200, { data: [summary], hasMore: false });
-      if (path.endsWith('/sessions/get')) return json(200, summary);
+      }
+      if (path.endsWith('/sessions/get')) {
+        summaryReads += 1;
+        return json(200, summary);
+      }
       if (path.endsWith('/transcript/query'))
         return json(200, {
           items: [],
@@ -113,14 +120,31 @@ function startPeer(clientFilesEnabled: boolean): Promise<{
           connectionId: relayConnectionId,
         });
       }
-      if (path.endsWith('/client-files/status'))
-        return json(200, {
-          serverId: 'local-files',
-          generation: 1,
-          state: 'active',
-          expiresAt: Date.now() + 3_600_000,
-          connectionId: relayConnectionId,
-        });
+      if (path.endsWith('/client-files/status')) {
+        // Mirror the server's ownership gate: the generation/identity is echoed
+        // only to a caller that proves it knows the registration identity.
+        const owned =
+          parsed.connectionId !== undefined &&
+          parsed.connectionId === relayConnectionId;
+        return json(
+          200,
+          owned
+            ? {
+                serverId: 'local-files',
+                generation: 1,
+                state: 'active',
+                expiresAt: Date.now() + 3_600_000,
+                connectionId: relayConnectionId,
+                owned: true,
+              }
+            : {
+                serverId: 'local-files',
+                state: 'active',
+                expiresAt: Date.now() + 3_600_000,
+                owned: false,
+              },
+        );
+      }
       if (path.endsWith('/client-files/unregister')) {
         unregistered.push(parsed);
         return json(200, {
@@ -186,6 +210,9 @@ function startPeer(clientFilesEnabled: boolean): Promise<{
         registered,
         responses,
         unregistered,
+        get summaryReads() {
+          return summaryReads;
+        },
       });
     });
   });
@@ -313,6 +340,12 @@ test('Managed local files entry is withheld without the capability', async ({
       `/e2e/fixtures/managed-local-files.html?api=${encodeURIComponent(peer.url)}&session=s1`,
     );
     await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+    // Anchor past mount: the session summary (which carries the capability)
+    // must actually have been served before asserting the entry is absent, or
+    // the count-0 check would pass even if the gate never ran.
+    await expect
+      .poll(() => peer.summaryReads, { timeout: 10_000 })
+      .toBeGreaterThanOrEqual(1);
     await expect(
       page.getByRole('button', { name: 'Local files', exact: true }),
     ).toHaveCount(0);

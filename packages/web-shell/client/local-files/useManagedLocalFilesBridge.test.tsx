@@ -92,7 +92,25 @@ function startPeer(unregisterGate?: Promise<void>): Promise<{
       }
       if (path.endsWith('/client-files/status')) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(binding ? JSON.stringify(binding) : '');
+        if (!binding) {
+          res.end('');
+          return;
+        }
+        // Mirror the server's ownership gate: the generation/identity is echoed
+        // only to a caller that proves it knows the registration identity.
+        const parsed = body
+          ? (JSON.parse(body) as Record<string, unknown>)
+          : {};
+        const owned =
+          parsed.connectionId !== undefined &&
+          parsed.connectionId === binding.connectionId;
+        res.end(
+          JSON.stringify(
+            owned
+              ? { ...binding, owned: true }
+              : { state: binding.state, owned: false },
+          ),
+        );
         return;
       }
       if (path.endsWith('/client-files/requests/stream')) {

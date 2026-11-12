@@ -3892,6 +3892,8 @@ export interface components {
         };
         WebShellClientFilesStatusRequest: {
             sessionId: string;
+            /** @description The caller's own registration identity. The response echoes the live generation and identity only when this matches the binding; a merely readable session learns that a binding exists, not how to attach to it. */
+            connectionId?: string;
         };
         WebShellClientFilesStreamRequest: {
             sessionId: string;
@@ -3924,9 +3926,10 @@ export interface components {
             /** @description Echo of the registration identity the caller supplied, for downlink correlation. */
             connectionId: string;
         };
-        /** @description The binding summary. Every field is optional because an absent binding answers 200 with an empty body, which a client reads as an empty object; when a binding is present all fields are populated. */
+        /** @description The binding summary. Every field is optional because an absent binding answers 200 with an empty body, which a client reads as an empty object. The generation and connectionId are the fence for the downlink and settlement, so they are echoed only when the request's connectionId proves the caller owns the binding (owned=true); otherwise they are 0 / absent and only the non-secret summary is returned. */
         WebShellClientFilesStatus: {
             serverId?: string;
+            /** @description The binding generation, echoed only when owned; 0 otherwise. */
             generation?: number;
             /** @enum {unknown} */
             state?: "active" | "closed";
@@ -3935,8 +3938,10 @@ export interface components {
              * @description Binding deadline in Unix epoch milliseconds.
              */
             expiresAt?: number;
-            /** @description The current binding's registration identity, for downlink correlation. */
+            /** @description The binding's registration identity, echoed only when the request proved it (owned=true); absent otherwise. */
             connectionId?: string;
+            /** @description Whether the request's connectionId matched the live binding, gating the generation/connectionId echo. */
+            owned?: boolean;
         };
         WebShellClientFilesRespondReceipt: {
             settled: boolean;

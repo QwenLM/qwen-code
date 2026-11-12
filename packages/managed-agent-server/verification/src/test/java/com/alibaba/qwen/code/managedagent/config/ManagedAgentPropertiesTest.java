@@ -133,6 +133,36 @@ public class ManagedAgentPropertiesTest {
     }
 
     @Test
+    void clientFilesNumericSettingsAreRangeCheckedAtBoot() {
+        var properties = new ManagedAgentProperties();
+        properties.getClientFiles().setEnabled(true);
+        properties.getClientFiles().setRelayUrl("http://127.0.0.1:4170");
+        // A zero queue-depth would refuse every admission and silently disable
+        // the feature; the boot must refuse it instead.
+        properties.getClientFiles().setQueueDepth(0);
+        assertThatThrownBy(properties::validateWorkspaceFiles)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("queue-depth");
+        properties.getClientFiles().setQueueDepth(32);
+        properties.getClientFiles().setMaxPayloadBytes(0);
+        assertThatThrownBy(properties::validateWorkspaceFiles)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("max-payload-bytes");
+        properties.getClientFiles().setMaxPayloadBytes(61440);
+        properties.getClientFiles().setRequestTtl(java.time.Duration.ZERO);
+        assertThatThrownBy(properties::validateWorkspaceFiles)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("request-ttl");
+        properties.getClientFiles().setRequestTtl(java.time.Duration.ofSeconds(25));
+        properties.getClientFiles().setBindingTtl(java.time.Duration.ofSeconds(-1));
+        assertThatThrownBy(properties::validateWorkspaceFiles)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("binding-ttl");
+        properties.getClientFiles().setBindingTtl(java.time.Duration.ofHours(8));
+        assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+    }
+
+    @Test
     void preflightValidatesTheSelectedProviderAfterLoadingHarnessCredentials(@TempDir Path directory) throws Exception {
         for (String digest : List.of("SHA256:" + "A".repeat(64), "sha256:" + "a".repeat(64))) {
             var properties = new ManagedAgentProperties();

@@ -181,10 +181,12 @@ public class ClientFilesRelayService {
             throw error(404, "client_files_not_found");
         }
         // A stale teardown (an old tab whose registration was already replaced)
-        // must not close the newer binding or drop its harness catalog.
+        // must not close the newer binding or drop its harness catalog — and it
+        // must not learn the replacement binding's identity either, which is the
+        // fence for the newer tab's downlink and settlement.
         if (connectionId != null && !connectionId.equals(binding.connectionId())) {
-            return new Status(binding.serverId(), binding.generation(), binding.state(),
-                    binding.expiresAt(), binding.connectionId());
+            return new Status(binding.serverId(), 0L, binding.state(), binding.expiresAt(),
+                    null, false);
         }
         long now = System.currentTimeMillis();
         relay.close(tenant, session, binding.generation(), now);
@@ -200,11 +202,16 @@ public class ClientFilesRelayService {
         } catch (RuntimeException ignored) {
             // best-effort dispatch
         }
-        return new Status(binding.serverId(), binding.generation(), ClientFilesModels.STATE_CLOSED,
-                binding.expiresAt(), binding.connectionId());
+        // Reaching here the caller is the owner and any supplied identity matched
+        // (a mismatch returned above); echo the identity back only when it was
+        // supplied, mirroring the status fence.
+        boolean owned = connectionId != null;
+        return new Status(binding.serverId(), owned ? binding.generation() : 0L,
+                ClientFilesModels.STATE_CLOSED, binding.expiresAt(),
+                owned ? binding.connectionId() : null, owned);
     }
 
-    public Status status(String tenant, String actor, String session) {
+    public Status status(String tenant, String actor, String session, String connectionId) {
         requireEnabled();
         requireSessionId(session);
         agentService.requireReadableSession(tenant, actor, session);
@@ -217,8 +224,14 @@ public class ClientFilesRelayService {
         // sweep flips the row.
         String state = binding.expiresAt() <= System.currentTimeMillis()
                 ? ClientFilesModels.STATE_CLOSED : binding.state();
-        return new Status(binding.serverId(), binding.generation(), state, binding.expiresAt(),
-                binding.connectionId());
+        // The connection identity is the only fence between two tabs of the same
+        // actor on the downlink and settlement paths, so it must not be handed
+        // to a caller that merely can read the session. Echo the generation and
+        // identity only to a caller that proves it already knows the identity;
+        // everyone else learns that a binding exists, not how to attach to it.
+        boolean owned = connectionId != null && connectionId.equals(binding.connectionId());
+        return new Status(binding.serverId(), owned ? binding.generation() : 0L, state,
+                binding.expiresAt(), owned ? binding.connectionId() : null, owned);
     }
 
     /**

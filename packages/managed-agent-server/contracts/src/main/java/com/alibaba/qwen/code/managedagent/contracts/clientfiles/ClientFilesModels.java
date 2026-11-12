@@ -47,15 +47,22 @@ public final class ClientFilesModels {
         }
     }
 
-    /** Binding summary without the credential. */
+    /**
+     * Binding summary without the credential. The connection identity is the
+     * fence for the downlink and settlement, so {@code generation} and
+     * {@code connectionId} are echoed only when the caller proved it already
+     * knows the identity ({@code owned}); a merely readable session must not
+     * hand a second tab the input it needs to take over the owner's downlink.
+     * When not owned they are {@code 0} / {@code null}.
+     */
     public record Status(String serverId, long generation, String state, long expiresAt,
-            String connectionId) {}
+            String connectionId, boolean owned) {}
 
     public record RegisterRequest(String sessionId, String connectionId) {}
 
     public record UnregisterRequest(String sessionId, String connectionId) {}
 
-    public record StatusRequest(String sessionId) {}
+    public record StatusRequest(String sessionId, String connectionId) {}
 
     public record StreamRequest(String sessionId, long generation, String connectionId) {}
 

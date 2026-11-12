@@ -97,7 +97,7 @@ class ClientFilesRelayServiceTest {
         assertThat(registration.toolCount()).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT token_hash FROM ma_client_files_binding", String.class))
                 .isEqualTo(DigestUtils.sha256Hex(registration.token()));
-        assertThat(service.status(tenant, ACTOR, session).state()).isEqualTo("active");
+        assertThat(service.status(tenant, ACTOR, session, CONNECTION).state()).isEqualTo("active");
         // The one-time credential must not leak through the record's toString
         // into any log or error that prints the registration.
         assertThat(registration.toString()).doesNotContain(registration.token());
@@ -157,9 +157,9 @@ class ClientFilesRelayServiceTest {
         // client's downlink was opened with, so a stream at that generation keeps
         // draining rows mcp() enqueues afterwards (instead of being refused 409).
         long restoredGeneration = first.generation();
-        assertThat(service.status(tenant, ACTOR, session).generation())
+        assertThat(service.status(tenant, ACTOR, session, CONNECTION).generation())
                 .isEqualTo(restoredGeneration);
-        assertThat(service.status(tenant, ACTOR, session).state()).isEqualTo("active");
+        assertThat(service.status(tenant, ACTOR, session, CONNECTION).state()).isEqualTo("active");
         service.mcp(tenant, session, first.token(), request("1"));
         assertThat(awaitQueue(restoredGeneration, 1).get(0).requestId()).isEqualTo("1");
     }
@@ -206,12 +206,12 @@ class ClientFilesRelayServiceTest {
         // A stale stream callback for an older generation must not close the
         // current binding.
         service.streamClosed(tenant, ACTOR, session, registration.generation() + 1);
-        assertThat(service.status(tenant, ACTOR, session).state()).isEqualTo("active");
+        assertThat(service.status(tenant, ACTOR, session, CONNECTION).state()).isEqualTo("active");
         service.streamClosed(tenant, ACTOR, session, registration.generation());
-        assertThat(service.status(tenant, ACTOR, session).state()).isEqualTo("closed");
+        assertThat(service.status(tenant, ACTOR, session, CONNECTION).state()).isEqualTo("closed");
         // A second callback for the now-closed binding is a no-op.
         service.streamClosed(tenant, ACTOR, session, registration.generation());
-        assertThat(service.status(tenant, ACTOR, session).state()).isEqualTo("closed");
+        assertThat(service.status(tenant, ACTOR, session, CONNECTION).state()).isEqualTo("closed");
     }
 
     @Test
@@ -319,9 +319,10 @@ class ClientFilesRelayServiceTest {
         CompletableFuture<String> call =
                 service.mcp(tenant, session, registration.token(), request("1"));
         awaitQueue(generation, 1);
-        // A second client of the same actor knows the generation (status hands
-        // it out) but not this registration's identity: an omitted or foreign
-        // connectionId must be refused, and the waiter must stay unsettled.
+        // A second client of the same actor cannot learn this registration's
+        // identity from status (it is echoed only to a caller that already
+        // proves it): an omitted or foreign connectionId must be refused, and
+        // the waiter must stay unsettled.
         assertThatThrownBy(() -> service.respond(tenant, ACTOR, session, generation, null,
                 "1", "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":{}}", null))
                 .hasFieldOrPropertyWithValue("code", "client_files_generation_conflict");
@@ -355,6 +356,48 @@ class ClientFilesRelayServiceTest {
     }
 
     @Test
+    void statusDoesNotHandTheFenceIdentityToASecondSameActorClient() throws Exception {
+        Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
+        long generation = registration.generation();
+        CompletableFuture<String> call =
+                service.mcp(tenant, session, registration.token(), request("1"));
+        awaitQueue(generation, 1);
+        // A second client of the same actor can read the session, but status must
+        // not hand it the live binding's generation or connection identity — those
+        // are the entire fence for the downlink and settlement. Removing the
+        // server-side ownership comparison reds this: the response would carry
+        // the identity and the attach/settle below would succeed.
+        Status leaked = service.status(tenant, ACTOR, session, null);
+        assertThat(leaked.state()).isEqualTo("active");
+        assertThat(leaked.owned()).isFalse();
+        assertThat(leaked.connectionId()).isNull();
+        assertThat(leaked.generation()).isZero();
+        Status foreign = service.status(tenant, ACTOR, session, "other-tab");
+        assertThat(foreign.owned()).isFalse();
+        assertThat(foreign.connectionId()).isNull();
+        assertThat(foreign.generation()).isZero();
+        // Nothing obtainable from those responses can attach to the downlink or
+        // settle the queued call; the waiter stays unsettled.
+        assertThatThrownBy(() -> service.requireStreamConnection(tenant, ACTOR, session,
+                leaked.generation(), leaked.connectionId()))
+                .hasFieldOrPropertyWithValue("code", "client_files_generation_conflict");
+        assertThatThrownBy(() -> service.respond(tenant, ACTOR, session, leaked.generation(),
+                leaked.connectionId(), "1", "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":{}}", null))
+                .hasFieldOrPropertyWithValue("code", "client_files_generation_conflict");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_request WHERE request_id='1'",
+                String.class)).isEqualTo("queued");
+        assertThat(call.isDone()).isFalse();
+        // The owner, proving its identity, still gets the full status and settles.
+        Status owned = service.status(tenant, ACTOR, session, CONNECTION);
+        assertThat(owned.owned()).isTrue();
+        assertThat(owned.generation()).isEqualTo(generation);
+        assertThat(owned.connectionId()).isEqualTo(CONNECTION);
+        service.respond(tenant, ACTOR, session, generation, CONNECTION, "1",
+                "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":{\"ok\":true}}", null);
+        assertThat(call.get(5, TimeUnit.SECONDS)).contains("\"ok\":true");
+    }
+
+    @Test
     void respondRefusesAnOversizeErrorCode() {
         Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         assertThatThrownBy(() -> service.respond(tenant, ACTOR, session, registration.generation(),
@@ -378,11 +421,14 @@ class ClientFilesRelayServiceTest {
     void staleUnregisterDoesNotCloseAReplacedBinding() throws Exception {
         Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         // An old tab whose registration was replaced tears down with its own
-        // (now stale) connection identity: it must not close the current binding.
+        // (now stale) connection identity: it must not close the current binding,
+        // and it must not learn the replacement's generation or identity either.
         Status stale = service.unregister(tenant, ACTOR, session, "superseded-connection");
         assertThat(stale.state()).isEqualTo("active");
-        assertThat(stale.generation()).isEqualTo(registration.generation());
-        assertThat(service.status(tenant, ACTOR, session).state()).isEqualTo("active");
+        assertThat(stale.owned()).isFalse();
+        assertThat(stale.generation()).isZero();
+        assertThat(stale.connectionId()).isNull();
+        assertThat(service.status(tenant, ACTOR, session, CONNECTION).state()).isEqualTo("active");
         // The owning connection still closes it.
         assertThat(service.unregister(tenant, ACTOR, session, CONNECTION).state())
                 .isEqualTo("closed");

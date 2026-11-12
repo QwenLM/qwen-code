@@ -41,6 +41,10 @@ interface PeerOptions {
   /** Refuse every /responses POST with this status + code (production envelope),
    * e.g. a 409 identity-fence refusal, to exercise the non-payload failure path. */
   responseRefusal?: { status: number; code: string };
+  /** Answer the reopen status probe with 500 this many times (after the first
+   * downlink has opened) before succeeding, to exercise the transient-probe
+   * retry instead of a permanent end. */
+  reopenProbeFailures?: number;
 }
 
 function startPeer(opts: PeerOptions = {}): Promise<Peer> {
@@ -48,6 +52,7 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
   const unregistered: Array<Record<string, unknown>> = [];
   const responses: Array<Record<string, unknown>> = [];
   const peerState = { streamOpens: 0 };
+  let reopenProbeFailuresRemaining = opts.reopenProbeFailures ?? 0;
   let resolveFirst: (value: Record<string, unknown>) => void;
   const firstResponse = new Promise<Record<string, unknown>>((resolve) => {
     resolveFirst = resolve;
@@ -99,12 +104,44 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
         return;
       }
       if (path.endsWith('/client-files/status')) {
+        // Transient reopen-probe failures: only after the first downlink has
+        // opened, so the initial binding poll is unaffected.
+        if (peerState.streamOpens >= 1 && reopenProbeFailuresRemaining > 0) {
+          reopenProbeFailuresRemaining -= 1;
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({ error: { code: 'transient_probe_failure' } }),
+          );
+          return;
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        const reported =
-          binding && opts.statusConnectionId !== undefined
-            ? { ...binding, connectionId: opts.statusConnectionId }
-            : binding;
-        res.end(reported ? JSON.stringify(reported) : '');
+        if (!binding) {
+          res.end('');
+          return;
+        }
+        // Mirror the server's ownership gate: the live generation/identity is
+        // echoed only to a caller that proves it already knows the identity.
+        // statusConnectionId simulates a concurrent tab having replaced the
+        // binding, so the reported identity differs from the caller's.
+        const liveConnectionId =
+          opts.statusConnectionId !== undefined
+            ? opts.statusConnectionId
+            : binding.connectionId;
+        const owned =
+          parsed.connectionId !== undefined &&
+          parsed.connectionId === liveConnectionId;
+        res.end(
+          JSON.stringify(
+            owned
+              ? {
+                  generation: binding.generation,
+                  state: binding.state,
+                  connectionId: liveConnectionId,
+                  owned: true,
+                }
+              : { state: binding.state, owned: false },
+          ),
+        );
         return;
       }
       if (path.endsWith('/client-files/unregister')) {
@@ -156,7 +193,9 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
         if (
           opts.payloadBound !== undefined &&
           responseJson !== undefined &&
-          responseJson.length > opts.payloadBound
+          // The relay bounds UTF-8 bytes, not UTF-16 code units; a multi-byte
+          // payload must be measured the same way here or the fake under-counts.
+          Buffer.byteLength(responseJson, 'utf8') > opts.payloadBound
         ) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           // The production envelope: ApiExceptionHandler wraps the code as
@@ -339,6 +378,31 @@ describe('ManagedClientFilesBridge', () => {
 
   it('reopens the downlink after a clean end while the binding is active', async () => {
     const p = await peer({ endStream: true });
+    const b = bridge(p, {
+      async handle(message) {
+        return {
+          jsonrpc: '2.0',
+          id: message.id ?? null,
+          result: { tools: [] },
+        };
+      },
+    });
+    void b.connect();
+    await vi.waitFor(() => expect(p.streamOpens).toBeGreaterThanOrEqual(2));
+    p.push('7', { jsonrpc: '2.0', id: '7', method: 'tools/list' });
+    const response = await p.firstResponse;
+    expect(response.rpcRequestId).toBe('7');
+    await vi.waitFor(() =>
+      expect(b.getState()).toMatchObject({ phase: 'connected', generation: 1 }),
+    );
+  });
+
+  it('a transient reopen-probe failure retries instead of ending the bridge', async () => {
+    // The first downlink ends cleanly and the reopen probe answers 500 once
+    // before succeeding. The server keeps the binding active, so the bridge
+    // must retry and reopen, not permanently fail on the transient blip.
+    // Treating every non-2xx probe as a lost binding turns this red.
+    const p = await peer({ endStream: true, reopenProbeFailures: 1 });
     const b = bridge(p, {
       async handle(message) {
         return {

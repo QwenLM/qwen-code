@@ -230,7 +230,13 @@ export class ManagedClientFilesBridge {
       const status = await this.options.fetch(this.url('status'), {
         method: 'POST',
         headers: this.headers(true),
-        body: JSON.stringify({ sessionId: this.options.sessionId }),
+        // Prove the identity we are asking about: the server echoes the live
+        // generation/identity only to a caller that already knows it, so a
+        // second tab cannot read them off status and take over this downlink.
+        body: JSON.stringify({
+          sessionId: this.options.sessionId,
+          connectionId,
+        }),
         signal,
       });
       if (status.ok) {
@@ -239,8 +245,10 @@ export class ManagedClientFilesBridge {
           state?: string;
           generation?: number;
           connectionId?: string;
+          owned?: boolean;
         };
         if (
+          body.owned === true &&
           body.state === 'active' &&
           typeof body.generation === 'number' &&
           body.connectionId === connectionId
@@ -281,22 +289,38 @@ export class ManagedClientFilesBridge {
     const status = await this.options.fetch(this.url('status'), {
       method: 'POST',
       headers: this.headers(true),
-      body: JSON.stringify({ sessionId: this.options.sessionId }),
+      body: JSON.stringify({
+        sessionId: this.options.sessionId,
+        connectionId,
+      }),
       signal,
     });
-    if (status.ok) {
-      const body = (await status.json().catch(() => ({}))) as {
-        state?: string;
-        generation?: number;
-        connectionId?: string;
-      };
-      return (
-        body.state === 'active' &&
-        body.generation === generation &&
-        body.connectionId === connectionId
+    if (status.status >= 500) {
+      // A server-side probe failure is transient, not proof the binding is
+      // gone; surface it so the drain retries instead of permanently ending a
+      // registration the server still keeps active. A network failure throws
+      // out of fetch the same way.
+      throw new Error(
+        `client files status probe failed with HTTP ${status.status}`,
       );
     }
-    return false;
+    if (!status.ok) {
+      // A 4xx is a definitive refusal (the session or the execution authority
+      // is gone), not a transient blip.
+      return false;
+    }
+    const body = (await status.json().catch(() => ({}))) as {
+      state?: string;
+      generation?: number;
+      connectionId?: string;
+      owned?: boolean;
+    };
+    return (
+      body.owned === true &&
+      body.state === 'active' &&
+      body.generation === generation &&
+      body.connectionId === connectionId
+    );
   }
 
   /** Stops the downlink and unregisters the binding (best-effort). Idempotent:
@@ -376,7 +400,17 @@ export class ManagedClientFilesBridge {
       // A clean end (the emitter's idle timeout) is not a lost binding: reopen
       // the downlink while the binding still carries this registration's
       // identity. A closed, rotated, or superseded binding ends the bridge.
-      const owned = await this.ownsConnection(signal, connectionId, generation);
+      let owned: boolean;
+      try {
+        owned = await this.ownsConnection(signal, connectionId, generation);
+      } catch (probeFailure) {
+        if (signal.aborted) throw probeFailure;
+        // A transient probe failure (5xx / network) is not a lost binding: the
+        // server may still keep the registration active. Retry the downlink
+        // instead of permanently ending it on a single blip.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        continue;
+      }
       if (!owned) {
         this.running = false;
         this.setState({
