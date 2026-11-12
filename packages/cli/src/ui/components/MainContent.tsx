@@ -384,6 +384,10 @@ export const MainContent = ({
       const label = kind === 'turn' ? 'turn' : 'output';
       const target = findAdjacentAnchor(
         items,
+        // The reading-position anchor is what makes one keypress move exactly
+        // one boundary: it is the top row while scrolled up, and the tail
+        // while following output. So "previous" first lands on the prompt of
+        // the turn you are inside, then on the turn before it.
         list.getScrollIndex(),
         direction,
         kind,

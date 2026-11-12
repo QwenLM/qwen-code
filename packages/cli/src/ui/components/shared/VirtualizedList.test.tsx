@@ -510,6 +510,48 @@ describe('<VirtualizedList />', () => {
     expect(listRef!.getScrollIndex()).toBe(12);
   });
 
+  it('getScrollIndex keeps the reading-position anchor structure navigation relies on', () => {
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={makeItems(50)}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={49}
+          containerHeight={5}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    expect(listRef).not.toBeNull();
+
+    act(() => {
+      listRef!.scrollToEnd();
+    });
+    rerender(<Wrapper />);
+    // Bottom-stuck means "inside the last turn": the anchor is the tail, so a
+    // previous-step lands on the current turn's prompt first, then earlier.
+    expect(listRef!.getScrollIndex()).toBe(49);
+
+    // An explicit jump re-anchors the reading position to the target item.
+    act(() => {
+      listRef!.scrollToIndex({ index: 12 });
+    });
+    rerender(<Wrapper />);
+    expect(listRef!.getScrollIndex()).toBe(12);
+  });
+
   it('survives a renderItem that throws (isolates per-item errors)', () => {
     const data = makeItems(3);
     const renderWithBomb = ({ item }: { item: Item }) => {

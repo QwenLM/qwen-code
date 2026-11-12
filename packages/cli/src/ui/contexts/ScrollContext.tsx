@@ -31,8 +31,11 @@ export interface ScrollActions {
   /** Follow the newest output again. No-op outside the virtual viewport. */
   scrollToEnd?: () => void;
   /**
-   * Index of the item currently at the top of the viewport, or null when the
-   * viewport is not virtualized or has not been measured yet.
+   * Index of the item the viewport's scroll position is anchored to: the top
+   * row while scrolled up, the last item while following output. Used as the
+   * reading position transcript search starts from, and as the origin for
+   * "restore my position" when search is cancelled. Null when the viewport is
+   * not virtualized or not measured yet.
    */
   getScrollIndex?: () => number | null;
 }
