@@ -55,6 +55,7 @@ export function questionWaitDefinitionAdmitted(
       'hosted-workspace-files/2',
       'hosted-workspace-files/3',
       'hosted-workspace-shell/1',
+      'hosted-workspace-shell/3',
     ].includes(String(definition['toolProfile'] ?? 'hosted-workspace-files/1'))
   )
     return false;
@@ -67,7 +68,8 @@ export function questionWaitDefinitionAdmitted(
   return (
     definition['publicChildAgentsVersion'] === 1 &&
     (expectedDepth === undefined || expectedDepth === 1) &&
-    definition['toolProfile'] === 'hosted-workspace-shell/1' &&
+    (definition['toolProfile'] === 'hosted-workspace-shell/1' ||
+      definition['toolProfile'] === 'hosted-workspace-shell/3') &&
     child['depth'] === 1 &&
     typeof child['parentSessionId'] === 'string' &&
     child['parentSessionId'] === child['rootSessionId'] &&

@@ -42,12 +42,15 @@ public class JdbcManagedSessionStore
         implements ManagedSessionStore {
     private final JournalStoreRows storeRows;
     private final JournalFencing fencing;
-    private final JournalHistoryQueries historyQueries;
+    private final JdbcTemplate jdbc;
+    private final ToolPublicationObjectStore publicationObjects;
+    private JournalHistoryQueries historyQueries;
     private final JournalLifecycleAuthorization lifecycleAuthorization;
     private final JournalResourceReads resourceReads;
     private final JournalResourceWrites resourceWrites;
     private final JournalWriterLifecycle writerLifecycle;
     private final JournalCommit commits;
+    private final JdbcJournalPacks journalPacks;
     private final org.springframework.transaction.support.TransactionTemplate writerTransactions;
 
     public JdbcManagedSessionStore(JdbcTemplate jdbc) {
@@ -62,7 +65,7 @@ public class JdbcManagedSessionStore
             JdbcManagedActionStore actions) {
         this(jdbc, extensionRecords, actions, null,
                 com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
-                null, null, null, null, null, WriterCredentialPolicy.unbound(), null);
+                null, null, null, null, null, WriterCredentialPolicy.unbound(), null, null);
     }
 
     @Autowired
@@ -76,7 +79,9 @@ public class JdbcManagedSessionStore
             @org.springframework.lang.Nullable JdbcManagedToolResultStore toolResults,
             @org.springframework.lang.Nullable JournalEventTransport journalEventTransport,
             WriterCredentialPolicy credentials,
-            @org.springframework.lang.Nullable RuntimeBindingRepository bindings) {
+            @org.springframework.lang.Nullable RuntimeBindingRepository bindings,
+            @org.springframework.lang.Nullable
+            com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings sessionResourceSettings) {
         if (lifecycleExecution == null || lifecycleSessions == null) {
             lifecycleExecution = null;
             lifecycleSessions = null;
@@ -93,14 +98,18 @@ public class JdbcManagedSessionStore
         ToolPublicationRetentionStore outputRetention = new ToolPublicationRetentionStore(jdbc, manager);
         var ownerReads = new org.springframework.transaction.support.TransactionTemplate(manager);
         ownerReads.setTimeout(10);
-        this.storeRows = new JournalStoreRows(readerVersion, jdbc);
-        this.fencing = new JournalFencing(storeRows, jdbc, journalEventTransport, credentials, csiBindings);
-        this.historyQueries = new JournalHistoryQueries(fencing, storeRows, jdbc);
+        this.journalPacks = sessionResourceSettings == null ? null
+                : new JdbcJournalPacks(jdbc, publicationObjects, sessionResourceSettings);
+        this.storeRows = new JournalStoreRows(readerVersion, jdbc, publicationObjects);
+        this.jdbc = jdbc;
+        this.publicationObjects = publicationObjects;
+        this.fencing = new JournalFencing(storeRows, jdbc, journalEventTransport, credentials, csiBindings, journalPacks);
+        this.historyQueries = new JournalHistoryQueries(fencing, storeRows, jdbc, journalPacks);
         this.lifecycleAuthorization = new JournalLifecycleAuthorization(fencing, storeRows, harnessRules, jdbc, extensionRecords, lifecycleExecution, lifecycleSessions);
         this.resourceReads = new JournalResourceReads(fencing, storeRows, jdbc, publicationObjects, outputRetention, ownerReads);
-        this.resourceWrites = new JournalResourceWrites(fencing, storeRows, jdbc);
-        this.writerLifecycle = new JournalWriterLifecycle(fencing, storeRows, readerVersion, jdbc, credentials, csiBindings, extensionRecords);
-        this.commits = new JournalCommit(fencing, lifecycleAuthorization, resourceWrites, storeRows, readerVersion, jdbc, toolResults, journalEventTransport, extensionRecords, actions);
+        this.resourceWrites = new JournalResourceWrites(fencing, storeRows, jdbc, sessionResourceSettings);
+        this.writerLifecycle = new JournalWriterLifecycle(fencing, storeRows, readerVersion, jdbc, credentials, csiBindings, extensionRecords, journalPacks);
+        this.commits = new JournalCommit(fencing, lifecycleAuthorization, resourceWrites, storeRows, readerVersion, jdbc, toolResults, journalEventTransport, extensionRecords, actions, journalPacks);
     }
 
     static final int GUARD_ACQUIRE_TIMEOUT_SECONDS = JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS;
@@ -144,6 +153,10 @@ public class JdbcManagedSessionStore
 
     boolean usesDataSource(javax.sql.DataSource source) {
         return storeRows.usesDataSource(source);
+    }
+
+    JdbcJournalPacks journalPacks() {
+        return journalPacks;
     }
 
     record PublicationWriter(long now, long leaseUntil, long journalRevision,

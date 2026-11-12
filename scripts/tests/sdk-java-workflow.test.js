@@ -2875,10 +2875,15 @@ describe('SDK Java contract version guard', () => {
     expect(step.if).toBe(
       "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}",
     );
-    expect(index).toBeGreaterThan(names.indexOf('Check lint gate freshness'));
+    // The freshness check now runs after `npm ci` (it parses ci.yml with the
+    // `yaml` dependency), so both cheap guards come before it, not after.
+    expect(index).toBeLessThan(names.indexOf('Check lint gate freshness'));
     expect(
       names.indexOf('Check Flyway migration versions are unique'),
-    ).toBeGreaterThan(names.indexOf('Check lint gate freshness'));
+    ).toBeLessThan(names.indexOf('Check lint gate freshness'));
+    expect(names.indexOf('Check lint gate freshness')).toBeGreaterThan(
+      parsed.steps.findIndex((s) => s.run?.includes('pnpm install')),
+    );
     expect(index).toBeLessThan(
       parsed.steps.findIndex((s) => s.run?.includes('pnpm install')),
     );

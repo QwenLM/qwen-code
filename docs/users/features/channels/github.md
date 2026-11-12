@@ -92,6 +92,7 @@ Local `gh` authentication requires an HTTPS `baseUrl` so the daemon host credent
 | `repoFilterMode`          | `"off"`                  | Repository event filter: `"allowlist"` processes only the repositories listed in `repoFilter`, `"blocklist"` processes all except them, `"off"` processes everything. Applies to notification intake only                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `repoFilter`              | unset                    | `owner/repo` repository names used by `repoFilterMode`; required while the mode is `"allowlist"` or `"blocklist"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `deliverToBoundSessions`  | `false`                  | Deliver events for PRs bound to a live session into that session as a prompt instead of a channel-owned session (daemon-managed channels only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `requireBoundWatch`       | `false`                  | Only deliver bound events to `review`/`verify` sessions while the same session holds an active watch on that PR (an `/autofix-pr` watch or `/verify-pr <n> --watch`). One-shot `/review` and `/verify-pr` sessions stay bound but receive nothing; events with no eligible session retire privately, never as a public reply. `fix` and untyped bindings are unaffected, and an unknown watch state (detection failure) keeps delivering. Requires `deliverToBoundSessions`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `prCommentWatch`          | `true`                   | Poll same-account conversation and inline review comments on bound PRs and deliver each new one to every bound session that did not post it (comments posted under the channel's GitHub account by another session/agent). Other-account comments stay with the notification lanes. Set `false` to disable. Requires `deliverToBoundSessions`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `prWatchEvents`           | unset                    | Optional state transitions to watch for bound PRs: `ci_failure`, `merge_conflict`, `head_change`, `state_change`. Requires `deliverToBoundSessions`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `prWatchLimit`            | `30`                     | Maximum open bound PRs watched per poll, kept between 1 and 500. Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR still issues about one `pulls.get` per poll when state events are subscribed (~60 requests/hour at the 60s default), but an unchanged PR answers `304` and costs no primary rate limit, so the state watch is near-free while PRs are quiet. What still counts is the default-on comment watch's two list calls per ~2-minute re-check (~60 requests/hour/PR) and the periodic CI re-checks, which put a 5000/hour PAT budget at roughly 70–75 bound PRs. The ceiling moved from the state watch to the comment watch — it did not disappear, so do not read "near-free" as "unlimited"; over budget, every watch pass still aborts on rate limits. Raise `pollInterval` when raising this. Requires `deliverToBoundSessions` (with `prWatchEvents` and/or the default-on `prCommentWatch`) |
@@ -200,13 +201,27 @@ when the reset already looks past, which means the local clock is ahead). If it
 still fails, or the channel stops during the wait, the channel stores the
 final reply in
 `~/.qwen/channels/<workspace-scope>/<channel>-<name-hash>-github-pending-deliveries.json`
-with private file permissions and retries it on the next channel start. That
-retry stops sending at the first stored reply GitHub still rate-limits and
-keeps the later ones for the following start, together with that reply when
-GitHub's headers prove it was not posted; replies the audit already records as
-posted are dropped. The corresponding inbound task
-remains in `reply_pending` state until that delivery succeeds or reaches a
-definite terminal failure. Ambiguous delivery failures are not retried
+with private file permissions and retries it in the background without
+rerunning the agent: while the channel runs, and again at the next channel
+start. While it runs, the first poll whose notification check succeeds after
+the wait starts a retry; a channel that delivers to bound sessions makes no
+such check until a binding snapshot arrives that is complete or lists a
+binding, or for 30 binding scans after an empty partial one. The wait is the
+`retry-after` of the refusal, or of the answer that stopped the previous retry,
+or the budget reset when the hourly budget is exhausted, but at least five
+minutes after the refusal or the previous retry (doubled after each retry that
+leaves replies behind, an unreadable pending file included, and five minutes
+again once a retry leaves none) and at most an hour. Such a retry makes one
+attempt per reply; the one at start waits as above. Each retry, the one at
+start included, stops sending at the first answer that would turn the later
+replies away too and keeps those for the next retry: a refusal proven by
+GitHub's headers or a credential GitHub does not accept (401) keeps that reply
+as well, while another rate limit or a server or network failure drops that
+reply as ambiguous. Replies the audit already records as posted are dropped,
+and so are replies the running channel already posted or sent with an
+ambiguous answer, even if it could not record that. The corresponding inbound
+task remains in `reply_pending` state until that delivery succeeds or the reply
+is dropped. Ambiguous delivery failures are not retried
 automatically because GitHub may have created the comment: the audit records
 `failed_ambiguous` and the reply is not kept. A rate-limit answer without a
 numeric `x-ratelimit-remaining` header, such as a 429 with only `retry-after`
@@ -219,6 +234,9 @@ By default every event is handled by a channel-owned session. With
 (the PR bindings shown in the Web Shell sidebar, registered when a session
 creates or reviews a PR) are delivered into that session as a prompt instead,
 so the session that follows the PR handles the event with its existing context.
+With `requireBoundWatch: true` this delivery is further scoped: `review` and
+`verify` sessions receive events only while they hold an active watch on the
+PR (see below).
 
 Public-path replies (events with no bound session, including the fallback
 when a bound session has gone and no replacement exists) run in a background
@@ -234,11 +252,44 @@ thread is re-read once the turn settles.
 - The injected prompt marks all GitHub content as untrusted event data. The
   session's reply stays in the session; it is **not** published to GitHub
   automatically, and the session may act on GitHub through its own tools.
+- The product-authored text of the injected prompt (the envelope, the
+  built-in role guidance, the delivery provenance, and watch summaries)
+  follows the channel's UI language: it is Chinese when `general.language`
+  resolves to Chinese (`zh`, `zh-*`, `中文`), and keeps the previous English
+  wording for every other value. Structural markers (the
+  `Type:`/`Title:`/`URL:`/`Trigger:`/`Event:`/`Author:`/`Role:` data lines, the
+  `File:` and `Comment:` labels used by the comment watch, the trusted-block
+  label `[Operator instruction — trusted]` and `Source:`) and platform-derived
+  values (PR titles, comment bodies, check names) are never translated, and
+  operator templates render verbatim in the language they were written in.
+  The language is read at channel startup; a watch summary already detected
+  keeps the language it was rendered with until it is delivered.
 - Comment sender, repository and pairing gates still apply before delivery.
   When several sessions are bound to the same PR, the most recently updated
   non-archived session wins; channel-owned sessions are never candidates. With
   `boundSessionActions` configured, routing becomes role-aware instead: one
   winner per role, fan-out across roles (see below).
+- **Active-watch gate (`requireBoundWatch`).** Bindings are minted automatically
+  for any session that ran `/review <n>` or `/verify-pr <n>` — one-shot commands
+  whose sessions are not watching the PR afterwards. With
+  `requireBoundWatch: true`, a `review` or `verify` binding receives events only
+  while the SAME session holds an active watch on the SAME PR: an `/autofix-pr`
+  watch or a `/verify-pr <n> --watch` standing trigger it installed itself.
+  Sessions without a watch stay bound (the badge and the binding remain) but
+  are not delivery targets; an event whose PR has followers but no eligible
+  session retires privately — never a public reply. The pre-claim skip lanes
+  (dispatch, comment watch, mention lane) journal `bound_watch_required`;
+  delivery-time and gone-fallback retirements keep their own reasons
+  (`bound_no_candidate`, `watch_no_candidate`, `watch_no_target`,
+  `siblings_still_follow`). `fix` and untyped bindings are unaffected. Watch
+  state is derived at scan time from the artifacts the watch flows already
+  write; when detection cannot determine it (a failing scan, an older daemon,
+  an unparseable gate), delivery continues as if the gate were off
+  (fail-open). In the comment watch and the PR-watch drains, a watch installed
+  just after a snapshot was fetched earns the first gated event one grace
+  cycle, so the event it was installed to catch is delivered on the next pass
+  instead of being skipped; notification- and mention-lane events are not
+  held.
 - A plain conversation comment on a bound PR reaches the session without a
   mention when the repository's group sender policy is an allowlist that lists
   the sender: the mention requirement (`groups.*.requireMention`) keeps ambient
