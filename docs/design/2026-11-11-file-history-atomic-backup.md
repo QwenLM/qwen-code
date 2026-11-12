@@ -199,8 +199,9 @@ resets `fileHistoryService` but leaves `sessionData` untouched; the lazy
 (the resume-time payload) against the **new** cwd. In a resumed session, a
 rewind to a pre-`cd` checkpoint could restore relative tracking paths under
 the new directory. This is a directory-relocation question, not a worktree
-enter/exit question; it is recorded here for a separate issue and is not
-changed by this pilot.
+enter/exit question; it is tracked as #16982 (which asks for an end-to-end
+reproduction before implementing per-snapshot cwd) and is not changed by
+this pilot.
 
 ## Constraints
 
@@ -342,5 +343,5 @@ changed by this pilot.
 
 ## Open questions
 
-None. The `cwd` item is resolved as "documented, no change"; the `/cd`
-rehydration observation is deferred to a separate issue.
+None. The `cwd` item is resolved as "documented, no change" for worktree
+enter/exit; the `/cd` rehydration observation is tracked as #16982.

@@ -163,8 +163,8 @@ issue 要求**仅在确认 enter/exit worktree 存在真实错误恢复缺陷时
 `sessionData`；随后惰性的 `getFileHistoryService()` 会把
 `sessionData.fileHistorySnapshots`（resume 时载入的载荷）按**新** cwd 重新
 水合。在已 resume 的会话里，rewind 到 `cd` 之前的检查点可能把相对跟踪路径恢复
-到新目录下。这是目录 relocate 问题，不是 worktree enter/exit 问题；记录在此
-供单独立项，本试点不改动。
+到新目录下。这是目录 relocate 问题，不是 worktree enter/exit 问题；已立
+#16982 跟踪（要求实现逐快照 cwd 前先落端到端复现），本试点不改动。
 
 ## 约束
 
@@ -273,4 +273,5 @@ issue 要求**仅在确认 enter/exit worktree 存在真实错误恢复缺陷时
 
 ## 开放问题
 
-无。`cwd` 项已按「已评估、无需改动」解决；`/cd` 水合观察推迟到单独 issue。
+无。`cwd` 项对 worktree enter/exit 已按「已评估、无需改动」解决；`/cd` 水合
+观察已立 #16982 跟踪。
