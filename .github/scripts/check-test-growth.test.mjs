@@ -190,6 +190,9 @@ test('ci.yml runs the check in lint_and_static on pull requests', () => {
     'github.event.pull_request.base.sha',
     'github.event.pull_request.head.sha',
     'node .github/scripts/check-test-growth.mjs',
+    // Same silent-drift class as above: with no token the script warns and
+    // exits 0 without a summary, so the report is permanently a no-op.
+    'GITHUB_TOKEN: ',
   ]) {
     assert.ok(stepBlock.includes(expected), `step must include ${expected}`);
   }
