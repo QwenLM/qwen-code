@@ -2282,19 +2282,56 @@ async function handleDaemonRoute(
     const displayName = readStringField(body, 'displayName');
     const prInput = getRecordValue(body, 'pr');
     let prs = summary.prs ?? [];
-    if (prInput && typeof prInput === 'object') {
-      const pr = prInput as Record<string, unknown>;
-      const state = pr['state'];
-      if (typeof pr['number'] === 'number' && typeof pr['url'] === 'string') {
-        const entry = {
-          number: pr['number'],
-          url: pr['url'],
-          ...(state === 'open' || state === 'merged' || state === 'closed'
-            ? { state }
-            : {}),
-        };
-        prs = [...prs.filter((p) => p.number !== entry.number), entry];
+    if (prInput !== undefined) {
+      // Mirror the real route's parseSessionPrBody: an invalid pr is a 400
+      // invalid_metadata, not a payload the mock silently accepts.
+      const pr = isRecord(prInput) ? prInput : null;
+      const number = pr?.['number'];
+      const url = pr?.['url'];
+      const state = pr?.['state'];
+      const role = pr?.['role'];
+      if (
+        pr === null ||
+        typeof number !== 'number' ||
+        !Number.isInteger(number) ||
+        number <= 0 ||
+        typeof url !== 'string' ||
+        url.length > 2048 ||
+        !/^https?:\/\//i.test(url) ||
+        Array.from(url).some((character) => {
+          const code = character.charCodeAt(0);
+          return code <= 31 || code === 127;
+        }) ||
+        (state !== undefined &&
+          state !== 'open' &&
+          state !== 'merged' &&
+          state !== 'closed') ||
+        (role !== undefined &&
+          role !== null &&
+          role !== 'review' &&
+          role !== 'verify' &&
+          role !== 'fix')
+      ) {
+        await json(
+          route,
+          {
+            code: 'invalid_metadata',
+            field: 'pr',
+            message:
+              '`pr` must be an object with a positive integer `number` and an http(s) `url` of at most 2048 characters, without control characters, an optional valid `state` and `role`.',
+          },
+          400,
+        );
+        return;
       }
+      const entry = {
+        number,
+        url,
+        ...(state === 'open' || state === 'merged' || state === 'closed'
+          ? { state }
+          : {}),
+      };
+      prs = [...prs.filter((p) => p.number !== entry.number), entry];
     }
     scenario.sessions[index] = {
       ...summary,

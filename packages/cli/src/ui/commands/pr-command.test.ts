@@ -13,7 +13,6 @@ const mocks = vi.hoisted(() => ({
   upsertSessionPrs: vi.fn(),
   isValidSessionPrUrl: vi.fn(),
   fetchPullRequestByReference: vi.fn(),
-  pullRequestViewUrl: vi.fn(),
 }));
 
 vi.mock('@qwen-code/qwen-code-core/services/session-pr-service.js', () => ({
@@ -22,10 +21,21 @@ vi.mock('@qwen-code/qwen-code-core/services/session-pr-service.js', () => ({
   isValidSessionPrUrl: mocks.isValidSessionPrUrl,
 }));
 
-vi.mock('@qwen-code/qwen-code-core/utils/github-prs.js', () => ({
-  fetchPullRequestByReference: mocks.fetchPullRequestByReference,
-  pullRequestViewUrl: mocks.pullRequestViewUrl,
-}));
+// Keep the producer's own pullRequestViewUrl rather than a hand-copy that
+// could drift from it; only the gh round trip is mocked.
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/github-prs.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/github-prs.js')
+      >();
+    return {
+      ...actual,
+      fetchPullRequestByReference: mocks.fetchPullRequestByReference,
+    };
+  },
+);
 
 const SESSION_ID = 'sess-pr-1';
 const PR_PATH = `/tmp/chats/${SESSION_ID}.active.pr.json`;
@@ -85,28 +95,6 @@ beforeEach(() => {
     status: 'pr',
     ...RESOLVED,
   });
-  // Faithful mirror of the core pullRequestViewUrl (new URL + the
-  // case-sensitive /pull/<n> path rule): strips userinfo and subpaths, and
-  // returns undefined for shapes like /PULL/5 or an encoded owner, so the
-  // command's `?? inputUrl` fallback is reachable here as it is in production.
-  mocks.pullRequestViewUrl.mockImplementation((url: string) => {
-    let parsed: URL;
-    try {
-      parsed = new URL(url);
-    } catch {
-      return undefined;
-    }
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-      return undefined;
-    }
-    const match =
-      /^\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)(?:\/|\.diff$|\.patch$|$)/.exec(
-        parsed.pathname,
-      );
-    const number = match ? Number(match[3]) : Number.NaN;
-    if (!match || !Number.isSafeInteger(number) || number < 1) return undefined;
-    return `${parsed.protocol}//${parsed.host}/${match[1]}/${match[2]}/pull/${number}`;
-  });
 });
 
 describe('prCommand', () => {
@@ -138,6 +126,9 @@ describe('prCommand', () => {
     });
     expect((result as { content: string }).content).toContain('/pr');
     expect(mocks.upsertSessionPrs).not.toHaveBeenCalled();
+    // Pin the read path: an active session must read the active sidecar, not
+    // the archived one (the mock otherwise answers any path identically).
+    expect(mocks.readSessionPrsDetailed).toHaveBeenCalledWith(PR_PATH);
   });
 
   it('lists bound PRs when no argument', async () => {
@@ -158,6 +149,7 @@ describe('prCommand', () => {
     const content = (result as { content: string }).content;
     expect(content).toContain('#16865 (open)');
     expect(content).toContain('#42 (merged)');
+    expect(mocks.readSessionPrsDetailed).toHaveBeenCalledWith(PR_PATH);
   });
 
   it('rejects an invalid reference', async () => {
@@ -451,9 +443,12 @@ describe('prCommand', () => {
       alreadyBound: [],
       unresolved: [RESOLVED.number],
     });
-    const { context } = createContext();
+    const { context, sessionService } = createContext();
     const result = await prCommand.action?.(context, '16865');
     expect((result as { messageType: string }).messageType).toBe('error');
+    // The other half of the announce guard: a declined entry (neither added
+    // nor already-bound) must not notify the catalog.
+    expect(sessionService.emitSessionPrBound).not.toHaveBeenCalled();
   });
 
   it('falls back to the active sidecar when the location query fails', async () => {

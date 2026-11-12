@@ -194,6 +194,10 @@ describe('BindSessionPrDialog', () => {
     await type('16865');
     await submit();
     expect(onSubmit).not.toHaveBeenCalled();
+    // The cwd-less arm shares this message but never fetches; asserting the
+    // fetch happened pins that the failure arm (not the cwd-less short-circuit)
+    // produced the alert.
+    expect(workspaceGitHubPullRequests).toHaveBeenCalled();
     expect(document.querySelector('[role="alert"]')?.textContent).toContain(
       'full PR URL',
     );
@@ -384,7 +388,7 @@ describe('BindSessionPrDialog', () => {
         resolveList = resolve;
       }),
     );
-    const { onClose } = await render();
+    const { onClose, onSubmit } = await render();
     await type('16865');
     await submit();
     // No modal trap: Cancel stays enabled during a slow list fetch.
@@ -395,9 +399,15 @@ describe('BindSessionPrDialog', () => {
     expect(cancel!.disabled).toBe(false);
     act(() => cancel!.click());
     expect(onClose).toHaveBeenCalled();
+    // The parent unmounts on close; the in-flight resolution must not submit
+    // the cancelled dialog (the aliveRef guard), not merely stay dismissible.
+    await act(async () => {
+      root.render(<I18nProvider language="en">{null}</I18nProvider>);
+    });
     await act(async () => {
       resolveList(LIST_RESPONSE);
     });
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it('marks the form busy and keeps Cancel enabled during the bind write', async () => {
@@ -426,5 +436,27 @@ describe('BindSessionPrDialog', () => {
     });
     expect(event.defaultPrevented).toBe(true);
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('lets a plain Enter through to submit (the other side of the IME guard)', async () => {
+    const { onSubmit } = await render();
+    await type('https://github.com/QwenLM/qwen-code/pull/16865');
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      isComposing: false,
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      input().dispatchEvent(event);
+    });
+    // A non-IME Enter must not be prevented, so the form's native submit
+    // proceeds; the IME test pins the prevented side, this pins the allowed side.
+    expect(event.defaultPrevented).toBe(false);
+    await submit();
+    expect(onSubmit).toHaveBeenCalledWith({
+      number: 16865,
+      url: 'https://github.com/QwenLM/qwen-code/pull/16865',
+    });
   });
 });

@@ -3748,6 +3748,10 @@ describe('SessionOverviewPanel', () => {
         ),
     );
     await flushAsync();
+    // Pin the workspaceCwd the panel handed the bind dialog: the bare-number
+    // resolution fetches the PR list through that cwd, so routing the dialog
+    // at the wrong workspace would be caught here.
+    expect(workspaceClient.workspaceByCwd).toHaveBeenCalledWith('/w');
     expect(workspaceActions.bindSessionPr).toHaveBeenCalledWith({
       number: 16865,
       url: prUrl,

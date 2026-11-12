@@ -37,7 +37,7 @@ TUI or the Web Shell, and in practice the agent has to be reminded to run it.
 | Surface                                                        | State                                                                                                                                 |
 | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | REST `PATCH /session/:id/metadata` (and workspace-scoped twin) | Accepts `pr`; persists the sidecar with `source: 'create'`. Requires token + session id + full body.                                  |
-| ACP `qwen/session/update_metadata`                             | Accepts `metadata.pr`; same persistence and reconciliation (`acp-http/dispatch.ts`).                                                  |
+| ACP `_qwen/session/update_metadata`                            | Accepts `metadata.pr`; same persistence and reconciliation (`acp-http/dispatch.ts`).                                                  |
 | SDK `DaemonSessionClient.updateMetadata`                       | Already typed `{displayName?, pr?}`; the Web Shell Git dialog already sends `pr` through the workspace REST twin after creating a PR. |
 | Web Shell UI                                                   | No entry for binding an arbitrary existing PR; `updateMetadata` is only used for renames and the Git dialog's post-create write.      |
 | Slash commands                                                 | No PR-binding command exists.                                                                                                         |

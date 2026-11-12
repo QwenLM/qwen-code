@@ -1529,6 +1529,26 @@ describe('fetchPullRequestByReference', () => {
     expect(mockExecFile).not.toHaveBeenCalled();
   });
 
+  it('refuses a file cwd inside a surviving repository (the deleted-cwd sibling)', async () => {
+    // Same root cause one spelling over: a cwd that exists but is a regular
+    // file under a surviving repo. findGitRoot still resolves the ancestor,
+    // so the pre-check must reject the caller-named path itself. Reordering
+    // the check back after findGitRoot reds this too.
+    const repo = tmp.repo();
+    const filePath = path.join(repo, 'not-a-dir');
+    fs.writeFileSync(filePath, 'x');
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/ancestor/repo/pull/77',
+      state: 'OPEN',
+    });
+    expect(await fetchPullRequestByReference(filePath, '77')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
   it('fails closed on an unrecognizable state', async () => {
     mockGhSuccess({
       number: 77,

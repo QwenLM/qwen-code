@@ -313,6 +313,24 @@ describe('WebShellSidebar bind PR', () => {
     expect(menuItem(menu, 'Bind PR')).toBeUndefined();
   });
 
+  it('shows Bind PR for the current session in a mutable scope even without capabilities', async () => {
+    // The first arm of canMutateSessionMetadata (isCurrentSession &&
+    // isMutableSessionScope) short-circuits before any capability check, so the
+    // attached session in the primary workspace shows Bind PR with no
+    // capabilities at all — the contrast to the non-current row above. Adding
+    // a capability requirement to that arm reds this test.
+    connection.sessionId = 's1';
+    connection.capabilities = { qwenCodeVersion: '1.2.3', features: [] };
+    workspace.capabilities = { qwenCodeVersion: '1.2.3', features: [] };
+    active.sessions = [makeSession('s1')];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    const menu = await openSessionMenu();
+    expect(menuItem(menu, 'Bind PR')).not.toBeUndefined();
+  });
+
   it('reopening Bind PR after cancelling a pending write is not a dead form', async () => {
     connection.sessionId = 's1';
     active.sessions = [makeSession('s1')];

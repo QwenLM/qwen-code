@@ -33,7 +33,7 @@ Shell 里的用户够不着这条路径，实践中总要提醒 agent 去跑。
 | 面                                                                | 状态                                                                                                    |
 | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | REST `PATCH /session/:id/metadata`（及 workspace 作用域孪生路由） | 接受 `pr`；以 `source: 'create'` 落盘 sidecar。需要 token + 会话 id + 完整 body。                       |
-| ACP `qwen/session/update_metadata`                                | 接受 `metadata.pr`；同样的落盘与对账（`acp-http/dispatch.ts`）。                                        |
+| ACP `_qwen/session/update_metadata`                               | 接受 `metadata.pr`；同样的落盘与对账（`acp-http/dispatch.ts`）。                                        |
 | SDK `DaemonSessionClient.updateMetadata`                          | 类型已是 `{displayName?, pr?}`；Web Shell Git 对话框创建 PR 后已经经 workspace REST 孪生路由发送 `pr`。 |
 | Web Shell UI                                                      | 没有绑定任意既有 PR 的入口；`updateMetadata` 只用于改名与 Git 对话框的创建后回写。                      |
 | Slash 命令                                                        | 不存在 PR 绑定命令。                                                                                    |
