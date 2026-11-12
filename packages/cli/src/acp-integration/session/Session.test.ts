@@ -28,6 +28,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { detectTurnInterruption } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
+import type { UserTurnInput } from '@qwen-code/qwen-code-core/core/client.js';
 import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import {
@@ -4872,6 +4873,9 @@ describe('Session', () => {
     /** Streams each round's events from LlmClient, then empty rounds. */
     function useSharedRounds(...rounds: RoundEvent[][]) {
       mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
+      agentTelemetry.getActiveInteractionSpan.mockReturnValue(
+        agentTelemetry.span,
+      );
       Object.assign(mockLlmClient, {
         admitUserPrompt: vi.fn().mockResolvedValue({ blocked: false }),
       });
@@ -5000,9 +5004,19 @@ describe('Session', () => {
       expect(send).toHaveBeenCalledOnce();
       expect(send.mock.calls[0][3]).toMatchObject({
         type: core.SendMessageType.UserQuery,
-        userTurnRecordedByHost: true,
+        userTurn: {
+          record: {
+            kind: 'recorded',
+            record: { kind: 'user', message: 'hello' },
+          },
+          todoWorkChain: { promptId: send.mock.calls[0][2] },
+          fileHistory: {
+            promptId: send.mock.calls[0][2],
+            outcome: 'attempted',
+          },
+        },
         workflowModeEligible: true,
-        interactionSpanByHost: true,
+        interactionSpan: agentTelemetry.span,
         promptAdmission: { blocked: false },
         // Recall searches the prompt text, not the resolved request.
         memoryRecallQuery: 'hello',
@@ -6097,7 +6111,7 @@ describe('Session', () => {
           expect(send).toHaveBeenCalledOnce();
           expect(send.mock.calls[0][3]).toMatchObject({
             type: core.SendMessageType.Retry,
-            userTurnRecordedByHost: true,
+            userTurn: { record: { kind: 'existing' } },
             historyPromptId: promptId,
           });
           // A retry runs UserPromptSubmit, as before; a continue does not.
@@ -6258,6 +6272,9 @@ describe('Session', () => {
         > = [];
         let pushCount = 0;
         mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
+        agentTelemetry.getActiveInteractionSpan.mockReturnValue(
+          agentTelemetry.span,
+        );
         Object.assign(mockChat, {
           getUserContentPushCount: vi.fn(() => pushCount),
         });
@@ -6330,8 +6347,17 @@ describe('Session', () => {
         expect(sends[1][0]).toEqual([{ text: 'nightly report' }]);
         expect(sends[1][3]).toMatchObject({
           type: core.SendMessageType.Cron,
-          userTurnRecordedByHost: true,
-          interactionSpanByHost: true,
+          userTurn: {
+            record: {
+              kind: 'deferred',
+              record: {
+                kind: 'cron',
+                message: [{ text: 'nightly report' }],
+                displayText: 'nightly report',
+              },
+            },
+          },
+          interactionSpan: agentTelemetry.span,
           toolCallPreparations: true,
         });
         expect(sends[1][3]['stopPolicies']).toHaveLength(1);
@@ -6503,9 +6529,9 @@ describe('Session', () => {
         expect(execute).toHaveBeenCalledOnce();
         expect(sends[2][3]).toMatchObject({
           type: core.SendMessageType.ToolResult,
-          interactionSpanByHost: true,
+          interactionSpan: agentTelemetry.span,
         });
-        expect(sends[2][3]).not.toHaveProperty('userTurnRecordedByHost');
+        expect(sends[2][3]).not.toHaveProperty('userTurn');
         expect(sends[2][0]).toContainEqual(
           expect.objectContaining({
             functionResponse: expect.objectContaining({ id: 'call-1' }),
@@ -6537,9 +6563,9 @@ describe('Session', () => {
         expect(sends).toHaveLength(1);
         expect(sends[0][3]).toMatchObject({
           type: core.SendMessageType.Notification,
-          userTurnRecordedByHost: true,
+          userTurn: { record: { kind: 'recorded' } },
         });
-        expect(sends[0][3]).not.toHaveProperty('interactionSpanByHost');
+        expect(sends[0][3]).not.toHaveProperty('interactionSpan');
         expect(sends[0][0]).toContainEqual({ text: '<task-notification />' });
         expect(
           backgroundResponses().map(
@@ -10674,12 +10700,15 @@ describe('Session', () => {
         Part[],
         AbortSignal,
         string,
-        { type: string; userTurnRecordedByHost?: boolean },
+        { type: string; userTurn?: UserTurnInput },
       ];
       expect(parts[0]?.functionResponse?.id).toBe('call-auq');
       expect(options).toMatchObject({
         type: core.SendMessageType.Retry,
-        userTurnRecordedByHost: true,
+        userTurn: {
+          record: { kind: 'existing' },
+          fileHistory: { outcome: 'restore-omitted' },
+        },
       });
       expect(options).not.toHaveProperty('promptAdmission');
     });
@@ -39421,7 +39450,12 @@ describe('Session', () => {
             goalPermit: permit,
             goalTurnKey: turnKey,
             goalOrigin: 'runtime',
-            userTurnRecordedByHost: true,
+            userTurn: {
+              record: {
+                kind: 'recorded',
+                record: { kind: 'goal', goalPermit: permit },
+              },
+            },
           });
           // The round's own signal: a cut or a cancel is left to the session.
           expect(sends[0][3]['goalSignal']).toBe(sends[0][1]);
@@ -39461,7 +39495,12 @@ describe('Session', () => {
             goalPermit: permit,
             goalTurnKey: expect.stringMatching(/^goal-user:/),
             goalOrigin: 'user',
-            userTurnRecordedByHost: true,
+            userTurn: {
+              record: {
+                kind: 'recorded',
+                record: { kind: 'user', message: 'hello' },
+              },
+            },
           });
           expect(
             mockChatRecordingService.recordUserMessage,

@@ -32,6 +32,7 @@ import type {
 import { buildAdvisorReminder } from './advisor-policy.js';
 import { isDeferredToolBridgeAvailable } from '../tools/tool-search.js';
 import { createUserContent } from './genai-compat.js';
+import type { Span } from '@opentelemetry/api';
 import process from 'node:process';
 
 // Config
@@ -117,7 +118,10 @@ import {
   LoopDetectionService,
 } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
-import type { UserPromptRecordPayload } from '../services/chatRecordingService.js';
+import type {
+  NotificationRecordPayload,
+  UserPromptRecordPayload,
+} from '../services/chatRecordingService.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
@@ -286,7 +290,9 @@ function hostContinuationOptions(
 ): Partial<SendMessageOptions> {
   return {
     ...(options?.toolCallPreparations && { toolCallPreparations: true }),
-    ...(options?.interactionSpanByHost && { interactionSpanByHost: true }),
+    ...(options?.interactionSpan && {
+      interactionSpan: options.interactionSpan,
+    }),
     ...(options?.toolLoopGuardsByHost && { toolLoopGuardsByHost: true }),
     ...(options?.skipMemoryExtraction && { skipMemoryExtraction: true }),
     ...(options?.stopPolicies && { stopPolicies: options.stopPolicies }),
@@ -304,6 +310,107 @@ function hostContinuationOptions(
 
 /** Upper bound on prompt ids tracked for an in-flight Stop-hook chain. */
 export const MAX_STOP_HOOK_CHAIN_PROMPT_IDS = 32;
+
+export type UserTurnRecord =
+  | {
+      kind: 'user';
+      message: PartListUnion;
+      payload?: UserPromptRecordPayload;
+      promptId?: string;
+      daemonPromptId?: string;
+      goalPermit?: GoalTurnPermit;
+    }
+  | {
+      kind: 'goal';
+      message: PartListUnion;
+      goalPermit: GoalTurnPermit;
+    }
+  | {
+      kind: 'cron';
+      message: PartListUnion;
+      displayText?: string;
+      goalPermit?: GoalTurnPermit;
+    }
+  | {
+      kind: 'notification';
+      message: PartListUnion;
+      displayText?: string;
+      backgroundTask?: NotificationRecordPayload['backgroundTask'];
+      goalPermit?: GoalTurnPermit;
+      deliveredTurn?: boolean;
+    };
+
+export interface UserTurnInput {
+  promptId: string;
+  record:
+    | { kind: 'recorded'; record: UserTurnRecord }
+    | { kind: 'existing'; promptId: string; taskId?: string }
+    | { kind: 'deferred'; record: UserTurnRecord };
+  todoWorkChain?: { promptId: string; continuedFrom?: string };
+  fileHistory?: {
+    promptId: string;
+    outcome: 'attempted' | 'restore-omitted';
+  };
+}
+
+export function recordUserTurn(
+  config: Config,
+  record: UserTurnRecord,
+): Extract<UserTurnInput['record'], { kind: 'recorded' }> {
+  const recorder = config.getChatRecordingService();
+  switch (record.kind) {
+    case 'user':
+      recorder?.recordUserMessage(
+        record.message,
+        record.goalPermit,
+        record.payload,
+        record.promptId,
+        record.daemonPromptId,
+      );
+      break;
+    case 'goal':
+      recorder?.recordGoalRuntimeMessage(record.message, record.goalPermit);
+      break;
+    case 'cron':
+      if (record.goalPermit === undefined) {
+        recorder?.recordCronPrompt(record.message, record.displayText);
+      } else {
+        recorder?.recordCronPrompt(
+          record.message,
+          record.displayText,
+          record.goalPermit,
+        );
+      }
+      break;
+    case 'notification':
+      if (record.deliveredTurn !== undefined) {
+        recorder?.recordNotification(
+          record.message,
+          record.displayText,
+          record.backgroundTask,
+          record.goalPermit,
+          record.deliveredTurn,
+        );
+      } else if (record.goalPermit !== undefined) {
+        recorder?.recordNotification(
+          record.message,
+          record.displayText,
+          record.backgroundTask,
+          record.goalPermit,
+        );
+      } else if (record.backgroundTask !== undefined) {
+        recorder?.recordNotification(
+          record.message,
+          record.displayText,
+          record.backgroundTask,
+        );
+      } else {
+        recorder?.recordNotification(record.message, record.displayText);
+      }
+      break;
+  }
+  return { kind: 'recorded', record };
+}
 
 interface StopHookChain {
   count: number;
@@ -355,17 +462,7 @@ export interface SendMessageOptions {
    * round it sends; the client carries it to the continuations it starts.
    */
   skipMemoryExtraction?: boolean;
-  /**
-   * The host already recorded this UserQuery's user message, started its todo
-   * work chain and took its file-history snapshot, as ACP does when it admits
-   * a prompt, so the client does none of them. On a Retry, the host started
-   * the todo work chain and keeps the attempt's recorded user message, so the
-   * client neither starts the chain nor records the message again. On a Goal
-   * turn, the host recorded the runtime continuation's message. On a Cron or
-   * Notification send, the host records the prompt or the notification
-   * itself.
-   */
-  userTurnRecordedByHost?: boolean;
+  userTurn?: UserTurnInput;
   /**
    * The rewindable identity a Retry's request carries in history: that of the
    * attempt it replaces. Spent by the first request.
@@ -378,11 +475,7 @@ export interface SendMessageOptions {
    * the Stop hook let the response stop.
    */
   stopPolicies?: readonly StopPolicy[];
-  /**
-   * The host keeps the interaction span open around its turn, so this send
-   * neither starts nor ends one.
-   */
-  interactionSpanByHost?: boolean;
+  interactionSpan?: Span;
   /**
    * The host runs its own tool-call guards and exploration budget and builds
    * the tool-result message with its todo reminder, so this send checks no
@@ -3947,11 +4040,17 @@ export class LlmClient {
       messageType === SendMessageType.Notification ||
       messageType === SendMessageType.Teammate ||
       messageType === SendMessageType.Goal;
-    const interactionSpanByHost = options?.interactionSpanByHost === true;
+    const userTurn =
+      options?.userTurn?.promptId === prompt_id ? options.userTurn : undefined;
+    const hasUserTurnRecord = userTurn !== undefined;
+    const hasTodoWorkChain = userTurn?.todoWorkChain?.promptId === prompt_id;
+    const hasFileHistory =
+      userTurn?.fileHistory?.promptId === prompt_id &&
+      userTurn.fileHistory.outcome === 'attempted';
+    const hostInteractionSpan = options?.interactionSpan;
     let interactionOwner =
-      startsInteraction || interactionSpanByHost
-        ? undefined
-        : getActiveInteractionSpan(prompt_id);
+      hostInteractionSpan ??
+      (startsInteraction ? undefined : getActiveInteractionSpan(prompt_id));
     if (interactionOwner) {
       recordInteractionActivity(prompt_id, interactionOwner);
     }
@@ -3961,6 +4060,10 @@ export class LlmClient {
       errorMessage?: string,
       errorType?: string,
     ) => {
+      if (hostInteractionSpan) {
+        this.interactionStartTypes.delete(prompt_id);
+        return;
+      }
       if (
         interactionOwner &&
         getActiveInteractionSpan(prompt_id) !== interactionOwner
@@ -4293,7 +4396,7 @@ export class LlmClient {
       // New input starts this interaction, so its first Stop is not
       // hook-forced even when a retry or goal turn reuses the prompt id.
       this.clearStopHookChain(prompt_id);
-      if (!interactionSpanByHost) {
+      if (!hostInteractionSpan) {
         startInteractionSpan(this.config, {
           promptId: prompt_id,
           model: options?.modelOverride ?? this.config.getModel(),
@@ -4636,7 +4739,7 @@ export class LlmClient {
       // under them without losing the resumed info item this record exists to
       // restore. See `ChatRecord.deliveredTurn` for that accepted imprecision
       // and the test pinning it.
-      if (!options?.userTurnRecordedByHost) {
+      if (!hasUserTurnRecord) {
         this.config
           .getChatRecordingService()
           ?.recordNotification(
@@ -4654,7 +4757,7 @@ export class LlmClient {
     // LoopDetected early on the notification turn.
     if (messageType === SendMessageType.UserQuery) {
       this.activeAutomaticTodoWorkChainPromptIds.clear();
-      if (!options?.userTurnRecordedByHost) {
+      if (!hasTodoWorkChain) {
         // A registered reminder means the previous chain's plan still has
         // unfinished items (todo_write deletes it on completion): continue
         // that chain instead of discarding its context with the very turn
@@ -4673,7 +4776,7 @@ export class LlmClient {
       }
       this.activeTodoWorkChainPromptId = prompt_id;
     } else if (messageType === SendMessageType.Retry) {
-      if (!options?.userTurnRecordedByHost) {
+      if (!hasTodoWorkChain) {
         this.config.startActiveTodoWorkChain(
           prompt_id,
           this.activeTodoWorkChainPromptId,
@@ -4765,7 +4868,7 @@ export class LlmClient {
     let messageDisplay: MessageDisplayDispatcher | null = null;
     try {
       if (messageType === SendMessageType.Goal) {
-        if (!options?.userTurnRecordedByHost) {
+        if (!hasUserTurnRecord) {
           this.config
             .getChatRecordingService()
             ?.recordGoalRuntimeMessage(request, goalPermit!);
@@ -4803,7 +4906,7 @@ export class LlmClient {
 
         // record user/cron message for session management
         if (messageType === SendMessageType.Cron) {
-          if (!options?.userTurnRecordedByHost) {
+          if (!hasUserTurnRecord) {
             this.config
               .getChatRecordingService()
               ?.recordCronPrompt(
@@ -4812,7 +4915,7 @@ export class LlmClient {
                 goalPermit,
               );
           }
-        } else if (!options?.userTurnRecordedByHost) {
+        } else if (!hasUserTurnRecord) {
           const recorder = this.config.getChatRecordingService();
           recorder?.recordUserMessage(
             request,
@@ -4875,10 +4978,7 @@ export class LlmClient {
 
         this.sessionTurnCount++;
 
-        if (
-          messageType === SendMessageType.UserQuery &&
-          !options?.userTurnRecordedByHost
-        ) {
+        if (messageType === SendMessageType.UserQuery && !hasFileHistory) {
           try {
             await this.config.getFileHistoryService().makeSnapshot(prompt_id);
             try {

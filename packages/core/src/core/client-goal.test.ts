@@ -1100,7 +1100,19 @@ describe('LlmClient Goal admission', () => {
     const { client, recorder, order } = setupGoalClient();
 
     await drain(
-      goalTurn(client, 'Continue the Goal.', { userTurnRecordedByHost: true }),
+      goalTurn(client, 'Continue the Goal.', {
+        userTurn: {
+          promptId: 'goal-prompt',
+          record: {
+            kind: 'recorded',
+            record: {
+              kind: 'goal',
+              message: [{ text: 'Continue the Goal.' }],
+              goalPermit: permit,
+            },
+          },
+        },
+      }),
     );
 
     expect(recorder.recordGoalRuntimeMessage).not.toHaveBeenCalled();
