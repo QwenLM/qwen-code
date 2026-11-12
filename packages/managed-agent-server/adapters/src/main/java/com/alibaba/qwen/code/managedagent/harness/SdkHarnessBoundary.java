@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.harness;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.List;
@@ -141,6 +142,11 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     @Override
     public boolean supportsClientFiles() {
         return call(delegate::supportsClientFiles);
+    }
+
+    @Override
+    public boolean supportsClientFiles(SessionRecord session) {
+        return call(() -> delegate.supportsClientFiles(session));
     }
 
     @Override

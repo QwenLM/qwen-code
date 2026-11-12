@@ -473,6 +473,11 @@ export class ManagedClientFilesBridge {
         }
         return;
       }
+      if (refusalCode === 'client_files_request_not_found') {
+        // The request's TTL already settled it (a slow tool call). That is not
+        // a lost binding: the registration is healthy, so do not tear it down.
+        return;
+      }
       throw new Error(`client files answer refused with HTTP ${posted.status}`);
     }
   }

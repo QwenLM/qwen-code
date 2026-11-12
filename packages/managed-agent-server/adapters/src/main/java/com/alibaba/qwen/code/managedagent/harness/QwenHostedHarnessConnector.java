@@ -729,6 +729,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsClientFiles(SessionRecord session) {
+        // Mirror the register route's refusal (hosted-harness-session): a
+        // foregroundOnly or profile-less Session never declares a client-files
+        // catalog, so the capability must not advertise it there.
+        return supportsClientFiles() && !foregroundOnly(session)
+                && session.toolProfile() != null && !session.toolProfile().isBlank();
+    }
+
+    @Override
     public Map<String, Object> clientFilesOperation(String tenantId, String sessionId, Map<String, Object> body) {
         try {
             requireReadyForNewWork(tenantId, sessionId, false);

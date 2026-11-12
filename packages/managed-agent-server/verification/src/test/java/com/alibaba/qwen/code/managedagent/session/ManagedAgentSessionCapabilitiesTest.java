@@ -214,16 +214,22 @@ class ManagedAgentSessionCapabilitiesTest {
 
     @ParameterizedTest
     @CsvSource({
-        "true,true,ACTIVE,true,true",
-        "true,true,CLOSED,true,false",
-        "false,true,ACTIVE,true,false",
-        "true,false,ACTIVE,true,false",
+        "true,true,ACTIVE,true,true,true",
+        "true,true,CLOSED,true,false,true",
+        "false,true,ACTIVE,true,false,true",
+        "true,false,ACTIVE,true,false,false",
         // Registration refuses a Workspace-less Session, so the capability
         // must not advertise it there even with the flag and harness on.
-        "true,true,ACTIVE,false,false"
+        "true,true,ACTIVE,false,false,true",
+        // foregroundOnly (ssh workspace + extensions off): the flag and the
+        // parameterless harness capability are on, but the session-aware
+        // predicate refuses because the register route would answer 409, so the
+        // capability must be false. Removing the session-aware check reds this.
+        "true,true,ACTIVE,true,false,false"
     })
     void clientFilesCapabilityRequiresTheDeploymentFlagHarnessSupportAndAnActiveSession(boolean enabled,
-            boolean harnessSupports, String status, boolean hasWorkspace, boolean expected) {
+            boolean harnessSupports, String status, boolean hasWorkspace, boolean expected,
+            boolean sessionAwareSupports) {
         var store = mock(AgentStateStore.class);
         var harness = mock(HarnessConnector.class);
         var workspaces = mock(JdbcManagedWorkspaceRegistry.class);
@@ -254,6 +260,7 @@ class ManagedAgentSessionCapabilitiesTest {
         when(settings.getClientFiles()).thenReturn(clientFiles);
         when(clientFiles.isEnabled()).thenReturn(enabled);
         when(harness.supportsClientFiles()).thenReturn(harnessSupports);
+        when(harness.supportsClientFiles(any(SessionRecord.class))).thenReturn(sessionAwareSupports);
         service.configureClientFiles(settings);
 
         assertThat(service.getWebShellSession("tenant", "actor", "session")

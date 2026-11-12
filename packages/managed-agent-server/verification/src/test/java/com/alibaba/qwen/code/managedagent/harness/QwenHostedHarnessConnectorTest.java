@@ -1330,6 +1330,59 @@ class QwenHostedHarnessConnectorTest {
         }
     }
 
+    @Test
+    void sessionAwareClientFilesCapabilityMirrorsTheRegisterRefusal() {
+        var sessions = sessions();
+        var workspace = new ContextBinding("tenant-a", "selected-workspace", 1, "storage", ".",
+                WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        var actions = mock(JdbcManagedActionStore.class);
+        var ssh = mock(JdbcSshWorkspaceStore.class);
+        when(ssh.runtimeStorage("tenant-a", "storage")).thenReturn(new SshRuntimeStorage("node", "storage", "/remote",
+                Map.of("identity", Map.of("root", "/remote"), "marker", Map.of("root", "/remote", "storageId", "storage"),
+                        "qwenVersion", "0.25.1")));
+        var client = mock(HostedHarnessClient.class);
+        var capabilities = mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getFeatures()).thenReturn(List.of("client-files/1"));
+        var session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null, null, "ACTIVE",
+                null, null, 0, 0, 0, 1, 1, null, 1, workspace, "default", "hosted-workspace-files/1", null, 0);
+
+        // A non-SSH Workspace with a tool profile is admitted.
+        var noSsh = new QwenHostedHarnessConnector(properties(), sessions,
+                mock(JdbcWorkspaceExecutionStore.class), actions, null, null, null);
+        ReflectionTestUtils.setField(noSsh, "client", client);
+        assertThat(noSsh.supportsClientFiles()).isTrue();
+        assertThat(noSsh.supportsClientFiles(session)).isTrue();
+
+        // An SSH Workspace with extensions off is foregroundOnly: the register
+        // route refuses it, so the capability must too. Removing the
+        // foregroundOnly check from the session-aware predicate reds this.
+        var foregroundSettings = properties();
+        foregroundSettings.getExtensions().setEnabled(false);
+        foregroundSettings.getManagedExtensions().setEnabled(false);
+        var sshForeground = new QwenHostedHarnessConnector(foregroundSettings, sessions,
+                mock(JdbcWorkspaceExecutionStore.class), actions, null, null, ssh);
+        ReflectionTestUtils.setField(sshForeground, "client", client);
+        assertThat(sshForeground.supportsClientFiles(session)).isFalse();
+
+        // The same SSH Workspace with public child agents + extensions on is not
+        // foregroundOnly, so it is admitted.
+        var childSettings = properties();
+        childSettings.getExtensions().setEnabled(true);
+        childSettings.getManagedExtensions().setEnabled(true);
+        var childSession = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null, null, "ACTIVE",
+                null, null, 0, 0, 0, 1, 1, null, 1, workspace, "default", "hosted-workspace-files/1", null, 1);
+        var sshChild = new QwenHostedHarnessConnector(childSettings, sessions,
+                mock(JdbcWorkspaceExecutionStore.class), actions, null, null, ssh);
+        ReflectionTestUtils.setField(sshChild, "client", client);
+        assertThat(sshChild.supportsClientFiles(childSession)).isTrue();
+
+        // A profile-less Session is refused even when not foregroundOnly.
+        var profileless = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null, null, "ACTIVE",
+                null, null, 0, 0, 0, 1, 1, null, 1, workspace, "default", null, null, 0);
+        assertThat(noSsh.supportsClientFiles(profileless)).isFalse();
+    }
+
     @ParameterizedTest
     @NullAndEmptySource
     @ValueSource(strings = {" ", "plan", "unknown"})

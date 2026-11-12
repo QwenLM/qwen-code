@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPol
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore;
 import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore.Placement;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionSkills;
@@ -467,6 +468,21 @@ public class HarnessPoolConnector implements HarnessConnector {
 
     @Override
     public boolean supportsClientFiles() { return feature(HarnessFeature.CLIENT_FILES); }
+
+    @Override
+    public boolean supportsClientFiles(SessionRecord session) {
+        if (!feature(HarnessFeature.CLIENT_FILES)) {
+            return false;
+        }
+        // All pool members share the same deployment/session dispatch policy;
+        // ask any ready member so the capability matches the register refusal.
+        for (Member member : accepting) {
+            if (member.reachable) {
+                return member.connector.supportsClientFiles(session);
+            }
+        }
+        return true;
+    }
 
     @Override
     public Map<String, Object> clientFilesOperation(String tenantId, String sessionId, Map<String, Object> body) {

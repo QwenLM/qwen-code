@@ -5,7 +5,10 @@ import { fetch as nodeFetch } from 'undici';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const fakeHandle = { name: 'my-dir' } as unknown as FileSystemDirectoryHandle;
+const fakeHandle = {
+  name: 'my-dir',
+  isSameEntry: async (other: unknown) => other === fakeHandle,
+} as unknown as FileSystemDirectoryHandle;
 
 vi.mock('./capabilities.js', () => ({
   detectLocalFilesCapability: () => ({ blocker: null }),
@@ -250,6 +253,9 @@ describe('useManagedLocalFilesBridge', () => {
     });
     await waitFor(() => expect(result.current.status.phase).toBe('connected'));
     expect(vi.mocked(pickDirectoryHandle)).toHaveBeenCalledTimes(1);
+    // The origin-scoped slot still holds this mount's own directory, so
+    // Disconnect may release it.
+    storeSpies.load.mockResolvedValue(fakeHandle);
     await act(async () => {
       await result.current.disconnect();
     });
@@ -262,6 +268,41 @@ describe('useManagedLocalFilesBridge', () => {
     await act(async () => {
       await result.current.disconnect();
     });
+  });
+
+  it('disconnect leaves a peer tab’s different-directory grant in the shared slot', async () => {
+    // The grant slot is origin-scoped (one record for every tab). A peer tab
+    // re-granted a DIFFERENT directory into it; this tab's Disconnect must not
+    // delete that peer's grant. A blind store.clear() (the pre-fix behavior)
+    // turns this red.
+    const peer = await startPeer();
+    servers.push(peer.server);
+    const fakeWin = {
+      location: { origin: 'http://localhost' },
+    } as unknown as Window;
+    const { result } = renderHook(() =>
+      useManagedLocalFilesBridge({
+        sessionId: 'session-1',
+        baseUrl: peer.baseUrl,
+        fetch: peerFetch,
+        win: fakeWin,
+      }),
+    );
+    act(() => {
+      void result.current.connect();
+    });
+    await waitFor(() => expect(result.current.status.phase).toBe('connected'));
+    // A peer tab overwrote the shared slot with a different directory entry.
+    const peerHandle = {
+      name: 'peer-dir',
+      isSameEntry: async (other: unknown) => other === peerHandle,
+    } as unknown as FileSystemDirectoryHandle;
+    storeSpies.load.mockResolvedValue(peerHandle);
+    await act(async () => {
+      await result.current.disconnect();
+    });
+    expect(result.current.status.phase).toBe('idle');
+    expect(storeSpies.clear).not.toHaveBeenCalled();
   });
 
   it('a superseded bridge’s late stopped does not overwrite the live status', async () => {
@@ -542,5 +583,17 @@ describe('useManagedLocalFilesBridge', () => {
     });
     expect(registerCalls).toBe(0);
     expect(result.current.status.phase).not.toBe('connected');
+    // The lapse must not wedge Connect permanently: the retained handle was
+    // dropped, so a fresh Connect reaches the picker instead of re-checking the
+    // same lapsed grant forever (the pre-fix permanent no-op turns this red).
+    act(() => {
+      void result.current.connect();
+    });
+    await waitFor(() =>
+      expect(vi.mocked(pickDirectoryHandle)).toHaveBeenCalled(),
+    );
+    await act(async () => {
+      await result.current.disconnect();
+    });
   });
 });

@@ -3390,10 +3390,14 @@ export class HostedWorkspaceToolTurn {
           })) ||
         intents.some((entry) => entry.payload['ordinal'] === ordinal) ||
         // A client-files call commits its own durable tool_result on the
-        // harness-local accept path (no broker dispatch), so the declared
-        // request is its own dispatch evidence — like skill/todo_write/team
-        // tools. Not gated on success so PostToolUseFailure fires too.
-        this.clientFilesDeclaredNames.has(call.name) ||
+        // harness-local accept path (no broker dispatch). The accept path
+        // stamps executionStatus on that result, so its presence — not the
+        // declared name alone — is the dispatch evidence: a call denied at
+        // approval never reaches the accept path and carries no
+        // executionStatus, so it must not fire an outcome hook. Not gated on
+        // success, so an executed-but-failed call fires PostToolUseFailure.
+        (this.clientFilesDeclaredNames.has(call.name) &&
+          response?.['executionStatus'] !== undefined) ||
         // A team tool commits only to the journal and answers a refusal as
         // its error, so its committed answer is its own dispatch evidence.
         (((call.name === 'skill' && this.skills !== undefined) ||
@@ -9908,6 +9912,7 @@ export class HostedWorkspaceToolTurn {
   ): Promise<Part[]> {
     const tool = this.clientFiles?.resolve(request.call.name);
     let parts: Part[];
+    let executionStatus: 'success' | 'error' = 'error';
     if (!tool) {
       parts = convertToFunctionErrorResponse(
         request.call.name,
@@ -9931,18 +9936,21 @@ export class HostedWorkspaceToolTurn {
         // let the abort propagate instead of committing a bogus failure.
         signal.throwIfAborted();
         const converted = clientFilesResultParts(result);
-        parts = result.isError
-          ? convertToFunctionErrorResponse(
-              request.call.name,
-              request.call.callId,
-              converted,
-              'The client files tool reported an error.',
-            )
-          : convertToFunctionResponse(
-              request.call.name,
-              request.call.callId,
-              converted,
-            );
+        if (result.isError) {
+          parts = convertToFunctionErrorResponse(
+            request.call.name,
+            request.call.callId,
+            converted,
+            'The client files tool reported an error.',
+          );
+        } else {
+          parts = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            converted,
+          );
+          executionStatus = 'success';
+        }
       } catch (cause) {
         if (signal.aborted) throw cause;
         parts = convertToFunctionErrorResponse(
@@ -9953,6 +9961,18 @@ export class HostedWorkspaceToolTurn {
             ? cause.message
             : 'The client files tool failed.',
         );
+      }
+    }
+    // Stamp the accept-path outcome like the memory/todo/shell accept paths do.
+    // It is the durable dispatch evidence completeHookResults reads: a call
+    // denied at approval never reaches this accept path, so its refusal
+    // response carries no executionStatus and must not fire an outcome hook.
+    for (const part of parts) {
+      if (part.functionResponse) {
+        part.functionResponse.response = {
+          ...part.functionResponse.response,
+          executionStatus,
+        };
       }
     }
     if (!this.messageFitsInline('tool_result', parts, model))

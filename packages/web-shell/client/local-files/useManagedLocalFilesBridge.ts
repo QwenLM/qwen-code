@@ -148,10 +148,27 @@ export function useManagedLocalFilesBridge(
     unsubscribeRef.current = undefined;
     await bridgeRef.current?.disconnect();
     bridgeRef.current = undefined;
-    // Release the grant so a wrong directory can be undone: Disconnect then
-    // Connect must reach the picker again instead of silently reusing it.
+    // Release this mount's handle so a wrong directory can be undone:
+    // Disconnect then Connect must reach the picker again instead of silently
+    // reusing it.
+    const bound = handleRef.current;
     handleRef.current = undefined;
-    await storeRef.current?.clear();
+    // The grant slot is origin-scoped — one record shared by every tab — so
+    // only clear it while it still holds THIS mount's directory. A peer tab
+    // may have re-granted a different directory into the slot, and a blind
+    // clear would delete that peer's grant. Entry identity fails closed: with
+    // no bound handle, or an isSameEntry that rejects, leave the stored record
+    // alone rather than risk deleting a grant this tab does not own.
+    const stored = await storeRef.current?.load();
+    if (stored && bound) {
+      let same = false;
+      try {
+        same = await bound.isSameEntry(stored);
+      } catch {
+        same = false;
+      }
+      if (same) await storeRef.current?.clear();
+    }
     setStatus((current) => (current.phase === 'unavailable' ? current : IDLE));
   }, []);
 
@@ -207,7 +224,10 @@ export function useManagedLocalFilesBridge(
           if (stale()) return;
           if (permission.state !== 'granted') {
             // Do not register on a handle the browser no longer allows, and do
-            // not report connected; surface the need for a fresh gesture.
+            // not report connected. Drop the retained handle so the next Connect
+            // reaches the picker for a fresh gesture instead of re-checking the
+            // same lapsed grant forever (a permanent no-op).
+            handleRef.current = undefined;
             setStatus(IDLE);
             return;
           }

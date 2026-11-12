@@ -482,6 +482,46 @@ describe('ManagedClientFilesBridge', () => {
     );
   });
 
+  it('a TTL-settled answer (request_not_found) keeps the registration healthy', async () => {
+    // A slow tool call can outlive its request TTL: the relay then refuses the
+    // answer with 404 request_not_found. That is not a lost binding — the
+    // registration is healthy, so the bridge must stay connected and not
+    // unregister. Treating every non-2xx as fatal (the pre-fix behavior) turns
+    // this red.
+    const p = await peer({
+      responseRefusal: {
+        status: 404,
+        code: 'client_files_request_not_found',
+      },
+    });
+    const b = bridge(p, {
+      async handle(message) {
+        return { jsonrpc: '2.0', id: message.id ?? null, result: {} };
+      },
+    });
+    void b.connect();
+    await vi.waitFor(() => expect(p.registered.length).toBe(1));
+    // Answer the discovery so register settles; its answer is refused as
+    // TTL-settled but must not tear the registration down.
+    p.push('d1', { jsonrpc: '2.0', id: 'd1', method: 'tools/list' });
+    await vi.waitFor(() =>
+      expect(b.getState()).toMatchObject({ phase: 'connected' }),
+    );
+    p.push('r1', {
+      jsonrpc: '2.0',
+      id: 'r1',
+      method: 'tools/call',
+      params: { name: 'read_file', arguments: { path: 'a.txt' } },
+    });
+    // The discovery answer and the tool-call answer are both refused as
+    // TTL-settled; neither may tear the registration down.
+    await vi.waitFor(() =>
+      expect(p.responses.length).toBeGreaterThanOrEqual(2),
+    );
+    expect(b.getState()).toMatchObject({ phase: 'connected' });
+    expect(p.unregistered.length).toBe(0);
+  });
+
   it('disconnect during a pending register ends stopped, not failed', async () => {
     const p = await peer();
     const phases: string[] = [];

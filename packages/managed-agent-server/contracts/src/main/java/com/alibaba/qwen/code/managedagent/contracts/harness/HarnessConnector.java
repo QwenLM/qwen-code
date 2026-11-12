@@ -114,6 +114,16 @@ public interface HarnessConnector extends AutoCloseable {
 
     public default boolean supportsClientFiles() { return false; }
 
+    /**
+     * Session-aware client-files admission: must answer the same question the
+     * register route answers, so the capability is never advertised for a
+     * Session whose registration the Harness would refuse (foregroundOnly or
+     * no tool profile). Defaults to the parameterless capability.
+     */
+    public default boolean supportsClientFiles(StoreModels.SessionRecord session) {
+        return supportsClientFiles();
+    }
+
     /** Registers or unregisters the Session's client filesystem relay. */
     public default Map<String, Object> clientFilesOperation(String tenantId, String sessionId, Map<String, Object> body) {
         throw new UnsupportedOperationException("Client files registration is unavailable");

@@ -158,7 +158,11 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
 
     private boolean supportsClientFiles(SessionRecord session) {
         return session.deletedAt() == null && "ACTIVE".equals(session.status())
-                && clientFilesEnabled.getAsBoolean();
+                && clientFilesEnabled.getAsBoolean()
+                // Ask the same question the register route answers: a
+                // foregroundOnly or profile-less Session is always refused, so
+                // the capability must not advertise it there.
+                && harness.supportsClientFiles(session);
     }
 
     @Autowired

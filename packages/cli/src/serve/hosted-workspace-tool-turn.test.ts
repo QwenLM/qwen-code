@@ -14114,6 +14114,86 @@ describe('client files tool execution', () => {
     await turn.finish();
   });
 
+  it('does not fire an outcome hook for a client-files call denied at approval', async () => {
+    // A declared name alone is not dispatch evidence: the permission rules
+    // deny the call before the accept path runs, so no executionStatus-bearing
+    // tool_result is committed and no outcome hook may fire. Treating the
+    // declared name as dispatch (the pre-fix arm) turns this red.
+    const fire = vi.fn<HostedHookSession['fire']>(async () => ({}));
+    const invoke = vi.fn(async () => ({ content: [] }));
+    const permissionRules = {
+      allow: [] as string[],
+      ask: [] as string[],
+      deny: ['mcp__local-files__read_file'],
+    };
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      {
+        settings: { mode: 'default', timeoutMs: 60_000, permissionRules },
+        waiters,
+      },
+      { clientFiles: clientFilesSession(invoke), hooks: hookSession(fire) },
+    );
+    await turn.declarations(new AbortController().signal);
+    const responses = await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    expect(responses[0].functionResponse?.response?.['error']).toContain(
+      'permission rules denied',
+    );
+    const events = fire.mock.calls.map(([event]) => event);
+    expect(events).not.toContain(HookEventName.PostToolUse);
+    expect(events).not.toContain(HookEventName.PostToolUseFailure);
+    await turn.consumeResults();
+    await turn.finish();
+  });
+
+  it('fires PostToolUseFailure for an executed-but-failed client-files call', async () => {
+    // The accept path stamps executionStatus=error on the committed result, so
+    // the outcome hook fires for a call that ran and failed (the arm is not
+    // gated on success). Dropping the stamp or gating the arm on success turns
+    // this red.
+    const fire = vi.fn<HostedHookSession['fire']>(async () => ({}));
+    const invoke = vi.fn(async () => {
+      throw new Error('client_files_offline');
+    });
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      { settings: { mode: 'yolo', timeoutMs: 60_000 }, waiters },
+      { clientFiles: clientFilesSession(invoke), hooks: hookSession(fire) },
+    );
+    await turn.declarations(new AbortController().signal);
+    await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    const events = fire.mock.calls.map(([event]) => event);
+    expect(events).toContain(HookEventName.PostToolUseFailure);
+    expect(events).not.toContain(HookEventName.PostToolUse);
+    await turn.consumeResults();
+    await turn.finish();
+  });
+
   it('advertises the registration tools on the main and read profiles', async () => {
     // The resident-profile push is witnessed above; the main and read-profile
     // declaration pushes must also hand the registration's tools to the model.
