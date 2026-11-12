@@ -116,6 +116,17 @@ class TenantContextFilterTest {
         assertThat(passed.getRequest()).isSameAs(upgrade);
         assertThat(response.getStatus()).isEqualTo(200);
 
+        // A plain non-upgrade method on the upgrade path keeps the header
+        // filter: the exemption is the GET upgrade shape, not the path alone.
+        MockHttpServletRequest plainPost = new MockHttpServletRequest("POST",
+                "/api/agent/web-shell/v1/sessions/s1/terminal");
+        MockFilterChain postBlocked = new MockFilterChain();
+        MockHttpServletResponse postResponse = new MockHttpServletResponse();
+        filter.doFilter(plainPost, postResponse, postBlocked);
+        assertThat(postResponse.getStatus()).isEqualTo(400);
+        assertThat(postResponse.getContentAsString()).contains("invalid_tenant");
+        assertThat(postBlocked.getRequest()).isNull();
+
         // The ticket-minting POST stays on the authenticated surface.
         MockHttpServletRequest mint = new MockHttpServletRequest("POST",
                 "/api/agent/web-shell/v1/sessions/terminal-ticket");

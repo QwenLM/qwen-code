@@ -548,6 +548,18 @@ public class SignatureAuthFilterTest {
         assertThat(passed.getRequest()).isSameAs(upgrade);
         assertThat(response.getStatus()).isEqualTo(200);
 
+        // A plain non-upgrade method on the upgrade path keeps the signed
+        // surface: the exemption is the GET upgrade shape, not the path alone.
+        MockHttpServletRequest plainPost = request("POST",
+                "/api/agent/web-shell/v1/sessions/s1/terminal");
+        MockFilterChain postBlocked = new MockFilterChain();
+        MockHttpServletResponse postResponse = new MockHttpServletResponse();
+        filter.doFilter(plainPost, postResponse, postBlocked);
+        assertThat(postResponse.getStatus()).isEqualTo(401);
+        assertThat(postResponse.getContentAsString())
+                .contains("authentication_required");
+        assertThat(postBlocked.getRequest()).isNull();
+
         // The ticket-minting POST stays on the signed surface: without the
         // signature headers it is refused, not exempted.
         MockHttpServletRequest mint = request("POST",

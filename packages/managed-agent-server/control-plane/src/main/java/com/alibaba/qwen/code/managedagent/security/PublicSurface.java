@@ -56,12 +56,14 @@ public final class PublicSurface {
     /**
      * The terminal WebSocket upgrade authenticates with the single-use ticket
      * carried in the bearer subprotocol, not the tenant/signature headers a
-     * browser upgrade cannot set. Only this exact upgrade path is exempt from
-     * the header filters; the ticket-minting POST stays on the authenticated
-     * surface, and the handshake interceptor still consumes and validates the
-     * ticket before the relay opens the worker.
+     * browser upgrade cannot set. Only a GET on this exact upgrade path is
+     * exempt from the header filters — an upgrade is always a GET, so any
+     * other method keeps the authenticated surface. The ticket-minting POST
+     * stays on the authenticated surface, and the handshake interceptor still
+     * consumes and validates the ticket before the relay opens the worker.
      */
-    public static boolean terminalUpgrade(String path) {
-        return TERMINAL_UPGRADE.matcher(path).matches();
+    public static boolean terminalUpgrade(HttpServletRequest request) {
+        return "GET".equals(request.getMethod())
+                && TERMINAL_UPGRADE.matcher(pathWithinApplication(request)).matches();
     }
 }

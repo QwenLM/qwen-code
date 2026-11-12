@@ -43,7 +43,7 @@ public class TenantContextFilter extends OncePerRequestFilter {
         String path = PublicSurface.pathWithinApplication(request);
         // The terminal upgrade carries its identity in the single-use ticket,
         // not the tenant header a browser WebSocket cannot set.
-        if (PublicSurface.terminalUpgrade(path)) {
+        if (PublicSurface.terminalUpgrade(request)) {
             return true;
         }
         return !PublicSurface.covers(path)
