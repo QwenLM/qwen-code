@@ -617,6 +617,7 @@ Web Shell 时生效。配置变化不会自动改变当前会话模式；当前�
 | `modelManagement`              | `WebShellModelManagementOptions`       | 可选。控制 WebShell 内模型新增/删除交互，默认均允许；见 [模型增删交互](#模型增删交互)。                                                        |
 | `unavailableModels`            | `readonly WebShellUnavailableModel[]`  | 可选。在输入框模型选择器中追加禁用模型；见 [不可用模型目录](#不可用模型目录)。                                                                 |
 | `mountUnavailableModelTooltip` | `WebShellUnavailableModelTooltipMount` | 可选。为禁用模型挂载自定义提示层，Solid/原生 DOM 宿主可写入传入的 `HTMLElement`。                                                              |
+| `modelPicker`                  | `WebShellModelPickerOptions`           | 可选。挂载模型列表头部和按模型 id 定制的行内容；见 [模型选择器自定义内容](#模型选择器自定义内容)。                                             |
 
 ### 宿主目录选择
 
@@ -741,6 +742,7 @@ daemon 参数的完整含义和配置方式见
 | `modelManagement`              | `WebShellModelManagementOptions`                                                                                                      | 可选。控制 WebShell 内模型新增/删除交互，默认均允许；见 [模型增删交互](#模型增删交互)。                                                                                      |
 | `unavailableModels`            | `readonly WebShellUnavailableModel[]`                                                                                                 | 可选。在输入框模型选择器中追加禁用模型；见 [不可用模型目录](#不可用模型目录)。                                                                                               |
 | `mountUnavailableModelTooltip` | `WebShellUnavailableModelTooltipMount`                                                                                                | 可选。为禁用模型挂载自定义提示层，Solid/原生 DOM 宿主可写入传入的 `HTMLElement`。                                                                                            |
+| `modelPicker`                  | `WebShellModelPickerOptions`                                                                                                          | 可选。挂载模型列表头部和按模型 id 定制的行内容；见 [模型选择器自定义内容](#模型选择器自定义内容)。                                                                           |
 
 移动访问二维码入口由 `header.showMobileAccess?: boolean` 控制，默认隐藏，适用于主聊天和分屏页头。独立入口 `main.tsx` 显式设为 `true`，保留本地 Qwen Code 用户的入口。
 
@@ -1071,6 +1073,120 @@ function mountUnavailableModelTooltip(container, info) {
 ```
 
 mount 成功则使用宿主内容；省略、返回 `null`/`undefined` 或同步失败则回退到 `model.tooltip`。mount 函数应保持引用稳定，并在 `dispose` 中拆除自己的视图。设计见 [English](../../docs/design/web-shell-unavailable-models.md) / [简体中文](../../docs/design/web-shell-unavailable-models.zh-CN.md)。
+
+## 模型选择器自定义内容
+
+`modelPicker` 可为输入框模型列表挂载头部，并通过 `displayContentByModelId` 按原始
+模型 id 替换整块行展示内容。宿主控制名称、图标、价格等内容，并自行决定是否提供
+hover。Web Shell 保留搜索、选择、禁用状态和原生选中、禁用标记。该配置同时适用于
+主输入框、分屏、侧边任务和托管会话的输入框选择器。
+
+```ts
+import type { WebShellModelPickerOptions } from '@qwen-code/web-shell';
+
+const modelPicker: WebShellModelPickerOptions = {
+  mountHeader(container, initial) {
+    const text = container.ownerDocument.createElement('span');
+    container.append(text);
+    const update = (info: typeof initial) => {
+      text.textContent = info.currentModelId ?? '';
+    };
+    update(initial);
+    return { update, dispose: () => text.remove() };
+  },
+  displayContentByModelId: {
+    'example-model(openai)'(container, initial) {
+      const text = container.ownerDocument.createElement('span');
+      container.append(text);
+      const update = (info: typeof initial) => {
+        text.textContent = `${info.model.label} · 0.5×`;
+      };
+      update(initial);
+      return { update, dispose: () => text.remove() };
+    },
+  },
+};
+```
+
+将上面的 `modelPicker` 传给 `WebShell` 或 `WebShellWithProviders`。示例模型和
+`0.5×` 为虚构展示数据。头部位于模型搜索框上方，模型列表进入思考参数子菜单时，
+头部随列表进入；`currentModelId` 始终来自所属输入框实际选中的模型。
+
+map 的值是可重复挂载的工厂。同一个模型出现在不同输入框时会分别调用，不能共享
+一个 DOM 节点。key 必须与选择器的原始 id 完全一致；未知 key 不会增加模型条目。
+搜索继续使用目录名称和 id，不读取自定义内容。未配置、挂载返回空或发生同步错误时，
+回退到原生内容与原有不可用模型说明。自定义行成功挂载后，原有 `title` 和不可用模型
+提示关闭，由宿主完整管理该行的 hover。
+
+行内只做展示，独立按钮和链接放在宿主浮层中。`rowElement` 可用于绑定整行原生
+hover、focus 或触屏监听；浮层应 portal 到本次挂载收到的 `overlayContainer`。这使
+浮层继承正确主题、兼容 Shadow DOM，并被所属选择器识别为内部交互区域。宿主负责
+浮层的定位、开闭、键盘和触屏访问。若消费了行上的触屏手势，需要在原生事件阶段
+取消对应点击，Web Shell 尊重 `event.defaultPrevented`。
+
+上下文还提供 `composerId`、可用的 `sessionId`、`workspaceId`、`workspaceCwd`、
+`daemonBaseUrl` 以及 `language / theme`。`daemonBaseUrl` 保留完整代理路径；托管会话
+没有真实 daemon 基址或绝对目录时省略对应字段。不能用缺失值推断主输入框的状态。
+
+挂载和 `update` 同步返回。保持未变化的挂载函数引用稳定，修改条目时替换 map。
+当前模型、主题、语言或行状态变化会更新已有内容；搜索过滤、关闭列表、切换 scope
+和卸载会销毁对应内容。宿主自行清理计时器、请求、监听和组件根；倒计时可以在宿主
+响应式组件内部更新，无需每秒更新 Web Shell props。
+
+Solid 宿主可保留创建工厂时的 owner，并为每次挂载建立独立 signal 和视图。以下模式
+不要求 Web Shell 依赖 Solid：
+
+```tsx
+import { createSignal, getOwner, onCleanup, runWithOwner } from 'solid-js';
+import { render } from 'solid-js/web';
+import type {
+  WebShellModelPickerItemContext,
+  WebShellModelPickerMount,
+} from '@qwen-code/web-shell';
+
+function createModelContentMount() {
+  const owner = getOwner();
+  const mounts = new Set<() => void>();
+  let disposed = false;
+  onCleanup(() => {
+    disposed = true;
+    for (const dispose of mounts) dispose();
+  });
+
+  const mount: WebShellModelPickerMount<WebShellModelPickerItemContext> = (
+    container,
+    initial,
+  ) => {
+    if (disposed) return undefined;
+    return runWithOwner(owner, () => {
+      const [info, setInfo] = createSignal(initial);
+      const unmount = render(
+        () => <span>{info().model.label}</span>,
+        container,
+      );
+      let closed = false;
+      const dispose = () => {
+        if (closed) return;
+        closed = true;
+        mounts.delete(dispose);
+        unmount();
+      };
+      mounts.add(dispose);
+      return {
+        update(next: WebShellModelPickerItemContext) {
+          if (!closed) setInfo(next);
+        },
+        dispose,
+      };
+    });
+  };
+  return mount;
+}
+```
+
+在 Solid owner 下调用 `createModelContentMount()` 一次，将返回的稳定函数放进
+`displayContentByModelId`。完整的接口、浮层边界和生命周期见
+[设计文档](../../docs/design/web-shell-model-picker-content.zh-CN.md)。
 
 ## Markdown 图表接入
 
