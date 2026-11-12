@@ -145,7 +145,11 @@ output files are deleted.
   `.gitignore`.
 - `list` and `clean` load the same `.env` and `settings.env` configuration as
   the other Batch commands, including `QWEN_BATCH_HOME`. They remain local-only
-  and do not require a model or API credentials.
+  and do not require a model or API credentials. If settings cannot be loaded,
+  they warn and continue using the task home available in the environment; if
+  `QWEN_BATCH_HOME` is unset or blank, they use the default task home:
+  `~/.qwen/batch`, or `batch` under `QWEN_HOME` if that variable is set. Fix the
+  reported settings problem if your configured task home was not loaded.
 - A task is tied to the endpoint and API key it was submitted with (only a
   short hash of the key is stored); after switching accounts or regions,
   commands refuse until you switch back.
