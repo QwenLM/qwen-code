@@ -392,15 +392,19 @@ export interface ServeOptions {
    */
   sessionPromptSettledCloseGraceMs?: number;
   /**
-   * ACP child request timeout, including the `initialize` handshake,
-   * in ms. Must be a positive
-   * integer. Default: 10000 (10 s).
+   * Per-phase ACP startup budget in ms: channel creation and `initialize`
+   * each receive it, with their pair capped at twice it. Failed startup can
+   * additionally await one such teardown budget. Other ACP requests use this
+   * timeout too. Must be a positive integer. Default: 10000 (10 s).
    */
   initializeTimeoutMs?: number;
   /**
-   * ACP session load/resume timeout in ms. Defaults to 60000 (60 s), raised
-   * to an explicitly set initialize timeout when that value is larger. An
-   * explicit value here wins outright, including below the default.
+   * Deadline in ms for engine selection, channel readiness, remembered-language
+   * delivery, and ACP load/resume, which uses the remaining time. Defaults to
+   * 60000 (60 s), raised to a larger explicitly set initialize timeout. An
+   * explicit value here wins outright, including below the default. At an
+   * initialize budget >=30000, allow more than twice it plus time for the other
+   * preparation stages and the restore request.
    */
   sessionRestoreTimeoutMs?: number;
   /**

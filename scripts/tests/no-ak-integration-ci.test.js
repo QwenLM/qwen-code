@@ -657,14 +657,17 @@ describe('no-AK integration CI wiring', () => {
     // ~2040 MB on a disposable runner whose host reported 181 GB available
     // (job 130506292678), so Node's own default was the cap and no host pressure
     // was involved. The containers get 8 GiB (config.example.json), enough for
-    // 4096; the hosted lane keeps the default it has always passed with, under
-    // the same fleet predicate as the worker caps.
+    // 4096; other runners retain the PR's 3072 cap, under the same fleet
+    // predicate as the worker caps.
     //
     // Through `env` on that one command, NOT the step's env block: the
     // zero-secrets contract above requires every value there but QWEN_HOME to
     // be the empty string, and is enforced by value on purpose so a credential
     // under an unanticipated name cannot ship green. A heap flag has no
     // business joining that exemption list.
+    expect(gateStep).toContain(
+      "typecheck_heap=('NODE_OPTIONS=--max-old-space-size=3072')",
+    );
     expect(gateStep).toContain(
       "ecs-qwen-*) typecheck_heap=('NODE_OPTIONS=--max-old-space-size=4096') ;;",
     );

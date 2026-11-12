@@ -58,7 +58,7 @@ Typed classes thrown by the bridge / mediator. Most carry an HTTP status via the
 | `PermissionPolicyNotImplementedError` | 500  | Requested policy not built into this daemon.                                                                                                                                                                                                                                                                                                                                                                                             | Update daemon, or change `policy.permissionStrategy`.                                                                                                                                                                  |
 | `BridgeChannelClosedError`            | 503  | ACP child channel closed mid-call.                                                                                                                                                                                                                                                                                                                                                                                                       | Reconnect / retry; check `session_died` for cause.                                                                                                                                                                     |
 | `BridgeTimeoutError`                  | 504  | Bridge-level wallclock exceeded.                                                                                                                                                                                                                                                                                                                                                                                                         | Retry; investigate underlying slowness.                                                                                                                                                                                |
-| `SessionRestoreTimeoutError`          | 504  | ACP session load/resume exceeded its dedicated restore budget.                                                                                                                                                                                                                                                                                                                                                                           | Retry after the advertised delay; inspect restore stage traces before raising the budget.                                                                                                                              |
+| `SessionRestoreTimeoutError`          | 504  | Restore preparation or the dispatched ACP load/resume exceeded the restore budget.                                                                                                                                                                                                                                                                                                                                                       | Preparation (`dispatched: false`): retry immediately, no fence or `Retry-After`. After dispatch: honor the budget-derived hint while late cleanup is fenced. Inspect stage traces before raising the budget.           |
 | `BridgeChannelQuarantinedError`       | 503  | `reason` is `restore_cleanup_failed`, `restore_settlement_overdue`, `new_session_cleanup_failed`, or `new_session_settlement_overdue`. A settlement-overdue state clears after a late failure settles or a late success completes exact-ID cleanup; inconclusive cleanup transitions to the matching cleanup-failed state. Cleanup-failed states last until the workspace channel drains. The 503 body also carries `retryAfterSeconds`. | Keep using existing sessions and retry after the advertised delay; cleanup-failed states require channel recycle, while settlement-overdue states may recover after settlement and any required cleanup complete.      |
 | `MissingCliEntryError`                | 500  | The `qwen` CLI entry file is missing (defined in `status.ts`, not `bridgeErrors.ts`).                                                                                                                                                                                                                                                                                                                                                    | Confirm the CLI install is complete; check that `packages/cli/index.ts` exists.                                                                                                                                        |
 
@@ -79,23 +79,23 @@ Typed classes thrown by the bridge / mediator. Most carry an HTTP status via the
 
 `SERVE_ERROR_KINDS` is the closed enum used by diagnostic cells and structured daemon errors:
 
-| Kind                       | Meaning                                                                 |
-| -------------------------- | ----------------------------------------------------------------------- |
-| `missing_binary`           | Required local executable or CLI entry could not be resolved.           |
-| `blocked_egress`           | Outbound network probe failed.                                          |
-| `auth_env_error`           | Auth-related env var, provider, or trust-gate configuration is invalid. |
-| `init_timeout`             | Daemon-side init step exceeded its wallclock.                           |
-| `restore_timeout`          | ACP session load/resume exceeded its dedicated restore budget.          |
-| `protocol_error`           | ACP / HTTP protocol mismatch.                                           |
-| `missing_file`             | Required local file missing.                                            |
-| `parse_error`              | Local file or request parse error.                                      |
-| `stat_failed`              | Local filesystem stat failed.                                           |
-| `budget_exhausted`         | MCP budget enforcement refused discovery or a server entry.             |
-| `mcp_budget_would_exceed`  | MCP restart or mutation would exceed the configured budget.             |
-| `mcp_server_spawn_failed`  | MCP server spawn or restart failed.                                     |
-| `invalid_config`           | MCP or daemon configuration was invalid.                                |
-| `prompt_deadline_exceeded` | Prompt wallclock deadline expired.                                      |
-| `writer_idle_timeout`      | SSE writer made no successful writes before its idle timeout.           |
+| Kind                       | Meaning                                                                            |
+| -------------------------- | ---------------------------------------------------------------------------------- |
+| `missing_binary`           | Required local executable or CLI entry could not be resolved.                      |
+| `blocked_egress`           | Outbound network probe failed.                                                     |
+| `auth_env_error`           | Auth-related env var, provider, or trust-gate configuration is invalid.            |
+| `init_timeout`             | Daemon-side init step exceeded its wallclock.                                      |
+| `restore_timeout`          | Preparation expiry has no fence or retry hint; dispatched ACP expiry retains both. |
+| `protocol_error`           | ACP / HTTP protocol mismatch.                                                      |
+| `missing_file`             | Required local file missing.                                                       |
+| `parse_error`              | Local file or request parse error.                                                 |
+| `stat_failed`              | Local filesystem stat failed.                                                      |
+| `budget_exhausted`         | MCP budget enforcement refused discovery or a server entry.                        |
+| `mcp_budget_would_exceed`  | MCP restart or mutation would exceed the configured budget.                        |
+| `mcp_server_spawn_failed`  | MCP server spawn or restart failed.                                                |
+| `invalid_config`           | MCP or daemon configuration was invalid.                                           |
+| `prompt_deadline_exceeded` | Prompt wallclock deadline expired.                                                 |
+| `writer_idle_timeout`      | SSE writer made no successful writes before its idle timeout.                      |
 
 These are surfaced through the preflight cell's `errorKind` so client UIs render structured remediation (not raw stack traces).
 

@@ -369,6 +369,7 @@ describe.skipIf(process.platform === 'win32')(
             GITHUB_RUN_ID: '1',
             GITHUB_RUN_ATTEMPT: '1',
             GITHUB_JOB: 'lint-scope-test',
+            CI: 'true',
             LINT_BASE_SHA: baseSha,
             LINT_LOG: log,
             FAIL_LINTER: fail,
@@ -395,7 +396,7 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.status, result.stderr).toBe(0);
       const groups = result.calls
         .filter(({ name }) => name === 'prettier')
-        .map(({ args }) => args.slice(3).sort());
+        .map(({ args }) => args.slice(5).sort());
       // `deep/` carries no config of its own, so it joins the root group; the
       // nested directory must stay separate or its config stops loading.
       expect(groups).toHaveLength(2);
@@ -423,7 +424,7 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.status, result.stderr).toBe(0);
       const groups = result.calls
         .filter(({ name }) => name === 'prettier')
-        .map(({ args }) => args.slice(3).sort());
+        .map(({ args }) => args.slice(5).sort());
       expect(groups).toHaveLength(2);
       expect(groups.flat().sort()).toEqual(
         ['./changed.ts', './root-file.ts'].sort(),
@@ -444,8 +445,8 @@ describe.skipIf(process.platform === 'win32')(
       // must be the whole selection, or a stride/slice edit silently skips
       // files while the lane still exits 0.
       expect(calls).toHaveLength(2);
-      expect(calls.every(({ args }) => args.length - 3 <= 50)).toBe(true);
-      expect(calls.flatMap(({ args }) => args.slice(3)).sort()).toEqual(
+      expect(calls.every(({ args }) => args.length - 5 <= 50)).toBe(true);
+      expect(calls.flatMap(({ args }) => args.slice(5)).sort()).toEqual(
         files.map((name) => `./${name}`).sort(),
       );
     });
@@ -474,12 +475,14 @@ describe.skipIf(process.platform === 'win32')(
         .filter(({ name }) => name === 'prettier')
         .map(({ args }) => args);
       expect(prettierCalls).toHaveLength(1);
-      expect(prettierCalls[0].slice(0, 3)).toEqual([
+      expect(prettierCalls[0].slice(0, 5)).toEqual([
         '--experimental-cli',
         '--check',
         '--ignore-unknown',
+        '--parallel-workers',
+        '4',
       ]);
-      expect(prettierCalls[0].slice(3).sort()).toEqual(
+      expect(prettierCalls[0].slice(5).sort()).toEqual(
         [
           `./${special}`,
           './config space.yml',
@@ -780,5 +783,45 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.status, result.stderr).toBe(0);
       expect(result.calls).toEqual([{ name: 'npm', args: ['run', 'lint:ci'] }]);
     });
+
+    it.each([
+      ['CI', 'true', ['--parallel-workers', '4']],
+      ['developer', undefined, []],
+    ])('uses the %s worker pool for full Prettier', (_name, ci, workers) => {
+      baseSha = '';
+      const result = run(['prettier'], '', lintScript, { env: { CI: ci } });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.calls).toEqual([
+        {
+          name: 'prettier',
+          args: ['--experimental-cli', '--check', '.', ...workers],
+        },
+      ]);
+    });
+
+    it.each([
+      ['CI', 'true', ['--parallel-workers', '4']],
+      ['developer', undefined, []],
+    ])(
+      'uses the %s worker pool for incremental Prettier',
+      (_name, ci, workers) => {
+        put('changed.ts');
+        commit();
+        const result = run(['prettier'], '', lintScript, { env: { CI: ci } });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.calls).toEqual([
+          {
+            name: 'prettier',
+            args: [
+              '--experimental-cli',
+              '--check',
+              '--ignore-unknown',
+              ...workers,
+              './changed.ts',
+            ],
+          },
+        ]);
+      },
+    );
   },
 );

@@ -362,15 +362,16 @@ export function sendBridgeError(
   }
   if (err instanceof SessionRestoreTimeoutError) {
     recordExpectedBridgeError(err, ctx, daemonLog);
-    // The state this 504 leaves behind is the abandoned-restore fence, which
-    // outlives one full budget. A 5s hint here just buys one wasted round trip
-    // before the 409 tells the client the real backoff.
-    res.set('Retry-After', String(restoreRetryAfterSeconds(err.timeoutMs)));
+    // Only dispatched restores leave an abandoned-restore fence to wait for.
+    if (err.dispatched) {
+      res.set('Retry-After', String(restoreRetryAfterSeconds(err.timeoutMs)));
+    }
     res.status(504).json({
       error: err.message,
       code: 'session_restore_timeout',
       errorKind: 'restore_timeout',
       retryable: true,
+      ...(!err.dispatched ? { dispatched: false } : {}),
       sessionId: err.sessionId,
       action: err.action,
       timeoutMs: err.timeoutMs,

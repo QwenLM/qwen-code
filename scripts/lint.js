@@ -402,9 +402,17 @@ export function runYamllint() {
 // eslint-config-prettier, which turns formatting rules off rather than
 // enforcing them. `npm run format` remains the way to fix what this
 // reports.
+// The experimental CLI defaults to host cores, oversubscribing CI containers.
+// In CI, keep both lanes within the pool's four-CPU budget.
 export function runPrettier() {
   console.log('\nRunning Prettier...');
-  if (!runCommand('prettier --experimental-cli --check .')) {
+  if (
+    !runCommand(
+      process.env['CI']
+        ? 'prettier --experimental-cli --check . --parallel-workers 4'
+        : 'prettier --experimental-cli --check .',
+    )
+  ) {
     process.exit(1);
   }
 }
@@ -570,7 +578,12 @@ async function main() {
         ? runPrettier()
         : runChangedFiles(
             'prettier',
-            ['--experimental-cli', '--check', '--ignore-unknown'],
+            [
+              '--experimental-cli',
+              '--check',
+              '--ignore-unknown',
+              ...(process.env['CI'] ? ['--parallel-workers', '4'] : []),
+            ],
             scope.prettier,
           ),
   };

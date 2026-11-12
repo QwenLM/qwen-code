@@ -1326,6 +1326,13 @@ jobs:
             console.log("PROVISIONED actionlint + shellcheck into " + tempDir);
           '
 
+      - name: 'Prepare terminal fonts for unit tests'
+        if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        timeout-minutes: 3
+        env:
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+        run: 'bash .github/scripts/ecs-runner/install-qwen-font-baseline.sh --user-terminal'
+
       # The disk floor above admits on bytes and inodes; this admits on CPU
       # contention: a backstop for a host no shard survived, not a predictor of
       # the RPC flake (the bands overlap; calibration in the script). It runs
@@ -3354,7 +3361,7 @@ jobs:
             # step's env block, whose zero-secrets contract requires every
             # value but QWEN_HOME to be empty. Rationale and measurements:
             # scripts/tests/no-ak-integration-ci.test.js.
-            typecheck_heap=()
+            typecheck_heap=('NODE_OPTIONS=--max-old-space-size=3072')
             case "${RUNNER_NAME:-}" in
               ecs-qwen-*) typecheck_heap=('NODE_OPTIONS=--max-old-space-size=4096') ;;
             esac

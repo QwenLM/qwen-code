@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -33,6 +34,8 @@ function makeCase({
   aptStatus = '0',
   extractStatus = '0',
   customDataHome = false,
+  splitMono = false,
+  missingBold = false,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'qwen-font-baseline-test-'));
   const bin = join(dir, 'bin');
@@ -60,6 +63,7 @@ function makeCase({
       '',
     ].join('\n'),
   );
+  write('apt-cache', '#!/usr/bin/env bash\n[ "$CASE_SPLIT_MONO" = 1 ]\n');
   write(
     'dpkg-deb',
     [
@@ -69,6 +73,8 @@ function makeCase({
       '[ "$1" = --extract ] || exit 2',
       'mkdir -p "$3/usr/share/fonts/truetype/dejavu"',
       'printf fixture-font > "$3/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"',
+      'printf regular-font > "$3/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"',
+      'if [ "$CASE_MISSING_BOLD" != 1 ]; then printf bold-font > "$3/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"; fi',
       '',
     ].join('\n'),
   );
@@ -108,6 +114,8 @@ function makeCase({
     CASE_SUDO_STATUS: sudoStatus,
     CASE_APT_STATUS: aptStatus,
     CASE_EXTRACT_STATUS: extractStatus,
+    CASE_SPLIT_MONO: splitMono ? '1' : '0',
+    CASE_MISSING_BOLD: missingBold ? '1' : '0',
     CASE_METRICS: JSON.stringify(metrics),
     GITHUB_ACTIONS: '',
     HOME: join(dir, 'home'),
@@ -263,6 +271,84 @@ test('installer fails when the host still resolves the wrong family', () => {
     assert.match(result.stderr, /fonts-dejavu-core/);
   });
 });
+
+function runTerminalInstaller(env, systemFonts = false) {
+  const systemDir = join(env.CASE_DIR, 'system-fonts');
+  mkdirSync(systemDir);
+  if (systemFonts) {
+    writeFileSync(join(systemDir, 'DejaVuSansMono.ttf'), 'system-regular');
+    writeFileSync(join(systemDir, 'DejaVuSansMono-Bold.ttf'), 'system-bold');
+  }
+  const script = join(env.CASE_DIR, 'terminal-installer.sh');
+  // Keep the real installer, substituting only the machine's font directory.
+  writeFileSync(
+    script,
+    readFileSync(installScript, 'utf8').replace(
+      'system_fonts=/usr/share/fonts/truetype/dejavu',
+      `system_fonts='${systemDir}'`,
+    ),
+  );
+  return run(script, ['--user-terminal'], {
+    ...env,
+    HOME: join(env.CASE_DIR, 'isolated home & fonts'),
+    GITHUB_ENV: join(env.CASE_DIR, 'github-env'),
+  });
+}
+
+test('terminal installer reuses both system weights without elevation or APT', () => {
+  withCase({}, (env) => {
+    const result = runTerminalInstaller(env, true);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.calls, '');
+    const home = join(env.CASE_DIR, 'isolated home & fonts');
+    assert.equal(
+      readFileSync(
+        join(
+          home,
+          '.local/share/fonts/qwen-ci-terminal/DejaVuSansMono-Bold.ttf',
+        ),
+        'utf8',
+      ),
+      'system-bold',
+    );
+    const config = join(home, '.config/qwen-ci-terminal/fonts.conf');
+    assert.equal(
+      readFileSync(join(env.CASE_DIR, 'github-env'), 'utf8'),
+      `FONTCONFIG_FILE=${config}\n`,
+    );
+    assert.match(readFileSync(config, 'utf8'), /<dir prefix="relative">/);
+  });
+});
+
+for (const splitMono of [false, true]) {
+  test(`terminal installer downloads ${splitMono ? 'split Mono' : 'Bookworm core'} without fontconfig tools`, () => {
+    withCase({ splitMono }, (env) => {
+      const result = runTerminalInstaller(env);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(
+        result.calls,
+        new RegExp(`download fonts-dejavu-${splitMono ? 'mono' : 'core'}\\n`),
+      );
+      assert.match(result.calls, /Dir::State::lists=.*\/lists/);
+      assert.doesNotMatch(result.calls, /sudo|fc-cache|apt-get install/);
+      assert.match(result.stdout, /regular and bold/);
+    });
+  });
+}
+
+for (const failure of [
+  { aptStatus: '23' },
+  { extractStatus: '24' },
+  { missingBold: true },
+]) {
+  test(`terminal installer rejects incomplete setup ${JSON.stringify(failure)}`, () => {
+    withCase(failure, (env) => {
+      const result = runTerminalInstaller(env);
+      assert.notEqual(result.status, 0);
+      assert.equal(existsSync(join(env.CASE_DIR, 'github-env')), false);
+    });
+  });
+}
 
 function runCiFontStep(env, { installer, checker } = {}) {
   const workflow = readFileSync(

@@ -331,6 +331,14 @@ describe('Managed Workspace upload receipts and filesystem', () => {
   });
 
   it('returns private terminal receipts after registered SSH storage changes while fencing new filesystem access', async () => {
+    // Minimal CI containers omit machine-id; keep this SSH identity fixture
+    // independent of the host while leaving all workspace reads real.
+    const readFile = fs.readFile;
+    vi.spyOn(fs, 'readFile').mockImplementation(async (...args) =>
+      args[0] === '/etc/machine-id'
+        ? 'd493e3da33bd4dd18c17cf78ee6c9828'
+        : readFile(...args),
+    );
     const probe = await executeSshBootstrap({
       protocolVersion: 1,
       operation: 'probe',

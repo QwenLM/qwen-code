@@ -843,14 +843,19 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('initialize-timeout-ms', {
         type: 'number',
         description:
-          'ACP child request timeout, including the initialize handshake (ms). ' +
+          'Per-phase ACP startup budget (ms): channel creation and initialize each ' +
+          'receive it; their pair is capped at twice it, plus one separate ' +
+          'teardown budget on failure. Also the default ACP request timeout. ' +
           'Default: 10000 (10 s).',
       })
       .option('session-restore-timeout-ms', {
         type: 'number',
         description:
-          'ACP session load/resume timeout (ms). Default: 60000. An explicit ' +
-          '--initialize-timeout-ms can raise (but never lower) this default.',
+          'Deadline (ms) for engine selection, channel readiness, remembered-language ' +
+          'delivery, and ACP load/resume using the remaining time. Default: 60000; ' +
+          'an explicit --initialize-timeout-ms can raise, but never lower, it. ' +
+          'For initialize budgets >=30000, set this above twice that budget ' +
+          'plus engine selection, language delivery, and restore time.',
       })
       .option('session-reap-interval-ms', {
         type: 'number',

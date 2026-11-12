@@ -9157,17 +9157,75 @@ export function createSessionControlPlane(
         resolveSettlement();
       }
     };
+    let preparationStage: string | undefined;
     const promise = (async (): Promise<BridgeRestoredSession> => {
+      const restoreDeadlineAt = performance.now() + sessionRestoreTimeoutMs;
+      async function withinRestoreBudget<T>(
+        stage: 'engine_selection' | 'channel_readiness' | 'language_delivery',
+        operation: () => Promise<T>,
+      ): Promise<T> {
+        preparationStage ??= stage;
+        const remainingMs = Math.min(
+          sessionRestoreTimeoutMs,
+          restoreDeadlineAt - performance.now(),
+        );
+        const error = new SessionRestoreTimeoutError(
+          req.sessionId,
+          action,
+          sessionRestoreTimeoutMs,
+          false,
+        );
+        if (remainingMs <= 0) throw error;
+        preparationStage = stage;
+        let timer: NodeJS.Timeout | undefined;
+        const timeout = new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(error), remainingMs);
+          timer.unref();
+        });
+        try {
+          return await Promise.race([operation(), timeout]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      }
       const engine = executionEngines
-        ? await selectExecutionEngine({
-            operation: action,
-            request: Object.freeze({ ...req, workspaceCwd: workspaceKey }),
-            daemonOwnedStandalone: daemonOwnedStandaloneRestore,
-          })
+        ? await withinRestoreBudget('engine_selection', () =>
+            selectExecutionEngine({
+              operation: action,
+              request: Object.freeze({ ...req, workspaceCwd: workspaceKey }),
+              daemonOwnedStandalone: daemonOwnedStandaloneRestore,
+            }),
+          )
         : undefined;
       assertExpectedEngine(engine);
       pendingRestoreEvents.set(req.sessionId, restoreEvents);
-      const restoreChannel = getChannelInfo(await harness.ensure(engine));
+      let readiness: ReturnType<typeof harness.ensure> | undefined;
+      let restoreChannel: ChannelInfo;
+      try {
+        restoreChannel = getChannelInfo(
+          await withinRestoreBudget('channel_readiness', () => {
+            readiness = harness.ensure(engine);
+            return readiness;
+          }),
+        );
+      } catch (error) {
+        void readiness?.then(
+          (late) => {
+            writeStderrLine(
+              `qwen serve: channel ${late.id} warmed after abandoned session/${action} preparation; decision=apply_idle_policy`,
+            );
+            if (harness.configuredChannelIdleTimeoutMs() > 0) {
+              return harness.startIdleTimer(
+                late,
+                'abandoned restore preparation',
+              );
+            }
+            return undefined;
+          },
+          () => undefined,
+        );
+        throw error;
+      }
       restoreLifecycle.channel = restoreChannel;
       void harness.settleReleasedRuntimeWork('session restore owner selected');
       if (restoreChannel.harness.isDying) {
@@ -9191,9 +9249,23 @@ export function createSessionControlPlane(
       let replayHasMore: true | undefined;
       let replayAnchorRecordId: string | undefined;
       let restoreAskUserQuestionHint = false;
-      // Before the restore deadline starts; this never throws.
-      await deliverRememberedUserLanguage(restoreChannel);
+      await withinRestoreBudget('language_delivery', () =>
+        deliverRememberedUserLanguage(restoreChannel),
+      );
       try {
+        preparationStage = 'dispatch_boundary';
+        const remainingRestoreMs = Math.min(
+          sessionRestoreTimeoutMs,
+          restoreDeadlineAt - performance.now(),
+        );
+        if (remainingRestoreMs <= 0) {
+          throw new SessionRestoreTimeoutError(
+            req.sessionId,
+            action,
+            sessionRestoreTimeoutMs,
+            false,
+          );
+        }
         const rawRestore = telemetry.withSpan(
           'session.restore',
           {
@@ -9339,7 +9411,7 @@ export function createSessionControlPlane(
                 sessionRestoreTimeoutMs,
               ),
             );
-          }, sessionRestoreTimeoutMs);
+          }, remainingRestoreMs);
           timer.unref();
           void observedRestore.then(
             (value) => {
@@ -9800,13 +9872,29 @@ export function createSessionControlPlane(
           resolveSettlement();
         }
       },
-      () => {
+      (error: unknown) => {
         if (restoreLifecycle.phase === 'active') {
+          const preparationTimeout =
+            error instanceof SessionRestoreTimeoutError && !error.dispatched;
+          if (preparationTimeout) {
+            writeStderrLine(
+              `qwen serve: session/${action} timed out after ${sessionRestoreTimeoutMs}ms for ${JSON.stringify(req.sessionId)}; phase=preparation; stage=${preparationStage}; decision=release_admission`,
+            );
+          }
           telemetry.event('session.restore.public_result', {
             'qwen-code.daemon.session_restore.action': action,
-            'qwen-code.daemon.session_restore.result': 'failure',
+            'qwen-code.daemon.session_restore.result':
+              error instanceof SessionRestoreTimeoutError
+                ? 'timeout'
+                : 'failure',
             'qwen-code.daemon.session_restore.timeout_ms':
               sessionRestoreTimeoutMs,
+            ...(preparationTimeout && preparationStage
+              ? {
+                  'qwen-code.daemon.session_restore.preparation_stage':
+                    preparationStage,
+                }
+              : {}),
             ...(ci ? { 'qwen-code.daemon.acp_channel.id': ci.id } : {}),
             'session.id': req.sessionId,
           });

@@ -365,6 +365,29 @@ describe('toRpcError', () => {
     });
   });
 
+  it('does not advertise an abandoned-restore backoff before dispatch', () => {
+    const error = new SessionRestoreTimeoutError(
+      'persisted-1',
+      'load',
+      15_000,
+      false,
+    );
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message: error.message,
+      data: {
+        code: 'session_restore_timeout',
+        errorKind: 'restore_timeout',
+        httpStatus: 504,
+        retryable: true,
+        dispatched: false,
+        sessionId: 'persisted-1',
+        action: 'load',
+        timeoutMs: 15_000,
+      },
+    });
+  });
+
   it('maps session initialization timeouts with the public retry contract', () => {
     const error = new BridgeTimeoutError('newSession', 10_000);
     expect(toRpcError(error)).toEqual({
