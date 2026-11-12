@@ -2,13 +2,14 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **状态**：已在 #15343 中通过。PR 1（headless）已在 #15369 合入。PR 2a（ACP prompt 轮次的模型轮）正在 #15509 中评审。
+- **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）与 OpenTUI（PR 4，#16743–#16820）的迁移均已合入；各 surface 的默认开启等待 nightly 统一 loop E2E 门控（#16192）。PR 5（AgentCore，#16880）正在进行。
 - **日期**：2026-10-23，基于 upstream `779a4d5d0d`。
 - **相关**：
   - tracking issue #15327；
   - 早先的提案 #8775，它从 AgentCore 和 headless 入手；本设计把它的目标扩展到全部七份 loop，其中 AgentCore 这一步是 PR 5；
   - 对比各 loop 时发现的缺陷：#15324、#15325、#15326；
-  - [loop protection 设置](2026-10-21-loop-protection-setting.zh-CN.md)。
+  - [loop protection 设置](2026-10-21-loop-protection-setting.zh-CN.md)；
+  - [事件总线 agent 循环](2026-11-11-event-bus-agent-loop.zh-CN.md) —— 共享 loop 的 opt-in 事件驱动内部架构，经 `experimental.eventBusAgentLoop` 在 headless 启用。
 
 ## 问题
 

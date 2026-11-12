@@ -2,13 +2,14 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **Status**: accepted in #15343. PR 1 (headless) merged in #15369. PR 2a (the model round of ACP prompt turns) is in review in #15509.
+- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip waits on the nightly unified-loop E2E gate (#16192). PR 5 (AgentCore, #16880) is in progress.
 - **Date**: 2026-10-23, against upstream `779a4d5d0d`.
 - **Related**:
   - tracking issue #15327;
   - the earlier proposal #8775, which starts with AgentCore and headless; this design extends its goal to all seven loops, and its AgentCore step is PR 5;
   - defects found while comparing the loops: #15324, #15325, #15326;
-  - [loop protection setting](2026-10-21-loop-protection-setting.md).
+  - [loop protection setting](2026-10-21-loop-protection-setting.md);
+  - [Event-bus agent loop](2026-11-11-event-bus-agent-loop.md) — the shared loop's opt-in event-driven internal architecture, enabled on headless via `experimental.eventBusAgentLoop`.
 
 ## Problem
 
