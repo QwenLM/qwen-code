@@ -144,7 +144,12 @@ for (const target of ['draft', 'session'] as const) {
         expect.objectContaining({
           method: 'POST',
           path: `/session/${sessionId}/model`,
-          body: { modelId },
+          // #16738 made desktop subscription activation opt out of
+          // persisting the activated model as the workspace default.
+          body: {
+            modelId,
+            _meta: { 'qwen.session.modelPersistDefault': false },
+          },
         }),
       ]);
       expect(scenario.currentModel).toBe(modelId);

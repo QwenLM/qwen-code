@@ -100,7 +100,21 @@ public class ManagedAgentStore implements AgentStateStore {
             JdbcManagedExtensionRecordStore configRecords) {
         this(jdbc, objectMapper, clock, eventPublisher, workspaces, properties, harnessRules,
                 worktreeFiles, creationSkills, extensionPackages, lifecycle, definitions,
-                sessionWorktrees, journalEventTransport, configRecords, null);
+                sessionWorktrees, journalEventTransport, configRecords, null, null);
+    }
+
+    public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper,
+            Clock clock, CommittedEventPublisher eventPublisher,
+            JdbcManagedWorkspaceRegistry workspaces, ManagedAgentSettings properties, HarnessRules harnessRules,
+            com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles,
+            JdbcManagedSessionSkills creationSkills,
+            com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
+            JdbcWorkspaceLifecycleStore lifecycle, JdbcManagedAgentDefinitionStore definitions,
+            JdbcSessionWorktreeStore sessionWorktrees, JournalEventTransport journalEventTransport,
+            JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs) {
+        this(jdbc, objectMapper, clock, eventPublisher, workspaces, properties, harnessRules,
+                worktreeFiles, creationSkills, extensionPackages, lifecycle, definitions,
+                sessionWorktrees, journalEventTransport, configRecords, modelConfigs, null);
     }
 
     @Autowired
@@ -112,7 +126,8 @@ public class ManagedAgentStore implements AgentStateStore {
             com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
             @Nullable JdbcWorkspaceLifecycleStore lifecycle, @Nullable JdbcManagedAgentDefinitionStore definitions,
             @Nullable JdbcSessionWorktreeStore sessionWorktrees, @Nullable JournalEventTransport journalEventTransport,
-            @Lazy @Nullable JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs) {
+            @Lazy @Nullable JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs,
+            @Nullable JdbcJournalPacks journalPacks) {
         String approvalMode = properties.getHarness().getApprovalMode().toLowerCase(Locale.ROOT);
         String agentRevision = properties.getAgentRevision();
         List<String> definitionToolProfiles = properties.getDefinitionToolProfiles();
@@ -140,8 +155,8 @@ public class ManagedAgentStore implements AgentStateStore {
         this.sessionCommands = new AgentSessionCommands(eventJournal, sessionPolicies, storeRows, worktreeFiles, jdbc, clock, workspaces, workspaceFilesEnabled, workspaceShellEnabled);
         this.lifecycleOperations = new AgentLifecycleOperations(eventJournal, sessionCommands, sessionPolicies, sessionQueries, storeRows, jdbc, lifecycle, objectMapper, clock, workspaces, workspaceFilesEnabled, lifecycleHandoffMillis);
         this.sessionAdmissions = new AgentSessionAdmissions(eventJournal, sessionCommands, sessionPolicies, storeRows, configRecords, jdbc, clock, approvalMode, workspaces, agentRevision, modelCatalog, definitions, creationSkills, sessionWorktrees, extensionPackages, workspaceFilesEnabled, workspaceShellEnabled, workspaceChildAgentsEnabled, managedExtensionExecutionEnabled, workspaceMounts, residentWorkspaces, createdRoots, journalEventTransport, journalEventTransportEnabled, modelConfigs);
-        this.turnExecution = new AgentTurnExecution(eventJournal, messageProjection, sessionCommands, storeRows, jdbc, objectMapper, clock);
-        this.executionOperations = new AgentExecutionOperations(eventJournal, lifecycleOperations, sessionPolicies, sessionQueries, storeRows, worktreeFiles, jdbc, clock, workspaces, workspaceFilesEnabled);
+        this.turnExecution = new AgentTurnExecution(eventJournal, messageProjection, sessionCommands, storeRows, jdbc, objectMapper, clock, journalPacks);
+        this.executionOperations = new AgentExecutionOperations(eventJournal, lifecycleOperations, sessionPolicies, sessionQueries, storeRows, worktreeFiles, jdbc, clock, workspaces, workspaceFilesEnabled, journalPacks);
     }
 
     @Override
@@ -196,15 +211,13 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public Optional<Admission> findWorkspaceCreateReplay(String tenantId,
-            String actorId, String idempotencyKey, String requestDigest) {
+    public Optional<Admission> findWorkspaceCreateReplay(String tenantId, String actorId, String idempotencyKey, String requestDigest) {
         return sessionAdmissions.findWorkspaceCreateReplay(tenantId, actorId, idempotencyKey, requestDigest);
     }
 
     @Override
     @Transactional
-    public Admission replayWorkspaceSessionCommand(String tenantId,
-            String actorId, String idempotencyKey, String requestDigest) {
+    public Admission replayWorkspaceSessionCommand(String tenantId, String actorId, String idempotencyKey, String requestDigest) {
         return sessionAdmissions.replayWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest);
     }
 
@@ -244,8 +257,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public String findChildWorkspaceCwd(String tenantId,
-            String parentSessionId, String childRunId) {
+    public String findChildWorkspaceCwd(String tenantId, String parentSessionId, String childRunId) {
         return sessionQueries.findChildWorkspaceCwd(tenantId, parentSessionId, childRunId);
     }
 
@@ -347,22 +359,19 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public SessionMutationCommand beginSessionRename(String tenantId, String key,
-            String digest, String sessionId, String title) {
+    public SessionMutationCommand beginSessionRename(String tenantId, String key, String digest, String sessionId, String title) {
         return sessionCommands.beginSessionRename(tenantId, key, digest, sessionId, title, null);
     }
 
     @Override
     @Transactional
-    public SessionMutationCommand beginSessionRename(String tenantId, String key,
-            String digest, String sessionId, String title, String actorId) {
+    public SessionMutationCommand beginSessionRename(String tenantId, String key, String digest, String sessionId, String title, String actorId) {
         return sessionCommands.beginSessionRename(tenantId, key, digest, sessionId, title, actorId);
     }
 
     @Override
     @Transactional
-    public SessionRecord completeSessionRename(String tenantId, String key, String sessionId,
-            String title, String bootId, long revision) {
+    public SessionRecord completeSessionRename(String tenantId, String key, String sessionId, String title, String bootId, long revision) {
         return sessionCommands.completeSessionRename(tenantId, key, sessionId, title, bootId, revision);
     }
 
@@ -425,8 +434,7 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public void abandonSessionMutation(String tenantId, String operation,
-            String idempotencyKey, String sessionId) {
+    public void abandonSessionMutation(String tenantId, String operation, String idempotencyKey, String sessionId) {
         sessionCommands.abandonSessionMutation(tenantId, operation, idempotencyKey, sessionId);
     }
 
@@ -450,22 +458,19 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public OperationAdmission beginWorkspaceClose(String tenantId, String sessionId, String actorId,
-            String actorDigest, String key, String digest, boolean supported) {
+    public OperationAdmission beginWorkspaceClose(String tenantId, String sessionId, String actorId, String actorDigest, String key, String digest, boolean supported) {
         return lifecycleOperations.beginWorkspaceClose(tenantId, sessionId, actorId, actorDigest, key, digest, supported);
     }
 
     @Override
     @Transactional
-    public OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId,
-            OperationKind kind, String actorId, String actorDigest, String key, String digest, boolean closeSupported) {
+    public OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId, OperationKind kind, String actorId, String actorDigest, String key, String digest, boolean closeSupported) {
         return lifecycleOperations.beginWorkspaceLifecycle(tenantId, sessionId, kind, actorId, actorDigest, key, digest, closeSupported);
     }
 
     @Override
     @Transactional
-    public OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId,
-            OperationKind kind, String actorId, String actorDigest, String key, String digest, boolean supported, int protocolVersion) {
+    public OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId, OperationKind kind, String actorId, String actorDigest, String key, String digest, boolean supported, int protocolVersion) {
         return lifecycleOperations.beginWorkspaceLifecycle(tenantId, sessionId, kind, actorId, actorDigest, key, digest, supported, protocolVersion);
     }
 
@@ -481,8 +486,7 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,
-            String actorId, String scopedKey, String requestDigest) {
+    public SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId, String actorId, String scopedKey, String requestDigest) {
         return lifecycleOperations.unarchiveWorkspaceSession(tenantId, sessionId, actorId, scopedKey, requestDigest);
     }
 
@@ -532,8 +536,7 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public Optional<OperationRecord> claimContextCompression(String tenantId, String sessionId,
-            String operationId, String owner, Duration duration) {
+    public Optional<OperationRecord> claimContextCompression(String tenantId, String sessionId, String operationId, String owner, Duration duration) {
         return executionOperations.claimContextCompression(tenantId, sessionId, operationId, owner, duration);
     }
 
@@ -550,8 +553,7 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public boolean settleContextCompression(OperationRecord operation, String owner,
-            String outcome, Long revision, String failureCode) {
+    public boolean settleContextCompression(OperationRecord operation, String owner, String outcome, Long revision, String failureCode) {
         return executionOperations.settleContextCompression(operation, owner, outcome, revision, failureCode);
     }
 
@@ -563,8 +565,7 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public void awaitContextCompression(OperationRecord operation, String owner,
-            boolean acceptanceKnown, String failureCode, long retryAt) {
+    public void awaitContextCompression(OperationRecord operation, String owner, boolean acceptanceKnown, String failureCode, long retryAt) {
         executionOperations.awaitContextCompression(operation, owner, acceptanceKnown, failureCode, retryAt);
     }
 
@@ -604,14 +605,12 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public boolean settleParkedOperation(ParkedOperation parked,
-            AcceptanceVerdict verdict, long retryAt) {
+    public boolean settleParkedOperation(ParkedOperation parked, AcceptanceVerdict verdict, long retryAt) {
         return executionOperations.settleParkedOperation(parked, verdict, retryAt);
     }
 
     @Override
-    public AcceptanceVerdict turnInputAcceptance(String tenantId,
-            String sessionId, String operationId) {
+    public AcceptanceVerdict turnInputAcceptance(String tenantId, String sessionId, String operationId) {
         return executionOperations.turnInputAcceptance(tenantId, sessionId, operationId);
     }
 
@@ -622,8 +621,7 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public boolean settleParkedRename(ParkedOperation parked, AcceptanceVerdict verdict,
-            long retryAt) {
+    public boolean settleParkedRename(ParkedOperation parked, AcceptanceVerdict verdict, long retryAt) {
         return executionOperations.settleParkedRename(parked, verdict, retryAt);
     }
 
@@ -641,20 +639,17 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public Set<String> sessionsWithExecutionRegistryFacts(String tenantId,
-            java.util.Collection<String> sessionIds) {
+    public Set<String> sessionsWithExecutionRegistryFacts(String tenantId, java.util.Collection<String> sessionIds) {
         return sessionQueries.sessionsWithExecutionRegistryFacts(tenantId, sessionIds);
     }
 
     @Override
-    public Optional<OperationRecord> findOperation(String tenantId,
-            String sessionId, String operationId) {
+    public Optional<OperationRecord> findOperation(String tenantId, String sessionId, String operationId) {
         return lifecycleOperations.findOperation(tenantId, sessionId, operationId);
     }
 
     @Override
-    public List<OperationTarget> findDeliverableOperations(long now,
-            int limit) {
+    public List<OperationTarget> findDeliverableOperations(long now, int limit) {
         return lifecycleOperations.findDeliverableOperations(now, limit);
     }
 
@@ -684,15 +679,13 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public boolean renewLifecycleOperation(String tenantId, String sessionId, String operationId,
-            String owner, long generation, Duration duration) {
+    public boolean renewLifecycleOperation(String tenantId, String sessionId, String operationId, String owner, long generation, Duration duration) {
         return lifecycleOperations.renewLifecycleOperation(tenantId, sessionId, operationId, owner, generation, duration);
     }
 
     @Override
     @Transactional
-    public void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
-            String owner, long generation, String failureCode, long availableAt) {
+    public void blockLifecycleOperation(String tenantId, String sessionId, String operationId, String owner, long generation, String failureCode, long availableAt) {
         lifecycleOperations.blockLifecycleOperation(tenantId, sessionId, operationId, owner, generation, failureCode,
                 availableAt, false);
     }
@@ -724,18 +717,15 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public void markOperationAnswered(String tenantId, String sessionId,
-            String operationId, String owner, long claimGeneration) {
+    public void markOperationAnswered(String tenantId, String sessionId, String operationId, String owner, long claimGeneration) {
         lifecycleOperations.markOperationAnswered(tenantId, sessionId, operationId, owner, claimGeneration);
     }
 
-    public Admission replayCommand(String tenantId, String operation,
-            String idempotencyKey, String requestDigest) {
+    public Admission replayCommand(String tenantId, String operation, String idempotencyKey, String requestDigest) {
         return sessionCommands.replayCommand(tenantId, operation, idempotencyKey, requestDigest);
     }
 
-    public Optional<CommandRecord> findCommand(String tenantId,
-            String operation, String idempotencyKey) {
+    public Optional<CommandRecord> findCommand(String tenantId, String operation, String idempotencyKey) {
         return sessionCommands.findCommand(tenantId, operation, idempotencyKey);
     }
 
@@ -747,19 +737,16 @@ public class ManagedAgentStore implements AgentStateStore {
         return sessionQueries.findSessionById(sessionId);
     }
 
-    public SessionPage listSessions(String tenantId, String actorId,
-            Long beforeCreatedAt, String beforeSessionId, int limit) {
+    public SessionPage listSessions(String tenantId, String actorId, Long beforeCreatedAt, String beforeSessionId, int limit) {
         return sessionQueries.listSessions(tenantId, actorId, beforeCreatedAt, beforeSessionId, limit, "all", "");
     }
 
-    public SessionPage listSessions(String tenantId, String actorId,
-            Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState) {
+    public SessionPage listSessions(String tenantId, String actorId, Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState) {
         return sessionQueries.listSessions(tenantId, actorId, beforeCreatedAt, beforeSessionId,
                 limit, archiveState, "");
     }
 
-    public SessionPage listSessions(String tenantId, String actorId,
-            Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState, String titleQuery) {
+    public SessionPage listSessions(String tenantId, String actorId, Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState, String titleQuery) {
         return sessionQueries.listSessions(tenantId, actorId, beforeCreatedAt, beforeSessionId, limit, archiveState, titleQuery);
     }
 
@@ -776,8 +763,7 @@ public class ManagedAgentStore implements AgentStateStore {
         return sessionQueries.findActiveTurns(tenantId, sessionIds);
     }
 
-    public Map<String, TurnSummary> findLatestTurns(String tenantId,
-            List<String> sessionIds) {
+    public Map<String, TurnSummary> findLatestTurns(String tenantId, List<String> sessionIds) {
         return sessionQueries.findLatestTurns(tenantId, sessionIds);
     }
 
@@ -793,14 +779,12 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public Map<String, WebShellModelSelection> findModelSelections(String tenantId,
-            List<String> sessionIds) {
+    public Map<String, WebShellModelSelection> findModelSelections(String tenantId, List<String> sessionIds) {
         return sessionQueries.findModelSelections(tenantId, sessionIds);
     }
 
     @Override
-    public WebShellModelSelection findTurnModelSelection(String tenantId, String sessionId,
-            String promptId) {
+    public WebShellModelSelection findTurnModelSelection(String tenantId, String sessionId, String promptId) {
         return sessionQueries.findTurnModelSelection(tenantId, sessionId, promptId);
     }
 
@@ -813,8 +797,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public Map<String, WebShellApprovalSelection> findApprovalSelections(String tenantId,
-            List<String> sessionIds) {
+    public Map<String, WebShellApprovalSelection> findApprovalSelections(String tenantId, List<String> sessionIds) {
         return sessionQueries.findApprovalSelections(tenantId, sessionIds);
     }
 
@@ -824,8 +807,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public WebShellApprovalSelection findTurnApprovalSelection(String tenantId, String sessionId,
-            String promptId) {
+    public WebShellApprovalSelection findTurnApprovalSelection(String tenantId, String sessionId, String promptId) {
         return sessionQueries.findTurnApprovalSelection(tenantId, sessionId, promptId);
     }
 
@@ -868,19 +850,16 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public TurnPage listTurns(String tenantId, String sessionId,
-            Long beforeCreatedAt, String beforeTurnId, int limit) {
+    public TurnPage listTurns(String tenantId, String sessionId, Long beforeCreatedAt, String beforeTurnId, int limit) {
         return sessionQueries.listTurns(tenantId, sessionId, beforeCreatedAt, beforeTurnId, limit);
     }
 
     @Override
-    public Optional<TurnSummary> findTurnSummary(String tenantId,
-            String sessionId, String turnId) {
+    public Optional<TurnSummary> findTurnSummary(String tenantId, String sessionId, String turnId) {
         return sessionQueries.findTurnSummary(tenantId, sessionId, turnId);
     }
 
-    public List<EventRecord> findEvents(String tenantId, String sessionId,
-            long afterSequence, int limit) {
+    public List<EventRecord> findEvents(String tenantId, String sessionId, long afterSequence, int limit) {
         return eventJournal.findEvents(tenantId, sessionId, afterSequence, limit);
     }
 
@@ -889,34 +868,29 @@ public class ManagedAgentStore implements AgentStateStore {
         return eventJournal.findLatestEnvironmentEvents(tenantId, latestTurns);
     }
 
-    public List<EventRecord> findControlEvents(String tenantId,
-            String sessionId, long throughSequence) {
+    public List<EventRecord> findControlEvents(String tenantId, String sessionId, long throughSequence) {
         return eventJournal.findControlEvents(tenantId, sessionId, throughSequence);
     }
 
-    public EventPage findTranscriptEvents(String tenantId, String sessionId,
-            Long beforeSequence, int limit) {
+    public EventPage findTranscriptEvents(String tenantId, String sessionId, Long beforeSequence, int limit) {
         return eventJournal.findTranscriptEvents(tenantId, sessionId, beforeSequence, limit);
     }
 
     @Override
     @Transactional(transactionManager = "managedAgentTransactionManager", readOnly = true,
             isolation = org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
-    public StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
-            String cursor, int limit, boolean backward) {
+    public StoreModels.MessagePage findMessagePage(String tenantId, String sessionId, String cursor, int limit, boolean backward) {
         return messageProjection.findMessagePage(tenantId, sessionId, cursor, limit, backward, 0);
     }
 
     @Override
     @Transactional(transactionManager = "managedAgentTransactionManager", readOnly = true,
             isolation = org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
-    public StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
-            String cursor, int limit, boolean backward, long afterSequence) {
+    public StoreModels.MessagePage findMessagePage(String tenantId, String sessionId, String cursor, int limit, boolean backward, long afterSequence) {
         return messageProjection.findMessagePage(tenantId, sessionId, cursor, limit, backward, afterSequence);
     }
 
-    public Map<String, Long> findMessageCoveredSequences(String tenantId,
-            List<String> sessionIds) {
+    public Map<String, Long> findMessageCoveredSequences(String tenantId, List<String> sessionIds) {
         return messageProjection.findMessageCoveredSequences(tenantId, sessionIds);
     }
 
@@ -929,8 +903,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Transactional
-    public ReplayWindow advanceReplayFloor(String tenantId, String sessionId,
-            long floorSequence) {
+    public ReplayWindow advanceReplayFloor(String tenantId, String sessionId, long floorSequence) {
         return messageProjection.advanceReplayFloor(tenantId, sessionId, floorSequence);
     }
 
@@ -939,15 +912,13 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Transactional
-    public MaterializationResult materializeNextBatch(String tenantId,
-            String sessionId, int limit) {
+    public MaterializationResult materializeNextBatch(String tenantId, String sessionId, int limit) {
         return messageProjection.materializeNextBatch(tenantId, sessionId, limit);
     }
 
     @Override
     @Transactional
-    public void deferMaterializationTarget(String tenantId,
-            String sessionId) {
+    public void deferMaterializationTarget(String tenantId, String sessionId) {
         messageProjection.deferMaterializationTarget(tenantId, sessionId);
     }
 
@@ -960,20 +931,17 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Transactional
-    public Optional<TurnRecord> claimTurn(String tenantId, String sessionId,
-            String turnId, String owner, Duration leaseDuration) {
+    public Optional<TurnRecord> claimTurn(String tenantId, String sessionId, String turnId, String owner, Duration leaseDuration) {
         return turnExecution.claimTurn(tenantId, sessionId, turnId, owner, leaseDuration);
     }
 
     @Transactional
-    public boolean renewTurn(String tenantId, String sessionId,
-            String turnId, String owner, Duration leaseDuration) {
+    public boolean renewTurn(String tenantId, String sessionId, String turnId, String owner, Duration leaseDuration) {
         return turnExecution.renewTurn(tenantId, sessionId, turnId, owner, leaseDuration);
     }
 
     @Transactional
-    public void releaseTurnLease(String tenantId, String sessionId,
-            String turnId, String owner) {
+    public void releaseTurnLease(String tenantId, String sessionId, String turnId, String owner) {
         turnExecution.releaseTurnLease(tenantId, sessionId, turnId, owner);
     }
 
@@ -987,15 +955,13 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public boolean markTurnFailureRecovery(String tenantId, String sessionId,
-            String turnId, String owner, String message) {
+    public boolean markTurnFailureRecovery(String tenantId, String sessionId, String turnId, String owner, String message) {
         return turnExecution.markTurnFailureRecovery(tenantId, sessionId, turnId, owner, message);
     }
 
     @Override
     @Transactional
-    public boolean requestRecoveryRecheck(String tenantId, String sessionId,
-            String turnId) {
+    public boolean requestRecoveryRecheck(String tenantId, String sessionId, String turnId) {
         return turnExecution.requestRecoveryRecheck(tenantId, sessionId, turnId);
     }
 
@@ -1009,8 +975,7 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public void deferTurnRetry(String tenantId, String sessionId,
-            String turnId, String owner, long retryAfter) {
+    public void deferTurnRetry(String tenantId, String sessionId, String turnId, String owner, long retryAfter) {
         turnExecution.deferTurnRetry(tenantId, sessionId, turnId, owner, retryAfter);
     }
 
@@ -1022,8 +987,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Transactional
-    public boolean bindHarness(String tenantId, String sessionId,
-            String turnId, String owner, String harnessBootId) {
+    public boolean bindHarness(String tenantId, String sessionId, String turnId, String owner, String harnessBootId) {
         return turnExecution.bindHarness(tenantId, sessionId, turnId, owner, harnessBootId);
     }
 
@@ -1040,14 +1004,12 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Transactional
-    public void markSubmissionAttempted(String tenantId, String sessionId,
-            String turnId, String owner) {
+    public void markSubmissionAttempted(String tenantId, String sessionId, String turnId, String owner) {
         turnExecution.markSubmissionAttempted(tenantId, sessionId, turnId, owner);
     }
 
     @Transactional
-    public boolean withdrawSubmissionAttempted(String tenantId,
-            String sessionId, String turnId, String owner) {
+    public boolean withdrawSubmissionAttempted(String tenantId, String sessionId, String turnId, String owner) {
         return turnExecution.withdrawSubmissionAttempted(tenantId, sessionId, turnId, owner);
     }
 
@@ -1098,20 +1060,17 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public boolean cancelUnadmittedTurn(String tenantId, String sessionId,
-            String turnId, String owner) {
+    public boolean cancelUnadmittedTurn(String tenantId, String sessionId, String turnId, String owner) {
         return turnExecution.cancelUnadmittedTurn(tenantId, sessionId, turnId, owner);
     }
 
     @Transactional
-    public void cancelBeforeAdmission(String tenantId, String sessionId,
-            String turnId, String owner) {
+    public void cancelBeforeAdmission(String tenantId, String sessionId, String turnId, String owner) {
         turnExecution.cancelBeforeAdmission(tenantId, sessionId, turnId, owner);
     }
 
     @Transactional
-    public void failTurn(String tenantId, String sessionId, String turnId,
-            String owner, String code, String message) {
+    public void failTurn(String tenantId, String sessionId, String turnId, String owner, String code, String message) {
         turnExecution.failTurn(tenantId, sessionId, turnId, owner, code, message);
     }
 
@@ -1121,8 +1080,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Transactional
-    public boolean failRecoveryBlockedTurn(String tenantId, String sessionId,
-            String turnId, String owner, String message) {
+    public boolean failRecoveryBlockedTurn(String tenantId, String sessionId, String turnId, String owner, String message) {
         return turnExecution.failRecoveryBlockedTurn(tenantId, sessionId, turnId, owner, message);
     }
 
@@ -1141,8 +1099,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
-    public Optional<String> findLastVisibleStatusBeforeDelete(String tenantId,
-            String sessionId) {
+    public Optional<String> findLastVisibleStatusBeforeDelete(String tenantId, String sessionId) {
         return sessionQueries.findLastVisibleStatusBeforeDelete(tenantId, sessionId);
     }
 

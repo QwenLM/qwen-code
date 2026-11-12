@@ -8,6 +8,7 @@ import type { DaemonChannelTypeDescriptor } from '@qwen-code/sdk/daemon';
 
 export const PLATFORM_MARKS: Record<string, string> = {
   dingtalk: 'D',
+  'dingtalk-webhook': 'D',
   dws: 'DWS',
   weixin: 'WX',
   wecom: 'W',
@@ -21,6 +22,7 @@ export const PLATFORM_MARKS: Record<string, string> = {
 
 const SUPPORTED_CHANNEL_TYPES = new Set([
   'dingtalk',
+  'dingtalk-webhook',
   'dws',
   'weixin',
   'wecom',
@@ -36,6 +38,7 @@ export function isSupportedChannelType(
   type: unknown,
 ): type is
   | 'dingtalk'
+  | 'dingtalk-webhook'
   | 'dws'
   | 'weixin'
   | 'wecom'
@@ -55,11 +58,12 @@ export function isChannelPlatformAvailable(
 }
 
 /**
- * Channels whose traffic is always repository-scoped group traffic. Every
- * envelope sets `isGroup`, so the direct-message policy never gates them, and
- * their group IDs are repository full names (`owner/repo`).
+ * Channels whose traffic is always repository-scoped group traffic. Both the
+ * GitHub and GitLab adapters build every envelope with `isGroup: true`, so the
+ * direct-message policy never gates them. Their group IDs are repository paths
+ * — GitHub `owner/repo`, GitLab `group[/subgroup…]/project`.
  */
-const REPOSITORY_ONLY_CHANNEL_TYPES = new Set(['github']);
+const REPOSITORY_ONLY_CHANNEL_TYPES = new Set(['github', 'gitlab']);
 
 export function isRepositoryOnlyChannelType(type: unknown): boolean {
   return typeof type === 'string' && REPOSITORY_ONLY_CHANNEL_TYPES.has(type);

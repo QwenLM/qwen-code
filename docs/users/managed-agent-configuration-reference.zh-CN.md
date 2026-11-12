@@ -306,6 +306,21 @@ SSH Runtime 节点：服务端通过 SSH 访问的主机，用户可以在这些
 | `enabled` | — | 布尔 | — | 是否提供 SSH Workspace：节点 `access` 中列出的 actor 可以浏览该节点允许的根目录，并把其中的目录登记为 Workspace；关闭时这些路由返回 `404 ssh_runtime_disabled`。未开启 `qwen.managed-agent.harness.workspace-files-enabled` 或未配置 `qwen.managed-agent.runtime-broker.ssh.nodes`、使用外部 provisioner，或处于 `managed-local` profile 时，启动时拒绝。 |
 | `nodes` | — | YAML 列表 | *（空）* | SSH Runtime 节点，以列表形式写在配置文件（YAML）中。每一项包含 `node-id` 和 `display-name`；`ssh-host`（服务端账号 SSH 配置中的主机别名）；节点上的绝对路径 `node-executable`、`qwen-entry` 和 `state-directory`；`allowed-roots`（至少一个绝对目录，Workspace 只能登记在其下）；`publication-port`（节点上的 loopback 端口，工具发布通过 SSH 转发到这里）；`qwen-version`（必填，必须与节点报告的版本一致）；`access`（允许使用该节点的 `tenant-id` 与 `actor-id` 组合）。条目无效时启动时拒绝。配置了节点后，`qwen.managed-agent.tool-publication.service-base-url` 必须是 `http` URL。 |
 
+## `qwen.managed-agent.session-resources`
+
+将超大的私有 Session 资源与已关闭 Session 的日志冷藏到不可变对象存储；资源写入、pack 构建与 SQL 正文腾空由各自独立、默认关闭的开关控制。
+
+| 属性 | 环境变量 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `deletion-enabled` | — | 布尔 | `false` | 是否允许在删除宽限期后腾空被 pack 覆盖的 SQL journal 正文。需先完成只打包模式的资格验证；腾空受 head 水位与宽限期围栏保护。前提：直读 record_bytes 的 JournalStoreRows.activationLeaseRow、WorkspaceCsiCheckpointSnapshotStore、JdbcCsiActivationAdmission、JdbcCsiExecutionAdmission 尚未 pack-aware，覆盖区间被腾空后即失败关闭；启用前须将其迁移到 pack 解析（或确认不会读到被腾空的区间）。 |
+| `deletion-grace` | — | 时长 | `72h` | pack 发布且发布者被围栏后、到可腾空被覆盖 SQL 正文之间的宽限期；必须大于备份复制 lag。纯数字按秒解析。 |
+| `enabled` | — | 布尔 | `false` | 是否允许把超大的私有 Session 资源外置到不可变对象存储（journal 提交前 allocate/upload/finalize）。为 false 时超上限资源返回 HTTP 501 `managed_session_oss_disabled`；已外置资源仍可读取。 |
+| `oss-key-prefix` | — | 字符串 | `session-resources/` | 已配置对象存储 bucket 中用于外置 Session 资源与 journal pack 的 key 前缀。 |
+| `pack-job-enabled` | — | 布尔 | `false` | 后台清扫任务是否为符合条件的 Session 构建并发布不可变 journal pack。需要开启 `qwen.managed-agent.session-resources.enabled`。构建 pack 绝不删除 SQL 正文。 |
+| `pack-max-transactions` | — | 整数 | `4096` | 单个 journal pack 最多容纳的 journal 事务数。 |
+| `pack-target-bytes` | — | 整数 | — | 单个 journal pack 的目标压缩后大小；pack 范围会自适应收缩以不超过该值。 |
+| `scan-delay` | — | 时长 | `30s` | 后台 journal compaction 清扫任务的运行间隔。纯数字按毫秒解析，也可使用带单位的值如 `30s`。 |
+
 ## `qwen.managed-agent.session-store`
 
 私有的 Managed Session Store：Hosted Harness 通过本服务的内部路由读写 Session 日志；以及保护它的写入凭据与写入租约。
@@ -326,7 +341,6 @@ SSH Runtime 节点：服务端通过 SSH 访问的主机，用户可以在这些
 | 属性 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `active-captures` | — | 整数 | — | 单个租户可同时处于打开状态的工具输出捕获数量；达到上限后新的预留会被拒绝，直到有捕获结束。`qwen.managed-agent.tool-publication.enabled` 为 true 时必填，且至少为 `1`（否则启动时拒绝）。 |
-| `async-verification-enabled` | `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_ASYNC_VERIFICATION_ENABLED` | 布尔 | `false` | 是否允许客户端通过 `X-Qwen-Tool-Publication-Async: 1` 请求头为发布操作申请异步校验（先返回 HTTP 202，再轮询结果）；关闭时所有操作均同步校验。关闭后不再接纳新的异步操作，已接纳的操作仍会继续校验完毕。 |
 | `claim-timeout` | — | 时长 | — | 服务端对进行中的发布操作持有认领的时长；持有者每隔该时长的三分之一续期一次，认领失效后重试请求才能接管该操作。启用工具发布时必填，必须为正且短于 `qwen.managed-agent.tool-publication.operation-timeout`（否则启动时拒绝）。不带单位的数字按秒解析。 |
 | `deletion-grace` | `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_DELETION_GRACE` | 时长 | `24h` | 已退役 Session 的工具输出和 Session 资源在可被垃圾回收删除之前的保留时长。仅在开启 `qwen.managed-agent.tool-publication.gc-enabled` 时生效；周期性的保留情况日志采样也使用该值。不得为负（启用工具发布时，否则启动时拒绝）。不带单位的数字按秒解析。 |
 | `enabled` | `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_ENABLED` | 布尔 | `false` | 服务端是否接受工具输出发布：Hosted Shell 执行通过内部 `/internal/managed-tool-publications` API 将输出流式写入对象存储（未注册自定义存储 bean 时为阿里云 OSS）。必须同时设置本组的服务 URL、容量和期限，以及 OSS endpoint、region 和 bucket，否则启动时拒绝。内部接口不在回环地址上时还需要 `qwen.managed-agent.session-store.binding-key`，除非 `qwen.managed-agent.auth.allow-insecure-bind` 为 true。 |
@@ -342,4 +356,4 @@ SSH Runtime 节点：服务端通过 SSH 访问的主机，用户可以在这些
 | `session-bytes` | — | 整数 | — | 单个 Session 所有捕获合计可预留的工具输出字节数；每次预留按其捕获大小加上固定的 `4784128` 字节开销计算。超出该值的预留会被拒绝。启用工具发布时必填，且至少为 `1`（否则启动时拒绝）。 |
 | `tenant-bytes` | — | 整数 | — | 单个租户在其所有 Session 的捕获中合计可预留的工具输出字节数；每次预留按其捕获大小加上固定的 `4784128` 字节开销计算。超出该值的预留会被拒绝。启用工具发布时必填，且至少为 `1`（否则启动时拒绝）。 |
 | `verification-bytes-per-second` | — | 整数 | — | 校验吞吐量下限（字节/秒）：校验期限为 `qwen.managed-agent.tool-publication.operation-timeout` 加上每校验这么多字节增加的一秒，且不得超过 `qwen.managed-agent.tool-publication.max-verification-timeout`。启用工具发布时必填，且至少为 `1`（否则启动时拒绝）。 |
-| `verification-concurrency` | `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_VERIFICATION_CONCURRENCY` | 整数 | `2` | 对已异步接纳的发布操作进行校验的后台线程数。关闭 `qwen.managed-agent.tool-publication.async-verification-enabled` 后校验器仍会运行，以便处理完已接纳的操作。至少为 `1`（启用工具发布时，否则启动时拒绝）。 |
+| `verification-concurrency` | `QWEN_MANAGED_AGENT_TOOL_PUBLICATION_VERIFICATION_CONCURRENCY` | 整数 | `2` | 对已接纳的发布操作进行校验的后台线程数。每个生产者操作在其输入保存后即返回 HTTP 202，由这些线程完成校验，客户端轮询结果。至少为 `1`（启用工具发布时，否则启动时拒绝）。 |
