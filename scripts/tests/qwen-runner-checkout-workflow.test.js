@@ -67,6 +67,13 @@ const jobs = [
     'integration_cli',
     'web_shell_e2e_smoke',
   ].map((name) => ['ci', name]),
+  // The E2E pool legs check out on the same shared workspace, and a leftover
+  // sparse index from another lane breaks them the same way: checkout's
+  // clean/reset skip the sparse-excluded paths, then `sparse-checkout disable`
+  // aborts with "not uptodate; will not remove from working tree" and leaves
+  // no .github/ behind. Run 43010833061 lost the sandbox:docker leg at the very
+  // next step, which could not resolve .github/actions/self-hosted-node.
+  ...['build', 'e2e-test-linux'].map((name) => ['e2e', name]),
   ...['test', 'flyway-migrations', 'mysql-integration', 'daemon-e2e'].map(
     (name) => ['sdk-java', name],
   ),

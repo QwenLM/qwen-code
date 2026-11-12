@@ -2,7 +2,7 @@
 
 [English](2026-11-07-ephemeral-container-runners.md) | [简体中文](2026-11-07-ephemeral-container-runners.zh-CN.md)
 
-Date: 2026-11-07. Status: runner lifecycle implemented; ten fixed slots are
+Date: 2026-11-07. Status: runner lifecycle implemented; thirty fixed slots are
 deployed on hz4. Direct external-PR routing still needs default-branch
 deployment and real CI acceptance.
 
@@ -56,7 +56,7 @@ Each container
 ```
 
 The manager keeps a configured number of slots, at most one container per slot.
-The Hangzhou trial ran ten slots at once; the hz4 deployment now maintains ten slots. It takes no webhook, schedules no PR
+The Hangzhou trial ran ten slots at once; the hz4 deployment now maintains thirty slots. It takes no webhook, schedules no PR
 itself, and introduces neither Kubernetes nor a database. GitHub assigns work by
 runner label. Each ECS runs its own manager against its local Docker socket,
 with a unique `poolId` and a per-host `slots` count. Hosts share the scheduling
@@ -106,10 +106,35 @@ comes online → run one job → runner exits → export logs → delete the con
 and network → clean up the leftover registration → create the next one.
 
 JIT provides single-job registration semantics under the normal protocol; the
-host manager is responsible for actually destroying the container. The design
-must not rely on a malicious job exiting on its own, finishing a final cleanup
-step, or keeping the runner intact. A watchdog outside the container enforces a
-maximum lifetime, and a manager restart reconciles old resources first.
+host manager is responsible for actually destroying the container after it
+exits. `ttlSeconds` marks the age at which health checks begin, not a hard
+lifetime: healthy idle runners remain available and late-assigned jobs are not
+interrupted by container age. Every five minutes after that threshold, the
+manager checks the recorded GitHub runner ID, name and online status. Missing,
+offline, invalid or unavailable registration information raises `WATCHDOG ALERT`
+without destroying the container. GitHub workflow job timeouts bound normal
+execution (45–90 minutes for the routed jobs).
+
+A `docker wait` transport error also does not prove that the container exited;
+the manager checks Docker state and retries the observation. The wait client
+has no age timeout and is cancelled when monitoring ends. A runner that is
+actually hung and cannot honor cancellation requires operator inspection and
+targeted recovery. This is an explicit availability tradeoff: container age or
+an offline control-plane record cannot safely identify a finished job, and
+malicious jobs are not guaranteed to exit cooperatively. Resource limits remain
+in force. Manager restart recovery still reconciles old resources first.
+A stop with a drain window configured is automatic: replenishment stops, and a
+slot whose container has shown no job worker for two consecutive polls retires
+its registration with a DELETE before the container is removed. The accepted
+deletion is the point at which GitHub can no longer assign work to that runner,
+which is what closes the gap between the last idle probe and `docker rm -f`. A
+refused retirement — busy, rate limited, or otherwise unconfirmed — keeps the
+container draining and restarts the idle window; only the drain deadline forces
+the shutdown. Assigned jobs finish on their own; the deadline, not the idle
+test, is what bounds a job that outlives the window. GitHub treats JIT
+registration labels as read-only, so removing the scheduling label is not an
+available drain mechanism; retiring the registration is.
+Record the actual installed commit and manager checksum when deploying.
 
 If deleting a container fails, that slot stops; if GitHub registration cleanup
 fails, the failure is recorded and retried instead of endlessly requesting new
@@ -178,7 +203,7 @@ For untrusted fork PRs, `pr_test_runner` directly selects
 Real external PR run 42382582937, attempt 2, received empty repository variables
 even though the repository settings were populated. Direct routing removes that
 dependency. It requires no configuration relay or manual smoke workflow. The
-ten registered runners use the formal labels to validate actual CI. The
+thirty registered runners use the formal labels to validate actual CI. The
 manager accepts up to 64 slots per host; keep capacity conservative until
 success rate, duration and resource use are stable. Capacity changes are
 manual configuration changes, not queue-driven scaling.
@@ -197,9 +222,8 @@ that the new image has not verified, and leaves the routing image relationship
 of the existing classifier job and the other workflows unchanged.
 
 Update 2026-11-08: the credential-free Web-shell Visuals capture job
-moves onto this pool **for untrusted fork PRs only** — same-repo PRs stay
-on the hosted lane, where the job ran before (the original rule above,
-"trusted and same-repository PR routes stay unchanged", still governs).
+initially moved onto this pool **for untrusted fork PRs only**. At that stage,
+same-repo PRs stayed on the hosted lane under the original rule above.
 The main CI `Test (ubuntu-latest, Node 22.x)` aggregate gate was tried
 here and moved back off (below).
 The capture job matches the pool's security
@@ -211,7 +235,7 @@ the shared 2 GiB default passed a slot with 14.6 GB free on an 89%-used
 filesystem and pnpm died on ENOSPC minutes later), renders with pinned
 `--workers=2` (an unpinned run sizes Chromium from the host's cores inside
 the 4-CPU container and starved the runner process itself), carries a
-routed 90-minute pool ceiling against the hosted 45 (two cold installs
+routed 90-minute pool ceiling against the hosted 45 (a head install
 measured 22m18s plus a Chromium download past 36m48s), and installs the
 DejaVu font baseline plus ffmpeg
 best-effort at runtime — apt egress and the Debian archive stay hard
@@ -220,8 +244,8 @@ the same archive; the best-effort step degrades only its own extra
 font/ffmpeg install failure to fallback fonts and .webm-only recordings
 instead of failing the preview, with bounded apt calls and a post-install
 font check. The first complete pooled render still needs acceptance for
-font metrics and end-to-end duration. Same-repo PRs never leave the hosted lane, so there is
-nothing to revert. Fork-triggered runs receive empty repository variables
+font metrics and end-to-end duration. At that stage, same-repo PRs never left
+the hosted lane. Fork-triggered runs receive empty repository variables
 (see the fork section above), so the kill-switch cannot reach them; the
 real fork-path escape is changing the selector on `main`, not the switch.
 The E2E OpenTUI leg deliberately stays hosted: it injects long-lived model
@@ -237,6 +261,76 @@ kill-switch cannot reach fork runs. It now follows the classifier's
 `ubuntu_runner` exactly like the sibling aggregates: persistent fleet for
 trusted events, hosted for untrusted forks, kill-switch honored through
 the classifier on every path.
+
+Update 2026-11-11: GitHub-hosted concurrency became the bottleneck while the
+disposable hz4/hz5 pool had available capacity. Web-shell Visuals capture now
+uses `ecs-qwen-ephemeral` for every PR, and the credential-free Managed Host
+Build uses it for PR events as well. Both jobs execute PR code with a read-only
+token and no long-lived secrets. Managed Host push and manual runs remain
+GitHub-hosted; the privileged Visuals publisher also remains GitHub-hosted
+because it receives OSS credentials and `CI_BOT_PAT`. The Managed Host lane
+reuses the image's Node, applies the same 8 GiB / 85% disk gate and gives pool
+runs a 90-minute ceiling while retaining the hosted 20-minute ceiling. Where
+repository variables are available, `MAINTAINER_ECS_RUNNER_DISABLED=true`
+returns these PR jobs to GitHub-hosted runners. Fork runs still cannot observe
+that variable, so their escape path remains a workflow selector change on
+`main` followed by a fresh event.
+
+Both lanes deliberately keep their pnpm store restore on the hosted arm only.
+A pool slot is a fresh container with no store, so every pooled run pays a cold
+install: the Managed Host lane measured 2m45s install plus 4m07s of builds
+(6m52s total, job 130475867804), against the capture lane's 22m18s
+head install. That is what the 90-minute ceilings buy, and it is accepted
+here rather than optimized: restoring the GitHub Actions cache on this pool
+means reaching the cache service through the slot's egress proxy, and saving
+from a container that dies with its job is upload cost with no return. Pool
+store caching is a separate decision, tracked with the capacity work in #16514.
+
+A slot's egress is likewise a declared exposure, not a new gate. The first
+pooled capture of this routing change failed in `Checkout PR head` on an hz5
+slot that could not reach github.com (run 42998471929), while the Managed Host
+job on hz4 checked out and built normally in the same run. Accepted for now,
+with a re-run on demand: the capture publishes an optional preview and is not a
+required check, so a broken slot costs that PR its images rather than its merge,
+and GitHub Actions offers no job-level retry. Same-repo PRs can also take
+`MAINTAINER_ECS_RUNNER_DISABLED=true`; a per-lane egress preflight belongs with
+the pool's network work in #16514, not in this routing change.
+
+Recording the timeout as an expression has a second, accepted cost: the
+PR-stage budget gate counts a non-numeric `timeout-minutes` as "no fixed
+timeout", so `.ci-budget` now carries `1 0 1` for the Managed Host lane and the
+gate no longer bounds its hosted 20-minute ceiling. The capture lane already
+paid this when its ceiling became an expression. Keeping the hosted bound
+visible would need the gate to understand routed expressions, which is its own
+change.
+
+The first-stage acceptance item above ("the first complete pooled render still
+needs acceptance") is now closed for duration on two complete runs, and still
+open for font metrics. Two complete pooled captures finished under the
+90-minute ceiling on the 2026-11-11 image: run 43005736229 in 74m44s and run
+42987806994 in 84m13s, both with a successful after render, merge-base render
+and composite. The margin is thin — 15m16s on the faster run, 5m47s on the
+slower one — and most of it is downloads (Chromium 22m, plus that run's two
+cold installs, 12m30s and 11m on the faster run and 14m33s and 13m51s on the
+slower one). A slower archive or mirror can still exhaust the ceiling, and on
+the merged head it did: run 43027483078 (job 130545811798,
+`ecs-qwen-hz5-ephemeral-09`) spent 17m27s on installs and 60m49s downloading
+Chromium, began its capture tests 83m31s into the job, and was cancelled at
+90m21s with 76 of 104 captures done, so its merge-base render and composite
+never ran. That is the same egress exposure recorded above, not a new one; the
+disposition is to re-run the capture whenever a green same-repository run is
+needed, which costs a slot, and the lane is not a required check. Font metrics remain unaccepted: no human has compared the pooled
+screenshots against the hosted baseline, and the best-effort apt step can still
+degrade to fallback fonts while the job stays green.
+
+Capacity is asymmetric under saturation and this change widens it: the pool now
+serves same-repository PRs alongside fork jobs that have no hosted fallback.
+GitHub queues by arrival order without priority, so a burst of same-repo PRs can
+delay a fork PR that cannot be routed anywhere else. Accepted for the current
+fixed capacity, with two levers: `MAINTAINER_ECS_RUNNER_DISABLED=true` returns
+the same-repo lanes to hosted and frees the pool for forks, and capacity is a
+manual configuration change. Queue-depth observation and any priority scheme
+stay with #16514.
 
 The pool label is `ecs-qwen-ephemeral`; the initial deployment registered ten
 ARM64 runners, and the 2026-11-08 live query showed 22 online slot

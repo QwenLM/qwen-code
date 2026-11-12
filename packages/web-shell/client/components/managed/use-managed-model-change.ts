@@ -3,59 +3,20 @@ import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
+  ManagedModelSelection,
   ManagedSessionModels,
 } from './managed-agent-provider';
 import { managedRequestId } from './managed-session-storage';
+import { withActionTimeout } from '../../daemon/timing';
 
-interface ModelIntent {
-  sessionId: string;
-  modelId: string;
-  expectedRevision: number;
-  idempotencyKey: string;
+function latestSelection(
+  current: ManagedModelSelection | undefined,
+  incoming: ManagedModelSelection | undefined,
+): ManagedModelSelection | undefined {
+  return incoming && (!current || incoming.revision > current.revision)
+    ? incoming
+    : current;
 }
-
-function readIntent(
-  key: string,
-  sessionId: string | undefined,
-): ModelIntent | undefined {
-  try {
-    const item: unknown = JSON.parse(sessionStorage.getItem(key) ?? 'null');
-    if (!item || typeof item !== 'object') return undefined;
-    const value = item as Record<string, unknown>;
-    if (
-      value['sessionId'] !== sessionId ||
-      typeof value['modelId'] !== 'string' ||
-      !value['modelId'].trim() ||
-      typeof value['idempotencyKey'] !== 'string' ||
-      !value['idempotencyKey'] ||
-      !Number.isSafeInteger(value['expectedRevision']) ||
-      Number(value['expectedRevision']) < 0
-    )
-      return undefined;
-    return item as ModelIntent;
-  } catch {
-    return undefined;
-  }
-}
-
-function persist(key: string, intent?: ModelIntent): boolean {
-  try {
-    if (intent) sessionStorage.setItem(key, JSON.stringify(intent));
-    else sessionStorage.removeItem(key);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const DEFINITIVE_ERRORS = new Set([
-  'unsupported_model',
-  'model_selection_conflict',
-  'turn_active',
-  'session_context_busy',
-  'session_operation_forbidden',
-  'unsupported_feature',
-]);
 
 export function useManagedModelChange(
   provider: ManagedAgentProvider,
@@ -70,10 +31,10 @@ export function useManagedModelChange(
   const key = `qwen-managed-model:${provider.storageKey}:${sessionId ?? ''}`;
   const [state, setState] = useState<{
     key: string;
-    pending?: ModelIntent;
     busy: boolean;
+    selection?: ManagedModelSelection;
     errorCode?: string;
-  }>({ key, pending: readIntent(key, sessionId), busy: false });
+  }>({ key, busy: false });
   const [optionsState, setOptionsState] = useState<{
     key: string;
     options?: ManagedSessionModels;
@@ -81,53 +42,98 @@ export function useManagedModelChange(
     error: boolean;
   }>({ key, loading: false, error: false });
   const [optionsRevision, setOptionsRevision] = useState(0);
-  const pendingRef = useRef(state.pending);
   const running = useRef(false);
   const lifetime = useRef<AbortController | undefined>(undefined);
+  // The revision the failed write expected. A later read proving the Session
+  // moved past it proves the write landed (or was superseded), so the failure
+  // alert must not keep claiming the change did not happen.
+  const failedRevision = useRef<number | undefined>(undefined);
   const summaryRef = useRef(summary);
   summaryRef.current = summary?.sessionId === sessionId ? summary : undefined;
   const refreshRef = useRef(refreshSummary);
   refreshRef.current = refreshSummary;
-  const optionsRef = useRef<ManagedSessionModels | undefined>(undefined);
+  const optionsRef = useRef<{
+    key: string;
+    value?: ManagedSessionModels;
+  }>({ key });
+  const visible = state.key === key ? state : { key, busy: false };
+  const optionView =
+    optionsState.key === key
+      ? optionsState
+      : { loading: false, error: false, options: undefined };
+  const selectionRef = useRef<{
+    key: string;
+    value?: ManagedModelSelection;
+  }>({ key });
+  const selection = latestSelection(
+    latestSelection(
+      selectionRef.current.key === key ? selectionRef.current.value : undefined,
+      visible.selection,
+    ),
+    latestSelection(
+      summaryRef.current?.modelSelection,
+      optionView.options?.modelSelection,
+    ),
+  );
+  selectionRef.current = { key, value: selection };
+  const selectionRevision = selection?.revision ?? 0;
   const supported =
     summaryRef.current?.capabilities.modelChange === true &&
     Boolean(provider.modelChange);
 
   useEffect(() => {
+    const failed = failedRevision.current;
+    if (visible.errorCode === undefined || failed === undefined) return;
+    if (selectionRevision <= failed) return;
+    failedRevision.current = undefined;
+    setState((previous) => ({ ...previous, errorCode: undefined }));
+  }, [selectionRevision, visible.errorCode]);
+
+  useEffect(() => {
     const abort = new AbortController();
     lifetime.current = abort;
     running.current = false;
-    const pending = readIntent(key, sessionId);
-    pendingRef.current = pending;
-    setState({ key, pending, busy: false });
+    failedRevision.current = undefined;
+    setState({ key, busy: false });
+    // 旧版待确认记录不再阻塞模型设置；存储不可用也不影响正常切换。
+    try {
+      sessionStorage.removeItem(key);
+    } catch {
+      // 清理历史记录失败不改变服务端的模型设置。
+    }
     return () => abort.abort();
   }, [key, provider, clientId, sessionId]);
 
   useEffect(() => {
     const abort = new AbortController();
-    optionsRef.current = undefined;
-    setOptionsState({ key, loading: supported && interactive, error: false });
+    if (optionsRef.current.key !== key) optionsRef.current = { key };
+    setOptionsState((current) => ({
+      key,
+      options: current.key === key ? current.options : undefined,
+      loading: supported && interactive,
+      error: false,
+    }));
     if (supported && interactive && sessionId && provider.modelChange) {
       void provider.modelChange
         .queryOptions(sessionId, { clientId, signal: abort.signal })
-        .then(async (options) => {
+        .then((options) => {
           if (abort.signal.aborted) return;
-          optionsRef.current = options;
+          optionsRef.current = { key, value: options };
           setOptionsState({ key, options, loading: false, error: false });
           if (
             options.modelSelection.revision >
             (summaryRef.current?.modelSelection?.revision ?? 0)
           ) {
-            try {
-              await refreshRef.current(abort.signal);
-            } catch {
-              /* The summary poll retries. */
-            }
+            void refreshRef.current(abort.signal).catch(() => undefined);
           }
         })
         .catch(() => {
           if (!abort.signal.aborted)
-            setOptionsState({ key, loading: false, error: true });
+            setOptionsState((current) => ({
+              ...current,
+              loading: false,
+              error: true,
+            }));
         });
     }
     return () => abort.abort();
@@ -142,155 +148,106 @@ export function useManagedModelChange(
     summary?.modelSelection?.revision,
   ]);
 
-  async function run(intent: ModelIntent) {
+  async function submit(modelId: string) {
     const owner = lifetime.current;
     const api = provider.modelChange;
+    const current = summaryRef.current;
+    const options =
+      optionsRef.current.key === key ? optionsRef.current.value : undefined;
+    const selected =
+      selectionRef.current.key === key ? selectionRef.current.value : undefined;
     if (
       !owner ||
       owner.signal.aborted ||
       running.current ||
       !interactive ||
       !api ||
-      intent.sessionId !== sessionId ||
-      summaryRef.current?.sessionId !== sessionId
+      !current ||
+      current.sessionId !== sessionId ||
+      current.capabilities.modelChange !== true ||
+      !options?.supported ||
+      !options.models.some((model) => model.modelId === modelId) ||
+      modelId === selected?.modelId
     )
       return;
     running.current = true;
-    setState((current) => ({ ...current, busy: true, errorCode: undefined }));
+    failedRevision.current = undefined;
+    setState((previous) => ({
+      ...previous,
+      busy: true,
+      errorCode: undefined,
+    }));
     const abort = new AbortController();
     const stop = () => abort.abort();
     owner.signal.addEventListener('abort', stop, { once: true });
-    const timer = setTimeout(stop, 30_000);
-    let accepted = false;
-    const update = (pending?: ModelIntent, errorCode?: string) => {
-      if (owner.signal.aborted) return;
-      pendingRef.current = pending;
-      const saved = persist(key, pending);
-      setState((current) => ({
-        ...current,
-        pending,
-        errorCode: saved ? errorCode : 'storage_unavailable',
-      }));
-    };
+    const expectedRevision = selected?.revision ?? 0;
     try {
-      const result = await api.submit(
-        intent.sessionId,
-        {
-          modelId: intent.modelId,
-          expectedRevision: intent.expectedRevision,
-        },
-        {
-          clientId,
-          signal: abort.signal,
-          idempotencyKey: intent.idempotencyKey,
-        },
+      const result = await withActionTimeout(
+        api.submit(
+          current.sessionId,
+          { modelId, expectedRevision },
+          {
+            clientId,
+            signal: abort.signal,
+            idempotencyKey: managedRequestId(),
+          },
+        ),
+        'Model change timed out',
       );
-      accepted = true;
       if (owner.signal.aborted) return;
       if (
-        result.sessionId !== intent.sessionId ||
-        result.modelSelection.modelId !== intent.modelId ||
+        result.sessionId !== current.sessionId ||
+        result.modelSelection.modelId !== modelId ||
         !Number.isSafeInteger(result.modelSelection.revision) ||
-        result.modelSelection.revision <= intent.expectedRevision
+        result.modelSelection.revision <= expectedRevision
       )
         throw new Error('Model change identity mismatch');
-      const latest = await refreshRef.current(abort.signal);
-      if (owner.signal.aborted) return;
-      const revision = latest?.modelSelection?.revision ?? 0;
-      if (
-        latest?.sessionId !== intent.sessionId ||
-        revision < result.modelSelection.revision ||
-        (revision === result.modelSelection.revision &&
-          latest.modelSelection?.modelId !== intent.modelId)
-      )
-        throw new Error('Model selection is not confirmed');
-      update();
-      setOptionsRevision((value) => value + 1);
+      // 与 DAC 一样以有效成功回执结束切换，后续刷新不能把成功重新变成待确认。
+      const acknowledged = latestSelection(
+        selectionRef.current.value,
+        result.modelSelection,
+      );
+      selectionRef.current = { key, value: acknowledged };
+      setState((previous) => ({
+        ...previous,
+        selection: acknowledged,
+      }));
       return true;
     } catch (failure) {
       if (owner.signal.aborted) return;
-      const definitive =
-        !accepted &&
-        failure instanceof JavaManagedAgentHttpError &&
-        [400, 403, 409].includes(failure.status) &&
-        DEFINITIVE_ERRORS.has(failure.code);
-      if (definitive) {
-        update(undefined, failure.code);
-        setOptionsRevision((value) => value + 1);
-        try {
-          await refreshRef.current(abort.signal);
-        } catch {
-          /* The summary poll retries. */
-        }
-      } else update(intent, 'unconfirmed');
+      // A read that later reports a revision past this one retires the alert:
+      // the write landed even though its response never arrived.
+      failedRevision.current = expectedRevision;
+      setState((previous) => ({
+        ...previous,
+        errorCode:
+          failure instanceof JavaManagedAgentHttpError
+            ? failure.code
+            : 'failed',
+      }));
+      return false;
     } finally {
-      clearTimeout(timer);
       owner.signal.removeEventListener('abort', stop);
       abort.abort();
       if (!owner.signal.aborted) {
         running.current = false;
-        setState((current) => ({ ...current, busy: false }));
+        setState((previous) => ({ ...previous, busy: false }));
+        setOptionsRevision((value) => value + 1);
+        void refreshRef.current(owner.signal).catch(() => undefined);
       }
     }
   }
 
-  async function submit(modelId: string) {
-    const current = summaryRef.current;
-    const options = optionsRef.current;
-    if (
-      !lifetime.current ||
-      lifetime.current.signal.aborted ||
-      running.current ||
-      pendingRef.current ||
-      !interactive ||
-      !current ||
-      current.sessionId !== sessionId ||
-      current.capabilities.modelChange !== true ||
-      !provider.modelChange ||
-      !options?.supported ||
-      !options.models.some((model) => model.modelId === modelId) ||
-      !['created', 'completed', 'failed', 'cancelled'].includes(
-        current.phase,
-      ) ||
-      options.modelSelection.revision !==
-        (current.modelSelection?.revision ?? 0) ||
-      modelId === current.modelSelection?.modelId
-    )
-      return;
-    const intent: ModelIntent = {
-      sessionId: current.sessionId,
-      modelId,
-      expectedRevision: options.modelSelection.revision,
-      idempotencyKey: managedRequestId(),
-    };
-    if (!persist(key, intent)) {
-      setState((value) => ({ ...value, errorCode: 'storage_unavailable' }));
-      return;
-    }
-    pendingRef.current = intent;
-    setState((value) => ({ ...value, pending: intent }));
-    return run(intent);
-  }
-
-  const visible =
-    state.key === key
-      ? state
-      : { key, pending: readIntent(key, sessionId), busy: false };
-  const optionView =
-    optionsState.key === key
-      ? optionsState
-      : { key, loading: supported, error: false };
   return {
     ...visible,
+    selection,
     options: optionView.options,
     optionsLoading: optionView.loading,
     optionsError: optionView.error,
     supported,
-    blocked: Boolean(visible.pending),
+    blocked: visible.busy,
     submit,
-    confirm: () =>
-      pendingRef.current ? run(pendingRef.current) : Promise.resolve(undefined),
     reloadOptions: () => setOptionsRevision((value) => value + 1),
-    isBlocked: () => Boolean(pendingRef.current) || running.current,
+    isBlocked: () => running.current,
   };
 }
