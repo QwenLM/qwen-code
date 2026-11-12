@@ -39,12 +39,22 @@ export function useChatNavigationVisible(
       typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update);
     resize?.observe(container);
     update();
+    let frame: number | null = null;
+    // Coalesce streaming DOM mutations into one layout read per frame.
+    const schedule = () => {
+      if (frame !== null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        update();
+      });
+    };
     const shell = element.closest('[data-web-shell-root]');
-    const mutation = new MutationObserver(update);
+    const mutation = new MutationObserver(schedule);
     mutation.observe(element, { childList: true, subtree: true });
     if (shell)
       mutation.observe(shell, { attributes: true, attributeFilter: ['style'] });
     return () => {
+      if (frame !== null) cancelAnimationFrame(frame);
       resize?.disconnect();
       mutation.disconnect();
     };

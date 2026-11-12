@@ -152,6 +152,7 @@ for (const navigation of [true, false]) {
     await scrollToBottom.click();
     for (const width of [
       1600, 1500, 1444, 1400, 1300, 1116, 1000, 802, 700, 609, 607, 599, 575,
+      390,
     ]) {
       await page.setViewportSize({ width, height: 900 });
       await expectSameEdges(message, composer);

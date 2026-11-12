@@ -4959,6 +4959,7 @@ describe('MessageList — turn collapse (DOM)', () => {
         '[data-testid="session-timeline-detail"]',
       );
       expect(detail?.style.top).toBe('45px');
+      expect(detail?.style.left).toBe('48px');
 
       focusOut(firstEntryButton!);
       detailRect = rect(240, 100, 30, 80);
@@ -5280,6 +5281,39 @@ describe('MessageList — turn collapse (DOM)', () => {
     await nextFrame();
 
     expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();
+    rectSpy.mockRestore();
+  });
+
+  it('shows the session timeline above the minimum content width', async () => {
+    const rectSpy = mockMessageListWidth(700);
+
+    const c = mount(simpleTurns(4));
+    await nextFrame();
+
+    expect(c.querySelector('[data-testid="session-timeline"]')).not.toBeNull();
+    rectSpy.mockRestore();
+  });
+
+  it('coalesces transcript mutations into one navigation measurement per frame', async () => {
+    const rectSpy = mockMessageListWidth(700);
+    const measure = rectSpy.getMockImplementation()!;
+    const reads: HTMLElement[] = [];
+    rectSpy.mockImplementation(function (this: HTMLElement) {
+      reads.push(this);
+      return measure.call(this);
+    });
+    const c = mount([userMsg('u1')]);
+    await nextFrame();
+    const list = c.querySelector<HTMLElement>('[data-web-shell-message-list]')!;
+    reads.length = 0;
+
+    for (let index = 0; index < 3; index++) {
+      list.append(document.createElement('span'));
+      await Promise.resolve();
+    }
+    await nextFrame();
+
+    expect(reads.filter((element) => element === list)).toHaveLength(1);
     rectSpy.mockRestore();
   });
 

@@ -4,9 +4,7 @@
     1000px,
     clamp(440px, 85cqw, calc(100cqw - 128px))
   );
-  --chat-shell-width: calc(
-    min(1000px, clamp(440px, 85cqw, calc(100cqw - 128px))) + 40px
-  );
+  --chat-shell-width: calc(var(--chat-responsive-content-width) + 40px);
   --chat-regular-content-width: 1000px;
   --chat-regular-shell-width: 1040px;
   --font-mono:
