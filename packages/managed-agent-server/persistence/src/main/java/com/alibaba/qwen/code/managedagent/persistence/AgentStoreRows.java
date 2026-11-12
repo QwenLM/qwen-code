@@ -143,11 +143,6 @@ final class AgentStoreRows {
 
     final RowMapper<TurnRecord> turnMapper;
 
-    static String renameTarget(String tenant, String session) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
-                "SESSION", tenant, session);
-    }
-
     static final String SESSION_OPERATION_KINDS =
             "('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL', 'CONTEXT_COMPRESSION')";
 

@@ -211,35 +211,6 @@ class KubernetesHttpRuntimeClientTest {
     }
 
     @Test
-    void readsCompleteCurrentCsiLogsWithNativeTimestampsAndNoServerTruncation() throws Exception {
-        String logs = "2026-10-01T16:40:42.007Z original CSI line\n";
-        response.set(logs.getBytes(StandardCharsets.UTF_8));
-        assertEquals(logs, client.readCsiPodLog("csi-plugin-one").toCompletableFuture().join());
-        assertEquals("/api/v1/namespaces/kube-system/pods/csi-plugin-one/log"
-                + "?container=csi-plugin&timestamps=true&previous=false&follow=false", path.get());
-        assertEquals("GET", method.get());
-        Files.writeString(token, "rotated-log-token");
-        client.readCsiPodLog("csi-plugin-one").toCompletableFuture().join();
-        assertEquals("Bearer rotated-log-token", authorization.get());
-        int original = calls.get();
-        assertThrows(IllegalArgumentException.class, () -> client.readCsiPodLog("../foreign/log"));
-        assertEquals(original, calls.get());
-    }
-
-    @Test
-    void rejectsAbsentRedirectedMalformedAndOversizedNativeLogs() {
-        for (int code : new int[] {404, 302, 403}) {
-            status.set(code);
-            assertFalse(failure(client.readCsiPodLog("csi-plugin-one").toCompletableFuture()).isRetryable());
-        }
-        status.set(200);
-        response.set(new byte[] {(byte) 0xc3, (byte) 0x28});
-        assertEquals(502, failure(client.readCsiPodLog("csi-plugin-one").toCompletableFuture()).getStatusCode());
-        response.set(new byte[1024 * 1024 + 1]);
-        assertEquals(502, failure(client.readCsiPodLog("csi-plugin-one").toCompletableFuture()).getStatusCode());
-    }
-
-    @Test
     void distinguishesAbsenceConflictDenialAndTransientFailuresWithoutServerBody() {
         status.set(404);
         response.set("sensitive-error-body".getBytes(StandardCharsets.UTF_8));

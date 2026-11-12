@@ -436,8 +436,8 @@ Close, archive and delete are durable `ma_operation` execution units. Each answe
 `202` with a command operation that
 `GET /v1/agents/sessions/{id}/operations/{operationId}` reads back, also after a
 delete; the WebShell adapter offers the same routes. The public control plane
-owns lifecycle state and tenant/idempotency checks, while the Hosted Harness
-remains the private title authority and the Runtime Broker owns execution
+owns lifecycle state and tenant/idempotency checks, the public SQL row is the
+Session title's display authority, and the Runtime Broker owns execution
 bindings.
 
 Turn input and cancellation are recorded in the same table as `submit_input`
@@ -516,15 +516,26 @@ journal, so the Session cannot admit a further Turn — close it and start a new
 Session. See "Hosted recovery scope" below for what the first release
 covers. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
 needs no Harness. Archive accepts only a closed Session and completes at once;
-unarchive restores it to closed. Rename waits for the Harness to durably commit
-`session_metadata`. When a rename failure is recorded, its `PENDING` command becomes `FAILED`
-while retaining its receipt and request digest. The same
-key retries the same content with the replay flag set; changed content or a
-different Session conflicts. A successful concurrent request can still complete
-the receipt, and a failing sibling cannot overwrite that completed outcome. It
-cannot complete a retired receipt once a later rename has completed either: that
-sibling answers `409 session_mutation_superseded` and the newer public SQL title stays.
-The latest title attempt is now a durable delivery with a monotonically increasing per-Session revision. The Harness checks this revision inside its journal commit and uses a stable command identity per attempt, so a late older versioned write cannot undo a newer versioned title and a lost reply can be replayed without another write. A failed same-key request retried after a later rename receives a new revision and can still win. Pending same-key retries keep their original revision. A recovery worker redelivers the latest unfinished title and completes its public receipt; older completion attempts cannot affect the newer delivery. Both inline requests and recovery workers claim before sending; failure cleanup requires the current unexpired owner. Fresh disabled or unsupported Harness requests are refused before admission. Workspace migration also refuses unfinished title delivery even when the public command is FAILED. Close, archive, delete and cwd changes wait for this delivery to settle, including when its public command is FAILED, so sealing cannot strand a title already accepted by the Harness. A delivery whose submission went unanswered is the exception (D7-2): it parks `recovery_blocked`, is never sent again, and retires its public receipt, so it holds neither later titles nor the lifecycle; the operation reconciler completes it, and shows the title, once the Session journal holds its revision's commit, and fails it once a deleted Session's complete journal lacks it ([design](../../docs/design/2026-10-17-managed-operation-reconciliation.md)). The Harness must advertise title protocol version 1 before the SDK sends a versioned title. Plain private SDK title writes remain supported and preserve the watermark. See [the concurrency design](../../docs/design/2026-10-08-managed-session-rename-delivery.md). If the command store
+unarchive restores it to closed. Rename settles synchronously in one local SQL
+transaction: it locks the Session row, increments `title_revision`, updates
+`ma_session.title`, records a `COMPLETED` `RENAME_SESSION` receipt with the
+request digest, and appends the rename mutation event, then returns the confirmed
+title. The SQL row is the public display authority; there is no `PENDING`
+command, delivery row, claim or lease. The same key replays the recorded outcome
+with the replay flag set; changed content or a different Session conflicts. After
+the transaction commits, the request sends one best-effort journal notification
+carrying the committed revision, so the Harness watermark orders concurrent and
+late notifications and a lost reply is replayed without another write. A failed
+notification (Harness unavailable, generation mismatch, sealed journal, transport
+error) is logged and never fails the rename: the journal copy lags until a later
+rename carries a higher revision, the same divergence the system already tolerates
+for auto titles. The notification is sent only when the Harness advertises title
+protocol version 1 and is skipped otherwise; a rename is no longer refused before
+admission for an unavailable or unsupported Harness. Because rename holds no
+delivery, it blocks neither close, archive, delete and cwd changes nor workspace
+migration, and no recovery worker redelivers or reconciles a title. Plain private
+SDK title writes remain supported and preserve the watermark. See
+[the single-authority design](../../docs/design/2026-11-12-managed-rename-single-authority.md). If the command store
 is unavailable during cleanup, the original API failure is preserved and the
 same key can resume its receipt when storage returns. Only an in-flight
 lifecycle change blocks another one. A retry with the same key from the same
@@ -1026,7 +1037,7 @@ Schema V6 preserves the original policy and adds a current override plus per-Tur
 
 Workspace-bound WebShell Session summaries can include `modelContext` with the actual observed `modelId`, optional latest-request `inputTokens` and resolved `contextWindowSize`, and `observedAt`. The Hosted CLI records capacity beside successful provider usage; the Java Session Store projects only committed main-model attempts into one private latest-resource pointer. Lists read these observations in one batch without scanning journal history. Older or invalid usage advances the pointer but leaves missing values unknown; cumulative billing totals and inferred capacities never substitute for them. The shared usage popover does not offer manual compression. New tasks continue to select published AgentDefinition presets. This observation projection uses existing SQL tables and resource-reference cleanup without changing the recovery format.
 
-To allow an existing Workspace Session to change its next Turn's model, publish an explicit `qwen.managed-agent.model-catalog` list of `{modelId, label}` entries in the server configuration. The default is empty. IDs must identify configured, cached-credential models in the Hosted CLI; this selection path supplies only an ID. The Harness must advertise `model-selection/1`. `POST /api/agent/web-shell/v1/session-models/query` returns the catalog and current selection; `POST /api/agent/web-shell/v1/session-models/change` takes `sessionId`, `modelId`, `expectedRevision` and `idempotencyKey` and synchronously returns the saved selection. The caller needs Workspace OPERATOR or OWNER and the Session must be idle, without pending approval, context/lifecycle work or recovery. Same-key retries return their original result before mutable catalog and role gates, provided the caller still has read access. They never reapply a change.
+To allow an existing Workspace Session to change its next Turn's model, publish an explicit `qwen.managed-agent.model-catalog` list of `{modelId, label}` entries in the server configuration. The default is empty. IDs must identify configured, cached-credential models in the Hosted CLI; this selection path supplies only an ID. The Harness must advertise `model-selection/1`. `POST /api/agent/web-shell/v1/session-models/query` returns the catalog and current selection; `POST /api/agent/web-shell/v1/session-models/change` takes `sessionId`, `modelId`, `expectedRevision` and `idempotencyKey` and synchronously returns the saved selection. The caller needs Workspace OPERATOR or OWNER. A running Turn or pending approval does not prevent saving a later-Turn selection; already admitted Turns keep their immutable model snapshot. Lifecycle, recovery and unsettled context changes remain guarded. The browser treats a validated success receipt as completion, refreshes state in the background and does not require another user confirmation. Same-key retries return their original result before mutable catalog and role gates, provided the caller still has read access. They never reapply a change.
 
 Creation can instead supply a complete connection in public `model_config` or
 WebShell `modelConfig`:

@@ -68,7 +68,8 @@ final class WorkspaceCsiApplicationHistory {
             var context = context(connection, tenant, workspace, session);
             var value = WorkspaceCsiApplicationStore.savedEnvelope(saved.binding(), context, retirement,
                     evidence.sealedBindingVersion(), saved.frozen());
-            byte[] body = WorkspaceCsiApplicationJson.base64(value.path("commitBodyBase64"), 128 * 1024);
+            byte[] body = WorkspaceCsiApplicationJson.base64(value.path("commitBodyBase64"),
+                    CsiNativeActivationProof.TERMINAL_BODY_LIMIT);
             WorkspaceCsiApplicationWorkerMatch.verify(evidence, WorkspaceCsiApplicationStore.savedObservation(value),
                     WorkspaceCsiApplicationStore.workerRequest(saved.binding(), context, retirement, "observe", hash(body), null, null));
             var finalize = WorkspaceCsiApplicationStore.workerRequest(saved.binding(), context, retirement, "finalize",

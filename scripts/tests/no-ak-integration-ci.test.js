@@ -230,6 +230,7 @@ describe('no-AK integration CI wiring', () => {
       './cli/acp-workflow-mode.test.ts',
       './cli/daemon-workflow-intent.test.ts',
       './cli/daemon-workflow-mode.test.ts',
+      './cli/daemon-workflow-background.test.ts',
       './cli/list_directory.test.ts',
       './cli/tool-hook-context.test.ts',
       './cli/tool-hook-updated-input.test.ts',
@@ -651,6 +652,58 @@ describe('no-AK integration CI wiring', () => {
       "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen'",
     );
     expect(gateStep).toContain('timeout-minutes: 20');
+    // The typecheck carries no heap cap of its own, unlike the workspace test
+    // scripts, so it inherits Node's default old-space. Node 22 sizes that from
+    // the CONTAINER's cgroup limit, not from the memory it can see: inside these
+    // containers os.totalmem() reports the whole host (245 GB) and is irrelevant
+    // to the heap ceiling. Measured on 2026-11-12 in throwaway containers from
+    // the pool's own runner image (Node v22.23.4, the incident's version), no
+    // NODE_OPTIONS set — `--memory` -> default heap_size_limit:
+    //   2g -> 1048 MB   3g -> 1584 MB   4g -> 2096 MB   6g -> 2096 MB
+    //   8g -> 2096 MB  12g -> 2096 MB  15g -> 4144 MB  16g -> 4144 MB
+    // A tiered table, not an exact halving, hence the measurements over a
+    // formula. On 2026-11-11 the typecheck died at ~2040 MB (job 130506292678)
+    // on a container whose limit was 8 GiB — recovered from the hosts'
+    // timestamped config backups, both snapshots bracketing the incident reading
+    // 8g — which is exactly the 2096 MB row above. So Node's own default was the
+    // cap and no host pressure was involved, but NOT because the container had
+    // 4 GiB: it had 8, and 8 GiB defaults to ~2 GiB. The job log carries no heap
+    // flag and no NODE_OPTIONS.
+    //
+    // With the flag, at --memory=8g the limit measures 4144 MB against that
+    // 2096 MB default, leaving ~4 GiB of the container for the rest of tsc's RSS
+    // (8 GiB − 4144 MiB ≈ 3.95 GiB, with no separate reserve claimed for the
+    // resident set) — a real 2x raise, not a cap that lets old-space reach the
+    // container ceiling and trade a diagnosable V8 abort for a kernel OOM kill.
+    // That arithmetic is also the flag's floor: it is only safe from 8 GiB up.
+    // At 4g the container's own default is 2096 MB, so a 4096 MB cap would take
+    // the whole container and leave nothing for the rest of the process; below
+    // 8 GiB the cap has to follow the container size instead. Do not lower it to
+    // 3072 on the theory that it endangers an 8 GiB container; at or above
+    // 8 GiB the evidence does not support that hazard.
+    //
+    // Both hosts moved to 16 GiB on 2026-11-12, where the default is already
+    // 4144 MB and this cap is a no-op. It is kept because every config snapshot
+    // since the 2026-11-08 scale-up used 8g — both snapshots bracketing the
+    // incident read 8g, and the earlier 4g row predates that scale-up — so the
+    // flag is what stops a future downscale from silently restoring the default
+    // that failed. config.example.json is a template, not the live budget — that
+    // lives in each host's /etc/qwen-ephemeral-runner/config.json. The hosted
+    // lane keeps the default it has always passed with, under the same fleet
+    // predicate as the worker caps.
+    //
+    // Through `env` on that one command, NOT the step's env block: the
+    // zero-secrets contract above requires every value there but QWEN_HOME to
+    // be the empty string, and is enforced by value on purpose so a credential
+    // under an unanticipated name cannot ship green. A heap flag has no
+    // business joining that exemption list.
+    expect(gateStep).toContain(
+      "ecs-qwen-*) typecheck_heap=('NODE_OPTIONS=--max-old-space-size=4096') ;;",
+    );
+    expect(gateStep).toContain(
+      'env "${typecheck_heap[@]}" npm run typecheck:integration',
+    );
+    expect(gateStep).not.toContain('\n          NODE_OPTIONS: ');
     // HOME/USERPROFILE are job-wide now (first-step GITHUB_ENV), so the
     // gate must not re-pin them step-locally.
     expect(gateStep).not.toContain('\n          HOME: ');
@@ -1154,6 +1207,15 @@ describe('no-AK integration CI wiring', () => {
         "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",
       );
       expect(step).toContain('node "${nested_cli}" install chromium webkit');
+      // The disposable pool image bakes Chromium and its system libraries and
+      // is what sets PLAYWRIGHT_BROWSERS_PATH; its root-owned tree cannot even
+      // be verified by a job's own install (playwright writes a lock and a
+      // `.links` entry before it checks what is present), so every install
+      // site skips on that env instead of failing.
+      expect(step).toContain('if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then');
+      expect(step).toContain(
+        "echo 'browsers baked into the image, skipping install'",
+      );
     }
   });
 

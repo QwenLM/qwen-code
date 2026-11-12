@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.alibaba.qwen.managedprobes.PublicationProbeWiring;
@@ -9,6 +10,7 @@ import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.InputStream;
@@ -333,6 +335,62 @@ class JournalPackTransactionRegressionTest {
             assertThat(packCount("BUILDING")).isZero();
             assertThat(packCount("PUBLISHED")).isZero();
             assertThat(watermark()).isZero();
+        }
+    }
+
+    @Test
+    void publishRollsBackWhenThePackRowWasReclaimedConcurrently() {
+        try (var context = context(new PublicationProbeWiring.InMemoryObjectStore())) {
+            JournalPackTransactions transactions = context.getBean(JournalPackTransactions.class);
+            insertHead(2);
+            insertTransaction(1, bytes(4096));
+            insertTransaction(2, bytes(8192));
+            String scope = ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
+            long now = System.currentTimeMillis();
+            transactions.insertBuilding("pack-A", scope, TENANT, WORKSPACE, SESSION, 1, 2,
+                    "key-A", 100, "sha", now, "builder-A", now - 1);
+            // A concurrent replica reclaims A's catalog row before A publishes.
+            jdbc.update("DELETE FROM ma_journal_pack WHERE pack_id = ?", "pack-A");
+            // Publication must fail closed: the VERIFIED update matches no row, so the watermark
+            // must never advance to a covered range that has no published pack.
+            assertThatThrownBy(() -> transactions.publish("pack-A", scope, TENANT, WORKSPACE,
+                    SESSION, 1, 2, "{}".getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+                    .isInstanceOf(ManagedAgentException.class);
+            assertThat(watermark()).isZero();
+            assertThat(packCount("PUBLISHED")).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Long.class))
+                    .isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE"
+                    + " owner_kind = 'JOURNAL'", Long.class)).isZero();
+        }
+    }
+
+    @Test
+    void insertBuildingDoesNotDisplaceALiveBuildOwnedByAnotherReplica() {
+        try (var context = context(new PublicationProbeWiring.InMemoryObjectStore())) {
+            JournalPackTransactions transactions = context.getBean(JournalPackTransactions.class);
+            insertHead(1);
+            insertTransaction(1, bytes(4096));
+            String scope = ManagedSessionStore.sessionScopeKey(TENANT, SESSION);
+            long now = System.currentTimeMillis();
+            long liveCutoff = now - 1;
+            transactions.insertBuilding("pack-A", scope, TENANT, WORKSPACE, SESSION, 1, 1,
+                    "key-A", 100, "shaA", now, "builder-A", liveCutoff);
+            // Another replica's live build (different owner, within its lease) must not be
+            // displaced: the INSERT collides on uk_ma_journal_pack_scope_from rather than deleting
+            // A's in-flight row and object.
+            assertThatThrownBy(() -> transactions.insertBuilding("pack-B", scope, TENANT,
+                    WORKSPACE, SESSION, 1, 1, "key-B", 100, "shaB", now, "builder-B", liveCutoff))
+                    .isInstanceOf(DuplicateKeyException.class);
+            assertThat(packCount("BUILDING")).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT pack_id FROM ma_journal_pack WHERE state ="
+                    + " 'BUILDING'", String.class)).isEqualTo("pack-A");
+            // The owning replica retrying its own crashed build reclaims it even within the lease.
+            transactions.insertBuilding("pack-A2", scope, TENANT, WORKSPACE, SESSION, 1, 1,
+                    "key-A2", 100, "shaA2", now, "builder-A", liveCutoff);
+            assertThat(packCount("BUILDING")).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT pack_id FROM ma_journal_pack WHERE state ="
+                    + " 'BUILDING'", String.class)).isEqualTo("pack-A2");
         }
     }
 }
