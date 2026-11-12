@@ -10,7 +10,8 @@ cleanup_release_containers() {
     container_ids=''
   fi
   if [ -n "$container_ids" ]; then
-    printf '%s\n' "$container_ids" | xargs -r timeout 60 docker rm -f > /dev/null 2>&1 || echo "::warning::failed to remove release containers for ${RELEASE_CONTAINER_OWNER}"
+    # BSD xargs (macOS) has no -r; the guard above keeps the input non-empty.
+    printf '%s\n' "$container_ids" | xargs timeout 60 docker rm -f > /dev/null 2>&1 || echo "::warning::failed to remove release containers for ${RELEASE_CONTAINER_OWNER}"
   fi
 }
 
