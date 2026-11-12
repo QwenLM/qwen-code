@@ -7352,6 +7352,39 @@ describe('Server Config (config.ts)', () => {
       expect(makeConfig().getWorkflowKeywordTriggerEnabled()).toBe(true);
     });
 
+    describe('isEventBusAgentLoopEnabled', () => {
+      beforeEach(() => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+      });
+      afterEach(() => vi.unstubAllEnvs());
+
+      it('defaults to off', () => {
+        expect(makeConfig().isEventBusAgentLoopEnabled()).toBe(false);
+      });
+
+      it('honors the constructor parameter', () => {
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: true,
+          }).isEventBusAgentLoopEnabled(),
+        ).toBe(true);
+      });
+
+      it('is enabled by QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1 even when the parameter is off', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '1');
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: false,
+          }).isEventBusAgentLoopEnabled(),
+        ).toBe(true);
+      });
+
+      it('ignores other env values', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '0');
+        expect(makeConfig().isEventBusAgentLoopEnabled()).toBe(false);
+      });
+    });
+
     describe('bundled review workflow activation', () => {
       beforeEach(() => {
         vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', undefined);

@@ -50,6 +50,7 @@ export function ChannelQrLogin({
   const [error, setError] = useState<string | undefined>(undefined);
   const mounted = useRef(true);
   const boundFor = useRef<string | undefined>(undefined);
+  const ownedLoginRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     mounted.current = true;
@@ -63,9 +64,61 @@ export function ChannelQrLogin({
     setView(undefined);
     setError(undefined);
     boundFor.current = undefined;
+    ownedLoginRef.current = undefined;
   }, [channelName]);
 
   const loginId = view?.status === 'pending' ? view.loginId : undefined;
+
+  // The daemon keeps a login alive on its own: it holds one of the workspace's
+  // four slots and polls Tencent whether or not this panel is on screen.
+  // Closing the editor must therefore drop the session explicitly, or four
+  // abandoned attempts reject every real bind until those sessions time out.
+  //
+  // Only a login this panel CREATED is ours to drop. Without a client id on
+  // these routes the daemon reattaches across tabs and browsers
+  // (`undefined === undefined`) and hands back a peer's `loginId` with
+  // `attached: true`; cancelling that would pull the code out from under
+  // another operator. Ownership is recorded where the id is learned, not
+  // derived from what is on screen.
+  const actionsRef = useRef(actions);
+  actionsRef.current = actions;
+  const pendingLoginRef = useRef<string | undefined>(undefined);
+  pendingLoginRef.current = loginId;
+  // The refs keep the unmount-only cleanup off the render-time identities: an
+  // effect keyed on `actions` or the id would also fire on every change and
+  // cancel a login the operator is still waiting on. Both conditions matter —
+  // still pending, so a finished bind is left alone, and created here, so a
+  // peer's reattached login is left alone.
+  useEffect(
+    () => () => {
+      const id = pendingLoginRef.current;
+      // Nobody is left to show a failure to; the session expires on its own.
+      if (id && id === ownedLoginRef.current) {
+        void actionsRef.current.cancel(id).catch(() => undefined);
+      }
+    },
+    [],
+  );
+
+  // A reload or tab close runs no React cleanup, so the unmount release above
+  // never fires for the abandonment path operators use most. `pagehide` is the
+  // last hook that does run, and the release is sent with `keepalive` so it
+  // outlives the document. Same ownership condition as the unmount path.
+  useEffect(() => {
+    const release = (event: PageTransitionEvent) => {
+      // A back/forward-cache freeze restores this panel with the code still on
+      // screen, so releasing there would cancel a login the operator never
+      // abandoned. Only a terminal departure releases it. Truthy, not
+      // `!== false`: a plain `Event('pagehide')` carries no `persisted`.
+      if (event.persisted) return;
+      const id = pendingLoginRef.current;
+      if (id && id === ownedLoginRef.current) {
+        void actionsRef.current.release(id).catch(() => undefined);
+      }
+    };
+    window.addEventListener('pagehide', release);
+    return () => window.removeEventListener('pagehide', release);
+  }, []);
 
   useEffect(() => {
     if (!loginId) return;
@@ -114,7 +167,21 @@ export function ChannelQrLogin({
       // really produces a new code, and so it does not consume a second slot.
       if (loginId) await actions.cancel(loginId);
       const result = await actions.start(channelName);
-      if (mounted.current) setView(result);
+      // Ownership is learned here, where the daemon says whether it minted a
+      // login or reattached a peer's — never inferred from what is on screen.
+      const owned = !result.attached && result.status === 'pending';
+      ownedLoginRef.current = owned ? result.loginId : undefined;
+      if (mounted.current) {
+        setView(result);
+      } else if (owned) {
+        // The login was created after the panel went away, so the unmount
+        // cleanup never saw its id and it would hold a slot and poll Tencent
+        // for its whole deadline with nobody watching — the same leak, in the
+        // window a user hits by pressing Scan and immediately closing the
+        // editor. Cancel is a no-op for a terminal entry, so this cannot undo
+        // a bind the daemon already committed.
+        void actions.cancel(result.loginId).catch(() => undefined);
+      }
     } catch (startError) {
       if (mounted.current) {
         setError(

@@ -29,6 +29,7 @@ const START: DaemonChannelQrLoginStartResult = { ...VIEW, attached: false };
 
 let container: HTMLDivElement;
 let root: Root;
+let unmounted: boolean;
 
 function actions(overrides?: {
   start?: () => Promise<DaemonChannelQrLoginStartResult>;
@@ -45,6 +46,7 @@ function actions(overrides?: {
           status: 'cancelled' as const,
         })),
     ),
+    release: vi.fn(async () => undefined),
   };
 }
 
@@ -87,19 +89,29 @@ async function click(label: string) {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  unmounted = false;
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
 });
 
 afterEach(async () => {
-  await act(async () => {
-    root.unmount();
-  });
+  if (!unmounted) {
+    await act(async () => {
+      root.unmount();
+    });
+  }
   container.remove();
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
+
+async function unmount() {
+  unmounted = true;
+  await act(async () => {
+    root.unmount();
+  });
+}
 
 describe('ChannelQrLogin', () => {
   it('renders the image the daemon produced after starting', async () => {
@@ -250,5 +262,288 @@ describe('ChannelQrLogin', () => {
     await render({ language: 'zh-CN' });
     expect(container.textContent).toContain('扫码绑定');
     expect(container.textContent).not.toContain('Scan to bind');
+  });
+});
+
+describe('ChannelQrLogin unmount cleanup', () => {
+  it('cancels the live login when the editor closes', async () => {
+    // The daemon holds one of the workspace's four slots and keeps polling
+    // Tencent with no panel on screen, so an abandoned session must be dropped.
+    const { a } = await render();
+    await click('Scan to bind');
+    expect(a.cancel).not.toHaveBeenCalled();
+    await unmount();
+    expect(a.cancel).toHaveBeenCalledWith('login-1');
+  });
+
+  it('does not cancel while the panel stays mounted across polls', async () => {
+    const { a } = await render();
+    await click('Scan to bind');
+    await act(async () => {
+      vi.advanceTimersByTime(6_000);
+    });
+    expect(a.state.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(a.cancel).not.toHaveBeenCalled();
+  });
+
+  it('does not cancel when the parent passes a fresh actions object', async () => {
+    // The host may rebuild the actions object on re-render. A cleanup keyed on
+    // its identity would drop a login the operator is still waiting on.
+    const first = actions();
+    await render({ actions: first });
+    await click('Scan to bind');
+    const second = actions();
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <ChannelQrLogin
+            channelName="qq-bot"
+            actions={second}
+            onBound={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    expect(first.cancel).not.toHaveBeenCalled();
+    expect(second.cancel).not.toHaveBeenCalled();
+    await unmount();
+    // The latest identity is the one that must issue the cancel.
+    expect(second.cancel).toHaveBeenCalledWith('login-1');
+    expect(first.cancel).not.toHaveBeenCalled();
+  });
+
+  it('does not cancel a login that already succeeded', async () => {
+    const a = actions({
+      state: async () => ({ ...VIEW, status: 'succeeded' as const }),
+    });
+    await render({ actions: a });
+    await click('Scan to bind');
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+    });
+    await unmount();
+    expect(a.cancel).not.toHaveBeenCalled();
+  });
+
+  it('does not cancel anything when no login was started', async () => {
+    const { a } = await render();
+    await unmount();
+    expect(a.cancel).not.toHaveBeenCalled();
+  });
+
+  it('attaches a rejection handler to the unmount cancel', async () => {
+    const calls: string[] = [];
+    let handlerAttached = false;
+    const base = actions();
+    // A plain function, not vi.fn: the mock wrapper neutralises the returned
+    // rejection. The promise is real and really rejects, but its `catch` is
+    // instrumented so the cell owns its oracle — relying on the runner to fail
+    // on an unhandled rejection would be vacuous here, because this package
+    // ignores unhandled errors off Linux.
+    const plain = {
+      start: base.start,
+      state: base.state,
+      release: base.release,
+      cancel: (id: string) => {
+        calls.push(id);
+        const rejecting: Promise<DaemonChannelQrLoginView> = Promise.reject(
+          new Error('daemon went away'),
+        );
+        const realCatch = rejecting.catch.bind(rejecting);
+        rejecting.catch = ((onRejected: (reason: unknown) => unknown) => {
+          handlerAttached = true;
+          return realCatch(onRejected);
+        }) as typeof rejecting.catch;
+        return rejecting;
+      },
+    };
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <ChannelQrLogin
+            channelName="qq-bot"
+            actions={plain}
+            onBound={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await click('Scan to bind');
+    await unmount();
+    expect(calls).toEqual(['login-1']);
+    // Nobody is left to show the failure to, so the cleanup must swallow it.
+    expect(handlerAttached).toBe(true);
+  });
+
+  it('cancels a login created after the panel unmounted', async () => {
+    // The POST is still in flight at unmount, so `view` is undefined and the
+    // cleanup sees no id. The creator is the only place that ever learns it.
+    let resolveStart!: (value: DaemonChannelQrLoginStartResult) => void;
+    const a = actions({
+      start: () =>
+        new Promise<DaemonChannelQrLoginStartResult>((resolve) => {
+          resolveStart = resolve;
+        }),
+    });
+    await render({ actions: a });
+    await click('Scan to bind');
+    await unmount();
+    expect(a.cancel).not.toHaveBeenCalled();
+    await act(async () => {
+      resolveStart(START);
+    });
+    expect(a.cancel).toHaveBeenCalledWith('login-1');
+  });
+
+  it('attaches a rejection handler to the late-arrival cancel', async () => {
+    let resolveStart!: (value: DaemonChannelQrLoginStartResult) => void;
+    let handlerAttached = false;
+    const base = actions({
+      start: () =>
+        new Promise<DaemonChannelQrLoginStartResult>((resolve) => {
+          resolveStart = resolve;
+        }),
+    });
+    const plain = {
+      start: base.start,
+      state: base.state,
+      release: base.release,
+      cancel: () => {
+        const rejecting: Promise<DaemonChannelQrLoginView> = Promise.reject(
+          new Error('daemon went away'),
+        );
+        const realCatch = rejecting.catch.bind(rejecting);
+        rejecting.catch = ((onRejected: (reason: unknown) => unknown) => {
+          handlerAttached = true;
+          return realCatch(onRejected);
+        }) as typeof rejecting.catch;
+        return rejecting;
+      },
+    };
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <ChannelQrLogin
+            channelName="qq-bot"
+            actions={plain}
+            onBound={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await click('Scan to bind');
+    await unmount();
+    await act(async () => {
+      resolveStart(START);
+    });
+    expect(handlerAttached).toBe(true);
+  });
+
+  it('does not cancel a late result that already succeeded', async () => {
+    let resolveStart!: (value: DaemonChannelQrLoginStartResult) => void;
+    const a = actions({
+      start: () =>
+        new Promise<DaemonChannelQrLoginStartResult>((resolve) => {
+          resolveStart = resolve;
+        }),
+    });
+    await render({ actions: a });
+    await click('Scan to bind');
+    await unmount();
+    await act(async () => {
+      resolveStart({ ...START, status: 'succeeded' });
+    });
+    expect(a.cancel).not.toHaveBeenCalled();
+  });
+
+  it('does not cancel a login it attached to rather than created', async () => {
+    // The web shell sends no client id, so the daemon reattaches across tabs
+    // and hands back a peer's loginId. Closing this panel must not pull the
+    // code out from under the tab that created it.
+    const a = actions({ start: async () => ({ ...START, attached: true }) });
+    await render({ actions: a });
+    await click('Scan to bind');
+    expect(container.querySelector('img')).not.toBeNull();
+    await unmount();
+    expect(a.cancel).not.toHaveBeenCalled();
+  });
+
+  it('does not cancel a late result it attached to', async () => {
+    let resolveStart!: (value: DaemonChannelQrLoginStartResult) => void;
+    const a = actions({
+      start: () =>
+        new Promise<DaemonChannelQrLoginStartResult>((resolve) => {
+          resolveStart = resolve;
+        }),
+    });
+    await render({ actions: a });
+    await click('Scan to bind');
+    await unmount();
+    await act(async () => {
+      resolveStart({ ...START, attached: true });
+    });
+    expect(a.cancel).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChannelQrLogin pagehide release', () => {
+  const pagehide = async () => {
+    await act(async () => {
+      window.dispatchEvent(new Event('pagehide'));
+    });
+  };
+
+  it('releases the login it created when the page goes away', async () => {
+    // A reload or tab close runs no React cleanup, so this is the only release
+    // for the abandonment path operators use most.
+    const { a } = await render();
+    await click('Scan to bind');
+    await pagehide();
+    expect(a.release).toHaveBeenCalledWith('login-1');
+    expect(a.cancel).not.toHaveBeenCalled();
+  });
+
+  it('does not release on a back/forward-cache freeze', async () => {
+    // Pressing Back restores this panel with the code still on screen, so a
+    // release here would cancel a login the operator never abandoned.
+    const { a } = await render();
+    await click('Scan to bind');
+    await act(async () => {
+      window.dispatchEvent(
+        Object.assign(new Event('pagehide'), { persisted: true }),
+      );
+    });
+    expect(a.release).not.toHaveBeenCalled();
+    expect(a.cancel).not.toHaveBeenCalled();
+  });
+
+  it('does not release a login it attached to', async () => {
+    const a = actions({ start: async () => ({ ...START, attached: true }) });
+    await render({ actions: a });
+    await click('Scan to bind');
+    await pagehide();
+    expect(a.release).not.toHaveBeenCalled();
+  });
+
+  it('does not release a login that already succeeded', async () => {
+    const a = actions({
+      state: async () => ({ ...VIEW, status: 'succeeded' as const }),
+    });
+    await render({ actions: a });
+    await click('Scan to bind');
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+    });
+    await pagehide();
+    expect(a.release).not.toHaveBeenCalled();
+  });
+
+  it('stops listening once the panel unmounts', async () => {
+    const { a } = await render();
+    await click('Scan to bind');
+    await unmount();
+    a.release.mockClear();
+    await pagehide();
+    expect(a.release).not.toHaveBeenCalled();
   });
 });
