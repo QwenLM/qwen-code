@@ -2,7 +2,7 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip waits on the nightly unified-loop E2E gate (#16192). PR 5 (AgentCore, #16880) is in progress.
+- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704), OpenTUI (PR 4, #16743–#16820) and AgentCore (PR 5, #16880) migrations are merged; each surface's default flip waits on the nightly unified-loop E2E gate (#16192). PR 6a (speculation's model round) is in review.
 - **Date**: 2026-10-23, against upstream `779a4d5d0d`.
 - **Related**:
   - tracking issue #15327;
@@ -500,6 +500,18 @@ AgentCore maps the round's events as it maps its chunks today and keeps the raw 
 
 Both paths emit `ROUND_START` after stream preparation so the workflow watchdog gives the model response a fresh stall window. The agent emits text from the entire received chunk before its loop checks and tracks response IDs per attempt. A failed request, a cancel and a retry wait cut off by the time limit end the run as today. The suite with the setting on counts each subagent round sent on the shared loop in the debug log. The TUI suite counts main-session rounds using a separate log entry.
 
+### Speculation on the shared loop (PR 6)
+
+Speculation's `runSpeculativeLoop` in `speculation.ts` runs the accepted suggestion ahead of the user on a forked `LlmChat` with copy-on-write file isolation. It sends each round on the chat and parses the stream's chunks itself, then runs the round's calls through its own tool gate (boundary/redirect) and executes them directly, without the scheduler. PR 6a moves only the model round: with the setting on, `runSpeculationModelRound` sends it on `runModelRound` over `turnModelRound(chat, model)` and rebuilds the visible-text and function-call parts from the round's events; the tool gate, the direct execution, the overlay writes and the boundary handling are unchanged.
+
+| Speculation today                                                     | With the setting on                                                   |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| it parses each chunk's parts, keeping visible text and function calls | the round's `Content` and `ToolCallRequest` events become those parts |
+| a retry or fallback keeps the abandoned attempt's text and calls      | they are dropped, so the round carries only the new attempt's output  |
+| a text part per streamed text part                                    | one text part per chunk, as the `Turn` reports it                     |
+
+The parity suite runs a text-only round, a single call and a two-call batch with the setting off and on and compares the resulting history, tool execution and status.
+
 ## Migration
 
 | PR    | Content                                                                                                                                             |
@@ -530,10 +542,11 @@ Both paths emit `ROUND_START` after stream preparation so the workflow watchdog 
 | 5b    | AgentCore: a round's calls as one shared batch, with its deferred approvals                                                                         |
 | 5c    | AgentCore: the run on the loop, with the parent's messages through the next round; the stops mapped to `terminateMode`                              |
 | 5d    | AgentCore: default on, then remove its current loop                                                                                                 |
-| 6     | speculation                                                                                                                                         |
+| 6a    | speculation: every model round on the loop's round, on a `Turn` over the forked chat; speculation keeps its tool gate and direct execution          |
+| 6b    | speculation: default on, then remove its current round                                                                                              |
 | —     | Hosted Harness: separate evaluation                                                                                                                 |
 
-PR 6 is followed by its own default-on and removal steps.
+PR 6b is speculation's default-on and removal step.
 
 A surface counts as moved when it passes its parity suite with the setting on and its known differences are listed. Each surface then changes its default on its own, without waiting for the others. Its default changes when:
 

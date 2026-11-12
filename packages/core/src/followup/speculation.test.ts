@@ -12,7 +12,7 @@ import {
   startSpeculation,
   type SpeculationState,
 } from './speculation.js';
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
 import type { CacheSafeParams } from '../agents/forkedAgent.js';
 import type { LlmClient } from '../core/client.js';
@@ -934,5 +934,104 @@ describe('acceptSpeculation', () => {
     // The forked chat already reported these results, so the main chat must
     // not emit their injection events a second time.
     expect(markToolResultsInjected).toHaveBeenCalledWith(result.messages);
+  });
+});
+
+describe('speculation model round on the shared agent loop', () => {
+  // Each scenario is the model's rounds as raw chunk parts; the mock exposes
+  // them both as candidate parts (the raw-chunk round) and as functionCalls
+  // (the Turn-backed round), as a real response does.
+  async function runScenario(
+    unified: boolean,
+    rounds: Array<{ parts: Part[]; functionCalls?: unknown[] }>,
+  ) {
+    forkedAgentMocks.sendMessageStream.mockReset();
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'file contents',
+      returnDisplay: 'file contents',
+    });
+    const toolRegistry = {
+      isPermissionDeferred: vi.fn().mockReturnValue(false),
+      ensureTool: vi.fn().mockResolvedValue({
+        build: vi.fn().mockReturnValue({
+          params: { path: 'a.ts' },
+          execute,
+        }),
+      }),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getTargetDir: vi.fn().mockReturnValue('/spec/cwd'),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+      isUnifiedAgentLoopEnabled: vi.fn().mockReturnValue(unified),
+    } as unknown as Config;
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      const round = forkedAgentMocks.sendMessageStream.mock.calls.length;
+      const chunk = rounds[round - 1];
+      if (!chunk) return;
+      yield {
+        type: 'chunk',
+        value: {
+          candidates: [{ content: { parts: chunk.parts } }],
+          ...(chunk.functionCalls
+            ? { functionCalls: chunk.functionCalls }
+            : {}),
+        },
+      };
+    });
+
+    const state = await startSpeculation(config, 'read a.ts');
+    await vi.waitFor(() => expect(state.status).toBe('completed'));
+    const snapshot = {
+      messages: state.messages,
+      status: state.status,
+      toolUseCount: state.toolUseCount,
+      executeCalls: execute.mock.calls.length,
+    };
+    await abortSpeculation(state);
+    return snapshot;
+  }
+
+  const call = (id: string) => ({
+    parts: [fnCall('read_file', { path: 'a.ts' }, id)],
+    functionCalls: [{ id, name: 'read_file', args: { path: 'a.ts' } }],
+  });
+  const text = (value: string) => ({ parts: [{ text: value }] });
+
+  it.each([
+    { name: 'text-only completion', rounds: [text('done')] },
+    {
+      name: 'one tool call then completion',
+      rounds: [call('call-parity'), text('done')],
+    },
+    {
+      name: 'two tool calls keep their order',
+      rounds: [
+        {
+          parts: [
+            fnCall('read_file', { path: 'a.ts' }, 'call-1'),
+            fnCall('read_file', { path: 'b.ts' }, 'call-2'),
+          ],
+          functionCalls: [
+            { id: 'call-1', name: 'read_file', args: { path: 'a.ts' } },
+            { id: 'call-2', name: 'read_file', args: { path: 'b.ts' } },
+          ],
+        },
+        text('done'),
+      ],
+    },
+  ])('matches the raw-chunk round: $name', async ({ rounds }) => {
+    const off = await runScenario(false, rounds);
+    const on = await runScenario(true, rounds);
+    expect(off.status).toBe('completed');
+    expect(on.executeCalls).toBe(off.executeCalls);
+    expect(on.toolUseCount).toBe(off.toolUseCount);
+    expect(on.messages).toEqual(off.messages);
   });
 });

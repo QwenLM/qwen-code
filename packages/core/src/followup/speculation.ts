@@ -18,9 +18,11 @@
 import { shellResultText } from '../utils/shell-result.js';
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
-import type { LlmClient } from '../core/client.js';
+import { SendMessageType, type LlmClient } from '../core/client.js';
 import type { ToolArtifact } from '../tools/tools.js';
-import { StreamEventType } from '../core/llm-chat.js';
+import { StreamEventType, type LlmChat } from '../core/llm-chat.js';
+import { runModelRound, turnModelRound } from '../core/agent-loop.js';
+import { LlmEventType } from '../core/turn.js';
 import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
@@ -250,6 +252,91 @@ interface LoopResult {
   boundary?: BoundaryInfo;
 }
 
+/**
+ * One model round of the speculative loop, as the visible-text and
+ * function-call parts the tool step consumes. With `unifiedAgentLoop` on, the
+ * round runs on the shared loop's `Turn`-backed model round (chunks parsed in
+ * `turn.ts`); off, it keeps the original raw-chunk parsing. Thought parts are
+ * dropped either way. The tool step itself is unchanged.
+ */
+async function runSpeculationModelRound(
+  config: Config,
+  chat: LlmChat,
+  model: string,
+  parts: Part[],
+  signal: AbortSignal | undefined,
+): Promise<Part[]> {
+  const modelParts: Part[] = [];
+  if (config.isUnifiedAgentLoopEnabled?.() !== true) {
+    const stream = await chat.sendMessageStream(
+      model,
+      { message: parts },
+      'speculation',
+    );
+    for await (const event of stream) {
+      if (signal?.aborted) break;
+      if (event.type !== StreamEventType.CHUNK) continue;
+      const response = event.value;
+      const chunkParts = response.candidates?.[0]?.content?.parts ?? [];
+      for (const part of chunkParts) {
+        // Skip thought/reasoning parts — only capture visible text + function calls
+        if (part.text && !(part as Record<string, unknown>)['thought']) {
+          modelParts.push({ text: part.text });
+        }
+        if (part.functionCall && part.functionCall.name) {
+          modelParts.push({
+            functionCall: {
+              ...(part.functionCall.id ? { id: part.functionCall.id } : {}),
+              name: part.functionCall.name,
+              args: part.functionCall.args,
+            },
+          });
+        }
+      }
+    }
+    return modelParts;
+  }
+
+  await runModelRound(
+    turnModelRound(chat, model),
+    {
+      parts,
+      promptId: 'speculation',
+      options: { type: SendMessageType.UserQuery },
+    },
+    signal ?? new AbortController().signal,
+    {
+      onModelEvent: (event) => {
+        if (
+          event.type === LlmEventType.Retry ||
+          event.type === LlmEventType.ModelFallback
+        ) {
+          // The shared round drops the abandoned attempt's calls; drop its
+          // text too, so the parts match the calls the round keeps.
+          modelParts.length = 0;
+          return;
+        }
+        if (event.type === LlmEventType.Content) {
+          if (event.value) modelParts.push({ text: event.value });
+        } else if (event.type === LlmEventType.ToolCallRequest) {
+          const fc = event.functionCall;
+          const name = fc?.name ?? event.value.name;
+          if (!name) return;
+          const id = fc?.id ?? event.value.callId;
+          modelParts.push({
+            functionCall: {
+              ...(id ? { id } : {}),
+              name,
+              args: fc?.args ?? event.value.args,
+            },
+          });
+        }
+      },
+    },
+  );
+  return modelParts;
+}
+
 async function runSpeculativeLoop(
   config: Config,
   state: SpeculationState,
@@ -276,34 +363,13 @@ async function runSpeculativeLoop(
 
       // Send user message for this turn
       const lastUserMsg = messages[messages.length - 1];
-      const stream = await chat.sendMessageStream(
+      const modelParts = await runSpeculationModelRound(
+        config,
+        chat,
         model,
-        { message: lastUserMsg.parts ?? [] },
-        'speculation',
+        lastUserMsg.parts ?? [],
+        state.abortController?.signal,
       );
-
-      const modelParts: Part[] = [];
-      for await (const event of stream) {
-        if (state.abortController?.signal.aborted) break;
-        if (event.type !== StreamEventType.CHUNK) continue;
-        const response = event.value;
-        const parts = response.candidates?.[0]?.content?.parts ?? [];
-        for (const part of parts) {
-          // Skip thought/reasoning parts — only capture visible text + function calls
-          if (part.text && !(part as Record<string, unknown>)['thought']) {
-            modelParts.push({ text: part.text });
-          }
-          if (part.functionCall && part.functionCall.name) {
-            modelParts.push({
-              functionCall: {
-                ...(part.functionCall.id ? { id: part.functionCall.id } : {}),
-                name: part.functionCall.name,
-                args: part.functionCall.args,
-              },
-            });
-          }
-        }
-      }
 
       if (state.abortController?.signal.aborted) break;
       if (modelParts.length === 0) break;

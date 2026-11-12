@@ -2,7 +2,7 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）与 OpenTUI（PR 4，#16743–#16820）的迁移均已合入；各 surface 的默认开启等待 nightly 统一 loop E2E 门控（#16192）。PR 5（AgentCore，#16880）正在进行。
+- **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）、OpenTUI（PR 4，#16743–#16820）与 AgentCore（PR 5，#16880）的迁移均已合入；各 surface 的默认开启等待 nightly 统一 loop E2E 门控（#16192）。PR 6a（speculation 的模型轮）正在评审。
 - **日期**：2026-10-23，基于 upstream `779a4d5d0d`。
 - **相关**：
   - tracking issue #15327；
@@ -500,6 +500,18 @@ AgentCore 像现在映射 chunk 那样映射这一轮的事件，并为自己的
 
 两条路径都在流准备完成后发出 `ROUND_START`，让 workflow 的停滞检测为模型响应重新计时。Agent 在循环检查前发出当前 chunk 中已收到的全部文本，并按尝试记录响应 ID。请求失败、取消以及重试等待被时间上限打断时，运行的结束方式与现在相同。开启设置的套件在调试日志中统计在共享 loop 上发出的子代理轮次。TUI 套件通过另一条日志统计主会话的轮次。
 
+### speculation 迁到共享 loop（PR 6）
+
+speculation 的 `runSpeculativeLoop`（`speculation.ts`）在用户确认前，用带写时复制文件隔离的 forked `LlmChat` 预先运行被接受的建议。它在该 chat 上发出每一轮并自行解析 chunk，再把这一轮的调用交给自己的工具门（boundary/redirect）并直接执行，不经过 scheduler。PR 6a 只迁移模型轮：开启设置时，`runSpeculationModelRound` 经 `turnModelRound(chat, model)` 在 `runModelRound` 上发出，并从这一轮的事件重建可见文本与 function-call parts；工具门、直接执行、overlay 写入与 boundary 处理均不变。
+
+| speculation 现状                                      | 开启设置后                                                 |
+| ----------------------------------------------------- | ---------------------------------------------------------- |
+| 解析每个 chunk 的 parts，保留可见文本与 function call | 这一轮的 `Content` 与 `ToolCallRequest` 事件成为这些 parts |
+| 重试或回退时保留被放弃尝试的文本与调用                | 丢弃这些内容，这一轮只带新尝试的输出                       |
+| 每个流式文本 part 一个文本 part                       | 每个 chunk 一个文本 part，按 `Turn` 的报告                 |
+
+对拍套件以设置开/关各跑一次纯文本轮、单调用与双调用批，比较所得的历史、工具执行与状态。
+
 ## 迁移计划
 
 | PR    | 内容                                                                                                      |
@@ -530,10 +542,11 @@ AgentCore 像现在映射 chunk 那样映射这一轮的事件，并为自己的
 | 5b    | AgentCore：一轮的调用作为一个共享工具批，连同它的延后审批                                                 |
 | 5c    | AgentCore：整个运行走 loop，父 agent 的消息经下一轮发出；停止映射到 `terminateMode`                       |
 | 5d    | AgentCore：默认开启，然后移除现有 loop                                                                    |
-| 6     | speculation                                                                                               |
+| 6a    | speculation：每一模型轮走 loop 的模型轮，在 forked chat 的 `Turn` 上；speculation 保留其工具门与直接执行  |
+| 6b    | speculation：默认开启，然后删除其现有模型轮                                                               |
 | —     | Hosted Harness：单独评估                                                                                  |
 
-PR 6 之后同样跟随默认开启和删除旧 loop 两步。
+PR 6b 是 speculation 的默认开启与删除步骤。
 
 一个入口在设置开启时通过它的对拍测试，并列出了已知差异，才算完成迁移。之后每个入口各自修改默认值，不必等其他入口。修改默认值需要同时满足：
 
