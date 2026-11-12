@@ -266,6 +266,15 @@ function tokenize(
   return tokens;
 }
 
+/**
+ * The words of one simple shell command after quote removal, ANSI-C `$'…'`
+ * decoding and `\`-newline joining. The amend guard matches on these so a
+ * quote-split spelling (`git com''mit --amend`) is read as the word bash runs.
+ */
+export function shellWords(command: string): string[] {
+  return tokenize(command);
+}
+
 function pushToken(
   tokens: string[],
   token: string,
