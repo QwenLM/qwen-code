@@ -128,33 +128,44 @@ function scalarValue(workflow, key, name) {
     `${name}: ${key} uses the \`${raw[0]}\` form, which this dependency-free reader cannot resolve`,
   );
   // A following line indented deeper than the key belongs to the same node.
-  const nextLine =
-    workflow.slice(match.index + match[0].length).split('\n')[1] ?? '';
+  // Blank lines are skipped first: a folded plain scalar may be separated from
+  // its continuation by one, and stopping at the blank line read the value as
+  // its first line while the tail of the list fell away unnoticed.
+  const following = workflow
+    .slice(match.index + match[0].length)
+    .split('\n')
+    .slice(1);
+  const nextContent = following.find((line) => line.trim() !== '') ?? '';
   assert.ok(
-    !new RegExp(`^[ \\t]{${indent.length + 1},}\\S`).test(nextLine),
+    !new RegExp(`^[ \\t]{${indent.length + 1},}\\S`).test(nextContent),
     `${name}: ${key} continues on a deeper-indented line, which this reader cannot follow`,
   );
+  let value;
   if (raw.startsWith("'") && raw.endsWith("'")) {
-    return raw.slice(1, -1).replaceAll("''", "'");
-  }
-  if (raw.startsWith('"') && raw.endsWith('"')) {
+    value = raw.slice(1, -1).replaceAll("''", "'");
+  } else if (raw.startsWith('"') && raw.endsWith('"')) {
     try {
-      return JSON.parse(raw);
+      value = JSON.parse(raw);
     } catch (error) {
       throw new Error(
         `${name}: ${key} is a double-quoted scalar this reader could not decode (${error.message}): ${raw}`,
       );
     }
+  } else {
+    assert.ok(
+      !/^["']/.test(raw),
+      `${name}: ${key} opens a quote it does not close on the same line`,
+    );
+    value = raw;
   }
+  // Checked AFTER decoding, not before: `KEY: ''` is two characters of raw text
+  // and an empty pattern once decoded, and an empty ERE matches every
+  // annotation — the fail-open class this suite exists to prevent.
   assert.ok(
-    raw.length > 0,
+    value.length > 0,
     `${name}: ${key} is empty; an empty pattern would match every annotation`,
   );
-  assert.ok(
-    !/^["']/.test(raw),
-    `${name}: ${key} opens a quote it does not close on the same line`,
-  );
-  return raw;
+  return value;
 }
 
 function readSignatures(name, key = 'INFRA_FAILURE_SIGNATURES') {
@@ -508,7 +519,10 @@ describe('check-host-load', () => {
     ]) {
       assert.throws(
         () => scalarValue(fixture, key, 'fixture.yml'),
-        new RegExp(`uses the .${form}. form`),
+        // A plain substring check, not `new RegExp` with the indicator
+        // interpolated: `|` is a regex operator there, so the assertion for that
+        // form would also accept `>`'s message.
+        (error) => error.message.includes(`uses the \`${form}\` form`),
         `${form} must be refused, not read as the indicator`,
       );
     }
@@ -522,6 +536,28 @@ describe('check-host-load', () => {
           'fixture.yml',
         ),
       /continues on a deeper-indented line/,
+    );
+    // A folded plain scalar can put a blank line before its continuation. The
+    // reader stops at the first line, so this must refuse rather than silently
+    // return the head of the list.
+    assert.throws(
+      () =>
+        scalarValue(
+          `env:\n  ${key}: lost communication\n\n    |the server\n`,
+          key,
+          'fixture.yml',
+        ),
+      /continues on a deeper-indented line/,
+    );
+    // `KEY: ''` decodes to the empty string, and an empty pattern matches every
+    // annotation: that is the fail-open case, so it has to throw.
+    assert.throws(
+      () => scalarValue(`env:\n  ${key}: ''\n`, key, 'fixture.yml'),
+      /is empty; an empty pattern would match every annotation/,
+    );
+    assert.throws(
+      () => scalarValue(`env:\n  ${key}: ""\n`, key, 'fixture.yml'),
+      /is empty; an empty pattern would match every annotation/,
     );
     // A trailing comment is legal YAML and is not part of the value.
     assert.equal(

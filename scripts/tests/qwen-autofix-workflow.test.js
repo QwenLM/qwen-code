@@ -53,6 +53,24 @@ const fixedRulingShape =
 // than a code line) read it here.
 const designDoc = readFileSync('.github/workflows/qwen-autofix.md', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
+// The built-tree handoff steps by name from ci.yml: the signature admits exactly
+// one of them, so a rename there has to move the cases below with it rather
+// than leave a hand-typed copy asserting a name no run reports.
+const handoffStepNames = [
+  ...new Set(
+    Object.values(parse(ciWorkflow).jobs)
+      .flatMap((job) => job.steps ?? [])
+      .filter(
+        (step) =>
+          /download-artifact/i.test(String(step.uses ?? '')) &&
+          /built tree/i.test(String(step.name ?? '')),
+      )
+      .map((step) => step.name),
+  ),
+];
+const firstDownloadStep = handoffStepNames.find(
+  (name) => !/^Retry\b/i.test(name),
+);
 const releaseStepScript = readFileSync(
   '.github/scripts/run-release-step.sh',
   'utf8',
@@ -1352,8 +1370,9 @@ describe('qwen-autofix workflow', () => {
     expect(INFRA_SIGNATURES).toContain(
       "The action 'Retry downloading the built tree' has timed out",
     );
+    expect(firstDownloadStep, 'no first-download step in ci.yml').toBeTruthy();
     expect(INFRA_SIGNATURES).not.toContain(
-      "The action 'Download the built tree' has timed out",
+      `The action '${firstDownloadStep}' has timed out`,
     );
     // The deterministic configuration class is a separate list: its members
     // must be absent from the rerun class, and an empty extraction would make
@@ -1578,7 +1597,7 @@ describe('qwen-autofix workflow', () => {
       run({
         checks: [FAIL],
         annotations: [
-          "The action 'Download the built tree' has timed out after 15 minutes.",
+          `The action '${firstDownloadStep}' has timed out after 15 minutes.`,
           "The action 'Run tests and generate reports' has timed out after 15 minutes.",
         ].join('\n'),
       }),

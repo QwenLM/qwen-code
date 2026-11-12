@@ -2759,8 +2759,18 @@ printf '%s\\n' '{"jobs":[]}'
       // infrastructure and suppressed the issue record. Two annotation lines
       // stand in for the blob; the run must stay a code failure, which here is
       // "does not match" — this workflow files instead of rerunning.
+      // Derived, not typed: renaming the first download's step in ci.yml has
+      // to move this blob with it, or the case would keep asserting a name no
+      // run reports.
+      const firstDownloadStep = handoffSteps.find(
+        (step) => !/^Retry\b/i.test(step),
+      );
+      expect(
+        firstDownloadStep,
+        'no first-download step in ci.yml',
+      ).toBeTruthy();
       const blob = [
-        "The action 'Download the built tree' has timed out after 15 minutes.",
+        `The action '${firstDownloadStep}' has timed out after 15 minutes.`,
         "The action 'Run tests and generate reports' has timed out after 15 minutes.",
       ].join('\n');
       expect(
