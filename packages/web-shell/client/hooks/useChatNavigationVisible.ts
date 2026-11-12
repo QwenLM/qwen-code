@@ -12,24 +12,35 @@ export function useChatNavigationVisible(
       return;
     }
     const container = element.closest('[data-history-viewport]') ?? element;
+    let observedContent: HTMLElement | null = null;
+    let resize: ResizeObserver | null = null;
     const update = () => {
       const style = getComputedStyle(element);
-      const minWidth =
-        Number.parseFloat(
-          style.getPropertyValue('--chat-regular-content-width'),
-        ) || 960;
-      // Reserve 64px gutters so hover-expanded ticks stay clear of the text.
+      const content = element.querySelector<HTMLElement>(
+        '[data-web-shell-message-row]',
+      );
+      if (content !== observedContent) {
+        if (observedContent) resize?.unobserve(observedContent);
+        observedContent = content;
+        if (content) resize?.observe(content);
+      }
+      const containerRect = container.getBoundingClientRect();
+      const contentRect = content?.getBoundingClientRect();
+      // Include rail padding, the 28px hovered tick, and a 16px text gap.
       setVisible(
         style.getPropertyValue('--chat-content-width').trim() !== '100%' &&
-          container.getBoundingClientRect().width >= minWidth + 128,
+          contentRect !== undefined &&
+          contentRect.left - containerRect.left >= 56 &&
+          containerRect.right - contentRect.right >= 56,
       );
     };
-    update();
-    const resize =
+    resize =
       typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update);
     resize?.observe(container);
+    update();
     const shell = element.closest('[data-web-shell-root]');
     const mutation = new MutationObserver(update);
+    mutation.observe(element, { childList: true, subtree: true });
     if (shell)
       mutation.observe(shell, { attributes: true, attributeFilter: ['style'] });
     return () => {

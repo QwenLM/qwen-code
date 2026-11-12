@@ -54,7 +54,10 @@
 .list > * {
   width: min(
     100%,
-    var(--chat-content-width, var(--chat-regular-content-width, 960px))
+    var(
+      --chat-responsive-content-width,
+      var(--chat-content-width, var(--chat-regular-content-width, 960px))
+    )
   );
   margin-right: auto;
   margin-left: auto;
@@ -73,7 +76,10 @@
 .virtualRow {
   width: min(
     100%,
-    var(--chat-content-width, var(--chat-regular-content-width, 960px))
+    var(
+      --chat-responsive-content-width,
+      var(--chat-content-width, var(--chat-regular-content-width, 960px))
+    )
   );
   margin-right: auto;
   margin-left: auto;
@@ -213,7 +219,7 @@
   left: 0;
   width: clamp(
     20px,
-    calc((100% + 40px - var(--chat-content-width, 960px)) / 2),
+    calc((100% + 40px - var(--chat-responsive-content-width, 960px)) / 2),
     86px
   );
   padding-left: 5px;

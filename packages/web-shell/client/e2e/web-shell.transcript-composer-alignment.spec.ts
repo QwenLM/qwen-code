@@ -94,6 +94,9 @@ for (const navigation of [true, false]) {
       .filter({ hasText: 'the weather report is ready' });
     await expect(message).toBeVisible();
     const composer = page.locator('[data-web-shell-composer]');
+    const sidebar = page.getByRole('complementary', {
+      name: 'Workspace sidebar',
+    });
     await expect(composer).toBeVisible();
     await expect
       .poll(() =>
@@ -118,7 +121,7 @@ for (const navigation of [true, false]) {
     );
     await scrollToBottom.click();
     for (const width of [
-      1600, 1500, 1444, 1443, 1400, 1300, 1000, 802, 700, 599,
+      1600, 1500, 1444, 1400, 1300, 1116, 1000, 802, 700, 599, 575,
     ]) {
       await page.setViewportSize({ width, height: 900 });
       await expectSameEdges(message, composer);
@@ -133,22 +136,84 @@ for (const navigation of [true, false]) {
           );
         })
         .toBeLessThanOrEqual(1);
+      await expect
+        .poll(async () => {
+          const viewportBox = await viewport.boundingBox();
+          const messageBox = await message.boundingBox();
+          if (!viewportBox || !messageBox) return Infinity;
+          return Math.abs(
+            messageBox.width - Math.min(viewportBox.width * 0.85, 960),
+          );
+        })
+        .toBeLessThanOrEqual(1);
       const viewportBox = await viewport.boundingBox();
-      if (viewportBox && viewportBox.width >= 1088) {
-        await expect(rail).toBeVisible();
+      const messageBox = await message.boundingBox();
+      const gutter = Math.min(
+        messageBox!.x - viewportBox!.x,
+        viewportBox!.x + viewportBox!.width - messageBox!.x - messageBox!.width,
+      );
+      if (gutter >= 56) {
+        await expect(
+          rail,
+          `rail at ${width}px with ${gutter}px gutters`,
+        ).toBeVisible();
         const railBox = await rail.boundingBox();
-        const messageBox = await message.boundingBox();
-        expect(railBox!.x + railBox!.width).toBeLessThanOrEqual(messageBox!.x);
+        expect(railBox!.x + railBox!.width).toBeLessThanOrEqual(
+          messageBox!.x + 1,
+        );
       } else {
-        await expect(rail).toBeHidden();
+        await expect(
+          rail,
+          `rail at ${width}px with ${gutter}px gutters`,
+        ).toBeHidden();
       }
+    }
+    {
+      await page.setViewportSize({ width: 1116, height: 743 });
+      await sidebar.evaluate((element) => {
+        element.style.setProperty('--web-shell-sidebar-width', '276px');
+      });
+      const viewport = page.locator('[data-history-viewport]');
+      await expect
+        .poll(async () => (await viewport.boundingBox())?.width ?? 0)
+        .toBe(840);
+      await expect(rail).toBeVisible();
+      await expectSameEdges(message, composer);
+      await expect
+        .poll(async () => (await message.boundingBox())?.width ?? 0)
+        .toBeCloseTo(714, 0);
+      const button = rail.locator('button').first();
+      const tick = button.locator(':scope > span').first();
+      await button.hover();
+      await expect
+        .poll(async () => {
+          const tickBox = await tick.boundingBox();
+          const messageBox = await message.boundingBox();
+          return tickBox && messageBox
+            ? messageBox.x - tickBox.x - tickBox.width
+            : -Infinity;
+        })
+        .toBeGreaterThanOrEqual(16);
+      const preview = page.locator(
+        navigation
+          ? '[data-slot="tooltip-content"]'
+          : '#session-timeline-detail-tooltip',
+      );
+      await expect(preview).toBeVisible();
+      await expect
+        .poll(async () => {
+          const previewBox = await preview.boundingBox();
+          const tickBox = await tick.boundingBox();
+          return previewBox && tickBox
+            ? previewBox.x - tickBox.x - tickBox.width
+            : -Infinity;
+        })
+        .toBeCloseTo(8, 0);
+      await page.mouse.move(500, 10);
     }
     {
       await page.setViewportSize({ width: 1600, height: 900 });
       const shell = page.locator('[data-web-shell-root]');
-      const sidebar = page.getByRole('complementary', {
-        name: 'Workspace sidebar',
-      });
       await expect(sidebar).toBeVisible();
       const sidebarWidth = (await sidebar.boundingBox())!.width;
       for (const minWidth of [800, 1200, 1000]) {
@@ -158,11 +223,15 @@ for (const navigation of [true, false]) {
             `${width}px`,
           );
           element.style.setProperty('--chat-content-width', `${width}px`);
+          element.style.setProperty(
+            '--chat-responsive-content-width',
+            `${width}px`,
+          );
           element.style.setProperty('--chat-shell-width', `${width + 40}px`);
         }, minWidth);
         for (const offset of [-1, 0, 1]) {
           await page.setViewportSize({
-            width: minWidth + 128 + sidebarWidth + offset,
+            width: minWidth + 112 + sidebarWidth + offset,
             height: 900,
           });
           if (offset < 0) await expect(rail).toBeHidden();
@@ -187,15 +256,7 @@ for (const navigation of [true, false]) {
           }
         }
       }
-      await page.setViewportSize({ width: 1128 + sidebarWidth, height: 900 });
-      await shell.evaluate((element) => {
-        element.style.setProperty('--chat-regular-content-width', '1200px');
-      });
-      await expect(rail).toBeHidden();
-      await shell.evaluate((element) => {
-        element.style.setProperty('--chat-regular-content-width', '1000px');
-      });
-      await expect(rail).toBeVisible();
+      await page.setViewportSize({ width: 1112 + sidebarWidth, height: 900 });
       await shell.evaluate((element) => {
         element.style.setProperty('--chat-content-width', '100%');
       });
@@ -225,6 +286,8 @@ for (const navigation of [true, false]) {
           : '#session-timeline-detail-tooltip',
       );
       await expect(preview).toBeVisible();
+      const previewBox = await preview.boundingBox();
+      expect(previewBox!.x - tickBox!.x - tickBox!.width).toBeCloseTo(8, 0);
       await expect(preview).toContainText('What is the weather?');
       if (navigation)
         await expect(preview).toContainText(

@@ -108,11 +108,13 @@ function getChatWidthStyle(chatMaxWidth: number | undefined): CSSProperties {
       ? chatMaxWidth
       : DEFAULT_CHAT_MAX_WIDTH;
   const contentWidth = `${width}px`;
-  const shellWidth = `calc(${contentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
+  const responsiveContentWidth = `min(85cqw, ${contentWidth})`;
+  const shellWidth = `calc(${responsiveContentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
   return {
     '--chat-regular-content-width': contentWidth,
     '--chat-regular-shell-width': shellWidth,
     '--chat-content-width': contentWidth,
+    '--chat-responsive-content-width': responsiveContentWidth,
     '--chat-shell-width': shellWidth,
   } as CSSProperties;
 }

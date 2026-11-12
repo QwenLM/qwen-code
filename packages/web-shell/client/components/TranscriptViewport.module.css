@@ -23,7 +23,11 @@
   position: absolute;
   inset: 0 auto 0 0;
   z-index: 4;
-  width: clamp(20px, calc((100% - var(--chat-content-width, 960px)) / 2), 64px);
+  width: clamp(
+    20px,
+    calc((100% - var(--chat-responsive-content-width, 960px)) / 2),
+    64px
+  );
 }
 
 .navigation:not([hidden]) {

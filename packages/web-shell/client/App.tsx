@@ -2883,11 +2883,14 @@ function getChatWidthStyle(
   chatMaxWidth: number | undefined,
 ): CSSProperties {
   const contentWidth = `${getChatMaxWidth(chatMaxWidth)}px`;
-  const shellWidth = `calc(${contentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
+  const responsiveContentWidth = `min(85cqw, ${contentWidth})`;
+  const shellWidth = `calc(${responsiveContentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
   return {
     '--chat-regular-content-width': contentWidth,
     '--chat-regular-shell-width': shellWidth,
     '--chat-content-width': mode === 'wide' ? '100%' : contentWidth,
+    '--chat-responsive-content-width':
+      mode === 'wide' ? '100%' : responsiveContentWidth,
     '--chat-shell-width': mode === 'wide' ? '100%' : shellWidth,
   } as CSSProperties;
 }
