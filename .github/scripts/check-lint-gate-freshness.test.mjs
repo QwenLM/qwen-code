@@ -170,13 +170,27 @@ test('ci.yml wires the check into lint_and_static before the lint lanes', () => 
   // PRs only: merge_group validates the prospective merged tree (fresh by
   // construction) and push validates the base itself.
   const stepBlock = job.slice(step, job.indexOf('\n      - name:', step + 1));
-  assert.ok(
-    stepBlock.includes("github.event_name == 'pull_request'"),
-    'step must be gated to pull_request',
+  // Whole literal, not the substrings this used to check: appending
+  // `&& ... != 'docs_only'` keeps every one of those tokens in place, and that
+  // revert was green on every suite while re-opening the stale-gate hole for
+  // docs-only PRs — a lane that still runs Prettier, but against the branch's
+  // older .prettierrc/lint.js, which is the post-merge class this check exists
+  // to catch (#16872, #16918). No profile arm: every profile runs a lint lane,
+  // docs_only included, so keying this gate on the profile could only narrow
+  // it — the hole this pin closes. On a skip_ci PR `Use trusted CI profile`
+  // is skipped, so the output is '' rather than a profile name.
+  assert.equal(
+    stepBlock.match(/^ {8}if: "(.*)"$/m)?.[1],
+    "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}",
+    'freshness gate drifted',
   );
-  assert.ok(
-    stepBlock.includes("skip_ci != 'true'"),
-    'step must stay running alongside the other no-op-pass lanes on skip_ci',
+  // The gate must stay fatal: `continue-on-error` would leave the literal
+  // above intact while the freshness check stops blocking the required
+  // check (#16918).
+  assert.equal(
+    stepBlock.match(/^ {8}continue-on-error:/m),
+    null,
+    'freshness gate must stay fatal',
   );
   assert.ok(
     stepBlock.includes('node .github/scripts/check-lint-gate-freshness.mjs'),

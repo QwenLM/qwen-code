@@ -124,6 +124,13 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private final HarnessConnector harness;
     private RuntimeWarmer runtimeWarmer;
     private SessionWorktreeService sessionWorktrees;
+    private com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages;
+
+    @Autowired(required = false)
+    public void setExtensionPackages(@org.springframework.context.annotation.Lazy
+            com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages value) {
+        this.extensionPackages = value;
+    }
     private org.springframework.beans.factory.ObjectProvider<SessionRecoveryService> recoveryServices;
     private java.util.function.Supplier<java.time.Duration> renameLeaseDuration = () -> java.time.Duration.ofSeconds(60);
     private Clock renameClock = Clock.systemUTC();
@@ -588,6 +595,18 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
         SessionWorktreeStore.Plan worktreePlan = worktree == null ? null
                 : sessionWorktrees.preflight(tenantId, actorId, selection, worktree);
+        com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages.Selection extensionSelection = null;
+        if (extensionPins != null) {
+            if (extensionPackages == null) {
+                throw new ManagedAgentException(409, "unsupported_feature", "Extension packages are unavailable.");
+            }
+            var selectedWorkspace = selection == null ? workspaces.readableDefault(tenantId, actorId)
+                    : workspaces.findReadable(tenantId, actorId, selection.workspaceId());
+            if (selectedWorkspace == null) {
+                throw new ManagedAgentException(404, "workspace_not_found", "Workspace was not found.");
+            }
+            extensionSelection = extensionPackages.authorizeSelection(tenantId, actorId, selectedWorkspace.workspaceId(), extensionPins);
+        }
         boolean approvalSelectionSupported = harness.supportsApprovalSelection()
                 && ("qwen-code".equals(agentId) || harness.supportsAgentDefinitionApprovalSelection());
         try {
@@ -610,6 +629,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                     .publicChildrenSupported(harness.supportsPublicChildAgents())
                     .modelId(modelId)
                     .extensionPins(extensionPins)
+                    .extensionSelection(extensionSelection)
                     .extensionLifecycleProfiles(extensionLifecycleProfiles)
                     .worktree(worktreePlan)
                     .modelConfig(modelConfig)
@@ -2106,14 +2126,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private static List<Map<String, Object>> normalizeInput(
             List<Map<String, Object>> input) {
         return ManagedUserMessagePolicy.normalizeInput(input);
-    }
-
-    private static Object normalizeValue(Object value) {
-        return ManagedUserMessagePolicy.normalizeValue(value);
-    }
-
-    static String replaceLoneSurrogates(String text) {
-        return ManagedUserMessagePolicy.replaceLoneSurrogates(text);
     }
 
     private static String metadataTitle(String explicitTitle,

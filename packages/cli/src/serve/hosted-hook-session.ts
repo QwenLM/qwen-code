@@ -29,6 +29,7 @@ import type {
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import type {
   ManagedSessionDurableRef,
+  ManagedSessionKey,
   ManagedSessionSubject,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { managedHookRestoreActivationId } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
@@ -96,6 +97,31 @@ interface HookPlan {
   readonly messagesRef?: ManagedSessionDurableRef;
   readonly refusedInputDigest?: string;
   readonly toolInputOrder?: HostedToolInputOrder;
+}
+
+const CONFIG_SCOPED_OWNER_PREFIX = 'extensions-components-';
+
+/**
+ * The config-scoped owner an active extension bundle names. The same id is
+ * recomputed on every load of that configRevision, so a terminal release
+ * tombstones the id a later load must re-acquire (R13-1). One builder for every
+ * producer, so the predicate below cannot silently stop recognising an owner
+ * the Harness still constructs.
+ */
+export function hostedConfigScopedOwnerId(
+  sessionKey: ManagedSessionKey,
+  configRevision: number,
+): string {
+  return `${CONFIG_SCOPED_OWNER_PREFIX}${digest([sessionKey, configRevision])}`;
+}
+
+/**
+ * Recognises an id built by `hostedConfigScopedOwnerId`. Only trustworthy
+ * for ids the Harness constructed: a channel `inputId` is client-chosen and
+ * carries no prefix rule, so shape alone never proves ownership.
+ */
+export function isHostedConfigScopedOwner(runtimeSessionId: string): boolean {
+  return runtimeSessionId.startsWith(CONFIG_SCOPED_OWNER_PREFIX);
 }
 
 function exceedsHookResourceLimit(value: unknown): boolean {
@@ -648,7 +674,7 @@ export class HostedHookSession {
    * the id a later load must re-acquire (R13-1).
    */
   private get deterministicOwner(): boolean {
-    return this.broker.runtimeSessionId.startsWith('extensions-components-');
+    return isHostedConfigScopedOwner(this.broker.runtimeSessionId);
   }
 
   delegateBrokerToMcp(): void {
@@ -1995,12 +2021,9 @@ export class HostedHookSession {
   }
 
   async close(opts: { terminal?: boolean } = {}): Promise<void> {
-    // A detach keeps the Session reloadable; only a delete is terminal. The
-    // deterministic config-scoped owner must survive a detach re-acquirable
-    // (R13-1): a terminal release would persist a RELEASED tombstone under the
-    // very id the next load recomputes, wedging every later acquire. The rule
-    // lives on the owner, not the call site (R14-1): every non-delete close
-    // defaults to non-terminal, and only DELETE opts into the terminal release.
+    // A detach keeps the deterministic owner re-acquirable (R13-1).
+    // Public close/delete opt into terminal release after lifecycle effects;
+    // applying it to a detach would fence every later same-revision load.
     const terminal = opts.terminal ?? false;
     await this.drain();
     // The close is the drain arm. A Hook-configured Shell turn shares this

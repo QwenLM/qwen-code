@@ -1,0 +1,462 @@
+/**
+ * @license
+ * Copyright 2026 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Real-filesystem end-to-end coverage for `gh pr create` attribution
+ * directory resolution. Nothing in the attribution chain is mocked: a real
+ * git repository with a real linked worktree, a real `gh` subprocess (a
+ * PATH stub that answers per branch and only reports a PR after a create),
+ * the real `findGitRoot` / `fetchCurrentBranchPullRequest` /
+ * `fetchCurrentBranchName` / `fetchAttributionRepoKeys` probes, the real
+ * shell AST, and the real locked sidecar write.
+ *
+ * This is the shape of two live incidents (sessions d0911852 / 195215bf):
+ * `cd <worktree> && gh pr create` with no `directory` param, launched from a
+ * workspace root whose own branch has no PR.
+ */
+
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  beforeAll,
+  vi,
+} from 'vitest';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { ShellTool } from './shell.js';
+import type { Config } from '../config/config.js';
+import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { readSessionPrs } from '../services/session-pr-service.js';
+
+const PR_NUMBER = 4242;
+const PR_URL = `https://github.com/o/r/pull/${PR_NUMBER}`;
+const WORKTREE_BRANCH = 'fix/x';
+
+/**
+ * A gh stand-in that models creation: `pr view` reports no PR for a branch
+ * until `pr create` ran in it. Without that state the pre-run snapshot
+ * would already see the PR and the gate would (correctly) decline it as
+ * pre-existing, which would hide the directory bug this file pins.
+ */
+const GH_STUB = `#!/usr/bin/env bash
+set -u
+state_dir="\${GH_STUB_STATE_DIR:?}"
+printf '%s\t%s\n' "$PWD" "$*" >> "$state_dir/calls.log"
+branch=$(git branch --show-current 2>/dev/null || echo detached)
+marker="$state_dir/$(printf '%s' "$branch" | tr '/' '_')"
+if [ "\${1:-}" = "repo" ] && [ "\${2:-}" = "view" ]; then
+  printf '%s' '{"url":"https://github.com/o/r","parent":null}'
+  exit 0
+fi
+if [ "\${1:-}" = "pr" ] && [ "\${2:-}" = "create" ]; then
+  : > "$marker"
+  printf '%s\\n' '${PR_URL}'
+  exit 0
+fi
+if [ "\${1:-}" = "pr" ] && [ "\${2:-}" = "view" ]; then
+  if [ -f "$marker" ]; then
+    printf '{"number":${PR_NUMBER},"url":"${PR_URL}","state":"OPEN","headRefName":"%s"}' "$branch"
+    exit 0
+  fi
+  printf 'no pull requests found for branch "%s"\\n' "$branch" >&2
+  exit 1
+fi
+printf 'gh stub: unsupported arguments: %s\\n' "$*" >&2
+exit 1
+`;
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_AUTHOR_NAME: 'Test',
+      GIT_AUTHOR_EMAIL: 'test@example.com',
+      GIT_COMMITTER_NAME: 'Test',
+      GIT_COMMITTER_EMAIL: 'test@example.com',
+    },
+  }).trim();
+}
+
+// The gh stand-in is a bash script and the fixture drives a real POSIX shell,
+// so this suite cannot run on the Windows workspace lane (same guard as the
+// executable-entry case in autofix-pr.test.ts).
+describe.skipIf(process.platform === 'win32')(
+  'gh pr create attribution directory (real filesystem)',
+  () => {
+    let tmp: string;
+    let repo: string;
+    let worktree: string;
+    let sidecar: string;
+    let stubBin: string;
+    let originalPath: string | undefined;
+    let originalStubState: string | undefined;
+
+    // The polling helpers below give up at 10s; keep every test's budget above
+    // that on ALL lanes (the package default is 15s, 60s on ecs-qwen) so a
+    // missed completion edge surfaces as the helper's diagnostic, not a bare
+    // vitest timeout or a vacuous pass.
+    beforeAll(() => {
+      vi.setConfig({ testTimeout: 30_000 });
+    });
+
+    beforeEach(() => {
+      tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pr-bind-')));
+      repo = path.join(tmp, 'repo');
+      fs.mkdirSync(repo);
+      stubBin = path.join(tmp, 'bin');
+      fs.mkdirSync(stubBin);
+      const stateDir = path.join(tmp, 'gh-state');
+      fs.mkdirSync(stateDir);
+      fs.writeFileSync(path.join(stubBin, 'gh'), GH_STUB, { mode: 0o755 });
+
+      originalPath = process.env['PATH'];
+      originalStubState = process.env['GH_STUB_STATE_DIR'];
+      process.env['PATH'] = `${stubBin}${path.delimiter}${originalPath ?? ''}`;
+      process.env['GH_STUB_STATE_DIR'] = stateDir;
+
+      git(repo, 'init', '--initial-branch=main', '.');
+      git(repo, 'config', 'user.name', 'Test');
+      git(repo, 'config', 'user.email', 'test@example.com');
+      // A developer's global `commit.gpgsign = true` would otherwise fail every
+      // fixture commit (no usable key), while CI without a global config stays
+      // green. Repo-local config also covers the linked worktree via commondir.
+      git(repo, 'config', 'commit.gpgsign', 'false');
+      git(repo, 'remote', 'add', 'origin', 'https://github.com/o/r.git');
+      fs.writeFileSync(path.join(repo, 'README.md'), 'base\n');
+      git(repo, 'add', 'README.md');
+      git(repo, 'commit', '-m', 'base');
+      // The launch directory's own branch deliberately has no PR.
+      worktree = path.join(repo, '.qwen', 'worktrees', 'fix');
+      git(repo, 'worktree', 'add', worktree, '-b', WORKTREE_BRANCH);
+      fs.writeFileSync(path.join(worktree, 'change.txt'), 'change\n');
+      git(worktree, 'add', 'change.txt');
+      git(worktree, 'commit', '-m', 'change');
+
+      sidecar = path.join(tmp, 'chats', 'real-session.pr.json');
+      fs.mkdirSync(path.dirname(sidecar), { recursive: true });
+    });
+
+    afterEach(() => {
+      if (originalPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = originalPath;
+      if (originalStubState === undefined)
+        delete process.env['GH_STUB_STATE_DIR'];
+      else process.env['GH_STUB_STATE_DIR'] = originalStubState;
+      fs.rmSync(tmp, { recursive: true, force: true });
+    });
+
+    /** A config whose target dir is the repo root, as a daemon session has. */
+    const config = (): Config =>
+      ({
+        getCoreTools: () => [],
+        getPermissionsAllow: () => [],
+        getPermissionsAsk: () => [],
+        getPermissionsDeny: () => [],
+        getDebugMode: () => false,
+        isRecordArtifactEnabled: () => false,
+        getTargetDir: () => repo,
+        getSessionId: () => 'real-session',
+        getWorkspaceContext: () => createMockWorkspaceContext(repo),
+        storage: {
+          getUserSkillsDirs: () => [],
+          getProjectTempDir: () => tmp,
+          getProjectDir: () => tmp,
+        },
+        getTruncateToolOutputThreshold: () => 0,
+        getTruncateToolOutputLines: () => 0,
+        isTruncateToolOutputThresholdExplicit: () => false,
+        getPermissionManager: () => undefined,
+        getFileReadCacheDisabled: () => true,
+        getModel: () => 'test-model',
+        isInteractive: () => false,
+        getGitCoAuthor: () => ({
+          commit: false,
+          pr: false,
+          name: 'Test',
+          email: 'test@example.com',
+        }),
+        getShouldUseNodePtyShell: () => false,
+        getShellDefaultTimeoutMs: () => undefined,
+        getShellHeartbeatIntervalMs: () => undefined,
+        getBackgroundShellRegistry: () => undefined,
+        getSessionService: () => ({
+          getPrSessionPathForArchiveState: () => sidecar,
+          getSessionLocation: async () => 'active',
+          emitSessionPrBound: () => {},
+        }),
+      }) as unknown as Config;
+
+    /**
+     * Runs a real foreground command. The binding hook is fire-and-forget, so
+     * this returns before the bind lands; callers that assert a binding poll
+     * the sidecar via `waitForSidecar`.
+     */
+    const run = async (command: string, directory?: string) => {
+      const tool = new ShellTool(config());
+      const invocation = tool.build({
+        command,
+        is_background: false,
+        ...(directory ? { directory } : {}),
+      });
+      return invocation.execute(new AbortController().signal);
+    };
+
+    /**
+     * Wait until the binding hook has actually queried gh (pre-run AND
+     * post-run `pr view` legs are logged) before a negative assertion. The
+     * hook is fire-and-forget, so without this edge a "nothing bound" check
+     * could pass simply because the write has not landed yet.
+     */
+    const waitForAttributionLegs = async (timeoutMs = 10_000) => {
+      const deadline = Date.now() + timeoutMs;
+      const logPath = path.join(tmp, 'gh-state', 'calls.log');
+      for (;;) {
+        const raw = fs.existsSync(logPath)
+          ? fs.readFileSync(logPath, 'utf8')
+          : '';
+        const views = raw
+          .split('\n')
+          .filter((line) => line.includes('\tpr view')).length;
+        if (views >= 2) return;
+        // Give up LOUDLY: a silent return would let a negative assertion pass
+        // while the binding hook is still in flight (a false green).
+        if (Date.now() > deadline) {
+          throw new Error(
+            `attribution legs did not both run within ${timeoutMs}ms; gh calls so far:\n${raw}`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    };
+
+    const waitForSidecar = async (timeoutMs = 10_000) => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        // null means "no sidecar yet" (or an empty list, which the reader
+        // rejects by shape) — keep polling until the bind lands.
+        const prs = (await readSessionPrs(sidecar)) ?? [];
+        if (prs.length > 0) return prs;
+        if (Date.now() > deadline) {
+          throw new Error(
+            `no PR bound within ${timeoutMs}ms; sidecar=${sidecar}`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    };
+
+    it('binds the worktree PR when the command cds into the worktree itself', async () => {
+      const result = await run(
+        `cd ${worktree} && gh pr create --fill 2>&1 | tail -5`,
+      );
+      expect(result.error).toBeUndefined();
+
+      const prs = await waitForSidecar();
+      expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
+      expect(prs[0]).toMatchObject({ url: PR_URL, source: 'create' });
+    });
+
+    it('binds through a chained cd with intervening commands and a redirect', async () => {
+      const body = path.join(tmp, 'body.md');
+      await run(
+        `cd ${repo} && printf 'body\\n' > ${body} && wc -l ${body} && cd .qwen/worktrees/fix && gh pr create --title "fix(managed-agent): dedupe" --body-file ${body} 2>&1 | tail -5`,
+      );
+
+      const prs = await waitForSidecar();
+      expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
+    });
+
+    it('still binds when the directory param names the worktree directly', async () => {
+      await run('gh pr create --fill', worktree);
+      const prs = await waitForSidecar();
+      expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
+    });
+
+    it.each(['--repo github.com/o/r', "--repo='o/r'", '--repo O/R'])(
+      'binds a same-repo create spelled %s',
+      async (repoArg) => {
+        // gh --repo accepts [HOST/]OWNER/REPO and compares identity
+        // case-insensitively; a host-qualified, quoted-equals or upper-case
+        // spelling of the worktree's OWN repo must not be mistaken for a
+        // different repository and re-pointed to the launch branch.
+        const result = await run(
+          `cd '${worktree}' && gh pr create ${repoArg} --fill`,
+        );
+        expect(result.error).toBeUndefined();
+        const prs = await waitForSidecar();
+        expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
+      },
+    );
+
+    it('binds a single-quoted worktree path containing a space', async () => {
+      // A space is the ordinary reason to quote a path at all, and
+      // tree-sitter spells single quotes as `raw_string` rather than
+      // `string`. Rejecting that node left this spelling unbound while the
+      // double-quoted one worked.
+      const spaced = path.join(repo, '.qwen', 'worktrees', 'with space');
+      git(repo, 'worktree', 'add', spaced, '-b', 'fix/spaced');
+      const result = await run(`cd '${spaced}' && gh pr create --fill`);
+      expect(result.error).toBeUndefined();
+
+      const prs = await waitForSidecar();
+      expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
+    });
+
+    it('binds when a quoted argument merely mentions gh pr create', async () => {
+      // The gate splits on separators without tracking quotes, so the
+      // printf's text carries a segment that starts `gh pr create`. Taking
+      // it for the create stopped the walk before the real one.
+      const result = await run(
+        `printf 'example; gh pr create' >/dev/null; cd '${worktree}' && gh pr create --fill`,
+      );
+      expect(result.error).toBeUndefined();
+
+      const prs = await waitForSidecar();
+      expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
+    });
+
+    it('does not bind a worktree the create never ran in', async () => {
+      // The cd is skipped, so the create runs on the launch branch, which
+      // has no PR. Carrying the skipped directory would query the worktree
+      // before and after and bind nothing — the parent commit bound this.
+      const result = await run(
+        `false && cd '${worktree}'; gh pr create --fill`,
+      );
+      expect(result.error).toBeUndefined();
+
+      // The launch branch created its own PR; the worktree never ran one.
+      const prs = await waitForSidecar();
+      expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
+      expect(
+        fs.existsSync(
+          path.join(tmp, 'gh-state', WORKTREE_BRANCH.replace(/\//g, '_')),
+        ),
+      ).toBe(false);
+    });
+
+    it('does not bind a worktree skipped by an OR-list', async () => {
+      // `true || cd w` succeeds through `true`, so the cd never runs and the
+      // outer `&&` creates on the launch branch. Carrying the right-hand cd
+      // out of the OR-list would query the worktree and bind nothing.
+      const result = await run(
+        `true || cd '${worktree}' && gh pr create --fill`,
+      );
+      expect(result.error).toBeUndefined();
+
+      const prs = await waitForSidecar();
+      expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
+      expect(
+        fs.existsSync(
+          path.join(tmp, 'gh-state', WORKTREE_BRANCH.replace(/\//g, '_')),
+        ),
+      ).toBe(false);
+    });
+
+    it('binds through a comment between the cd and the create', async () => {
+      // The comment sits between `&&` and the command in the AST. Consuming
+      // the pending operator there made a proven chain look unproven.
+      const result = await run(
+        `cd '${worktree}' && # create the PR below\ngh pr create --fill`,
+      );
+      expect(result.error).toBeUndefined();
+
+      const prs = await waitForSidecar();
+      expect(prs.map((pr) => pr.number)).toEqual([PR_NUMBER]);
+    });
+
+    it('falls back visibly when the worktree does not exist at the pre-run snapshot', async () => {
+      // R1-2: before spawn the future worktree path resolves upward to the
+      // launch repo, while post-run gh runs on the new worktree branch. Those
+      // disagree, so binding declines; the run must not hide that behind a
+      // `resolved` result with no notice.
+      const created = path.join(
+        repo,
+        '.qwen',
+        'worktrees',
+        'created-during-run',
+      );
+      const result = await run(
+        `git worktree add '${created}' -b fix/created-during-run && cd '${created}' && gh pr create --fill`,
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain(
+        'PR auto-binding fell back to the launch directory',
+      );
+
+      await waitForAttributionLegs();
+      expect((await readSessionPrs(sidecar)) ?? []).toEqual([]);
+    });
+
+    it('falls back with a notice when the cd target is an expansion', async () => {
+      // The create really runs and really creates the worktree's PR; only the
+      // attribution is unprovable, because the resolver refuses to guess what
+      // $WORKTREE_PATH expands to. That is the miss the notice must surface.
+      const original = process.env['WORKTREE_PATH'];
+      process.env['WORKTREE_PATH'] = worktree;
+      try {
+        const result = await run('cd "$WORKTREE_PATH" && gh pr create --fill');
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toContain(
+          'PR auto-binding fell back to the launch directory',
+        );
+        // The PR exists on the worktree branch, but nothing bound it. The stub
+        // names its marker by the branch with separators flattened.
+        expect(
+          fs.existsSync(
+            path.join(tmp, 'gh-state', WORKTREE_BRANCH.replace(/\//g, '_')),
+          ),
+        ).toBe(true);
+        // Wait for the hook's gh legs to be logged before asserting nothing
+        // bound. Reading immediately would pass merely because the write has
+        // not landed yet — the very oracle this case exists to pin.
+        await waitForAttributionLegs();
+        expect((await readSessionPrs(sidecar)) ?? []).toEqual([]);
+      } finally {
+        if (original === undefined) delete process.env['WORKTREE_PATH'];
+        else process.env['WORKTREE_PATH'] = original;
+      }
+    });
+
+    it('keeps the git fixture working when a global git config enables signing', () => {
+      // R1-8: `GIT_CONFIG_NOSYSTEM` only screens /etc/gitconfig. A developer's
+      // `~/.gitconfig` with `commit.gpgsign = true` used to fail every fixture
+      // commit while CI without a global config stayed green. Reproduce that
+      // hostile HOME and assert the repo-local remedy makes commits succeed.
+      const hostileHome = path.join(tmp, 'hostile-home');
+      fs.mkdirSync(hostileHome, { recursive: true });
+      fs.writeFileSync(
+        path.join(hostileHome, '.gitconfig'),
+        '[commit]\n\tgpgsign = true\n',
+      );
+      const original = process.env['HOME'];
+      process.env['HOME'] = hostileHome;
+      try {
+        const r = path.join(tmp, 'signing-repo');
+        fs.mkdirSync(r);
+        git(r, 'init', '--initial-branch=main', '.');
+        git(r, 'config', 'user.name', 'Test');
+        git(r, 'config', 'user.email', 'test@example.com');
+        git(r, 'config', 'commit.gpgsign', 'false');
+        fs.writeFileSync(path.join(r, 'f'), 'x\n');
+        git(r, 'add', 'f');
+        git(r, 'commit', '-m', 'base');
+        expect(git(r, 'rev-parse', 'HEAD')).toMatch(/^[0-9a-f]{40}$/);
+      } finally {
+        if (original === undefined) delete process.env['HOME'];
+        else process.env['HOME'] = original;
+      }
+    });
+  },
+);
