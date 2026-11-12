@@ -235,6 +235,36 @@ test('ci.yml wires the check into lint_and_static before the lint lanes', () => 
     job.includes("name: 'Run lint gate freshness tests'"),
     'the github_ci_only profile must run the freshness suite',
   );
+  // The step's own wiring, not just its name. Its profile arm and its run line
+  // are what make the most relevant profile execute the suite: dropping the
+  // arm runs it on profiles that do not need it, and pointing the run line at
+  // another file leaves the name in place while this suite stops running.
+  const suiteStep = job.indexOf("- name: 'Run lint gate freshness tests'");
+  const suiteBlock = job.slice(
+    suiteStep,
+    job.indexOf('\n      - name:', suiteStep + 1),
+  );
+  assert.equal(
+    suiteBlock.match(/^ {8}if: "(.*)"$/m)?.[1],
+    "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}",
+    'the freshness suite must run on the github_ci_only profile',
+  );
+  assert.ok(
+    suiteBlock.includes(
+      'node --test --test-concurrency=1 .github/scripts/check-lint-gate-freshness.test.mjs',
+    ),
+    'the step must run this suite',
+  );
+  assert.equal(
+    suiteBlock.match(/^ {8}continue-on-error:/m),
+    null,
+    'the freshness suite must stay fatal',
+  );
+  // The suite imports `yaml`, so it can only run once the install has happened.
+  assert.ok(
+    suiteStep > job.indexOf("- name: 'Install dependencies'"),
+    'the freshness suite must follow the install it depends on',
+  );
 });
 
 const GATE_SHA = 'a'.repeat(40);

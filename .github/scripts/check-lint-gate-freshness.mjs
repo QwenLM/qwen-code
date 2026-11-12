@@ -184,12 +184,12 @@ function firstLine(message) {
  * global one; the config-scoped arrays further down stay in `rest` and keep
  * being compared byte for byte.
  *
- * Line-anchored on purpose. This suite is in HELPER_TESTS_DEP_FREE, so the
- * import closure is node: builtins — no parser — and importing the config
- * itself would execute branch-controlled code. Anchoring the literal at the
- * start of the line is what keeps prose in a trailing comment from being read
- * as an entry. An unexpected line returns null ("cannot narrow"), never a
- * silently shortened list.
+ * Line-anchored on purpose, unlike the ci.yml comparison below. This reads
+ * JavaScript, not YAML: importing the config to get its array would execute
+ * branch-controlled code, and the `yaml` parser the ci.yml side uses cannot
+ * read it either. Anchoring the literal at the start of the line is what keeps
+ * prose in a trailing comment from being read as an entry. An unexpected line
+ * returns null ("cannot narrow"), never a silently shortened list.
  */
 export function splitGlobalIgnores(text) {
   // Split on the engine's terminator set, not just \n. A line written
@@ -231,8 +231,8 @@ export function splitGlobalIgnores(text) {
 // Any backslash is refused too, not just a leading bang: the extractor sees
 // source text while the consumer sees the decoded pattern, so '\x21foo'
 // (or gitignore's '\!foo') hides a negation from a startsWith('!') test.
-// Decoding here would mean evaluating branch-controlled text, which the
-// dep-free lane has no parser for and this check must never do.
+// Decoding here would mean evaluating branch-controlled text, which this
+// check must never do.
 function reincludesFiles(entries) {
   return entries.some((entry) => entry.startsWith('!') || entry.includes('\\'));
 }
