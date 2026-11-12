@@ -753,7 +753,7 @@ describe.each([false, true])(
           .mockReturnValue(Number.POSITIVE_INFINITY),
         getToolResultBytesWritten: vi.fn().mockReturnValue(0),
         getSessionId: vi.fn().mockReturnValue(`${slug}-session`),
-        isUnifiedAgentLoopEnabled: () => shared,
+        isUnifiedAgentLoopEnabled: vi.fn(() => shared),
         ...overrides,
       } as unknown as Config;
       const core = new AgentCore(
@@ -808,6 +808,14 @@ describe.each([false, true])(
         const result = await running;
         settle('late-call', 'success', 20);
         expect(results).toHaveLength(1);
+        // AgentCore must resolve the loop for the 'agent-core' surface.
+        expect(
+          (
+            core.runtimeContext as unknown as {
+              isUnifiedAgentLoopEnabled: ReturnType<typeof vi.fn>;
+            }
+          ).isUnifiedAgentLoopEnabled,
+        ).toHaveBeenCalledWith('agent-core');
         // The cancelled call's result stays for the next round's check.
         expect(result.messages[0].parts).toEqual([
           {

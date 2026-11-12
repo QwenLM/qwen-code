@@ -1110,3 +1110,27 @@ export async function runForcedToolCallScenario(options: {
     await fakeServer.close();
   }
 }
+
+/**
+ * The debug-log line `runModelRound` writes on the shared agent loop. Its
+ * presence proves a round ran on the shared loop; a surface's legacy loop
+ * never calls `runModelRound`, so the line is absent there.
+ */
+export const SHARED_LOOP_ROUND_MARKER = /model round on the shared agent loop/g;
+
+/**
+ * Counts the shared-loop round markers in a runtime dir's debug logs. Run the
+ * child with `QWEN_DEBUG_LOG_FILE=1` and `QWEN_RUNTIME_DIR` pointing at the
+ * returned dir, then assert the count is > 0 for a shared arm and 0 for a
+ * legacy arm — so an arm label is verified, not assumed.
+ */
+export function sharedLoopRoundCount(runtimeDir: string): number {
+  const debugDir = join(runtimeDir, 'debug');
+  if (!fs.existsSync(debugDir)) return 0;
+  const log = fs
+    .readdirSync(debugDir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name !== 'latest')
+    .map((entry) => readFileSync(join(entry.parentPath, entry.name), 'utf8'))
+    .join('');
+  return log.match(SHARED_LOOP_ROUND_MARKER)?.length ?? 0;
+}

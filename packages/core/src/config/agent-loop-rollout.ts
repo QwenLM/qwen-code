@@ -68,14 +68,17 @@ export function resolveAgentLoopEnvOverride(
     const name = eq === -1 ? entry : entry.slice(0, eq).trim();
     const flag = eq === -1 ? '1' : entry.slice(eq + 1).trim();
     if (!isSurface(name)) {
-      debugLogger.debug(`ignoring unknown agent-loop surface token: ${entry}`);
+      debugLogger.warn(`ignoring unknown agent-loop surface token: ${entry}`);
       continue;
     }
     if (name !== surface) continue;
     if (flag === '1') return true;
     if (flag === '0') return false;
-    debugLogger.debug(`ignoring malformed agent-loop token: ${entry}`);
-    return undefined;
+    // Skip only the unparseable token; a later well-formed token for the same
+    // surface still applies, and a lone malformed token leaves the surface to
+    // the setting/default. The first well-formed token wins.
+    debugLogger.warn(`ignoring malformed agent-loop token: ${entry}`);
+    continue;
   }
   return undefined;
 }

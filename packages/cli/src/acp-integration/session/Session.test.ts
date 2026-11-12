@@ -4998,6 +4998,10 @@ describe('Session', () => {
       expect(result.stopReason).toBe('end_turn');
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
       expect(send).toHaveBeenCalledOnce();
+      // ACP must resolve the loop for the 'acp' surface, not another.
+      expect(
+        mockConfig.isUnifiedAgentLoopEnabled as ReturnType<typeof vi.fn>,
+      ).toHaveBeenCalledWith('acp');
       expect(send.mock.calls[0][3]).toMatchObject({
         type: core.SendMessageType.UserQuery,
         userTurnRecordedByHost: true,

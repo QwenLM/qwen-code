@@ -203,12 +203,12 @@ ACP passes one policy, the Todo Stop Guard. The current turn's background result
 
 ### The setting
 
-`experimental.unifiedAgentLoop` is a boolean, `false` by default, and takes effect after a restart. `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1` overrides it, which lets CI and scripts run the suites with the shared loop. Both follow the pattern of `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM`.
+`experimental.unifiedAgentLoop` is a boolean, `false` by default, and takes effect after a restart. The `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` environment variable overrides it per surface: `1` forces every surface on, `0` forces every surface off, and a comma-separated list such as `headless,acp=0` forces individual surfaces. This lets CI and scripts run the suites with the shared loop, and lets an operator force a surface back off. Both follow the pattern of `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM`.
 
-`Config.isUnifiedAgentLoopEnabled()` exposes it. Each surface reads it at its loop's entry point:
+`Config.isUnifiedAgentLoopEnabled(surface)` exposes it. Each surface reads it at its loop's entry point, naming itself (`headless`, `acp`, `ink`, `opentui`, `agent-core`, `speculation`):
 
 ```ts
-if (config.isUnifiedAgentLoopEnabled()) {
+if (config.isUnifiedAgentLoopEnabled('headless')) {
   return runOnSharedLoop(...);
 }
 // current loop, unchanged
@@ -216,7 +216,7 @@ if (config.isUnifiedAgentLoopEnabled()) {
 
 The current loop stays as the `else` branch and is not refactored while the setting exists. A surface that has not moved yet ignores the setting, and the setting's description names the surfaces it covers. ACP children started by `qwen serve` read the same settings, so the daemon and Web Shell follow the setting for the ACP turns that have moved. The Web Shell settings panel lists the setting from PR 2a on.
 
-Once surfaces change their defaults one at a time, the setting has no schema default. `Config.isUnifiedAgentLoopEnabled(surface)` returns the setting when it is set, and otherwise the surface's own default. The environment variable still overrides both.
+Per-surface resolution landed in #17045 (block B): the environment override wins when it addresses the surface, else the explicit setting when set, else the surface's built-in default (`false` everywhere today). The setting is tri-state at runtime — unset is distinct from explicitly off — while the schema keeps `default: false` until the first surface default flips. See `2026-11-12-loop-rollout-switches.md` for the resolution rules and the rollout ladder.
 
 ### Headless on the shared loop (PR 1)
 
@@ -558,7 +558,7 @@ Its current loop is removed one release after its default changed. Until then, s
 
 `integration-tests/fake-openai-server.ts` already records every request body.
 
-**How it runs.** The suite runs each scripted scenario on a surface twice, once with `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` unset and once with it set to `1`. It compares:
+**How it runs.** The suite runs each scripted scenario on a surface twice, once with the shared loop forced off and once with it forced on — the ACP and TUI suites set `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` to `0` and `1` per arm, and the headless suite forces the setting per arm — so a surface default turning on cannot make the off arm run the new path. It compares:
 
 - the request sequence the model saw, normalized by removing timestamps, the date reminder, ids and durations;
 - the surface's output: the stream-json frames for headless; for ACP the `session/update` notifications and each prompt's stop reason, without `available_commands_update`, which arrives on its own schedule.

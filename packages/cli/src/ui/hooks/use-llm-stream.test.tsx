@@ -25330,7 +25330,7 @@ describe('useLlmStream', () => {
     beforeEach(() => {
       (
         mockConfig as unknown as { isUnifiedAgentLoopEnabled: () => boolean }
-      ).isUnifiedAgentLoopEnabled = () => true;
+      ).isUnifiedAgentLoopEnabled = vi.fn(() => true);
       mockRunModelRound.mockClear();
     });
 
@@ -25351,6 +25351,14 @@ describe('useLlmStream', () => {
       });
 
       expect(mockRunModelRound).toHaveBeenCalledTimes(1);
+      // The Ink TUI must resolve the loop for the 'ink' surface, not another.
+      expect(
+        (
+          mockConfig as unknown as {
+            isUnifiedAgentLoopEnabled: ReturnType<typeof vi.fn>;
+          }
+        ).isUnifiedAgentLoopEnabled,
+      ).toHaveBeenCalledWith('ink');
       const [, round, signal] = mockRunModelRound.mock.calls[0];
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       expect(mockSendMessageStream).toHaveBeenCalledWith(

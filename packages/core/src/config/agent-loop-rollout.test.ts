@@ -75,6 +75,22 @@ describe('resolveAgentLoopEnvOverride', () => {
     ).toBe(false);
   });
 
+  it('skips a malformed token and applies a later well-formed one', () => {
+    expect(
+      resolveAgentLoopEnvOverride('headless=2,headless=1', 'headless'),
+    ).toBe(true);
+    expect(
+      resolveAgentLoopEnvOverride('headless=2,headless=0', 'headless'),
+    ).toBe(false);
+  });
+
+  it('does not treat a bare 1/0 inside a list as a whole-value override', () => {
+    // The whole-value form is `1` or `0` alone. Inside a list a bare `1` has
+    // no surface name, so it is dropped; only the named surfaces are forced.
+    expect(resolveAgentLoopEnvOverride('1,acp=0', 'acp')).toBe(false);
+    expect(resolveAgentLoopEnvOverride('1,acp=0', 'headless')).toBeUndefined();
+  });
+
   it('handles the hyphenated agent-core surface', () => {
     expect(resolveAgentLoopEnvOverride('agent-core', 'agent-core')).toBe(true);
     expect(resolveAgentLoopEnvOverride('agent-core=0', 'agent-core')).toBe(

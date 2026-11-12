@@ -4318,7 +4318,7 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
     client['recordCompletedToolCall'] ??= vi.fn();
     return {
       ...config,
-      isUnifiedAgentLoopEnabled: () => true,
+      isUnifiedAgentLoopEnabled: vi.fn(() => true),
     } as unknown as Config;
   };
   const call = (callId: string) => ({
@@ -4335,6 +4335,7 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
 
   it('sends the same requests and yields the same events as the current path', async () => {
     const runs = [];
+    let sharedConfig: Config | undefined;
     for (const onShared of [false, true]) {
       const send = oneToolBatchStream({
         callId: 't1',
@@ -4342,15 +4343,12 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
         args: {},
       });
       const config = createFakeConfig(send);
+      const effective = onShared ? shared(config) : config;
+      if (onShared) sharedConfig = effective;
       const events = await drain(
-        livePromptEvents(
-          onShared ? shared(config) : config,
-          'start',
-          undefined,
-          {
-            promptId: 'p1',
-          },
-        ),
+        livePromptEvents(effective, 'start', undefined, {
+          promptId: 'p1',
+        }),
       );
       runs.push({
         events,
@@ -4363,6 +4361,14 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
     }
     expect(runs[1].requests).toHaveLength(2);
     expect(runs[1]).toEqual(runs[0]);
+    // OpenTUI must resolve the loop for the 'opentui' surface, not another.
+    expect(
+      (
+        sharedConfig as unknown as {
+          isUnifiedAgentLoopEnabled: ReturnType<typeof vi.fn>;
+        }
+      ).isUnifiedAgentLoopEnabled,
+    ).toHaveBeenCalledWith('opentui');
   });
 
   it.each(['retry', 'model_fallback'])(

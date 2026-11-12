@@ -53,7 +53,7 @@ Linux 矩阵增加第三个 `agent-loop` 值 `kernel`，OpenTUI 任务加上它�
 
 **元测试。**`scripts/tests/e2e-workflow.test.js` 新增一个 describe 块，像并发 pin 求值自己的表达式那样，对 `push`、`schedule`、`workflow_dispatch` 求值真实的矩阵与环境变量表达式：push 在两个任务上都只产生 `current`；schedule/dispatch 产生全部三个值；docker 排除两个开关组；每个矩阵值在两个任务上映射到期望的一对环境变量值。既有的任务结构 pin（install 重试清单、artifact 时限、单一 build）不变，因为没有增删任务。
 
-**headless 对拍的内核维度也被强制。**headless 对拍会 stub `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 并用按臂设置强制两臂，但把 `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` 留给了环境。在新的内核组里这个变量是 `1`，共享臂就会悄悄跑内核，套件对比的就和其他组不是同一对了。套件现在把内核变量也 stub 成 undefined，让它在每个组里都测量「旧路径 vs 共享过程式路径」；内核路径仍由套件里继承组环境的其他用例跑到。ACP 对拍删除 unified 变量、且不读内核变量；TUI 对拍从零构建子进程环境（`inheritEnv: false`）——两者都不泄漏。
+**headless 对拍的内核维度也被强制。**headless 对拍会 stub `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 并用按臂设置强制两臂，但把 `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` 留给了环境。在新的内核组里这个变量是 `1`，共享臂就会悄悄跑内核，套件对比的就和其他组不是同一对了。套件现在把内核变量也 stub 成 undefined，让它在每个组里都测量「旧路径 vs 共享过程式路径」；内核路径仍由套件里继承组环境的其他用例跑到。ACP 与 TUI 对拍的 off 臂把 unified 变量强制为 `0`（切片 2）而不是留空，因此默认值开启后仍对比「旧路径 vs 共享路径」；ACP 对拍不读内核变量，TUI 对拍从零构建子进程环境（`inheritEnv: false`）——两者都不泄漏内核维度。
 
 **体积棘轮。**`e2e.yml` 当前 45412 字节，基线 45412，容差 4096 字节；新增的矩阵、env 行与后缀必须留在容差内，否则在同一 PR 里更新 `.github/workflows/.size-baseline` 并说明原因。
 
@@ -131,6 +131,6 @@ token 去除首尾空白；空 token 忽略；未知入口名忽略并记 debug 
 
 ## 待解问题
 
-- ~~设置加载器是否会把 schema 默认值注入合并后的设置对象？~~ 准备切片 1 时已解决：不会——合并后的设置对未设置的键保持 undefined（`packages/cli/src/config/settings.test.ts:4624` 对 `goals.modelProposed` 钉住了这一点），所以三态只需要 CLI 不再把未设置塌缩成 `false`，以及 schema 为对话框去掉 `default: false`。
-- 环境变量列表文法是否接受列表内的裸 `0`/`1` token（如 `1,acp=0`）？本提案说不——整值形式已经覆盖「所有入口」；在有调用方需要更多之前保持文法最小。
+- ~~设置加载器是否会把 schema 默认值注入合并后的设置对象？~~ 准备切片 1 时已解决：不会——合并后的设置对未设置的键保持 undefined（`packages/cli/src/config/settings.test.ts:4624` 对 `goals.modelProposed` 钉住了这一点），所以运行时三态只需要 CLI 不再把未设置塌缩成 `false`。schema 保留 `default: false` 直到第一个入口默认值翻转：更早移除会经由 `nextBooleanSettingValue`（`packages/cli/src/config/settingsUtils.ts:687`）把两个设置对话框的第一次切换从开启翻成关闭，因此 schema 默认值的移除推迟到那次翻转，不属于三态本身。
+- ~~环境变量列表文法是否接受列表内的裸 `0`/`1` token（如 `1,acp=0`）？~~ 已定：不接受——整值 `1`/`0` 才表示「所有入口」，列表内的裸 `1`/`0` 无入口名会被丢弃；此行为已在用户可见文本中写明，并被解析模块单测钉住。
 - #17029 的 speculation 读取点：切片 2 在它之前还是之后落地？后落地方适配调用点；入口标识符 `speculation` 无论如何都预留。
