@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAdmission;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
@@ -70,7 +71,8 @@ final class RuntimeBindingSessionRelease {
         if (com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
                         .isExternalWorkspaceRequest(claim.getRequest())
                 && HarnessOwnership.sharesRuntimeSessions(
-                        claim.getRequest())) {
+                        claim.getRequest())
+                && !storageRetirement(claim, repository)) {
             throw new RuntimeBrokerException(409,
                     "external_workspace_recovery_required",
                     "A resident Workspace cannot be destroyed by closing one Session",
@@ -148,6 +150,19 @@ final class RuntimeBindingSessionRelease {
             com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore.releaseMembers(connection, key,
                     clear.executeUpdate());
         }
+    }
+
+    // The drain coordinator admits a shared binding only for storage
+    // retirement: no loss evidence, no harness authority, and a fenced
+    // storage (RuntimeDrainCoordinator.drainBinding). A single-Session close
+    // can never present that fence, so it keeps the refusal above; the fenced
+    // retirement has to be able to release the Session rows it just stopped.
+    static boolean storageRetirement(RuntimeBindingRecord claim,
+            RuntimeBindingRepository repository) {
+        String storage = claim.getRequest().getStorageId();
+        return storage != null
+                && repository.isStorageFenced(
+                        claim.getRequest().getScope().getTenantId(), storage, null);
     }
 
     private static String localStorageOwnerKey(Connection connection, String tenant, String storage) throws SQLException {
