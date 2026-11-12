@@ -16,8 +16,11 @@ import {
   type AgentLoopOptions,
   type AgentLoopResult,
 } from '../core/agent-loop.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { createBusEvent } from './bus.js';
 import { createLoopEventRuntime } from './runtime.js';
+
+const debugLogger = createDebugLogger('EVENT_BUS');
 
 /**
  * The event-driven implementation of `runAgentLoop`. It creates the run
@@ -39,6 +42,9 @@ export async function runAgentLoopOnBus(
     options.executor ??
     createSchedulerExecutor(config, options.scheduler, options.runtimeView);
   const runId = randomUUID();
+  // Execution marker: with QWEN_DEBUG_LOG_FILE on, this line proves a run
+  // took the bus path rather than the procedural loop.
+  debugLogger.debug('runAgentLoopOnBus started', runId);
   const runtime = createLoopEventRuntime();
   const state = runtime.store.create({
     runId,

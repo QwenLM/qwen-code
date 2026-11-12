@@ -1355,7 +1355,7 @@ describe('package scripts', () => {
     expect(prepare).toContain(
       'bash .github/scripts/ecs-runner/install-qwen-font-baseline.sh --user-terminal',
     );
-    expect(prepare).not.toContain('continue-on-error');
+    expect(prepare).not.toMatch(/^\s+continue-on-error:/m);
     expect(prepare).not.toContain('sudo');
     expect(job.indexOf(prepare)).toBeLessThan(job.indexOf(tests));
   });
