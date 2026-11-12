@@ -26,7 +26,9 @@ import java.util.concurrent.TimeoutException;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
-/** The legacy-mutation pin probe locks no other Session's insertion gap (#13996). */
+/** A probe for a root visible to its snapshot takes no lock; a pinned root is
+ * locked by its primary key, and an absent root still leaves the primary-key
+ * insertion gap (#13996). */
 @Timeout(30)
 class ManagedLegacySessionGuardMySqlIT {
     private IsolatedManagedSchemaMySqlTestDatabase database;
@@ -98,6 +100,30 @@ class ManagedLegacySessionGuardMySqlIT {
                 probe.rollback();
             }
             assertThat(writer.get(5, TimeUnit.SECONDS)).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void absentProbeKeepsTheDocumentedPrimaryKeyGap() throws Exception {
+        createSession("guard-tenant-a");
+        try (Connection probe = database.source().getConnection();
+                var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            probe.setAutoCommit(false);
+            assertThat(ManagedLegacySessionGuard.isPrivate(onto(probe), "guard-tenant-z", "absent")).isFalse();
+            // The absent key sorts after every existing root, so the locking
+            // read's primary-key insertion gap reaches the supremum and covers
+            // this later tenant's first root. The wait is the documented
+            // residual of the absent branch; removing the locking read would
+            // silence this case, and widening it to the first probe would fail
+            // ordinaryProbeDoesNotBlockAnotherTenantsFirstSession.
+            Future<String> creation = executor.submit(() -> createSession("guard-tenant-zz"));
+            try {
+                MySqlLockProbe.awaitLockWaits(jdbc, jdbc.queryForObject("SELECT DATABASE()", String.class), 1,
+                        "another tenant's first Session behind the absent probe's primary-key gap");
+            } finally {
+                probe.rollback();
+            }
+            assertThat(creation.get(5, TimeUnit.SECONDS)).isNotBlank();
         }
     }
 
