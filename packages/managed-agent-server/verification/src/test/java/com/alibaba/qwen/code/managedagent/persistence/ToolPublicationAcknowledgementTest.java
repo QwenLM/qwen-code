@@ -55,6 +55,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 
 class ToolPublicationAcknowledgementTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -62,7 +63,7 @@ class ToolPublicationAcknowledgementTest {
     private static final String PRODUCER_TOKEN = Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[32]);
     private JdbcTemplate jdbc;
     private DataSourceTransactionManager manager;
-    private ManagedSessionStore sessions;
+    private JdbcManagedSessionStore sessions;
     private JdbcRuntimeBindingRepository bindings;
     private JdbcRuntimeSessionRepository runtimeSessions;
     private JdbcToolExecutionRepository executions;
@@ -111,7 +112,7 @@ class ToolPublicationAcknowledgementTest {
             public void validateConfiguration() { }
         };
         sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc,
-                new ManagedExtensionRecordStore(jdbc), null, null, null, bucket, null, null,
+                new JdbcManagedExtensionRecordStore(jdbc), null, null, null, bucket, null, null,
                 com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("fixture", new byte[32]));
         runtimeSessions = new JdbcRuntimeSessionRepository(source);
@@ -405,13 +406,13 @@ class ToolPublicationAcknowledgementTest {
 
     private void finishAndCommitOriginalReceipt() {
         byte[] output = "abc".getBytes(StandardCharsets.UTF_8);
-        data.publishSegment(key(), "pub-1", PRODUCER_TOKEN, "segment-0", "stdout", 0, output, digest(output));
-        data.seal(key(), "pub-1", PRODUCER_TOKEN, "seal-stdout", "stdout", 1, 3, digest(output));
-        data.seal(key(), "pub-1", PRODUCER_TOKEN, "seal-stderr", "stderr", 0, 0, digest(new byte[0]));
+        verified(data).publishSegment(key(), "pub-1", PRODUCER_TOKEN, "segment-0", "stdout", 0, output, digest(output));
+        verified(data).seal(key(), "pub-1", PRODUCER_TOKEN, "seal-stdout", "stdout", 1, 3, digest(output));
+        verified(data).seal(key(), "pub-1", PRODUCER_TOKEN, "seal-stderr", "stderr", 0, 0, digest(new byte[0]));
         var page = JSON.createObjectNode().put("toolResult", "managed-tool-result/1").put("type", "page").put("captureId", "capture-1")
                 .put("streamId", "stdout").put("firstOrdinal", 0).put("offset", 0);
         page.putArray("segments").add(JSON.createObjectNode().put("byteLength", 3).put("digest", digest(output)));
-        JsonNode pageRef = data.publishResource(key(), "pub-1", PRODUCER_TOKEN, "page-0", "page:stdout:0", "managed-tool-result-page", bytes(page));
+        JsonNode pageRef = verified(data).publishResource(key(), "pub-1", PRODUCER_TOKEN, "page-0", "page:stdout:0", "managed-tool-result-page", bytes(page));
         ObjectNode manifest = JSON.createObjectNode().put("toolResult", "managed-tool-result/1").put("type", "manifest");
         for (String field : List.of("turnId", "executionCallId", "bindingGeneration", "captureId", "revision", "captureScope", "capturePolicy")) {
             manifest.set(field, binding.path(field));
@@ -431,12 +432,12 @@ class ToolPublicationAcknowledgementTest {
             content.set("body", JSON.createObjectNode().set("pages", pages));
             contents.add(content);
         }
-        JsonNode manifestRef = data.publishResource(key(), "pub-1", PRODUCER_TOKEN, "manifest-1", "manifest:1", "managed-tool-result-manifest", bytes(manifest));
+        JsonNode manifestRef = verified(data).publishResource(key(), "pub-1", PRODUCER_TOKEN, "manifest-1", "manifest:1", "managed-tool-result-manifest", bytes(manifest));
         ObjectNode result = JSON.createObjectNode().put("executionStatus", "success");
         result.putArray("responseParts").addObject().put("score", 0.5);
         result.set("capture", JSON.createObjectNode().put("captureStatus", "complete").putNull("captureReason")
                 .put("previewTruncated", false).put("deliveryStatus", "pending").set("manifest", manifestRef));
-        data.finish(key(), "pub-1", PRODUCER_TOKEN, "finish-1", bytes(result));
+        verified(data).finish(key(), "pub-1", PRODUCER_TOKEN, "finish-1", bytes(result));
         execution = executions.compareAndSet(execution, execution.withResult(JSON.convertValue(result, Map.class), 0, Instant.now()),
                 "dispatcher", execution.getDispatchGeneration());
         ObjectNode outcome = JSON.createObjectNode().put("schemaVersion", 1).put("decision", "committed");

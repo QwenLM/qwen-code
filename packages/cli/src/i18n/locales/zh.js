@@ -22,8 +22,6 @@ export default {
   '{{count}} hours': '{{count}}小时',
   Retry: '重试',
   'Connecting…': '正在连接…',
-  'Could not connect Qwen Subscription. Please try again.':
-    '无法连接 Qwen 订阅，请重试。',
   'Loading models from provider…': '正在加载服务商模型…',
   'Recommended models · provider list unavailable, showing built-ins':
     '推荐模型 · 无法获取服务商列表，显示内置模型',
@@ -378,6 +376,8 @@ export default {
   'Open the skills panel (browse, search, toggle, pick).':
     '打开技能面板（浏览、搜索、启停、选择）。',
   'Move this session to a new working directory': '将此会话移动到新的工作目录',
+  'Wait for background agents to finish or stop them in /tasks before changing directories.':
+    '请等待后台智能体完成，或在 /tasks 中停止它们后再切换目录。',
   // SkillsManagerDialog (`/skills` 弹出的面板)
   'Manage Skills': '管理技能',
   'Skills configuration saved.': '技能配置已保存。',
@@ -1770,10 +1770,10 @@ export default {
   'Signed in successfully · {{email}}': '登录成功 · {{email}}',
   'Current plan: Qwen {{plan}}. Qwen Code is ready.':
     '当前套餐：Qwen {{plan}}，已可使用 Qwen Code',
-  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.':
-    '模型：{{model}}，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型。',
-  'Common commands: /usage   /upgrade   /model   /status   /logout':
-    '常用命令：/usage   /upgrade   /model   /status   /logout',
+  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.':
+    '模型：{{model}}，输入 /upgrade 升级套餐，/usage 查看用量，/model 切换模型，/effort 修改思考强度。',
+  'Common commands: /usage   /upgrade   /model   /effort   /status   /logout':
+    '常用命令：/usage   /upgrade   /model   /effort   /status   /logout',
   'Signed in as {{email}} (Qwen {{plan}})':
     '已登录为 {{email}}（Qwen {{plan}}）',
   'Qwen {{plan}} is active · usage is included with your plan':
@@ -2057,6 +2057,7 @@ export default {
   'Model Usage': '模型使用情况',
   'Input Tokens': '输入 token 数',
   'Output Tokens': '输出 token 数',
+  'Output (incl. Reasoning)': '输出（含推理）',
   'Savings Highlight:': '节省亮点：',
   'of input tokens were served from the cache, reducing costs.':
     '从缓存载入 token ，降低了成本',
@@ -2420,6 +2421,8 @@ export default {
   'Advisor review failed: {{error}}': '审查失败：{{error}}',
   'No conversation context available for /advisor':
     '没有可供 /advisor 使用的对话上下文',
+  'No conversation context available for /btw':
+    '没有可供 /btw 使用的对话上下文',
   'Focus too long (max {{max}} chars)': '关注点过长（最多 {{max}} 个字符）',
   'Another operation is in progress, wait for it to complete before running /advisor':
     '另一个操作正在进行中，请等待其完成后再运行 /advisor',
@@ -2845,4 +2848,17 @@ export default {
   'Signed out of Qwen. Use /auth to sign in with another account.':
     '已退出 Qwen，请使用 /auth 登录其他账号。',
   'Tip: Run /usage to see your plan usage.': '提示：运行 /usage 查看套餐用量。',
+  'Copied to clipboard': '已复制到剪贴板',
+  'Copy failed': '复制失败',
+  '(API error: {{error}})': '（API 错误：{{error}}）',
+  'API error': 'API 错误',
+  '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}':
+    '{{reason}} · {{seconds}} 秒后重试 · 第 {{attempt}}/{{max}} 次',
+  '←/→ browse earlier answers': '←/→ 浏览之前的回答',
+  'c copy': 'c 复制',
+  'x clear history': 'x 清空历史',
+  'Tip: Use /btw to ask a quick side question without interrupting the current work':
+    '提示：用 /btw 顺带问一个旁路问题，不打断当前工作',
+  '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
+    '（模型试图调用 {{tool}}，而没有直接回答。请换个问法，或在主对话中提问。）',
 };

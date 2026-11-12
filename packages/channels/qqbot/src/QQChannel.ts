@@ -14,6 +14,7 @@
 
 import {
   ChannelBase,
+  ChannelProactiveDeliveryError,
   SessionRouter,
   getGlobalQwenDir,
   sanitizeSenderName,
@@ -89,6 +90,25 @@ import {
 /** QQ Bot OPENID format: exactly 32 uppercase hex chars (bot and sender OPENIDs). */
 const QQ_OPENID_RE = /^[A-F0-9]{32}$/i;
 
+/**
+ * Marks a forwarded bot's message as machine-authored: `[bot] ` goes into the
+ * self-prefixed sender line, and the same word rides on the envelope
+ * (`senderTag`) so ChannelBase renders it on the paths where it owns the
+ * prefix (message routes, DM without a prefix). One definition, both carriers.
+ */
+const QQ_BOT_SENDER_TAG = 'bot';
+const QQ_BOT_TAG = `[${QQ_BOT_SENDER_TAG}] `;
+
+/**
+ * The two prompt lines that tell the model what `[bot]` means and how to stop
+ * replying. One definition: the default prompt embeds them, and an operator's
+ * own `instructions` gets them appended (connect() re-runs, so the append is
+ * idempotent per line).
+ */
+const FORWARD_BOT_INSTRUCTION =
+  '消息前缀 [bot] 表示该消息来自另一个机器人（不是人类成员）；是否回复由你自主判断。';
+const NOREPLY_INSTRUCTION = '不想回复时只输出 <noreply> 即可，消息不会发出。';
+
 export type DeliveryErrorCode =
   | 'RATE_LIMITED'
   | 'RETRY_EXHAUSTED'
@@ -103,6 +123,21 @@ export class DeliveryError extends Error {
     super(message);
     this.name = 'DeliveryError';
   }
+}
+
+/**
+ * Delivery failures no retry can fix. The single definition of the permanent
+ * set: every send/flush site and the proactive arm classify with it, so a code
+ * added or renamed here changes all of them together.
+ */
+const PERMANENT_DELIVERY_CODES = new Set<DeliveryErrorCode>([
+  'RETRY_EXHAUSTED',
+  'ACTIVE_MSG_DISABLED',
+  'FALLBACK_FAILED',
+]);
+
+function isPermanentDeliveryError(err: unknown): err is DeliveryError {
+  return err instanceof DeliveryError && PERMANENT_DELIVERY_CODES.has(err.code);
 }
 
 interface QQReplyContext {
@@ -457,6 +492,8 @@ export class QQChannel extends ChannelBase {
   private _keywordTriggerCache: RegExp[] | null = null;
   /** Rate-limit timestamps for keyword non-match log entries (chatId → last log ms). */
   private _lastKeywordNoMatchLog: Map<string, number> = new Map();
+  /** Rate-limit timestamps for forwarded-bot notices (chatId → last log ms). */
+  private _lastForwardedBotLog: Map<string, number> = new Map();
 
   /** Accumulation buffer for cron/non-prompt textChunk events. */
   private cronBuffer: Map<string, CronBufferEntry> = new Map();
@@ -821,11 +858,7 @@ export class QQChannel extends ChannelBase {
             process.stderr.write(
               `[QQ:${this.name}] Cron flush send error${codeStr}: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
             );
-            if (
-              code === 'RETRY_EXHAUSTED' ||
-              code === 'ACTIVE_MSG_DISABLED' ||
-              code === 'FALLBACK_FAILED'
-            ) {
+            if (isPermanentDeliveryError(err)) {
               this.dropCronEntryOrRearm(sessionId, entry);
               return;
             }
@@ -877,11 +910,7 @@ export class QQChannel extends ChannelBase {
                     `[QQ:${this.name}] Cron flush retry failed${retryCodeStr}: ${sanitizeLogText(retryErr instanceof Error ? retryErr.message : String(retryErr), 200)}\n`,
                   );
                   entry.pendingRetry = '';
-                  if (
-                    retryCode === 'RETRY_EXHAUSTED' ||
-                    retryCode === 'ACTIVE_MSG_DISABLED' ||
-                    retryCode === 'FALLBACK_FAILED'
-                  ) {
+                  if (isPermanentDeliveryError(retryErr)) {
                     this.dropCronEntryOrRearm(sessionId, entry);
                     return;
                   }
@@ -937,11 +966,7 @@ export class QQChannel extends ChannelBase {
                             `[QQ:${this.name}] Cron flush re-retry failed${code2Str}: ${sanitizeLogText(err2 instanceof Error ? err2.message : String(err2), 200)}, toFlush=${toFlush.length}, session=${sanitizeLogText(sessionId, 32)}\n`,
                           );
                           entry.pendingRetry = '';
-                          if (
-                            code2 === 'RETRY_EXHAUSTED' ||
-                            code2 === 'ACTIVE_MSG_DISABLED' ||
-                            code2 === 'FALLBACK_FAILED'
-                          ) {
+                          if (isPermanentDeliveryError(err2)) {
                             this.dropCronEntryOrRearm(sessionId, entry);
                             return;
                           }
@@ -1084,7 +1109,10 @@ export class QQChannel extends ChannelBase {
         '你是通过 QQ Bot 与用户对话的 AI 助手。',
         '支持 Markdown 格式，回复自然流畅即可。',
         '消息前缀 [atMention=true] 表示该消息 @了你，[atMention=false] 表示未 @你。',
-        '不想回复时只输出 <noreply> 即可，消息不会发出。',
+        ...(this.qqConfig.forwardBotMessages === true
+          ? [FORWARD_BOT_INSTRUCTION]
+          : []),
+        NOREPLY_INSTRUCTION,
         '',
         '以下规则仅适用于群聊消息。C2C 私聊中请始终正常回复。',
         '## 群聊唤醒与静默规则',
@@ -1128,6 +1156,17 @@ export class QQChannel extends ChannelBase {
         );
       }
       this.config.instructions = parts.join('\n');
+    } else if (this.qqConfig.forwardBotMessages === true) {
+      // Operator-supplied instructions replace the default prompt wholesale,
+      // which would drop the feature's own brake (what `[bot]` means and how to
+      // stay silent). Attach it to the operator text. Per-line `includes` guard
+      // makes the append idempotent: connect() re-runs on every reconnect.
+      const supplements = [FORWARD_BOT_INSTRUCTION, NOREPLY_INSTRUCTION];
+      const existing = this.config.instructions;
+      const missing = supplements.filter((line) => !existing.includes(line));
+      if (missing.length > 0) {
+        this.config.instructions = [existing, ...missing].join('\n');
+      }
     }
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -1176,6 +1215,29 @@ export class QQChannel extends ChannelBase {
     );
   }
 
+  override supportsProactiveSend(): boolean {
+    return true;
+  }
+
+  /**
+   * A group whose active-message toggle is known to be off rejects every
+   * proactive send, so loops/webhooks/background results must not target it.
+   * Direct messages never consult the group toggle map.
+   *
+   * The chat type comes from `chatTypeFor` (not `chatTypeMap`) so a group
+   * declared only in the channel config is gated on the same type `resolveRoute`
+   * routes on. A target explicitly marked as a group whose type has not been
+   * learned yet is rejected here: the send would otherwise die on the wire
+   * after a full unattended turn was spent.
+   */
+  protected override supportsProactiveTarget(target: SessionTarget): boolean {
+    if (!super.supportsProactiveTarget(target)) return false;
+    const chatType = this.chatTypeFor(target.chatId);
+    if (target.isGroup === true && chatType !== 'group') return false;
+    const isGroup = target.isGroup === true || chatType === 'group';
+    return !isGroup || this.groupActiveMsgEnabled.get(target.chatId) !== false;
+  }
+
   async sendMessage(chatId: string, text: string): Promise<void> {
     const inboundContext = this.inboundReplyContext.getStore();
     const latest = this.replyMsgId.get(chatId);
@@ -1208,6 +1270,73 @@ export class QQChannel extends ChannelBase {
       replyContext,
       sourceLabel,
     );
+  }
+
+  /**
+   * Proactive deliveries are unattended. Four callers reach this override —
+   * the loop prompt, the webhook-task prompt, background/named-task response
+   * delivery (deliverBackgroundResponseToTarget), and the daemon's
+   * deliverProactive. All of them send as active messages with no reply
+   * anchor: an unattended delivery must not inherit a chat-level reply anchor,
+   * because QQ would accept it as a passive reply (msg_id/msg_seq) and the
+   * active-message toggle would not apply.
+   */
+  protected override async pushProactive(
+    target: SessionTarget,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    try {
+      const blocked = await this.sendMessageWithReplyContext(
+        target.chatId,
+        text,
+        undefined,
+        sourceLabel,
+      );
+      // A route-blocked send resolves without throwing and never reaches the
+      // wire (see resolveRoute), while runLoopPrompt has already marked the
+      // delivery started — returning here would record an undelivered loop as
+      // delivered. Keep the block's class: the daemon's proactive-delivery arm
+      // maps `permanent` to `channel_delivery_rejected` via
+      // classifyChannelDeliveryError. The loop scheduler counts any failure
+      // alike.
+      if (blocked !== undefined) {
+        throw new ChannelProactiveDeliveryError(
+          blocked,
+          `outgoing route unresolved (${blocked}) for ${target.chatId}`,
+        );
+      }
+    } catch (err) {
+      // A permanent delivery code keeps its class: the daemon's
+      // proactive-delivery arm maps `permanent` to `channel_delivery_rejected`
+      // via classifyChannelDeliveryError, and the loop scheduler counts any
+      // failure alike. RATE_LIMITED and any other error stay untouched, so
+      // base's pushProactiveDelivery wrapper labels them retryable.
+      if (isPermanentDeliveryError(err)) {
+        throw new ChannelProactiveDeliveryError('permanent', err.message, {
+          cause: err,
+        });
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Background/named-task responses are unattended too, so they must never
+   * fall back to the anchored passive reply that base's
+   * `deliverBackgroundReply` would produce when the target gate fails: a
+   * toggle-off group would silently receive the response as a passive reply
+   * (msg_id/msg_seq), exactly what the active-message toggle is meant to
+   * block. Route every target through `pushProactive`; a target that cannot
+   * receive active messages then fails permanently instead of being delivered
+   * anyway. Base's fallback stays for attended replies.
+   */
+  protected override async deliverBackgroundResponseToTarget(
+    _sessionId: string,
+    text: string,
+    delivery: { target: SessionTarget; sourceLabel?: string },
+  ): Promise<void> {
+    await this.pushProactive(delivery.target, text, delivery.sourceLabel);
   }
 
   /**
@@ -1637,6 +1766,7 @@ export class QQChannel extends ChannelBase {
     }
     this.cronBuffer.clear();
     this._lastKeywordNoMatchLog.clear();
+    this._lastForwardedBotLog.clear();
     this.flushQQState();
     this.backupGlobalSessions();
     if (this.readyTimeout) {
@@ -2067,12 +2197,7 @@ export class QQChannel extends ChannelBase {
           // RETRY_EXHAUSTED / ACTIVE_MSG_DISABLED / FALLBACK_FAILED are permanent
           // (see flushAndTrack); everything else — RATE_LIMITED and a plain
           // network error — is transient and re-attempted under the bound.
-          if (
-            e instanceof DeliveryError &&
-            (e.code === 'RETRY_EXHAUSTED' ||
-              e.code === 'ACTIVE_MSG_DISABLED' ||
-              e.code === 'FALLBACK_FAILED')
-          ) {
+          if (isPermanentDeliveryError(e)) {
             process.stderr.write(
               `[QQ:${this.name}] cancelled-stash delivery failed (${e.code}): ${sanitizeLogText(e.message, 200)}, dropping ${text.length} chars\n`,
             );
@@ -2130,6 +2255,10 @@ export class QQChannel extends ChannelBase {
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): void {
+    // Unattended turns (loop/webhook task) deliver their answer once, in full,
+    // through pushProactive; base never calls onResponseComplete for them, so
+    // streaming the chunks here would post the same text to the group twice.
+    if (this.isProactivePromptTurn(sessionId)) return;
     const currentTurn = this.turnCounter.get(sessionId) ?? 0;
     let state = this.streamState.get(sessionId);
     if (state && state.turn !== currentTurn) {
@@ -2586,12 +2715,7 @@ export class QQChannel extends ChannelBase {
         }
       })
       .catch((e: unknown) => {
-        if (
-          e instanceof DeliveryError &&
-          (e.code === 'RETRY_EXHAUSTED' ||
-            e.code === 'ACTIVE_MSG_DISABLED' ||
-            e.code === 'FALLBACK_FAILED')
-        ) {
+        if (isPermanentDeliveryError(e)) {
           // The text that accumulated into state.buffer while this send was in
           // flight is dropped with the entry below, so the loss log must report
           // it too: the payload count alone under-reports what the operator
@@ -5257,10 +5381,21 @@ export class QQChannel extends ChannelBase {
     const safeName = this.name.replace(/[^A-Za-z0-9_-]/g, '_');
     const credsFile = getCredsFilePath(safeName);
 
+    // Only a daemon worker has no operator watching. A stream cannot tell
+    // "piped to a human-visible tee" from "piped to a worker" — both are
+    // pipes — so key on the explicit context the supervisor stamps on every
+    // child it spawns (QWEN_CODE_SERVE=1, set in
+    // cli/src/serve/channel-worker-supervisor.ts and not scrubbed).
+    const daemonWorker = process.env['QWEN_CODE_SERVE'] === '1';
+
     let appID = this.qqConfig.appID;
     let appSecret = this.qqConfig.appSecret;
 
-    if (!appID || !appSecret) {
+    // The credentials file is keyed by channel name under one shared QWEN_HOME,
+    // so in a daemon it can hold a bot bound by a different workspace. The
+    // workspace channel config is the daemon's only source of truth; adopting
+    // that file would connect this workspace to someone else's bot.
+    if (!daemonWorker && (!appID || !appSecret)) {
       const saved = loadCredentials(credsFile);
       if (saved) {
         appID = saved.appId;
@@ -5271,6 +5406,11 @@ export class QQChannel extends ChannelBase {
     }
 
     if (!appID || !appSecret) {
+      if (daemonWorker) {
+        throw new Error(
+          `QQ channel "${this.name}" has no appID/appSecret. Bind it by QR from the channel management UI, or set appID and appSecret in the channel config.`,
+        );
+      }
       process.stderr.write(
         `[QQ:${this.name}] No credentials, scan QR code with QQ...\n`,
       );
@@ -5599,16 +5739,36 @@ export class QQChannel extends ChannelBase {
         } else if (t === 'GROUP_ADD_ROBOT') {
           this.handleGroupAddRobot(msg['d'] as unknown as GroupAddRobotEvent);
         } else if (t === 'GROUP_DEL_ROBOT') {
-          this.handleGroupDelRobot(msg['d'] as unknown as GroupDelRobotEvent);
+          void this.handleGroupDelRobot(
+            msg['d'] as unknown as GroupDelRobotEvent,
+          ).catch((error: unknown) =>
+            this.logGroupEventError(
+              'handleGroupDelRobot',
+              (msg['d'] as unknown as GroupDelRobotEvent).group_openid,
+              error,
+            ),
+          );
         } else if (t === 'GROUP_MSG_REJECT') {
-          this.handleGroupMsgToggle(
+          void this.handleGroupMsgToggle(
             msg['d'] as unknown as GroupMsgToggleEvent,
             false,
+          ).catch((error: unknown) =>
+            this.logGroupEventError(
+              'handleGroupMsgToggle',
+              (msg['d'] as unknown as GroupMsgToggleEvent).group_openid,
+              error,
+            ),
           );
         } else if (t === 'GROUP_MSG_RECEIVE') {
-          this.handleGroupMsgToggle(
+          void this.handleGroupMsgToggle(
             msg['d'] as unknown as GroupMsgToggleEvent,
             true,
+          ).catch((error: unknown) =>
+            this.logGroupEventError(
+              'handleGroupMsgToggle',
+              (msg['d'] as unknown as GroupMsgToggleEvent).group_openid,
+              error,
+            ),
           );
         } else if (t === 'RESUMED') {
           // RESUME success — the process did NOT restart, all in-memory
@@ -5870,6 +6030,27 @@ export class QQChannel extends ChannelBase {
     }
     return false;
   }
+
+  /**
+   * One rate-limited stderr line per chat per minute when a forwarded bot
+   * message is handed to the base channel. Forwarding is the one enabled path
+   * whose only brake is the model's own judgement, so an operator needs to see
+   * it is live; the line carries no sender name or payload, only the sanitized
+   * chat id.
+   *
+   * Worded as "dispatched", not "forwarded": the base channel still runs its
+   * own gates (e.g. `requireMention`) after this point, so a dispatched message
+   * is not necessarily one the model saw.
+   */
+  private logForwardedBotMessage(chatId: string): void {
+    const now = Date.now();
+    if (now - (this._lastForwardedBotLog.get(chatId) ?? 0) < 60_000) return;
+    this._lastForwardedBotLog.set(chatId, now);
+    process.stderr.write(
+      `[QQ:${this.name}] forwardBotMessages: bot-authored message in ${sanitizeLogText(chatId, 64)} dispatched\n`,
+    );
+  }
+
   /**
    * Extract common group-message fields shared by handleGroup and handleGroupAll.
    * Returns null when the message has no meaningful text after @-tag stripping.
@@ -5888,6 +6069,7 @@ export class QQChannel extends ChannelBase {
     body: string;
     text: string;
     senderName: string;
+    forwardedBot: boolean;
   } | null {
     // Keep identity values out of the display-name position. In particular,
     // falling back to member_openid would expose a full mentionable OPENID
@@ -5931,19 +6113,27 @@ export class QQChannel extends ChannelBase {
     const effectiveIsAtBot = forceAtMention ?? isAtBot;
 
     const rawCommandText = safeCleanText.replace(/<@[^>]{1,64}>/g, '').trim();
-    const isSlash = effectiveIsAtBot && rawCommandText.startsWith('/');
+    // A forwarded bot message must reach the model instead of the channel's
+    // local command table: a peer bot's `/clear` or `!cmd` is another bot
+    // talking, not this channel being commanded.
+    // Same truthiness predicate as the three drop guards above, so a malformed
+    // non-boolean `author.bot` can never be forwarded untagged.
+    const forwardedBot =
+      Boolean(event.author?.bot) && this.qqConfig.forwardBotMessages === true;
+    const isSlash =
+      effectiveIsAtBot && !forwardedBot && rawCommandText.startsWith('/');
     const commandText = sanitizePromptText(rawCommandText);
 
-    // Deliberately NOT hard-blocking bot messages — QQ Bot API may deliver
-    // self-echoes or other bot messages. Instead, tag with [bot] prefix so the
-    // model can judge relevance and decide whether to respond. Hard-blocking
-    // would prevent intentional bot-to-bot interactions that the operator
-    // explicitly configures. The [bot] prefix gives the model enough context
-    // to ignore irrelevant bot traffic.
-    // NOTE: Both callers (handleGroup, handleGroupAll) guard against bot
-    // messages before reaching prepareGroupMessage, so isBot is always false
-    // here. The check is retained as defense-in-depth in case a future
-    // caller skips the guard.
+    // Bot-authored messages are a feature when the operator opts in, and the
+    // switch is the whole tradeoff. This traffic is another bot talking in the
+    // group: QQ delivers message events for user-authored messages only, and a
+    // bot's own sends come back in the send API's response (a message the bot
+    // itself sent is referenced through the response's ext_info.ref_idx, not
+    // through a message event), so a self-echo cannot reach this handler. No
+    // automatic rate cap follows the switch — the group's human members and the
+    // model's own silence rules are the guard. Dropping them is the default. A
+    // user-supplied `[bot]` is stripped above, so the tag cannot be forged.
+    const botTag = forwardedBot ? QQ_BOT_TAG : '';
 
     const groupBotOpenId = this.botOpenIdByGroup.get(chatId);
     const openIdSuffix =
@@ -5998,7 +6188,7 @@ export class QQChannel extends ChannelBase {
       : senderIdentity
         ? `(${truncateCodePoints(sanitizeSenderName(senderIdentity), 8)}…)`
         : '';
-    const head = `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderTag}]: `;
+    const head = `[atMention=${effectiveIsAtBot}]${openIdSuffix} ${botTag}[${safeName}${senderTag}]: `;
     const body = sanitizePromptText(
       this.qqConfig.allowMention !== false ? safeDisplayText : safeCleanText,
     );
@@ -6016,6 +6206,7 @@ export class QQChannel extends ChannelBase {
       body,
       text,
       senderName,
+      forwardedBot,
     };
   }
 
@@ -6141,7 +6332,7 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    if (event.author.bot) {
+    if (event.author.bot && this.qqConfig.forwardBotMessages !== true) {
       process.stderr.write(`[QQ:${this.name}] Bot C2C message dropped\n`);
       return;
     }
@@ -6165,35 +6356,46 @@ export class QQChannel extends ChannelBase {
     // resolved and would consume the ring's shared 256-chat budget.
     const senderName = event.author.username || event.author.id || 'QQ User';
     const safeName = sanitizeSenderName(senderName);
+    // Same truthiness predicate as the drop guard above (see prepareGroupMessage).
+    const forwardedBot =
+      Boolean(event.author.bot) && this.qqConfig.forwardBotMessages === true;
+    const botTag = forwardedBot ? QQ_BOT_TAG : '';
     const cleanText = rawContent.trim();
     // Strip system-reserved tags that could be forged by users
     const safeContent = cleanText
       .replace(/\[atMention=[^\]]*]/g, '')
       .replace(/\[botOpenId:[^\]]*]/g, '')
       .replace(/\[bot]/g, '');
-    const isSlash = safeContent.startsWith('/');
+    // Same rule as the group path: a forwarded bot's slash/bang text is a
+    // model prompt, not a command for this channel to execute locally.
+    const isSlash = !forwardedBot && safeContent.startsWith('/');
     const body = sanitizePromptText(safeContent);
     const mediaOnly = !body && media.length > 0;
     const text = mediaOnly
       ? mediaPlaceholder(media)
       : isSlash || this.config.messageRoutes
         ? body
-        : `[atMention=true] [${safeName}]: ${body}`;
+        : `[atMention=true] ${botTag}[${safeName}]: ${body}`;
     const envelope: Envelope = {
       channelName: this.name,
       senderId: chatId,
       senderName,
       chatId,
       text,
+      ...(forwardedBot ? { senderTag: QQ_BOT_SENDER_TAG } : {}),
       messageId: event.id,
       isGroup: false,
       isMentioned: true,
       isReplyToBot: false,
       ...(mediaOnly ? { syntheticText: true as const } : {}),
-      ...(isSlash || this.config.messageRoutes
+      // A forwarded bot's media-only text is a bare placeholder with no sender
+      // line, so leave it unprefixed: ChannelBase then renders the senderTag
+      // (and keeps it when a failed download replaces the placeholder).
+      ...(isSlash || this.config.messageRoutes || (forwardedBot && mediaOnly)
         ? {}
         : { alreadyPrefixed: true as const }),
     };
+    if (forwardedBot) this.logForwardedBotMessage(chatId);
     this.dispatchInbound(envelope, media).catch((e) =>
       process.stderr.write(
         `[QQ:${this.name}] C2C handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
@@ -6214,7 +6416,7 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    if (event.author.bot) {
+    if (event.author.bot && this.qqConfig.forwardBotMessages !== true) {
       process.stderr.write(
         `[QQ:${this.name}] Bot message dropped in group ${sanitizeLogText(event.group_openid, 64)}\n`,
       );
@@ -6241,8 +6443,15 @@ export class QQChannel extends ChannelBase {
       forceAtMention: true,
     });
     if (!result) return;
-    const { isSlash, text, commandText, routeText, senderName, safeName } =
-      result;
+    const {
+      isSlash,
+      text,
+      commandText,
+      routeText,
+      senderName,
+      safeName,
+      forwardedBot,
+    } = result;
     const media = this.inboundMedia(event);
     const mediaOnly = result.body === '' && media.length > 0;
 
@@ -6283,15 +6492,20 @@ export class QQChannel extends ChannelBase {
         : this.config.messageRoutes
           ? routeText
           : text,
+      ...(forwardedBot ? { senderTag: QQ_BOT_SENDER_TAG } : {}),
       messageId: event.id,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: true,
       ...(mediaOnly ? { syntheticText: true as const } : {}),
-      ...(isSlash || this.config.messageRoutes
+      // A forwarded bot's media-only text is a bare placeholder with no sender
+      // line, so leave it unprefixed: ChannelBase then renders the senderTag
+      // attribution. Every other self-prefixed path keeps the flag.
+      ...(isSlash || this.config.messageRoutes || (forwardedBot && mediaOnly)
         ? {}
         : { alreadyPrefixed: true as const }),
     };
+    if (forwardedBot) this.logForwardedBotMessage(chatId);
     this.dispatchInbound(envelope, media).catch((e) =>
       process.stderr.write(
         `[QQ:${this.name}] Group handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
@@ -6312,7 +6526,7 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    if (event.author.bot) {
+    if (event.author.bot && this.qqConfig.forwardBotMessages !== true) {
       process.stderr.write(
         `[QQ:${this.name}] Bot message dropped in group ${sanitizeLogText(event.group_openid, 64)}\n`,
       );
@@ -6348,6 +6562,7 @@ export class QQChannel extends ChannelBase {
       senderName,
       isAtBot,
       safeName,
+      forwardedBot,
     } = result;
     const media = this.inboundMedia(event);
     const mediaOnly = result.body === '' && media.length > 0;
@@ -6455,15 +6670,20 @@ export class QQChannel extends ChannelBase {
           : text,
       senderId,
       senderName,
+      ...(forwardedBot ? { senderTag: QQ_BOT_SENDER_TAG } : {}),
       messageId: event.id,
       isGroup: true,
       isMentioned: isAtBot,
       isReplyToBot: isAtBot,
       ...(mediaOnly ? { syntheticText: true as const } : {}),
-      ...(isSlash || this.config.messageRoutes
+      // A forwarded bot's media-only text is a bare placeholder with no sender
+      // line, so leave it unprefixed: ChannelBase then renders the senderTag
+      // attribution. Every other self-prefixed path keeps the flag.
+      ...(isSlash || this.config.messageRoutes || (forwardedBot && mediaOnly)
         ? {}
         : { alreadyPrefixed: true as const }),
     };
+    if (forwardedBot) this.logForwardedBotMessage(chatId);
     this.dispatchInbound(envelope, media).catch((e) => {
       process.stderr.write(
         `[QQ:${this.name}] handleGroupAll error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
@@ -6472,6 +6692,16 @@ export class QQChannel extends ChannelBase {
   }
 
   // ── Group management events ────────────────────────────────────
+
+  private logGroupEventError(
+    handler: string,
+    groupOpenid: string | undefined,
+    error: unknown,
+  ): void {
+    process.stderr.write(
+      `[QQ:${this.name}] ${handler} failed for group ${sanitizeLogText(groupOpenid ?? '', 64)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 200)}\n`,
+    );
+  }
 
   private handleGroupAddRobot(event: GroupAddRobotEvent): void {
     const groupId = event.group_openid;
@@ -6494,7 +6724,7 @@ export class QQChannel extends ChannelBase {
     );
   }
 
-  private handleGroupDelRobot(event: GroupDelRobotEvent): void {
+  private async handleGroupDelRobot(event: GroupDelRobotEvent): Promise<void> {
     const groupId = event.group_openid;
     if (!groupId) {
       process.stderr.write(
@@ -6529,6 +6759,7 @@ export class QQChannel extends ChannelBase {
     }
     this.botOpenIdByGroup.delete(groupId);
     this._lastKeywordNoMatchLog.delete(groupId);
+    this._lastForwardedBotLog.delete(groupId);
     this.recentInbound.delete(groupId);
     // Clean up cron buffers targeting this group (always, regardless of config flag)
     let cleanedCron = 0;
@@ -6578,16 +6809,17 @@ export class QQChannel extends ChannelBase {
         cleanedStreams++;
       }
     }
+    const disabledLoops = await this.disableLoopJobsForChat(groupId);
     this.saveQQState();
     process.stderr.write(
-      `[QQ:${this.name}] Removed from group ${sanitizeLogText(groupId, 64)} by ${sanitizeLogText(event.op_member_openid, 64)}, cleaned ${cleanedStreams} stream(s) and ${cleanedCron} cron buffer(s)\n`,
+      `[QQ:${this.name}] Removed from group ${sanitizeLogText(groupId, 64)} by ${sanitizeLogText(event.op_member_openid, 64)}, cleaned ${cleanedStreams} stream(s), ${cleanedCron} cron buffer(s), and disabled ${disabledLoops} loop(s)\n`,
     );
   }
 
-  private handleGroupMsgToggle(
+  private async handleGroupMsgToggle(
     event: GroupMsgToggleEvent,
     enabled: boolean,
-  ): void {
+  ): Promise<void> {
     if (!event.group_openid) {
       process.stderr.write(
         `[QQ:${this.name}] Group msg toggle dropped: missing group_openid\n`,
@@ -6605,5 +6837,10 @@ export class QQChannel extends ChannelBase {
     process.stderr.write(
       `[QQ:${this.name}] Active msg ${enabled ? 'enabled' : 'disabled'} for group ${sanitizeLogText(event.group_openid, 64)}\n`,
     );
+    // No eager loop teardown here: a toggle is reversible. The pre-flight
+    // target gate already refuses the next fire (so no turn is burned), and a
+    // loop left failing is retired by the scheduler's 5-failure limit.
+    // handleGroupDelRobot still disables eagerly: the gate cannot see a
+    // removal, so there the teardown is the only thing that stops the fires.
   }
 }

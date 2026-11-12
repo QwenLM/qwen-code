@@ -249,12 +249,12 @@ vi.mock('./config/sandboxConfig.js', () => ({
 }));
 
 vi.mock('./core/initializer.js', () => ({
-  initializeApp: vi.fn().mockResolvedValue({
+  initializeApp: vi.fn(async () => ({
     authError: null,
     themeError: null,
     shouldOpenAuthDialog: false,
     memoryFileCount: 0,
-  }),
+  })),
 }));
 
 vi.mock('./startup/startup-prefetch.js', () => ({
@@ -512,6 +512,15 @@ describe('llm.tsx main function', () => {
         const provider =
           vi.mocked(loadCliConfig).mock.calls[0]?.[9]
             ?.workflowAncestorTrustProvider;
+        if (sandbox) {
+          // The pre-sandbox partialConfig validates auth for a configuration
+          // that never uses LSP, so it must refuse the service outright: the
+          // setting alone would otherwise start host-side language servers
+          // outside the container.
+          expect(vi.mocked(loadCliConfig).mock.calls[0]?.[9]?.lspDisabled).toBe(
+            true,
+          );
+        }
         if (capability === undefined) {
           expect(provider).toBeTypeOf('function');
           await expect(
@@ -2231,7 +2240,11 @@ describe('llm.tsx main function', () => {
     expect(initializerModule.initializeApp).toHaveBeenCalledWith(
       configStub,
       expect.any(Object),
-      { deferIdeConnection: false },
+      {
+        deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
+      },
     );
     expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
       configStub,
@@ -3009,7 +3022,11 @@ describe('llm.tsx main function', () => {
     expect(initializerModule.initializeApp).toHaveBeenCalledWith(
       configStub,
       expect.any(Object),
-      { deferIdeConnection: false },
+      {
+        deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
+      },
     );
     expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
       validatedConfig,
@@ -3516,6 +3533,8 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: true,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: true,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -3645,6 +3664,8 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -3775,6 +3796,8 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -3913,6 +3936,8 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: false,
+        allowSubscriptionStartupFallback: false,
+        allowUnlistedSubscriptionModel: false,
       },
     );
     expect(mockRunAcpAgent).toHaveBeenCalledWith(

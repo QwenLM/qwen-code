@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { PR_BINDING_ROLES } from '@qwen-code/channel-base';
 import { plugin } from './index.js';
-import { PR_NOTIFICATION_REASONS, PR_WATCH_EVENTS } from './GithubAdapter.js';
+import {
+  PR_NOTIFICATION_REASONS,
+  PR_WATCH_EVENTS,
+  REPO_FILTER_MODES,
+} from './GithubAdapter.js';
 
 function validate(overrides: Record<string, unknown>): string | undefined {
   return plugin.management?.validateConfig?.({
@@ -49,6 +53,74 @@ describe('github plugin validateConfig', () => {
     );
   });
 
+  it('rejects a non-boolean requireBoundWatch and its missing dependency', () => {
+    expect(
+      validate({ deliverToBoundSessions: true, requireBoundWatch: 'yes' }),
+    ).toContain('requireBoundWatch must be a boolean');
+    expect(validate({ requireBoundWatch: true })).toContain(
+      'requireBoundWatch for channel github requires deliverToBoundSessions',
+    );
+    expect(
+      validate({ deliverToBoundSessions: true, requireBoundWatch: true }),
+    ).toBeUndefined();
+  });
+
+  it('describes requireBoundWatch as an opt-in boolean defaulting off', () => {
+    const field = plugin.management?.fields.find(
+      (candidate) => candidate.key === 'requireBoundWatch',
+    );
+    expect(field?.kind).toBe('boolean');
+    expect(field?.default).toBe('false');
+    expect(field?.description).toContain('watch');
+  });
+
+  it('requires deliverToBoundSessions for the watch budget reserve', () => {
+    expect(validate({ prWatchBudgetReserve: 300 })).toContain(
+      'prWatchBudgetReserve',
+    );
+    expect(
+      validate({ deliverToBoundSessions: true, prWatchBudgetReserve: 300 }),
+    ).toBeUndefined();
+  });
+
+  it('declares the reserve floor inclusively instead of an exclusive -1', () => {
+    // exclusiveMinimum: -1 was the only way to admit 0 before the vocabulary
+    // had an inclusive bound, and it also admitted (-1, 0) — the editor took
+    // -0.5 and the save failed. Pin the descriptor, not just the validator.
+    const reserve = plugin.management?.fields?.find(
+      (field) => field.key === 'prWatchBudgetReserve',
+    );
+    expect(reserve).toBeDefined();
+    expect(reserve).toMatchObject({ kind: 'number', minimum: 0 });
+    expect(
+      (reserve as { exclusiveMinimum?: number }).exclusiveMinimum,
+    ).toBeUndefined();
+  });
+
+  it('rejects a reserve the getter would silently default', () => {
+    // The descriptor declares minimum: 0, so the editor refuses these when
+    // they are typed. The adapter check is the backstop for everything else
+    // (hand-edited settings.json, a daemon API call, a stored negative re-sent
+    // unchanged): a negative must be refused rather than becoming the
+    // default 200.
+    for (const reserve of [-0.5, -1, 'abc', Number.NaN]) {
+      expect(
+        validate({
+          deliverToBoundSessions: true,
+          prWatchBudgetReserve: reserve,
+        }),
+      ).toContain('must be a non-negative number');
+    }
+    // 0 disables, and a positive fraction is rounded up by the getter — both
+    // stay legal.
+    expect(
+      validate({ deliverToBoundSessions: true, prWatchBudgetReserve: 0 }),
+    ).toBeUndefined();
+    expect(
+      validate({ deliverToBoundSessions: true, prWatchBudgetReserve: 200.5 }),
+    ).toBeUndefined();
+  });
+
   it('accepts the full watch vocabulary, case-insensitively', () => {
     expect(
       validate({
@@ -67,6 +139,30 @@ describe('github plugin validateConfig', () => {
     expect(validate({ prWatchEvents: [] })).toBeUndefined();
   });
 
+  it('accepts the default-on prCommentWatch without bound delivery', () => {
+    // The editor emits the descriptor default (true) even for channels that
+    // never enable bound delivery; it is inert there, not a validation error.
+    expect(validate({ prCommentWatch: true })).toBeUndefined();
+    expect(validate({ prCommentWatch: false })).toBeUndefined();
+    expect(
+      validate({ deliverToBoundSessions: true, prCommentWatch: true }),
+    ).toBeUndefined();
+  });
+
+  it('rejects a non-boolean prCommentWatch', () => {
+    expect(validate({ prCommentWatch: 'yes' })).toContain(
+      'prCommentWatch must be a boolean',
+    );
+  });
+
+  it('defaults prCommentWatch to enabled in the management descriptor', () => {
+    const field = plugin.management?.fields.find(
+      (candidate) => candidate.key === 'prCommentWatch',
+    );
+    expect(field?.kind).toBe('boolean');
+    expect(field?.default).toBe('true');
+  });
+
   it('builds the prWatchEvents UI options from the adapter vocabulary (R2-18)', () => {
     const field = plugin.management?.fields.find(
       (candidate) => candidate.key === 'prWatchEvents',
@@ -76,6 +172,19 @@ describe('github plugin validateConfig', () => {
     expect(field?.options?.map((option) => option.value)).toEqual([
       ...PR_WATCH_EVENTS,
     ]);
+  });
+
+  it('builds the repoFilterMode UI options from the adapter vocabulary', () => {
+    const field = plugin.management?.fields.find(
+      (candidate) => candidate.key === 'repoFilterMode',
+    );
+    // The settings store's enum branch requires membership in this option
+    // list, and the editor always submits the seeded value: dropping options
+    // or a mode would reject every Web Shell save with no other test red.
+    expect(field?.options?.map((option) => option.value)).toEqual([
+      ...REPO_FILTER_MODES,
+    ]);
+    expect(field?.default).toBe('off');
   });
 
   it('describes and groups every boundSessionActions key for management UIs', () => {

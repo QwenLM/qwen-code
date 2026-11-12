@@ -67,6 +67,9 @@ import { Spinner } from '../ui/spinner';
 import { Switch } from '../ui/switch';
 import styles from './ChannelEditorDialog.module.css';
 import { ChannelPairingRequests } from './ChannelPairingRequests';
+import { ChannelQrLogin } from './ChannelQrLogin';
+import type { DaemonChannelQrLoginActions } from '../../daemon/workspace/types';
+import { WeixinLoginPanel, type WeixinLoginApi } from './WeixinLoginPanel';
 import {
   buildChannelUpsertRequest,
   createChannelEditorDraft,
@@ -74,8 +77,10 @@ import {
   hasDescriptorGroupPolicy,
   hasDescriptorPrivatePolicy,
   configuredPrivatePolicy,
+  GROUP_ONLY_FIELD_KEYS,
   PRIVATE_ONLY_FIELD_KEYS,
   invalidRepositoryGroupEntries,
+  isRepoFilterActive,
   projectRepositoryGroup,
   recordHasRoute,
   repositoryAllowlistIds,
@@ -89,6 +94,7 @@ import {
   type ChannelGroupSenders,
 } from './channel-editor-state';
 import {
+  isPrivateOnlyChannelType,
   isRepositoryOnlyChannelType,
   PLATFORM_MARKS,
 } from './channel-platform';
@@ -97,6 +103,10 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
   dingtalk: {
     clientId: 'channels.editor.field.dingtalk.clientId',
     clientSecret: 'channels.editor.field.dingtalk.clientSecret',
+  },
+  weixin: {
+    groupPolicy: 'channels.editor.field.weixin.groupPolicy',
+    allowedUsers: 'channels.editor.field.weixin.allowedUsers',
   },
   wecom: {
     botId: 'channels.editor.field.wecom.botId',
@@ -117,9 +127,15 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     pollInterval: 'channels.editor.field.github.pollInterval',
     groupPolicy: 'channels.editor.field.github.groupPolicy',
     reasonFilter: 'channels.editor.field.github.reasonFilter',
+    repoFilterMode: 'channels.editor.field.github.repoFilterMode',
+    repoFilter: 'channels.editor.field.github.repoFilter',
     deliverToBoundSessions:
       'channels.editor.field.github.deliverToBoundSessions',
+    requireBoundWatch: 'channels.editor.field.github.requireBoundWatch',
+    prCommentWatch: 'channels.editor.field.github.prCommentWatch',
     prWatchEvents: 'channels.editor.field.github.prWatchEvents',
+    prWatchLimit: 'channels.editor.field.github.prWatchLimit',
+    prWatchBudgetReserve: 'channels.editor.field.github.prWatchBudgetReserve',
     boundSessionActions: 'channels.editor.field.github.boundSessionActions',
   },
   gitlab: {
@@ -128,6 +144,29 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     groupPolicy: 'channels.editor.field.gitlab.groupPolicy',
     action_prompt_template:
       'channels.editor.field.gitlab.action_prompt_template',
+  },
+  email: {
+    address: 'channels.editor.field.email.address',
+    imapHost: 'channels.editor.field.email.imapHost',
+    imapUser: 'channels.editor.field.email.imapUser',
+    imapPassword: 'channels.editor.field.email.imapPassword',
+    smtpHost: 'channels.editor.field.email.smtpHost',
+    smtpUser: 'channels.editor.field.email.smtpUser',
+    smtpPassword: 'channels.editor.field.email.smtpPassword',
+    folder: 'channels.editor.field.email.folder',
+    imapPort: 'channels.editor.field.email.imapPort',
+    smtpPort: 'channels.editor.field.email.smtpPort',
+    imapSecure: 'channels.editor.field.email.imapSecure',
+    smtpSecure: 'channels.editor.field.email.smtpSecure',
+    proactiveRecipients: 'channels.editor.field.email.proactiveRecipients',
+    pollInterval: 'channels.editor.field.email.pollInterval',
+    maxMessageBytes: 'channels.editor.field.email.maxMessageBytes',
+    maxAttachmentBytes: 'channels.editor.field.email.maxAttachmentBytes',
+    maxTextLength: 'channels.editor.field.email.maxTextLength',
+    // The shared hints say "stable user IDs ... without pairing", but the
+    // Email adapter only accepts bare mailbox addresses and rejects pairing.
+    allowedUsers: 'channels.editor.field.email.allowedUsers',
+    operators: 'channels.editor.field.email.operators',
   },
 };
 
@@ -144,11 +183,15 @@ const SHARED_SESSION_FIELD_KEYS = new Set([
   'multiSession',
   'instructions',
 ]);
-// One panel: watch events and action templates only mean something with
-// bound delivery enabled.
+// One panel: watch events, the watch limit, and action templates only mean
+// something with bound delivery enabled.
 const BOUND_SESSION_FIELD_KEYS = new Set([
   'deliverToBoundSessions',
+  'requireBoundWatch',
+  'prCommentWatch',
   'prWatchEvents',
+  'prWatchLimit',
+  'prWatchBudgetReserve',
   'boundSessionActions',
 ]);
 
@@ -166,9 +209,28 @@ const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
 /** Per-platform placeholders that spell out the expected value shape. */
 const FIELD_PLACEHOLDER_KEYS: Record<string, string> = {
   'github.baseUrl': 'https://ghe.example.com/api/v3',
+  'github.repoFilter': 'owner/repo, owner/repo',
+  'email.allowedUsers': 'you@example.com, colleague@example.com',
+  'email.operators': 'you@example.com',
+  // The id shape, not a WeChat handle: an operator who reads "user ID" and
+  // types their WeChat name gets a silently inert allowlist entry.
+  'weixin.allowedUsers': 'oAbCd…@im.wechat',
 };
 
-const CONNECTION_FIELD_KEYS = new Set(['baseUrl', 'wsUrl', 'pollInterval']);
+// Email's endpoint and TLS keys are declared by no other channel, so listing
+// them here moves only Email's fields: they decide where the mailbox
+// credentials are sent, which is Connection rather than Credentials.
+const CONNECTION_FIELD_KEYS = new Set([
+  'baseUrl',
+  'wsUrl',
+  'pollInterval',
+  'imapHost',
+  'imapPort',
+  'imapSecure',
+  'smtpHost',
+  'smtpPort',
+  'smtpSecure',
+]);
 /**
  * Rarely changed tuning, collapsed into one disclosure panel. Primary
  * endpoints stay out: `wsUrl` (WeCom) and `baseUrl` (GitHub Enterprise /
@@ -186,6 +248,14 @@ const ADVANCED_FIELD_KEYS = new Set([
   'defaultMessageRoute',
   'multiSession',
   'instructions',
+  // Email tuning: the polled mailbox folder (defaults to INBOX) and the size
+  // caps are rarely changed, not credentials. `folder` is a plain string, so
+  // unlike an enum it is not pre-filled on a fresh draft and does not auto-open
+  // this panel.
+  'folder',
+  'maxMessageBytes',
+  'maxAttachmentBytes',
+  'maxTextLength',
 ]);
 
 /** Every repository starts fully inheriting; nothing is materialized. */
@@ -218,6 +288,7 @@ export interface ChannelEditorDialogProps {
     request: DaemonChannelUpsertRequest,
   ) => Promise<unknown>;
   onReload: () => Promise<unknown>;
+  qrLoginActions?: DaemonChannelQrLoginActions;
   listPairingRequests: (
     name: string,
   ) => Promise<DaemonChannelPairingRequestsSnapshot>;
@@ -232,6 +303,12 @@ export interface ChannelEditorDialogProps {
     name: string,
     request: DaemonChannelPairingRevocationRequest,
   ) => Promise<DaemonChannelPairingRevocationResult>;
+  /**
+   * WeChat login is process-global rather than workspace-scoped, so it arrives
+   * as its own injected API instead of riding the channel management client.
+   * Absent when the host cannot supply it; the panel then does not render.
+   */
+  weixinLogin?: WeixinLoginApi;
 }
 
 function configuredAllowedUsers(instance?: DaemonChannelInstanceSnapshot) {
@@ -327,10 +404,12 @@ export function ChannelEditorDialog({
   onOpenChange,
   onSave,
   onReload,
+  qrLoginActions,
   listPairingRequests,
   approvePairingRequest,
   listPairingApprovals,
   revokePairingApproval,
+  weixinLogin,
 }: ChannelEditorDialogProps) {
   const { t } = useI18n();
   const formId = useId();
@@ -483,22 +562,35 @@ export function ChannelEditorDialog({
       return t('channels.editor.validation.invalidGroupId');
     if (code === 'invalidRepoId')
       return t('channels.editor.validation.invalidRepoId');
+    if (code === 'repoFilterRequired')
+      return t('channels.editor.validation.repoFilterRequired');
     if (code === 'conflictingRepoAliases')
       return t('channels.editor.validation.conflictingRepoAliases');
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');
     if (code === 'requiresBoundDelivery')
       return t('channels.editor.validation.requiresBoundDelivery');
+    if (code === 'requiresBoundDeliveryForWatchGate')
+      return t('channels.editor.validation.requiresBoundDeliveryForWatchGate');
     if (code === 'number') return t('channels.editor.validation.number');
     if (code === 'outOfRange') {
       const numberField = field && field.kind === 'number' ? field : undefined;
       // Only name the bounds the descriptor actually declares: a field with a
-      // maximum and no exclusiveMinimum has no floor, and inventing "greater
-      // than 0" would state a constraint the validator does not enforce.
+      // maximum and no lower bound has no floor, and inventing "greater than
+      // 0" would state a constraint the validator does not enforce.
+      const exclusive = numberField?.exclusiveMinimum;
+      const inclusive = numberField?.minimum;
+      // Name whichever floor the validator actually enforces at the margin.
+      // On a tie the exclusive bound is stricter, since it also rejects equality.
+      const floorIsInclusive =
+        inclusive !== undefined &&
+        (exclusive === undefined || inclusive > exclusive);
       return t('channels.editor.validation.outOfRange', {
-        ...(numberField?.exclusiveMinimum !== undefined
-          ? { min: numberField.exclusiveMinimum }
-          : {}),
+        ...(floorIsInclusive
+          ? { minInclusive: inclusive }
+          : exclusive !== undefined
+            ? { min: exclusive }
+            : {}),
         ...(numberField?.maximum !== undefined
           ? { max: numberField.maximum }
           : {}),
@@ -720,7 +812,13 @@ export function ChannelEditorDialog({
     const id = `${formId}-${field.key}`;
     const value = draft.values[field.key];
     const error = errors[field.key];
-    const update = (next: string | boolean) =>
+    const update = (next: string | boolean) => {
+      if (field.key === 'repoFilterMode' || field.key === 'repoFilter') {
+        // Both remedies retire a shown error: switching to off hides the
+        // list, and typing a valid entry satisfies the instruction. Submit
+        // stays the only site that populates errors.
+        refreshErrors({ ...draft.values, [field.key]: next });
+      }
       setDraft((current) => ({
         ...current,
         values: {
@@ -731,17 +829,30 @@ export function ChannelEditorDialog({
             : {}),
         },
       }));
+    };
     if (field.kind === 'boolean') {
       const isLocalGhSwitch =
         field.key === 'useLocalGh' &&
         isRepositoryOnlyChannelType(descriptor.type);
+      // Same prerequisite gate as prWatchEvents: name it at the field
+      // instead of letting the daemon reject the whole draft after submit.
+      // A stored true stays switchable OFF while gated, so turning delivery
+      // off never strands the operator with a flag they cannot clear.
+      const gateField =
+        field.key === 'requireBoundWatch' && descriptor.type === 'github';
+      const gatedBoundWatch =
+        gateField && draft.values['deliverToBoundSessions'] !== true;
       const updateSwitch = (checked: boolean) => {
-        if (field.key === 'deliverToBoundSessions') {
+        if (
+          field.key === 'deliverToBoundSessions' ||
+          field.key === 'requireBoundWatch'
+        ) {
           // Both directions re-derive shown errors: on retires the dependency
           // instruction, off keeps a shown one instead of dropping it silently.
+          // Unticking the gate is itself a remedy for its dependency error.
           refreshErrors({
             ...draft.values,
-            deliverToBoundSessions: checked,
+            [field.key]: checked,
           });
         }
         if (!isLocalGhSwitch) {
@@ -787,12 +898,23 @@ export function ChannelEditorDialog({
           label={fieldLabel(field)}
           required={field.required}
           description={fieldDescription(field)}
+          hint={
+            gatedBoundWatch
+              ? t('channels.editor.field.github.requireBoundWatch.disabledHint')
+              : undefined
+          }
+          // Keep the live region mounted from first render (keyed off the
+          // field, not the gated state): a region that enters the DOM already
+          // filled is never announced when the hint appears.
+          hintId={gateField ? `${id}-disabled-hint` : undefined}
           error={error}
         >
           <Switch
             id={id}
             checked={value === true}
             aria-required={field.required}
+            disabled={gatedBoundWatch && value !== true}
+            aria-describedby={gateField ? `${id}-disabled-hint` : undefined}
             onCheckedChange={updateSwitch}
           />
         </FieldShell>
@@ -1543,9 +1665,27 @@ export function ChannelEditorDialog({
               </FieldShell>
             </section>
 
+            {descriptor.type === 'weixin' && weixinLogin ? (
+              <section className={styles.section}>
+                <h3 className={styles.sectionHeading}>
+                  {t('channels.editor.section.credentials')}
+                </h3>
+                <WeixinLoginPanel api={weixinLogin} />
+              </section>
+            ) : null}
+
             {(['credentials', 'connection'] as const).map((section) => {
               const sectionFields = credentialFields.filter(
-                (field) => fieldSectionKey(field) === section,
+                (field) =>
+                  fieldSectionKey(field) === section &&
+                  // The repository list only means something while a filter
+                  // mode is active; validation is gated on the same
+                  // predicate, so the hidden field can never strand a save.
+                  !(
+                    field.key === 'repoFilter' &&
+                    isRepositoryOnlyChannelType(descriptor.type) &&
+                    !isRepoFilterActive(draft.values['repoFilterMode'])
+                  ),
               );
               if (sectionFields.length === 0) return null;
               return (
@@ -1647,6 +1787,7 @@ export function ChannelEditorDialog({
               const repositoryOnly = isRepositoryOnlyChannelType(
                 descriptor.type,
               );
+              const privateOnly = isPrivateOnlyChannelType(descriptor.type);
               const descriptorPolicy = hasDescriptorPrivatePolicy(descriptor);
               const effectivePolicy = repositoryOnly
                 ? ''
@@ -1656,9 +1797,17 @@ export function ChannelEditorDialog({
               const showRadioGroup = !descriptorPolicy && !repositoryOnly;
               const descriptorGroupPolicy =
                 hasDescriptorGroupPolicy(descriptor);
-              const effectiveGroupPolicy = descriptorGroupPolicy
-                ? String(draft.values['groupPolicy'] ?? '')
-                : String(instance?.config.groupPolicy ?? '');
+              // Mirror of the repository-only branch above. The draft skip is
+              // what normally keeps this empty: it omits groupPolicy from
+              // draft.values, so the descriptor arm below reads ''. This
+              // ternary is the guard for the other arm — if the descriptor ever
+              // lacked the injected field, the fallback would read the STORED
+              // config, and a stored 'pairing' must not resurrect the panel.
+              const effectiveGroupPolicy = privateOnly
+                ? ''
+                : descriptorGroupPolicy
+                  ? String(draft.values['groupPolicy'] ?? '')
+                  : String(instance?.config.groupPolicy ?? '');
               const showPairing =
                 effectivePolicy === 'pairing' ||
                 effectiveGroupPolicy === 'pairing';
@@ -1666,6 +1815,7 @@ export function ChannelEditorDialog({
                 (field) =>
                   field.key !== 'operators' &&
                   !(repositoryOnly && PRIVATE_ONLY_FIELD_KEYS.has(field.key)) &&
+                  !(privateOnly && GROUP_ONLY_FIELD_KEYS.has(field.key)) &&
                   (field.key !== 'allowedUsers' ||
                     effectivePolicy === 'allowlist' ||
                     effectivePolicy === 'pairing'),
@@ -1847,6 +1997,21 @@ export function ChannelEditorDialog({
                     </FieldShell>
                   ) : null}
                   {operatorsField ? renderField(operatorsField) : null}
+                  {descriptor.supportsQrLogin && instance && qrLoginActions ? (
+                    <ChannelQrLogin
+                      channelName={instance.name}
+                      actions={qrLoginActions}
+                      onBound={() => {
+                        // The draft was seeded from the pre-bind instance, so
+                        // saving it would submit the old empty credentials and
+                        // clear the binding just made. Close instead of leaving
+                        // a stale draft over a changed store.
+                        void onReload();
+                        onOpenChange(false);
+                      }}
+                    />
+                  ) : null}
+
                   {showPairing ? (
                     instance &&
                     ((!repositoryOnly &&

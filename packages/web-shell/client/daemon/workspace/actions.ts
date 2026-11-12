@@ -15,6 +15,7 @@ import { withActionTimeout } from '../timing.js';
 import { createDaemonRestRequest } from '../rest-request.js';
 import type {
   DaemonAutofixPrWatchList,
+  DaemonChannelObservedContacts,
   DaemonDirectoryListing,
   DaemonFileStat,
   DaemonGoal,
@@ -229,6 +230,23 @@ export function createDaemonWorkspaceActions({
       return { catalog, snapshot };
     },
 
+    async listChannelObservedContacts(workspaceId) {
+      requireClient(getClient, 'Load observed channel contacts failed');
+      const path = workspaceId
+        ? `/workspaces/${encodeURIComponent(workspaceId)}/channel/observed-contacts`
+        : '/workspace/channel/observed-contacts';
+      const res = await withActionTimeout(
+        requestRest(createDaemonRequestUrl(baseUrl, path), {
+          headers: createDaemonHeaders(token),
+        }),
+        'Load observed channel contacts timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, `GET ${path}`));
+      }
+      return (await res.json()) as DaemonChannelObservedContacts;
+    },
+
     async listChannelEvents(query) {
       const workspace = requireWorkspaceClient(
         getClient,
@@ -293,6 +311,38 @@ export function createDaemonWorkspaceActions({
         'Restart channel failed',
       );
       return workspace.restartWorkspaceChannel(name);
+    },
+
+    channelQrLogin: {
+      async start(name) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Start channel QR login failed',
+        );
+        return workspace.startWorkspaceChannelQrLogin(name);
+      },
+
+      async state(loginId) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Load channel QR login failed',
+        );
+        return withActionTimeout(
+          workspace.workspaceChannelQrLogin(loginId),
+          'Load channel QR login timed out',
+        );
+      },
+
+      async cancel(loginId) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Cancel channel QR login failed',
+        );
+        return workspace.cancelWorkspaceChannelQrLogin(loginId);
+      },
     },
 
     channelPairing: {
@@ -1222,12 +1272,13 @@ export function createDaemonWorkspaceActions({
     },
 
     activateSubscription(options) {
+      const { workspaceCwd, ...request } = options ?? {};
       const workspace = requireWorkspaceClient(
         getClient,
-        getWorkspaceCwd,
+        () => workspaceCwd ?? getWorkspaceCwd(),
         'Connect Qwen Subscription failed',
       );
-      return workspace.activateSubscription(options);
+      return workspace.activateSubscription(request);
     },
 
     getSubscriptionConfig(options) {
@@ -1251,6 +1302,11 @@ export function createDaemonWorkspaceActions({
     getSubscriptionUserInfo(options) {
       return subscriptionRequest((client) =>
         client.getSubscriptionUserInfo(options),
+      );
+    },
+    getSubscriptionDefaultModel(options) {
+      return subscriptionRequest((client) =>
+        client.getSubscriptionDefaultModel(options),
       );
     },
     signOutSubscription() {

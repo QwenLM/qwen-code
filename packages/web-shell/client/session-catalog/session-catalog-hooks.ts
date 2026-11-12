@@ -40,6 +40,7 @@ interface SessionCatalogHookOptions {
 }
 
 export interface WebShellSessionsOptions extends SessionCatalogHookOptions {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   pageSize?: number;
   cursor?: string;
   archiveState?: DaemonSessionArchiveState;
@@ -48,6 +49,7 @@ export interface WebShellSessionsOptions extends SessionCatalogHookOptions {
   sourceType?: string;
   sourceId?: string;
   parentSessionId?: string;
+  liveOnly?: boolean;
 }
 
 export function useSessionCatalogQuery(
@@ -511,6 +513,7 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
     enabled = true,
     maxAgeMs,
     pollIntervalMs,
+    sortBy,
     pageSize,
     cursor,
     archiveState,
@@ -519,6 +522,7 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
     sourceType,
     sourceId,
     parentSessionId,
+    liveOnly,
   } = options;
   const workspace = useWorkspace();
   const legacy = useSessions({
@@ -536,6 +540,7 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
   const workspaceCwd = workspace.workspaceCwd;
   const listOptions = useMemo<DaemonSessionListPageOptions>(
     () => ({
+      ...(sortBy !== undefined ? { sortBy } : {}),
       ...(pageSize !== undefined ? { pageSize } : {}),
       ...(cursor !== undefined ? { cursor } : {}),
       ...(archiveState !== undefined ? { archiveState } : {}),
@@ -544,11 +549,14 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
       ...(sourceType !== undefined ? { sourceType } : {}),
       ...(sourceId !== undefined ? { sourceId } : {}),
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+      ...(liveOnly === true ? { liveOnly: true } : {}),
     }),
     [
+      sortBy,
       archiveState,
       cursor,
       group,
+      liveOnly,
       pageSize,
       parentSessionId,
       sourceId,

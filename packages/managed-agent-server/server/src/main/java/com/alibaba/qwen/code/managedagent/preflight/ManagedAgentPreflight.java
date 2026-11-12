@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessCapacityFailu
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessTransportFailure;
+import com.alibaba.qwen.code.managedagent.preflight.ServerEnvironment.Format;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
@@ -18,21 +19,35 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
 import org.flywaydb.core.api.FlywayException;
 import org.flywaydb.core.api.MigrationVersion;
+import org.springframework.boot.ApplicationContextFactory;
+import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.web.ServerProperties;
 import org.springframework.boot.autoconfigure.web.servlet.WebMvcProperties;
 import org.springframework.boot.context.properties.bind.Bindable;
 import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.env.PropertiesPropertySourceLoader;
+import org.springframework.boot.env.PropertySourceLoader;
 import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.core.env.EnumerablePropertySource;
 import org.springframework.core.env.PropertySource;
-import org.springframework.core.env.SimpleCommandLinePropertySource;
-import org.springframework.core.env.StandardEnvironment;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.ClassPathResource;
-import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
+import org.yaml.snakeyaml.nodes.MappingNode;
+import org.yaml.snakeyaml.nodes.Node;
+import org.yaml.snakeyaml.nodes.NodeTuple;
+import org.yaml.snakeyaml.nodes.ScalarNode;
+import org.yaml.snakeyaml.nodes.SequenceNode;
+import org.yaml.snakeyaml.nodes.Tag;
+import org.yaml.snakeyaml.reader.UnicodeReader;
 
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.Reader;
+import java.io.StringReader;
+import java.io.StringWriter;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
@@ -48,6 +63,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
@@ -59,8 +75,13 @@ import java.sql.SQLException;
 import java.sql.SQLTimeoutException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -70,36 +91,63 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.function.BiPredicate;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
  * Read-only deployment preflight for the reference distribution.
  *
- * <p>It binds the same configuration Spring would load, checks the inputs that
- * otherwise fail during startup or on the first Turn, and never opens the web
- * server, a scheduler or a worker.
+ * <p>It binds the configuration the server reads, prepared as
+ * {@link ServerEnvironment} prepares it, so files at Spring Boot's default
+ * locations count, read in the working directory; run it with the server
+ * unit's working directory. It checks the inputs that otherwise fail during
+ * startup or on the first Turn, and never opens the web server, a scheduler
+ * or a worker.
  */
 public final class ManagedAgentPreflight {
-    static final String CONFIG_LOCATION_ARG =
-            "--spring.config.additional-location=";
-    static final String CONFIG_LOCATION_ENV =
-            "SPRING_CONFIG_ADDITIONAL_LOCATION";
     static final String ONLINE_ARG = "--online";
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final String WORKER_ARG = "managed-runtime-worker";
     // The kernel appends this to /proc/<pid>/cwd once the directory is removed.
     private static final String DELETED_SUFFIX = " (deleted)";
     private static final String SHELL_MCP_FEATURE = "workspace-shell-mcp/1";
     private static final Pattern QWEN_CODE_VERSION = Pattern.compile("[0-9A-Za-z.+-]{1,64}");
-    private static final String OPTIONAL_PREFIX = "optional:";
-    private static final String FILE_PREFIX = "file:";
     private static final Pattern DIGEST =
             Pattern.compile("sha256:[0-9a-f]{64}");
     private static final int TIMEOUT_MILLIS = 5_000;
     private static final int KEY_BYTES = 32;
     private static final int MIN_JAVA_FEATURE = 21;
     private static final int DEFAULT_SERVER_PORT = 8080;
+    // A property whose last word is one of these holds a secret, in the
+    // configuration reference's terms; credential-key-id and the paths to
+    // files that hold one end otherwise.
+    private static final List<String> SECRET_SUFFIXES =
+            List.of("password", "token", "key", "keys", "secret");
+    // An XML comment, which cannot nest or hold "--".
+    private static final Pattern XML_COMMENT = Pattern.compile("<!--(.*?)-->", Pattern.DOTALL);
+    // The markers and white space that start a comment, as "# " or "#!".
+    private static final Pattern COMMENT_START = Pattern.compile("^[#!\\s]+");
+    // A comment marker .properties reads though it is escaped, with a
+    // backslash or as a Unicode escape.
+    private static final Pattern ESCAPED_MARKER = Pattern.compile("^\\\\(?:[#!]|u00(?:23|21))");
+    // White space at the start of a line, which .properties skips.
+    private static final Pattern INDENT = Pattern.compile("^\\s+");
+    // A setting as YAML and .properties both write one: an optional list
+    // marker, a key, quoted or not, then ':' or '=' and the value.
+    private static final Pattern WRITTEN_SETTING = Pattern.compile(
+            "(?:-\\s+)?[\"']?([^\\s:=\"'#!]+)[\"']?\\s*[:=](.*)");
+    // An entry of an XML properties file, which a comment may hold unclosed.
+    private static final Pattern XML_ENTRY = Pattern.compile(
+            "<entry\\s+key\\s*=\\s*[\"']([^\"']*)[\"']\\s*>([^<]*)");
+    private static final String XML_PROPERTIES = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+            + "<!DOCTYPE properties SYSTEM \"http://java.sun.com/dtd/properties.dtd\">";
+    // A parameter of a value, such as a JDBC URL's ?password=, and the
+    // password of a URL's user information, as in https://user:secret@host.
+    private static final Pattern VALUE_PARAMETER = Pattern.compile("[?&;]([^=?&;#\\s]+)=");
+    private static final Pattern URL_PASSWORD = Pattern.compile("//[^/?#@\\s:]*:[^/?#@\\s]++@");
 
     private ManagedAgentPreflight() {
     }
@@ -139,32 +187,43 @@ public final class ManagedAgentPreflight {
     }
 
     static List<Check> checks(String[] args) {
+        return checks(args, ApplicationContextFactory.DEFAULT
+                .createEnvironment(WebApplicationType.SERVLET));
+    }
+
+    /**
+     * The checks against {@code base}, prepared as the server prepares its
+     * environment; a test may replace its process variables.
+     */
+    static List<Check> checks(String[] args, ConfigurableEnvironment base) {
         List<Check> checks = new ArrayList<>();
         // While the server runs it holds its ports and its Runtime workers.
         boolean online = online(args, checks);
-        ConfigurableEnvironment environment = baseEnvironment(args);
-        List<String> locations = configLocations(args, environment);
-        loadConfiguration(environment, locations, checks);
+        Prepared prepared = prepare(args, base, checks);
+        ConfigurableEnvironment environment = prepared.environment();
         ManagedAgentProperties properties = bind(environment, checks);
         checks.add(javaCheck());
-        AccessCheck access = serviceUserCheck(properties.getServiceUser(),
-                System.getProperty("user.name", ""), ServiceAccount::lookup);
+        String runner = runner();
+        AccessCheck access = serviceUserCheck(properties.getServiceUser(), runner,
+                ServiceAccount::lookup);
         checks.add(access.check());
-        checks.add(configFileCheck(locations, access.account()));
+        checks.addAll(configChecks(prepared, access.account(), runner));
         checks.add(startupValidationCheck(properties));
         checks.add(keyRingCheck(properties));
-        checks.add(authCheck(environment, properties));
+        checks.add(row("auth", () -> authCheck(environment, properties)));
         checks.add(harnessCheck(properties, distributionQwenCodeVersion()));
-        checks.add(credentialsFileCheck(properties, access.account()));
+        checks.add(credentialsFileCheck(properties, access.account(), runner));
         checks.add(sessionStoreCheck(properties));
         checks.add(toolPathCheck(properties));
         checks.addAll(brokerChecks(properties));
         checks.add(workspaceCheck(properties));
-        String serverAddress = environment.getProperty("server.address", "127.0.0.1");
-        int serverPort = environment.getProperty("server.port", Integer.class,
-                DEFAULT_SERVER_PORT);
-        checks.add(online ? listeningCheck("server", serverAddress, serverPort)
-                : portCheck("server", serverAddress, serverPort));
+        checks.add(row("server-port", () -> {
+            String serverAddress = environment.getProperty("server.address", "127.0.0.1");
+            int serverPort = environment.getProperty("server.port", Integer.class,
+                    DEFAULT_SERVER_PORT);
+            return online ? listeningCheck("server", serverAddress, serverPort)
+                    : portCheck("server", serverAddress, serverPort);
+        }));
         if (properties.getRuntimeBroker().isEnabled()) {
             ManagedAgentProperties.RuntimeBroker broker = properties.getRuntimeBroker();
             checks.add(online ? listeningCheck("broker", broker.getHost(), broker.getPort())
@@ -172,79 +231,210 @@ public final class ManagedAgentPreflight {
         }
         checks.add(workersCheck(properties, () -> ProcessHandle.allProcesses()
                 .collect(Collectors.toList()), online));
-        Check database = databaseCheck(environment);
+        Check database = row("database", () -> databaseCheck(environment));
         checks.add(database);
         checks.add(database.status() == Status.PASS
-                ? capacityCheck(environment)
+                ? row("capacity", () -> capacityCheck(environment))
                 : new Check("capacity", Status.SKIP,
                         "database check did not pass; capacity not measured",
                         null));
         return checks;
     }
 
-    static ConfigurableEnvironment baseEnvironment(String[] args) {
-        StandardEnvironment environment = new StandardEnvironment();
-        if (args.length > 0) {
-            environment.getPropertySources().addFirst(
-                    new SimpleCommandLinePropertySource(args));
-        }
-        return environment;
-    }
-
-    static List<String> configLocations(
-            String[] args, ConfigurableEnvironment environment) {
-        List<String> locations = new ArrayList<>();
-        for (String arg : args) {
-            if (arg.startsWith(CONFIG_LOCATION_ARG)) {
-                addLocations(locations,
-                        arg.substring(CONFIG_LOCATION_ARG.length()));
-            }
-        }
-        if (locations.isEmpty()) {
-            String configured = environment.getProperty(CONFIG_LOCATION_ENV);
-            if (configured != null) {
-                addLocations(locations, configured);
-            }
-        }
-        return locations;
-    }
-
-    private static void addLocations(List<String> locations, String value) {
-        for (String part : value.split(",")) {
-            String trimmed = part.trim();
-            if (!trimmed.isEmpty()) {
-                locations.add(trimmed);
-            }
+    /**
+     * A row that reads the environment, which fails as Spring would where a
+     * setting does not resolve, such as a placeholder with no value and no
+     * default, rather than stop the check before it prints a row.
+     */
+    private static Check row(String name, Supplier<Check> check) {
+        try {
+            return check.get();
+        } catch (RuntimeException error) {
+            return new Check(name, Status.FAIL, rootMessage(error),
+                    "correct the configured value");
         }
     }
 
-    static void loadConfiguration(
-            ConfigurableEnvironment environment, List<String> locations,
+    /**
+     * The environment the checks read, and either the configuration files it
+     * holds from the file system, with the property each config tree value
+     * file holds, those of them Spring also reads as configuration files and
+     * the directories this process cannot look in for more, or why Spring
+     * would refuse to start.
+     */
+    record Prepared(ConfigurableEnvironment environment, List<Path> files,
+            Map<Path, String> values, Map<Path, Set<Format>> configurations,
+            List<ServerEnvironment.Hidden> hidden, ServerEnvironment.Failure failure,
+            String unlisted) {
+        Prepared(ConfigurableEnvironment environment, List<Path> files,
+                Map<Path, String> values, Map<Path, Set<Format>> configurations,
+                List<ServerEnvironment.Hidden> hidden, ServerEnvironment.Failure failure) {
+            this(environment, files, values, configurations, hidden, failure, null);
+        }
+    }
+
+    /**
+     * The environment as the server prepares it. When Spring would refuse to
+     * start, as for a named location that does not exist or a file it cannot
+     * read, the failure is kept for the config row, which names an account
+     * once the service-user row has found it, and the other rows read the
+     * arguments, the process environment and the packaged defaults. Where
+     * Spring prepared it but the files it read cannot be told apart, as for
+     * a location value this check cannot resolve, why is kept instead.
+     */
+    static Prepared prepare(String[] args, ConfigurableEnvironment base,
             List<Check> checks) {
-        YamlPropertySourceLoader loader = new YamlPropertySourceLoader();
-        for (int index = locations.size() - 1; index >= 0; index--) {
-            String location = locations.get(index);
-            boolean optional = location.startsWith(OPTIONAL_PREFIX);
-            String path = optional
-                    ? location.substring(OPTIONAL_PREFIX.length()) : location;
-            if (path.startsWith(FILE_PREFIX)) {
-                path = path.substring(FILE_PREFIX.length());
-            }
-            Resource resource = new FileSystemResource(path);
-            if (!resource.exists()) {
-                if (!optional) {
-                    checks.add(new Check("config", Status.FAIL,
-                            path + " does not exist",
-                            "copy config/application.example.yml to "
-                                    + "config/application.yml"));
-                }
-                continue;
-            }
-            addYaml(loader, environment, resource, "external-" + index,
-                    checks);
+        ConfigurableEnvironment environment;
+        try {
+            environment = ServerEnvironment.prepare(args, base);
+        } catch (RuntimeException error) {
+            ServerEnvironment.Failure failure = ServerEnvironment.failure(error, base);
+            // Spring adds the files' sources once it has read them all, so
+            // base holds what the arguments and the process environment set.
+            loadDefaults(base, checks);
+            return new Prepared(base, List.of(), Map.of(), Map.of(), List.of(), failure);
         }
-        addYaml(loader, environment, new ClassPathResource("application.yml"),
-                "defaults", checks);
+        try {
+            return new Prepared(environment, ServerEnvironment.files(environment),
+                    ServerEnvironment.valueFiles(environment),
+                    ServerEnvironment.configurationFiles(environment),
+                    ServerEnvironment.hidden(environment), null);
+        } catch (RuntimeException unlisted) {
+            // The server would start; only this check's account of its files
+            // failed, so it keeps the files the property sources name.
+            return new Prepared(environment, ServerEnvironment.sourceFiles(environment),
+                    ServerEnvironment.valueFiles(environment),
+                    ServerEnvironment.sourceConfigurations(environment), List.of(), null,
+                    rootMessage(unlisted));
+        }
+    }
+
+    /**
+     * The config rows: why the server would not start with its
+     * configuration, or one row for each file it reads and for each
+     * directory it may read one in that this process cannot look in.
+     */
+    static List<Check> configChecks(Prepared prepared, ServiceAccount account,
+            String runner) {
+        if (prepared.failure() != null) {
+            return List.of(configFailureCheck(prepared.failure(), account, runner));
+        }
+        if (prepared.unlisted() != null) {
+            List<Check> checks = new ArrayList<>();
+            if (!prepared.files().isEmpty()) {
+                checks.addAll(configFileChecks(prepared.files(), account, runner,
+                        prepared.values(), prepared.configurations()));
+            }
+            checks.add(new Check("config", Status.WARN,
+                    "cannot tell which other files the server reads: " + prepared.unlisted(),
+                    "check the configuration files by hand, and the location values"
+                            + " that name them"));
+            return checks;
+        }
+        List<Check> hidden = new ArrayList<>();
+        for (ServerEnvironment.Hidden directory : prepared.hidden()) {
+            Check check = hiddenCheck(directory, account, runner);
+            if (check != null) {
+                hidden.add(check);
+            }
+        }
+        List<Check> checks = new ArrayList<>();
+        // A directory it cannot look in is no sign that the server reads no file.
+        if (!prepared.files().isEmpty() || hidden.isEmpty()) {
+            checks.addAll(configFileChecks(prepared.files(), account, runner,
+                    prepared.values(), prepared.configurations()));
+        }
+        checks.addAll(hidden);
+        return checks;
+    }
+
+    /**
+     * The row for a directory the server looks in for a configuration file
+     * that this process cannot look in, which then cannot check what the
+     * server reads; or null where the service account cannot either, as
+     * Spring then reads nothing there, and without one, as this process then
+     * stands in for it.
+     */
+    static Check hiddenCheck(ServerEnvironment.Hidden hidden, ServiceAccount account,
+            String runner) {
+        if (account == null) {
+            return null;
+        }
+        Path directory = hidden.directory();
+        try {
+            if (!account.canEnter(directory)
+                    || hidden.listed() && !account.canRead(directory)) {
+                return null;
+            }
+        } catch (AccessDeniedException | UnsupportedOperationException error) {
+            // This process cannot look along the path; the account may.
+        } catch (IOException error) {
+            // A loop of symbolic links the kernel refuses the account too, or
+            // gone: Spring reads nothing there.
+            return null;
+        }
+        return new Check("config", Status.FAIL,
+                directory + " cannot be " + (hidden.listed() ? "listed" : "entered") + " by "
+                        + runner + ", which runs this check, and the server may read a"
+                        + " configuration file in it",
+                runAs(account));
+    }
+
+    // The account the check sees the server's files as.
+    private static String runAs(ServiceAccount account) {
+        return "run --check as " + account.name()
+                + (account.superuser() ? "" : " or as root");
+    }
+
+    /** The account this process runs as, which the rows name. */
+    static String runner() {
+        return System.getProperty("user.name", "");
+    }
+
+    // A file the service account may read but this process cannot, which
+    // then cannot check what the server reads.
+    private static Check notReadableByRunner(String row, String path, String runner,
+            ServiceAccount account) {
+        return new Check(row, Status.FAIL,
+                path + " is not readable by " + runner + ", which runs this check",
+                runAs(account));
+    }
+
+    /**
+     * The row for a configuration Spring refused. A file this process cannot
+     * read is named with the account that must read it: the service account,
+     * when that cannot read it either, and otherwise this process, which
+     * then cannot check what the server reads.
+     */
+    static Check configFailureCheck(ServerEnvironment.Failure failure,
+            ServiceAccount account, String runner) {
+        Path file = failure.unreadable();
+        if (file == null || account == null) {
+            return new Check("config", Status.FAIL, failure.detail(), failure.fix());
+        }
+        String path = file.toString();
+        boolean serverReads;
+        try {
+            serverReads = account.canRead(file);
+        } catch (AccessDeniedException | UnsupportedOperationException error) {
+            // This process cannot look along the path; the account may.
+            serverReads = true;
+        } catch (IOException error) {
+            // A loop of symbolic links the kernel refuses the account too.
+            serverReads = false;
+        }
+        return serverReads
+                ? notReadableByRunner("config", path, runner, account)
+                : new Check("config", Status.FAIL,
+                        path + " is not readable by " + account.name(),
+                        unreadableFix(account.name(), path));
+    }
+
+    /** Adds the packaged defaults, below what the environment holds. */
+    static void loadDefaults(ConfigurableEnvironment environment,
+            List<Check> checks) {
+        addYaml(new YamlPropertySourceLoader(), environment,
+                new ClassPathResource("application.yml"), "defaults", checks);
     }
 
     private static void addYaml(
@@ -337,69 +527,545 @@ public final class ManagedAgentPreflight {
                 null), account.get());
     }
 
+    // Whether the service account can read a file, as far as this process
+    // can tell.
+    private enum Access {
+        READABLE, UNREADABLE,
+        // This process cannot look along the path, so cannot tell.
+        UNKNOWN
+    }
+
     // The server reads these files as its service account, which may not be
     // the account running preflight.
-    private static boolean readable(Path file, ServiceAccount account) {
+    private static Access access(Path file, ServiceAccount account) {
         if (account == null) {
-            return Files.isReadable(file);
+            return Files.isReadable(file) ? Access.READABLE : Access.UNREADABLE;
         }
         try {
-            return account.canRead(file);
+            return account.canRead(file) ? Access.READABLE : Access.UNREADABLE;
         } catch (UnsupportedOperationException error) {
-            return Files.isReadable(file);
+            return Files.isReadable(file) ? Access.READABLE : Access.UNREADABLE;
+        } catch (AccessDeniedException hidden) {
+            return Access.UNKNOWN;
         } catch (IOException error) {
-            return false;
+            // Missing, or a loop of symbolic links the kernel would refuse too.
+            return Access.UNREADABLE;
         }
     }
 
-    static Check configFileCheck(List<String> locations) {
-        return configFileCheck(locations, null);
-    }
-
-    static Check configFileCheck(List<String> locations,
+    /**
+     * One row for each configuration file the server reads, which Spring
+     * found at a location named or at one of its defaults, such as
+     * ./config/application.yml in the working directory.
+     */
+    static List<Check> configFileChecks(List<Path> files,
             ServiceAccount account) {
-        if (locations.isEmpty()) {
-            return new Check("config", Status.WARN,
-                    "no external configuration; environment only",
-                    "create config/application.yml for the credential key ring");
+        Map<Path, Set<Format>> configurations = new HashMap<>();
+        for (Path file : files) {
+            configurations.put(file, Format.named(String.valueOf(file.getFileName())));
         }
-        String location = locations.get(0);
-        boolean optional = location.startsWith(OPTIONAL_PREFIX);
-        String path = optional
-                ? location.substring(OPTIONAL_PREFIX.length()) : location;
-        if (path.startsWith(FILE_PREFIX)) {
-            path = path.substring(FILE_PREFIX.length());
+        return configFileChecks(files, account, runner(), Map.of(), configurations);
+    }
+
+    /**
+     * As above, with the account this process runs as, the property each
+     * config tree value file holds, and the files Spring reads as
+     * configuration files, which a value file may be, each with the formats
+     * Spring reads it in.
+     */
+    static List<Check> configFileChecks(List<Path> files, ServiceAccount account,
+            String runner, Map<Path, String> values, Map<Path, Set<Format>> configurations) {
+        if (files.isEmpty()) {
+            return List.of(new Check("config", Status.WARN,
+                    "no configuration file; packaged defaults and the"
+                            + " environment only",
+                    "create a configuration file at a location Spring reads, such as"
+                            + " config/application.yml, for the credential key ring"));
         }
-        Path file = Path.of(path);
-        if (!Files.exists(file) && optional) {
-            return new Check("config", Status.WARN,
-                    path + " does not exist (optional)", null);
+        List<Check> checks = new ArrayList<>();
+        for (Path file : files) {
+            checks.add(configFileCheck(file, account, runner, values.get(file),
+                    configurations.getOrDefault(file, Set.of())));
         }
-        if (!readable(file, account)) {
+        return checks;
+    }
+
+    static Check configFileCheck(Path file, ServiceAccount account) {
+        return configFileCheck(file, account, runner(), null,
+                Format.named(String.valueOf(file.getFileName())));
+    }
+
+    /**
+     * As above, with the account this process runs as, for a config tree
+     * value file that holds this property's value, or null for none, and the
+     * formats Spring reads the file in as a
+     * configuration file, none where it reads it as none. One path can be
+     * both, as application.yml is under a config tree imported over config/;
+     * and the format is the one a location names, as
+     * file:app.yml[.properties] names .properties.
+     */
+    static Check configFileCheck(Path file, ServiceAccount account, String runner,
+            String property, Set<Format> formats) {
+        String path = file.toString();
+        Access access = access(file, account);
+        if (access == Access.UNKNOWN) {
+            return notReadableByRunner("config", path, runner, account);
+        }
+        if (access == Access.UNREADABLE) {
             return account == null
                     ? new Check("config", Status.FAIL,
                             path + " is not readable", "chmod 600 " + path)
                     : new Check("config", Status.FAIL,
                             path + " is not readable by " + account.name(),
-                            unreadableFix(account, path));
+                            unreadableFix(account.name(), path));
         }
-        String content;
-        try {
-            content = Files.readString(file, StandardCharsets.UTF_8);
-        } catch (IOException error) {
-            return new Check("config", Status.WARN,
-                    path + ": cannot inspect permissions", null);
+        boolean secrets;
+        if (property != null && secretProperty(property)) {
+            // The property's name tells; its value need not be read.
+            secrets = true;
+        } else {
+            try {
+                secrets = holdsSecret(Files.readAllBytes(file), formats,
+                        String.valueOf(file.getFileName()));
+            } catch (AccessDeniedException denied) {
+                // The account can read it, by its modes, but this process
+                // cannot, so it cannot tell what the file holds.
+                return account == null
+                        ? new Check("config", Status.WARN,
+                                path + ": cannot inspect permissions", null)
+                        : notReadableByRunner("config", path, runner, account);
+            } catch (IOException error) {
+                return new Check("config", Status.WARN,
+                        path + ": cannot inspect permissions", null);
+            }
         }
-        boolean secrets = content.contains("credential-key")
-                || content.contains("signing-key")
-                || content.contains("password");
         return secrets ? sharedSecretFileCheck("config", file, path)
                 : new Check("config", Status.PASS, path, null);
     }
 
-    private static String unreadableFix(ServiceAccount account, String path) {
-        return "chown " + account.name() + " " + path + ", chmod 600 " + path
-                + ", and let " + account.name()
+    /**
+     * Whether a file holds a secret, by secretProperty's one rule, as Spring
+     * reads it in each of these formats: a value holds one anywhere in it,
+     * as a JDBC URL's ?password= or a URL's user information does; a key it
+     * declares names one, or a value it declares holds one, in any of its
+     * documents, which a profile may leave inactive; or a comment would,
+     * uncommented. Read as its name says too, where a hint named another
+     * loader: what Spring does not bind is still in the file. A config tree
+     * value file Spring reads as no configuration file holds a value alone,
+     * whatever its name.
+     */
+    private static boolean holdsSecret(byte[] bytes, Set<Format> formats, String name) {
+        if (formats.isEmpty()) {
+            return valueSecret(new String(bytes, utf16(bytes) ? StandardCharsets.UTF_16
+                    : StandardCharsets.ISO_8859_1));
+        }
+        for (Format format : formats) {
+            if (holdsSecret(bytes, format)) {
+                return true;
+            }
+        }
+        for (Format named : Format.named(name)) {
+            if (!formats.contains(named) && holdsSecret(bytes, named)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** As above, in one format. */
+    private static boolean holdsSecret(byte[] bytes, Format format) {
+        String content = text(bytes, format);
+        if (valueSecret(content) || (format == Format.YAML ? yamlSecret(content, false)
+                : declaresSecret(format, bytes))) {
+            return true;
+        }
+        for (String comment : comments(content, format)) {
+            if (commentSecret(format, comment)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether text, read as Spring reads a file in this format, declares a
+     * key that names a secret or a value that holds one, in any document:
+     * .properties or XML, as YAML is by yamlSecret.
+     */
+    private static boolean declaresSecret(Format format, byte[] bytes) {
+        return declaresSecret(format, bytes, (key, value) -> true);
+    }
+
+    /** As above, of the keys this admits with their values. */
+    private static boolean declaresSecret(Format format, byte[] bytes,
+            BiPredicate<String, String> admitted) {
+        PropertySourceLoader loader = new PropertiesPropertySourceLoader();
+        // That loader reads a resource whose name ends in .xml as XML.
+        Resource resource = new ByteArrayResource(bytes) {
+            @Override
+            public String getFilename() {
+                return format == Format.XML ? "read.xml" : null;
+            }
+        };
+        try {
+            for (PropertySource<?> source : loader.load("read", resource)) {
+                if (source instanceof EnumerablePropertySource<?> declared) {
+                    for (String key : declared.getPropertyNames()) {
+                        Object held = declared.getProperty(key);
+                        if (admitted.test(key, String.valueOf(held)) && secretProperty(key)
+                                || held != null && valueSecret(held.toString())) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        } catch (IOException | RuntimeException error) {
+            // What does not parse declares no key; its comments still tell.
+        }
+        return false;
+    }
+
+    /**
+     * Whether a comment would set a secret uncommented: read in the file's
+     * format, its entries one by one in XML, where a comment need be no
+     * document; or, in YAML and .properties, as the key and value line both
+     * write, as "# spring.datasource.password=x" is in YAML. Prose is no
+     * setting: a key with white space in it in YAML, as "Database password:"
+     * is, and in .properties, which takes white space as a separator, a key
+     * white space ends but for one with a dot in it and a one-word value,
+     * as "# spring.datasource.password hunter2" has and
+     * "# Password rotation is yearly" has not.
+     */
+    private static boolean commentSecret(Format format, String comment) {
+        if (format == Format.XML) {
+            if (declaresSecret(format, (XML_PROPERTIES + "<properties>" + comment
+                    + "</properties>").getBytes(StandardCharsets.UTF_8))) {
+                return true;
+            }
+            Matcher entry = XML_ENTRY.matcher(comment);
+            while (entry.find()) {
+                if (secretProperty(entry.group(1)) || valueSecret(entry.group(2))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (format == Format.YAML ? yamlSecret(comment, true)
+                : declaresSecret(format, comment.getBytes(StandardCharsets.ISO_8859_1),
+                        (key, value) -> key.contains(".") && !value.isBlank()
+                                && value.strip().chars().noneMatch(Character::isWhitespace))) {
+            return true;
+        }
+        Matcher setting = WRITTEN_SETTING.matcher(comment);
+        return setting.matches()
+                && (secretProperty(setting.group(1)) || valueSecret(setting.group(2)));
+    }
+
+    /**
+     * Whether YAML names a secret, by its keys and values, in any document;
+     * in prose, but a key with white space in it. It is read as Spring's
+     * loader reads it, its nodes composed and walked rather than built.
+     */
+    private static boolean yamlSecret(String text, boolean prose) {
+        try {
+            for (Node node : ServerEnvironment.yaml(false).composeAll(new StringReader(text))) {
+                if (new YamlWalk(prose).secret(node)) {
+                    return true;
+                }
+            }
+        } catch (RuntimeException unreadable) {
+            // YAML that does not parse declares nothing.
+        }
+        return false;
+    }
+
+    /**
+     * One walk over a document's nodes, which aliases share. A key is judged
+     * wherever a map holds it, a set's members and pairs' keys among them,
+     * which Spring binds as values, and the keys a merge adds where the map
+     * they come from is: a superset of the names Spring binds. Each node is
+     * walked once, with a stack rather than by recursion. Which nodes lead to
+     * a secret's name is found once for the document, and a node found to
+     * bind nothing is kept, while a value found to bind ends the walk, as its
+     * key named a secret; so neither a chain of aliases nor one that holds
+     * itself, nor many keys or values sharing one, costs more than its nodes
+     * a few times.
+     */
+    private static final class YamlWalk {
+        private final boolean prose;
+        private final Set<Node> seen = identities();
+        private final Set<Node> unbound = identities();
+        private Node root;
+        private Set<Node> naming;
+
+        YamlWalk(boolean prose) {
+            this.prose = prose;
+        }
+
+        boolean secret(Node root) {
+            this.root = root;
+            Deque<Node> pending = new ArrayDeque<>();
+            pending.push(root);
+            while (!pending.isEmpty()) {
+                Node node = pending.pop();
+                if (!seen.add(node)) {
+                    continue;
+                }
+                if (node instanceof ScalarNode scalar) {
+                    if (valueSecret(scalar.getValue())) {
+                        return true;
+                    }
+                } else if (node instanceof SequenceNode sequence) {
+                    sequence.getValue().forEach(pending::push);
+                } else if (node instanceof MappingNode mapping) {
+                    for (NodeTuple tuple : mapping.getValue()) {
+                        pending.push(tuple.getKeyNode());
+                        pending.push(tuple.getValueNode());
+                        if (names(tuple.getKeyNode()) && binds(tuple.getValueNode())) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        /**
+         * Whether a key names a secret: a string, or anything in a collection
+         * Spring writes into the property's name; in prose, not one with
+         * white space in it. A merge key names nothing, being no string.
+         */
+        private boolean names(Node key) {
+            if (key instanceof ScalarNode scalar) {
+                return name(scalar);
+            }
+            if (naming == null) {
+                naming = naming();
+            }
+            return naming.contains(key);
+        }
+
+        /**
+         * The document's nodes a secret's name can be reached from: the
+         * names, then each node that holds one, as a parent of one found.
+         */
+        private Set<Node> naming() {
+            Map<Node, List<Node>> parents = new IdentityHashMap<>();
+            Set<Node> found = identities();
+            Set<Node> visited = identities();
+            Deque<Node> pending = new ArrayDeque<>();
+            pending.push(root);
+            while (!pending.isEmpty()) {
+                Node node = pending.pop();
+                if (!visited.add(node)) {
+                    continue;
+                }
+                List<Node> children = new ArrayList<>();
+                if (node instanceof ScalarNode scalar) {
+                    if (name(scalar)) {
+                        found.add(scalar);
+                    }
+                } else if (node instanceof SequenceNode sequence) {
+                    children.addAll(sequence.getValue());
+                } else if (node instanceof MappingNode mapping) {
+                    for (NodeTuple tuple : mapping.getValue()) {
+                        children.add(tuple.getKeyNode());
+                        children.add(tuple.getValueNode());
+                    }
+                }
+                for (Node child : children) {
+                    parents.computeIfAbsent(child, each -> new ArrayList<>()).add(node);
+                    pending.push(child);
+                }
+            }
+            Deque<Node> spread = new ArrayDeque<>(found);
+            while (!spread.isEmpty()) {
+                for (Node parent : parents.getOrDefault(spread.pop(), List.of())) {
+                    if (found.add(parent)) {
+                        spread.push(parent);
+                    }
+                }
+            }
+            return found;
+        }
+
+        private boolean name(ScalarNode scalar) {
+            return Tag.STR.equals(scalar.getTag())
+                    && !(prose && scalar.getValue().chars().anyMatch(Character::isWhitespace))
+                    && secretProperty(scalar.getValue());
+        }
+
+        /**
+         * Whether a value binds a property, as Spring flattens it: a scalar,
+         * an empty list, a set or pairs do; a map or list does where something
+         * in it does, so {} and [{}] bind nothing, nor does a merge of nothing.
+         */
+        private boolean binds(Node value) {
+            Set<Node> visited = identities();
+            Deque<Node> pending = new ArrayDeque<>();
+            pending.push(value);
+            while (!pending.isEmpty()) {
+                Node node = pending.pop();
+                if (unbound.contains(node) || !visited.add(node)) {
+                    continue;
+                }
+                if (node instanceof MappingNode mapping && !Tag.SET.equals(mapping.getTag())) {
+                    for (NodeTuple tuple : mapping.getValue()) {
+                        // A merge adds the entries of what it names, not a value of its own.
+                        if (Tag.MERGE.equals(tuple.getKeyNode().getTag())
+                                && tuple.getValueNode() instanceof SequenceNode sources) {
+                            sources.getValue().forEach(pending::push);
+                        } else {
+                            pending.push(tuple.getValueNode());
+                        }
+                    }
+                } else if (node instanceof SequenceNode sequence && !sequence.getValue().isEmpty()
+                        && !Tag.PAIRS.equals(sequence.getTag())) {
+                    sequence.getValue().forEach(pending::push);
+                } else {
+                    return true;
+                }
+            }
+            unbound.addAll(visited);
+            return false;
+        }
+    }
+
+    private static Set<Node> identities() {
+        return Collections.newSetFromMap(new IdentityHashMap<>());
+    }
+
+    /**
+     * The comments of a text as its format reads them, each without its
+     * markers: in YAML, from a # at a line's start or after white space to
+     * the next, which a quoted or block scalar may also hold, which only adds
+     * text to judge; in .properties, a line that starts with # or !, or with
+     * one escaped, which Spring reads as one too, but one that a value
+     * continues onto;
+     * and the line after one that ends in a backslash, which Spring may read
+     * into it; in XML, what lies between <!-- and -->.
+     */
+    private static List<String> comments(String text, Format format) {
+        List<String> comments = new ArrayList<>();
+        if (format == Format.XML) {
+            Matcher comment = XML_COMMENT.matcher(text);
+            while (comment.find()) {
+                comments.add(comment.group(1));
+            }
+            return comments;
+        }
+        if (format == Format.YAML) {
+            for (String line : text.split("\\R")) {
+                int from = -1;
+                for (int at = line.indexOf('#'); at >= 0; at = line.indexOf('#', at + 1)) {
+                    if (at == 0 || Character.isWhitespace(line.charAt(at - 1))) {
+                        if (from >= 0) {
+                            comments.add(COMMENT_START.matcher(line.substring(from, at))
+                                    .replaceFirst(""));
+                        }
+                        from = at;
+                    }
+                }
+                if (from >= 0) {
+                    comments.add(COMMENT_START.matcher(line.substring(from)).replaceFirst(""));
+                }
+            }
+            return comments;
+        }
+        boolean continued = false;
+        boolean swallowed = false;
+        for (String line : text.split("\r\n|\r|\n", -1)) {
+            String start = INDENT.matcher(line).replaceFirst("");
+            start = ESCAPED_MARKER.matcher(start).replaceFirst("#");
+            // An odd run of backslashes at the end escapes the line break.
+            int backslashes = 0;
+            while (backslashes < line.length()
+                    && line.charAt(line.length() - 1 - backslashes) == '\\') {
+                backslashes++;
+            }
+            boolean odd = backslashes % 2 == 1;
+            if (swallowed || !continued && (start.startsWith("#") || start.startsWith("!"))) {
+                comments.add(COMMENT_START.matcher(start).replaceFirst(""));
+                swallowed = odd;
+                continued = false;
+                continue;
+            }
+            // A backslash alone where a key would start escapes the break
+            // before any value, so the next line starts afresh.
+            continued = odd && (continued || !start.equals("\\"));
+        }
+        return comments;
+    }
+
+    /**
+     * Whether a value holds a secret: a parameter named as a secret
+     * property, or the password of a URL's user information.
+     */
+    private static boolean valueSecret(String value) {
+        if (URL_PASSWORD.matcher(value).find()) {
+            return true;
+        }
+        Matcher parameter = VALUE_PARAMETER.matcher(value);
+        while (parameter.find()) {
+            if (secretProperty(parameter.group(1))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether a property holds a secret, as the configuration reference
+     * marks them: a password, token or key, or one of a map of keys, such as
+     * previous-credential-keys.<id>. A path to a file that holds one, such as
+     * kubernetes-token-file, and credential-key-id hold none.
+     */
+    static boolean secretProperty(String property) {
+        for (String element : property.split("[./\\[\\]]+")) {
+            // Spring matches names ignoring case, dashes and underscores, so
+            // credential-key, credentialKey, credential_key and credentialkey
+            // are one name, and each ends in key.
+            String lower = element.toLowerCase(Locale.ROOT);
+            if (SECRET_SUFFIXES.stream().anyMatch(lower::endsWith)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // As Spring decodes a file: YAML as UTF-8, or as its byte order mark
+    // says, with SnakeYAML's own reader; .properties as ISO-8859-1; XML as
+    // its declaration says, whose comment markers are ASCII in all but
+    // UTF-16. Bytes YAML cannot decode Spring would not read, nor start on.
+    // A .properties file an editor marked, Spring reads as ISO-8859-1
+    // anyway: a UTF-8 mark into its first key, UTF-16 throughout. Its
+    // comments are found as the editor wrote them.
+    private static String text(byte[] bytes, Format format) {
+        if (format == Format.YAML) {
+            StringWriter text = new StringWriter();
+            try (Reader reader = new UnicodeReader(new ByteArrayInputStream(bytes))) {
+                reader.transferTo(text);
+                return text.toString();
+            } catch (IOException | RuntimeException undecodable) {
+                return new String(bytes, StandardCharsets.ISO_8859_1);
+            }
+        }
+        boolean utf16 = utf16(bytes);
+        int start = format == Format.PROPERTIES && !utf16 && bytes.length >= 3
+                && (bytes[0] & 0xff) == 0xef && (bytes[1] & 0xff) == 0xbb
+                && (bytes[2] & 0xff) == 0xbf ? 3 : 0;
+        return new String(bytes, start, bytes.length - start,
+                utf16 ? StandardCharsets.UTF_16 : StandardCharsets.ISO_8859_1);
+    }
+
+    private static boolean utf16(byte[] bytes) {
+        return bytes.length >= 2 && ((bytes[0] & 0xff) == 0xfe && (bytes[1] & 0xff) == 0xff
+                || (bytes[0] & 0xff) == 0xff && (bytes[1] & 0xff) == 0xfe);
+    }
+
+    static String unreadableFix(String account, String path) {
+        return "chown " + account + " " + path + ", chmod 600 " + path
+                + ", and let " + account
                 + " enter every directory on its path, following symbolic links";
     }
 
@@ -505,6 +1171,11 @@ public final class ManagedAgentPreflight {
 
     static Check credentialsFileCheck(ManagedAgentProperties properties,
             ServiceAccount account) {
+        return credentialsFileCheck(properties, account, runner());
+    }
+
+    static Check credentialsFileCheck(ManagedAgentProperties properties,
+            ServiceAccount account, String runner) {
         ManagedAgentProperties.Harness harness = properties.getHarness();
         if (!harness.isEnabled()) {
             return new Check("credentials", Status.SKIP, "disabled", null);
@@ -525,7 +1196,7 @@ public final class ManagedAgentPreflight {
                     file + ": cannot inspect permissions", null);
         }
         // The server reads the file as its service account at startup.
-        if (!readable(path, account)) {
+        if (access(path, account) == Access.UNREADABLE) {
             return account == null
                     ? new Check("credentials", Status.FAIL,
                             file + " is not readable",
@@ -533,7 +1204,13 @@ public final class ManagedAgentPreflight {
                                     + file)
                     : new Check("credentials", Status.FAIL,
                             file + " is not readable by " + account.name(),
-                            unreadableFix(account, file));
+                            unreadableFix(account.name(), file));
+        }
+        // The startup validation reads it as this process, so say why that
+        // fails where the account may read it: this process cannot read it,
+        // or cannot even look along its path to tell.
+        if (account != null && !Files.isReadable(path)) {
+            return notReadableByRunner("credentials", file, runner, account);
         }
         return sharedSecretFileCheck("credentials", path, file);
     }
@@ -769,7 +1446,7 @@ public final class ManagedAgentPreflight {
     // A Harness string reaches a root-run report, so only a version's shape.
     private static String qwenCodeVersion(String body) {
         try {
-            JsonNode version = new ObjectMapper().readTree(body)
+            JsonNode version = JSON.readTree(body)
                     .path("qwenCodeVersion");
             return version.isTextual()
                     && QWEN_CODE_VERSION.matcher(version.asText()).matches()
@@ -790,7 +1467,7 @@ public final class ManagedAgentPreflight {
 
     static String manifestQwenCodeVersion(Path manifest) {
         try {
-            JsonNode version = new ObjectMapper().readTree(manifest.toFile())
+            JsonNode version = JSON.readTree(manifest.toFile())
                     .path("compatibility").path("qwenCodeVersion");
             return version.isTextual() ? version.asText() : null;
         } catch (IOException | RuntimeException error) {
@@ -1633,7 +2310,7 @@ public final class ManagedAgentPreflight {
 
     static String expectedSchemaVersion(Path manifest) {
         try {
-            JsonNode root = new ObjectMapper().readTree(manifest.toFile());
+            JsonNode root = JSON.readTree(manifest.toFile());
             JsonNode value = root.path("compatibility")
                     .path("databaseSchema").path("latestMigrationVersion");
             return value.isTextual() ? value.asText() : null;
@@ -1690,7 +2367,8 @@ public final class ManagedAgentPreflight {
     }
 
     private static void print(List<Check> checks) {
-        System.out.println("Managed Agent preflight");
+        // Relative locations, Spring Boot's defaults among them, are read here.
+        System.out.println("Managed Agent preflight in " + Path.of("").toAbsolutePath());
         System.out.printf("%-6s %-14s %s%n", "STATUS", "CHECK", "DETAIL");
         for (Check check : checks) {
             System.out.printf("%-6s %-14s %s%n",
@@ -1706,13 +2384,6 @@ public final class ManagedAgentPreflight {
                 .filter(check -> check.status() == Status.WARN).count();
         System.out.printf("%d check(s), %d warning(s), %d failure(s)%n",
                 checks.size(), warnings, failures);
-    }
-
-    static boolean isLoopback(String address) {
-        return StringUtils.isBlank(address)
-                || "127.0.0.1".equals(address)
-                || "::1".equals(address)
-                || "localhost".equalsIgnoreCase(address);
     }
 
     static boolean isDigest(String value) {

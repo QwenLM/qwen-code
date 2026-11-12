@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -62,8 +63,8 @@ final class WorkspaceRecoveryReader {
     JsonNode resource(JsonNode source, JsonNode ref) {
         validateRef(ref);
         JsonNode head = head(source);
-        String sessionScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(text(head, "tenantId"), text(head, "sessionId"));
-        String resourceKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(sessionScope, text(ref, "resourceId"));
+        String sessionScope = ManagedSessionStore.sessionScopeKey(text(head, "tenantId"), text(head, "sessionId"));
+        String resourceKey = ManagedSessionStore.resourceKey(sessionScope, text(ref, "resourceId"));
         var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ? AND tenant_id = ?"
                 + " AND workspace_id = ? AND session_id = ? AND resource_id = ?",
                 resourceKey, sessionScope, text(head, "tenantId"), text(head, "workspaceId"), text(head, "sessionId"), text(ref, "resourceId"));
@@ -138,7 +139,7 @@ final class WorkspaceRecoveryReader {
         JsonNode head = head(source);
         var rows = WorkspaceOperations.rows(jdbc, "SELECT publication_id, slot_key FROM ma_resource"
                 + " WHERE resource_key = ? AND scope_key = ? AND resource_id = ?",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(text(head, "tenantId"), text(head, "sessionId")), text(ref, "resourceId")),
+                ManagedSessionStore.resourceKey(ManagedSessionStore.sessionScopeKey(text(head, "tenantId"), text(head, "sessionId")), text(ref, "resourceId")),
                 scope(head), text(ref, "resourceId"));
         check(rows.size() == 1, "resource_missing");
         var row = rows.getFirst();

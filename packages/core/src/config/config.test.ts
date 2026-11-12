@@ -76,7 +76,8 @@ import {
   resetPreloadedContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
-import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
+import { DEFAULT_TOKEN_LIMIT, tokenLimit } from '../core/tokenLimits.js';
+import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { LlmClient } from '../core/client.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { buildSessionAgentToolConfig } from '../agents/workspace-agents/capability.js';
@@ -126,6 +127,7 @@ import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-stat
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
+import { resolveModelConfig } from '../models/modelConfigResolver.js';
 
 /**
  * A settled registration for the shared record, the shape
@@ -317,6 +319,10 @@ vi.mock('../hooks/index.js', () => {
   const HookSystemMock = vi.fn();
   HookSystemMock.prototype.runtimeId = 'test-hook-runtime';
   HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
+  HookSystemMock.prototype.close = vi.fn().mockResolvedValue(undefined);
+  HookSystemMock.prototype.refreshFileWatchingForWorkingDirectory = vi
+    .fn()
+    .mockResolvedValue(undefined);
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.isManaged = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
@@ -1201,6 +1207,7 @@ describe('Server Config (config.ts)', () => {
 
     const subscriptionConfig = async () => {
       const config = makeConfig({
+        cliVersion: '0.0.0-test',
         model: 'qwen3.8-max',
         generationConfig: { reasoning: { effort: 'high' } },
         modelProvidersConfig: { openai: [{ id: 'other-model' }] },
@@ -1209,22 +1216,148 @@ describe('Server Config (config.ts)', () => {
       return config;
     };
 
+    it.each([
+      ['old-project-model', 'qwen3.8-flash', 'qwen3.8-flash'],
+      ['qwen3.8-max', 'qwen3.8-flash', 'qwen3.8-max'],
+      ['old-project-model', 'removed-user-model', undefined],
+    ])(
+      'resolves startup model %s with saved user fallback %s',
+      async (projectModel, fallback, expectedModel) => {
+        const config = makeConfig({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: projectModel,
+        });
+        const refresh = config.refreshAuth(
+          AuthType.QWEN_SUBSCRIPTION,
+          true,
+          fallback,
+        );
+        if (expectedModel) {
+          await refresh;
+          expect(config.getContentGeneratorConfig()?.model).toBe(expectedModel);
+          expect(config.getWarnings()).toEqual([]);
+        } else {
+          await expect(refresh).rejects.toThrow(
+            `The selected model, ${projectModel}, is no longer available. Run /model to choose another model.`,
+          );
+          expect(config.getModel()).toBe(projectModel);
+        }
+        expect(
+          QwenSubscriptionSession.prototype.getModels,
+        ).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each([
+      { fallback: undefined, expected: 'qwen4' },
+      { fallback: 'removed-user-model', expected: 'qwen4' },
+      { fallback: 'qwen3.8-flash', expected: 'qwen3.8-flash' },
+    ])(
+      'initializes subscription model $expected with startup fallback $fallback',
+      async ({ fallback, expected }) => {
+        const { config: generationConfig, sources } = resolveModelConfig({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          settings: { model: 'qwen4' },
+          env: {},
+        });
+        const config = makeConfig({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: 'qwen4',
+          generationConfig,
+          generationConfigSources: sources,
+        });
+
+        await config.refreshAuth(
+          AuthType.QWEN_SUBSCRIPTION,
+          true,
+          fallback,
+          true,
+        );
+
+        expect(config.getContentGeneratorConfig()).toMatchObject({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: expected,
+        });
+        expect(
+          config
+            .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
+            .map(({ id }) => id),
+        ).toEqual(['qwen3.8-max', 'qwen3.8-flash']);
+        expect(config.getWarnings()).toEqual([]);
+      },
+    );
+
+    it('initializes an API model when switching from a signed-out subscription', async () => {
+      const config = makeConfig({
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        model: 'qwen3.8-max',
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'api-model',
+              generationConfig: { contextWindowSize: 64000 },
+            },
+          ],
+        },
+      });
+      expect(
+        config.getContentGenerator({ allowUninitialized: true }),
+      ).toBeUndefined();
+
+      await config.switchModel(AuthType.USE_OPENAI, 'api-model', {
+        initializeIfNeeded: true,
+      });
+      expect(
+        config.getContentGenerator({ allowUninitialized: true }),
+      ).toBeDefined();
+      expect(config.getContentGeneratorConfig()).toMatchObject({
+        authType: AuthType.USE_OPENAI,
+        model: 'api-model',
+        contextWindowSize: 64000,
+      });
+    });
+
     it('reuses the same account catalog while rebuilding model capabilities and reasoning', async () => {
+      vi.mocked(
+        QwenSubscriptionSession.prototype.getModels,
+      ).mockResolvedValueOnce({
+        models: ['qwen3.8-max', 'qwen3.8-flash'],
+        modelMetadata: [
+          { id: 'qwen3.8-flash', modalities: {}, contextWindowSize: 262144 },
+        ],
+        cached: false,
+      });
       const config = await subscriptionConfig();
       await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(
+        config.getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION),
+      ).toContainEqual(
+        expect.objectContaining({
+          id: 'qwen3.8-flash',
+          modalities: {},
+          contextWindowSize: 262144,
+        }),
+      );
       expect(config.getContentGeneratorConfig()).toMatchObject({
         model: 'qwen3.8-flash',
-        modalities: { image: true, video: true },
-        contextWindowSize: config
-          .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
-          .find((model) => model.id === 'qwen3.8-flash')?.contextWindowSize,
+        contextWindowSize: 262144,
         reasoning: { effort: 'high' },
       });
+      expect(config.getContentGeneratorConfig()?.modalities).toEqual({});
+      expect(
+        buildAgentContentGeneratorConfig(config, 'qwen3.8-max', {
+          authType: AuthType.QWEN_SUBSCRIPTION,
+        }).contextWindowSize,
+      ).toBe(tokenLimit('qwen3.8-max'));
       await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
       await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max');
 
       expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
         1,
+      );
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledWith(
+        undefined,
+        '0.0.0-test',
       );
       expect(createContentGenerator).toHaveBeenCalledTimes(4);
       expect(config.getContentGeneratorConfig()).toMatchObject({
@@ -6646,6 +6779,19 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    it('loads bootstrap hooks with file watching disabled', async () => {
+      const config = makeConfig();
+      await config.initialize({
+        skipFileWatching: true,
+        skipLlmInitialization: true,
+        skipMcpDiscovery: true,
+      });
+      expect(HookSystem).toHaveBeenCalled();
+      expect(config.getHookSystem()?.initialize).toHaveBeenCalledWith({
+        skipFileWatching: true,
+      });
+    });
+
     it('should skip hook, skill, and file checkpointing side effects when requested', async () => {
       const config = makeConfig({ fileCheckpointingEnabled: true });
 
@@ -8318,6 +8464,31 @@ describe('Server Config (config.ts)', () => {
       expect(config.getFastModel()).toBe(expected);
     });
 
+    it.each([true, false])(
+      'rejects a stale fast endpoint in strict mode (same-id alternative: %s)',
+      (alternative) => {
+        const config = makeConfig({
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          fastModel: 'openai:shared\0https://removed.example/v1',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: alternative ? 'shared' : 'other',
+                baseUrl: 'https://moved.example/v1',
+              },
+            ],
+          },
+        });
+        expect(() =>
+          config.getFastModel({ requirePinnedEndpoint: true }),
+        ).toThrow('no longer configured at the selected endpoint');
+        expect(config.getFastModel()).toBe(
+          alternative ? 'openai:shared' : undefined,
+        );
+      },
+    );
+
     const readAuxModel = (
       config: Config,
       key: 'fastModel' | 'compactionModel',
@@ -8638,105 +8809,21 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
-  describe('the main-session policy and the auto-memory reference (#16291)', () => {
-    /** A session that can load skills: a skill manager and a Skill tool. */
-    const withSkillTool = (config: Config) => {
-      vi.spyOn(config, 'getSkillManager').mockReturnValue(
-        {} as unknown as ReturnType<Config['getSkillManager']>,
-      );
-      vi.spyOn(config, 'getToolRegistry').mockReturnValue({
-        getAllToolNames: () => ['skill'],
-        isPermissionDeferred: () => false,
-      } as unknown as ReturnType<Config['getToolRegistry']>);
-    };
+  // Every reader gets the same policy: the main session and a subagent's
+  // derived Config, whether or not that subagent may use the Skill tool.
+  it('sends the resident policy to the session and to a derived Config', async () => {
+    const config = makeConfig();
+    loadProjectRules();
 
-    it('sends the resident policy with a pointer when the skill can be loaded', async () => {
-      const config = makeConfig();
-      withSkillTool(config);
-      loadProjectRules();
+    await config.refreshHierarchicalMemory();
 
-      await config.refreshHierarchicalMemory();
-
-      const policy = config.getAutoMemoryPrompt();
-      expect(policy).toContain('# auto memory');
-      expect(policy).toContain('load the `auto-memory` skill');
-      expect(policy).not.toContain('<types>');
-    });
-
-    it('keeps the full policy when no skill can be loaded', async () => {
-      const config = makeConfig();
-      vi.spyOn(config, 'getSkillManager').mockReturnValue(null);
-      loadProjectRules();
-
-      await config.refreshHierarchicalMemory();
-
-      const policy = config.getAutoMemoryPrompt();
-      expect(policy).toContain('<types>');
-      expect(policy).not.toContain('auto-memory');
-    });
-
-    // The session-start refresh runs before the tool registry exists, so the
-    // route must be decided when the policy is read, not when it is built.
-    it('sends the full policy once the registry turns out to have no Skill tool', async () => {
-      const config = makeConfig();
-      vi.spyOn(config, 'getSkillManager').mockReturnValue(
-        {} as unknown as ReturnType<Config['getSkillManager']>,
-      );
-      const toolNames: string[] = [];
-      vi.spyOn(config, 'getToolRegistry').mockReturnValue({
-        getAllToolNames: () => toolNames,
-        isPermissionDeferred: () => false,
-      } as unknown as ReturnType<Config['getToolRegistry']>);
-      loadProjectRules();
-
-      await config.refreshHierarchicalMemory();
-
-      expect(config.getAutoMemoryPrompt()).toContain('<types>');
-      toolNames.push('skill');
-      expect(config.getAutoMemoryPrompt()).toContain(
-        'load the `auto-memory` skill',
-      );
-    });
-
-    it('gives a derived Config with no skill manager the full policy', async () => {
-      const config = makeConfig();
-      withSkillTool(config);
-      loadProjectRules();
-      await config.refreshHierarchicalMemory();
-
-      // As buildSubagentContextOverride does for a skill-denied agent (#12424).
-      const subagent = deriveConfig(config);
-      subagent.getSkillManager = () => null;
-
-      expect(config.getAutoMemoryPrompt()).toContain(
-        'load the `auto-memory` skill',
-      );
-      expect(subagent.getAutoMemoryPrompt()).toContain('<types>');
-      expect(subagent.getAutoMemoryPrompt()).not.toContain('auto-memory');
-    });
-
-    it('does not list the bundled auto-memory skill under structured recall', () => {
-      const config = makeConfig({ enableManagedAutoMemory: true });
-      Object.assign(config, { memoryRecallMode: 'structured' });
-
-      expect(
-        config.isSkillEnabled({ name: 'auto-memory', level: 'bundled' }),
-      ).toBe(false);
-    });
-
-    it.each([
-      [true, true],
-      [false, false],
-    ])(
-      'lists the bundled auto-memory skill only with managed auto-memory (enabled: %s)',
-      (enableManagedAutoMemory, listed) => {
-        const config = makeConfig({ enableManagedAutoMemory });
-
-        expect(
-          config.isSkillEnabled({ name: 'auto-memory', level: 'bundled' }),
-        ).toBe(listed);
-      },
-    );
+    const policy = config.getAutoMemoryPrompt();
+    expect(policy).toContain('## Types and where they go');
+    expect(policy).not.toContain('<types>');
+    expect(policy).not.toContain('load the `auto-memory` skill');
+    const subagent = deriveConfig(config);
+    subagent.getSkillManager = () => null;
+    expect(subagent.getAutoMemoryPrompt()).toBe(policy);
   });
 
   it('delivers each memory tier in the request catalog while keeping indexes out of the policy', async () => {
@@ -9513,6 +9600,10 @@ describe('Server Config (config.ts)', () => {
 
   it('relocateWorkingDirectory should update the session working roots', async () => {
     const config = makeConfig();
+    const refreshFileWatchingForWorkingDirectory = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    internals(config).hookSystem = { refreshFileWatchingForWorkingDirectory };
     Object.assign(config, {
       memoryRecallMode: 'structured',
       memoryRecallModeInitialized: true,
@@ -9536,6 +9627,7 @@ describe('Server Config (config.ts)', () => {
 
     await config.relocateWorkingDirectory(NEW_DIR);
 
+    expect(refreshFileWatchingForWorkingDirectory).toHaveBeenCalledOnce();
     expect(cwd.chdirSpy).toHaveBeenCalledWith(NEW_DIR);
     expect(config.getTargetDir()).toBe(NEW_DIR);
     expect(config.getProjectRoot()).toBe(NEW_DIR);
@@ -9669,6 +9761,7 @@ describe('Server Config (config.ts)', () => {
       '.runtime.json',
       '.worktree.json',
       '.pr.json',
+      '.title.json',
     ]);
     mockProcessCwd(NEW_DIR);
     existingPaths(...from);
@@ -13123,7 +13216,13 @@ describe('Model Switching and Config Updates', () => {
         const config = await withHookSystem(hookSystem);
         const warn = vi.spyOn(config.getDebugLogger(), 'warn');
 
-        const response = await hookRequest(config, eventName, {});
+        const response = await hookRequest(
+          config,
+          eventName,
+          eventName === 'FileChanged'
+            ? { file_path: '/tmp/notes.md', event: 'change' }
+            : {},
+        );
 
         expect(warn).not.toHaveBeenCalledWith(
           expect.stringContaining('Unknown hook event'),
@@ -13135,6 +13234,44 @@ describe('Model Switching and Config Updates', () => {
   });
 
   describe('direct-call hook events through the hook execution bridge', () => {
+    it.each(['add', 'change', 'unlink'] as const)(
+      'forwards a valid FileChanged %s input',
+      async (event) => {
+        const fireFileChangedEvent = vi.fn().mockResolvedValue({
+          success: true,
+          allOutputs: [],
+          errors: [],
+          totalDuration: 0,
+        });
+        const config = await withHookSystem({ fireFileChangedEvent });
+        const response = await hookRequest(config, 'FileChanged', {
+          file_path: path.resolve('/memory/topic.md'),
+          event,
+        });
+        expect(response.success).toBe(true);
+        expect(fireFileChangedEvent).toHaveBeenCalledWith(
+          path.resolve('/memory/topic.md'),
+          event,
+          undefined,
+        );
+      },
+    );
+
+    it.each([
+      {},
+      { file_path: 'relative.md', event: 'change' },
+      { file_path: '/memory/topic.md', event: 'rename' },
+      { file_path: 1, event: 'add' },
+    ])(
+      'rejects invalid FileChanged input %j before dispatch',
+      async (input) => {
+        const fireFileChangedEvent = vi.fn();
+        const config = await withHookSystem({ fireFileChangedEvent });
+        const response = await hookRequest(config, 'FileChanged', input);
+        expect(response.success).toBe(false);
+        expect(fireFileChangedEvent).not.toHaveBeenCalled();
+      },
+    );
     const dispatch = async (
       method: string,
       fire: ReturnType<typeof vi.fn>,

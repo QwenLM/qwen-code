@@ -23,6 +23,8 @@ import { isNodeError } from '../../utils/errors.js';
 import { getProjectHash } from '../../utils/paths.js';
 import {
   AGENT_HOSTS_SCHEMA_VERSION,
+  AGENT_HOST_ALREADY_ENROLLED,
+  AGENT_HOST_PROPOSED_SECRET_PATTERN,
   AGENT_HOST_REPLACEMENT_REQUIRED,
   AGENTS_SCHEMA_VERSION,
   type AgentHost,
@@ -617,6 +619,40 @@ export async function issueAgentHostEnrollment(
   });
 }
 
+/** An enrollment the store turned down, as opposed to one it could not do. */
+function refuseEnrollment(message: string): Error {
+  return Object.assign(new Error(message), { enrollmentRefused: true });
+}
+
+/**
+ * Whether {@link enrollAgentHost} turned the enrollment down (a bad token or
+ * request): it enrolled nothing with that secret then, unless a replacement
+ * staged under it, which its capability finishes with a new one. Anything
+ * else (a busy or failing store) says nothing about an earlier attempt.
+ */
+export function isAgentHostEnrollmentRefusal(error: unknown): boolean {
+  return (
+    (error as { enrollmentRefused?: unknown } | null | undefined)
+      ?.enrollmentRefused === true
+  );
+}
+
+/**
+ * Enrolls a Host with a token from {@link issueAgentHostEnrollment}.
+ *
+ * `secret` is one the Host saved before enrolling; without it (an older
+ * Host) the store mints one. The store keeps only its hash, so a Host that
+ * never got the answer would otherwise be enrolled with a secret nobody
+ * has. A Host that sends a secret already enrolled is answered as that
+ * enrollment was, whatever its token: it can already authenticate as that
+ * Host, and the token, if still valid, stays unspent. Except:
+ * - a replacement staged under that identity is finished by its own
+ *   enrollment;
+ * - a Replace (its capability's token, expired or not) is refused with
+ *   {@link AGENT_HOST_ALREADY_ENROLLED}, its capability unspent: answering
+ *   it as that Host would skip the Replace, and going through with that
+ *   secret would leave two Hosts holding it.
+ */
 export async function enrollAgentHost(
   projectRoot: string,
   input: {
@@ -624,43 +660,64 @@ export async function enrollAgentHost(
     name: string;
     workspaceCwd: string;
     providers: string[];
+    secret?: string;
   },
 ): Promise<{ host: AgentHostView; secret: string }> {
+  const proposed = input.secret;
+  if (
+    proposed !== undefined &&
+    !AGENT_HOST_PROPOSED_SECRET_PATTERN.test(proposed)
+  ) {
+    throw refuseEnrollment('Invalid Agent Host enrollment.');
+  }
   const name = input.name.trim();
   const workspaceCwd = input.workspaceCwd.trim();
   const providers = [...new Set(input.providers.map((value) => value.trim()))];
-  if (!input.token || !name || name.length > 80) {
-    throw new Error('Invalid Agent Host enrollment.');
-  }
-  if (!workspaceCwd || workspaceCwd.length > 4_096) {
-    throw new Error('Invalid Agent Host workspace.');
-  }
-  if (
-    providers.length === 0 ||
-    providers.length > 20 ||
-    providers.some((provider) => !provider || provider.length > 80)
-  ) {
-    throw new Error('Invalid Agent Host providers.');
-  }
+  const invalid =
+    !input.token || !name || name.length > 80
+      ? 'Invalid Agent Host enrollment.'
+      : !workspaceCwd || workspaceCwd.length > 4_096
+        ? 'Invalid Agent Host workspace.'
+        : providers.length === 0 ||
+            providers.length > 20 ||
+            providers.some((provider) => !provider || provider.length > 80)
+          ? 'Invalid Agent Host providers.'
+          : undefined;
+  // Without a secret it cannot be a repeat: refused before the store is
+  // touched, as the route that calls this is unauthenticated.
+  if (invalid && proposed === undefined) throw refuseEnrollment(invalid);
   return withAgentStoreTransaction(projectRoot, async (transaction) => {
     const registry = await readAgentHostsUnlocked(projectRoot);
-    if (
-      !registry.enrollment ||
-      registry.enrollment.expiresAt < Date.now() ||
-      !matchesAgentHostSecret(input.token, registry.enrollment.tokenHash)
-    ) {
-      throw new Error('Invalid or expired Agent Host enrollment token.');
+    const { enrollment } = registry;
+    const tokenMatches =
+      enrollment !== undefined &&
+      matchesAgentHostSecret(input.token, enrollment.tokenHash);
+    if (proposed !== undefined) {
+      const enrolled = registry.hosts.find((host) =>
+        matchesAgentHostSecret(proposed, host.secretHash),
+      );
+      if (enrolled && enrollment?.replacementHostId !== enrolled.id) {
+        if (tokenMatches && enrollment?.supersedesHostId !== undefined) {
+          throw new Error(AGENT_HOST_ALREADY_ENROLLED);
+        }
+        return { host: publicAgentHost(enrolled), secret: proposed };
+      }
     }
-    const supersedesHostId = registry.enrollment.supersedesHostId;
+    // Only now: a repeat is answered whatever the rest of it says.
+    if (invalid) throw refuseEnrollment(invalid);
+    if (!tokenMatches || !enrollment || enrollment.expiresAt < Date.now()) {
+      throw refuseEnrollment('Invalid or expired Agent Host enrollment token.');
+    }
+    const supersedesHostId = enrollment.supersedesHostId;
     if (
       supersedesHostId !== undefined &&
       !registry.hosts.some((host) => host.id === supersedesHostId)
     ) {
-      throw new Error('Agent Host to replace not found.');
+      throw refuseEnrollment('Agent Host to replace not found.');
     }
-    const secret = randomBytes(32).toString('base64url');
+    const secret = proposed ?? randomBytes(32).toString('base64url');
     const host: AgentHost = {
-      id: registry.enrollment.replacementHostId ?? generateAgentHostId(),
+      id: enrollment.replacementHostId ?? generateAgentHostId(),
       name,
       secretHash: hashAgentHostSecret(secret),
       workspaceCwd,
@@ -676,7 +733,7 @@ export async function enrollAgentHost(
           ...registry.hosts.filter((entry) => entry.id !== host.id),
           host,
         ],
-        enrollment: { ...registry.enrollment, replacementHostId: host.id },
+        enrollment: { ...enrollment, replacementHostId: host.id },
       });
       await replaceAgentHostInTransaction(
         transaction,

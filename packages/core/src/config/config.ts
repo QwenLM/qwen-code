@@ -175,10 +175,6 @@ import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import {
-  AUTO_MEMORY_SKILL_NAME,
-  MainSessionAutoMemoryPolicy,
-} from '../skills/auto-memory-skill.js';
-import {
   authoredSkillName,
   skillRestrictionNames,
   type SkillLevel,
@@ -450,6 +446,7 @@ import {
 } from '../memory/metadata-migration.js';
 import {
   buildAutoMemoryIndexContext,
+  buildResidentAutoMemoryPrompt,
   buildStructuredAutoMemoryPrompt,
 } from '../memory/prompt.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
@@ -544,6 +541,7 @@ import {
   type ResolvedModelConfig,
   type RuntimeModelSnapshot,
 } from '../models/index.js';
+import type { ModelSwitchOptions } from '../models/modelsConfig.js';
 import { resolveModelId } from '../utils/modelId.js';
 import type { WebSearchSettings } from '../tools/web-search.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
@@ -1087,6 +1085,8 @@ export interface AgentsCollabSettings {
   modelGrades?: Record<string, string>;
   /** Optional whitelist of model grades exposed to the Agent tool. */
   allowedGrades?: string[];
+  /** Default background mode for top-level regular subagents (default: true). */
+  defaultBackground?: boolean;
   /**
    * Global maximum number of background sub-agents running concurrently.
    * When the cap is reached, additional launches wait for a slot.
@@ -2342,6 +2342,8 @@ export interface ConfigInitializeOptions {
    * need config services (hooks, tools, MCP) before a real session exists.
    */
   skipLlmInitialization?: boolean;
+  /** Load hooks without starting a filesystem subscription for bootstrap configs. */
+  skipFileWatching?: boolean;
   /** @deprecated Use `skipLlmInitialization`; retained until a future major release. */
   skipGeminiInitialization?: boolean;
   /**
@@ -3124,18 +3126,8 @@ export class Config {
   private promptToolSnapshot: ReadonlySet<string> | undefined;
   private promptAgentReachable = false;
 
-  /**
-   * Stable managed-memory policy, separate from the changing catalog. Empty
-   * while the legacy main-session policy below is in effect.
-   */
+  /** Stable managed-memory policy, separate from the changing catalog. */
   private autoMemoryPrompt = '';
-  /**
-   * The legacy main-session policy, resolved per reading Config: whether it
-   * points at the bundled `auto-memory` reference depends on the reader's
-   * route to the Skill tool (#16291). Set only by a legacy refresh, cleared by
-   * every path that sets `autoMemoryPrompt` instead.
-   */
-  private mainSessionAutoMemoryPolicy: MainSessionAutoMemoryPolicy | undefined;
   private autoMemoryContext = '';
   private memoryRecallMode: MemoryRecallMode = 'legacy';
   private memoryCorpusRevision = '';
@@ -4383,7 +4375,9 @@ export class Config {
         (!options?.skipHooks && !this.getDisableAllHooks()))
     ) {
       this.hookSystem = new HookSystem(this, options?.managedHookDispatcher);
-      await this.hookSystem.initialize();
+      await this.hookSystem.initialize({
+        skipFileWatching: options?.skipFileWatching,
+      });
       this.debugLogger.debug('Hook system initialized');
 
       // Initialize MessageBus for hook execution
@@ -4446,6 +4440,28 @@ export class Config {
                     signal,
                   );
                   break;
+                case 'FileChanged': {
+                  const filePath = input['file_path'];
+                  const event = input['event'];
+                  if (
+                    typeof filePath !== 'string' ||
+                    !path.isAbsolute(filePath) ||
+                    (event !== 'add' &&
+                      event !== 'change' &&
+                      event !== 'unlink')
+                  ) {
+                    throw new Error('Invalid FileChanged hook input');
+                  }
+                  const changed = await hookSystem.fireFileChangedEvent(
+                    filePath,
+                    event,
+                    signal,
+                  );
+                  result = changed.finalOutput
+                    ? createHookOutput('FileChanged', changed.finalOutput)
+                    : undefined;
+                  break;
+                }
                 case 'Stop': {
                   // Extract context usage data from input with runtime validation
                   const contextUsageData = buildContextUsage(
@@ -5611,7 +5627,6 @@ export class Config {
     if (this.isSafeMode()) {
       this.setUserMemory('');
       this.autoMemoryPrompt = '';
-      this.mainSessionAutoMemoryPolicy = undefined;
       this.autoMemoryContext = '';
       this.setMemoryFileCount(0);
       this.setContextFilePaths([]);
@@ -5803,7 +5818,6 @@ export class Config {
           userSection.memoryDir,
           teamSection?.memoryDir,
         );
-        this.mainSessionAutoMemoryPolicy = undefined;
       } else {
         const catalog = buildAutoMemoryIndexContext(
           memoryDir,
@@ -5811,19 +5825,16 @@ export class Config {
           userSection,
           teamSection,
         );
-        this.autoMemoryPrompt = '';
-        this.mainSessionAutoMemoryPolicy = new MainSessionAutoMemoryPolicy({
+        this.autoMemoryPrompt = buildResidentAutoMemoryPrompt(
           memoryDir,
-          indexContent: managedAutoMemoryIndex,
           userSection,
           teamSection,
-        });
+        );
         this.autoMemoryContext = catalog;
       }
     } else {
       this.setUserMemory(memoryContent);
       this.autoMemoryPrompt = '';
-      this.mainSessionAutoMemoryPolicy = undefined;
       this.autoMemoryContext = '';
     }
     this.setMemoryFileCount(fileCount);
@@ -6125,7 +6136,10 @@ export class Config {
     const session = new QwenSubscriptionSession();
     const identity = session.getIdentity();
     this.subscriptionModelIdentity = undefined;
-    const result = await this.modelsConfig.refreshSubscriptionModels(signal);
+    const result = await this.modelsConfig.refreshSubscriptionModels(
+      signal,
+      this.getCliVersion(),
+    );
     if (identity && session.getIdentity() === identity) {
       this.subscriptionModelIdentity = identity;
     }
@@ -6139,14 +6153,27 @@ export class Config {
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */
-  async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
-    return this.rebuildContentGenerator(authMethod, isInitialAuth, true);
+  async refreshAuth(
+    authMethod: AuthType,
+    isInitialAuth?: boolean,
+    subscriptionFallbackModel?: string,
+    allowUnlistedSubscriptionModel?: boolean,
+  ) {
+    return this.rebuildContentGenerator(
+      authMethod,
+      isInitialAuth,
+      true,
+      subscriptionFallbackModel,
+      allowUnlistedSubscriptionModel,
+    );
   }
 
   private async rebuildContentGenerator(
     authMethod: AuthType,
     isInitialAuth: boolean | undefined,
     refreshSubscriptionModels: boolean,
+    subscriptionFallbackModel?: string,
+    allowUnlistedSubscriptionModel?: boolean,
   ) {
     const hookOwner = captureHookExecutionOwner(this, null);
     if (!this.contentGenerator && authMethod === this.initialAuthType) {
@@ -6172,6 +6199,7 @@ export class Config {
       ? priorReasoning.effort
       : undefined;
 
+    let fallbackModel: string | undefined;
     if (authMethod === AuthType.QWEN_SUBSCRIPTION) {
       const { models } = refreshSubscriptionModels
         ? await this.refreshSubscriptionModels()
@@ -6182,12 +6210,24 @@ export class Config {
           };
       const selected = this.modelsConfig.getModel();
       if (selected && !models.includes(selected)) {
-        throw new Error(subscriptionModelUnavailable(selected));
+        if (
+          isInitialAuth &&
+          subscriptionFallbackModel &&
+          models.includes(subscriptionFallbackModel)
+        ) {
+          fallbackModel = subscriptionFallbackModel;
+        } else if (
+          !isInitialAuth ||
+          !allowUnlistedSubscriptionModel ||
+          priorGeneration.authType !== authMethod
+        ) {
+          throw new Error(subscriptionModelUnavailable(selected));
+        }
       }
     }
 
-    // Sync modelsConfig state for this auth refresh.
-    const modelId = this.modelsConfig.getModel();
+    // The CLI's resolved subscription credentials preserve an unlisted model during sync.
+    const modelId = fallbackModel ?? this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
 
     // Check and consume cached credentials flag
@@ -7233,13 +7273,30 @@ export class Config {
    * model. Bare selectors stay bare and authType-qualified selectors keep their
    * authType prefix so selector-aware runtime paths can route cross-auth calls.
    */
-  getFastModel(): string | undefined {
+  getFastModel({ requirePinnedEndpoint = false } = {}): string | undefined {
     const selector = this.resolveFastModelSelector();
     if (!selector) return undefined;
 
     const available = selector.authType
       ? this.getAllConfiguredModels([selector.authType])
       : this.getAllConfiguredModels();
+    const pinnedEndpoint = this.fastModel?.trim().split('\0')[1];
+    if (
+      requirePinnedEndpoint &&
+      pinnedEndpoint !== undefined &&
+      !available.some(
+        (model) =>
+          model.id === selector.modelId &&
+          model.baseUrl === pinnedEndpoint &&
+          !model.voiceOnly &&
+          !model.imageOnly &&
+          !model.visionOnly,
+      )
+    ) {
+      throw new Error(
+        'Fast model is no longer configured at the selected endpoint',
+      );
+    }
     if (
       !available.some(
         (model) =>
@@ -7752,10 +7809,11 @@ export class Config {
   private async handleModelChange(
     authType: AuthType,
     requiresRefresh: boolean,
+    initializeIfNeeded?: boolean,
   ): Promise<void> {
     this.initialResolvedAuthType = undefined;
     if (!this.contentGeneratorConfig) {
-      if (authType === AuthType.QWEN_SUBSCRIPTION)
+      if (initializeIfNeeded || authType === AuthType.QWEN_SUBSCRIPTION)
         await this.refreshAuth(authType);
       return;
     }
@@ -7955,7 +8013,7 @@ export class Config {
   async switchModel(
     authType: AuthType,
     modelId: string,
-    options?: { requireCachedCredentials?: boolean; baseUrl?: string },
+    options?: ModelSwitchOptions,
   ): Promise<void> {
     await this.modelsConfig.switchModel(authType, modelId, options);
     this.notifyModelChangeListeners();
@@ -8046,6 +8104,7 @@ export class Config {
       `${this.sessionId}.runtime.json`,
       `${this.sessionId}.worktree.json`,
       `${this.sessionId}.pr.json`,
+      `${this.sessionId}.title.json`,
     ].map((fileName) => ({
       from: path.join(oldChatsDir, fileName),
       to: path.join(newChatsDir, fileName),
@@ -8219,6 +8278,7 @@ export class Config {
     this.backgroundTaskRegistry.disposeResidentAgents();
     this.targetDir = expected;
     this.cwd = expected;
+    await this.hookSystem?.refreshFileWatchingForWorkingDirectory();
     resetPreloadedContentGenerator(this.contentGenerator);
     await this.refreshCurrentRuntimeStatus(expected);
     this.workspaceContext.applyRootDirectories(workspaceDirectories);
@@ -8244,7 +8304,6 @@ export class Config {
     // reassigns it, and the stale text keeps routing to search_memory while
     // the reset mode leaves that tool undeclared.
     this.autoMemoryPrompt = '';
-    this.mainSessionAutoMemoryPolicy = undefined;
     this.autoMemoryContext = '';
 
     let memoryRefreshError: unknown;
@@ -8439,6 +8498,9 @@ export class Config {
   private async shutdownResourcesOnce(): Promise<void> {
     let resourceError: unknown;
     try {
+      if (Object.hasOwn(this, 'hookSystem')) {
+        await this.hookSystem?.close();
+      }
       this.memoryManager.cancelMigrations();
       this.clearSessionRestoreProjection();
       // Drop this session's project-dir registry entry. It is registered during
@@ -8703,18 +8765,6 @@ export class Config {
       skill.level === 'bundled' &&
       skill.name === 'generated-ui' &&
       !this.getBundledGeneratedUiStatus().enabled
-    ) {
-      return false;
-    }
-    // The auto-memory reference only serves the legacy managed auto-memory
-    // policy; without it, or under the structured protocol (`manage_memory`,
-    // no direct file access), the skill would be listed on every request for
-    // nothing.
-    if (
-      skill.level === 'bundled' &&
-      skill.name === AUTO_MEMORY_SKILL_NAME &&
-      (!this.getManagedAutoMemoryEnabled() ||
-        this.getMemoryRecallMode() !== 'legacy')
     ) {
       return false;
     }
@@ -9642,20 +9692,8 @@ export class Config {
     this.promptAgentReachable = reachable;
   }
 
-  /**
-   * Managed-memory policy for the system prompt, without legacy indexes.
-   *
-   * In legacy mode the main-session policy is resolved for the Config it is
-   * read through, so a subagent's derived Config with no route to the Skill
-   * tool gets the full policy rather than the session's pointer (#16291).
-   */
+  /** Managed-memory policy for the system prompt, without legacy indexes. */
   getAutoMemoryPrompt(): string {
-    if (
-      this.memoryRecallMode === 'legacy' &&
-      this.mainSessionAutoMemoryPolicy !== undefined
-    ) {
-      return this.mainSessionAutoMemoryPolicy.forConfig(this);
-    }
     return this.autoMemoryPrompt;
   }
 

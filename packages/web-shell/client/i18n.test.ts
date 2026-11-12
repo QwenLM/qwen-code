@@ -7,6 +7,7 @@ import {
   languageSettingToWebShellLanguage,
   normalizeLanguage,
 } from './i18n';
+import type { WebShellLanguage } from './i18n';
 
 // getTranslator returns the raw key when EN has no entry. SettingsMessage
 // translateSettingText then substitutes the settingsSchema.ts description,
@@ -18,7 +19,180 @@ const FOLLOWUP_SETTING_KEYS = [
   'settings.description.ui.enableFollowupSuggestions',
 ] as const;
 
+// The panel's localization cases compare rendered text against the same
+// translator lookup the component performs, so a missing zh entry falls back
+// to EN on both sides and they stay green. Parity has to be asserted here,
+// key by key, including the strings no panel case renders.
+const WEIXIN_LOGIN_KEYS = [
+  'title',
+  'description',
+  'loggedIn',
+  'loggedOut',
+  'login',
+  'relogin',
+  'logout',
+  'refresh',
+  'waiting',
+  'preparing',
+  'scanned',
+  'ready',
+  'expired',
+  'error',
+  'credentialsError',
+  'unsupported',
+  'restartHint',
+  'userId',
+  'savedAt',
+  'qrAlt',
+  'openUrl',
+].map((suffix) => `channels.weixin.${suffix}`);
+
+// The editor labels live in a different namespace, so the prefix above does
+// not reach them. A missing zh `.description` falls back to the plugin's
+// hardcoded English sentence rather than to a raw key, which is the silent
+// degradation this table exists to catch.
+const WEIXIN_EDITOR_KEYS = [
+  'channels.editor.field.weixin.groupPolicy',
+  'channels.editor.field.weixin.groupPolicy.description',
+  'channels.editor.field.weixin.groupPolicy.option.disabled',
+];
+
+const BROWSER_NOTIFICATION_KEYS = [
+  'label',
+  'description',
+  'prompt',
+  'reply',
+  'completed',
+  'failed',
+  'ended',
+  'approval',
+  'question',
+  'allow',
+  'enable',
+  'helpEnabled',
+  'helpWaiting',
+  'helpWhen',
+  'helpSystem',
+  'helpMac',
+  'helpWindows',
+  'enabled',
+  'disabled',
+  'waiting',
+  'denied',
+  'unavailable',
+  'requesting',
+  'error',
+  'temporary',
+].map((suffix) => `browserNotifications.${suffix}`);
+
+const SCHEDULED_TASK_DELIVERY_KEYS = [
+  'channel',
+  'off',
+  'hint',
+  'unavailable',
+  'discardChanges',
+  'perRun',
+  'required',
+  'whitespace',
+  'trimWhitespace',
+  'loading',
+  'loadingContacts',
+  'channelsFailed',
+  'noChannels',
+  'targetUnavailable',
+  'notObserved',
+  'suggestion',
+  'manual',
+  'contactsFailed',
+  'suggestionsHint',
+  'type',
+  'id',
+  'user',
+  'chat',
+  'cardPrefix',
+].map((suffix) => `scheduledTasks.delivery.${suffix}`);
+
 describe('web-shell i18n catalog', () => {
+  it('localizes the scheduled-task workspace host-lock hint', () => {
+    expect(getTranslator('en')('scheduledTasks.workspaceFixedByHost')).toBe(
+      'Fixed by host',
+    );
+    expect(getTranslator('zh-CN')('scheduledTasks.workspaceFixedByHost')).toBe(
+      '由宿主固定',
+    );
+  });
+
+  it('keeps every scheduled-task delivery translation in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    for (const key of SCHEDULED_TASK_DELIVERY_KEYS) {
+      expect(en(key)).not.toBe(key);
+      expect(zh(key)).not.toBe(key);
+      expect(zh(key)).not.toBe(en(key));
+    }
+    expect(zh('scheduledTasks.delivery.perRun')).toContain(
+      '每次新会话不支持频道投递',
+    );
+  });
+
+  it('keeps the channel range message spacing in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    const key = 'channels.editor.validation.outOfRange';
+
+    // The exclusive-floor shapes predate the inclusive bound. Folding the
+    // lower clause into one variable moved a space inside the interpolation
+    // and silently changed these two existing zh strings; pin them verbatim.
+    expect(zh(key, { min: 0, max: 86_400_000 })).toBe(
+      '请输入大于 0 且不超过 86400000 的数字。',
+    );
+    expect(zh(key, { min: 0 })).toBe('请输入大于 0 的数字。');
+    expect(zh(key, { max: 4 })).toBe('请输入不超过 4 的数字。');
+    expect(en(key, { min: 0, max: 86_400_000 })).toBe(
+      'Enter a number greater than 0 and at most 86400000.',
+    );
+
+    // The inclusive floor is worded differently but padded the same way.
+    expect(zh(key, { minInclusive: 0, max: 5000 })).toBe(
+      '请输入不小于 0 且不超过 5000 的数字。',
+    );
+    expect(zh(key, { minInclusive: 0 })).toBe('请输入不小于 0 的数字。');
+    expect(en(key, { minInclusive: 0, max: 5000 })).toBe(
+      'Enter a number at least 0 and at most 5000.',
+    );
+  });
+
+  it('keeps every WeChat login translation in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    for (const key of [...WEIXIN_LOGIN_KEYS, ...WEIXIN_EDITOR_KEYS]) {
+      const vars = { id: 'wx-user-1', time: '2026-11-09 10:00' };
+      expect(en(key, vars)).not.toBe(key);
+      expect(zh(key, vars)).not.toBe(key);
+      // zh against en, not zh against the key: the translator falls back to
+      // EN per key, so a deleted zh entry would otherwise pass both checks.
+      expect(zh(key, vars)).not.toBe(en(key, vars));
+    }
+  });
+
+  it('keeps every browser notification translation in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    for (const key of BROWSER_NOTIFICATION_KEYS) {
+      const english = en(key, { text: 'Task' });
+      const chinese = zh(key, { text: 'Task' });
+      expect(english).not.toBe(key);
+      expect(chinese).not.toBe(key);
+      expect(chinese).not.toBe(english);
+    }
+    expect(en('browserNotifications.prompt', { text: 'Task' })).toBe(
+      'Prompt: Task',
+    );
+    expect(zh('browserNotifications.reply', { text: 'Task' })).toBe(
+      '回复：Task',
+    );
+  });
+
   it.each([
     [
       'en',
@@ -50,6 +224,7 @@ describe('web-shell i18n catalog', () => {
       }
     },
   );
+
   it('explains missing rewind identities in both locales', () => {
     expect(getTranslator('en')('rewind.identityUnavailable')).toContain(
       'no prompt identity',
@@ -81,6 +256,50 @@ describe('web-shell i18n catalog', () => {
       '已选 2 组',
     );
   });
+
+  it('keeps the waiting minigame copy available in both locales', () => {
+    for (const language of ['en', 'zh-CN'] as const) {
+      const t = getTranslator(language);
+      for (const key of [
+        'waitingGame.title',
+        'waitingGame.openActivity',
+        'waitingGame.activityTitle',
+        'waitingGame.usageTitle',
+        'waitingGame.startGame',
+        'waitingGame.backToHeatmap',
+        'waitingGame.heatmap',
+        'waitingGame.tokens',
+        'waitingGame.jumpToMessage',
+        'waitingGame.tokenTotal',
+        'waitingGame.tokenInput',
+        'waitingGame.tokenOutput',
+        'waitingGame.tokenCached',
+        'waitingGame.tokenContext',
+        'waitingGame.tokenEmpty',
+        'waitingGame.snakeControls',
+        'waitingGame.collapse',
+        'waitingGame.region',
+        'waitingGame.controls',
+        'waitingGame.paused',
+        'waitingGame.pausedHint',
+        'waitingGame.gameOver',
+        'waitingGame.restart',
+        'waitingGame.mute',
+        'waitingGame.unmute',
+      ]) {
+        expect(t(key)).not.toBe(key);
+      }
+    }
+    const zh = getTranslator('zh-CN');
+    expect(zh('waitingGame.heatmap')).toBe('热力图');
+    expect(zh('waitingGame.activityTitle')).toBe('问答热度');
+    expect(zh('waitingGame.openActivity')).toBe('打开任务热度');
+    expect(zh('waitingGame.score', { score: 100 })).toBe('得分 100');
+    expect(zh('waitingGame.cleared', { count: 2, score: 100 })).toBe(
+      '消除 2 列 · +100',
+    );
+  });
+
   it('keeps task cancellation and elapsed-time copy available in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');
@@ -149,6 +368,17 @@ describe('web-shell i18n catalog', () => {
         t('settings.liveSetup.modelCustom'),
       );
     }
+  });
+
+  // A locale outside the shipped union (the provider is typed, but the
+  // runtime value is not checked) must resolve from the EN table: content
+  // assertions, so a mutation of the EN entry itself is caught.
+  it('falls back to EN for a language outside the shipped union', () => {
+    const t = getTranslator('fr' as unknown as WebShellLanguage);
+    expect(t('managed.tasks.title')).toBe('Session tasks');
+    expect(t('trajectory.filter.search')).toBe('Search loaded records…');
+    expect(t('messageDelete.selected', { count: 2 })).toBe('2 groups selected');
+    expect(t('welcome.prompt')).not.toBe('welcome.prompt');
   });
 });
 

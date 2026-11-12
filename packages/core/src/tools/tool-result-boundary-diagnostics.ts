@@ -203,7 +203,9 @@ export function createToolResultBoundaryObserver(
     (logger === boundaryLogger
       ? isToolResultBoundaryDiagnosticsEnabled
       : () => isDebugLogFileEnabled() && logger.isEnabled());
-  let hmacKey = options.hmacKey ? Buffer.from(options.hmacKey) : undefined;
+  let hmacKey: Buffer | undefined = options.hmacKey
+    ? Buffer.from(options.hmacKey)
+    : undefined;
   const thresholdBytes =
     options.thresholdBytes ?? TOOL_RESULT_BOUNDARY_JSON_BYTE_THRESHOLD;
   const logLimit = options.logLimit ?? TOOL_RESULT_BOUNDARY_LOG_LIMIT;
