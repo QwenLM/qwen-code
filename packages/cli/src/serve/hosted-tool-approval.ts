@@ -55,7 +55,10 @@ export interface HostedApprovalSettings {
 // Session's own team board (H4e-b1). `todo_write` only writes the Session's
 // own task list, so it is as safe to pre-approve as a read. A tool that
 // reaches the network would not join this list: it contacts a URL nobody in
-// the Session chose.
+// the Session chose. `cron_list` reads the Session's own pending loop wakeups
+// and `cron_delete` cancels one — the autonomous loop's list/cancel arm must
+// not stall on an operator dialog (its sibling loop_wakeup is exempt via the
+// funnel admission instead).
 const PREAPPROVED_TOOLS: Readonly<
   Record<Exclude<HostedApprovalMode, 'yolo'>, readonly string[]>
 > = {
@@ -65,6 +68,8 @@ const PREAPPROVED_TOOLS: Readonly<
     'todo_write',
     'exit_plan_mode',
     'team_plan_approval',
+    'cron_list',
+    'cron_delete',
   ],
   auto: [
     'read_file',
@@ -72,6 +77,8 @@ const PREAPPROVED_TOOLS: Readonly<
     'todo_write',
     'exit_plan_mode',
     'team_plan_approval',
+    'cron_list',
+    'cron_delete',
   ],
   'auto-edit': [
     'read_file',
@@ -81,6 +88,8 @@ const PREAPPROVED_TOOLS: Readonly<
     'todo_write',
     'exit_plan_mode',
     'team_plan_approval',
+    'cron_list',
+    'cron_delete',
   ],
 };
 
