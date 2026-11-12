@@ -17,6 +17,31 @@ Vitest worker，以及后续每一次校验 locator 命令的 `PlaywrightRuntime
 Web Shell 的使用者依赖树，GHSA-mrhx-c7xc-m3w5（high，影响 `zod < 4.6.6`）仍然可以通过
 已发布产物到达。
 
+这个代价不只是「存在一个被公告标记的版本」。Zod 3 会在报告 `.max()` 失败之前先校验数组的
+每一个元素，因此一个超限参数即使被 schema 拒绝，也已经做了与攻击者输入规模成正比的工作。
+Zod 4.6.6 的 `capSize` 先让前置的 size 检查失败，不解析任何元素就返回。用本包自己的
+schema 实测，同一棵树、只替换解析到的 Zod，且每个元素都非法：
+
+| 超限参数                                | Zod 3.25.76                  | Zod 4.6.6        |
+| --------------------------------------- | ---------------------------- | ---------------- |
+| `cua.keypress`，200,000 个 keys         | 66 ms，200,001 条 issue      | 1 ms，1 条 issue |
+| `locatorStepsSchema`，200,000 个 step   | 245 ms，200,001 条 issue     | 1 ms，1 条 issue |
+| `cua.keypress`，3,000,000 个 keys       | 1,091 ms，3,000,001 条 issue | 1 ms，1 条 issue |
+| `locatorStepsSchema`，3,000,000 个 step | 5,245 ms，3,000,001 条 issue | 1 ms，1 条 issue |
+
+这些 schema 里的每个数组都有长度约束（`locatorStepsSchema` 与 `keyNames` 为 `.max(32)`，
+`optionalKeyNames` 为 `.max(8)`，拖拽 `path` 为 `.max(512)`，`queries` 为 `.max(20)`），
+这正是 `capSize` 生效的前提 —— 所以该修复覆盖这里每一个取数组的命令参数。两个版本都会拒绝
+上述全部输入，而 `invalidArguments` 只保留前三条 issue，因此另外三百万条是被构造出来又丢掉
+的。`PlaywrightRuntime.dispatch` 对拿到的任何输入调用 `schema.parse`，所以这条路径可由一个
+畸形命令到达，而不只是合成基准测试。
+
+关于公告本身要说清一点：GHSA-mrhx-c7xc-m3w5 描述的是**没有**长度约束的数组，而在 2,000,000
+个元素时，无约束的 `z.array(z.string())` 在 4.6.6 上仍会累积 2,000,000 条 issue（577 ms，
+RSS +631 MB），与 3.25.76 的表现相近（1,067 ms，+589 MB）。所以 4.6.6 并没有让无界数组变
+安全，本包也不是仅靠版本就得到保护 —— 它得到保护是因为它接受的每个数组都有界。这里可测量的
+收益，是本包实际使用的有界数组上的提前退出，外加从已发布产物中移除被标记的版本。
+
 ## 当前状态
 
 在本次审查的 commit 上，挂起已无法复现。commit `7a38780c` 把 `z.lazy()` 递归边换成了
@@ -39,6 +64,8 @@ Web Shell 的使用者依赖树，GHSA-mrhx-c7xc-m3w5（high，影响 `zod < 4.6
 ## 目标
 
 - 把 `packages/browser-use` 迁移到 Zod 4，使打包产物不再内联受公告影响的 Zod。
+- 同时获得随之而来的前置 size 拒绝，让一个超限的数组型命令参数只付出一条 issue 的代价，
+  而不是每个元素一条。
 - 保留所有既有校验行为：深度与广度上限、strict 叶子对象、regex/`exact` 门禁、matcher
   flag 限制，以及 `invalidArguments` 所消费的 `code`/`path`/`message` issue 形状。
 - 防止将来根目录的版本变动把本包静默拖回一个递归 schema 会挂起的 Zod 主版本。
@@ -217,6 +244,12 @@ scripts/tests/browser-use-assets.test.js` 验证新增的 pin 断言，并确认
   `invalid_union_discriminator`、`invalid_enum_value`、`ZodParsedType`、`arrayToEnum`
   均已消失，而 Zod 4 的 `$ZodString`、`ZodRealError` 以及该公告对应的 `capSize` 防护均
   存在 —— 发布产物不再内联受公告影响的 Zod。
+- 前置 size 拒绝是用本包自己的 schema 实测的，而不是合成 schema：`cua.keypress` 传入
+  3,000,000 个非法 key、`locatorStepsSchema` 传入 3,000,000 个非法 step，在 Zod 4.6.6 上
+  各自 1 ms 返回 1 条 issue；在 Zod 3.25.76 上则分别是 1,091 ms 与 5,245 ms、各
+  3,000,001 条 issue。两者都拒绝该输入，差别在于拒绝之前做了多少工作。复现方式：就地替换
+  `node_modules/zod`，通过 `tsx` 驱动 `commandSchemas` / `locatorStepsSchema`，测完后
+  恢复 4.6.6。
 
 ## 验收标准
 

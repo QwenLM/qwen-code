@@ -19,6 +19,38 @@ dependency audit cannot see that copy, and GHSA-mrhx-c7xc-m3w5 (high, affecting
 `zod < 4.6.6`) stays reachable through the shipped artifact even after #16434
 cleared the SDK and Web Shell consumer trees.
 
+That cost is not only the presence of a flagged version. Zod 3 validates every
+element of an array before it reports a failed `.max()`, so an oversized
+argument does work proportional to the attacker's input even though the schema
+rejects it. Zod 4.6.6's `capSize` fails the leading size check first and returns
+without parsing any element. Measured through this package's own schemas, same
+tree, only the resolved Zod swapped, each element invalid:
+
+| oversized argument                    | Zod 3.25.76                | Zod 4.6.6     |
+| ------------------------------------- | -------------------------- | ------------- |
+| `cua.keypress` with 200,000 keys      | 66 ms, 200,001 issues      | 1 ms, 1 issue |
+| `locatorStepsSchema`, 200,000 steps   | 245 ms, 200,001 issues     | 1 ms, 1 issue |
+| `cua.keypress` with 3,000,000 keys    | 1,091 ms, 3,000,001 issues | 1 ms, 1 issue |
+| `locatorStepsSchema`, 3,000,000 steps | 5,245 ms, 3,000,001 issues | 1 ms, 1 issue |
+
+Every array in these schemas is length-constrained (`locatorStepsSchema` and
+`keyNames` at `.max(32)`, `optionalKeyNames` at `.max(8)`, the drag `path` at
+`.max(512)`, `queries` at `.max(20)`), which is what makes `capSize` apply — so
+the fix reaches every array-valued command argument here. Both versions reject
+all of these inputs, and `invalidArguments` keeps only the first three issues,
+so the other 3 million are built and thrown away. `PlaywrightRuntime.dispatch`
+calls `schema.parse` on whatever it is handed, so this is reachable from a
+malformed command, not just from a synthetic benchmark.
+
+One honesty note on the advisory: GHSA-mrhx-c7xc-m3w5 describes an array
+_without_ a length constraint, and at 2,000,000 elements an unconstrained
+`z.array(z.string())` still accumulates 2,000,000 issues on 4.6.6 (577 ms,
++631 MB RSS) much as it does on 3.25.76 (1,067 ms, +589 MB). So 4.6.6 does not
+make unbounded arrays safe, and this package is not protected by the version
+alone — it is protected because every array it accepts is bounded. The
+measurable gain here is the early exit on the bounded arrays this package
+actually uses, plus removing the flagged version from the shipped artifact.
+
 ## Current state
 
 The hang no longer reproduces at the reviewed commit. Commit `7a38780c` replaced
@@ -45,6 +77,8 @@ nothing structural keeps it in place.
 
 - Move `packages/browser-use` to Zod 4 so the bundled artifact no longer embeds
   an advisory-affected Zod.
+- Get the early size rejection that comes with it, so an oversized
+  array-valued command argument costs one issue instead of one per element.
 - Preserve every documented validation behavior: depth and breadth bounds,
   strict leaf objects, the regex/`exact` gate, matcher flag restrictions, and
   the `code`/`path`/`message` issue shape that `invalidArguments` consumes.
@@ -273,6 +307,14 @@ scripts/tests/browser-use-assets.test.js` for the new pin assertion, and
   `arrayToEnum` are absent, while Zod 4's `$ZodString`, `ZodRealError`, and the
   advisory's `capSize` guard are present — the shipped artifact no longer embeds
   an advisory-affected Zod.
+- The early size rejection is measured through this package's own schemas, not
+  a synthetic one: `cua.keypress` with 3,000,000 invalid keys and
+  `locatorStepsSchema` with 3,000,000 invalid steps each return 1 issue in 1 ms
+  on Zod 4.6.6, against 3,000,001 issues in 1,091 ms and 5,245 ms on Zod
+  3.25.76. Both reject the input; the difference is the work done before
+  rejecting. Reproduce by swapping `node_modules/zod` in place and driving
+  `commandSchemas` / `locatorStepsSchema` through `tsx`, restoring 4.6.6
+  afterwards.
 
 ## Acceptance criteria
 
