@@ -7046,6 +7046,7 @@ export function WebShellSidebar({
   );
   const footerContent = (footer !== false || mobileOpen) && (
     <div
+      data-web-shell-sidebar-footer
       className={cx(
         styles.footer,
         !railLayout && footerCompact && styles.footerCompact,
@@ -7973,6 +7974,7 @@ export function WebShellSidebar({
           <div
             ref={sidebarBodyRef}
             className={styles.body}
+            data-web-shell-sidebar-body
             onScroll={(event) =>
               setBodyScrolled(event.currentTarget.scrollTop > 0)
             }

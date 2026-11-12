@@ -13,6 +13,10 @@ Footer actions continue to respect their configured list: in a Home-only shell
 they render directly below the session list, with collapse at the right. With
 additional primary pages they retain the existing More menu. Custom renderers
 continue to occupy the session column and do not themselves require a rail.
+The single-column footer participates in flex layout so it reserves its actual
+height. Its utility buttons wrap at narrow widths; in a short collapsed column,
+utilities can scroll while Expand stays visible. The rail's More menu keeps its
+existing layout.
 
 No new layout or theme API is needed. Hosts can omit the built-in theme action
 and implement theme selection in their own settings using the existing controlled

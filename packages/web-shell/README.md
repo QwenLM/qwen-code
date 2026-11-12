@@ -940,6 +940,8 @@ daemon 不净化它读到的文件。该配置只从 User / System / SystemDefau
 自动展示首页及这些一级入口。`sidebar: false` 或 `enabled: false` 仍完全隐藏侧栏。
 底部设置、主题、状态等工具不触发一级栏；仅首页时直接显示在会话列表底部，
 右下角保留展开／收起，也不会出现「更多」。
+单栏底部工具在窄宽度下自动换行，不覆盖会话列表；收起栏高度不足时工具可滚动，
+展开按钮仍保持可见。
 `primaryNav.items` 默认仅 `['newTask']`，`footer.items` 默认仅 `['collapse']`；
 独立 Web Shell 显式开启现有完整入口。宿主例如配置
 `sidebar={{ primaryNav: { items: ['newTask', 'plugins'] } }}` 即显示首页和插件的一级栏。

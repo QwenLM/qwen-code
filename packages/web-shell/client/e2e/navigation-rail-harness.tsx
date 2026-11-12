@@ -52,7 +52,8 @@ function Harness() {
                       items:
                         params.has('single') ||
                         params.has('split-only') ||
-                        params.has('minimal')
+                        params.has('minimal') ||
+                        params.has('rich-footer')
                           ? ['newTask']
                           : params.has('plugin-only')
                             ? ['newTask', 'plugins']
@@ -68,23 +69,36 @@ function Harness() {
                               ],
                     },
                     footer: {
-                      items: params.has('minimal')
-                        ? ['settings', 'theme', 'daemonStatus', 'collapse']
-                        : params.has('split-only')
-                          ? ['splitView', 'collapse']
-                          : params.has('single') || params.has('plugin-only')
-                            ? ['collapse']
-                            : [
-                                'settings',
-                                'update',
-                                'version',
-                                'theme',
-                                'sessionsOverview',
-                                'splitView',
-                                'daemonStatus',
-                                'localFiles',
-                                'collapse',
-                              ],
+                      items: params.has('rich-footer')
+                        ? [
+                            'settings',
+                            'version',
+                            'theme',
+                            'sessionsOverview',
+                            'workspacesOverview',
+                            'splitView',
+                            'daemonStatus',
+                            'localFiles',
+                            'desktopRelay',
+                            'collapse',
+                          ]
+                        : params.has('minimal')
+                          ? ['settings', 'theme', 'daemonStatus', 'collapse']
+                          : params.has('split-only')
+                            ? ['splitView', 'collapse']
+                            : params.has('single') || params.has('plugin-only')
+                              ? ['collapse']
+                              : [
+                                  'settings',
+                                  'update',
+                                  'version',
+                                  'theme',
+                                  'sessionsOverview',
+                                  'splitView',
+                                  'daemonStatus',
+                                  'localFiles',
+                                  'collapse',
+                                ],
                     },
                     showLive: params.has('live'),
                     ...(custom
