@@ -7870,9 +7870,14 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it.each([1, 1025])(
-    'supplements a persisted page with %i unpersisted lifecycle frames',
-    async (count) => {
+  it.each([
+    [1, 'executionLifecycle'],
+    [1025, 'executionLifecycle'],
+    [1, 'hookLifecycle'],
+    [1025, 'hookLifecycle'],
+  ] as const)(
+    'supplements a persisted page with %i unpersisted %s frames',
+    async (count, metaKey) => {
       const handle = makeChannel({
         extMethodImpl: (method, params) => {
           if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript)
@@ -7898,9 +7903,9 @@ describe('createAcpSessionBridge', () => {
                 text: 'body must not enter lifecycle supplement',
               },
               _meta: {
-                executionLifecycle: {
+                [metaKey]: {
                   v: 1,
-                  kind: 'request',
+                  kind: metaKey === 'hookLifecycle' ? 'hook' : 'request',
                   executionId: `execution-${index}`,
                   sessionId: session.sessionId,
                   promptId: 'prompt',
@@ -7937,7 +7942,7 @@ describe('createAcpSessionBridge', () => {
         );
         expect(refreshed.lifecycleReplay?.at(-1)?.data).toMatchObject({
           _meta: {
-            executionLifecycle: { executionId: `execution-${count - 1}` },
+            [metaKey]: { executionId: `execution-${count - 1}` },
           },
         });
       } finally {

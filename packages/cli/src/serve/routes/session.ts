@@ -6095,6 +6095,140 @@ export function registerSessionRoutes(
     }
   });
 
+  for (const route of [
+    '/session/:id/turns/:promptId/hooks',
+    '/workspaces/:workspace/session/:id/turns/:promptId/hooks',
+  ]) {
+    app.get(route, async (req, res) => {
+      const routeName = `GET ${route}`;
+      const sessionId = requireSessionId(req, res);
+      if (sessionId === null) return;
+      const promptId = req.params['promptId'];
+      if (typeof promptId !== 'string' || !promptId.trim()) {
+        res.status(400).json({
+          code: 'invalid_prompt_id',
+          error: 'A history prompt ID is required',
+        });
+        return;
+      }
+      const qualified = route.startsWith('/workspaces/');
+      const target = qualified
+        ? resolveQualifiedSessionTarget(req, res, {
+            allowUntrustedSecondary: true,
+          })
+        : undefined;
+      if (qualified && !target) return;
+      const limit = parseTranscriptLimitQuery(req.query['limit'], res);
+      if (limit === null) return;
+      const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
+      if (snapshot === null) return;
+      const start = parseTranscriptStartQuery(req.query['start'], res);
+      if (start === null) return;
+      if (
+        (start !== undefined && snapshot === undefined) ||
+        (snapshot !== undefined &&
+          workspaceTranscriptCursorExceedsLimit(snapshot))
+      ) {
+        res.status(400).json({
+          code: 'invalid_transcript_cursor',
+          error: 'Invalid hook page snapshot or start',
+        });
+        return;
+      }
+      try {
+        const result = await runWithoutDebugLogSession(() =>
+          archiveCoordinator.runSharedMany([sessionId], async () => {
+            const runtime = qualified
+              ? target?.kind === 'ordinary'
+                ? target.runtime
+                : await resolveQualifiedSessionRuntime(
+                    req,
+                    res,
+                    routeName,
+                    [sessionId],
+                    'active',
+                  )
+              : await resolveTranscriptSessionRuntime(
+                  res,
+                  routeName,
+                  sessionId,
+                  snapshot !== undefined,
+                );
+            if (!runtime) return undefined;
+            const assertOpen = captureRuntimeGenerationAssertion(runtime);
+            assertOpen?.();
+            return runWithWorkspaceRuntimeStorage(runtime, async () => {
+              if (snapshot === undefined) {
+                await assertSessionLoadable(
+                  runtime.workspaceCwd,
+                  sessionId,
+                  runtime.sessionRuntimeBaseDir,
+                  { allowActiveConflict: true },
+                );
+                try {
+                  runtime.bridge.getSessionSummary(sessionId);
+                  if (runtime.bridge.flushSessionTranscript)
+                    await runtime.bridge.flushSessionTranscript(sessionId);
+                  else
+                    await runtime.bridge.getSessionTranscriptPage({
+                      sessionId,
+                      direction: 'backward',
+                      limit: 1,
+                    });
+                } catch (error) {
+                  if (!(error instanceof SessionNotFoundError)) throw error;
+                }
+                assertOpen?.();
+              }
+              try {
+                const page = await new SessionTranscriptReader(
+                  runtime.workspaceCwd,
+                  getTranscriptCursorCodec(runtime),
+                ).readTurnHooksPage(sessionId, promptId, {
+                  ...(snapshot !== undefined ? { snapshot } : {}),
+                  ...(start !== undefined ? { start } : {}),
+                  ...(limit !== undefined ? { limit } : {}),
+                });
+                assertOpen?.();
+                if (!page)
+                  res.status(404).json({
+                    code: 'turn_not_found',
+                    error: 'History turn not found',
+                    sessionId,
+                  });
+                return page;
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+                  throw error;
+                if (snapshot !== undefined)
+                  throw new SessionTranscriptSnapshotUnavailableError(
+                    sessionId,
+                  );
+                const location =
+                  await createWorkspaceRuntimeSessionService(
+                    runtime,
+                  ).getSessionLocation(sessionId);
+                if (location === 'archived')
+                  throw new SessionArchivedError(sessionId);
+                if (location === 'conflict')
+                  throw new SessionConflictError(sessionId);
+                throw new SessionNotFoundError(sessionId);
+              }
+            });
+          }),
+        );
+        if (result === undefined) return;
+        res
+          .status(200)
+          .set('Cache-Control', 'no-store')
+          .type('application/json')
+          .send(serializeWorkspaceTranscriptResponse(result, sessionId));
+      } catch (error) {
+        sendBridgeError(res, error, { route: routeName, sessionId });
+      }
+    });
+  }
+
   app.get('/session/:id/turn-index', async (req, res) => {
     const route = 'GET /session/:id/turn-index';
     const sessionId = requireSessionId(req, res);

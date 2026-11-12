@@ -5,6 +5,14 @@
  */
 
 import {
+  createHookLifecycleState,
+  parseHookLifecycle,
+  reduceHookLifecycle,
+  summarizeHookExecutions,
+  type HookTurnPage,
+} from '../telemetry/hook-lifecycle-contract.js';
+
+import {
   restoreSessionSources,
   type SessionSourcesRestoreState,
 } from './session-sources.js';
@@ -376,7 +384,8 @@ function buildManagedSessionRestoreProjection(
       if (
         uiEvent &&
         uiEvent['event.name'] !== 'request_lifecycle' &&
-        uiEvent['event.name'] !== 'tool_lifecycle'
+        uiEvent['event.name'] !== 'tool_lifecycle' &&
+        uiEvent['event.name'] !== 'hook_lifecycle'
       ) {
         uiTelemetryEvents.push(uiEvent as UiEvent);
       }
@@ -1871,6 +1880,8 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(entry.turnHint.turnPromptId) +
       estimateStringBytes(entry.turnHint.turnDaemonPromptId) +
       estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
+      estimateStringBytes(entry.turnHint.hookTurn?.promptId) +
+      estimateStringBytes(entry.turnHint.hookTurn?.parentUuid) +
       entry.segments.length * INDEX_SEGMENT_BYTES;
   }
   for (const turn of index.navigationTurns) {
@@ -3336,6 +3347,109 @@ export class SessionTranscriptReader {
     };
   }
 
+  async readTurnHooksPage(
+    sessionId: string,
+    promptId: string,
+    options: SessionTranscriptReadTurnIndexOptions = {},
+  ): Promise<HookTurnPage | undefined> {
+    const limit = normalizeLimit(options.limit ?? 50);
+    const start = options.start ?? 0;
+    if (
+      (options.start !== undefined && options.snapshot === undefined) ||
+      !isFiniteNonNegativeInteger(start)
+    )
+      throw new InvalidSessionTranscriptCursorError();
+    const anchor = await this.readTurnIndexPage(sessionId, {
+      ...(options.snapshot !== undefined ? { snapshot: options.snapshot } : {}),
+      limit: 1,
+    });
+    const snapshot = this.decodeSnapshot(anchor.snapshot);
+    const index = await getCachedIndex({
+      filePath: this.getSessionFilePath(sessionId),
+      fileIdentity: snapshot.fileIdentity,
+      snapshotSize: snapshot.snapshotSize,
+      lastUpdated: snapshot.lastUpdated,
+    });
+    const base = { sessionId, promptId, snapshot: anchor.snapshot, start };
+    if (indexHasManagedHeader(index)) {
+      return {
+        ...base,
+        totalExecutions: 0,
+        executions: [],
+        summary: null,
+        coverage: 'unsupported',
+      };
+    }
+    let state = createHookLifecycleState();
+    const executionPrompts = new Map<string, string>();
+    const conflictingExecutions = new Set<string>();
+    let partial = !index.sourceReadComplete || index.gaps.length > 0;
+    await forEachAggregatedRecord(
+      index,
+      index.replayUuids.filter(
+        (uuid) => index.byUuid.get(uuid)?.subtype === 'ui_telemetry',
+      ),
+      (record) => {
+        const value = (
+          record.systemPayload as UiTelemetryRecordPayload | undefined
+        )?.uiEvent;
+        if (value?.['event.name'] !== 'hook_lifecycle') return;
+        const event = parseHookLifecycle(value);
+        if (!event) {
+          partial = true;
+          return;
+        }
+        if (event.sessionId !== sessionId) {
+          partial = true;
+          return;
+        }
+        const priorPrompt = executionPrompts.get(event.executionId);
+        if (priorPrompt !== undefined && priorPrompt !== event.promptId)
+          conflictingExecutions.add(event.executionId);
+        executionPrompts.set(event.executionId, event.promptId);
+        if (event.promptId === promptId)
+          state = reduceHookLifecycle(state, event, { source: 'replay' });
+      },
+    );
+    if (
+      state.entries.size === 0 &&
+      !index.replayUuids.some(
+        (uuid) => index.byUuid.get(uuid)?.turnHint.turnPromptId === promptId,
+      )
+    )
+      return undefined;
+    const entries = [...state.entries.values()]
+      .map((entry) =>
+        conflictingExecutions.has(entry.event.executionId)
+          ? { ...entry, conflicted: true }
+          : entry,
+      )
+      .sort(
+        (a, b) =>
+          a.event.startedAt - b.event.startedAt ||
+          a.event.executionId.localeCompare(b.event.executionId),
+      );
+    if (start > entries.length) throw new InvalidSessionTranscriptCursorError();
+    partial ||= entries.some(
+      (entry) => entry.conflicted || entry.status === 'unknown',
+    );
+    const executions = entries.slice(start, start + limit);
+    return {
+      ...base,
+      totalExecutions: entries.length,
+      executions,
+      summary: entries.length > 0 ? summarizeHookExecutions(entries) : null,
+      ...(start + executions.length < entries.length
+        ? { nextStart: start + executions.length }
+        : {}),
+      coverage: partial
+        ? 'partial'
+        : entries.length > 0
+          ? 'recorded'
+          : 'unrecorded',
+    };
+  }
+
   async readRestoreProjection(
     sessionId: string,
     options: SelectiveSessionRestoreOptions,
@@ -3564,7 +3678,8 @@ export class SessionTranscriptReader {
         if (
           uiEvent &&
           uiEvent['event.name'] !== 'request_lifecycle' &&
-          uiEvent['event.name'] !== 'tool_lifecycle'
+          uiEvent['event.name'] !== 'tool_lifecycle' &&
+          uiEvent['event.name'] !== 'hook_lifecycle'
         ) {
           uiTelemetryEvents.push(uiEvent as UiEvent);
         }

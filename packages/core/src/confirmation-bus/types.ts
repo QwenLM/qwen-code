@@ -144,6 +144,7 @@ export type HookProgressOutcome =
  * observational: nothing waits for a subscriber.
  */
 export interface HookProgress {
+  hookLifecycle?: import('../telemetry/hook-lifecycle-contract.js').HookLifecycleEvent;
   type: MessageBusType.HOOK_PROGRESS;
   phase: 'start' | 'end';
   /** HookEventName value, e.g. 'PreToolUse'. */

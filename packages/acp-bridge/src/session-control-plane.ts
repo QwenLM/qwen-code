@@ -8336,7 +8336,8 @@ export function createSessionControlPlane(
               if (!isRecord(meta)) continue;
               if (
                 !isRecord(meta['executionLifecycle']) &&
-                !isRecord(meta['toolLifecycle'])
+                !isRecord(meta['toolLifecycle']) &&
+                !isRecord(meta['hookLifecycle'])
               )
                 continue;
               lifecycleReplay.push({
@@ -8347,6 +8348,9 @@ export function createSessionControlPlane(
                   _meta: {
                     ...(isRecord(meta['executionLifecycle'])
                       ? { executionLifecycle: meta['executionLifecycle'] }
+                      : {}),
+                    ...(isRecord(meta['hookLifecycle'])
+                      ? { hookLifecycle: meta['hookLifecycle'] }
                       : {}),
                     ...(isRecord(meta['toolLifecycle'])
                       ? { toolLifecycle: meta['toolLifecycle'] }

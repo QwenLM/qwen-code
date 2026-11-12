@@ -203,6 +203,17 @@ import type {
   DaemonUnrecognizedDiagnosticReason as DaemonEntryUnrecognizedDiagnosticReason,
 } from '../../src/daemon/index.js';
 
+it('exports hook page contracts from the root and daemon entry points', () => {
+  expectTypeOf<Public.DaemonSessionTurnHooksPage>().toEqualTypeOf<DaemonPublic.DaemonSessionTurnHooksPage>();
+  expectTypeOf<Public.DaemonSessionTurnHooksPageOptions>().toEqualTypeOf<DaemonPublic.DaemonSessionTurnHooksPageOptions>();
+  expectTypeOf<
+    ReturnType<Public.DaemonClient['getSessionTurnHooksPage']>
+  >().toEqualTypeOf<Promise<Public.DaemonSessionTurnHooksPage>>();
+  expectTypeOf<
+    ReturnType<Public.WorkspaceDaemonClient['getSessionTurnHooksPage']>
+  >().toEqualTypeOf<Promise<Public.DaemonSessionTurnHooksPage>>();
+});
+
 it('exports native Skill archive contracts without widening legacy runtime sources', () => {
   expect(Public.DaemonSkillInstallError).toBe(
     DaemonPublic.DaemonSkillInstallError,

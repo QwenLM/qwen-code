@@ -1840,6 +1840,11 @@ export interface DaemonSessionToolCalls {
   events: DaemonEvent[];
 }
 
+export type DaemonSessionTurnHooksPage =
+  import('./ui/hook-lifecycle.js').HookTurnPage;
+export type DaemonSessionTurnHooksPageOptions =
+  DaemonSessionTurnIndexPageOptions;
+
 export interface DaemonSessionTurnIndexPageOptions {
   snapshot?: string;
   start?: number;

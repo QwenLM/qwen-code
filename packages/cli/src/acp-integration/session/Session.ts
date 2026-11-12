@@ -4,6 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { HookProgress } from '@qwen-code/qwen-code-core/confirmation-bus/types.js';
+import { parseHookLifecycle } from '@qwen-code/qwen-code-core/telemetry/hook-lifecycle-contract.js';
+import {
+  createTranscriptHookLifecycleUpdate,
+  createAgentRecordTranscriptUpdate,
+  createTranscriptExecutionLifecycleUpdate,
+} from '@qwen-code/acp-bridge/transcriptReplay';
 import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
@@ -64,6 +71,7 @@ import {
 import type { LoopReminderInput } from '@qwen-code/qwen-code-core/services/loop-protection.js';
 import {
   captureHookExecutionOwner,
+  enterHookExecutionOwner,
   runWithHookExecutionOwner,
   type HookExecutionOwner,
 } from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
@@ -373,10 +381,6 @@ import {
   INTERRUPTED_PROMPT_ABORT_REASON,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
-import {
-  createAgentRecordTranscriptUpdate,
-  createTranscriptExecutionLifecycleUpdate,
-} from '@qwen-code/acp-bridge/transcriptReplay';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   SERVE_CONTROL_EXT_METHODS,
@@ -2831,6 +2835,8 @@ export class Session implements SessionContext {
   private availableCommandsUpdateTail: Promise<void> = Promise.resolve();
   private lastSuccessfulAvailableCommandsHash?: string;
   private unsubscribeRequestLifecycle?: () => void;
+  private unsubscribeHookBusChange?: () => void;
+  private unsubscribeHookProgress?: () => void;
   private requestLifecycleSessionId: string;
   private readonly requestLifecycleExecutions = new Set<string>();
   /** The exact status-change callback this Session installed, so dispose can
@@ -3058,6 +3064,24 @@ export class Session implements SessionContext {
     this.planEmitter = new PlanEmitter(this);
     this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
+    this.unsubscribeHookBusChange = this.config.onMessageBusChange?.((bus) => {
+      this.unsubscribeHookProgress?.();
+      const listener = (message: HookProgress) => {
+        const event = parseHookLifecycle(message.hookLifecycle);
+        if (
+          this.disposed ||
+          !event ||
+          event.sessionId !== this.requestLifecycleSessionId
+        )
+          return;
+        void this.sendUpdate(createTranscriptHookLifecycleUpdate(event)).catch(
+          () => debugLogger.warn('Failed to send hook lifecycle'),
+        );
+      };
+      bus.subscribe(MessageBusType.HOOK_PROGRESS, listener);
+      this.unsubscribeHookProgress = () =>
+        bus.unsubscribe(MessageBusType.HOOK_PROGRESS, listener);
+    });
     this.unsubscribeRequestLifecycle = this.config.onRequestLifecycle?.(
       (event) => {
         if (this.disposed) return;
@@ -5334,6 +5358,10 @@ export class Session implements SessionContext {
     this.unsubscribeWorkflowModeChange = undefined;
     this.unsubscribeApprovalModeChange?.();
     this.unsubscribeApprovalModeChange = undefined;
+    this.unsubscribeHookBusChange?.();
+    this.unsubscribeHookBusChange = undefined;
+    this.unsubscribeHookProgress?.();
+    this.unsubscribeHookProgress = undefined;
     this.unsubscribeRequestLifecycle?.();
     this.unsubscribeRequestLifecycle = undefined;
     this.requestLifecycleExecutions.clear();
@@ -7095,6 +7123,14 @@ export class Session implements SessionContext {
         promptIdContext.enterWith(promptId);
         const parentContext = extractDaemonTraceContext(params);
 
+        const hookOwner = captureHookExecutionOwner(this.config);
+        if (hookOwner)
+          enterHookExecutionOwner(
+            Object.freeze({
+              ...hookOwner,
+              historyPromptId: responseCapture.turnId,
+            }),
+          );
         return await withInteractionSpan(
           this.config,
           {

@@ -5831,6 +5831,101 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
+  it('reads hook pages within their persisted workspace without loading a session', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440283';
+      const promptId = `${sessionId}########1`;
+      for (const cwd of [PRIMARY_CWD, SECONDARY_CWD]) {
+        await writeStoredSession({
+          sessionId,
+          cwd,
+          timestamp: '2026-07-08T00:00:00.000Z',
+          prompt: 'hook turn',
+          mtime: new Date('2026-07-08'),
+        });
+        const file = path.join(
+          new Storage(cwd).getProjectDir(),
+          'chats',
+          `${sessionId}.jsonl`,
+        );
+        await fsp.appendFile(
+          file,
+          JSON.stringify({
+            uuid: `${sessionId}-hook`,
+            parentUuid: `${sessionId}-user-1`,
+            sessionId,
+            cwd,
+            timestamp: '2026-07-08T00:00:01.000Z',
+            type: 'system',
+            subtype: 'ui_telemetry',
+            systemPayload: {
+              uiEvent: {
+                'event.name': 'hook_lifecycle',
+                v: 1,
+                kind: 'hook',
+                executionId: 'exec',
+                runtimeId: cwd,
+                sessionId,
+                promptId,
+                agentId: null,
+                eventName: 'Stop',
+                hookType: 'command',
+                name: cwd === PRIMARY_CWD ? 'primary hook' : 'secondary hook',
+                source: 'project',
+                startedAt: 100,
+                phase: 'ended',
+                endedAt: 110,
+                durationMs: 10,
+                outcome: 'success',
+              },
+            },
+          }) + '\n',
+        );
+      }
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        secondaryTrusted: false,
+      });
+      const suffix = `/session/${sessionId}/turns/${encodeURIComponent(promptId)}/hooks`;
+      const secondary = await request(app)
+        .get('/workspaces/secondary-id' + suffix)
+        .set('Host', host())
+        .expect(200);
+      expect(secondary.body).toMatchObject({
+        totalExecutions: 1,
+        coverage: 'recorded',
+        executions: [{ event: { name: 'secondary hook' } }],
+      });
+      expect(JSON.stringify(secondary.body)).not.toContain('primary hook');
+      const primary = await request(app)
+        .get('/workspaces/primary-id' + suffix)
+        .set('Host', host())
+        .expect(200);
+      expect(primary.body.executions[0].event.name).toBe('primary hook');
+      await request(app)
+        .get(
+          '/workspaces/primary-id' +
+            suffix +
+            '?snapshot=' +
+            encodeURIComponent(secondary.body.snapshot),
+        )
+        .set('Host', host())
+        .expect(400);
+      await request(app)
+        .get('/workspaces/secondary-id' + suffix + '?start=1')
+        .set('Host', host())
+        .expect(400);
+      await request(app)
+        .get(
+          `/workspaces/secondary-id/session/${sessionId}/turns/missing/hooks`,
+        )
+        .set('Host', host())
+        .expect(404);
+      expect(primaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.restoreCalls).toEqual([]);
+    });
+  });
+
   it('serves workspace-qualified turn index and anchored transcript without starting the bridge', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440282';
