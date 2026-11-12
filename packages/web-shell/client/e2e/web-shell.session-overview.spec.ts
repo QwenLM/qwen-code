@@ -503,7 +503,8 @@ test('shadow portal details keep focus in the overview after hover replacement @
   page,
 }) => {
   await page.goto('/e2e/session-overview-shadow-dom.html');
-  await page.getByRole('button', { name: 'More', exact: true }).click();
+  // The harness declares a footer-only sidebar, which renders without a
+  // navigation rail since #17027: reach the overview from the footer instead.
   await page
     .getByRole('button', { name: 'Session Overview', exact: true })
     .click();
