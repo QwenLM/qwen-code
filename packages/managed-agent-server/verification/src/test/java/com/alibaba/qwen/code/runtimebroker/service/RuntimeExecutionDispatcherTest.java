@@ -452,6 +452,59 @@ class RuntimeExecutionDispatcherTest {
                 any(Instant.class));
     }
 
+    // R4-6 second exit: the schedule is accepted, then close() shuts the
+    // executor down and discards the queued tick. The wait must still settle
+    // its PREPARED row and end, or the row stays active forever.
+    @Test
+    void aShutdownAfterTheInitialScheduleSettlesTheStrandedPreparedRecord() throws Exception {
+        var registry = mock(RuntimeBindingRegistry.class);
+        var bindings = mock(RuntimeBindingRepository.class);
+        var sessions = mock(RuntimeSessionRepository.class);
+        var executions = mock(ToolExecutionRepository.class);
+        var scheduler = new java.util.concurrent.ScheduledThreadPoolExecutor(1);
+        var context = mock(SessionContext.class);
+        var binding = mock(RuntimeBindingRecord.class);
+        var session = mock(RuntimeSession.class);
+        var prepared = mock(ToolExecutionRecord.class);
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "workspace");
+        var request = new RuntimeProvisionRequest(scope, null,
+                com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE,
+                "workspace");
+        when(binding.getRequest()).thenReturn(request);
+        when(context.binding()).thenReturn(binding);
+        when(context.session()).thenReturn(session);
+        when(session.getScope()).thenReturn(scope);
+        when(session.getHarnessSessionId()).thenReturn("harness");
+        when(prepared.getExecutionCallId()).thenReturn("execution");
+        when(prepared.getState()).thenReturn(ToolExecutionRecord.State.PREPARED);
+        when(prepared.sameIdentity(prepared)).thenReturn(true);
+        when(prepared.getReference()).thenReturn(Map.of("sessionId", "runtime", "dispatchMode", "deferred"));
+        when(executions.findByExecutionCallId("execution")).thenReturn(prepared);
+        when(executions.claimValidatedDispatch(eq("execution"), eq("broker"), any(Duration.class), any()))
+                .thenReturn(null);
+        var dispatcher = new RuntimeExecutionDispatcher(registry, mock(RuntimeExecutionState.class), bindings,
+                sessions, executions, mock(RuntimeProvisioner.class), mock(RuntimeTransport.class),
+                mock(RuntimePublicationVerifier.class), "broker", Duration.ofSeconds(60),
+                Duration.ofSeconds(10), Clock.fixed(Instant.parse("2026-11-01T00:00:00Z"), ZoneOffset.UTC),
+                scheduler, mock(ScheduledExecutorService.class), new AtomicBoolean());
+        dispatcher.beginDispatch(context, prepared, Map.of("toolName", "read_file", "input", Map.of()), null,
+                com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload.of("digest", "read_file"));
+        // close(): the dispatch wait is settled and ended before the executor
+        // discards the queued tick.
+        dispatcher.cancelPendingOperations();
+        scheduler.shutdownNow();
+        verify(executions).settlePrepared(eq(prepared), argThat(result ->
+                "not_started".equals(result.get("executionStatus"))
+                        && result.get("error") instanceof Map<?, ?> refusal
+                        && "dispatch_failed".equals(refusal.get("type"))),
+                any(Instant.class));
+        var field = RuntimeExecutionDispatcher.class.getDeclaredField("dispatches");
+        field.setAccessible(true);
+        var dispatches = (java.util.concurrent.ConcurrentMap<String, CompletableFuture<Void>>) field.get(dispatcher);
+        assertTrue(dispatches.isEmpty());
+    }
+
     private static final class Fixture {
         private static final Duration LEASE = Duration.ofSeconds(60);
         private static final Map<String, Object> REFERENCE = Map.of("sessionId", "runtime");

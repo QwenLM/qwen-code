@@ -74,6 +74,14 @@ final class RuntimeExecutionDispatcher {
     private final AtomicBoolean closed;
     private final ConcurrentMap<String, CompletableFuture<Void>> dispatches =
             new ConcurrentHashMap<>();
+    // The shared-dispatch waits own their PREPARED row: a close that discards
+    // the queued tick must settle it, and the wait must end so the dispatch
+    // map entry is removed.
+    private final ConcurrentMap<String, Awaiting> awaiting =
+            new ConcurrentHashMap<>();
+    private record Awaiting(CompletableFuture<Void> queued,
+            ToolExecutionRecord prepared) {
+    }
     // Executions whose transport.execute call is in flight in this process,
     // as opposed to dispatches, which also covers a claim being fenced.
     private final Set<String> invocations = ConcurrentHashMap.newKeySet();
@@ -111,6 +119,19 @@ final class RuntimeExecutionDispatcher {
     }
 
     void cancelPendingOperations() {
+        // A shared-dispatch wait owns its PREPARED row: close() rejects every
+        // queued tick with shutdownNow(), so settle here before unblocking the
+        // wait, or the row stays active and fences the binding's release.
+        awaiting.values().forEach(wait -> {
+            try {
+                settleStrandedPrepared(wait.prepared(), "dispatch_failed",
+                        "Shared Workspace dispatch failed before claim");
+            } catch (RuntimeException | Error ignored) {
+                // Close still has to unblock the caller's wait below.
+            }
+            wait.queued().completeExceptionally(unavailable(
+                    "runtime_admission_closed", "Runtime broker is closing"));
+        });
         dispatches.values().forEach(future -> future.cancel(false));
     }
 
@@ -230,6 +251,10 @@ final class RuntimeExecutionDispatcher {
         // occupant that never settles answers a conflict instead of retrying
         // forever on the shared coordination thread.
         CompletableFuture<Void> queued = new CompletableFuture<>();
+        Awaiting wait = new Awaiting(queued, prepared);
+        awaiting.put(prepared.getExecutionCallId(), wait);
+        queued.whenComplete((ignored, error) ->
+                awaiting.remove(prepared.getExecutionCallId(), wait));
         java.time.Instant deadline = clock.instant().plus(v3ResultWindow);
         java.util.concurrent.atomic.AtomicInteger attempt =
                 new java.util.concurrent.atomic.AtomicInteger();
@@ -317,6 +342,7 @@ final class RuntimeExecutionDispatcher {
             // PREPARED row would otherwise stay active with no owner and fence
             // the binding's release forever. Settle it before propagating,
             // exactly like the tick's own exceptional exit.
+            awaiting.remove(prepared.getExecutionCallId(), wait);
             try {
                 settleStrandedPrepared(prepared, "dispatch_failed",
                         "Shared Workspace dispatch failed before claim");
