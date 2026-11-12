@@ -199,6 +199,11 @@ test('ci.yml wires the check into lint_and_static before the lint lanes', () => 
   // below, so the model costs nothing here. The same class bit the autofix
   // signature extractor in #17011, where a Prettier re-quote silently emptied a
   // pattern that every behavioural assertion then matched trivially.
+  // One call covers all three pins that used to live here: this step, the
+  // freshness suite step further down, and the JOB level — the last of which no
+  // slice could ever see, since a job-level key sits above `steps:` and outside
+  // every step block, while silencing every step in the job including this one.
+  // It reads the whole workflow rather than the slice above for that reason.
   assertNoContinueOnError(
     ci,
     'lint_and_static',
@@ -266,12 +271,12 @@ test('ci.yml wires the check into lint_and_static before the lint lanes', () => 
     ),
     'the step must run this suite',
   );
-  // The body half of the same pair the gate's own step is pinned for above:
+  // This step's fatality is pinned by the same parsed reading as the gate's
+  // above. The body half of that pair still needs its own assertion here:
   // `|| true` (or `|| :`) leaves the profile arm, the run-line containment and
   // the continue-on-error pin all intact while the suite exits 0 on a failure.
   // This step is the only reason the suite runs on github_ci_only at all, so a
   // silenced one restores exactly the coverage gap it was added to close.
-  // Its fatality is pinned by the same parsed reading as the gate's above.
   assert.doesNotMatch(
     suiteBlock,
     /\|\|\s*(true|:)(\s|'|$)/,
@@ -1542,6 +1547,7 @@ test('every legal spelling of continue-on-error is refused', () => {
       gateStep + "        continue-on-error: ${{ github.actor == 'bot' }}\n",
     ),
   );
+  assert.notEqual(conditional, realCi, 'the expression fixture did not apply');
   assert.throws(
     () =>
       assertNoContinueOnError(
