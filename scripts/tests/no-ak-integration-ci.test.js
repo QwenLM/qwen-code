@@ -670,19 +670,26 @@ describe('no-AK integration CI wiring', () => {
     // flag and no NODE_OPTIONS.
     //
     // With the flag, at --memory=8g the limit measures 4144 MB against that
-    // 2096 MB default, leaving ~3 GiB of the container for the rest of tsc's RSS
-    // — a real 2x raise, not a cap that lets old-space reach the container
-    // ceiling and trade a diagnosable V8 abort for a kernel OOM kill. Do not
-    // lower it to 3072 on that theory; the evidence does not support the hazard.
+    // 2096 MB default, leaving ~4 GiB of the container for the rest of tsc's RSS
+    // (8 GiB − 4144 MiB ≈ 3.95 GiB, with no separate reserve claimed for the
+    // resident set) — a real 2x raise, not a cap that lets old-space reach the
+    // container ceiling and trade a diagnosable V8 abort for a kernel OOM kill.
+    // That arithmetic is also the flag's floor: it is only safe from 8 GiB up.
+    // At 4g the container's own default is 2096 MB, so a 4096 MB cap would take
+    // the whole container and leave nothing for the rest of the process; below
+    // 8 GiB the cap has to follow the container size instead. Do not lower it to
+    // 3072 on the theory that it endangers an 8 GiB container; at or above
+    // 8 GiB the evidence does not support that hazard.
     //
     // Both hosts moved to 16 GiB on 2026-11-12, where the default is already
     // 4144 MB and this cap is a no-op. It is kept because every config snapshot
-    // before that date used 8g: the flag is what stops a future downscale from
-    // silently restoring the default that failed. config.example.json is a
-    // template, not the live budget — that lives in each host's
-    // /etc/qwen-ephemeral-runner/config.json. The hosted lane keeps the default
-    // it has always passed with, under the same fleet predicate as the worker
-    // caps.
+    // since the 2026-11-08 scale-up used 8g — both snapshots bracketing the
+    // incident read 8g, and the earlier 4g row predates that scale-up — so the
+    // flag is what stops a future downscale from silently restoring the default
+    // that failed. config.example.json is a template, not the live budget — that
+    // lives in each host's /etc/qwen-ephemeral-runner/config.json. The hosted
+    // lane keeps the default it has always passed with, under the same fleet
+    // predicate as the worker caps.
     //
     // Through `env` on that one command, NOT the step's env block: the
     // zero-secrets contract above requires every value there but QWEN_HOME to
