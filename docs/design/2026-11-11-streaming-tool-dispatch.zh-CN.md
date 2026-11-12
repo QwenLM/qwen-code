@@ -2,7 +2,7 @@
 
 [English](2026-11-11-streaming-tool-dispatch.md) | [简体中文](2026-11-11-streaming-tool-dispatch.zh-CN.md)
 
-- **状态**：评估完成；建议见下。这是 [event-bus agent 循环](2026-11-11-event-bus-agent-loop.zh-CN.md) 移植的第三片（PR 1 #16935 已合入，PR 2 #16938 评审中）。它是该设计所指名的「评估并决策」切片：记录 parity 差异与实现设计，并对是否/何时实现做出决断。
+- **状态**：评估完成；建议见下。这是 [event-bus agent 循环](2026-11-11-event-bus-agent-loop.zh-CN.md) 移植的第三片（PR 1 #16935 已合入，PR 2 #16938 已合入）。它是该设计所指名的「评估并决策」切片：记录 parity 差异与实现设计，并对是否/何时实现做出决断。
 - **日期**：2026-11-11。行号引用在 `feat/event-bus-handlers`（PR 2 #16938，基于 `origin/main` `1fe1f197781c`）上核实。
 - **行为来源**：`v1.0.0-preview` `587e3429cabf`，`event-bus/llm/inference-round.ts`、`event-bus/tool-handler.ts`、`tool-executor/`。
 
