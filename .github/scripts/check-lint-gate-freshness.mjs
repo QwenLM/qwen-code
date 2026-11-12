@@ -338,20 +338,56 @@ const LINE_BREAK = /\r\n|[\n\r\u2028\u2029]/;
 // meaning the compared text does not.
 const ANCHOR_OR_ALIAS = /(?:^|[\s[(,:=])[&*][A-Za-z0-9_][\w.-]*/;
 
-// The indent of a block-scalar opener (`run: |`, `with: >-`, `timeout: |2-`),
-// or null when the line does not open one. Everything indented deeper than this
-// is scalar CONTENT — the runner reads it as a script, so it is compared
-// verbatim, including blank lines and lines starting with `#` (a shell comment,
-// not a YAML one).
+// The indent of a block-scalar opener, or null when the line is not one.
+// `run: |`, `with: >-`, `timeout: |2-` are all openers; the chomping indicator
+// and the explicit indentation may come in either order (`|+2` and `|2+` are
+// both legal YAML, as are `>-2` and `>2-`). Everything indented deeper than the
+// opener is scalar CONTENT — the runner reads it as a script, so it is compared
+// verbatim, including lines starting with `#` (a shell comment, not a YAML one).
 function blockScalarIndent(line) {
-  const opener = /^(\s*)(?:-\s+)?[^\s#][^:]*:\s*[|>][+-]?\d*\s*(?:#.*)?$/.exec(
-    line,
-  );
+  const opener =
+    /^(\s*)(?:-\s+)?[^\s#][^:]*:\s*[|>](?:[+-]?\d*|\d+[+-])\s*(?:#.*)?$/.exec(
+      line,
+    );
   return opener ? opener[1].length : null;
 }
 
+// A value that OPENS with `|` or `>` is a scalar whatever follows it. When the
+// opener pattern above does not accept the modifier spelled there, the shape is
+// one this model does not enumerate — and the answer is null, not "treat the
+// body as structure". Deleting the body was the R1-1 hole: `|2-` fell through,
+// its lines were reclassified as structure, and every `#` line in the script was
+// then dropped as prose.
+const SCALAR_VALUE_START = /^(?:\s*)(?:-\s+)?[^\s#][^:]*:\s*[|>]/;
+
 function indentOf(line) {
   return /^ */.exec(line)[0].length;
+}
+
+// True when a structural line ends inside a quoted scalar. Tracks both quote
+// kinds, a doubled `''` inside single quotes, a backslash escape inside double
+// quotes, and a trailing `#` comment (which starts only after whitespace, so
+// `run: 'echo #tag'` keeps its `#`). A line that ends inside a quote is a
+// multi-line flow scalar, a shape this model does not enumerate.
+function endsInsideQuote(line) {
+  let quote = null;
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    if (quote === null) {
+      if (char === '#' && (i === 0 || /\s/.test(line[i - 1]))) break;
+      if (char === "'" || char === '"') quote = char;
+    } else if (quote === "'") {
+      if (char === "'") {
+        if (line[i + 1] === "'") i += 1;
+        else quote = null;
+      }
+    } else if (char === '\\') {
+      i += 1;
+    } else if (char === '"') {
+      quote = null;
+    }
+  }
+  return quote !== null;
 }
 
 /**
@@ -389,7 +425,15 @@ function structuralLines(text) {
     if (line.trimStart().startsWith('#')) continue;
     if (/^[ \t]*\t/.test(/^[ \t]*/.exec(line)[0])) return null;
     if (ANCHOR_OR_ALIAS.test(line)) return null;
+    // A quoted scalar that does not close on its own line continues on the
+    // next one, and those continuation lines are DATA the runner reads. This
+    // model is one line at a time, so it refuses rather than let a `#` there be
+    // mistaken for prose.
+    if (endsInsideQuote(line)) return null;
     scalar = blockScalarIndent(line);
+    // The value opens with `|`/`>` but the opener did not accept it: an
+    // unenumerated modifier. Refuse; never fall through to the structural path.
+    if (scalar === null && SCALAR_VALUE_START.test(line)) return null;
     lines.push(line);
     content.push(false);
   }

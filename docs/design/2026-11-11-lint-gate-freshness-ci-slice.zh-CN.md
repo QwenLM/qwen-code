@@ -108,13 +108,15 @@ Node 供给相关步骤（`setup-node`、pnpm store action、self-hosted Node ac
 
 ### fail-closed 的提取
 
-对任何它未建模的形态，`extractLintGateSlice` 返回 `null`，调用方随即保留整文件判定：
+这个模型是白名单式的：一行要么被枚举（进入比对，或被标记替换），要么整次提取被拒绝。「不认识就删掉」在这里不存在。对任何它未建模的形态，`extractLintGateSlice` 返回 `null`，调用方随即保留整文件判定：
 
 - 序列项不是 `      - name: '<单引号名称>'` 的形态，包括未命名的 `- uses:` 步骤，以及名字写在下一行的裸 `      -`。该检查在把任何正文追加进当前步骤**之前**执行，因此它不会被当作上一步骤的内容吸收、从而从切片中消失；
 - 重复的 job key——YAML 会取最后一份，而 `Map` 会静默保留解析器最后到达的那份；
 - 缺少 `jobs:`、`classify_pr` 或 `lint_and_static`，因此给 lint job 改名不会被读成「没有闸门需要比对」；
 - job key 不在缩进 2、job 正文行落在任何 key 区域之外、或 `jobs:` 之后出现列 0 的内容——这些是本行模型无法定位的形态；
 - 缩进里出现制表符；
+- 值位置以 `|` 或 `>` 开头、但修饰符不在枚举之内。两种顺序都是合法 YAML 且都被接受——`|`、`|-`、`|+`、`|2`、`|2-`、`|+2` 以及 `>` 一族。其余（如 `|2+-`）直接拒绝，而不是让正文掉进结构路径、把其中的 `#` 行当作 prose 丢掉；
+- 引号标量在该行内未闭合。多行 flow scalar 的续行是 runner 会读取的数据，逐行模型无法把那里的 `#` 与注释区分开，因此拒绝；
 - 任何结构行上出现锚点（`&name`）或别名（`*name`）。本模型逐行处理、无法跟随跨行引用：当锚点落在被丢弃的步骤上时，`&lintcmd 'node scripts/lint.js --prettier'` 与 `--write` 两种取值，在引用 `*lintcmd` 的地方会渲染出完全相同的切片。
 
 `null` 会抛出而不是返回 `false`，以便既有的 fail-closed catch 输出其 `::warning::`。静默返回 `false` 会让 narrowing 对每个 PR 都失效，而除了一个无人能解释的 stale 判定之外不留任何痕迹。
@@ -155,7 +157,7 @@ merge base 取自该检查**已经做过**的包含比较，因此 narrowing 不
 
 ## 验证计划
 
-1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs`——78 个用例，含本次修订新增的 16 个。CI 通过 `Run .github/scripts helper tests` 在 Linux 上佐证这一点，该步骤从 `${{ env.HELPER_TESTS }}` 收集本测试。
+1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs`——81 个用例全绿，数字取自本修订上 `node --test` 的运行时计数（`main` 为 47，本 PR 增加 34）。CI 通过 `Run .github/scripts helper tests` 在 Linux 上佐证这一点，该步骤从 `${{ env.HELPER_TESTS }}` 收集本测试。此处的计数一律是「某个具名修订上的运行时计数」，不是跨评审轮累加的账。
 2. mutation witness：八个刻意植入的缺陷都必须让测试变红——从 `NARROWINGS` 移除 `ci.yml`、把整个文件当作切片返回、只保留 header、比对 head 而非 merge base、吸收未命名步骤、把缺失 merge base 当作 fresh、去掉 linter 检查而只信任 plumbing 标签，以及把 job `env` 从切片中移除。
 3. 模型完备性 witness，每个对应一种「旧的行吸收模型会比对成相同」的形态：裸 `-` 步骤、步骤清单头部与步骤之间的注释、`run: |` 正文里以 `#` 开头的行、放在 `steps:` 之后的 job 级 key、只用一个 CR 隐藏被改 flag 的换行、以及锚点定义在被丢弃 job 而别名被保留步骤引用。每一例都必须返回 `null` 或不同的切片，且去掉对应守卫时该例变红。
 4. job 名单本身进入比对：base 侧新增一个 job 会改变切片，因此「把安装前置步骤拆进新 job、再让闸门 job `needs:` 它」这种形态会拒绝 narrowing。

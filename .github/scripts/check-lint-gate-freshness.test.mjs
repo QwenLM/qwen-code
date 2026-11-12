@@ -1118,6 +1118,23 @@ test('the depth guarantee that makes excluding Checkout safe stays in the slice'
     !CI_PLUMBING_STEPS.has('Fetch incremental lint history'),
     "'Fetch incremental lint history' is the only guard of the depth guarantee that makes excluding 'Checkout' safe — it must stay in the slice",
   );
+  // Membership in the list is not the claim; what matters is that the step's
+  // own body reaches the compared text. Assert that, on the slice.
+  const slice = extractLintGateSlice(realCi);
+  assert.ok(
+    slice.includes("      - name: 'Fetch incremental lint history'"),
+    'the depth guarantee must be compared, not merely unlisted',
+  );
+  const depthEdit = withStepText(
+    'Fetch incremental lint history',
+    "      - name: 'Fetch incremental lint history'",
+    "      - name: 'Fetch incremental lint history' # narrowed",
+  );
+  assert.notEqual(
+    extractLintGateSlice(depthEdit),
+    slice,
+    'a base-side edit to the depth guarantee must change the compared text',
+  );
 });
 
 test('a base-side runner-routing edit does not stale the branch', async () => {
@@ -1284,6 +1301,12 @@ test('a base-side lint lane edit still stales the branch', async () => {
     'node scripts/lint.js --prettier',
     'node scripts/lint.js --prettier --write',
   );
+  assert.notEqual(base, realCi, 'the fixture must change the Prettier lane');
+  assert.notEqual(
+    extractLintGateSlice(base),
+    extractLintGateSlice(realCi),
+    'and the change must reach the compared text',
+  );
   const stale = await findStaleGateFiles({
     ...CI_OPTS,
     ...ciFetch(base, realCi),
@@ -1392,22 +1415,28 @@ test('comments at list positions and between steps change nothing', () => {
   // two steps are exactly where an absorbed comment used to truncate a job
   // slice and drop `Run Prettier` from the comparison.
   const base = extractLintGateSlice(realCi);
-  const head = extractLintGateSlice(
-    lintJobEdit((job) =>
-      job.replace(
-        /^ {4}steps:\n/m,
-        '    steps:\n      # Which gates this lane runs\n',
-      ),
+  const headText = lintJobEdit((job) =>
+    job.replace(
+      /^ {4}steps:\n/m,
+      '    steps:\n      # Which gates this lane runs\n',
     ),
   );
-  const between = extractLintGateSlice(
-    lintJobEdit((job) =>
-      job.replace(
-        /^( {6})- name: 'Run Prettier'$/m,
-        "      # Prettier is the lane #11117 flipped\n      - name: 'Run Prettier'",
-      ),
+  const betweenText = lintJobEdit((job) =>
+    job.replace(
+      /^( {6})- name: 'Run Prettier'$/m,
+      "      # Prettier is the lane #11117 flipped\n      - name: 'Run Prettier'",
     ),
   );
+  // Both fixtures must actually have changed the file, or the equality below
+  // says nothing about comments at all.
+  assert.notEqual(headText, realCi, 'the list-head fixture did not apply');
+  assert.notEqual(
+    betweenText,
+    realCi,
+    'the between-steps fixture did not apply',
+  );
+  const head = extractLintGateSlice(headText);
+  const between = extractLintGateSlice(betweenText);
   assert.equal(head, base);
   assert.equal(between, base);
   assert.ok(String(between).includes("  - name: 'Run Prettier'"));
@@ -1430,6 +1459,127 @@ test("a '#' line inside a run block is content, not a comment to drop", () => {
   assert.ok(one && one.includes('# sampler revision one'));
   assert.notEqual(one, two);
   assert.notEqual(one, extractLintGateSlice(realCi));
+});
+
+// Put a scalar into the lint job's Run Prettier step in place of its plain
+// `run:` value, so every row below is exercised inside the structure the real
+// workflow has.
+function withStepValue(valueLines) {
+  return lintJobEdit((job) =>
+    job.replace(
+      /^ {8}run: 'node scripts\/lint\.js --prettier'$/m,
+      [
+        `        run: ${valueLines[0]}`,
+        ...valueLines.slice(1).map((line) => `          ${line}`),
+      ].join('\n'),
+    ),
+  );
+}
+
+test('a scalar opened with | or > is content in either modifier order', () => {
+  // `|2-` and `>2-` are legal YAML (explicit indent then chomping), as are
+  // `|+2` and `>+2`. The opener accepted only `[+-]?\d*`, so `|2-` was not an
+  // opener at all: its body fell through to the structural path and every `#`
+  // line in the script was dropped as prose while the two sides compared equal.
+  const tweaked = withStepValue([
+    '|2-',
+    '# lane: prettier',
+    'node scripts/lint.js --prettier',
+  ]);
+  assert.notEqual(tweaked, realCi, 'fixture did not apply');
+  const slash = extractLintGateSlice(tweaked);
+  assert.ok(slash, '|2- must open a block scalar');
+  assert.ok(
+    slash.includes('# lane: prettier'),
+    'a # line inside an explicitly indented block scalar is code, not prose',
+  );
+  assert.ok(slash.includes('node scripts/lint.js --prettier'));
+  const folded = withStepValue([
+    '>2-',
+    '# folded lane',
+    'node scripts/lint.js --prettier',
+  ]);
+  const foldedSlice = extractLintGateSlice(folded);
+  assert.ok(foldedSlice, '>2- must open a block scalar');
+  assert.ok(foldedSlice.includes('# folded lane'));
+  // Two versions differing only inside that script must not compare equal.
+  const other = withStepValue([
+    '|2-',
+    '# lane: eslint',
+    'node scripts/lint.js --prettier',
+  ]);
+  assert.notEqual(extractLintGateSlice(other), slash);
+});
+
+test('a multi-line quoted scalar refuses the narrowing', () => {
+  // The continuation of a quoted scalar is DATA the runner reads. This model is
+  // one line at a time, so a line that does not close its quote is refused
+  // rather than letting a `#` on the next line be read as prose.
+  for (const value of [
+    ["'node scripts/lint.js", "--prettier'"],
+    ['"node scripts/lint.js', '--prettier"'],
+  ]) {
+    const patched = withStepValue(value);
+    assert.notEqual(patched, realCi, `fixture did not apply: ${value[0]}`);
+    assert.equal(
+      extractLintGateSlice(patched),
+      null,
+      `a multi-line quoted scalar must refuse: ${value[0]}`,
+    );
+  }
+});
+
+test('every scalar form in value position is either modelled or refused', () => {
+  // The convergence mechanism: a table instead of one entry per reported shape.
+  // Each row states what the model must do with it, so a newly legal YAML form
+  // is one line here rather than another round of review findings.
+  const forms = [
+    ['plain', ['node scripts/lint.js --prettier'], 'kept'],
+    ['single-quoted', ["'node scripts/lint.js --prettier'"], 'kept'],
+    ['double-quoted', ['"node scripts/lint.js --prettier"'], 'kept'],
+    [
+      'single-quoted with trailing comment',
+      ["'node scripts/lint.js --prettier' # lane"],
+      'kept',
+    ],
+    ['|', ['|', 'node scripts/lint.js --prettier'], 'kept'],
+    ['|-', ['|-', 'node scripts/lint.js --prettier'], 'kept'],
+    ['|+', ['|+', 'node scripts/lint.js --prettier'], 'kept'],
+    ['|2', ['|2', 'node scripts/lint.js --prettier'], 'kept'],
+    ['|2-', ['|2-', 'node scripts/lint.js --prettier'], 'kept'],
+    ['|+2', ['|+2', 'node scripts/lint.js --prettier'], 'kept'],
+    ['>', ['>', 'node scripts/lint.js --prettier'], 'kept'],
+    ['>-', ['>-', 'node scripts/lint.js --prettier'], 'kept'],
+    ['>2-', ['>2-', 'node scripts/lint.js --prettier'], 'kept'],
+    ['>+2', ['>+2', 'node scripts/lint.js --prettier'], 'kept'],
+    [
+      'multi-line single-quoted',
+      ["'node scripts/lint.js", "--prettier'"],
+      'null',
+    ],
+    [
+      'multi-line double-quoted',
+      ['"node scripts/lint.js', '--prettier"'],
+      'null',
+    ],
+    [
+      'unknown block modifier',
+      ['|2+-', 'node scripts/lint.js --prettier'],
+      'null',
+    ],
+  ];
+  for (const [label, value, want] of forms) {
+    const slice = extractLintGateSlice(withStepValue(value));
+    if (want === 'null') {
+      assert.equal(slice, null, `${label} must refuse the narrowing`);
+    } else {
+      assert.ok(slice, `${label} must be modelled`);
+      assert.ok(
+        slice.includes('--prettier'),
+        `${label} must keep the step body in the compared text`,
+      );
+    }
+  }
 });
 
 test('a job-level key after steps: is a key, not the tail of the last step', () => {
@@ -1517,13 +1667,17 @@ test('the plumbing-name inventory is scoped to the gate jobs', () => {
     !gateJobStepNames(renamed).includes('Create isolated HOME'),
     'a rename inside the gate job must leave the scoped inventory',
   );
+  // The whole-file inventory is what the old assertion used, and it still finds
+  // the renamed name in a test lane — which is exactly why it could never see
+  // this rename. Assert the name that WAS renamed, not a different one.
   const wholeFile = [...renamed.matchAll(/^ {6}- name: '([^']*)'\s*$/gm)].map(
     (m) => m[1],
   );
   assert.ok(
-    wholeFile.includes('Restore workspace ownership'),
-    'the same name must still exist in another job, which is what fooled it',
+    wholeFile.includes('Create isolated HOME'),
+    'the renamed name must still exist in a test lane, which is what fooled the whole-file inventory',
   );
+  assert.notEqual(renamed, realCi, 'the rename fixture must apply');
 });
 
 test('a plumbing step that reaches a linter through a package manager refuses', () => {
@@ -1569,10 +1723,10 @@ test('a missing gate job refuses the narrowing', () => {
 test('a duplicated job key refuses the narrowing', () => {
   // YAML would take the last one; a Map that silently overwrites would compare
   // a slice built from whichever copy the parser happened to keep.
-  const at = realCi.indexOf('\n  lint_and_static:');
-  const end = realCi.indexOf('\n  web_shell_e2e_smoke:', at);
+  const { start, end } = jobSpan(realCi, 'lint_and_static');
   const duplicated =
-    realCi.slice(0, end) + realCi.slice(at, end) + realCi.slice(end);
+    realCi.slice(0, end) + realCi.slice(start, end) + realCi.slice(end);
+  assert.notEqual(duplicated, realCi, 'the fixture did not apply');
   assert.equal(extractLintGateSlice(duplicated), null);
 });
 
@@ -1615,6 +1769,7 @@ test('a comment-only base-side edit does not stale the branch', () => {
     "      - name: 'Run Prettier'",
     "      # A new explanatory paragraph about the Prettier lane.\n      - name: 'Run Prettier'",
   );
+  assert.notEqual(commented, realCi, 'the comment fixture did not apply');
   assert.equal(extractLintGateSlice(commented), extractLintGateSlice(realCi));
   const inBody = withStepText(
     'Use trusted CI profile',

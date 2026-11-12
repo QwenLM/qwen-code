@@ -205,8 +205,10 @@ profile never runs.
 
 ### Fail-closed extraction
 
-`extractLintGateSlice` returns `null` — and the caller keeps the whole-file
-verdict — for any shape it does not model:
+The model is a whitelist: a line is either enumerated (and compared, or replaced
+by a marker) or the extraction refuses. "Not recognised, so delete it" does not
+exist here. `extractLintGateSlice` returns `null` — and the caller keeps the
+whole-file verdict — for any shape it does not model:
 
 - a sequence item that is not `      - name: '<single-quoted name>'`, including
   an unnamed `- uses:` step and a bare `      -` whose name sits on the next
@@ -219,6 +221,14 @@ verdict — for any shape it does not model:
 - a job key off indent 2, a job body line outside a key's region, or content
   after `jobs:` at column zero — shapes this line model cannot place;
 - a tab in the indent;
+- a value that opens with `|` or `>` but whose modifier is not one of the
+  enumerated forms. Both orders are legal YAML and both are accepted — `|`, `|-`,
+  `|+`, `|2`, `|2-`, `|+2` and the `>` family. Anything else (`|2+-`) refuses
+  rather than letting the body fall into the structural path, where its `#` lines
+  would be dropped as prose;
+- a quoted scalar that does not close on its own line. The continuation of a
+  multi-line flow scalar is data the runner reads, and a one-line model cannot
+  tell a `#` there from a comment, so it refuses;
 - an anchor (`&name`) or an alias (`*name`) anywhere on a structural line. The
   model is one line at a time and cannot follow a cross-reference: with the
   anchor on a dropped step, `&lintcmd 'node scripts/lint.js --prettier'` and the
@@ -343,10 +353,12 @@ head commit` stay outside the slice. A `ref:` edit on its own is caught: the
 
 ## Validation plan
 
-1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs` — 78 cases,
-   including the 16 added by this revision. CI corroborates this on Linux through
+1. `node --test .github/scripts/check-lint-gate-freshness.test.mjs` — 81 cases,
+   all green, as reported by `node --test` on this revision (`main` runs 47; the
+   PR adds 34). CI corroborates this on Linux through
    `Run .github/scripts helper tests`, which collects the suite from
-   `${{ env.HELPER_TESTS }}`.
+   `${{ env.HELPER_TESTS }}`. Counts here are the runtime count at a named
+   revision, not a tally carried across review rounds.
 2. Mutation witnesses: each of eight deliberate defects must redden the suite —
    dropping `ci.yml` from `NARROWINGS`, returning the whole file as the slice,
    keeping headers only, comparing the head instead of the merge base, absorbing
