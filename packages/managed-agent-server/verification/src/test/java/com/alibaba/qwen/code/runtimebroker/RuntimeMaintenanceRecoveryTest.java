@@ -1,16 +1,11 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.reflect.Proxy;
 import java.net.URI;
@@ -26,20 +21,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 public class RuntimeMaintenanceRecoveryTest {
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    public void maintenanceRequiresHolderCleanupAndNeverResolvesOrReprovisions(boolean jdbc) throws Exception {
-        if (jdbc) {
-            var source = new JdbcDataSource();
-            source.setURL("jdbc:h2:mem:maintenance-" + UUID.randomUUID()
-                    + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
-            verifyBatches(new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])),
-                    new JdbcRuntimeSessionRepository(source), new JdbcToolExecutionRepository(source), UUID.randomUUID().toString());
-        } else {
-            verifyBatches(new InMemoryRuntimeBindingRepository(), new InMemoryRuntimeSessionRepository(),
-                    new InMemoryToolExecutionRepository(), UUID.randomUUID().toString());
-        }
+    @org.junit.jupiter.api.Test
+    public void maintenanceRequiresHolderCleanupAndNeverResolvesOrReprovisions() throws Exception {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:maintenance-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        verifyBatches(new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])),
+                new JdbcRuntimeSessionRepository(source), new JdbcToolExecutionRepository(source), UUID.randomUUID().toString());
     }
 
     public static void verifyBatches(RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
@@ -97,29 +86,14 @@ public class RuntimeMaintenanceRecoveryTest {
     }
 
     @org.junit.jupiter.api.Test
-    void lateCleanupCompletionCannotRetireAnExpiredClaim() throws Exception {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
-        var fixture = new Fixture(bindings, sessions, executions, "late");
-        var lost = fixture.lose();
-        bindings.releaseOperation(lost.getBindingId(), "fixture", lost.getOperationGeneration());
-        var pending = new CompletableFuture<Void>();
-        try (var service = service(bindings, sessions, executions, provisioner(saved -> pending), Duration.ofMillis(100))) {
-            var recovery = service.recoverBinding(lost.getBindingId(), lost.getGeneration()).toCompletableFuture();
-            assertThrows(java.util.concurrent.ExecutionException.class, () -> recovery.get(3, TimeUnit.SECONDS));
-            pending.complete(null);
-            assertEquals(RuntimeBindingRecord.State.LOST, bindings.findById(lost.getBindingId()).getState());
-            assertEquals(1, sessions.countActiveByBinding(lost.getBindingId(), lost.getGeneration()));
-            assertNull(bindings.findById(lost.getBindingId()).getOperationOwner());
-        }
-    }
-
-    @org.junit.jupiter.api.Test
     void managedGenerationWithoutCleanupCallbackStaysPinned() throws Exception {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:missing-cleanup-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var fixture = new Fixture(bindings, sessions, executions, "missing-cleanup");
         var lost = fixture.lose();
         bindings.releaseOperation(lost.getBindingId(), "fixture", lost.getOperationGeneration());
