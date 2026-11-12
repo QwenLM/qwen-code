@@ -502,15 +502,18 @@ Both paths emit `ROUND_START` after stream preparation so the workflow watchdog 
 
 ### Speculation on the shared loop (PR 6)
 
-Speculation's `runSpeculativeLoop` in `speculation.ts` runs the accepted suggestion ahead of the user on a forked `LlmChat` with copy-on-write file isolation. It sends each round on the chat and parses the stream's chunks itself, then runs the round's calls through its own tool gate (boundary/redirect) and executes them directly, without the scheduler. PR 6a moves only the model round: with the setting on, `runSpeculationModelRound` sends it on `runModelRound` over `turnModelRound(chat, model)` and rebuilds the visible-text and function-call parts from the round's events; the tool gate, the direct execution, the overlay writes and the boundary handling are unchanged.
+Speculation's `runSpeculativeLoop` in `speculation.ts` runs the accepted suggestion ahead of the user on a forked `LlmChat` with copy-on-write file isolation. It sends each round on the chat and parses the stream's chunks itself, then runs the round's calls through its own tool gate (boundary/redirect) and executes them directly, without the scheduler. PR 6a moves only the model round: with the setting on, `runSpeculationModelRound` sends it on `runModelRound` over `turnModelRound(chat, model, { throwErrors: true })` and rebuilds the visible-text and function-call parts from the round's events; the tool gate, the direct execution, the overlay writes and the boundary handling are unchanged. `throwErrors` keeps a failed request rejecting so `startSpeculation` sets `aborted` and cleans the overlay, as the raw-chunk path does.
 
-| Speculation today                                                     | With the setting on                                                   |
-| --------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| it parses each chunk's parts, keeping visible text and function calls | the round's `Content` and `ToolCallRequest` events become those parts |
-| a retry or fallback keeps the abandoned attempt's text and calls      | they are dropped, so the round carries only the new attempt's output  |
-| a text part per streamed text part                                    | one text part per chunk, as the `Turn` reports it                     |
+| Speculation today                                                     | With the setting on                                                                                    |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| it parses each chunk's parts, keeping visible text and function calls | the round's `Content` and `ToolCallRequest` events become those parts                                  |
+| a retry or fallback keeps the abandoned attempt's text and calls      | a fresh retry or fallback drops them; a continuation retry keeps the text it appends to                |
+| a text part per streamed text part                                    | one text part per chunk, as the `Turn` reports it                                                      |
+| an id-less function call keeps no id                                  | the call gains the `Turn`'s generated id (not reachable on the OpenAI wire, which already assigns ids) |
+| a name-less function call is dropped                                  | dropped too: the guard reads the raw name, not the `Turn`'s `undefined_tool_name` placeholder          |
+| the request carries no abort signal; cancelling returns the iterator  | the request carries the abort signal, so a cancel also aborts the in-flight request                    |
 
-The parity suite runs a text-only round, a single call and a two-call batch with the setting off and on and compares the resulting history, tool execution and status.
+The parity suite runs a text-only round, a single call and a two-call batch with the setting off and on and compares the resulting history, tool execution and status; a branch marker pins that the shared round runs only with the setting on. Event-seam tests cover a fresh retry, a continuation retry, a model fallback, a failed request (aborted on both paths) and a name-less call.
 
 ## Migration
 
@@ -700,6 +703,12 @@ The suites run in the integration job, the TUI suite on Ink; the OpenTUI interac
 - With the setting on, AgentCore differs from today in these intended ways:
   - from PR 5a, a model fallback drops what the failed model streamed, its calls, text and thought text, so the round's answer carries only the fallback model's output, as on the other surfaces ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
   - from PR 5a, a streamed text event carries a chunk's thought text or its visible text ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
+
+- With the setting on, speculation differs from today in these intended ways:
+  - from PR 6a, a fresh retry or a model fallback drops the abandoned attempt's text and calls, so the round carries only the new attempt's output; a continuation retry keeps the text it appends to, as today ([#15327](https://github.com/QwenLM/qwen-code/issues/15327));
+  - from PR 6a, a round's visible text arrives as one part per chunk instead of one part per streamed text part ([#15327](https://github.com/QwenLM/qwen-code/issues/15327));
+  - from PR 6a, an id-less function call gains the `Turn`'s generated id on the call and its response (not reachable on the OpenAI wire, which already assigns ids) ([#15327](https://github.com/QwenLM/qwen-code/issues/15327));
+  - from PR 6a, the model request carries the abort signal, so a cancel aborts the in-flight request as well as returning the iterator ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
 
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 

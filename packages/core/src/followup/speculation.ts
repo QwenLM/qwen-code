@@ -298,7 +298,11 @@ async function runSpeculationModelRound(
   }
 
   await runModelRound(
-    turnModelRound(chat, model),
+    // A failed request must reject so startSpeculation's catch sets `aborted`
+    // and cleans the overlay, as the raw-chunk path does; without this the
+    // Turn would surface the failure as an Error event and the round would
+    // resolve empty, reporting `completed` (agent-core.ts uses the same option).
+    turnModelRound(chat, model, { throwErrors: true }),
     {
       parts,
       promptId: 'speculation',
@@ -308,11 +312,13 @@ async function runSpeculationModelRound(
     {
       onModelEvent: (event) => {
         if (
-          event.type === LlmEventType.Retry ||
-          event.type === LlmEventType.ModelFallback
+          event.type === LlmEventType.ModelFallback ||
+          (event.type === LlmEventType.Retry && event.isContinuation !== true)
         ) {
-          // The shared round drops the abandoned attempt's calls; drop its
-          // text too, so the parts match the calls the round keeps.
+          // A fresh restart (or a model switch) drops the abandoned attempt's
+          // output. A continuation retry appends to what was already delivered,
+          // so its text is kept; the parts are rebuilt from events here, so the
+          // round's own call bookkeeping does not enter the tool step.
           modelParts.length = 0;
           return;
         }
@@ -320,14 +326,15 @@ async function runSpeculationModelRound(
           if (event.value) modelParts.push({ text: event.value });
         } else if (event.type === LlmEventType.ToolCallRequest) {
           const fc = event.functionCall;
-          const name = fc?.name ?? event.value.name;
-          if (!name) return;
-          const id = fc?.id ?? event.value.callId;
+          // Guard the raw name: the Turn fills a missing one with
+          // 'undefined_tool_name', which the raw-chunk path would have dropped.
+          if (!fc?.name) return;
+          const id = fc.id ?? event.value.callId;
           modelParts.push({
             functionCall: {
               ...(id ? { id } : {}),
-              name,
-              args: fc?.args ?? event.value.args,
+              name: fc.name,
+              args: fc.args ?? event.value.args,
             },
           });
         }

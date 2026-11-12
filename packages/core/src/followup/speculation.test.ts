@@ -14,6 +14,7 @@ import {
 } from './speculation.js';
 import type { Content, Part } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
+import * as agentLoop from '../core/agent-loop.js';
 import type { CacheSafeParams } from '../agents/forkedAgent.js';
 import type { LlmClient } from '../core/client.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
@@ -57,6 +58,10 @@ vi.mock('../agents/forkedAgent.js', () => ({
   createForkedChat: forkedAgentMocks.createForkedChat.mockImplementation(
     () => ({
       sendMessageStream: forkedAgentMocks.sendMessageStream,
+      // The Turn's error path calls this before yielding an Error event; a
+      // real LlmChat has it. Without it the error path throws a TypeError and
+      // masks whether throwErrors is set.
+      maybeIncludeSchemaDepthContext: async () => {},
     }),
   ),
   runForkedAgent: forkedAgentMocks.runForkedAgent,
@@ -1033,5 +1038,144 @@ describe('speculation model round on the shared agent loop', () => {
     expect(on.executeCalls).toBe(off.executeCalls);
     expect(on.toolUseCount).toBe(off.toolUseCount);
     expect(on.messages).toEqual(off.messages);
+  });
+
+  it('runs the shared round only with the setting on (branch marker)', async () => {
+    const spy = vi.spyOn(agentLoop, 'runModelRound');
+    try {
+      await runScenario(true, [text('done')]);
+      expect(spy).toHaveBeenCalled();
+      spy.mockClear();
+      await runScenario(false, [text('done')]);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('speculation shared-round event semantics', () => {
+  const chunk = (parts: Part[], functionCalls?: unknown[]) => ({
+    type: 'chunk',
+    value: {
+      candidates: [{ content: { parts } }],
+      ...(functionCalls ? { functionCalls } : {}),
+    },
+  });
+
+  async function runEventRound(
+    unified: boolean,
+    events: Array<Record<string, unknown>>,
+    throws?: Error,
+  ) {
+    forkedAgentMocks.sendMessageStream.mockReset();
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'file contents',
+      returnDisplay: 'file contents',
+    });
+    const toolRegistry = {
+      isPermissionDeferred: vi.fn().mockReturnValue(false),
+      ensureTool: vi.fn().mockResolvedValue({
+        build: vi.fn().mockReturnValue({ params: { path: 'a.ts' }, execute }),
+      }),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getTargetDir: vi.fn().mockReturnValue('/spec/cwd'),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+      isUnifiedAgentLoopEnabled: vi.fn().mockReturnValue(unified),
+    } as unknown as Config;
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      if (forkedAgentMocks.sendMessageStream.mock.calls.length !== 1) return;
+      if (throws) throw throws;
+      for (const event of events) yield event;
+    });
+
+    const state = await startSpeculation(config, 'read a.ts');
+    await vi.waitFor(() =>
+      expect(['completed', 'aborted', 'boundary']).toContain(state.status),
+    );
+    const snapshot = {
+      messages: state.messages,
+      status: state.status,
+      toolUseCount: state.toolUseCount,
+    };
+    await abortSpeculation(state);
+    return snapshot;
+  }
+
+  const modelTexts = (messages: Content[]) =>
+    (messages.find((m) => m.role === 'model')?.parts ?? [])
+      .filter((p) => p.text !== undefined)
+      .map((p) => p.text);
+
+  it('a continuation retry keeps the text it appends to', async () => {
+    const on = await runEventRound(true, [
+      chunk([{ text: 'The answer is ' }]),
+      { type: 'retry', isContinuation: true },
+      chunk([{ text: '42.' }]),
+    ]);
+    expect(on.status).toBe('completed');
+    expect(modelTexts(on.messages)).toEqual(['The answer is ', '42.']);
+  });
+
+  it('a fresh retry drops the abandoned attempt', async () => {
+    const on = await runEventRound(true, [
+      chunk([{ text: 'abandoned' }]),
+      { type: 'retry', isContinuation: false },
+      chunk([{ text: 'kept' }]),
+    ]);
+    expect(on.status).toBe('completed');
+    expect(modelTexts(on.messages)).toEqual(['kept']);
+  });
+
+  it('a model fallback drops the failed model output', async () => {
+    const on = await runEventRound(true, [
+      chunk([{ text: 'abandoned' }]),
+      {
+        type: 'model_fallback',
+        info: {
+          fromModel: 'm1',
+          toModel: 'm2',
+          statusCode: 429,
+          fallbackIndex: 1,
+        },
+      },
+      chunk([{ text: 'kept' }]),
+    ]);
+    expect(on.status).toBe('completed');
+    expect(modelTexts(on.messages)).toEqual(['kept']);
+  });
+
+  it('a failed request aborts on both paths', async () => {
+    const off = await runEventRound(
+      false,
+      [],
+      new Error('429 quota exhausted'),
+    );
+    const on = await runEventRound(true, [], new Error('429 quota exhausted'));
+    expect(off.status).toBe('aborted');
+    expect(on.status).toBe('aborted');
+  });
+
+  it('a name-less function call is dropped, not sent to the gate', async () => {
+    const off = await runEventRound(false, [
+      chunk([{ functionCall: { args: { path: 'a.ts' } } }]),
+    ]);
+    const on = await runEventRound(true, [
+      chunk(
+        [{ functionCall: { args: { path: 'a.ts' } } }],
+        [{ args: { path: 'a.ts' } }],
+      ),
+    ]);
+    expect(off.status).toBe('completed');
+    expect(on.status).toBe('completed');
+    expect(on.toolUseCount).toBe(0);
   });
 });

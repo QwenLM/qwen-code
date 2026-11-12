@@ -502,15 +502,18 @@ AgentCore 像现在映射 chunk 那样映射这一轮的事件，并为自己的
 
 ### speculation 迁到共享 loop（PR 6）
 
-speculation 的 `runSpeculativeLoop`（`speculation.ts`）在用户确认前，用带写时复制文件隔离的 forked `LlmChat` 预先运行被接受的建议。它在该 chat 上发出每一轮并自行解析 chunk，再把这一轮的调用交给自己的工具门（boundary/redirect）并直接执行，不经过 scheduler。PR 6a 只迁移模型轮：开启设置时，`runSpeculationModelRound` 经 `turnModelRound(chat, model)` 在 `runModelRound` 上发出，并从这一轮的事件重建可见文本与 function-call parts；工具门、直接执行、overlay 写入与 boundary 处理均不变。
+speculation 的 `runSpeculativeLoop`（`speculation.ts`）在用户确认前，用带写时复制文件隔离的 forked `LlmChat` 预先运行被接受的建议。它在该 chat 上发出每一轮并自行解析 chunk，再把这一轮的调用交给自己的工具门（boundary/redirect）并直接执行，不经过 scheduler。PR 6a 只迁移模型轮：开启设置时，`runSpeculationModelRound` 经 `turnModelRound(chat, model, { throwErrors: true })` 在 `runModelRound` 上发出，并从这一轮的事件重建可见文本与 function-call parts；工具门、直接执行、overlay 写入与 boundary 处理均不变。`throwErrors` 使失败的请求继续 reject，从而 `startSpeculation` 置 `aborted` 并清理 overlay，与 raw-chunk 路径一致。
 
-| speculation 现状                                      | 开启设置后                                                 |
-| ----------------------------------------------------- | ---------------------------------------------------------- |
-| 解析每个 chunk 的 parts，保留可见文本与 function call | 这一轮的 `Content` 与 `ToolCallRequest` 事件成为这些 parts |
-| 重试或回退时保留被放弃尝试的文本与调用                | 丢弃这些内容，这一轮只带新尝试的输出                       |
-| 每个流式文本 part 一个文本 part                       | 每个 chunk 一个文本 part，按 `Turn` 的报告                 |
+| speculation 现状                                      | 开启设置后                                                           |
+| ----------------------------------------------------- | -------------------------------------------------------------------- |
+| 解析每个 chunk 的 parts，保留可见文本与 function call | 这一轮的 `Content` 与 `ToolCallRequest` 事件成为这些 parts           |
+| 重试或回退时保留被放弃尝试的文本与调用                | 全新重试或回退丢弃它们；续传重试保留它要续写的文本                   |
+| 每个流式文本 part 一个文本 part                       | 每个 chunk 一个文本 part，按 `Turn` 的报告                           |
+| 无 id 的 function call 不带 id                        | 调用获得 `Turn` 生成的 id（OpenAI 线路不可达，其已分配 id）          |
+| 无 name 的 function call 被丢弃                       | 同样丢弃：守卫读原始 name，而非 `Turn` 的 `undefined_tool_name` 占位 |
+| 请求不带 abort 信号；取消时返回迭代器                 | 请求带上 abort 信号，取消同时中止在飞请求                            |
 
-对拍套件以设置开/关各跑一次纯文本轮、单调用与双调用批，比较所得的历史、工具执行与状态。
+对拍套件以设置开/关各跑一次纯文本轮、单调用与双调用批，比较所得的历史、工具执行与状态；分支标记钉住共享轮仅在开启设置时运行。事件接缝测试覆盖全新重试、续传重试、模型回退、失败请求（两臂均 aborted）与无 name 调用。
 
 ## 迁移计划
 
@@ -700,6 +703,12 @@ PR 6b 是 speculation 的默认开启与删除步骤。
 - 设置开启后，AgentCore 与现在有以下预期差异：
   - 从 PR 5a 起，模型回退时丢弃失败模型已流出的调用、正文和思考文本，这一轮的回答只带回退模型的输出，与其他入口相同（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）。
   - 从 PR 5a 起，一个流式文本事件承载一个 chunk 的思考文本或正文（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）。
+
+- 设置开启后，speculation 与现在有以下预期差异：
+  - 从 PR 6a 起，全新重试或模型回退丢弃被放弃尝试的文本与调用，这一轮只带新尝试的输出；续传重试保留它要续写的文本，与现在一致（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）；
+  - 从 PR 6a 起，一轮的可见文本按每 chunk 一个 part 到达，而非每个流式文本 part 一个（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）；
+  - 从 PR 6a 起，无 id 的 function call 在调用及其响应上获得 `Turn` 生成的 id（OpenAI 线路不可达，其已分配 id）（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）；
+  - 从 PR 6a 起，模型请求带上 abort 信号，取消时除返回迭代器外还中止在飞请求（[#15327](https://github.com/QwenLM/qwen-code/issues/15327)）。
 
 - 之后迁移的入口会带来各自的修复：#15324（ACP）、#15326（OpenTUI）、#14114 与 #12209（ACP）。
 
