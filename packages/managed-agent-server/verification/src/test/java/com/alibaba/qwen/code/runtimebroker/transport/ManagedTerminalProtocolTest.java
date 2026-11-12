@@ -1,12 +1,16 @@
 package com.alibaba.qwen.code.runtimebroker.transport;
 
+import com.alibaba.qwen.code.managedagent.VerificationFixtures;
+import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -103,5 +107,43 @@ class ManagedTerminalProtocolTest {
                 () -> ManagedTerminalProtocol.response(envelope(view), session(),
                         operation()));
         assertEquals("managed_terminal_response_invalid", error.getCode());
+    }
+
+    /**
+     * The worker route test (managed-terminal-routes.test.ts) drives the real
+     * producer into each of these states and asserts its answer deep-equals
+     * this same fixture; here the validator must accept every one of those
+     * serialized answers. A key rename on either side reds its own suite
+     * instead of drifting into a runtime managed_terminal_response_invalid
+     * that wedges the hold.
+     */
+    @Test
+    void consumesTheSharedWorkerEnvelopeFixture() throws Exception {
+        Map<String, Object> fixture = JsonCodec.parseObject(Files.readAllBytes(
+                VerificationFixtures.moduleRoot().resolve(
+                        "../cli/src/serve/contracts/managed-terminal-control-v1.fixtures.json")),
+                "shared terminal control fixture");
+        assertEquals(ManagedTerminalProtocol.PATH, fixture.get("path"));
+        RuntimeSession sharedSession = new RuntimeSession("harness",
+                (String) fixture.get("runtimeSessionId"), "bootstrap",
+                new RuntimeScope("tenant", "workspace", "gen", "/workspace",
+                        "capability", "workspace"));
+        for (Object item : (List<?>) fixture.get("cases")) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> testCase = (Map<String, Object>) item;
+            String name = (String) testCase.get("name");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = (Map<String, Object>) testCase
+                    .get("request");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> operation = (Map<String, Object>) request
+                    .get("operation");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> response = (Map<String, Object>) testCase
+                    .get("response");
+            Map<String, Object> answered = ManagedTerminalProtocol.response(
+                    JsonCodec.encode(response), sharedSession, operation);
+            assertEquals(response.get("operation"), answered, name);
+        }
     }
 }
