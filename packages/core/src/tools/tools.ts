@@ -1256,8 +1256,7 @@ export interface AutoModeFallbackConfirmation {
     | 'total_denial'
     | 'external_write'
     | 'external_directory'
-    // A human-only `safety_check` fallback, currently the `git commit
-    // --amend` guard (R23-3): the dialog must not offer "always allow".
+    // A human-only safety floor, currently the `git commit --amend` guard.
     | 'safety_check';
   message: string;
 }

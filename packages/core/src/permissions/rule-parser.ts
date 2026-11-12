@@ -1141,17 +1141,6 @@ function findOperatorBoundaries(
       if (op === '&' && (arithmeticDepth > 0 || !isAsyncOperator(command, i))) {
         continue;
       }
-      // `>|` is the clobber-override redirection, not a pipe: bash runs
-      // `git >| /dev/null commit --amend` as ONE command (#16075 review,
-      // R1-1). An escaped `\>` is a literal argument, so the `|` after it
-      // still pipes.
-      if (
-        (op === '|' || op === '|&') &&
-        command[i - 1] === '>' &&
-        precedingBackslashCount(command, i - 1) % 2 === 0
-      ) {
-        continue;
-      }
       boundaries.push({ start: i, end: i + op.length, operator: op });
       i += op.length - 1; // -1 because the loop will i++
       break;

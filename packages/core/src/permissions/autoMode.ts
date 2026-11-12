@@ -517,14 +517,13 @@ export type AutoModeDecision =
       via: 'fallback';
       reason: FallbackToAskReason;
       /**
-       * Set when a deterministic floor must be confirmed by a human: a
-       * `PermissionRequest` hook answering `allow` must not waive it.
+       * A deterministic floor only a human can confirm; a `PermissionRequest`
+       * hook answering `allow` must not waive it.
        */
       requiresHumanDecision?: boolean;
       /**
-       * The approval-dialog explanation for this fallback. The scheduler only
-       * records an `autoModeFallback` (and hides "always allow") when one is
-       * present, so a human-only floor must carry it (R23-3).
+       * The approval-dialog explanation. The scheduler records an
+       * `autoModeFallback` (and hides "always allow") only when one is present.
        */
       message?: string;
     };
@@ -913,13 +912,8 @@ export async function evaluateAutoMode(
         reason: destructiveResult.reason,
       };
     }
-    // A `git commit --amend` mention the guard cannot prove is either a
-    // program or data (issue #13570) goes to the user instead of being
-    // hard-blocked: the approval path lets them decide. Since R23-2 there is
-    // no cwd-based exemption — the target repository is not knowable from the
-    // command (`env --chdir`, `sudo -D`, `git checkout HEAD~1 && …`), so every
-    // amend asks. The message is what makes the scheduler record the fallback
-    // and hide "always allow" (R23-3).
+    // Ask instead of hard-blocking (#13570). The `message` is what makes the
+    // scheduler record the fallback and hide "always allow".
     if (amendNeedsApproval(command)) {
       return {
         via: 'fallback',

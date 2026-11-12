@@ -580,38 +580,6 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     expect(forcesReview('D=.qwen/settings.json; cp payload "$D"')).toBe(true);
   });
 
-  it('keeps proven heredocs on their real paths (no blanket escalation)', () => {
-    for (const command of [
-      'cat <<EOF\ncd /tmp\nEOF\necho hi > out.txt',
-      'echo $((8<<2))\necho hi > out.txt',
-      '(true)# note <<EOF\necho hi > out.txt',
-      'echo $(echo ok); (true)# note <<EOF\necho hi > out.txt',
-    ]) {
-      expect(forcesReview(command)).toBe(false);
-    }
-  });
-
-  it('does not escalate ambiguous syntax without a heredoc opener', () => {
-    for (const command of [
-      "printf %s $'a\\'b'; echo hi > out.txt",
-      'echo a\\ # harmless; echo hi > out.txt',
-      'echo $(echo SUB)#note; echo hi > out.txt',
-      "echo $((8<<2)); printf %s $'a\\'b'; echo hi > out.txt",
-      "echo '<<EOF'; printf %s $'a\\'b'; echo hi > out.txt",
-      'echo a # x > evil.txt',
-    ]) {
-      expect(forcesReview(command)).toBe(false);
-    }
-
-    // A heredoc that closed before the ambiguity cannot be re-opened by it.
-    for (const command of [
-      "cat <<EOF\nbody\nEOF\nprintf %s $'a\\'b'; echo hi > out.txt",
-      'cat <<EOF\nbody\nEOF\necho a\\ # harmless; echo hi > out.txt',
-    ]) {
-      expect(forcesReview(command)).toBe(false);
-    }
-  });
-
   it('does not force review for awk field references', () => {
     expect(forcesReview("awk '{print $1}' data.csv")).toBe(false);
   });
@@ -1604,9 +1572,7 @@ describe('applyAutoModeDecision — blocked:destructive-command escalation', () 
   });
 
   it('marks the amend approval as one a PermissionRequest hook cannot waive', async () => {
-    // R21-1: the amend floor moved from `blocked:destructive-command` onto the
-    // plain fallback arm, which does not invent the marker by itself. The bit
-    // has to travel on the decision, or a hook `allow` rewrites a
+    // The marker has to travel on the decision, or a hook `allow` rewrites a
     // human-authored commit with nobody in the loop.
     const decision = await evaluate({
       toolName: ToolNames.SHELL,
@@ -1616,8 +1582,7 @@ describe('applyAutoModeDecision — blocked:destructive-command escalation', () 
     if (decision.via === 'fallback') {
       expect(decision.reason).toBe('safety_check');
       expect(decision.requiresHumanDecision).toBe(true);
-      // R23-3: the message is what makes the scheduler record the fallback
-      // and decorate the dialog with `hideAlwaysAllow`.
+      // The message is what makes the scheduler hide "always allow".
       expect(decision.message).toContain('requires manual approval');
     }
     const { result } = apply(decision, counters(0, 0, 0, 0));

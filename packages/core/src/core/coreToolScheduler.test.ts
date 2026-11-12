@@ -5974,9 +5974,8 @@ describe('CoreToolScheduler', () => {
   });
 
   it('does not let a PermissionRequest hook allow waive an amend approval', async () => {
-    // R21-1 counterpart to the destructive case above: the amend floor rides
-    // the plain fallback arm, so `requiresHumanDecision` is the only thing
-    // that stops this hook from rewriting a human-authored commit unattended.
+    // The amend floor rides the plain fallback arm, so `requiresHumanDecision`
+    // is the only thing stopping this hook from rewriting a commit unattended.
     const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
     const execute = vi.fn().mockResolvedValue(textResult('executed'));
     const harness = autoScheduler(
@@ -6010,9 +6009,7 @@ describe('CoreToolScheduler', () => {
         'awaiting_approval',
       ),
     );
-    // R23-3: the dialog must not offer "always allow" — the option would
-    // persist a rule that waives the guard. The fallback record with its
-    // message is what the decorator keys on.
+    // "always allow" would persist a rule that waives the guard.
     const waiting = reportedCalls(harness.onToolCallsUpdate).find(
       (call) => call.status === 'awaiting_approval',
     ) as WaitingToolCall;
