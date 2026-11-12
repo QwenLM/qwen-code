@@ -11,6 +11,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
+import { isEditableTarget } from '../../utils/dom';
 import { DialogShell } from '../dialogs/DialogShell';
 import { SessionSearchDialog } from './SessionSearchDialog';
 import { useSessionSearch } from './use-session-search';
@@ -198,6 +199,23 @@ it('closes with Escape and restores focus to the search trigger', async () => {
   await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
   expect(props.onClose).toHaveBeenCalledOnce();
   expect(document.activeElement).toBe(trigger);
+});
+
+it('carries the markers that keep the mobile drawer from swallowing gestures', async () => {
+  await render();
+  const panel = portal.querySelector<HTMLElement>('[role="dialog"]')!;
+  expect(panel.hasAttribute('data-web-shell-dialog')).toBe(true);
+  expect(panel.hasAttribute('data-keyboard-scope')).toBe(true);
+
+  // The drawer's document-level touchmove blocker exempts descendants of the
+  // dialog marker, and its window-capture Escape handler leaves editable or
+  // keyboard-scoped targets to the dialog. Both gestures can start on a row
+  // or on the close button.
+  const row = panel.querySelector<HTMLElement>('[role="option"]')!;
+  const close = panel.querySelector<HTMLElement>('button[aria-label="close"]')!;
+  expect(row.closest('[data-web-shell-dialog]')).toBe(panel);
+  expect(isEditableTarget(row)).toBe(true);
+  expect(isEditableTarget(close)).toBe(true);
 });
 
 it('does not open a result when Enter confirms an IME composition', async () => {

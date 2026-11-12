@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, createRef } from 'react';
+import { act, createRef, type RefObject } from 'react';
 import { DialogShell } from '../components/dialogs/DialogShell';
 import { I18nProvider } from '../i18n';
 import { ThemeProvider } from '../themeContext';
@@ -16,6 +16,7 @@ interface HarnessProps {
   onConfirm: (index: number) => void;
   enabled?: boolean;
   onKeyboardMode?: (value: boolean) => void;
+  scope?: RefObject<HTMLElement | null>;
 }
 
 function Harness({ onKeyboardMode, ...props }: HarnessProps) {
@@ -488,16 +489,16 @@ describe('useListboxKeyboard', () => {
     host.remove();
   });
 
-  it('stays inert when a shadow-root scope has no focused element', () => {
+  it('keeps shadow-root scoped keys active when focus drops to the document body', () => {
     const host = document.createElement('div');
     document.body.appendChild(host);
     const shadow = host.attachShadow({ mode: 'open' });
     const panel = document.createElement('div');
-    panel.appendChild(document.createElement('input'));
+    const inside = document.createElement('input');
+    panel.appendChild(inside);
     shadow.appendChild(panel);
-    const outside = document.createElement('input');
-    document.body.appendChild(outside);
-    outside.focus();
+    inside.focus();
+    expect(document.activeElement).toBe(host);
 
     const onActiveIndexChange = vi.fn();
     mount({
@@ -508,11 +509,13 @@ describe('useListboxKeyboard', () => {
       scope: { current: panel },
     });
 
-    // The panel's shadow root has no active element while focus sits outside
-    // it, so the list must stay inert rather than guess.
+    act(() => inside.blur());
+    // The shadow root has no active element while the document reports body.
+    expect(shadow.activeElement).toBeNull();
+    expect(document.activeElement).toBe(document.body);
+
     press('ArrowDown');
-    expect(onActiveIndexChange).not.toHaveBeenCalled();
-    outside.remove();
+    expect(onActiveIndexChange).toHaveBeenLastCalledWith(1);
     host.remove();
   });
 

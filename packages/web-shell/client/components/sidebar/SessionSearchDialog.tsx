@@ -134,6 +134,12 @@ export function SessionSearchDialog({
         showCloseButton={false}
         aria-describedby={undefined}
         className="flex w-[92vw] max-w-[48rem] flex-col gap-0 overflow-hidden rounded-2xl p-0 shadow-2xl sm:max-w-[48rem]"
+        // The dialog portals outside the drawer subtree. These two markers are
+        // what the App-level drawer guards key on: [data-web-shell-dialog]
+        // keeps touch scrolling alive, and [data-keyboard-scope] leaves Escape
+        // to the dialog instead of the drawer behind it.
+        data-web-shell-dialog
+        data-keyboard-scope
         onOpenAutoFocus={(event) => {
           event.preventDefault();
           inputRef.current?.focus();

@@ -144,18 +144,15 @@ export function useListboxKeyboard({
       if (!isTopDialogShellId(dialogShellId)) return;
       // Dialogs outside the DialogShell stack still need to yield while focus
       // is in another dialog above them. `document.activeElement` retargets to
-      // the shadow host in portal mode, so resolve it from the panel's root;
-      // body means focus was dropped on non-focusable dialog chrome, which
-      // still belongs to this dialog.
+      // the shadow host in portal mode, so resolve it from the panel's root.
       const focused = scope
         ? getShadowAwareActiveElement(scope.current)
         : document.activeElement;
-      if (
-        scope &&
-        focused !== document.body &&
-        !scope.current?.contains(focused)
-      )
-        return;
+      // Body means focus was dropped on non-focusable dialog chrome, which
+      // still belongs to this dialog. A shadow root reports `activeElement` as
+      // null in that state, so read the document for this check.
+      const bodyFocused = document.activeElement === document.body;
+      if (scope && !bodyFocused && !scope.current?.contains(focused)) return;
       // keyCode 229 is the cross-browser "this key belongs to the IME" marker.
       // WebKit fires `compositionend` BEFORE the committing Enter's keydown,
       // so that keydown arrives with isComposing === false — only the legacy
