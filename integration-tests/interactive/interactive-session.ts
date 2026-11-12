@@ -147,6 +147,18 @@ export class InteractiveSession {
 
     const baseEnv = options?.inheritEnv === false ? {} : { ...process.env };
     delete baseEnv['NO_COLOR'];
+    // The nightly loop arms export these two switches. Forward just them into
+    // the isolated env so the shared-loop/kernel legs reach the suites that
+    // keep the operator environment out (inheritEnv: false); a test's own
+    // options.env still overrides them below.
+    if (options?.inheritEnv === false) {
+      for (const key of [
+        'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+        'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
+      ]) {
+        if (process.env[key] !== undefined) baseEnv[key] = process.env[key];
+      }
+    }
     // The renderer matrix pins QWEN_TUI_RENDERER last so a test's own env
     // cannot silently switch the renderer mid-matrix.
     const env = {
