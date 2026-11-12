@@ -270,37 +270,46 @@ export function hostedToolOutputBudget(cwd: string): number {
 export function createHostedLoopFireClassifier(deps: {
   cwd: string;
   sessionId: string;
+  modelConfig?: HostedModelConfigReader;
 }): HostedLoopClassifier {
   return async ({ delaySeconds, prompt, reason }) => {
-    const settings = loadSettings(deps.cwd, {
-      skipLoadEnvironment: true,
-      skipWorkspaceSettings: true,
-      workspaceTrusted: false,
-    });
-    const argv = {
-      acp: true,
-      safeMode: true,
-      chatRecording: false,
-      sessionId: deps.sessionId,
-      sessionIdGenerated: true,
-    } as CliArgs;
-    const config = await loadCliConfig(
-      settings.merged,
-      argv,
-      deps.cwd,
-      undefined,
-      getSeparatedHookSettings(settings),
-      undefined,
-      undefined,
-      undefined,
-      true,
-      {
-        toolInvocationGuard: () => ({ allowed: false }),
-        lspDisabled: true,
-      },
-    );
+    let config: Awaited<ReturnType<typeof loadCliConfig>> | undefined;
     try {
-      await applyHostedModelPin(config, undefined);
+      // Wire the Session's own model, exactly as the model turn does, so the
+      // re-review classifies with the model the Session actually runs rather
+      // than an ambient default that may have no credentials.
+      const sessionModelConfig = await deps.modelConfig?.();
+      const settings = loadSettings(deps.cwd, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: true,
+        workspaceTrusted: false,
+      });
+      const argv = {
+        acp: true,
+        safeMode: true,
+        chatRecording: false,
+        sessionId: deps.sessionId,
+        sessionIdGenerated: true,
+      } as CliArgs;
+      config = await loadCliConfig(
+        settings.merged,
+        argv,
+        deps.cwd,
+        undefined,
+        getSeparatedHookSettings(settings),
+        undefined,
+        undefined,
+        undefined,
+        true,
+        {
+          toolInvocationGuard: () => ({ allowed: false }),
+          lspDisabled: true,
+          ...(sessionModelConfig
+            ? { modelConfiguration: sessionModelConfig }
+            : {}),
+        },
+      );
+      if (!sessionModelConfig) await applyHostedModelPin(config, undefined);
       const result = await classifyAction({
         toolName: 'loop_wakeup',
         toolParams: { delaySeconds, prompt, reason },
@@ -312,9 +321,17 @@ export function createHostedLoopFireClassifier(deps: {
         allowed: !result.shouldBlock && !result.unavailable,
         reason: result.reason || null,
       };
+    } catch {
+      // Fail closed without throwing into the pump's pick: a classifier that
+      // cannot be built denies the fire (settled loop_admission_denied) rather
+      // than stranding the input on a transient read error.
+      return {
+        allowed: false,
+        reason: 'Loop fire-time classifier unavailable.',
+      };
     } finally {
       await config
-        .shutdown({ shutdownTelemetry: false })
+        ?.shutdown({ shutdownTelemetry: false })
         .catch(() => undefined);
     }
   };

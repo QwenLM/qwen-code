@@ -74,6 +74,12 @@ export function createMonitorWakeRunTurn(params: {
   /** Commits a loop tick's expanded content once the turn delivered it, so an
    * aborted tick cannot poison the resolver's full-vs-reminder cache. */
   readonly markLoopDelivered?: () => void;
+  /** Fire-time sentinel expansion at delivery. Returns the expanded text, or
+   * null when a denied re-review settled the input (the loop ends). */
+  readonly expandLoopFire?: (
+    turnId: string,
+    text: string,
+  ) => Promise<{ text: string } | null>;
   readonly busy: () => boolean;
   /** A turn its source no longer runs (H4d-b: a stopped run's message),
    * re-read with the busy verdict right before the turn starts. */
@@ -211,9 +217,19 @@ export function createMonitorWakeRunTurn(params: {
     }
     let turnResult: { systemPayload?: Record<string, unknown> } | null;
     try {
+      // Fire-time sentinel expansion happens here, at delivery, not in the
+      // pump's pick: a busy Session must not re-classify the same tick on
+      // every retry, and a denied re-review settles the input and lets the
+      // pump advance to the next pending input instead of stranding it.
+      let turnText = turn.text;
+      if (turn.source === LOOP_INPUT_SOURCE && params.expandLoopFire) {
+        const expanded = await params.expandLoopFire(turn.turnId, turn.text);
+        if (expanded === null) return 'settled';
+        turnText = expanded.text;
+      }
       turnResult = (await params.executeHostedTurn(
         turn.turnId,
-        turn.text,
+        turnText,
         abort,
       )) as { systemPayload?: Record<string, unknown> } | null;
       if (turn.source === LOOP_INPUT_SOURCE) params.markLoopDelivered?.();

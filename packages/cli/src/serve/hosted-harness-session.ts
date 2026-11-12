@@ -6856,6 +6856,7 @@ export function registerHostedHarnessSessionRoutes(
           classifyFire: createHostedLoopFireClassifier({
             cwd: session.cwd,
             sessionId,
+            modelConfig: session.modelConfig,
           }),
         },
       );
@@ -7157,20 +7158,9 @@ export function registerHostedHarnessSessionRoutes(
             const body = object(JSON.parse(bytes.toString('utf8')));
             if (typeof body?.['text'] !== 'string')
               throw new Error('Wake input has no text.');
-            let text = body['text'];
-            if (first.source === LOOP_INPUT_SOURCE) {
-              // Fire-time sentinel expansion (decision 5): a denied re-review
-              // settles the input and ends the loop, so the pump skips it.
-              const expanded = await session.loops!.expandFireText(
-                first.turnId,
-                text,
-              );
-              if (expanded === null) return undefined;
-              text = expanded.text;
-            }
             return {
               turnId: first.turnId,
-              text,
+              text: body['text'],
               source: first.source,
             };
           },
@@ -7193,6 +7183,10 @@ export function registerHostedHarnessSessionRoutes(
                   brokerOptions,
                 ),
               markLoopDelivered: () => session.loops?.markLoopDelivered(),
+              expandLoopFire: (turnId, text) =>
+                session.loops
+                  ? session.loops.expandFireText(turnId, text)
+                  : Promise.resolve({ text }),
               busy: wakeBusy,
               held: (turn) => stoppedMessage(turn.source),
               cancelled: async (turn) =>
