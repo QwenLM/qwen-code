@@ -272,6 +272,13 @@ describe('detectIsolation', () => {
       signals: ['/.dockerenv'],
       seatbelt: false,
     });
+    expect(
+      detectIsolation({}, (path) => path === '/run/.containerenv'),
+    ).toEqual({
+      isolated: true,
+      signals: ['/run/.containerenv'],
+      seatbelt: false,
+    });
   });
 
   // The built-in macOS sandbox sets this value and runs a profile that still
