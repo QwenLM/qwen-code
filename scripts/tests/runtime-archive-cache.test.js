@@ -479,15 +479,58 @@ describe('the ephemeral image seeds the runtime archives', () => {
     expect(last).toContain("-name '*.tgz'");
     expect(last).toContain("-name '*.tar.gz'");
     expect(last).toContain('-eq 2');
-    // Both listings, named: a single `tar -tzf` substring stayed green with the
-    // Node line deleted (measured), which is the half that would ship an image
-    // whose Node archive nobody ever unpacked.
-    expect(last).toContain(
-      'tar -tzf "${QWEN_CI_BAKED_RUNTIME_CACHE}"/node-v*.tar.gz > /dev/null',
-    );
-    expect(last).toContain(
-      'tar -tzf "${QWEN_CI_BAKED_RUNTIME_CACHE}"/bun-linux-*.tgz > /dev/null',
-    );
+    // Both listings, EXECUTED rather than matched: a substring pin accepted
+    // `… > /dev/null || true`, which neutralises the only check that the
+    // archives are readable tarballs while both strings stay present and the
+    // `-eq 2` count still passes — the image could ship archives nothing ever
+    // unpacked. Extracting the shell segments and running them is what makes
+    // the neutralised form fail.
+    const listings = last
+      .split('&&')
+      .map((segment) => segment.trim())
+      .filter((segment) => segment.includes('tar -tzf'));
+    expect(listings, 'one listing per archive').toHaveLength(2);
+    const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-listing-'));
+    try {
+      const source = path.join(workdir, 'src');
+      fs.mkdirSync(source);
+      fs.writeFileSync(path.join(source, 'payload'), 'archive\n');
+      for (const listing of listings) {
+        const glob = /\/([^/\s"']+\.(?:tar\.gz|tgz))/.exec(listing)?.[1];
+        expect(glob, listing).toBeTruthy();
+        // A name the glob matches, built from the script's own pins.
+        const fixture = path.join(
+          workdir,
+          glob.replace('*', `${NODE_VERSION}-linux-x64`),
+        );
+        execFileSync('tar', ['-czf', fixture, '-C', source, 'payload']);
+        const command = listing.replaceAll(
+          '${QWEN_CI_BAKED_RUNTIME_CACHE}',
+          workdir,
+        );
+        const valid = spawnSync('bash', ['-c', command], {
+          encoding: 'utf8',
+        });
+        expect(valid.status, `${listing}: a readable archive must list`).toBe(
+          0,
+        );
+        // Truncated bytes: the same command must fail. Anything that swallows
+        // that exit — `|| true`, a dropped listing — reds here instead of
+        // shipping an archive nobody unpacked.
+        fs.writeFileSync(fixture, fs.readFileSync(fixture).subarray(0, 64));
+        const truncated = spawnSync('bash', ['-c', command], {
+          encoding: 'utf8',
+        });
+        expect(
+          truncated.status,
+          `${listing}: a truncated archive must not list`,
+        ).not.toBe(0);
+        // Restore a valid archive for the next listing's fixture.
+        fs.rmSync(fixture);
+      }
+    } finally {
+      fs.rmSync(workdir, { recursive: true, force: true });
+    }
   });
 
   // The seed cannot BE the cache: marking an archive used writes its mtime and
