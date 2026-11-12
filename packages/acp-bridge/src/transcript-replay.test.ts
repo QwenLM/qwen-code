@@ -1970,6 +1970,37 @@ describe('createTranscriptReplayMachine', () => {
     expect(machine.snapshot().pendingToolCalls).toHaveLength(2);
   });
 
+  it('preserves selected source records without exempting older duplicate call ids', () => {
+    const machine = createTranscriptReplayMachine({
+      skipFinalizeRecordIds: new Set(['assistant-live']),
+      skipFinalizeCallIds: new Set(['restore-question']),
+    });
+    for (const [uuid, ids] of [
+      ['assistant-old', ['duplicate', 'restore-question']],
+      ['assistant-live', ['duplicate', 'parallel']],
+    ] as const) {
+      updates(
+        machine,
+        record(uuid, 'assistant', {
+          message: {
+            role: 'model',
+            parts: ids.map((id) => ({
+              functionCall: { id, name: 'read_file', args: {} },
+            })),
+          },
+        }),
+      );
+    }
+
+    expect([...machine.finalize()].map((emission) => emission.update)).toEqual([
+      expect.objectContaining({ toolCallId: 'duplicate', status: 'failed' }),
+    ]);
+    expect(
+      machine.snapshot().pendingToolCalls.map((call) => call.callId),
+    ).toEqual(['restore-question', 'duplicate:2', 'parallel']);
+    expect([...machine.finalize()]).toEqual([]);
+  });
+
   it.each(['completed', 'failed', 'cancelled', 'timed_out'] as const)(
     'replays persisted structured shell %s results without flattening metadata',
     (outcome) => {
