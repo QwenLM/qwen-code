@@ -200,9 +200,9 @@ class WorkspaceCsiSqlWorkerMySqlIT {
             original.headers().map().forEach((key, values) -> values.forEach(value -> mapped.header(key, value)));
             return actualClient.sendAsync(mapped.build(), call.getArgument(1));
         }).when(mappedClient).sendAsync(any(HttpRequest.class), any());
-        var application = new WorkspaceCsiApplicationStore(jdbc, manager, journal, bindings, sessions, new HttpRuntimeTransport(mappedClient));
+        var application = new WorkspaceCsiApplicationStore(jdbc, manager, journal, bindings, sessions, new HttpRuntimeTransport(mappedClient), null);
         var access = new WorkspaceCsiRuntimeAccess(jdbc, manager, JSON, properties, registration,
-                sessionId, request.requestKey(), bindings, sessions, new HttpRuntimeTransport(mappedClient), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                sessionId, request.requestKey(), bindings, sessions, new HttpRuntimeTransport(mappedClient), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), null);
         var provisioner = mock(RuntimeProvisioner.class);
         var placement = new AtomicReference<RuntimeResourceHandle>();
         when(provisioner.kind()).thenReturn("kubernetes-workspace");

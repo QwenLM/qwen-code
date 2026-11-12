@@ -231,6 +231,14 @@ Workspace 扩展包的发布与管理，以及哪些 actor 有权执行这些操
 | `enabled` | — | 布尔 | `false` | 是否提供个人记忆，默认为 false。仅在验证专用 Mem0 服务并关闭跨服务共享后启用。要求开启 Session Store 且 Hosted 声明 session-memory/1 能力；Session 必须在创建时明确选择 Store。 |
 | `endpoint` | — | 字符串 | — | 专用 Mem0 服务的基础 URL，仅在开启记忆时读取。除回环 HTTP 测试外要求 HTTPS；拒绝内嵌凭据、查询参数和片段。该地址仅保留在 Control Plane。 |
 
+## `qwen.managed-agent.object-storage`
+
+tool publication 与 Session 资源 / journal 冷存储共用的通用 Aliyun OSS 对象存储。
+
+| 属性 | 环境变量 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `enabled` | `QWEN_MANAGED_AGENT_OBJECT_STORAGE_ENABLED` | 布尔 | 同 `qwen.managed-agent.tool-publication.enabled` | 通用 Aliyun OSS 对象存储自动装配是否启用。默认跟随 `qwen.managed-agent.tool-publication.enabled`；在关闭 tool publication 时设为 true，可在不启用发布的情况下支撑 Session 资源与 journal 冷存储。OSS endpoint、region、bucket 仍从 `qwen.managed-agent.tool-publication.oss-*` 读取。 |
+
 ## `qwen.managed-agent.runtime-broker`
 
 内嵌 Runtime Broker：包括面向 Hosted Harness 的私有 HTTP 监听器、放置并恢复执行 Hosted 工具的 Runtime worker 的 provisioner、worker 的 Workspace 挂载与隔离方式，以及加密其持久化 Runtime 凭据的密钥。
@@ -257,7 +265,7 @@ Workspace 扩展包的发布与管理，以及哪些 actor 有权执行这些操
 | `isolation-class` | `QWEN_MANAGED_AGENT_RUNTIME_ISOLATION` | 字符串 | `session` | Broker 如何在未绑定 Workspace 的 Session 之间共享 Runtime worker：`session` 为每个 Hosted Session 单独启动 worker，`workspace` 让配置的整个 Workspace 共用一个 worker。在 `local-process` 上启用 Hosted Workspace 文件、启用子 Workspace 或使用外部 provisioner 时，`workspace` 启动时拒绝；使用 `static` 或 `kubernetes-workspace` provisioner 时，`session` 启动时拒绝。绑定 Workspace 的 Session 改用 `qwen.managed-agent.runtime-broker.bound-session-isolation-class`。 |
 | `local-directory-import-enabled` | `QWEN_MANAGED_AGENT_LOCAL_DIRECTORY_IMPORT_ENABLED` | 布尔 | `false` | 是否允许 WebShell 将本机上已有的目录导入为 Workspace：导入时把其父目录登记为存储，并授予发起导入的 actor OWNER 权限。仅适用于可信的单用户主机：要求 `server.address` 为回环地址并使用 signed 认证或 `qwen.managed-agent.trusted-actor-header`，同时开启 `qwen.managed-agent.harness.workspace-files-enabled`、`qwen.managed-agent.runtime-broker.durable-local-process` 和 `qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled`，否则启动时拒绝。 |
 | `node-executable` | `QWEN_MANAGED_AGENT_NODE_EXECUTABLE` | 字符串 | *（空）* | Node.js 可执行文件的路径，用于运行本地 Runtime worker（`qwen.managed-agent.runtime-broker.worker-entry`）以及本地 Workspace 文件读取和上传的辅助进程。使用 `local-process` provisioner 时必填，留空时启动时拒绝。预检会检查它是否可执行。 |
-| `operator-recovery-enabled` | `QWEN_MANAGED_AGENT_RUNTIME_OPERATOR_RECOVERY_ENABLED` | 布尔 | `false` | 是否允许离线的运维恢复命令（`bin/qwen-managed-agent-operator-recovery`）对仍占用 Workspace 租约的 Hosted Shell 捕获执行 `inspect`、`prepare` 与 `complete` 步骤。请在该维护进程中设置：除非此项开启，且同时开启 `qwen.managed-agent.runtime-broker.durable-local-process`、使用 `local-process` provisioner 并配置 `qwen.managed-agent.runtime-broker.state-directory`，否则该命令拒绝运行。使用外部 provisioner 时，服务端启动时拒绝此项。 |
+| `operator-recovery-enabled` | `QWEN_MANAGED_AGENT_RUNTIME_OPERATOR_RECOVERY_ENABLED` | 布尔 | `false` | 是否允许离线的运维恢复命令（`bin/qwen-managed-agent-admin operator-recovery`）对仍占用 Workspace 租约的 Hosted Shell 捕获执行 `inspect`、`prepare` 与 `complete` 步骤。请在该维护进程中设置：除非此项开启，且同时开启 `qwen.managed-agent.runtime-broker.durable-local-process`、使用 `local-process` provisioner 并配置 `qwen.managed-agent.runtime-broker.state-directory`，否则该命令拒绝运行。使用外部 provisioner 时，服务端启动时拒绝此项。 |
 | `port` | `QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT` | 整数 | `4182` | 内嵌 Runtime Broker HTTP 监听器的 TCP 端口；Hosted Harness 的 `QWEN_MANAGED_RUNTIME_BROKER_URL` 必须能到达它：回环地址时直接指向它，非回环绑定时经由前置的 TLS 终止代理。监听器无法绑定该端口时启动失败。预检会检查端口是否空闲（使用 `--online` 时检查是否在监听），并与 Harness 凭据文件中的 Broker URL 比对。 |
 | `previous-credential-keys` | — | YAML 映射 | *（空）* | 密钥轮换后保留的旧 Runtime 凭据密钥，形式为 key ID 到 base64 编码 32 字节密钥的映射，使以旧密钥加密的行仍可读取，而写入始终只使用当前密钥。属于机密。须在配置文件（YAML）中设置，并用方括号包住每个 ID，例如 `'[old-v1]': <key>`；无法通过环境变量提供。密钥不是 32 字节，或 ID 与 `qwen.managed-agent.runtime-broker.credential-key-id` 相同时启动时拒绝。 |
 | `provider-options` | — | YAML 映射 | `{}` | 传递给选中 Runtime 工厂的专用字符串配置，以 YAML 映射设置。其含义及校验由该 provider 决定；内置后端继续使用原有配置项。默认为空映射。 |
@@ -312,7 +320,7 @@ SSH Runtime 节点：服务端通过 SSH 访问的主机，用户可以在这些
 
 | 属性 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `deletion-enabled` | — | 布尔 | `false` | 是否允许在删除宽限期后腾空被 pack 覆盖的 SQL journal 正文。需先完成只打包模式的资格验证；腾空受 head 水位与宽限期围栏保护。 |
+| `deletion-enabled` | — | 布尔 | `false` | 是否允许在删除宽限期后腾空被 pack 覆盖的 SQL journal 正文。需先完成只打包模式的资格验证；腾空受 head 水位与宽限期围栏保护。直读 record_bytes 的 JournalStoreRows.activationLeaseRow、JdbcCsiActivationAdmission、JdbcCsiExecutionAdmission 已 pack-aware（#17047）：被腾空的区间会从已发布的 journal pack 解析，并对照留存的 SQL 摘要重新校验。前提：任何承载这些读取的进程都必须配置 tool-publication 对象存储（Spring broker 与手工构造的 CSI/维护入口皆然）；缺少对象存储时被腾空的读取仍会失败关闭，因此启用前须确认所有相关进程均已配置 OSS。 |
 | `deletion-grace` | — | 时长 | `72h` | pack 发布且发布者被围栏后、到可腾空被覆盖 SQL 正文之间的宽限期；必须大于备份复制 lag。纯数字按秒解析。 |
 | `enabled` | — | 布尔 | `false` | 是否允许把超大的私有 Session 资源外置到不可变对象存储（journal 提交前 allocate/upload/finalize）。为 false 时超上限资源返回 HTTP 501 `managed_session_oss_disabled`；已外置资源仍可读取。 |
 | `oss-key-prefix` | — | 字符串 | `session-resources/` | 已配置对象存储 bucket 中用于外置 Session 资源与 journal pack 的 key 前缀。 |
