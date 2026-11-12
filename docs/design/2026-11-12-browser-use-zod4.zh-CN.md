@@ -110,11 +110,11 @@ GHSA-mrhx-c7xc-m3w5 的版本），并要求 lockfile 中该 importer 解析出�
 
   | `dist/index.js` | Zod 3.25.76        | Zod 4.6.6           |
   | --------------- | ------------------ | ------------------- |
-  | 总字节数        | 312,440            | 947,098             |
+  | 总字节数        | 312,906            | 947,236             |
   | 其中 Zod 占比   | 120,808 / 9 个文件 | 751,128 / 95 个文件 |
 
-  即增加 634,658 B（约 620 KB），其中 630,320 B 来自 Zod 本身。产出的运行时有一半是
-  本包从不执行的代码：
+  即增加 634,330 B（约 619 KB，3.03 倍），其中 630,320 B 来自 Zod 本身。产出的运行时有
+  一半是本包从不执行的代码：
 
   | 本包从不调用                   | 产物中的字节数 | 占比 |
   | ------------------------------ | -------------- | ---- |
@@ -124,8 +124,14 @@ GHSA-mrhx-c7xc-m3w5 的版本），并要求 lockfile 中该 importer 解析出�
   转换这一行涵盖实现它的全部六个输入：`core/compile.js` 58,860、
   `core/json-schema-processors.js` 25,437、`classic/from-json-schema.js` 25,333、
   `core/to-json-schema.js` 17,389、`core/json-schema-generator.js` 2,312，以及
-  `core/json-schema.js` 30。只统计前三个会少算 19,731 B。总字节数取 metafile 自身的
-  `outputs['index.js'].bytes`；`build.mjs` 会多写 138 B，因为它在前面加了 kernel banner。
+  `core/json-schema.js` 30。只统计前三个会少算 19,731 B。
+
+  有两个测量细节决定这些数字能否复现。这里的总字节数是 `build.mjs` 实际产出的产物，
+  含 banner（不加 banner 时 metafile 报 312,768 与 947,098，两侧各少 138 B，因此差值
+  不变）；上面的占比以含 banner 的总数为分母。另外，构建必须在
+  `packages/browser-use/node_modules` 已安装的树中进行：缺少它时 esbuild 对部分非 Zod
+  输入的解析不同，两侧都会多报约 7 KB —— 本节先前一版得到 954,646 就是这个原因。两种
+  情况下 Zod 自身的占比完全相同。
 
   其中 locale 占主导，而它们之所以没被 tree-shaking 去掉，是因为
   `zod/v4/classic/external.js` 末尾有 `export * as locales from
@@ -155,10 +161,11 @@ scripts/tests/browser-use-assets.test.js` 验证新增的 pin 断言，并确认
 - 确认 `--frozen-lockfile` 安装成功，且该 importer 解析到 Zod 4。
 - 若要复测「风险」段的体积代价，可用 `metafile: true` 以及与 `build.mjs` 相同的选项
   （`packages: 'bundle'`、`external: ['playwright-core', 'playwright-core/*']`、
-  `target: 'node22'`、`format: 'esm'`）构建该入口，再对 metafile 中位于
-  `node_modules/zod/` 下的输入累加 `bytesInOutput`。Zod 3 一侧同样要经由它的 ESM 入口
-  （`zod/index.js`）解析：用 esbuild `alias` 指向包目录会绕过 `exports` 而选到 CommonJS
-  构建，那不是对等口径的对照。
+  `target: 'node22'`、`format: 'esm'`，以及它的 kernel banner）构建该入口，且所在树的
+  `packages/browser-use/node_modules` 已安装；再对 metafile 中位于 `node_modules/zod/`
+  下的输入累加 `bytesInOutput`。Zod 3 一侧同样要经由它的 ESM 入口（`zod/index.js`）
+  解析：用 esbuild `alias` 指向包目录会绕过 `exports` 而选到 CommonJS 构建，那不是对等
+  口径的对照。
 
 ### 已验证结果
 

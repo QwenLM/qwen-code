@@ -136,11 +136,11 @@ resolve below `4.6.6`.
 
   | `dist/index.js`   | Zod 3.25.76       | Zod 4.6.6          |
   | ----------------- | ----------------- | ------------------ |
-  | total bytes       | 312,440           | 947,098            |
+  | total bytes       | 312,906           | 947,236            |
   | Zod's share of it | 120,808 / 9 files | 751,128 / 95 files |
 
-  That is +634,658 B (~620 KB), of which 630,320 B is Zod itself. Half the
-  emitted runtime is code this package never executes:
+  That is +634,330 B (~619 KB, 3.03×), of which 630,320 B is Zod itself. Half
+  the emitted runtime is code this package never executes:
 
   | never called from here             | bytes in the output | share |
   | ---------------------------------- | ------------------- | ----- |
@@ -151,8 +151,16 @@ resolve below `4.6.6`.
   58,860, `core/json-schema-processors.js` 25,437, `classic/from-json-schema.js`
   25,333, `core/to-json-schema.js` 17,389, `core/json-schema-generator.js` 2,312,
   and `core/json-schema.js` 30. Counting only the first three understates it by
-  19,731 B. Total bytes are the metafile's own `outputs['index.js'].bytes`;
-  `build.mjs` writes 138 B more because it prepends the kernel banner.
+  19,731 B.
+
+  Two measurement details decide whether these numbers reproduce. Total bytes
+  here are the artifact `build.mjs` actually emits, banner included (the
+  metafile without it reports 312,768 and 947,098 — 138 B less on each side, so
+  the delta is unchanged); the shares above are taken against the banner-included
+  total. And the build has to run in a tree whose `packages/browser-use/node_modules`
+  is installed: without it esbuild resolves some non-Zod inputs differently and
+  reports ~7 KB more on both sides, which is how an earlier pass of this section
+  arrived at 954,646. Zod's own share is identical either way.
 
   The locales dominate, and they survive tree-shaking because
   `zod/v4/classic/external.js` ends with `export * as locales from
@@ -191,11 +199,12 @@ scripts/tests/browser-use-assets.test.js` for the new pin assertion, and
 - To re-measure the size cost in the Risks section, build this entry point with
   `metafile: true` and the same options as `build.mjs` (`packages: 'bundle'`,
   `external: ['playwright-core', 'playwright-core/*']`, `target: 'node22'`,
-  `format: 'esm'`), then sum `bytesInOutput` over the metafile inputs under
-  `node_modules/zod/`. For the Zod 3 side, resolve that major through its ESM
-  entry (`zod/index.js`) as well: an esbuild `alias` to the package directory
-  bypasses `exports` and picks the CommonJS build, which is not a like-for-like
-  comparison.
+  `format: 'esm'`, and its kernel banner), in a tree whose
+  `packages/browser-use/node_modules` is installed. Then sum `bytesInOutput`
+  over the metafile inputs under `node_modules/zod/`. For the Zod 3 side,
+  resolve that major through its ESM entry (`zod/index.js`) as well: an esbuild
+  `alias` to the package directory bypasses `exports` and picks the CommonJS
+  build, which is not a like-for-like comparison.
 
 ### Verified results
 
