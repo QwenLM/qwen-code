@@ -213,13 +213,13 @@ merge base 取自该检查**已经做过**的包含比较，因此 narrowing 不
 
    另有五条 witness 针对本修订新增的套件步骤。每条都单独施加在真实 `ci.yml` 上，先确认本修订变红、上一修订仍绿，再还原：
 
-   | 对 `Run lint gate freshness tests` 的变异 | 结果         |
-   | ----------------------------------------- | ------------ |
-   | 去掉 `github_ci_only` 这个 profile 分支   | 红，1 个失败 |
-   | 把 run 行指向另一个套件                   | 红，1        |
-   | 加上 `continue-on-error: true`            | 红，1        |
-   | 把它移回 `Install dependencies` 之前      | 红，1        |
-   | 在它的 run 行后追加 `|| true`（或 `|| :`） | 红，1        |
+   | 对 `Run lint gate freshness tests` 的变异      | 结果         |
+   | ---------------------------------------------- | ------------ |
+   | 去掉 `github_ci_only` 这个 profile 分支        | 红，1 个失败 |
+   | 把 run 行指向另一个套件                        | 红，1        |
+   | 加上 `continue-on-error: true`                 | 红，1        |
+   | 把它移回 `Install dependencies` 之前           | 红，1        |
+   | 在它的 run 行后追加 `\|\| true`（或 `\|\| :`） | 红，1        |
 
 3. 与被替换的行模型做等价对照：取十三个历史 `ci.yml` 提交，父提交作为分叉点，内容按真实 ref 读取。两个模型跑在同一对上；`旧`/`新` 是 stale/fresh 判定，两列拒绝表示该侧是否对这一对返回了 `null`：
 
