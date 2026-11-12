@@ -427,8 +427,9 @@ const MAX_INFLIGHT_MCP_DISPATCH = 8;
 /**
  * A permanently-rejecting client — most often the Chrome extension retrying an
  * origin the daemon was never told to allow — reconnects forever, so one log
- * line per rejection buries the journal (#13966). Each distinct reason and
- * client address is logged once, then suppressed until this window elapses.
+ * line per rejection buries the journal (#13966). Each distinct rejection
+ * category and client address is logged once, then suppressed until this
+ * window elapses; the line that does get written carries the full reason.
  */
 const UPGRADE_REJECT_LOG_INTERVAL_MS = 60_000;
 
@@ -1572,10 +1573,12 @@ export function mountAcpHttp(
   let upgradeListener:
     | ((req: IncomingMessage, socket: Duplex, head: Buffer) => void)
     | undefined;
-  // Last time each `reason@address` rejection was logged and how many of that
-  // key were dropped since, so a client stuck in a retry loop cannot flood the
-  // journal (see UPGRADE_REJECT_LOG_INTERVAL_MS) while the next line still
-  // tells an operator how hard it retried.
+  // Last time each `category@address` rejection was logged and how many of
+  // that key were dropped since, so a client stuck in a retry loop cannot
+  // flood the journal (see UPGRADE_REJECT_LOG_INTERVAL_MS) while the next
+  // line still tells an operator how hard it retried. The key is the category
+  // rather than the rendered reason: the reason embeds client-controlled text,
+  // which would otherwise mint a fresh key per attempt.
   const upgradeRejectLoggedAt = new Map<
     string,
     { at: number; suppressed: number }
@@ -1655,12 +1658,17 @@ export function mountAcpHttp(
           const oldest = upgradeRejectLoggedAt.keys().next().value;
           if (oldest !== undefined) upgradeRejectLoggedAt.delete(oldest);
         }
-        const suppressedNote =
+        // The count goes in a fixed slot ahead of the free-text reason, and
+        // the reason is rendered as a delimited field. The reason embeds
+        // client-controlled header text, so anything shape-compatible with the
+        // note inside it — `(99999 similar suppressed ...)` — must not read as
+        // the real count.
+        const suppressedPrefix =
           last === undefined || last.suppressed === 0
             ? ''
-            : ` (${last.suppressed} similar suppressed since the last line)`;
+            : `suppressed=${last.suppressed} `;
         writeStderrLine(
-          `qwen serve: WebSocket upgrade rejected (${reason}) from ${rawAddr}${suppressedNote}`,
+          `qwen serve: WebSocket upgrade rejected ${suppressedPrefix}(${JSON.stringify(reason)}) from ${rawAddr}`,
         );
       };
       // `/cdp` is the Plan C CDP-tunnel endpoint (issue #5626): a loopback

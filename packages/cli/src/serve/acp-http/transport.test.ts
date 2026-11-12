@@ -12997,6 +12997,30 @@ describe('ACP WebSocket transport security', () => {
     expect(result.code).toBe(403);
   });
 
+  // The dedupe key is `category@address`, not the rendered reason. The reason
+  // embeds client-controlled text, so a client that varies it must still be
+  // throttled: both attempts fold into one key and only one line is written.
+  it('throttles a client that varies the rejected origin', async () => {
+    await startServer();
+    const lines = () =>
+      stdioMocks.writeStderrLine.mock.calls.filter(([line]) =>
+        String(line).includes('WebSocket upgrade rejected'),
+      );
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const before = lines().length;
+      expect(
+        (await wsConnectRaw('127.0.0.1', 'chrome-extension://aaaa')).code,
+      ).toBe(403);
+      expect(
+        (await wsConnectRaw('127.0.0.1', 'chrome-extension://bbbb')).code,
+      ).toBe(403);
+      expect(lines().length - before).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('logs a repeated identical upgrade rejection once per window (#13966)', async () => {
     await startServer();
     const rejections = () =>
@@ -13033,12 +13057,10 @@ describe('ACP WebSocket transport security', () => {
           .code,
       ).toBe(403);
       expect(rejections().length - before).toBe(2);
-      expect(String(rejections().at(-1)![0])).toContain(
-        '(5 similar suppressed since the last line)',
-      );
+      expect(String(rejections().at(-1)![0])).toContain('suppressed=5 ');
       // The detail is still reported on the line that does get written.
       expect(String(rejections().at(-1)![0])).toContain(
-        'origin-not-allowed chrome-extension://abcdefghijklmnop',
+        '"origin-not-allowed chrome-extension://abcdefghijklmnop"',
       );
     } finally {
       vi.useRealTimers();
@@ -13063,6 +13085,39 @@ describe('ACP WebSocket transport security', () => {
       vi.setSystemTime(Date.now() - 120_000);
       expect((await wsConnectRaw('127.0.0.1', origin)).code).toBe(403);
       expect(rejections().length).toBeGreaterThan(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a client-supplied header from forging the suppressed count', async () => {
+    await startServer();
+    const origin = 'chrome-extension://abcdefghijklmnop';
+    const rejections = () =>
+      stdioMocks.writeStderrLine.mock.calls.filter(([line]) =>
+        String(line).includes('WebSocket upgrade rejected'),
+      );
+    const before = rejections().length;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      expect((await wsConnectRaw('127.0.0.1', origin)).code).toBe(403);
+      // Header values may contain spaces and parentheses, so a client that
+      // pastes the note's own shape into Origin must not be able to write it
+      // into a log line that also carries the real count.
+      // Same rejection category as the first attempt, so the two share a
+      // throttle key and stay inside one window.
+      const forged = await wsConnectRaw(
+        '127.0.0.1',
+        'chrome-extension://evil.test/(99999 similar suppressed since the last line)',
+      );
+      expect(forged.code).toBe(403);
+      expect(rejections().length - before).toBe(1);
+
+      vi.setSystemTime(Date.now() + 61_000);
+      expect((await wsConnectRaw('127.0.0.1', origin)).code).toBe(403);
+      const last = String(rejections().at(-1)![0]);
+      expect(last).toContain('suppressed=1 ');
+      expect(last).not.toContain('99999');
     } finally {
       vi.useRealTimers();
     }
