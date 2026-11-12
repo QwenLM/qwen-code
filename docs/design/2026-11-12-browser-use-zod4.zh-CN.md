@@ -110,10 +110,10 @@ GHSA-mrhx-c7xc-m3w5 的版本），并要求 lockfile 中该 importer 解析出�
 
   | `dist/index.js` | Zod 3.25.76        | Zod 4.6.6           |
   | --------------- | ------------------ | ------------------- |
-  | 总字节数        | 312,906            | 947,236             |
+  | 总字节数        | 312,578            | 947,236             |
   | 其中 Zod 占比   | 120,808 / 9 个文件 | 751,128 / 95 个文件 |
 
-  即增加 634,330 B（约 619 KB，3.03 倍），其中 630,320 B 来自 Zod 本身。产出的运行时有
+  即增加 634,658 B（约 620 KB，3.03 倍），其中 630,320 B 来自 Zod 本身。产出的运行时有
   一半是本包从不执行的代码：
 
   | 本包从不调用                   | 产物中的字节数 | 占比 |
@@ -126,12 +126,19 @@ GHSA-mrhx-c7xc-m3w5 的版本），并要求 lockfile 中该 importer 解析出�
   `core/to-json-schema.js` 17,389、`core/json-schema-generator.js` 2,312，以及
   `core/json-schema.js` 30。只统计前三个会少算 19,731 B。
 
-  有两个测量细节决定这些数字能否复现。这里的总字节数是 `build.mjs` 实际产出的产物，
-  含 banner（不加 banner 时 metafile 报 312,768 与 947,098，两侧各少 138 B，因此差值
-  不变）；上面的占比以含 banner 的总数为分母。另外，构建必须在
-  `packages/browser-use/node_modules` 已安装的树中进行：缺少它时 esbuild 对部分非 Zod
-  输入的解析不同，两侧都会多报约 7 KB —— 本节先前一版得到 954,646 就是这个原因。两种
-  情况下 Zod 自身的占比完全相同。
+  有三个测量细节决定这些数字能否复现。总字节数是 `build.mjs` 实际产出的产物，探针传入
+  同一个 kernel banner，因此 metafile 自身的 `outputs[...].bytes` 等于磁盘上的文件大小；
+  不加 banner 会让两侧各少报 138 B，而差值不变。上面的占比以该总数为分母。
+
+  其次，要替换解析到的包，而不是让 esbuild 指向一个目录。`alias` 会绕过 `exports`，
+  因此把 Zod 3 的包根目录作为 alias 会选中它的 CommonJS 构建，报出 343,689 B、其中 Zod
+  为 150,830 B / 10 个文件 —— 那不是同源对照。把它的 ESM 入口（`zod/index.js`）作为 alias
+  能拿到正确的 Zod 占比，但仍产出 312,882 B，因为 alias 同时改变了无关输入的解析方式。
+  就地替换 `node_modules/zod` 是唯一只测量版本变化本身的路径：312,578 B 对 947,236 B。
+
+  第三，构建必须在 `packages/browser-use/node_modules` 已安装的树中进行。缺少它时
+  esbuild 对部分非 Zod 输入的解析不同，两侧都会多报约 7 KB —— 本节先前一版得到 954,646
+  就是这个原因。两种情况下 Zod 自身的占比完全相同。
 
   其中 locale 占主导，而它们之所以没被 tree-shaking 去掉，是因为
   `zod/v4/classic/external.js` 末尾有 `export * as locales from
@@ -163,9 +170,10 @@ scripts/tests/browser-use-assets.test.js` 验证新增的 pin 断言，并确认
   （`packages: 'bundle'`、`external: ['playwright-core', 'playwright-core/*']`、
   `target: 'node22'`、`format: 'esm'`，以及它的 kernel banner）构建该入口，且所在树的
   `packages/browser-use/node_modules` 已安装；再对 metafile 中位于 `node_modules/zod/`
-  下的输入累加 `bytesInOutput`。Zod 3 一侧同样要经由它的 ESM 入口（`zod/index.js`）
-  解析：用 esbuild `alias` 指向包目录会绕过 `exports` 而选到 CommonJS 构建，那不是对等
-  口径的对照。
+  下的输入累加 `bytesInOutput`。Zod 3 一侧要把 `node_modules/zod` 替换成该版本后重新
+  构建 —— 不要用 esbuild `alias`。alias 指向包目录会绕过 `exports` 而选到 CommonJS
+  构建；alias 指向它的 ESM 入口能修正 Zod 占比，但仍会挪动无关输入。测完后要恢复
+  4.6.6 那一份，因为本包套件与防护都会读取解析到的版本。
 
 ### 已验证结果
 

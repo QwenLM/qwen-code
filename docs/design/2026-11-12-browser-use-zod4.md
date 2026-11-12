@@ -136,10 +136,10 @@ resolve below `4.6.6`.
 
   | `dist/index.js`   | Zod 3.25.76       | Zod 4.6.6          |
   | ----------------- | ----------------- | ------------------ |
-  | total bytes       | 312,906           | 947,236            |
+  | total bytes       | 312,578           | 947,236            |
   | Zod's share of it | 120,808 / 9 files | 751,128 / 95 files |
 
-  That is +634,330 B (~619 KB, 3.03×), of which 630,320 B is Zod itself. Half
+  That is +634,658 B (~620 KB, 3.03×), of which 630,320 B is Zod itself. Half
   the emitted runtime is code this package never executes:
 
   | never called from here             | bytes in the output | share |
@@ -153,14 +153,24 @@ resolve below `4.6.6`.
   and `core/json-schema.js` 30. Counting only the first three understates it by
   19,731 B.
 
-  Two measurement details decide whether these numbers reproduce. Total bytes
-  here are the artifact `build.mjs` actually emits, banner included (the
-  metafile without it reports 312,768 and 947,098 — 138 B less on each side, so
-  the delta is unchanged); the shares above are taken against the banner-included
-  total. And the build has to run in a tree whose `packages/browser-use/node_modules`
-  is installed: without it esbuild resolves some non-Zod inputs differently and
-  reports ~7 KB more on both sides, which is how an earlier pass of this section
-  arrived at 954,646. Zod's own share is identical either way.
+  Three measurement details decide whether these numbers reproduce. Total bytes
+  are the artifact `build.mjs` actually emits, and the probe passes the same
+  kernel banner, so the metafile's own `outputs[...].bytes` equals the file size
+  on disk; omitting the banner understates both sides by 138 B and leaves the
+  delta unchanged. The shares above are taken against that total.
+
+  Second, swap the resolved package rather than pointing esbuild at a directory.
+  An `alias` bypasses `exports`, so aliasing the Zod 3 package root selects its
+  CommonJS build and reports 343,689 B with 150,830 B of Zod across 10 files —
+  not a like-for-like comparison. Aliasing its ESM entry (`zod/index.js`) gets
+  the right Zod share but still emits 312,882 B, because the alias also changes
+  how unrelated inputs resolve. Replacing `node_modules/zod` in place is the one
+  route that measures only the version change: 312,578 B against 947,236 B.
+
+  Third, build in a tree whose `packages/browser-use/node_modules` is installed.
+  Without it esbuild resolves some non-Zod inputs differently and reports about
+  7 KB more on both sides, which is how an earlier pass of this section arrived
+  at 954,646. Zod's own share is identical either way.
 
   The locales dominate, and they survive tree-shaking because
   `zod/v4/classic/external.js` ends with `export * as locales from
@@ -201,10 +211,12 @@ scripts/tests/browser-use-assets.test.js` for the new pin assertion, and
   `external: ['playwright-core', 'playwright-core/*']`, `target: 'node22'`,
   `format: 'esm'`, and its kernel banner), in a tree whose
   `packages/browser-use/node_modules` is installed. Then sum `bytesInOutput`
-  over the metafile inputs under `node_modules/zod/`. For the Zod 3 side,
-  resolve that major through its ESM entry (`zod/index.js`) as well: an esbuild
-  `alias` to the package directory bypasses `exports` and picks the CommonJS
-  build, which is not a like-for-like comparison.
+  over the metafile inputs under `node_modules/zod/`. For the Zod 3 side, replace
+  `node_modules/zod` with that version and rebuild — do not use an esbuild
+  `alias`. An alias to the package directory bypasses `exports` and picks the
+  CommonJS build; an alias to its ESM entry fixes the Zod share but still shifts
+  unrelated inputs. Restore the 4.6.6 copy afterwards, since the suite and the
+  guard both read the resolved version.
 
 ### Verified results
 
