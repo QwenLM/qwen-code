@@ -48,6 +48,8 @@ CREATE TABLE ma_session (
     session_key CHAR(64) COMMENT 'Hashed Session identity used for indexed lookup.',
     session_scope_key CHAR(64) COMMENT 'Hashed tenant and Session identity used to scope related records.',
     title_revision BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Monotonic title revision preventing stale rename settlement.',
+    preview VARCHAR(1024) COMMENT 'Bounded last-message preview denormalized for Session lists.',
+    preview_revision BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Monotonic preview revision preventing stale preview settlement.',
     retirement_operation_id VARBINARY(512) COMMENT 'Operation identity that initiated permanent Session retirement.',
     retirement_generation BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Monotonic retirement generation fencing readers and resource mutations.',
     retired_at BIGINT UNSIGNED COMMENT 'Permanent retirement time in Unix epoch milliseconds.',
@@ -101,6 +103,7 @@ CREATE TABLE ma_user_message_queue (
     resumed_turn_id VARBINARY(256) COMMENT 'Turn associated with the latest queue resume.',
     next_sequence BIGINT UNSIGNED NOT NULL DEFAULT 1 COMMENT 'Next monotonically increasing input queue sequence.',
     last_dispatch_at BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Last queue dispatch time in Unix epoch milliseconds.',
+    queue_revision BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Monotonic revision bumped by every queue content or state mutation for cheap client sync.',
     CONSTRAINT uk_ma_user_message_queue_business_key UNIQUE (tenant_id, session_id),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_user_message_queue_id PRIMARY KEY (id),
@@ -198,6 +201,7 @@ CREATE TABLE ma_session_head (
     activation_epoch BIGINT UNSIGNED COMMENT 'Activation generation associated with the committed Session state.',
     latest_checkpoint_resource_id VARBINARY(2048) COMMENT 'Resource identity of the latest committed Session checkpoint.',
     compacted_through_revision BIGINT UNSIGNED COMMENT 'Highest journal revision covered by completed compaction.',
+    packed_through_revision BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Highest journal revision covered by published live journal packs.',
     recovery_status VARCHAR(32) COMMENT 'Current private Session recovery status.',
     recovery_detail_code VARCHAR(128) COMMENT 'Machine-readable detail for the recovery status.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
@@ -254,12 +258,11 @@ CREATE TABLE ma_session_journal_tx (
     activation_epoch BIGINT UNSIGNED NOT NULL COMMENT 'Activation generation associated with the committed Session state.',
     latest_checkpoint_resource_id VARBINARY(2048) COMMENT 'Resource identity of the latest committed Session checkpoint.',
     record_encoding VARCHAR(32) NOT NULL COMMENT 'Encoding of the stored transaction bytes.',
-    record_bytes MEDIUMBLOB NOT NULL COMMENT 'Exact serialized transaction bytes used for replay and recovery.',
+    record_bytes MEDIUMBLOB COMMENT 'Exact serialized transaction bytes used for replay and recovery, or NULL when covered by a published journal pack.',
     byte_length BIGINT UNSIGNED NOT NULL COMMENT 'Length of the stored content in bytes.',
     record_digest CHAR(64) NOT NULL COMMENT 'Digest of the stored transaction bytes.',
     activation_lease_until BIGINT UNSIGNED COMMENT 'Latest activation lease expiry in Unix epoch milliseconds.',
     activation_renewal_seq BIGINT UNSIGNED COMMENT 'Monotonic activation lease renewal sequence.',
-    -- WorkspaceCsiApplicationImage.ACTIVATION_OPERATIONS mirrors this CASE, so keep the two in sync.
     is_activation_record TINYINT UNSIGNED GENERATED ALWAYS AS (CASE operation WHEN 'installActivation' THEN 1 WHEN 'renewActivation' THEN 1 ELSE 0 END)
         COMMENT 'Generated flag marking the transaction that carries an activation lease.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
@@ -269,9 +272,38 @@ CREATE TABLE ma_session_journal_tx (
     CONSTRAINT uk_managed_session_command
         UNIQUE (tenant_id, session_id, command_key_hash),
     CONSTRAINT ck_ma_activation_lease CHECK ((activation_lease_until IS NULL AND activation_renewal_seq IS NULL) OR (activation_lease_until IS NOT NULL AND activation_lease_until <= 9007199254740991 AND activation_renewal_seq IS NOT NULL AND activation_renewal_seq > 0 AND activation_renewal_seq <= 9007199254740991)),
+    CONSTRAINT ck_ma_journal_record_bytes CHECK (record_bytes IS NULL OR OCTET_LENGTH(record_bytes) = byte_length),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_session_journal_tx_id PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Committed private Session transactions, exact record bytes, and digest-chain evidence.';
+
+CREATE TABLE ma_journal_pack (
+    pack_id VARBINARY(144) NOT NULL COMMENT 'Stable pack identity.',
+    session_scope_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and Session identity used to scope related records.',
+    tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
+    workspace_id VARBINARY(2048) NOT NULL COMMENT 'Workspace identity within the tenant.',
+    session_id VARBINARY(2048) NOT NULL COMMENT 'Managed Session identity.',
+    from_revision BIGINT UNSIGNED NOT NULL COMMENT 'First journal revision covered by the pack.',
+    through_revision BIGINT UNSIGNED NOT NULL COMMENT 'Last journal revision covered by the pack.',
+    manifest_resource_key CHAR(64) NOT NULL COMMENT 'Hashed identity of the pack manifest resource.',
+    object_key VARBINARY(8192) NOT NULL COMMENT 'Object-store key of the immutable pack object.',
+    state VARCHAR(16) NOT NULL COMMENT 'Pack lifecycle: BUILDING, VERIFIED, PUBLISHED, EVICTED, or RETIRED.',
+    byte_length BIGINT UNSIGNED NOT NULL COMMENT 'Compressed pack length in bytes.',
+    sha256 CHAR(64) NOT NULL COMMENT 'SHA-256 digest of the complete pack object.',
+    builder_id VARBINARY(144) NOT NULL COMMENT 'Replica-scoped builder identity that owns a BUILDING row, used to reclaim only own or expired builds.',
+    gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
+    gmt_modified BIGINT UNSIGNED NOT NULL COMMENT 'Last record update time in Unix epoch milliseconds.',
+    CONSTRAINT uk_ma_journal_pack_scope_from UNIQUE (session_scope_key, from_revision),
+    CONSTRAINT uk_ma_journal_pack_id UNIQUE (pack_id),
+    CONSTRAINT ck_ma_journal_pack_range CHECK (from_revision >= 1 AND through_revision >= from_revision),
+    CONSTRAINT ck_ma_journal_pack_state CHECK ((CASE state WHEN 'BUILDING' THEN 8 WHEN 'VERIFIED' THEN 8 WHEN 'PUBLISHED' THEN 9 WHEN 'EVICTED' THEN 7 WHEN 'RETIRED' THEN 7 ELSE -1 END = CHAR_LENGTH(state))),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_journal_pack_id PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Immutable journal pack catalog and lifecycle.';
+
+CREATE INDEX ix_ma_journal_pack_through ON ma_journal_pack (session_scope_key, through_revision);
+
+CREATE INDEX ix_ma_journal_pack_state ON ma_journal_pack (state, gmt_modified);
 
 CREATE TABLE ma_event_stream (
     tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
@@ -652,7 +684,7 @@ CREATE TABLE ma_request_receipt (
     CONSTRAINT uk_ma_request_receipt_business_key UNIQUE (receipt_key),
     CONSTRAINT uk_ma_decision_slot UNIQUE (tenant_key, decision_scope_key),
     CONSTRAINT uk_ma_request UNIQUE (namespace, tenant_key, scope_key, idempotency_digest),
-    CONSTRAINT ck_ma_request_namespace CHECK ((CASE namespace WHEN 'SESSION_COMMAND' THEN 15 WHEN 'SESSION_CREATE_MODE' THEN 19 WHEN 'SESSION_CREATE_ACTOR' THEN 20 WHEN 'AGENT_DEFINITION' THEN 16 WHEN 'AUTOMATION' THEN 10 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'ACTION_DECISION' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 WHEN 'EXTERNAL_STORAGE' THEN 16 WHEN 'MEMORY' THEN 6 WHEN 'SIDE_QUERY' THEN 10 ELSE -1 END = CHAR_LENGTH(namespace))),
+    CONSTRAINT ck_ma_request_namespace CHECK ((CASE namespace WHEN 'SESSION_COMMAND' THEN 15 WHEN 'SESSION_CREATE_MODE' THEN 19 WHEN 'SESSION_CREATE_ACTOR' THEN 20 WHEN 'AGENT_DEFINITION' THEN 16 WHEN 'AUTOMATION' THEN 10 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'ACTION_DECISION' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 WHEN 'EXTERNAL_STORAGE' THEN 16 WHEN 'MEMORY' THEN 6 WHEN 'SIDE_QUERY' THEN 10 WHEN 'RESOURCE_ALLOCATE' THEN 17 ELSE -1 END = CHAR_LENGTH(namespace))),
     CONSTRAINT ck_ma_request_scope CHECK ((CASE scope_kind WHEN 'TENANT' THEN 6 WHEN 'ACTOR' THEN 5 WHEN 'SESSION' THEN 7 WHEN 'CHANNEL' THEN 7 ELSE -1 END = CHAR_LENGTH(scope_kind))),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_request_receipt_id PRIMARY KEY (id),
@@ -857,6 +889,20 @@ CREATE TABLE ma_workspace_access (
     CONSTRAINT pk_ma_workspace_access_id PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Per-actor Workspace grants with READER, OPERATOR, or OWNER access.';
 
+CREATE TABLE ma_extension_source_import (
+    import_key CHAR(64) NOT NULL COMMENT 'Scoped actor source import receipt identity.',
+    tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
+    workspace_id VARBINARY(512) NOT NULL COMMENT 'Workspace identity within the tenant.',
+    actor_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and Actor identity.',
+    operation_id VARBINARY(128) NOT NULL COMMENT 'Actor-scoped import operation identity.',
+    request_digest CHAR(64) NOT NULL COMMENT 'Source reference and target request fingerprint.',
+    request_json LONGTEXT NOT NULL COMMENT 'Original exact source reference and target, without locations or credentials.',
+    gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Receipt creation time in Unix epoch milliseconds.',
+    CONSTRAINT uk_ma_extension_source_import_business_key UNIQUE (import_key),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_extension_source_import_id PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Source import intents retained before external I/O, paired with publication operations when prepared.';
+
 CREATE TABLE ma_extension_package (
     package_key CHAR(64) NOT NULL COMMENT 'Hashed identity of the scoped extension package revision.',
     scope_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and Workspace identity.',
@@ -866,6 +912,7 @@ CREATE TABLE ma_extension_package (
     package_revision BIGINT UNSIGNED NOT NULL COMMENT 'Immutable extension package revision.',
     package_digest CHAR(64) NOT NULL COMMENT 'Digest of the extension package content.',
     manifest_json LONGTEXT NOT NULL COMMENT 'Validated extension package manifest.',
+    source_json LONGTEXT NULL COMMENT 'External source identity, exact business revision and verified source digest, null for direct uploads.',
     byte_length BIGINT UNSIGNED NOT NULL COMMENT 'Total published package size in bytes.',
     state VARCHAR(16) NOT NULL COMMENT 'Package publication state: PREPARING or PUBLISHED.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
@@ -1201,6 +1248,7 @@ CREATE TABLE ma_delivery (
     source_revision BIGINT UNSIGNED COMMENT 'Source record revision captured by the delivery.',
     segment_id VARBINARY(512) COMMENT 'Identity of an external channel message segment.',
     segment_ordinal BIGINT UNSIGNED COMMENT 'Ordering position of a segment within the delivery.',
+    segment_count INT UNSIGNED COMMENT 'Immutable number of segments in the channel delivery plan, used by the reconcile gate to prove the segment ledger complete.',
     creation_key VARBINARY(2048) COMMENT 'Original child-Session creation identity for child-result recovery.',
     provider_id VARBINARY(2048) COMMENT 'External provider identity associated with the delivery.',
     provider_receipt_json LONGTEXT COMMENT 'Receipt returned by the external delivery provider.',
@@ -1467,6 +1515,7 @@ CREATE INDEX idx_ma_output_capture_seal_manifest_resource_key ON ma_output_captu
 CREATE INDEX idx_ma_event_stream_artifact_refs_resource_key ON ma_event_stream (artifact_refs_resource_key);
 
 CREATE INDEX idx_ma_extension_package_workspace ON ma_extension_package (tenant_id, workspace_id);
+CREATE INDEX idx_ma_extension_source_import_workspace ON ma_extension_source_import (tenant_id, workspace_id);
 
 CREATE INDEX idx_ma_extension_settings_workspace ON ma_extension_settings (tenant_id, workspace_id);
 

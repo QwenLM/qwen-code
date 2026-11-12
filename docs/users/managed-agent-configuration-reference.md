@@ -306,6 +306,21 @@ SSH Runtime nodes: hosts the server reaches over SSH, on which users may registe
 | `enabled` | — | boolean | — | Whether SSH Workspaces are offered: an actor listed in a node's `access` may browse that node's allowed roots and register a directory there as a Workspace; while off, those routes answer `404 ssh_runtime_disabled`. Startup refuses it without `qwen.managed-agent.harness.workspace-files-enabled` or without `qwen.managed-agent.runtime-broker.ssh.nodes`, with an external provisioner, and under the `managed-local` profile. |
 | `nodes` | — | YAML list | *(empty)* | The SSH Runtime nodes, set in a configuration file (YAML) as a list. Each entry has `node-id` and `display-name`, `ssh-host` (a host alias of the server account's SSH configuration), the absolute node paths `node-executable`, `qwen-entry` and `state-directory`, `allowed-roots` (at least one absolute directory Workspaces may be registered under), `publication-port` (the node's loopback port that tool publication is forwarded to over SSH), `qwen-version` (required; must equal the version the node reports) and `access` (the `tenant-id` and `actor-id` pairs that may use the node). Startup refuses an invalid entry. With nodes set, `qwen.managed-agent.tool-publication.service-base-url` must be an `http` URL. |
 
+## `qwen.managed-agent.session-resources`
+
+Externalization of oversized private Session resources and cold storage of closed Session journals into immutable object storage, with independent default-off controls for resource writes, pack building, and SQL body eviction.
+
+| Property | Variable | Type | Default | Description |
+| --- | --- | --- | --- | --- |
+| `deletion-enabled` | — | boolean | `false` | Whether covered SQL journal bodies may be evicted after the deletion grace period. Requires pack-only mode to be qualified first; eviction is fenced by the head watermark and grace period. Precondition: the direct record_bytes readers JournalStoreRows.activationLeaseRow, JdbcCsiActivationAdmission and JdbcCsiExecutionAdmission are not yet pack-aware and fail closed once a covered range is evicted; migrate them to pack resolution (or confirm they never read an evicted range) before enabling. |
+| `deletion-grace` | — | duration | `72h` | Grace period after a pack is published and its publisher fenced before covered SQL bodies may be evicted; must exceed the backup replication lag. A plain number is seconds. |
+| `enabled` | — | boolean | `false` | Whether oversized private Session resources may be externalized to immutable object storage (allocate/upload/finalize before journal commit). While false, over-cap resources are refused with HTTP 501 `managed_session_oss_disabled`; already-externalized resources remain readable. |
+| `oss-key-prefix` | — | string | `session-resources/` | Key prefix under the configured object-storage bucket for externalized Session resources and journal packs. |
+| `pack-job-enabled` | — | boolean | `false` | Whether the background sweeper builds and publishes immutable journal packs for eligible Sessions. Requires `qwen.managed-agent.session-resources.enabled`. Pack building never deletes SQL bodies. |
+| `pack-max-transactions` | — | integer | `4096` | Maximum number of journal transactions packed into one journal pack. |
+| `pack-target-bytes` | — | integer | — | Target compressed size of a single journal pack; the pack range shrinks adaptively to stay within it. |
+| `scan-delay` | — | duration | `30s` | Interval between background journal-compaction sweeper passes. A plain number is milliseconds; a value with a unit such as `30s` is also accepted. |
+
 ## `qwen.managed-agent.session-store`
 
 The private Managed Session Store through which the Hosted Harness reads and writes Session journals on this server's internal routes, and the writer credentials and leases that guard it.
