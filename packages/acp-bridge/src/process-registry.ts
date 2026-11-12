@@ -177,8 +177,11 @@ class TrackedChild implements TrackedChildProcess {
    * thing that tells "we lost permission or the pgid was reused" apart from
    * "our own process tree is wedged", so the refusals for groups still alive
    * at the deadline ride along on the deadline error. Keying by pgid drops a
-   * refusal recorded for a group that has since emptied, and keeping every
-   * refusal per group keeps a refused SIGKILL visible next to the SIGTERM.
+   * refusal recorded for a group that has since emptied, and keeping one
+   * refusal per signal per group keeps a refused SIGKILL visible next to the
+   * SIGTERM while a re-signal of an already-refused group does not append a
+   * byte-identical sentence — the two shutdown paths that share a group would
+   * otherwise make one refusal read as several.
    */
   private readonly cleanupRefusals = new Map<number, string[]>();
   private exitInfo: AcpChannelExitInfo | undefined;
@@ -586,11 +589,11 @@ class TrackedChild implements TrackedChildProcess {
         // the `surviving pgids=` error below. `survivingGroups` already treats
         // EPERM as provisional for the same reason.
         if (isErrno(error, 'EPERM')) {
-          const notes = this.cleanupRefusals.get(group) ?? [];
-          notes.push(
+          const note =
             `ACP child pid=${rootPid ?? 'unknown'} was refused ${signal} ` +
-              `to pgid=${group}: ${toError(error).message}`,
-          );
+            `to pgid=${group}: ${toError(error).message}`;
+          const notes = this.cleanupRefusals.get(group) ?? [];
+          if (!notes.includes(note)) notes.push(note);
           this.cleanupRefusals.set(group, notes);
           continue;
         }

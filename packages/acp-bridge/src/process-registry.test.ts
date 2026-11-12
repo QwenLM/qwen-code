@@ -800,6 +800,41 @@ describe('ProcessRegistry', () => {
     });
   });
 
+  it('explains the refusal of every surviving group, not just the first', async () => {
+    vi.useFakeTimers();
+    setPlatform('linux');
+    setAsyncProcessTable(['1234 1 1234', '1236 1234 1236'].join('\n'));
+    const child = fakeChild(1234);
+    vi.mocked(child.kill).mockImplementation(() => true);
+    // Both owned groups survive the deadline and both refuse every signal.
+    const alive = new Set([1234, 1236]);
+    vi.spyOn(process, 'kill').mockImplementation(((
+      pid: number,
+      signal?: NodeJS.Signals | number,
+    ) => {
+      const group = -pid;
+      if (signal === 0) {
+        if (!alive.has(group)) throw errno('ESRCH');
+        return true;
+      }
+      throw errno('EPERM');
+    }) as typeof process.kill);
+    const tracked = new ProcessRegistry()
+      .reserve()
+      .attach(child, { ownsProcessTree: true });
+    (tracked as unknown as { knownGroups: Set<number> }).knownGroups.add(1236);
+
+    const terminating = tracked.terminate().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    const message = ((await terminating) as Error).message;
+    expect(message).toContain('surviving pgids=1234,1236');
+    // A message that names both groups but explains only one leaves the
+    // operator unable to tell which of them we lost.
+    expect(message).toContain('was refused SIGTERM to pgid=1234');
+    expect(message).toContain('was refused SIGTERM to pgid=1236');
+  });
+
   it('names only the surviving pgid when a refusal was recorded for a retired group', async () => {
     vi.useFakeTimers();
     setPlatform('linux');
