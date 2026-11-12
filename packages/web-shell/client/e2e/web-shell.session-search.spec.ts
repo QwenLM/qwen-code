@@ -4,6 +4,14 @@ import {
   installMockDaemon,
 } from './utils/mockDaemon';
 
+declare global {
+  interface Window {
+    __sessionSearchOldStarted?: boolean;
+    __sessionSearchOldServed?: boolean;
+    __releaseSessionSearchOld?: () => void;
+  }
+}
+
 const cwd = '/tmp/qwen-web-shell-e2e';
 const secondCwd = '/tmp/search-second';
 const now = new Date().toISOString();
@@ -217,41 +225,55 @@ test('pending and failed content requests keep local matches and discard stale r
   await installMockDaemon(
     page,
     createWebShellDaemonScenario({
-      sessions: [summary('alpha', 'Authentication architecture')],
+      sessions: [
+        summary('alpha', 'Authentication architecture'),
+        summary('beta', 'Authentication flow'),
+      ],
     }),
     { baseURL },
   );
-  let releaseOld: (() => void) | undefined;
-  const oldResponse = new Promise<void>((resolve) => {
-    releaseOld = resolve;
-  });
-  let oldServed: (() => void) | undefined;
-  const oldServedPromise = new Promise<void>((resolve) => {
-    oldServed = resolve;
-  });
-  let oldStarted = false;
-  await page.route('**/sessions/search?*', async (route) => {
-    const query = new URL(route.request().url()).searchParams.get('q');
-    if (query === 'old-query') {
-      oldStarted = true;
-      await oldResponse;
-      await route.fulfill({
-        json: {
-          results: [
-            {
-              session: summary('stale-hit', 'Old stale match'),
-              snippet: 'old-query',
-            },
-          ],
-        },
-      });
-      oldServed?.();
-    } else if (query === 'Authentication') {
-      await route.fulfill({ status: 503, json: { error: 'Unavailable' } });
-    } else {
-      await route.fulfill({ json: { results: [] } });
-    }
-  });
+  // A real fetch is cancelled with the query change, so its route.fulfill can
+  // never deliver the old body. Answer content search in page code and ignore
+  // the abort signal so the old response actually reaches the hook; that is
+  // the only way its stale-result guards can be observed.
+  await page.addInitScript(
+    ({ staleSession }) => {
+      const originalFetch = window.fetch.bind(window);
+      const releases: Array<() => void> = [];
+      window.__releaseSessionSearchOld = () => {
+        for (const release of releases.splice(0)) release();
+      };
+      window.fetch = async (input, init) => {
+        const request = new Request(input, init);
+        const url = new URL(request.url);
+        if (!url.pathname.endsWith('/sessions/search')) {
+          return originalFetch(input, init);
+        }
+        const query = url.searchParams.get('q');
+        if (query === 'old-query') {
+          window.__sessionSearchOldStarted = true;
+          await new Promise<void>((resolve) => releases.push(resolve));
+          window.__sessionSearchOldServed = true;
+          return new Response(
+            JSON.stringify({
+              results: [{ session: staleSession, snippet: 'old-query' }],
+            }),
+            { headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        if (query === 'Authentication') {
+          return new Response(JSON.stringify({ error: 'Unavailable' }), {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ results: [] }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      };
+    },
+    { staleSession: summary('stale-hit', 'Old stale match') },
+  );
   await page.goto('/?language=en-US', { waitUntil: 'domcontentloaded' });
   await page
     .getByRole('button', { name: 'Search sessions', exact: true })
@@ -260,26 +282,36 @@ test('pending and failed content requests keep local matches and discard stale r
   const dialog = page.getByRole('dialog', { name: 'Search sessions' });
   const input = dialog.getByRole('textbox');
   await input.fill('old-query');
-  await expect.poll(() => oldStarted).toBe(true);
+  await expect
+    .poll(() => page.evaluate(() => window.__sessionSearchOldStarted === true))
+    .toBe(true);
   await expect(dialog.getByRole('listbox')).toHaveAttribute(
     'aria-busy',
     'true',
   );
   await input.fill('Authentication');
-  await expect(dialog.getByRole('option')).toHaveText(
+  await expect(dialog.getByRole('option')).toHaveCount(2);
+  await expect(dialog.getByRole('option').first()).toHaveText(
     /Authentication architecture/,
   );
   await expect(
     dialog.getByText('Some sessions could not be searched.'),
   ).toBeVisible();
-  releaseOld?.();
-  await oldServedPromise;
-  await expect(dialog.getByRole('option')).toHaveText(
-    /Authentication architecture/,
+  await page.evaluate(() => window.__releaseSessionSearchOld?.());
+  await expect
+    .poll(() => page.evaluate(() => window.__sessionSearchOldServed === true))
+    .toBe(true);
+  // ArrowDown re-renders the list only after the released response settled, so
+  // a stale row that leaked into state has to surface here.
+  await input.press('ArrowDown');
+  await expect(dialog.getByRole('option').nth(1)).toHaveAttribute(
+    'aria-selected',
+    'true',
   );
+  await expect(dialog.getByRole('option')).toHaveCount(2);
+  await expect(dialog.getByText('Old stale match')).toHaveCount(0);
   await expect(dialog.getByRole('listbox')).toHaveAttribute(
     'aria-busy',
     'false',
   );
-  await expect(dialog.getByText('Old stale match')).toHaveCount(0);
 });
