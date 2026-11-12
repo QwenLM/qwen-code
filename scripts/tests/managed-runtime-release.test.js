@@ -537,20 +537,14 @@ describe('Managed runtime publication gates', () => {
     expect(verification).not.toContain('-DargLine=');
   });
 
-  it('keeps auxiliary executable JARs out of Central without changing their ordinary build attachment', () => {
+  it('ships a single executable JAR and keeps the Central release plugins', () => {
     const pom = fs.readFileSync(
       path.join(root, 'packages/managed-agent-server/pom.xml'),
       'utf8',
     );
-    expect(pom).toContain(
-      '<managed.operator-tools.attach>true</managed.operator-tools.attach>',
-    );
     const profile = pom.match(
       /<profile>\s*<id>central-release<\/id>([\s\S]*?)<\/profile>/,
     )[1];
-    expect(profile).toContain(
-      '<managed.operator-tools.attach>false</managed.operator-tools.attach>',
-    );
     for (const plugin of [
       'central-publishing-maven-plugin',
       'maven-source-plugin',
@@ -558,13 +552,18 @@ describe('Managed runtime publication gates', () => {
       'maven-gpg-plugin',
     ])
       expect(profile).toContain(plugin);
+    expect(pom).not.toContain('managed.operator-tools');
     const serverPom = fs.readFileSync(
       path.join(root, 'packages/managed-agent-server/server/pom.xml'),
       'utf8',
     );
-    expect(
-      serverPom.match(/<attach>\$\{managed.operator-tools.attach\}<\/attach>/g),
-    ).toHaveLength(6);
+    expect(serverPom).not.toContain('managed.operator-tools');
+    // Only the exec classifier remains (jar resources plus repackage); the
+    // auxiliary operator-tool jars and their attachment machinery are gone.
+    expect(serverPom.match(/<classifier>[^<]+<\/classifier>/g)).toEqual([
+      '<classifier>exec</classifier>',
+      '<classifier>exec</classifier>',
+    ]);
   });
 });
 
