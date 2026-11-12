@@ -206,6 +206,12 @@ describe('isDestructiveCommand — git commit --amend', () => {
     'git commit --am',
     'git commit --amen',
     'GIT COMMIT --AMEND',
+    // Quote-split spellings: the raw text never contains `commit`, so only the
+    // quote-removed reading sees these. bash runs every one as an amend.
+    "git com''mit --amend",
+    'git "commit" --amend',
+    'git com""mit --amend',
+    "git commit --$'amend'",
   ])('asks for %s', (command) => {
     expect(amendNeedsApproval(command)).toBe(true);
   });
@@ -230,6 +236,9 @@ describe('isDestructiveCommand — git commit --amend', () => {
     'git push origin main',
     'npm run build',
     "awk '{print $1}' data.csv",
+    'git push origin $BRANCH',
+    'echo $HOME; git commit -m x',
+    'git commit -am "feat: x"',
   ])('does not ask for %s', (command) => {
     expect(amendNeedsApproval(command)).toBe(false);
   });

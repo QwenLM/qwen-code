@@ -21,6 +21,8 @@
 import type { Content, Part } from '@google/genai';
 import { execSync } from 'node:child_process';
 
+import { shellWords } from './shell-semantics.js';
+
 /**
  * Destructive git commands that discard local work.
  * These are blocked unless the user explicitly mentions discarding work.
@@ -154,14 +156,23 @@ export function registerSessionCommit(sha: string): void {
  * Whether a command mentioning `git commit --amend` must be confirmed by a
  * human instead of hard-blocked (#13570).
  *
- * A literal mention is all this decides: whether the mention is inert (a grep
- * pattern, a commit message, a heredoc body) is not answerable from the text,
- * so an inert mention asks too. Encoded commands, git aliases and renamed
- * binaries never spell the phrase and stay outside the contract. Deciding
- * inertness from a real parse is #16604.
+ * Two mechanical readings, both fail-closed on a *mention*: the raw text, and
+ * the same text with quotes removed. The second is what keeps a quote-split
+ * spelling (`git com''mit --amend`) visible — the raw text does not contain
+ * `commit` there, and dropping this arm would let such an amend run unattended
+ * under an AUTO allow rule.
+ *
+ * Whether a mention is inert (a grep pattern, a commit message, a heredoc
+ * body) is not answerable without parsing bash, so an inert mention asks too.
+ * Encoded commands, git aliases and renamed binaries never spell the phrase
+ * and stay outside the contract. Deciding inertness from a real parse is
+ * #16604.
  */
 export function amendNeedsApproval(command: string): boolean {
-  return GIT_AMEND_MENTION.test(command);
+  return (
+    GIT_AMEND_MENTION.test(command) ||
+    GIT_AMEND_MENTION.test(shellWords(command).join(' '))
+  );
 }
 
 /**
