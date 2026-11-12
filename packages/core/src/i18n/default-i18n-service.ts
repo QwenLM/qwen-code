@@ -6,6 +6,7 @@
  */
 
 import { getQoderErrorText } from '../provider/qoder/qoderErrorText.js';
+import { getContentFilterMessage } from '../provider/qoder/qoderContentFilterText.js';
 import {
   getPaidConfirmationMessage,
   isNewPaidConfirmationCode,
@@ -140,6 +141,7 @@ export class DefaultI18nService implements I18nService {
     if (!text) return defaultMessage;
     const key = text.startsWith('error.code.') ? text : `error.code.${text}`;
     const normalizedCode = key.slice('error.code.'.length);
+    if (normalizedCode === '406') return getContentFilterMessage(this.locale);
     if (isNewPaidConfirmationCode(normalizedCode)) {
       return getPaidConfirmationMessage(this.locale);
     }

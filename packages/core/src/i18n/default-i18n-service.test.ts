@@ -78,6 +78,30 @@ describe('static I18nService and installation', () => {
     );
   });
 
+  it('renders actionable 406 guidance in the selected UI language', () => {
+    initializeI18nService();
+    const service = getI18nService();
+    service.configureUi({
+      locale: 'en',
+      preference: 'en',
+      dynamicContentEnabled: true,
+    });
+    expect(formatApiErrorDisplayMessage(406, 'Session blocked')).toBe(
+      'The model service rejected the conversation content. Use /clear to start a new conversation and restate your task.',
+    );
+    service.configureUi({
+      locale: 'zh-CN',
+      preference: 'zh-CN',
+      dynamicContentEnabled: false,
+    });
+    expect(formatApiErrorDisplayMessage('406', 'Session blocked')).toBe(
+      '模型服务拒绝了当前会话内容。请使用 /clear 新建会话后重新描述任务。',
+    );
+    expect(service.get('error.code.406', { message: 'Session blocked' })).toBe(
+      '模型服务拒绝了当前会话内容。请使用 /clear 新建会话后重新描述任务。',
+    );
+  });
+
   it('serves existing defaults and missing-key fallbacks without fetching', async () => {
     const fetch = vi.spyOn(globalThis, 'fetch');
     const service = getStaticI18nService();

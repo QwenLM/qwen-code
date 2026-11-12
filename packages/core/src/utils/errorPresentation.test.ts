@@ -17,6 +17,7 @@ import {
 import { ModelInferenceError } from '../provider/modelInferenceError.js';
 import { EmptyAssistantCompletionError } from '../model-request/empty-assistant-completion.js';
 import { CONTENT_FILTERED_MESSAGE } from '../core/query-event.js';
+import { getContentFilterMessage } from '../provider/qoder/qoderContentFilterText.js';
 import {
   getResultErrorCode,
   getResultErrorCodeFromMessages,
@@ -580,14 +581,27 @@ describe('SDK 错误呈现', () => {
       });
     },
   );
-  it('保留没有服务端文案的内容拒绝提示', () => {
+  it('406 提供新会话指引并保留原错误码与诊断', () => {
+    const error = new ModelInferenceError('Session blocked', {
+      code: '406',
+      status: 406,
+      kind: 'invalid_request',
+      phase: 'before_output',
+    });
+    expect(resolveErrorPresentation(error, 'qoder')).toEqual({
+      displayErrorCode: '406',
+      fallbackMessage: getContentFilterMessage(),
+    });
+    expect(error.message).toBe('Session blocked');
+    expect(getResultErrorCode(error)).toBe('406');
+    expect(getContentFilterMessage()).not.toBe(CONTENT_FILTERED_MESSAGE);
     expect(
       resolveErrorPresentation(
         Object.assign(new Error('HTTP 406'), { status: 406 }),
       ),
     ).toEqual({
       displayErrorCode: 406,
-      fallbackMessage: CONTENT_FILTERED_MESSAGE,
+      fallbackMessage: getContentFilterMessage(),
     });
   });
   it('取消不伪装成服务故障', () => {
