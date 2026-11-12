@@ -260,28 +260,29 @@ describe('StreamJsonOutputAdapter', () => {
             callId: 'call-1',
             name: 'read_file',
             args: { path: 'a.txt' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-1',
           },
         });
 
-        const blockStarts = stdoutWriteSpy.mock.calls
-          .map((call: unknown[]) => {
-            try {
-              return JSON.parse(call[0] as string);
-            } catch {
-              return undefined;
-            }
-          })
-          .filter(
-            (
-              parsed,
-            ): parsed is {
-              type: string;
-              event: { type: string; index: number };
-            } =>
-              parsed?.type === 'stream_event' &&
-              parsed.event?.type === 'content_block_start',
-          )
-          .map((parsed) => parsed.event.index);
+        const blockStarts: number[] = [];
+        for (const call of stdoutWriteSpy.mock.calls as unknown[][]) {
+          let parsed: {
+            type: string;
+            event: { type: string; index: number };
+          };
+          try {
+            parsed = JSON.parse(call[0] as string);
+          } catch {
+            continue;
+          }
+          if (
+            parsed.type === 'stream_event' &&
+            parsed.event?.type === 'content_block_start'
+          ) {
+            blockStarts.push(parsed.event.index);
+          }
+        }
 
         expect(blockStarts).toEqual([0, 1, 2]);
       });
