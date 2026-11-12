@@ -159,22 +159,24 @@ test('report names the file, the commit, and the remedy', () => {
 
 test('ci.yml wires the check into lint_and_static before the lint lanes', () => {
   const ci = readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8');
-  // Slice out the lint_and_static job: from its key to the next job key.
+  // Slice out the lint_and_static job: from its key to the next top-level
+  // (2-space) job key. YAML keys are unordered, so a job-level
+  // `continue-on-error` may sit after `steps:` — search the whole body.
   const jobStart = ci.indexOf('\n  lint_and_static:');
-  const jobEnd = ci.indexOf('\n  test_macos:', jobStart);
+  const jobEnd =
+    jobStart +
+    1 +
+    ci.slice(jobStart + 1).search(/\n {2}[a-z_][a-z0-9_-]*:\s*(?:#.*)?\n/);
   assert.ok(jobStart > 0 && jobEnd > jobStart, 'lint_and_static job not found');
   const job = ci.slice(jobStart, jobEnd);
 
   const step = job.indexOf("- name: 'Check lint gate freshness'");
   assert.ok(step > 0, 'freshness step missing');
-  // The job's own keys, ahead of `steps:`. A job-level `continue-on-error`
-  // sits outside every step slice below, so the step pins cannot see it —
-  // and it swallows the whole required check, not just this gate.
-  const stepsAt = job.indexOf('\n    steps:');
-  assert.ok(stepsAt > 0, 'lint_and_static steps key not found');
-  const jobHead = job.slice(0, stepsAt);
+  // A job-level `continue-on-error` anywhere in this job — including after
+  // `steps:` — sits outside every step slice below, so the step pins cannot
+  // see it, and it swallows the whole required check, not just this gate.
   assert.equal(
-    jobHead.match(/^ {4}continue-on-error:/m),
+    job.match(/^ {4}continue-on-error\s*:/m),
     null,
     'lint_and_static must stay fatal to the required check',
   );
