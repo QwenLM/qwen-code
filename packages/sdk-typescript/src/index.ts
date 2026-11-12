@@ -83,6 +83,8 @@ export {
   type DaemonChannelPairingRequest,
   type DaemonChannelPairingSubject,
   type DaemonChannelPairingRequestsSnapshot,
+  type DaemonChannelQrLoginStartResult,
+  type DaemonChannelQrLoginView,
   type DaemonChannelPairingApprovalRequest,
   type DaemonChannelPairingApprovalResult,
   type DaemonChannelPairingApprovalsSnapshot,

@@ -25,7 +25,7 @@ public final class StoreModels {
             Long deletedAt, long version, ContextBinding workspace,
             String approvalMode, String toolProfile,
             String agentDefinitionDigest, int publicChildAgentsVersion, String modelConfigDigest,
-            String memoryStoreId, boolean ownerOnly) {
+            String memoryStoreId, boolean ownerOnly, String preview, Long lastActivity) {
         public SessionRecord(String tenantId, String sessionId, String agentId, String agentRevision,
                 String title, String status, String harnessBootId, String harnessEventEpoch,
                 long harnessLastEventId, long lastSequence, long replayFloorSequence,
@@ -35,7 +35,7 @@ public final class StoreModels {
             this(tenantId, sessionId, agentId, agentRevision, title, status, harnessBootId, harnessEventEpoch,
                     harnessLastEventId, lastSequence, replayFloorSequence, createdAt, updatedAt, deletedAt, version,
                     workspace, approvalMode, toolProfile, agentDefinitionDigest, publicChildAgentsVersion, modelConfigDigest,
-                    null, false);
+                    null, false, null, null);
         }
         public SessionRecord(String tenantId, String sessionId, String agentId, String agentRevision,
                 String title, String status, String harnessBootId, String harnessEventEpoch,
@@ -87,7 +87,8 @@ public final class StoreModels {
                     harnessEventEpoch, harnessLastEventId, lastSequence,
                     replayFloorSequence, createdAt, updatedAt, deletedAt,
                     version, workspace, approvalMode, toolProfile,
-                    agentDefinitionDigest, publicChildAgentsVersion, modelConfigDigest, memoryStoreId, ownerOnly);
+                    agentDefinitionDigest, publicChildAgentsVersion, modelConfigDigest, memoryStoreId, ownerOnly,
+                    preview, lastActivity);
         }
     }
 
@@ -160,20 +161,18 @@ public final class StoreModels {
     }
 
     public record SessionMutationCommand(String sessionId, String status,
-            boolean replayed, long renameRevision) {
-        public SessionMutationCommand(String sessionId, String status, boolean replayed) {
-            this(sessionId, status, replayed, 0);
-        }
-    }
-
-    public record RenameDelivery(String tenantId, String sessionId,
-            String idempotencyKey, String title, long revision, int attemptCount, long claimGeneration) {
-        public RenameDelivery(String tenantId, String sessionId, String idempotencyKey, String title, long revision, int attemptCount) {
-            this(tenantId, sessionId, idempotencyKey, title, revision, attemptCount, 0);
-        }
+            boolean replayed) {
     }
 
     public record SessionMutation(SessionRecord session, boolean replayed) {
+    }
+
+    /**
+     * A synchronously settled rename: the public SQL row is the display
+     * authority. The revision orders the best-effort journal notification the
+     * caller sends after the settlement transaction commits.
+     */
+    public record SyncRename(SessionRecord session, long revision, boolean replayed) {
     }
 
     public enum OperationKind {

@@ -14,6 +14,7 @@ import {
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   ChannelPromptCancelledError,
   type ChannelPromptImage,
 } from './ChannelAgentBridge.js';
@@ -1481,6 +1482,95 @@ describe('DaemonChannelBridge', () => {
     await expect(bridge.prompt('session-1', 'run it')).resolves.toBe('Done.');
     expect(errors).toHaveLength(0);
     expect(toolCalls).toHaveLength(0);
+
+    events.close();
+    bridge.stop();
+  });
+
+  // A background workflow's approval belongs to no turn: it must not cut
+  // the turn's collected reply, and its terminal update is no tool card.
+  it('keeps background workflow approvals out of the turn and its tool cards', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const permissionRequest = vi.fn();
+    const responseBoundary = vi.fn();
+    const toolCalls: unknown[] = [];
+    bridge.on('permissionRequest', permissionRequest);
+    bridge.on('responseBoundary', responseBoundary);
+    bridge.on('toolCall', (event) => toolCalls.push(event));
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    const approval = (requestId: string, background: boolean) =>
+      ({
+        requestId,
+        sessionId: 'session-1',
+        toolCall: {
+          toolCallId: `${requestId}-tool`,
+          kind: 'execute',
+          title: 'Run command',
+          rawInput: {},
+          _meta: {
+            workflowApproval: true,
+            ...(background ? { backgroundWorkflowApproval: true } : {}),
+          },
+        },
+        options: [
+          { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        ],
+      }) as RequestPermissionRequest & { requestId: string };
+    const finished = (toolCallId: string, background: boolean) => ({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId,
+        kind: 'execute',
+        status: 'completed',
+        _meta: {
+          workflowApproval: true,
+          ...(background ? { backgroundWorkflowApproval: true } : {}),
+        },
+      },
+    });
+
+    events.push({
+      id: 1,
+      v: 1,
+      type: 'permission_request',
+      data: approval('req-bg', true),
+    });
+    events.push({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: finished('req-bg-tool', true),
+    });
+    await waitFor(() => expect(permissionRequest).toHaveBeenCalledTimes(1));
+    // The control pair: an attached approval does both.
+    events.push({
+      id: 3,
+      v: 1,
+      type: 'permission_request',
+      data: approval('req-fg', false),
+    });
+    events.push({
+      id: 4,
+      v: 1,
+      type: 'session_update',
+      data: finished('req-fg-tool', false),
+    });
+    await waitFor(() => expect(toolCalls).toHaveLength(1));
+
+    expect(permissionRequest).toHaveBeenCalledTimes(2);
+    expect(responseBoundary).toHaveBeenCalledOnce();
+    expect(toolCalls).toEqual([
+      expect.objectContaining({ toolCallId: 'req-fg-tool' }),
+    ]);
 
     events.close();
     bridge.stop();
@@ -4817,6 +4907,13 @@ describe('DaemonChannelBridge', () => {
   it.each([undefined, 'per_task'] as const)(
     'consumes a task result only for %s',
     async (outputMode) => {
+      const workflowOrigin = {
+        channelName: 'telegram',
+        chatId: 'launch-chat',
+        senderId: 'launch-user',
+        threadId: 'launch-thread',
+        userInitiated: true as const,
+      };
       const events = new EventQueue();
       const session = createFakeSession(events);
       session.prompt.mockImplementation(async () => {
@@ -4849,9 +4946,10 @@ describe('DaemonChannelBridge', () => {
                   [CHANNEL_TASK_OUTPUT_META_KEY]: claimed,
                   backgroundTask: {
                     taskId: 'task-1',
-                    kind: 'agent',
+                    kind: 'workflow',
                     status: 'completed',
                     turnComplete: true,
+                    [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: workflowOrigin,
                   },
                 },
               },
@@ -4870,18 +4968,23 @@ describe('DaemonChannelBridge', () => {
       await bridge.start();
       await bridge.newSession('/repo');
       await expect(
-        bridge.prompt('session-1', 'question', { outputMode }),
+        bridge.prompt('session-1', 'question', { outputMode, workflowOrigin }),
       ).resolves.toBe(outputMode ? 'Task result' : 'Main result');
       expect(
         session.prompt.mock.calls[0]?.[0]?._meta?.[
           CHANNEL_OUTPUT_MODE_META_KEY
         ],
       ).toBe(outputMode);
+      expect(
+        session.prompt.mock.calls[0]?.[0]?._meta?.[
+          CHANNEL_WORKFLOW_ORIGIN_META_KEY
+        ],
+      ).toEqual(workflowOrigin);
       expect(backgroundResponse).toHaveBeenCalledOnce();
       expect(backgroundResponse).toHaveBeenCalledWith(
         'session-1',
         'Unrelated result',
-        expect.any(Object),
+        expect.objectContaining({ channelWorkflowOrigin: workflowOrigin }),
       );
       events.close();
       bridge.stop();

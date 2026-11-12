@@ -36,10 +36,16 @@ public class JdbcWakeRecoveryStore
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
     private final LinkedHashMap<Candidate, Proof> pendingProofs = new LinkedHashMap<>(128, 0.75f, true);
+    private JdbcJournalPacks packs;
 
     public JdbcWakeRecoveryStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
         transactions = new TransactionTemplate(new DataSourceTransactionManager(Objects.requireNonNull(jdbc.getDataSource())));
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void setJournalPacks(JdbcJournalPacks packs) {
+        this.packs = packs;
     }
 
     private record Chunk(String workspaceId, long revision, long firstSequence,
@@ -134,10 +140,18 @@ public class JdbcWakeRecoveryStore
                             + " record_digest FROM ma_session_journal_tx WHERE tenant_id = ?"
                             + " AND session_id = ? AND journal_revision > ? AND journal_revision <= ?"
                             + " ORDER BY journal_revision LIMIT ?",
-                    (row, index) -> new Chunk(row.getString("workspace_id"), row.getLong("journal_revision"),
-                            row.getLong("first_sequence"), row.getLong("last_sequence"), row.getInt("event_count"),
-                            row.getString("record_encoding"), row.getBytes("record_bytes"),
-                            row.getLong("byte_length"), row.getString("record_digest")),
+                    (row, index) -> {
+                        byte[] bytes = row.getBytes("record_bytes");
+                        if (bytes == null && packs != null) {
+                            bytes = packs.resolveBytes(candidate.tenantId(), candidate.sessionId(),
+                                    row.getLong("journal_revision"), row.getString("record_digest"),
+                                    row.getLong("byte_length"));
+                        }
+                        return new Chunk(row.getString("workspace_id"), row.getLong("journal_revision"),
+                                row.getLong("first_sequence"), row.getLong("last_sequence"), row.getInt("event_count"),
+                                row.getString("record_encoding"), bytes,
+                                row.getLong("byte_length"), row.getString("record_digest"));
+                    },
                     candidate.tenantId(), candidate.sessionId(), revision, candidate.journalRevision(), JOURNAL_PAGE);
             if (page.isEmpty()) {
                 throw corrupt();

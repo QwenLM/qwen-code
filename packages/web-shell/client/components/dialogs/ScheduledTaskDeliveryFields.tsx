@@ -65,13 +65,33 @@ export function ScheduledTaskDeliveryFields({
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [contactsError, setContactsError] = useState(false);
+  const [editingTarget, setEditingTarget] = useState(false);
+  const target = delivery?.target;
   const hasTarget = delivery !== null;
+  const getConfiguredTarget = (channelName: string) => {
+    if (!Object.hasOwn(channels.channels, channelName)) return undefined;
+    const type = channels.channels[channelName]?.config.type;
+    return channels.catalog.find((entry) => entry.type === type)
+      ?.defaultDeliveryTarget;
+  };
+  const configuredTarget =
+    canDiscover && target ? getConfiguredTarget(target.channelName) : undefined;
+  const usesConfiguredTarget =
+    !!configuredTarget &&
+    !!target &&
+    target.type === configuredTarget.type &&
+    target.id === configuredTarget.id;
+  const canSuggestContacts =
+    hasTarget &&
+    !configuredTarget &&
+    (channels.data !== undefined || !!channels.error);
   useEffect(() => {
     let cancelled = false;
     setSuggestions([]);
     setContactsError(false);
     setContactsLoading(false);
-    if (!canDiscover || !observedContactsAvailable || !hasTarget) return;
+    if (!canDiscover || !observedContactsAvailable || !canSuggestContacts)
+      return;
     setContactsLoading(true);
     void actions.listChannelObservedContacts(workspaceId).then(
       (contacts) => {
@@ -97,7 +117,13 @@ export function ScheduledTaskDeliveryFields({
     return () => {
       cancelled = true;
     };
-  }, [actions, canDiscover, observedContactsAvailable, workspaceId, hasTarget]);
+  }, [
+    actions,
+    canDiscover,
+    observedContactsAvailable,
+    workspaceId,
+    canSuggestContacts,
+  ]);
 
   const names = canDiscover ? Object.keys(channels.channels) : [];
   const channelsReady =
@@ -105,7 +131,6 @@ export function ScheduledTaskDeliveryFields({
     channels.data !== undefined &&
     !channels.loading &&
     !channels.error;
-  const target = delivery?.target;
   const unavailableTarget =
     !!target && channelsReady && !names.includes(target.channelName);
   const hasSurroundingWhitespace = !!target && target.id !== target.id.trim();
@@ -135,7 +160,10 @@ export function ScheduledTaskDeliveryFields({
   return (
     <FieldGroup>
       <Field>
-        <FieldLabel htmlFor="scheduled-task-delivery-channel">
+        <FieldLabel
+          className={styles.fieldLabel}
+          htmlFor="scheduled-task-delivery-channel"
+        >
           {t('scheduledTasks.delivery.channel')}
         </FieldLabel>
         <select
@@ -143,20 +171,23 @@ export function ScheduledTaskDeliveryFields({
           className={styles.select}
           value={target?.channelName ?? ''}
           disabled={disabled || !available}
-          onChange={(event) =>
+          onChange={(event) => {
+            setEditingTarget(false);
+            const channelName = event.target.value;
+            const destination = getConfiguredTarget(channelName);
             onChange(
-              event.target.value
+              channelName
                 ? {
                     kind: 'channel',
                     target: {
-                      channelName: event.target.value,
-                      type: 'chat',
-                      id: '',
+                      channelName,
+                      type: destination?.type ?? 'chat',
+                      id: destination?.id ?? '',
                     },
                   }
                 : null,
-            )
-          }
+            );
+          }}
         >
           <option value="">{t('scheduledTasks.delivery.off')}</option>
           {target && !names.includes(target.channelName) && (
@@ -168,154 +199,224 @@ export function ScheduledTaskDeliveryFields({
             </option>
           ))}
         </select>
-        <FieldDescription>{t('scheduledTasks.delivery.hint')}</FieldDescription>
+        <FieldDescription className={styles.fieldHint}>
+          {t('scheduledTasks.delivery.hint')}
+        </FieldDescription>
         {!available && (
-          <FieldDescription>
+          <FieldDescription className={styles.fieldHint}>
             {t('scheduledTasks.delivery.unavailable')}
           </FieldDescription>
         )}
         {available && perRun && hasTarget && (
-          <FieldDescription>
+          <FieldDescription className={styles.fieldHint}>
             {t('scheduledTasks.delivery.perRun')}
           </FieldDescription>
         )}
         {available && !canDiscover && (
-          <FieldDescription>
+          <FieldDescription className={styles.fieldHint}>
             {t('scheduledTasks.error.workspaceUnavailable')}
           </FieldDescription>
         )}
         {canDiscover && channels.loading && (
-          <FieldDescription>
+          <FieldDescription className={styles.fieldHint}>
             {t('scheduledTasks.delivery.loading')}
           </FieldDescription>
         )}
         {canDiscover && channels.error && (
-          <FieldDescription>
+          <FieldDescription className={styles.fieldHint}>
             {t('scheduledTasks.delivery.channelsFailed')}
           </FieldDescription>
         )}
         {channelsReady && names.length === 0 && (
-          <FieldDescription>
+          <FieldDescription className={styles.fieldHint}>
             {t('scheduledTasks.delivery.noChannels')}
           </FieldDescription>
         )}
       </Field>
       {target && (
         <>
-          <FieldDescription className="min-w-0 break-all">
-            {identity(target)}
-          </FieldDescription>
+          {!usesConfiguredTarget && (
+            <FieldDescription
+              className={`${styles.fieldHint} min-w-0 break-all`}
+            >
+              {identity(target)}
+            </FieldDescription>
+          )}
           {unavailableTarget && (
-            <FieldDescription>
+            <FieldDescription className={styles.fieldHint}>
               {t('scheduledTasks.delivery.targetUnavailable')}
             </FieldDescription>
           )}
-          <Field>
-            <FieldLabel htmlFor="scheduled-task-delivery-suggestion">
-              {t('scheduledTasks.delivery.suggestion')}
-            </FieldLabel>
-            <select
-              id="scheduled-task-delivery-suggestion"
-              className={styles.select}
-              value={selectedSuggestion}
-              disabled={
-                disabled || !available || unavailableTarget || contactsLoading
-              }
-              onChange={(event) => {
-                const selected = matchingSuggestions.find(
-                  (suggestion) =>
-                    suggestionKey(suggestion) === event.target.value,
-                );
-                if (selected)
-                  updateTarget({ type: selected.type, id: selected.id });
-              }}
-            >
-              <option value="">{t('scheduledTasks.delivery.manual')}</option>
-              {matchingSuggestions.map((suggestion) => (
-                <option
-                  key={suggestionKey(suggestion)}
-                  value={suggestionKey(suggestion)}
-                >
-                  {suggestion.label ? `${suggestion.label} · ` : ''}
-                  {identity(suggestion)}
-                </option>
-              ))}
-            </select>
-            {canDiscover &&
-              observedContactsAvailable &&
-              !contactsLoading &&
-              !contactsError &&
-              target.id &&
-              !selectedSuggestion && (
-                <FieldDescription>
-                  {t('scheduledTasks.delivery.notObserved')}
+          {configuredTarget && (
+            <Field>
+              {usesConfiguredTarget && (
+                <FieldDescription className={styles.fieldHint}>
+                  {t(
+                    configuredTarget.type === 'chat'
+                      ? 'scheduledTasks.delivery.configuredGroupHint'
+                      : 'scheduledTasks.delivery.configuredHint',
+                  )}
                 </FieldDescription>
               )}
-            {contactsLoading && (
-              <FieldDescription>
-                {t('scheduledTasks.delivery.loadingContacts')}
+              {!usesConfiguredTarget && (
+                <>
+                  <FieldDescription className={styles.fieldHint}>
+                    {t(
+                      'scheduledTasks.delivery.differentConfiguredDestination',
+                    )}
+                  </FieldDescription>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={disabled || !available || unavailableTarget}
+                    onClick={() => {
+                      setEditingTarget(false);
+                      updateTarget({
+                        type: configuredTarget.type,
+                        id: configuredTarget.id,
+                      });
+                    }}
+                  >
+                    {t('scheduledTasks.delivery.useConfiguredDestination')}
+                  </Button>
+                </>
+              )}
+            </Field>
+          )}
+          {!configuredTarget && (
+            <Field>
+              <FieldLabel
+                className={styles.fieldLabel}
+                htmlFor="scheduled-task-delivery-suggestion"
+              >
+                {t('scheduledTasks.delivery.suggestion')}
+              </FieldLabel>
+              <select
+                id="scheduled-task-delivery-suggestion"
+                className={styles.select}
+                value={selectedSuggestion}
+                disabled={
+                  disabled || !available || unavailableTarget || contactsLoading
+                }
+                onChange={(event) => {
+                  const selected = matchingSuggestions.find(
+                    (suggestion) =>
+                      suggestionKey(suggestion) === event.target.value,
+                  );
+                  if (selected)
+                    updateTarget({ type: selected.type, id: selected.id });
+                }}
+              >
+                <option value="">{t('scheduledTasks.delivery.manual')}</option>
+                {matchingSuggestions.map((suggestion) => (
+                  <option
+                    key={suggestionKey(suggestion)}
+                    value={suggestionKey(suggestion)}
+                  >
+                    {suggestion.label ? `${suggestion.label} · ` : ''}
+                    {identity(suggestion)}
+                  </option>
+                ))}
+              </select>
+              {canDiscover &&
+                observedContactsAvailable &&
+                canSuggestContacts &&
+                !contactsLoading &&
+                !contactsError &&
+                target.id &&
+                !selectedSuggestion && (
+                  <FieldDescription className={styles.fieldHint}>
+                    {t('scheduledTasks.delivery.notObserved')}
+                  </FieldDescription>
+                )}
+              {contactsLoading && (
+                <FieldDescription className={styles.fieldHint}>
+                  {t('scheduledTasks.delivery.loadingContacts')}
+                </FieldDescription>
+              )}
+              <FieldDescription className={styles.fieldHint}>
+                {t(
+                  contactsError
+                    ? 'scheduledTasks.delivery.contactsFailed'
+                    : 'scheduledTasks.delivery.suggestionsHint',
+                )}
               </FieldDescription>
-            )}
-            <FieldDescription>
-              {t(
-                contactsError
-                  ? 'scheduledTasks.delivery.contactsFailed'
-                  : 'scheduledTasks.delivery.suggestionsHint',
-              )}
-            </FieldDescription>
-          </Field>
-          <Field>
-            <FieldLabel htmlFor="scheduled-task-delivery-type">
-              {t('scheduledTasks.delivery.type')}
-            </FieldLabel>
-            <select
-              id="scheduled-task-delivery-type"
-              className={styles.select}
-              value={target.type}
-              disabled={disabled || !available || unavailableTarget}
-              onChange={(event) =>
-                updateTarget({
-                  type: event.target.value === 'user' ? 'user' : 'chat',
-                  id: '',
-                })
-              }
-            >
-              <option value="user">{t('scheduledTasks.delivery.user')}</option>
-              <option value="chat">{t('scheduledTasks.delivery.chat')}</option>
-            </select>
-          </Field>
-          <Field>
-            <FieldLabel htmlFor="scheduled-task-delivery-id">
-              {t('scheduledTasks.delivery.id')}
-            </FieldLabel>
-            <Input
-              id="scheduled-task-delivery-id"
-              value={target.id}
-              disabled={disabled || !available || unavailableTarget}
-              aria-describedby={
-                hasSurroundingWhitespace
-                  ? 'scheduled-task-delivery-id-whitespace'
-                  : undefined
-              }
-              onChange={(event) => updateTarget({ id: event.target.value })}
-            />
-            {hasSurroundingWhitespace && (
-              <>
-                <FieldDescription id="scheduled-task-delivery-id-whitespace">
-                  {t('scheduledTasks.delivery.whitespace')}
-                </FieldDescription>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={disabled || !available || unavailableTarget}
-                  onClick={() => updateTarget({ id: target.id.trim() })}
+            </Field>
+          )}
+          {(!usesConfiguredTarget || editingTarget) && (
+            <>
+              <Field>
+                <FieldLabel
+                  className={styles.fieldLabel}
+                  htmlFor="scheduled-task-delivery-type"
                 >
-                  {t('scheduledTasks.delivery.trimWhitespace')}
-                </Button>
-              </>
-            )}
-          </Field>
+                  {t('scheduledTasks.delivery.type')}
+                </FieldLabel>
+                <select
+                  id="scheduled-task-delivery-type"
+                  className={styles.select}
+                  value={target.type}
+                  disabled={disabled || !available || unavailableTarget}
+                  onChange={(event) => {
+                    setEditingTarget(true);
+                    updateTarget({
+                      type: event.target.value === 'user' ? 'user' : 'chat',
+                      id: '',
+                    });
+                  }}
+                >
+                  <option value="user">
+                    {t('scheduledTasks.delivery.user')}
+                  </option>
+                  <option value="chat">
+                    {t('scheduledTasks.delivery.chat')}
+                  </option>
+                </select>
+              </Field>
+              <Field>
+                <FieldLabel
+                  className={styles.fieldLabel}
+                  htmlFor="scheduled-task-delivery-id"
+                >
+                  {t('scheduledTasks.delivery.id')}
+                </FieldLabel>
+                <Input
+                  id="scheduled-task-delivery-id"
+                  value={target.id}
+                  disabled={disabled || !available || unavailableTarget}
+                  aria-describedby={
+                    hasSurroundingWhitespace
+                      ? 'scheduled-task-delivery-id-whitespace'
+                      : undefined
+                  }
+                  onChange={(event) => {
+                    setEditingTarget(true);
+                    updateTarget({ id: event.target.value });
+                  }}
+                />
+                {hasSurroundingWhitespace && (
+                  <>
+                    <FieldDescription
+                      className={styles.fieldHint}
+                      id="scheduled-task-delivery-id-whitespace"
+                    >
+                      {t('scheduledTasks.delivery.whitespace')}
+                    </FieldDescription>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={disabled || !available || unavailableTarget}
+                      onClick={() => updateTarget({ id: target.id.trim() })}
+                    >
+                      {t('scheduledTasks.delivery.trimWhitespace')}
+                    </Button>
+                  </>
+                )}
+              </Field>
+            </>
+          )}
         </>
       )}
     </FieldGroup>
