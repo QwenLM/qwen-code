@@ -889,7 +889,7 @@ function AssistantRow({
           content={content}
           syntaxStyle={SYNTAX}
           streaming={streaming}
-          {...STREAMING_MARKDOWN_OPTIONS}
+          {...(streaming ? STREAMING_MARKDOWN_OPTIONS : {})}
         />
       </box>
     </box>
@@ -969,7 +969,7 @@ function ThinkingRow({
                       streaming={isTail}
                       fg={C.dim}
                       marginTop={index === 0 ? 0 : 1}
-                      {...STREAMING_MARKDOWN_OPTIONS}
+                      {...(isTail ? STREAMING_MARKDOWN_OPTIONS : {})}
                     />
                   );
                 })}
@@ -980,7 +980,7 @@ function ThinkingRow({
                 syntaxStyle={SYNTAX_DIM}
                 streaming={!item.done}
                 fg={C.dim}
-                {...STREAMING_MARKDOWN_OPTIONS}
+                {...(!item.done ? STREAMING_MARKDOWN_OPTIONS : {})}
               />
             )}
           </box>

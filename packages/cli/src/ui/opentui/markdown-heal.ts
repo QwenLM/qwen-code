@@ -198,7 +198,8 @@ function maskAutolinksInProse(line: string): string {
         line[i] === '<' &&
         line[i - 1] !== '\\' &&
         /[A-Za-z_:]/.test(line[i + 1] ?? '') &&
-        !/^https?:\/\//.test(line.slice(i + 1))
+        !line.startsWith('http://', i + 1) &&
+        !line.startsWith('https://', i + 1)
       ) {
         const close = line.indexOf('>', i + 1);
         if (close !== -1) {
@@ -216,9 +217,11 @@ function maskAutolinksInProse(line: string): string {
         const close = line.indexOf(']', i + 1);
         const after = close === -1 ? '' : line[close + 1];
         const label = close === -1 ? '' : line.slice(i + 1, close);
+        const atLineStart = line.slice(0, i).trim() === '';
         if (
           after !== '(' &&
           after !== '[' &&
+          !(after === ':' && atLineStart) &&
           label.length > 0 &&
           label.length < 80 &&
           !label.startsWith('^') &&
@@ -275,59 +278,16 @@ function maskTrailingAutolinks(text: string): string {
   return text.slice(0, tailStart) + masked.join('\n');
 }
 
-function endsInsideFence(text: string): boolean {
-  let fence: Fence | null = null;
-  for (const line of text.split('\n')) {
-    if (fence) {
-      if (isFenceClose(line, fence)) fence = null;
-    } else {
-      const next = fenceAtLineStart(line);
-      if (next) fence = next;
-    }
-  }
-  return fence !== null;
-}
-
-/** The backtick run that opens an unclosed inline span, or null. */
-function unmatchedBacktickRun(line: string): string | null {
-  let from = 0;
-  while (from < line.length) {
-    if (line[from] !== '`') {
-      from++;
-      continue;
-    }
-    let end = from;
-    while (end < line.length && line[end] === '`') end++;
-    const close = closingBackticks(line, end, end - from);
-    if (close === null) return line.slice(from, end);
-    from = close;
-  }
-  return null;
-}
-
-/**
- * remend skips closing an inline span whose tail holds `<...>` (it reads the
- * angle brackets as an HTML tag), so the preview leaks the opening backtick
- * and shifts the rest of the line. Close that last span ourselves.
- */
-function closeTrailingCodeSpan(text: string): string {
-  if (endsInsideFence(text)) return text;
-  const lineStart = text.lastIndexOf('\n') + 1;
-  const lastLine = text.slice(lineStart);
-  if (fenceAtLineStart(lastLine)) return text;
-  const run = unmatchedBacktickRun(lastLine);
-  return run ? `${text}${run}` : text;
-}
-
 export function healStreamingMarkdown(text: string): string {
   // CommonMark accepts CRLF and lone CR; normalize once so the fence and
   // offset arithmetic below can assume one-character separators.
   const normalized = text.replace(/\r\n?/g, '\n');
-  const healed = closeTrailingCodeSpan(
-    // Keep C++ templates: remend's htmlTags handler strips `<int, ...`
-    // while the angle bracket is still streaming.
-    remend(normalized, { linkMode: 'text-only', htmlTags: false }),
-  );
+  // Keep C++ templates: remend's htmlTags handler strips `<int, ...`
+  // while the angle bracket is still streaming.
+  const healed = remend(normalized, {
+    linkMode: 'text-only',
+    htmlTags: false,
+  });
   return maskTrailingAutolinks(healed);
 }
 

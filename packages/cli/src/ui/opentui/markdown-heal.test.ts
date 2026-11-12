@@ -94,6 +94,12 @@ describe('healStreamingMarkdown', () => {
     expect(healStreamingMarkdown('see [TODO] and [1]')).toBe('see TODO and 1');
   });
 
+  it('keeps link-definition brackets', () => {
+    expect(healStreamingMarkdown('[expr.add]: https://x.dev')).toBe(
+      `[expr.add]: https${ZWSP}://x.dev`,
+    );
+  });
+
   it('leaves array indexing and real links alone', () => {
     expect(healStreamingMarkdown('a[0] and b[i]')).toBe('a[0] and b[i]');
     expect(healStreamingMarkdown('[link](https://x.dev)')).toBe(

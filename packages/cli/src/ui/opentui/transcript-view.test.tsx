@@ -917,6 +917,49 @@ describe('OpenTuiTranscriptView', () => {
     expect(blocks).toEqual(['FIRST_BLOCK', 'SECOND_BLOCK']);
   });
 
+  it('heals only the tail block of a streaming thought', () => {
+    const items: LiveThinkingItem[] = [
+      {
+        kind: 'thinking',
+        id: 'th1',
+        text: 'see https://a.dev\n\nsee https://b.dev',
+        done: false,
+        startedAt: Date.now(),
+      },
+    ];
+    const { container } = render(
+      <OpenTuiTranscriptView items={items} thoughtsExpanded />,
+    );
+    const blocks = [...container.querySelectorAll('markdown')].map((element) =>
+      element.getAttribute('content'),
+    );
+    expect(blocks[0]).toBe('see https://a.dev');
+    expect(blocks[1]).toBe('see https\u200B://b.dev');
+  });
+
+  it('applies the streaming markdown options only while streaming', () => {
+    const item = (streaming: boolean): LiveAssistantItem => ({
+      kind: 'assistant',
+      id: 'a1',
+      text: 'ANSWER',
+      streaming,
+    });
+    const live = render(<OpenTuiTranscriptView items={[item(true)]} />);
+    expect(
+      live.container
+        .querySelector('markdown')
+        ?.getAttribute('internalBlockMode'),
+    ).toBe('top-level');
+    live.unmount();
+
+    const settled = render(<OpenTuiTranscriptView items={[item(false)]} />);
+    expect(
+      settled.container
+        .querySelector('markdown')
+        ?.getAttribute('internalBlockMode'),
+    ).toBeNull();
+  });
+
   it('drops the click affordance from both hints when ui.mouseTracking is off (#172)', () => {
     const thought: LiveThinkingItem[] = [
       {
