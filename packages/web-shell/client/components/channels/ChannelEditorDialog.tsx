@@ -68,7 +68,7 @@ import { Switch } from '../ui/switch';
 import styles from './ChannelEditorDialog.module.css';
 import { ChannelPairingRequests } from './ChannelPairingRequests';
 import { ChannelQrLogin } from './ChannelQrLogin';
-import type { DaemonChannelQrLoginActions } from '../../daemon/workspace/types';
+import type { DaemonChannelQrLoginHandlers } from '../../daemon/workspace/types';
 import { WeixinLoginPanel, type WeixinLoginApi } from './WeixinLoginPanel';
 import {
   buildChannelUpsertRequest,
@@ -292,7 +292,7 @@ export interface ChannelEditorDialogProps {
     request: DaemonChannelUpsertRequest,
   ) => Promise<unknown>;
   onReload: () => Promise<unknown>;
-  qrLoginActions?: DaemonChannelQrLoginActions;
+  qrLoginActions?: DaemonChannelQrLoginHandlers;
   listPairingRequests: (
     name: string,
   ) => Promise<DaemonChannelPairingRequestsSnapshot>;

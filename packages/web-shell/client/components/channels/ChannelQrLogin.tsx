@@ -12,7 +12,7 @@ import {
   RefreshCwIcon,
 } from 'lucide-react';
 import type { DaemonChannelQrLoginView } from '@qwen-code/sdk/daemon';
-import type { DaemonChannelQrLoginActions } from '../../daemon/workspace/types';
+import type { DaemonChannelQrLoginHandlers } from '../../daemon/workspace/types';
 import { useI18n } from '../../i18n';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
 import { Button } from '../ui/button';
@@ -24,7 +24,7 @@ const POLL_INTERVAL_MS = 2_000;
 
 export interface ChannelQrLoginProps {
   channelName: string;
-  actions: DaemonChannelQrLoginActions;
+  actions: DaemonChannelQrLoginHandlers;
   /** Called once a bind succeeds so the editor can reload the channel. */
   onBound: () => void;
 }
