@@ -118,7 +118,7 @@ for (const navigation of [true, false]) {
     );
     await scrollToBottom.click();
     for (const width of [
-      1600, 1440, 1405, 1404, 1403, 1300, 1000, 802, 700, 599,
+      1600, 1500, 1444, 1443, 1400, 1300, 1000, 802, 700, 599,
     ]) {
       await page.setViewportSize({ width, height: 900 });
       await expectSameEdges(message, composer);
@@ -134,7 +134,7 @@ for (const navigation of [true, false]) {
         })
         .toBeLessThanOrEqual(1);
       const viewportBox = await viewport.boundingBox();
-      if (viewportBox && viewportBox.width >= 1128) {
+      if (viewportBox && viewportBox.width >= 1088) {
         await expect(rail).toBeVisible();
         const railBox = await rail.boundingBox();
         const messageBox = await message.boundingBox();

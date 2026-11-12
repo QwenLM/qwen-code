@@ -1,8 +1,8 @@
 .app {
-  --chat-content-width: 1000px;
-  --chat-shell-width: 1040px;
-  --chat-regular-content-width: 1000px;
-  --chat-regular-shell-width: 1040px;
+  --chat-content-width: 960px;
+  --chat-shell-width: 1000px;
+  --chat-regular-content-width: 960px;
+  --chat-regular-shell-width: 1000px;
   --font-mono:
     'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', monospace;
   --font-sans:
@@ -867,7 +867,7 @@
 .btwPanel {
   flex-shrink: 0;
   margin: 0 auto;
-  width: min(100%, var(--chat-regular-shell-width, 1040px));
+  width: min(100%, var(--chat-regular-shell-width, 1000px));
   padding: 4px 20px;
 }
 

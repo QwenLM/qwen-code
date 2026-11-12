@@ -17,7 +17,7 @@ export function useChatNavigationVisible(
       const minWidth =
         Number.parseFloat(
           style.getPropertyValue('--chat-regular-content-width'),
-        ) || 1000;
+        ) || 960;
       // Reserve 64px gutters so hover-expanded ticks stay clear of the text.
       setVisible(
         style.getPropertyValue('--chat-content-width').trim() !== '100%' &&

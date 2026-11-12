@@ -1,7 +1,7 @@
 .toolbar {
   width: min(
     calc(100% - 40px),
-    var(--chat-content-width, var(--chat-regular-content-width, 1000px))
+    var(--chat-content-width, var(--chat-regular-content-width, 960px))
   );
   margin-right: auto;
   margin-left: auto;

@@ -449,7 +449,7 @@ type ChatEditorTestProps = {
   onShowContextUsage?: () => void;
   onOpenContextUsage?: () => void;
   contextUsageControls?: ContextUsageControls;
-  onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
+  onChatWidthModeChange?: (mode: '960' | 'wide') => void;
 };
 
 type AddWorkspaceDialogTestProps = {

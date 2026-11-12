@@ -1,6 +1,6 @@
 .panel {
   display: flex;
-  width: min(100%, var(--chat-regular-content-width, 1000px));
+  width: min(100%, var(--chat-regular-content-width, 960px));
   flex-direction: column;
   gap: 2px;
   padding: 12px 16px;

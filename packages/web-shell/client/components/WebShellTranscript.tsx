@@ -54,7 +54,7 @@ import {
 import styles from '../App.module.css';
 import { McpAppHostContext } from '../mcpAppHostContext';
 
-const DEFAULT_CHAT_MAX_WIDTH = 1000;
+const DEFAULT_CHAT_MAX_WIDTH = 960;
 const CHAT_SHELL_HORIZONTAL_PADDING = 40;
 
 export interface WebShellTranscriptProps {

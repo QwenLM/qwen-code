@@ -82,7 +82,7 @@ import {
   type WebShellSettingsOptions,
 } from '../../settings';
 
-type ChatWidthMode = '1000' | 'wide';
+type ChatWidthMode = '960' | 'wide';
 
 interface SettingsMessageProps {
   settingsState: SettingsMessageSettingsState;
@@ -1119,7 +1119,7 @@ export function SettingsMessage({
       className={
         embedded
           ? 'flex min-h-0 flex-1 flex-col text-sm text-foreground'
-          : 'flex max-w-[min(var(--chat-regular-content-width,1000px),calc(100vw-64px))] flex-col overflow-hidden rounded-xl border border-border bg-background text-sm text-foreground'
+          : 'flex max-w-[min(var(--chat-regular-content-width,960px),calc(100vw-64px))] flex-col overflow-hidden rounded-xl border border-border bg-background text-sm text-foreground'
       }
       data-keyboard-scope
     >
@@ -1325,7 +1325,7 @@ export function SettingsMessage({
                                       ),
                                     [
                                       {
-                                        value: '1000',
+                                        value: '960',
                                         label: t(
                                           'settings.option.ui.chatWidth.1000',
                                         ),

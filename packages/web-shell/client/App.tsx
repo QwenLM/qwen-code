@@ -1527,7 +1527,7 @@ export interface WebShellProps {
   style?: React.CSSProperties;
   /** Optional Shadow DOM isolation for plugin content and/or all portals. */
   shadowDom?: WebShellShadowDom;
-  /** Maximum chat content width in regular mode. Defaults to 1000px. */
+  /** Maximum chat content width in regular mode. Defaults to 960px. */
   chatMaxWidth?: number;
   /** Workspace sidebar. Defaults to Home only; false hides it. */
   sidebar?: boolean | WebShellSidebarOptions;
@@ -1953,7 +1953,7 @@ const EMPTY_SESSION_WORKFLOW_TODOS: FloatingTodosState = {
   sourceMessageId: null,
 };
 const EMPTY_ADDITIONAL_SLASH_COMMANDS: readonly CommandInfo[] = [];
-const DEFAULT_CHAT_MAX_WIDTH = 1000;
+const DEFAULT_CHAT_MAX_WIDTH = 960;
 const DEFAULT_CHAT_HEADER_ITEMS: readonly WebShellChatHeaderItem[] = [
   'title',
   'environment',
