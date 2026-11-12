@@ -20,9 +20,11 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcCsiBindingControlTest {
     private static final String SESSION = "2815c6b8-468c-449a-869a-8794b0d52fca";
@@ -31,9 +33,10 @@ class JdbcCsiBindingControlTest {
     private static final String RESERVATION = "cfd417c7-f9dc-450d-b880-5667c7a5b029";
     private static final Duration LEASE = Duration.ofSeconds(30);
 
-    // The decoy is load-bearing: every statement and catalog probe is recorded,
-    // and none may name the other schema, so a re-introduced cross-schema read
-    // reds this test even though the decoy row itself is never selected.
+    // The decoy is load-bearing: the recorder must be live, no recorded statement
+    // or catalog probe may name the other schema, and no probe may span schemas
+    // with a wildcard/null schemaPattern (the shape that would enumerate the
+    // decoy without naming it). A re-introduced cross-schema read reds this test.
     @Test
     void ordinarySessionControlsIgnoreADecoySessionTableInAnotherSchema() throws Exception {
         var source = source();
@@ -55,7 +58,26 @@ class JdbcCsiBindingControlTest {
         var updated = bindings.compareAndSet(renewed, renewed.withLastHealthAt(Instant.now(), Instant.now()));
         assertNotNull(updated);
         assertNotNull(bindings.releaseOperation(created.getBindingId(), "owner", updated.getOperationGeneration()));
+        assertFalse(calls.isEmpty(), calls.toString());
         assertEquals(List.of(), calls.stream().filter(call -> call.contains("other")).toList(), calls.toString());
+        assertTrue(calls.stream().filter(call -> call.startsWith("getTables"))
+                .noneMatch(call -> call.startsWith("getTables %.") || call.startsWith("getTables null.")),
+                calls.toString());
+    }
+
+    @Test
+    void pinnedProfileControlLocksTheRootOnceOnTheReadPinPath() throws Exception {
+        // readPin derives the pin from one full locking read; restoring the narrow
+        // pre-gate probe would make lockManagedSession/requireProvisionPin lock the
+        // same root twice. The renewal case never reaches readPin, so pin it here.
+        var fixture = fixture();
+        var calls = new java.util.ArrayList<String>();
+        var traced = new JdbcRuntimeBindingRepository(recording(fixture.source(), calls),
+                new AesGcmSecretProtector("test", new byte[32]));
+        traced.findOrCreate(request());
+        assertEquals(1, calls.stream()
+                .filter(call -> call.contains(" FROM ma_session WHERE") && call.endsWith(" FOR UPDATE"))
+                .count(), calls.toString());
     }
 
     @Test
