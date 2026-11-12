@@ -66,4 +66,25 @@ describe('SDK hook lifecycle', () => {
       durationMs: 20,
     });
   });
+  it('ignores malformed updates and strips fields outside the lifecycle contract', () => {
+    const initial = createHookLifecycleState();
+    for (const update of [
+      undefined,
+      {},
+      frame({ ...start, promptId: '' }),
+      frame({ ...start, phase: 'ended', durationMs: -1 }),
+    ]) {
+      expect(reduceHookLifecycle(initial, update, { source: 'live' })).toBe(
+        initial,
+      );
+    }
+    const state = reduceHookLifecycle(
+      initial,
+      frame({ ...start, command: 'SECRET', stdout: 'SECRET' }),
+      { source: 'live' },
+    );
+    expect([...state.entries.values()]).toEqual([
+      { event: start, status: 'running', conflicted: false },
+    ]);
+  });
 });

@@ -103,7 +103,8 @@ export function reduceHookLifecycle(
   update: unknown,
   options: { source: 'live' | 'replay' },
 ): HookLifecycleState {
-  return reduce(state, extractHookLifecycle(update), options);
+  const event = extractHookLifecycle(update);
+  return event ? reduce(state, event, options) : state;
 }
 export function summarizeHookExecutions(
   entries: Iterable<HookExecutionEntry>,

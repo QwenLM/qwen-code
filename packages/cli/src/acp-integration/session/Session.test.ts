@@ -46817,7 +46817,10 @@ describe('Session', () => {
           expect(messageBus.request).toHaveBeenCalledWith(
             expect.objectContaining({
               eventName: 'PreToolUse',
-              owner,
+              owner: {
+                ...owner,
+                historyPromptId: 'test-session-id########1',
+              },
               input: expect.objectContaining({
                 tool_name: 'read_file',
                 tool_input: { path: '/tmp/test.txt' },

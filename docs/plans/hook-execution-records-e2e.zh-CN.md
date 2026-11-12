@@ -26,6 +26,8 @@
 
 同时验证 `GET /session/:id/turns/:promptId/hooks` 和 `GET /workspaces/:workspace/session/:id/turns/:promptId/hooks`。promptId 需 URL 编码。后续页携带返回的 `snapshot` 和 `nextStart`，比较全轮汇总。
 
+reader 性能验证使用 1,000、5,000 和 10,000 次合成执行，测量首页和冻结页；再将目标轮次固定为一次执行，仅增加其他轮次的执行数。全程断言页内次数和汇总正确，记录耗时，不设置依赖硬件的测试阈值。确认目标轮次仍包含提问前 Hook、保留轮内冲突检测，并忽略其他轮次的执行身份。此类合成探针与真实命令 E2E 证据分开报告。
+
 ## 确定性回归命令
 
 构建工作区依赖后，在各自包目录执行：

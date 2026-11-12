@@ -5,10 +5,10 @@
  */
 
 import {
-  createHookLifecycleState,
+  mergeHookExecution,
   parseHookLifecycle,
-  reduceHookLifecycle,
   summarizeHookExecutions,
+  type HookExecutionEntry,
   type HookTurnPage,
 } from '../telemetry/hook-lifecycle-contract.js';
 
@@ -3380,14 +3380,13 @@ export class SessionTranscriptReader {
         coverage: 'unsupported',
       };
     }
-    let state = createHookLifecycleState();
-    const executionPrompts = new Map<string, string>();
-    const conflictingExecutions = new Set<string>();
+    const executionsById = new Map<string, HookExecutionEntry>();
     let partial = !index.sourceReadComplete || index.gaps.length > 0;
     await forEachAggregatedRecord(
       index,
       index.replayUuids.filter(
-        (uuid) => index.byUuid.get(uuid)?.subtype === 'ui_telemetry',
+        (uuid) =>
+          index.byUuid.get(uuid)?.turnHint.hookTurn?.promptId === promptId,
       ),
       (record) => {
         const value = (
@@ -3399,36 +3398,32 @@ export class SessionTranscriptReader {
           partial = true;
           return;
         }
-        if (event.sessionId !== sessionId) {
+        if (event.sessionId !== sessionId || event.promptId !== promptId) {
           partial = true;
           return;
         }
-        const priorPrompt = executionPrompts.get(event.executionId);
-        if (priorPrompt !== undefined && priorPrompt !== event.promptId)
-          conflictingExecutions.add(event.executionId);
-        executionPrompts.set(event.executionId, event.promptId);
-        if (event.promptId === promptId)
-          state = reduceHookLifecycle(state, event, { source: 'replay' });
+        executionsById.set(
+          event.executionId,
+          mergeHookExecution(
+            executionsById.get(event.executionId),
+            event,
+            'replay',
+          ),
+        );
       },
     );
     if (
-      state.entries.size === 0 &&
+      executionsById.size === 0 &&
       !index.replayUuids.some(
         (uuid) => index.byUuid.get(uuid)?.turnHint.turnPromptId === promptId,
       )
     )
       return undefined;
-    const entries = [...state.entries.values()]
-      .map((entry) =>
-        conflictingExecutions.has(entry.event.executionId)
-          ? { ...entry, conflicted: true }
-          : entry,
-      )
-      .sort(
-        (a, b) =>
-          a.event.startedAt - b.event.startedAt ||
-          a.event.executionId.localeCompare(b.event.executionId),
-      );
+    const entries = [...executionsById.values()].sort(
+      (a, b) =>
+        a.event.startedAt - b.event.startedAt ||
+        a.event.executionId.localeCompare(b.event.executionId),
+    );
     if (start > entries.length) throw new InvalidSessionTranscriptCursorError();
     partial ||= entries.some(
       (entry) => entry.conflicted || entry.status === 'unknown',

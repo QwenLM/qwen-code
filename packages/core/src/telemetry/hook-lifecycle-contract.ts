@@ -194,15 +194,11 @@ export function createHookLifecycleState(): HookLifecycleState {
   return { entries: new Map() };
 }
 
-export function reduceHookLifecycle(
-  state: HookLifecycleState,
-  input: unknown,
-  options: { source: 'live' | 'replay' },
-): HookLifecycleState {
-  const event = parseHookLifecycle(input);
-  if (!event) return state;
-  const key = JSON.stringify([event.sessionId, event.executionId]);
-  const prior = state.entries.get(key);
+export function mergeHookExecution(
+  prior: HookExecutionEntry | undefined,
+  event: HookLifecycleEvent,
+  source: 'live' | 'replay',
+): HookExecutionEntry {
   const identity = (entry: HookLifecycleEvent) =>
     JSON.stringify([
       entry.runtimeId,
@@ -229,7 +225,7 @@ export function reduceHookLifecycle(
       ? kept.outcome
       : kept.phase === 'dispatched'
         ? 'dispatched'
-        : prior?.status === 'running' || options.source === 'live'
+        : prior?.status === 'running' || source === 'live'
           ? 'running'
           : 'unknown';
   const conflicted = conflict || prior?.conflicted === true;
@@ -239,9 +235,21 @@ export function reduceHookLifecycle(
     prior.status === status &&
     prior.conflicted === conflicted
   )
-    return state;
+    return prior;
+  return { event: kept, status, conflicted };
+}
+
+export function reduceHookLifecycle(
+  state: HookLifecycleState,
+  event: HookLifecycleEvent,
+  options: { source: 'live' | 'replay' },
+): HookLifecycleState {
+  const key = JSON.stringify([event.sessionId, event.executionId]);
+  const prior = state.entries.get(key);
+  const entry = mergeHookExecution(prior, event, options.source);
+  if (entry === prior) return state;
   const entries = new Map(state.entries);
-  entries.set(key, { event: kept, status, conflicted });
+  entries.set(key, entry);
   return { entries };
 }
 

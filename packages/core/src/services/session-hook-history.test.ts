@@ -143,9 +143,32 @@ describe('persisted hook turn pages', () => {
       reader.readTurnHooksPage(sessionId, promptId, { limit: 501 }),
     ).rejects.toThrow(RangeError);
   });
-  it('marks a cross-turn execution identity conflict incomplete', async () => {
+  it('limits aggregation and identity conflicts to the requested history turn', async () => {
     append(event('conflicting'));
-    append({ ...event('conflicting'), promptId: 'another-turn' });
+    const otherPromptId = `${sessionId}########2`;
+    append().promptId = otherPromptId;
+    append({ ...event('conflicting'), promptId: otherPromptId });
+    append({ ...event('unrelated'), promptId: otherPromptId });
+    await write();
+    const reader = new SessionTranscriptReader(cwd);
+    const page = (await reader.readTurnHooksPage(sessionId, promptId))!;
+    expect(page).toMatchObject({
+      coverage: 'recorded',
+      totalExecutions: 1,
+      executions: [{ event: event('conflicting'), conflicted: false }],
+      summary: { durationMs: 20, durationComplete: true },
+    });
+    expect(
+      await reader.readTurnHooksPage(sessionId, otherPromptId),
+    ).toMatchObject({
+      coverage: 'recorded',
+      totalExecutions: 2,
+      summary: { durationMs: 40, durationComplete: true },
+    });
+  });
+  it('marks conflicting events within the requested turn incomplete', async () => {
+    append(event('conflicting'));
+    append({ ...event('conflicting'), runtimeId: 'other-runtime' });
     await write();
     const page = (await new SessionTranscriptReader(cwd).readTurnHooksPage(
       sessionId,
@@ -156,6 +179,23 @@ describe('persisted hook turn pages', () => {
       totalExecutions: 1,
       executions: [{ conflicted: true }],
       summary: { durationMs: 0, durationComplete: false },
+    });
+  });
+  it('includes pre-prompt hooks from the requested turn', async () => {
+    records = [];
+    append({ ...event('pre-prompt'), phase: 'started' });
+    append();
+    append(event('pre-prompt'));
+    await write();
+    expect(
+      await new SessionTranscriptReader(cwd).readTurnHooksPage(
+        sessionId,
+        promptId,
+      ),
+    ).toMatchObject({
+      coverage: 'recorded',
+      totalExecutions: 1,
+      summary: { durationMs: 20, counts: { success: 1 } },
     });
   });
   it('keeps only the active branch and treats unfinished persisted starts as unknown', async () => {

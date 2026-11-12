@@ -26,6 +26,8 @@ Configure real command hooks that read JSON from stdin, append one line containi
 
 Use both `GET /session/:id/turns/:promptId/hooks` and `GET /workspaces/:workspace/session/:id/turns/:promptId/hooks`. URL-encode promptId. Follow `nextStart` with the returned `snapshot`; compare whole-turn summaries across pages.
 
+For reader performance, measure first and frozen pages for 1,000, 5,000 and 10,000 synthetic executions, then keep the requested turn at one execution while increasing another turn. Assert page counts and summaries throughout; record elapsed times without a hardware-dependent test threshold. Verify the requested turn still includes pre-prompt Hooks, retains within-turn conflict detection and ignores other turns' execution identities. Keep these synthetic probes separate from real-command E2E evidence.
+
 ## Deterministic regression commands
 
 Run each command from its named package directory, after building workspace dependencies:

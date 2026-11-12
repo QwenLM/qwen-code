@@ -72,6 +72,24 @@ describe('hook lifecycle contract', () => {
       durationComplete: true,
     });
   });
+  it('preserves prior SDK state and returns it unchanged for duplicate events', () => {
+    const initial = createHookLifecycleState();
+    const running = reduceHookLifecycle(initial, start, { source: 'live' });
+    const completed = reduceHookLifecycle(running, end, { source: 'live' });
+    expect(initial.entries.size).toBe(0);
+    expect([...running.entries.values()]).toEqual([
+      { event: start, status: 'running', conflicted: false },
+    ]);
+    expect([...completed.entries.values()]).toEqual([
+      { event: end, status: 'blocked', conflicted: false },
+    ]);
+    expect(reduceHookLifecycle(completed, end, { source: 'replay' })).toBe(
+      completed,
+    );
+    expect(reduceHookLifecycle(completed, start, { source: 'replay' })).toBe(
+      completed,
+    );
+  });
   it('distinguishes replay-only starts, live starts and dispatch duration', () => {
     let state = reduceHookLifecycle(createHookLifecycleState(), start, {
       source: 'replay',
