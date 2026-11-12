@@ -117,9 +117,11 @@ tool-execution 行、不产生 journal 事件、不产生 artifact；它是按�
 live 数据，没有幂等重放语义，而且持久化它会把终端打印出的任何秘密一并
 落库。只有 hold（见下）是持久的。
 
-当 Session 离开 ACTIVE、binding 开始 draining 或 Workspace drain 时，控制
-平面主动关闭活跃中继。授权撤销在 attach 时强制生效；生命周期转换额外终止
-存活中继，使被撤销授权或正在关闭的 Session 无法保留一条打开的管道。
+控制平面通过 hold drain 终止活跃中继：close、delete 与 drain 停止终端、
+收集退出证据并结算 hold，worker 随之而来的关闭经中继传播到浏览器侧。
+授权撤销在 attach 时强制生效；撤销前已 attach 的中继会保持打开，直到该
+Session 的下一次生命周期 drain，因为不 sweep hold 的离开 ACTIVE 转换
+尚未枚举存活中继（见「风险与后续」）。
 
 统一本地启动器（`qwen serve --managed`）把 Java 路由挂在 daemon 认证之后；
 其 managed 代理必须同样转发该路由的 WebSocket upgrade。普通 daemon 自己的
@@ -285,6 +287,8 @@ digest 且准入链通过时才获得终端；已保存的 Session 作用域不�
   workspace 包含规则不适用于人类终端。能启用终端的只有普通本地 Workspace
   binding，那里 worker 以服务器账户运行、没有容器隔离。部署必须把该 opt-in
   视为授予该账户的 shell 访问。
+- 控制面活体中继注册表：供生命周期转换枚举以直接关闭中继，使授权撤销
+  能终止已 attach 的终端，而不必等待该 Session 的下一次 drain。
 - 后续工作：背景 Shell 的 `send_input`（H3 预留）、经独立持久 owner 跨
   close 存活的 detach、每 Session 终端配额，以及未来是否向 files-only
   Session 暴露终端的决策。

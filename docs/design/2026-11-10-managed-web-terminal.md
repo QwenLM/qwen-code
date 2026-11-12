@@ -136,10 +136,13 @@ rows, no journal events and no artifacts; it is keystroke-volume live data
 with no idempotent-replay semantics, and journaling it would also persist
 whatever secrets the terminal prints. Only the hold (below) is durable.
 
-The control plane closes active relays when the Session leaves ACTIVE, the
-binding starts draining, or the Workspace drains. Grant revocation is enforced
-at attach; lifecycle transitions additionally terminate live relays so a
-revoked or closing Session cannot keep an open pipe.
+The control plane terminates active relays through the hold drain: close,
+delete and drain stop the terminals, collect exit evidence and settle the
+hold, and the worker's resulting close propagates through the relay to the
+browser leg. Grant revocation is enforced at attach; a relay attached before
+a revocation stays open until the Session's next lifecycle drain, because
+transitions that leave ACTIVE without sweeping holds do not yet enumerate
+live relays (see Risks and follow-up).
 
 The unified local launcher (`qwen serve --managed`) mounts Java routes behind
 daemon authentication; its managed proxy must forward this route's WebSocket
@@ -339,6 +342,9 @@ scope is not rewritten. Do not downgrade consumers with active holds.
   terminal are ordinary local Workspace bindings, where the worker runs as
   the server account with no container isolating it. Deployments must treat
   the opt-in as granting that account's shell access.
+- A control-plane live-relay registry that lifecycle transitions enumerate
+  to close relays directly, so a grant revocation terminates an
+  already-attached terminal without waiting for the Session's next drain.
 - Follow-ups: `send_input` for background Shells (H3 reserved), detach that
   survives close via an independent durable owner, per-Session terminal
   quotas, and any later decision to expose terminals to files-only Sessions.
