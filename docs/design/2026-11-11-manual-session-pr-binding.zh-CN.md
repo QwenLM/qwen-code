@@ -175,7 +175,9 @@ ghost 按钮，渲染条件是它自己的谓词
 成功后：`sessionCatalogController.refreshWorkspace(ownerCwd)` +
 `reloadData()`（与改名相同的刷新路径；badge 从会话列表读 `prs`，不依赖
 pr-only 的 `session_metadata_updated` 事件，其 mapper 语义保持不动）。失败
-走面板的 `setActionError` 行。
+时：错误先显示在仍然打开的对话框上（`setBindPrError`）；若用户在写入中途关
+闭了对话框，面板回退到它的 `setActionError` 行，侧栏则丢弃被取消请求的失败
+（用户已取消）。
 
 i18n：`client/i18n.tsx` 的 EN 与 ZH 两份字典各加 `sessionsOverview.bindPr*`
 键。命令还注册进 Web Shell 的两张内置命令表——`BUILT_IN_COMMANDS`

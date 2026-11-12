@@ -355,6 +355,44 @@ describe('WebShellSidebar bind PR', () => {
     expect(bindPrInput().disabled).toBe(false);
   });
 
+  it('a late failure from an abandoned write does not error a reopened form', async () => {
+    connection.sessionId = 's1';
+    active.sessions = [makeSession('s1')];
+    active.data = active.sessions;
+    let rejectBind!: (err: Error) => void;
+    mocks.actions.bindSessionPr.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectBind = reject;
+        }),
+    );
+    renderSidebar();
+    await flushSidebar();
+
+    let menu = await openSessionMenu();
+    act(() => click(menuItem(menu, 'Bind PR')!));
+    await flushSidebar();
+    await typeAndSubmit(PR_URL);
+    // Cancel while the write is in flight, then reopen.
+    const cancel = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.trim() === 'cancel');
+    act(() => click(cancel!));
+    await flushSidebar();
+    menu = await openSessionMenu();
+    act(() => click(menuItem(menu, 'Bind PR')!));
+    await flushSidebar();
+    expect(bindPrInput().disabled).toBe(false);
+    // The abandoned write now fails; the catch token guard must keep the
+    // error off the reopened dialog (no alert, form still usable).
+    await act(async () => {
+      rejectBind(new Error('late failure'));
+    });
+    await flushSidebar();
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(bindPrInput().disabled).toBe(false);
+  });
+
   it('binds a cwd-less session through the top-level client', async () => {
     connection.sessionId = 'current';
     connection.workspaceCwd = '';
@@ -411,11 +449,29 @@ describe('WebShellSidebar bind PR', () => {
     expect(mocks.actions.bindSessionPr).not.toHaveBeenCalled();
   });
 
-  it('hides Bind PR on a standalone recents row', async () => {
+  it('hides Bind PR on a standalone row even with metadata mutation enabled', async () => {
     connection.sessionId = null;
+    // Register the standalone cwd as a trusted workspace and advertise the
+    // metadata + qualified-rest capabilities so canMutateSessionMetadata is
+    // TRUE for the row. Then the only thing hiding Bind PR is the standalone
+    // conjunct — deleting !standalone would offer Bind PR here (a route that
+    // only accepts displayName). Verified load-bearing: removing !standalone
+    // reds this test.
     const caps = {
       qwenCodeVersion: '1.2.3',
-      features: [STANDALONE_SESSIONS_CAPABILITY, 'workspace_session_metadata'],
+      features: [
+        STANDALONE_SESSIONS_CAPABILITY,
+        'workspace_session_metadata',
+        'workspace_qualified_rest_core',
+      ],
+      workspaces: [
+        {
+          id: 'ws-solo',
+          cwd: '/private/standalone/solo1',
+          primary: false,
+          trusted: true,
+        },
+      ],
     };
     connection.capabilities = caps;
     workspace.capabilities = caps;
@@ -436,8 +492,9 @@ describe('WebShellSidebar bind PR', () => {
     await flushSidebar();
 
     const menu = await openSessionMenu();
-    // A standalone row's metadata route only accepts displayName, so Bind PR
-    // must not be offered even with default items.
+    // The menu renders and Rename is available (metadata mutation is on), so
+    // the absence of Bind PR is attributable to the standalone exclusion.
+    expect(menuItem(menu, 'Rename')).not.toBeUndefined();
     expect(menuItem(menu, 'Bind PR')).toBeUndefined();
   });
 });

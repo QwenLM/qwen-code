@@ -212,8 +212,10 @@ Submit routing mirrors `saveRename`'s three branches:
 On success: `sessionCatalogController.refreshWorkspace(ownerCwd)` +
 `reloadData()` (the same refresh path renames use; the badge reads `prs`
 from the session list, not from the pr-only `session_metadata_updated`
-event, whose mapper semantics stay untouched). On failure: the panel's
-`setActionError` row.
+event, whose mapper semantics stay untouched). On failure: the error is
+shown on the still-open dialog (`setBindPrError`); if the user dismissed the
+dialog mid-write, the panel falls back to its `setActionError` row, while the
+sidebar drops the dismissed request's failure (they cancelled).
 
 i18n: new `sessionsOverview.bindPr*` keys in both EN and ZH dictionaries of
 `client/i18n.tsx`. The command is also registered in the Web Shell's two

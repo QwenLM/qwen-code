@@ -439,6 +439,16 @@ describe('prCommand', () => {
     expect((result as { messageType: string }).messageType).toBe('info');
   });
 
+  it('binds to the active sidecar when the location is an active/archived conflict', async () => {
+    const { context, sessionService } = createContext();
+    sessionService.getSessionLocation.mockResolvedValue('conflict');
+    const result = await prCommand.action?.(context, '16865');
+    expect(mocks.upsertSessionPrs).toHaveBeenCalledWith(PR_PATH, [
+      { ...RESOLVED, source: 'create' },
+    ]);
+    expect((result as { messageType: string }).messageType).toBe('info');
+  });
+
   it('reports a read failure in list mode instead of an empty list', async () => {
     mocks.readSessionPrsDetailed.mockRejectedValue(new Error('EACCES'));
     const { context } = createContext();
