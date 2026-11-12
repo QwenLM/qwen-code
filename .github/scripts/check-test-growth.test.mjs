@@ -190,12 +190,16 @@ test('ci.yml runs the check in lint_and_static on pull requests', () => {
     'github.event.pull_request.base.sha',
     'github.event.pull_request.head.sha',
     'node .github/scripts/check-test-growth.mjs',
-    // Same silent-drift class as above: with no token the script warns and
-    // exits 0 without a summary, so the report is permanently a no-op.
-    'GITHUB_TOKEN: ',
   ]) {
     assert.ok(stepBlock.includes(expected), `step must include ${expected}`);
   }
+  // Whole line, not just the key: an empty value or a mistyped secret name
+  // keeps the key in place and the report silently becomes a no-op.
+  assert.match(
+    stepBlock,
+    /^ {10}GITHUB_TOKEN: '\$\{\{ secrets\.GITHUB_TOKEN \}\}'$/m,
+    'test growth step must pass the GitHub token',
+  );
   assert.ok(
     step < job.indexOf("- name: 'Install dependencies'"),
     'the check needs no dependencies and must run before the install',
