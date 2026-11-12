@@ -94,6 +94,11 @@
   display: none;
 }
 
+.summary,
+.selection {
+  white-space: nowrap;
+}
+
 .summary {
   color: var(--foreground);
   font-weight: 600;
@@ -110,7 +115,7 @@
 
 .selectionStats {
   display: flex;
-  min-width: 0;
+  flex-shrink: 0;
   flex-wrap: nowrap;
   gap: 4px 10px;
   align-items: center;
@@ -618,6 +623,19 @@ tr:hover .frozenCell.selectedCell {
   @container table-toolbar (max-width: 720px) {
     .selectionMetricSecondary {
       display: none;
+    }
+  }
+
+  @container table-toolbar (500px < width <= 720px) {
+    .selectionStats
+      ~ .compactToolbarControl
+      :is(.compactToolbarLabel, .toolbarChevron) {
+      display: none;
+    }
+
+    .selectionStats ~ .compactToolbarControl {
+      width: 28px;
+      padding-inline: 0;
     }
   }
 

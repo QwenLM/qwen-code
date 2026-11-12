@@ -36,14 +36,14 @@ async function openFixture(
   page: Page,
   testInfo: TestInfo,
   options: {
-    narrow?: boolean;
+    width?: number;
     shadow?: boolean;
     theme?: 'light' | 'dark';
+    language?: 'en' | 'zh-CN';
   } = {},
 ) {
-  await page.setViewportSize(
-    options.narrow ? { width: 390, height: 844 } : { width: 1280, height: 800 },
-  );
+  const { width = 1280, language = 'en' } = options;
+  await page.setViewportSize({ width, height: width < 768 ? 844 : 800 });
   const scenario = createWebShellDaemonScenario({
     events: [
       userTextEvent('Show a wide and tall table.', { id: 1 }),
@@ -60,7 +60,7 @@ async function openFixture(
     );
   } else {
     await page.goto(
-      `/session/${encodeURIComponent(scenario.sessionId)}?theme=${options.theme ?? 'dark'}&lang=en`,
+      `/session/${encodeURIComponent(scenario.sessionId)}?theme=${options.theme ?? 'dark'}&lang=${language}`,
     );
   }
   await daemon.sse.waitForConnection(scenario.sessionId);
@@ -73,15 +73,12 @@ async function openFixture(
   await expect(
     page.getByRole('heading', { name: 'Fullscreen table acceptance' }),
   ).toBeVisible();
-  await expect(
-    page
-      .locator('[data-selection-copy-table]')
-      .getByRole('button', { name: 'Copy', exact: true }),
-  ).toBeVisible();
-  await page
-    .locator('[data-selection-copy-table]')
-    .getByRole('button', { name: 'Copy', exact: true })
-    .scrollIntoViewIfNeeded();
+  const copy = page.locator('[data-selection-copy-table]').getByRole('button', {
+    name: language === 'zh-CN' ? '复制' : 'Copy',
+    exact: true,
+  });
+  await expect(copy).toBeVisible();
+  await copy.scrollIntoViewIfNeeded();
   return { daemon, scenario };
 }
 
@@ -338,6 +335,34 @@ test.describe('enhanced table fullscreen', () => {
     ).toEqual([]);
   });
 
+  test('keeps the inline toolbar from overlapping after selecting a cell in a narrow window', async ({
+    page,
+  }, testInfo) => {
+    await openFixture(page, testInfo, {
+      width: 620,
+      language: 'zh-CN',
+      theme: 'light',
+    });
+    const table = page.locator('[data-selection-copy-table]');
+    const rowCount = table.getByText('共80行', { exact: true });
+    const copySelection = table.getByRole('button', { name: '复制文本' });
+    const density = table.getByRole('button', { name: '表格密度' });
+    const copyTable = table.getByRole('button', { name: '复制', exact: true });
+    const rowCountBefore = (await rowCount.boundingBox())!;
+    await expect(copySelection).toHaveCount(0);
+
+    await table.getByRole('cell', { name: 'Item 01', exact: true }).click();
+
+    await expect(copySelection).toBeVisible();
+    const selectionBox = (await copySelection.boundingBox())!;
+    const densityBox = (await density.boundingBox())!;
+    expect(selectionBox.x + selectionBox.width).toBeLessThanOrEqual(
+      densityBox.x,
+    );
+    expect((await rowCount.boundingBox())!.height).toBe(rowCountBefore.height);
+    await expect(copyTable).toBeInViewport({ ratio: 1 });
+  });
+
   test('keeps narrow-screen controls and Shadow DOM portals usable', async ({
     page,
   }, testInfo) => {
@@ -345,7 +370,7 @@ test.describe('enhanced table fullscreen', () => {
       process.env['TABLE_FULLSCREEN_BUILT'] === '1',
       'The production bundle does not include test-only host harnesses.',
     );
-    await openFixture(page, testInfo, { narrow: true, shadow: true });
+    await openFixture(page, testInfo, { width: 390, shadow: true });
     const copy = page
       .locator('[data-selection-copy-table]')
       .getByRole('button', { name: 'Copy', exact: true });
