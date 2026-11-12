@@ -546,6 +546,41 @@ describe('MultiClientPermissionMediator — cancelForPrompt', () => {
     await Promise.all([promiseUser, promiseOtherSession]);
   });
 
+  it('cancels every request of the session but detached workflow approvals on a turn cancel', async () => {
+    const { mediator } = makeMediator();
+    const turn = mediator.request(
+      makeRecord({ requestId: 'req-turn', promptId: 'turn-1' }),
+      5_000,
+    );
+    const appCall = mediator.request(
+      makeRecord({ requestId: 'req-app', promptId: 'app-call-1' }),
+      5_000,
+    );
+    const workflow = mediator.request(
+      {
+        ...makeRecord({ requestId: 'req-workflow' }),
+        workflowApprovalToolCallId: 'workflow:sess-1:wf_1:wfap_1',
+      },
+      5_000,
+    );
+    const otherSession = mediator.request(
+      makeRecord({ requestId: 'req-other', sessionId: 'sess-2' }),
+      5_000,
+    );
+
+    mediator.cancelForTurnCancel('sess-1');
+
+    const cancelled = { kind: 'cancelled', reason: 'agent_cancelled' };
+    await expect(turn).resolves.toEqual(cancelled);
+    await expect(appCall).resolves.toEqual(cancelled);
+    expect(mediator.peekSessionFor('req-workflow')).toBe('sess-1');
+    expect(mediator.peekSessionFor('req-other')).toBe('sess-2');
+
+    mediator.forgetSession('sess-1');
+    mediator.forgetSession('sess-2');
+    await Promise.all([workflow, otherSession]);
+  });
+
   it('is a no-op when nothing pending matches the prompt', () => {
     const { mediator, events } = makeMediator();
     void mediator.request(

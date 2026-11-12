@@ -10,13 +10,15 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.host.HostCommandRunner;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeNode;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeStorage;
 import com.sun.net.httpserver.HttpServer;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -33,6 +35,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
@@ -284,7 +287,7 @@ class SshRuntimeProvisionerTest {
 
     @Test
     void aProvenFailedLaunchCannotBeReplacedButCanBeRetiredWithoutALease() throws Exception {
-        var bindings = new InMemoryRuntimeBindingRepository();
+        var bindings = new JdbcRuntimeBindingRepository(source(), new AesGcmSecretProtector("test", new byte[32]));
         var request = provisioner.createRequest(SCOPE, "session");
         var original = bindings.findOrCreate(request);
         var claim = bindings.claimOperation(original.getBindingId(), "owner", Duration.ofMinutes(1));
@@ -318,7 +321,7 @@ class SshRuntimeProvisionerTest {
 
     @Test
     void verifiesEveryOriginalIdentityBeforeAcceptingCleanRetirement() throws Exception {
-        var bindings = new InMemoryRuntimeBindingRepository();
+        var bindings = new JdbcRuntimeBindingRepository(source(), new AesGcmSecretProtector("test", new byte[32]));
         var request = provisioner.createRequest(SCOPE, "session");
         var original = bindings.findOrCreate(request);
         var claim = bindings.claimOperation(original.getBindingId(), "owner", Duration.ofMinutes(1));
@@ -356,6 +359,13 @@ class SshRuntimeProvisionerTest {
     private SshRuntimeProvisioner provisioner() {
         return new SshRuntimeProvisioner(id -> id.equals(NODE.nodeId()) ? NODE : null, scope -> STORAGE,
                 connections, transport);
+    }
+
+    private static JdbcDataSource source() {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:ssh-provisioner-" + UUID.randomUUID() + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        return source;
     }
 
     private Map<String, Object> ready() {
