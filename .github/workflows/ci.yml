@@ -3332,10 +3332,13 @@ jobs:
         run: |-
           mkdir -p "${QWEN_HOME}"
           if [ "${{ matrix.shard }}" = 1 ]; then
-            # The typecheck has no heap cap of its own and died at Node's
-            # ~2 GB default inside an 8 GiB container. Via `env`, not the
-            # step's env block, whose zero-secrets contract requires every
-            # value but QWEN_HOME to be empty. Rationale and measurements:
+            # The typecheck has no heap cap of its own, so it inherits Node's
+            # default old-space, which is sized from the container's cgroup
+            # limit: 2096 MB at the 8 GiB this pool ran on 2026-11-11, the
+            # ceiling it died at. This raises it to a measured 4144 MB so
+            # scaling a host back down cannot restore that default. Via `env`,
+            # not the step's env block, whose zero-secrets contract requires
+            # every value but QWEN_HOME to be empty. Measurements:
             # scripts/tests/no-ak-integration-ci.test.js.
             typecheck_heap=()
             case "${RUNNER_NAME:-}" in
