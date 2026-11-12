@@ -2837,6 +2837,7 @@ export async function runNonInteractive(
         return runAgentLoop({
           client: llmClient,
           config,
+          useEventBus: config.isEventBusAgentLoopEnabled?.() === true,
           signal: abortController.signal,
           ...(activeGoalTurn && {
             toolSignal: AbortSignal.any([

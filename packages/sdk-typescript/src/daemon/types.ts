@@ -5080,7 +5080,15 @@ export interface DaemonChannelConfigNumberFieldDescriptor
   required?: boolean;
   envResolvable?: never;
   multiline?: never;
+  /** Exclusive lower bound: the value must be strictly greater than this. */
   exclusiveMinimum?: number;
+  /**
+   * Inclusive lower bound: the value may equal this. Needed because a field
+   * whose real floor is 0 cannot express it with `exclusiveMinimum` — writing
+   * -1 to admit 0 also admits (-1, 0), which the editor then accepts and the
+   * adapter rejects at save. When both are declared the stricter one wins.
+   */
+  minimum?: number;
   /** Inclusive upper bound. A poll interval above Node's 32-bit timer range is
    * clamped to 1ms, so an unbounded interval field can persist a hot loop. */
   maximum?: number;
@@ -5138,6 +5146,14 @@ export interface DaemonChannelTypeDescriptor {
    */
   supportsQrLogin?: boolean;
   fields: readonly DaemonChannelConfigFieldDescriptor[];
+  /** True for sending-only integrations; absent on older daemons. */
+  outboundOnly?: boolean;
+  /** Adapter-owned logical destination, without endpoint credentials. */
+  defaultDeliveryTarget?: {
+    type: 'user' | 'chat';
+    id: string;
+    label?: string;
+  };
 }
 
 export type DaemonChannelTypeCatalog = DaemonChannelTypeDescriptor[];

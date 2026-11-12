@@ -102,6 +102,6 @@ class ConsolidatedChannelStoreTest {
     }
 
     private static ChannelDelivery planned(String channel) {
-        return new ChannelDelivery("tenant", channel, "delivery", "segment", 0, "planned", null, 0, 0);
+        return new ChannelDelivery("tenant", channel, "delivery", "segment", 0, "planned", null, 0, 0, 1);
     }
 }

@@ -803,7 +803,9 @@ export function ThinkingTranslateButton({
       </PopoverTrigger>
       <PopoverContent
         align="start"
-        className={styles.translationPopover}
+        // A width utility lets tailwind-merge drop PopoverContent's default w-72;
+        // a CSS-module width ties on specificity and loses when utilities load later.
+        className={`${styles.translationPopover} w-[min(480px,calc(100vw-32px))]`}
         data-approval-shortcuts-ignore={
           mode === 'explain-shell' ? '' : undefined
         }

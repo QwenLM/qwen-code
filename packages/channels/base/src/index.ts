@@ -80,6 +80,7 @@ export {
   BOUND_EVENT_PLATFORMS,
   BOUND_PROMPT_BODY_MAX_CODE_POINTS,
   DEFAULT_BOUND_ROLE_GUIDANCE,
+  DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE,
   boundActionTemplateEntries,
   buildBoundEventPrompt,
   isBoundActionKey,
@@ -93,6 +94,7 @@ export type {
   BoundActionValues,
   BoundEventPlatform,
   BoundEventPromptParts,
+  BoundPromptLanguage,
 } from './bound-session-prompt.js';
 export type {
   ChannelBaseOptions,

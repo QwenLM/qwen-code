@@ -47,6 +47,16 @@ const WEIXIN_LOGIN_KEYS = [
   'openUrl',
 ].map((suffix) => `channels.weixin.${suffix}`);
 
+// The editor labels live in a different namespace, so the prefix above does
+// not reach them. A missing zh `.description` falls back to the plugin's
+// hardcoded English sentence rather than to a raw key, which is the silent
+// degradation this table exists to catch.
+const WEIXIN_EDITOR_KEYS = [
+  'channels.editor.field.weixin.groupPolicy',
+  'channels.editor.field.weixin.groupPolicy.description',
+  'channels.editor.field.weixin.groupPolicy.option.disabled',
+];
+
 const BROWSER_NOTIFICATION_KEYS = [
   'label',
   'description',
@@ -100,9 +110,42 @@ const SCHEDULED_TASK_DELIVERY_KEYS = [
   'user',
   'chat',
   'cardPrefix',
+  'configuredGroupHint',
+  'configuredHint',
+  'useConfiguredDestination',
+  'differentConfiguredDestination',
 ].map((suffix) => `scheduledTasks.delivery.${suffix}`);
 
+const OUTBOUND_CHANNEL_KEYS = [
+  'method.title',
+  'method.description',
+  'method.applicationBot',
+  'method.applicationBot.description',
+  'method.webhook',
+  'method.webhook.description',
+  'status.readyToSend',
+  'statusDescription.readyToSend',
+  'statusDescription.notReadyToSend',
+  'statusDescription.outbound',
+  'editor.field.dingtalkWebhook.webhookUrl',
+  'editor.field.dingtalkWebhook.webhookUrl.description',
+  'editor.field.dingtalkWebhook.signingSecret',
+  'editor.field.dingtalkWebhook.signingSecret.description',
+].map((suffix) => `channels.${suffix}`);
+
 describe('web-shell i18n catalog', () => {
+  it('labels the incremental session expansion with its count in both locales', () => {
+    expect(getTranslator('en')('sidebar.showMoreSessions', { count: 10 })).toBe(
+      'Show 10 more',
+    );
+    expect(
+      getTranslator('zh-CN')('sidebar.showMoreSessions', { count: 10 }),
+    ).toBe('再显示 10 个');
+    expect(
+      getTranslator('zh-CN')('sidebar.showMoreSessions', { count: 3 }),
+    ).toBe('再显示 3 个');
+  });
+
   it('localizes the scheduled-task workspace host-lock hint', () => {
     expect(getTranslator('en')('scheduledTasks.workspaceFixedByHost')).toBe(
       'Fixed by host',
@@ -125,10 +168,47 @@ describe('web-shell i18n catalog', () => {
     );
   });
 
+  it('keeps the outbound Channel translations in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    for (const key of OUTBOUND_CHANNEL_KEYS) {
+      expect(en(key)).not.toBe(key);
+      expect(zh(key)).not.toBe(key);
+      expect(zh(key)).not.toBe(en(key));
+    }
+  });
+
+  it('keeps the channel range message spacing in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    const key = 'channels.editor.validation.outOfRange';
+
+    // The exclusive-floor shapes predate the inclusive bound. Folding the
+    // lower clause into one variable moved a space inside the interpolation
+    // and silently changed these two existing zh strings; pin them verbatim.
+    expect(zh(key, { min: 0, max: 86_400_000 })).toBe(
+      '请输入大于 0 且不超过 86400000 的数字。',
+    );
+    expect(zh(key, { min: 0 })).toBe('请输入大于 0 的数字。');
+    expect(zh(key, { max: 4 })).toBe('请输入不超过 4 的数字。');
+    expect(en(key, { min: 0, max: 86_400_000 })).toBe(
+      'Enter a number greater than 0 and at most 86400000.',
+    );
+
+    // The inclusive floor is worded differently but padded the same way.
+    expect(zh(key, { minInclusive: 0, max: 5000 })).toBe(
+      '请输入不小于 0 且不超过 5000 的数字。',
+    );
+    expect(zh(key, { minInclusive: 0 })).toBe('请输入不小于 0 的数字。');
+    expect(en(key, { minInclusive: 0, max: 5000 })).toBe(
+      'Enter a number at least 0 and at most 5000.',
+    );
+  });
+
   it('keeps every WeChat login translation in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');
-    for (const key of WEIXIN_LOGIN_KEYS) {
+    for (const key of [...WEIXIN_LOGIN_KEYS, ...WEIXIN_EDITOR_KEYS]) {
       const vars = { id: 'wx-user-1', time: '2026-11-09 10:00' };
       expect(en(key, vars)).not.toBe(key);
       expect(zh(key, vars)).not.toBe(key);
