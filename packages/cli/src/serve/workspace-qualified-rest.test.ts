@@ -2442,6 +2442,9 @@ describe('workspace-qualified core REST', () => {
         h.secondaryBridge.runWorkspaceMemoryRemember,
       ).toHaveBeenCalledTimes(2);
 
+      vi.mocked(
+        h.secondaryBridge.isWorkspaceMemoryRememberAvailable,
+      ).mockResolvedValue(false);
       const forget = await request(h.app)
         .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory/forget`)
         .set('Authorization', 'Bearer secret')
@@ -2466,6 +2469,9 @@ describe('workspace-qualified core REST', () => {
         1,
       );
 
+      vi.mocked(
+        h.secondaryBridge.isWorkspaceMemoryRememberAvailable,
+      ).mockResolvedValue(true);
       const dream = await request(h.app)
         .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory/dream`)
         .set('Authorization', 'Bearer secret')

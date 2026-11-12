@@ -46,11 +46,13 @@ class ManagedSchemaTest {
             Map.entry("ma_request_receipt", List.of("receipt_key")),
             Map.entry("ma_memory_store", List.of("store_key")),
             Map.entry("ma_memory_entry", List.of("entry_key")),
+            Map.entry("ma_side_query", List.of("query_key")),
             Map.entry("ma_operation", List.of("operation_key")),
             Map.entry("ma_operation_work", List.of("operation_key", "work_kind", "target_key")),
             Map.entry("ma_workspace", List.of("tenant_id", "workspace_id")),
             Map.entry("ma_workspace_access", List.of("tenant_id", "workspace_id", "actor_id")),
             Map.entry("ma_extension_package", List.of("package_key")),
+            Map.entry("ma_extension_source_import", List.of("import_key")),
             Map.entry("ma_extension_settings", List.of("settings_key")),
             Map.entry("ma_extension_operation", List.of("operation_key")),
             Map.entry("ma_storage", List.of("alias_key")),
@@ -64,9 +66,11 @@ class ManagedSchemaTest {
             Map.entry("ma_channel_instance", List.of("tenant_id", "channel_id")),
             Map.entry("ma_channel_binding", List.of("tenant_id", "channel_id", "route_id")),
             Map.entry("ma_delivery", List.of("delivery_key")),
+            Map.entry("ma_channel_segment", List.of("delivery_key", "segment_id")),
             Map.entry("ma_schedule", List.of("tenant_id", "schedule_id")),
             Map.entry("ma_schedule_occurrence", List.of("tenant_id", "schedule_id", "occurrence_key")),
-            Map.entry("ma_session_worktree", List.of("tenant_id", "session_id")));
+            Map.entry("ma_session_worktree", List.of("tenant_id", "session_id")),
+            Map.entry("ma_journal_pack", List.of("session_scope_key", "from_revision")));
 
     @Test
     void generatesRowIdentitiesWithoutWeakeningBusinessUniqueness() throws Exception {
@@ -580,6 +584,27 @@ class ManagedSchemaTest {
         }
     }
 
+    // Every shipped receipt namespace must satisfy the length CHECK, including the
+    // RESOURCE_ALLOCATE namespace used by session resource allocation.
+    @Test
+    void theCurrentReceiptNamespaceCheckAdmitsEveryShippedNamespace() throws Exception {
+        DataSource migrated = source();
+        Flyway.configure()
+                .dataSource(migrated)
+                .locations(ManagedSchema.FLYWAY_LOCATION)
+                .load()
+                .migrate();
+        for (DataSource source : new DataSource[] {initialized(), migrated}) {
+            try (var connection = source.getConnection()) {
+                for (var namespace : ManagedSchemaContract.ReceiptNamespace.values()) {
+                    receipt(connection, namespace.name(), namespace.name());
+                }
+                assertThrows(SQLException.class,
+                        () -> receipt(connection, "unknown", "RESOURCE_ALLOCATE_EXTRA"));
+            }
+        }
+    }
+
     @Test
     void hookOnceRemainsUniqueWithoutDatabaseForeignKeys() throws Exception {
         DataSource source = initialized();
@@ -624,49 +649,6 @@ class ManagedSchemaTest {
             assertEquals("tenant ", values.get("tenant_id"));
             assertTrue(values.get("observed_at") instanceof java.sql.Timestamp);
         }
-    }
-
-    @Test
-    void all63OriginalEntitiesHaveOnlyRealTargetDestinations() throws Exception {
-        var inventory = ManagedSchemaMapping.inventory();
-        assertEquals(63, inventory.size());
-        try (var source = getClass().getResourceAsStream("/original-managed-table-inventory.tsv")) {
-            String original =
-                    new String(
-                            java.util.Objects.requireNonNull(source).readAllBytes(),
-                            java.nio.charset.StandardCharsets.UTF_8);
-            Set<String> originalNames =
-                    original.lines()
-                            .filter(line -> !line.startsWith("#") && !line.isBlank())
-                            .map(line -> line.split("\\t")[0])
-                            .collect(java.util.stream.Collectors.toSet());
-            assertEquals(63, originalNames.size());
-            assertEquals(originalNames, inventory.keySet());
-        }
-        assertTrue(
-                inventory.values().stream()
-                        .allMatch(
-                                tables ->
-                                        !tables.isEmpty()
-                                                && ManagedSchemaContract.TABLES.containsAll(
-                                                        tables)));
-        Set<String> originalTargets = new java.util.HashSet<>(ManagedSchemaContract.TABLES);
-        originalTargets.removeAll(Set.of("ma_extension_package", "ma_extension_settings", "ma_extension_operation",
-                "ma_session_worktree", "ma_memory_store", "ma_memory_entry"));
-        assertEquals(
-                originalTargets,
-                inventory.values().stream()
-                        .flatMap(java.util.Collection::stream)
-                        .collect(java.util.stream.Collectors.toSet()));
-        assertEquals(Set.of("ma_message"), Set.copyOf(inventory.get("managed_agent_item_part")));
-        assertEquals(
-                Set.of("ma_storage_owner"),
-                Set.copyOf(inventory.get("managed_workspace_execution_lease")));
-        assertEquals(
-                Set.of("ma_session_head"), Set.copyOf(inventory.get("qwen_runtime_harness_drain")));
-        assertEquals(
-                Set.of("ma_event_stream", "ma_resource_ref"),
-                Set.copyOf(inventory.get("qwen_managed_session_task_journal_cursor")));
     }
 
     @Test

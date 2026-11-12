@@ -163,6 +163,8 @@ export interface OpenTuiAppProps {
   startupHistory?: HistoryItem[];
   /** Preloaded slash registry; when omitted the shell loads it on mount. */
   commands?: readonly SlashCommand[];
+  /** Shared with the entry's keyboard exit guard. */
+  slashGateway?: OpenTuiSlashGateway;
   /** Owned by a Batch-6 stats provider; commands read it through the host. */
   getSessionStats: () => SessionStatsState;
   /** Reactive provider snapshot; the getter remains for imperative commands. */
@@ -313,6 +315,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     settings,
     logger,
     commands,
+    slashGateway,
     getSessionStats,
     extensionRefreshState,
     renderMain,
@@ -1049,7 +1052,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     );
   }, [config, settings.merged.ui?.disableWorkflowKeywordTrigger]);
 
-  const gateway = useMemo(() => new OpenTuiSlashGateway(), []);
+  const gateway = useMemo(
+    () => slashGateway ?? new OpenTuiSlashGateway(),
+    [slashGateway],
+  );
   const reloadRef = useRef<(() => void | Promise<void>) | null>(null);
   // Slash and shell submissions held back while a model turn streams (ink's
   // message queue; a queued shell entry carries its routing so the drain
