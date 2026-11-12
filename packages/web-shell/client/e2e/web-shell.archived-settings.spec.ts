@@ -397,6 +397,7 @@ test('archive management remains reachable without a local workspace @smoke', as
     baseURL: String(testInfo.project.use.baseURL),
   });
   await page.goto('/?language=en');
+  // A Home-only shell renders footer actions inline; there is no More menu.
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   const nav = page.getByRole('navigation', { name: 'Settings', exact: true });
   await expect(nav.getByRole('button', { name: /^Model/ })).toHaveCount(0);
