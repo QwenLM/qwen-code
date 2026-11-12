@@ -2458,17 +2458,24 @@ recovered-download blob above does not.
 
 Separate from that class, `CONFIG_FAILURE_SIGNATURES` holds the gate's
 deterministic configuration errors (`HOST_LOAD_MAX_RATIO` /
-`HOST_LOAD_MAX_WAIT_TRIES` / `HOST_LOAD_WAIT_SECONDS` "must be a positive
-…"). A repository variable cannot change between attempts, so a re-run fails
-identically; the scan skips the PR instead of re-paying install, artifact
-download and tooling provisioning, and does not hand the typo to an agent
-that cannot edit a repository variable. The labels are kept even for the two
-knobs no workflow sets today, because the script declares every knob
-env-overridable: wiring one later must not make its typo read as the PR's
-code. `main-ci-failure-issue.yml` deliberately does not carry these — with
-no rerun to suppress, it files the failure record so a human fixes the
-variable. `Host load gate breached` stays in the infrastructure class: a
-re-run can land on another host.
+`HOST_LOAD_MAX_WAIT_TRIES` / `HOST_LOAD_WAIT_SECONDS` "must be a positive …",
+and `DISK_FLOOR_MIN_FREE_KB` / `DISK_FLOOR_MIN_FREE_INODES` /
+`DISK_FLOOR_MAX_USED_PCT`). A repository variable cannot change between
+attempts, so a re-run fails identically; the scan skips the PR instead of
+re-paying install, artifact download and tooling provisioning, and does not
+hand the typo to an agent that cannot edit a repository variable. The labels
+are kept even for the knobs no workflow sets today, because the scripts
+declare every knob env-overridable: wiring one later must not make its typo
+read as the PR's code. `main-ci-failure-issue.yml` deliberately does not carry
+these — with no rerun to suppress, it files the failure record so a human fixes
+the variable.
+
+Two host-level refusals stay in the infrastructure class, because a re-run can
+land elsewhere: `Host load gate breached` (a contended host cannot run the
+suites) and `Disk floor breached` (the host is out of space or inodes). The
+disk floor's *configuration* errors are the opposite case and sit in the list
+above: `DISK_FLOOR_*` names a threshold a human typed into a repository
+variable, so the same host refuses again and a re-run only spends the wait.
 ```
 
 <a id="af-077"></a>
