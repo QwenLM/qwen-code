@@ -197,10 +197,11 @@ Managed Session 今天无法运行这条路径：
    `hosted_turn_recovery_required`。
 8. **工具面是 `loop_wakeup` 加共享的 cron list/cancel。** `loop_wakeup`
    由可写 profile 的新修订版声明，沿用添加 `todo_write` 的 `files/3`
-   先例。profile 修订版是持久化词汇，因此每个切片各自发布自己的修订版：
-   [固定间隔姊妹设计](2026-11-10-managed-loop-schedule.zh-CN.md)为其
-   cron 三件套钉住下一批修订版号，本切片取其后的一批（版号在落地时按
-   落地顺序分配）；无论哪个切片先落地都由它声明
+   先例。profile 修订版是持久化词汇，因此每个切片各自发布自己的修订版，
+   先落地的切片声明较小的版号：本切片已先落地、取
+   `hosted-workspace-shell/3`，[固定间隔姊妹设计](2026-11-10-managed-loop-schedule.zh-CN.md)
+   落地时为其 cron 三件套取下一批修订版号（版号在落地时按落地顺序分配）；
+   无论哪个切片先落地都由它声明
    `cron_list`/`cron_delete`，本切片把它们扩展到并集——`cron_list`
    加上未触发的 pending loop input（id、触发时刻、prompt），
    `cron_delete` 把 `loop:<wakeupId>` 路由到决策 7 的取消。不存在

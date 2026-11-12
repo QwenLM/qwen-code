@@ -239,12 +239,13 @@ The facts below are from this repository at `488845a4a81`.
    list/cancel.** `loop_wakeup` is declared by new revisions of the
    write-capable profiles, following the `files/3` precedent that added
    `todo_write`. A profile revision is a persisted vocabulary, so each
-   slice ships its own: the
-   [fixed-interval sibling](2026-11-10-managed-loop-schedule.md) pins the
-   next revisions for its cron trio, and this slice takes the revisions
-   after them (numbering assigned at landing, in landing order);
-   whichever slice lands first declares `cron_list`/`cron_delete`, and
-   this slice extends them to the union — `cron_list` adds the pending
+   slice ships its own, and the first-landed slice declares the lower
+   revision: this slice landed first with `hosted-workspace-shell/3`, and
+   the [fixed-interval sibling](2026-11-10-managed-loop-schedule.md) takes
+   the next revision for its cron trio when it lands (numbering assigned
+   at landing, in landing order); whichever slice lands first declares
+   `cron_list`/`cron_delete`, and this slice extends them to the union —
+   `cron_list` adds the pending
    unfired loop input (id, fire time, prompt), `cron_delete` routes
    `loop:<wakeupId>` to the cancel of decision 7. There is no `loop_list`
    or `loop_cancel`: the local tools already cover both kinds, and the
