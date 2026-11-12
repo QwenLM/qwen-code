@@ -463,8 +463,9 @@ jobs:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           QWEN_SANDBOX: "${{ matrix.sandbox == 'sandbox:docker' && 'docker' || 'false' }}"
           # Read by Config.isUnifiedAgentLoopEnabled and
-          # Config.isEventBusAgentLoopEnabled in every CLI the tests spawn;
-          # the parity suites still force their arms per run themselves.
+          # Config.isEventBusAgentLoopEnabled in every CLI the tests spawn.
+          # InteractiveSession forwards these into inheritEnv:false children,
+          # so the parity suites pin both arms explicitly to override them.
           QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: "${{ matrix.agent-loop != 'current' && '1' || '' }}"
           QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP: "${{ matrix.agent-loop == 'kernel' && '1' || '' }}"
           BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true'
@@ -746,8 +747,9 @@ jobs:
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
           KEEP_OUTPUT: 'true'
           VERBOSE: 'true'
-          # Same mapping as e2e-test-linux: the parity suites force their
-          # arms per run themselves (inheritEnv: false).
+          # Same mapping as e2e-test-linux: InteractiveSession forwards these
+          # into inheritEnv:false children, so the parity suites pin both arms
+          # explicitly to override them.
           QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: "${{ matrix.agent-loop != 'current' && '1' || '' }}"
           QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP: "${{ matrix.agent-loop == 'kernel' && '1' || '' }}"
         run: |-

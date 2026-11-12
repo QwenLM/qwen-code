@@ -81,4 +81,21 @@ describe('InteractiveSession.start source pins (#13552)', () => {
     expect(source).toContain('this.closed = true;');
     expect(source).toContain('Session closed while waiting for text:');
   });
+
+  it('pins the isolated-env loop-switch pass-through', () => {
+    // The nightly loop legs export the two switches; deleting the forwarding
+    // block (or narrowing it to one switch) leaves the inheritEnv:false
+    // suites on the default loop on every arm, and only a nightly run would
+    // notice. Both keys must be present inside the inheritEnv:false guard.
+    expect(source).toMatch(
+      /if \(options\?\.inheritEnv === false\) \{[\s\S]*?'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'[\s\S]*?'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'/,
+    );
+  });
+
+  it('pins that a test own env overrides the forwarded switches', () => {
+    // The parity control arm pins the switches off through options.env; that
+    // only wins if options.env is spread after baseEnv. Reordering the spread
+    // re-arms the control arm on the nightly legs.
+    expect(source).toMatch(/\.\.\.baseEnv,\s*\.\.\.options\?\.env,/);
+  });
 });

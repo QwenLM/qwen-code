@@ -6,11 +6,12 @@
 
 /**
  * The TUI that `QWEN_E2E_RENDERER` selects, Ink or OpenTUI, runs each
- * scripted scenario twice, with
- * `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` unset and set, and the two runs must
- * send the model the same requests and record the same session. The screen is
- * not compared: it repaints on timers, and what it shows comes from the same
- * events the session records.
+ * scripted scenario twice, with `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` forced
+ * to `0` and to `1` per arm, and the two runs must send the model the same
+ * requests and record the same session. Both arms pin the switches explicitly
+ * because the nightly legs export them and InteractiveSession forwards them
+ * into the isolated child env. The screen is not compared: it repaints on
+ * timers, and what it shows comes from the same events the session records.
  */
 
 import {
@@ -497,7 +498,11 @@ describeTui(SUITE, () => {
         NO_PROXY: 'localhost,127.0.0.1',
         no_proxy: 'localhost,127.0.0.1',
         ...scenario.env,
-        ...(shared ? { QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: '1' } : {}),
+        // Force both arms explicitly: the nightly legs export these switches
+        // and InteractiveSession forwards them into the isolated env, so the
+        // control arm must pin them off rather than rely on an empty env.
+        QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: shared ? '1' : '0',
+        QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP: '0',
       },
       args: [
         '--auth-type',
