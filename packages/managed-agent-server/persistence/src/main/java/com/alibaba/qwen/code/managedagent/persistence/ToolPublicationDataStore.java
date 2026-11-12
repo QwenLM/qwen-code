@@ -277,54 +277,42 @@ public final class ToolPublicationDataStore {
 
     private JsonNode submitVerification(JsonNode key, String publicationId, String token,
             String operationId, String slot, String digest, ObjectNode inputs, String kind,
-            byte[] bytes, String payloadDigest, boolean asynchronous) {
-        if (verificationTask.get() != null) {
-            return null;
-        }
+            byte[] bytes, String payloadDigest) {
         require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
                 "Invalid publication operation ID");
         String scope = scope(key);
         List<Operation> observed = operation(scope, publicationId, operationId, false);
-        if (!asynchronous && (observed.isEmpty() || !observed.getFirst().asynchronous())) {
-            return null;
-        }
-        if (!observed.isEmpty() && observed.getFirst().asynchronous()
-                && "FAILED".equals(observed.getFirst().state())) {
+        if (!observed.isEmpty() && "FAILED".equals(observed.getFirst().state())) {
             require(slot.equals(observed.getFirst().slot()) && digest.equals(observed.getFirst().digest()),
                     "Publication operation conflicts");
             return operationStatus(key, publicationId, token, operationId);
         }
-        Submission submission = transactions.execute(status -> {
+        Submission submission = Objects.requireNonNull(transactions.execute(status -> {
             var authorization = authorizeClaim(key, scope, publicationId, token);
             List<Operation> prior = operation(scope, publicationId, operationId, true);
             if (!prior.isEmpty()) {
                 Operation row = prior.getFirst();
                 require(slot.equals(row.slot()) && digest.equals(row.digest()), "Publication operation conflicts");
-                if (!row.asynchronous()) {
-                    return null;
-                }
                 if (!"PENDING".equals(row.state()) || row.ready() || !row.deadline().after(now())) {
                     return new Submission(0, null, operationStatus(key, publicationId, token, operationId));
                 }
-            } else if (!asynchronous) {
-                return null;
             }
             long epoch;
             String objectKey = null;
             JsonNode receipt;
             if ("terminal".equals(slot)) {
                 FinishClaim claim = beginFinish(key, scope, publicationId, token, operationId,
-                        bytes.length, payloadDigest, true);
+                        bytes.length, payloadDigest);
                 epoch = claim.epoch();
                 objectKey = claim.objectKey();
                 receipt = claim.receipt();
             } else if (slot.startsWith("seal:") || slot.startsWith("prefix:")) {
-                ScanClaim claim = claimScan(key, scope, publicationId, token, operationId, slot, digest, true);
+                ScanClaim claim = claimScan(key, scope, publicationId, token, operationId, slot, digest);
                 epoch = claim.epoch();
                 receipt = claim.receipt();
             } else {
                 Candidate claim = claim(key, scope, publicationId, token, operationId, slot, kind,
-                        bytes.length, payloadDigest, true);
+                        bytes.length, payloadDigest);
                 epoch = claim.epoch();
                 objectKey = claim.objectKey();
                 receipt = claim.receipt();
@@ -335,12 +323,9 @@ public final class ToolPublicationDataStore {
             }
             inputs.put("bindingDigest", ToolPublicationContract.bindingDigest(authorization.binding()))
                     .put("tokenHash", ToolPublicationContract.tokenHash(token));
-            jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", execution_mode = 'ASYNC', verification_request_json = ? WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ? AND operation_id = ?", inputs.toString(), scope, publicationId, operationId);
+            jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", verification_request_json = ? WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ? AND operation_id = ?", inputs.toString(), scope, publicationId, operationId);
             return new Submission(epoch, objectKey, null);
-        });
-        if (submission == null) {
-            return null;
-        }
+        }));
         if (submission.response() != null) {
             return submission.response();
         }
@@ -368,7 +353,7 @@ public final class ToolPublicationDataStore {
     }
 
     boolean verifyNextOperation() {
-        var candidates = jdbc.query("SELECT scope_key, publication_id, operation_id, claim_generation, verification_request_json FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND execution_mode = 'ASYNC' AND state = 'PENDING' AND is_verification_ready = TRUE AND verification_next_at <= " + ManagedSchemaTime.SQL_NOW + " ORDER BY verification_next_at, scope_key, publication_id, operation_id LIMIT 32", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow));
+        var candidates = jdbc.query("SELECT scope_key, publication_id, operation_id, claim_generation, verification_request_json FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND state = 'PENDING' AND is_verification_ready = TRUE AND verification_next_at <= " + ManagedSchemaTime.SQL_NOW + " ORDER BY verification_next_at, scope_key, publication_id, operation_id LIMIT 32", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow));
         boolean processed = false;
         for (var candidate : candidates) {
             String scope = (String) candidate.get("scope_key");
@@ -384,7 +369,7 @@ public final class ToolPublicationDataStore {
                             text(inputs, "bindingDigest"), text(inputs, "tokenHash"));
                     List<Operation> rows = operation(scope, publicationId, operationId, true);
                     Timestamp current = now();
-                    if (rows.size() != 1 || !rows.getFirst().asynchronous() || !rows.getFirst().ready()
+                    if (rows.size() != 1 || !rows.getFirst().ready()
                             || !"PENDING".equals(rows.getFirst().state())
                             || rows.getFirst().claimUntil() != null && rows.getFirst().claimUntil().after(current)) {
                         return null;
@@ -554,14 +539,13 @@ public final class ToolPublicationDataStore {
         return null;
     }
 
-    private boolean deferOrFailUnclaimedVerification(String scope, String publicationId, String operationId,
-            long epoch, RuntimeException error) {
+    private boolean deferOrFailUnclaimedVerification(String scope, String publicationId, String operationId, long epoch, RuntimeException error) {
         String[] releasedObject = new String[1];
         boolean handled = Boolean.TRUE.equals(transactions.execute(status -> {
             retention.lockRetainedPublication(scope, publicationId);
             var rows = operation(scope, publicationId, operationId, true);
             Timestamp current = now();
-            if (rows.size() != 1 || !"PENDING".equals(rows.getFirst().state()) || !rows.getFirst().asynchronous()
+            if (rows.size() != 1 || !"PENDING".equals(rows.getFirst().state())
                     || rows.getFirst().epoch() != epoch || !rows.getFirst().ready() || rows.getFirst().claimUntil() != null
                     && rows.getFirst().claimUntil().after(current)) {
                 return false;
@@ -613,8 +597,7 @@ public final class ToolPublicationDataStore {
         deleteReleasedObject(objectKey);
     }
 
-    private void deferVerification(String scope, String publicationId, String operationId,
-            Timestamp current, Timestamp deadline, RuntimeException error) {
+    private void deferVerification(String scope, String publicationId, String operationId, Timestamp current, Timestamp deadline, RuntimeException error) {
         jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_owner = NULL, claim_until = NULL, verification_next_at = ? WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ? AND operation_id = ?",
                 new Timestamp(Math.min(current.getTime() + 1000, deadline.getTime())), scope, publicationId, operationId);
         LOG.info("Tool publication verification retry scope={} operation={} cause={}",
@@ -679,26 +662,14 @@ public final class ToolPublicationDataStore {
         LOG.info("Tool publication verification expired operation={}", operationId);
     }
 
-    public JsonNode publishSegment(JsonNode key, String publicationId, String token,
-            String operationId, String streamId, int ordinal, byte[] input, String expectedDigest) {
-        return publishSegment(key, publicationId, token, operationId, streamId, ordinal, input, expectedDigest, false);
-    }
-
-    public JsonNode publishSegment(JsonNode key, String publicationId, String token,
-            String operationId, String streamId, int ordinal, byte[] input, String expectedDigest, boolean asynchronous) {
+    public JsonNode publishSegment(JsonNode key, String publicationId, String token, String operationId, String streamId, int ordinal, byte[] input, String expectedDigest) {
         require("stdout".equals(streamId) || "stderr".equals(streamId), "Invalid stream ID");
         require(ordinal >= 0 && ordinal < 65536, "Invalid ordinal");
         return publish(key, publicationId, token, operationId, "segment:" + streamId + ":" + ordinal,
-                null, input, expectedDigest, MAX_SEGMENT, asynchronous);
+                null, input, expectedDigest, MAX_SEGMENT);
     }
 
-    public JsonNode publishResource(JsonNode key, String publicationId, String token,
-            String operationId, String slot, String kind, byte[] input) {
-        return publishResource(key, publicationId, token, operationId, slot, kind, input, false);
-    }
-
-    public JsonNode publishResource(JsonNode key, String publicationId, String token,
-            String operationId, String slot, String kind, byte[] input, boolean asynchronous) {
+    public JsonNode publishResource(JsonNode key, String publicationId, String token, String operationId, String slot, String kind, byte[] input) {
         require(kind != null && (("managed-tool-result-page".equals(kind)
                 && slot.matches("page:(stdout|stderr):(?:0|[1-9][0-9]{0,4})"))
                 || ("managed-tool-result-manifest".equals(kind) && "manifest:1".equals(slot))
@@ -714,16 +685,11 @@ public final class ToolPublicationDataStore {
             JsonNode manifest = ToolPublicationContract.parseToolResult("manifest", input, MAX_MANIFEST);
             require(manifest.path("revision").asInt(-1) == 1, "Publication manifest revision conflicts");
         }
-        return publish(key, publicationId, token, operationId, slot, kind, input, null, maximum, asynchronous);
+        return publish(key, publicationId, token, operationId, slot, kind, input, null, maximum);
     }
 
-    public JsonNode seal(JsonNode key, String publicationId, String token, String operationId,
-            String streamId, int segmentCount, long byteLength, String digest) {
-        return seal(key, publicationId, token, operationId, streamId, segmentCount, byteLength, digest, false);
-    }
-
-    public JsonNode seal(JsonNode key, String publicationId, String token, String operationId,
-            String streamId, int segmentCount, long byteLength, String digest, boolean asynchronous) {
+    /** Admits a seal; inside the verifier context, verifies the accepted seal instead. */
+    public JsonNode seal(JsonNode key, String publicationId, String token, String operationId, String streamId, int segmentCount, long byteLength, String digest) {
         requireStagedCall(key, publicationId);
         require("stdout".equals(streamId) || "stderr".equals(streamId), "Invalid stream ID");
         require(segmentCount >= 0 && segmentCount <= 65536 && byteLength >= 0
@@ -732,117 +698,92 @@ public final class ToolPublicationDataStore {
         String slot = "seal:" + streamId;
         String requestDigest = hash(JSON.createArrayNode().add(slot).add(segmentCount)
                 .add(byteLength).add(digest).toString());
-        JsonNode accepted = submitVerification(key, publicationId, token, operationId, slot, requestDigest,
-                JSON.createObjectNode().put("segmentCount", segmentCount).put("byteLength", byteLength)
-                        .put("digest", digest), null, null, null, asynchronous);
-        if (accepted != null) {
-            return accepted;
+        if (verificationTask.get() == null) {
+            return submitVerification(key, publicationId, token, operationId, slot, requestDigest,
+                    JSON.createObjectNode().put("segmentCount", segmentCount).put("byteLength", byteLength)
+                            .put("digest", digest), null, null, null);
         }
         ScanClaim claim = transactions.execute(status -> claimScan(key, scope, publicationId, token,
-                operationId, slot, requestDigest, false));
+                operationId, slot, requestDigest));
         require(claim != null, "Seal operation unavailable");
         if (claim.receipt() != null) {
             return claim.receipt();
         }
-        try {
-            List<Map<String, Object>> existing = sealRows(scope, publicationId, streamId);
-            if (!existing.isEmpty()) {
-                Map<String, Object> row = existing.get(0);
-                requireContract(((Number) row.get("segment_count")).intValue() == segmentCount
-                        && ((Number) row.get("byte_length")).longValue() == byteLength
-                        && digest.equals(row.get("sha256")),
+        List<Map<String, Object>> existing = sealRows(scope, publicationId, streamId);
+        if (!existing.isEmpty()) {
+            Map<String, Object> row = existing.get(0);
+            requireContract(((Number) row.get("segment_count")).intValue() == segmentCount
+                    && ((Number) row.get("byte_length")).longValue() == byteLength
+                    && digest.equals(row.get("sha256")),
+                    409, "managed_tool_result_conflict", "Seal conflicts");
+        }
+        StreamScan scan = scan(scope, publicationId, streamId, segmentCount,
+                heartbeat(key, scope, publicationId, token, operationId, claim.epoch()));
+        requireContract(scan.segmentCount() == segmentCount,
+                409, "managed_tool_result_conflict", "Seal has missing or extra segments");
+        requireContract(scan.byteLength() == byteLength && scan.digest().equals(digest),
+                400, "managed_tool_result_digest_mismatch", "Seal digest mismatch");
+        return transactions.execute(status -> {
+            authorize(key, scope, publicationId, token);
+            checkScanClaim(scope, publicationId, operationId, claim.epoch());
+            List<Map<String, Object>> old = sealRows(scope, publicationId, streamId);
+            if (old.isEmpty()) {
+                persistSeal(scope, publicationId, streamId, segmentCount, byteLength, digest, operationId);
+            } else {
+                requireContract(((Number) old.get(0).get("segment_count")).intValue() == segmentCount
+                        && ((Number) old.get(0).get("byte_length")).longValue() == byteLength
+                        && digest.equals(old.get(0).get("sha256")),
                         409, "managed_tool_result_conflict", "Seal conflicts");
             }
-            StreamScan scan = scan(scope, publicationId, streamId, segmentCount,
-                    heartbeat(key, scope, publicationId, token, operationId, claim.epoch()));
-            requireContract(scan.segmentCount() == segmentCount,
-                    409, "managed_tool_result_conflict", "Seal has missing or extra segments");
-            requireContract(scan.byteLength() == byteLength && scan.digest().equals(digest),
-                    400, "managed_tool_result_digest_mismatch", "Seal digest mismatch");
-            return transactions.execute(status -> {
-                authorize(key, scope, publicationId, token);
-                checkScanClaim(scope, publicationId, operationId, claim.epoch());
-                List<Map<String, Object>> old = sealRows(scope, publicationId, streamId);
-                if (old.isEmpty()) {
-                    persistSeal(scope, publicationId, streamId, segmentCount, byteLength, digest, operationId);
-                } else {
-                    requireContract(((Number) old.get(0).get("segment_count")).intValue() == segmentCount
-                            && ((Number) old.get(0).get("byte_length")).longValue() == byteLength
-                            && digest.equals(old.get(0).get("sha256")),
-                            409, "managed_tool_result_conflict", "Seal conflicts");
-                }
-                ObjectNode receipt = JSON.createObjectNode().put("segmentCount", segmentCount)
-                        .put("byteLength", byteLength).put("digest", digest);
-                finishScan(scope, publicationId, operationId, receipt);
-                return receipt;
-            });
-        } catch (RuntimeException error) {
-            try {
-                abandonScan(scope, publicationId, operationId, claim.epoch());
-            } catch (RuntimeException cleanup) {
-                error.addSuppressed(cleanup);
-            }
-            throw error;
-        }
+            ObjectNode receipt = JSON.createObjectNode().put("segmentCount", segmentCount)
+                    .put("byteLength", byteLength).put("digest", digest);
+            finishScan(scope, publicationId, operationId, receipt);
+            return receipt;
+        });
     }
 
-    public JsonNode prefix(JsonNode key, String publicationId, String token, String operationId,
-            String streamId) {
-        return prefix(key, publicationId, token, operationId, streamId, false);
-    }
-
-    public JsonNode prefix(JsonNode key, String publicationId, String token, String operationId,
-            String streamId, boolean asynchronous) {
+    /** Admits a prefix scan; inside the verifier context, performs the accepted scan instead. */
+    public JsonNode prefix(JsonNode key, String publicationId, String token, String operationId, String streamId) {
         requireStagedCall(key, publicationId);
         require("stdout".equals(streamId) || "stderr".equals(streamId), "Invalid stream ID");
         String scope = scope(key);
         String slot = "prefix:" + streamId;
         String requestDigest = hash(slot);
-        JsonNode accepted = submitVerification(key, publicationId, token, operationId, slot, requestDigest,
-                JSON.createObjectNode(), null, null, null, asynchronous);
-        if (accepted != null) {
-            return accepted;
+        if (verificationTask.get() == null) {
+            return submitVerification(key, publicationId, token, operationId, slot, requestDigest,
+                    JSON.createObjectNode(), null, null, null);
         }
         ScanClaim claim = transactions.execute(status -> claimScan(key, scope, publicationId, token,
-                operationId, slot, requestDigest, false));
+                operationId, slot, requestDigest));
         require(claim != null, "Prefix operation unavailable");
         if (claim.receipt() != null) {
             return claim.receipt();
         }
-        try {
-            StreamScan scan = scan(scope, publicationId, streamId, -1,
-                    heartbeat(key, scope, publicationId, token, operationId, claim.epoch()));
-            return transactions.execute(status -> {
-                authorize(key, scope, publicationId, token);
-                checkScanClaim(scope, publicationId, operationId, claim.epoch());
-                List<Map<String, Object>> seals = sealRows(scope, publicationId, streamId);
-                boolean sealed = !seals.isEmpty();
-                if (sealed) {
-                    Map<String, Object> row = seals.get(0);
-                    require(((Number) row.get("segment_count")).intValue() == scan.segmentCount()
-                            && ((Number) row.get("byte_length")).longValue() == scan.byteLength()
-                            && scan.digest().equals(row.get("sha256")), "Sealed stream changed");
-                }
-                ObjectNode receipt = JSON.createObjectNode().put("segmentCount", scan.segmentCount())
-                        .put("byteLength", scan.byteLength()).put("digest", scan.digest()).put("sealed", sealed);
-                finishScan(scope, publicationId, operationId, receipt);
-                return receipt;
-            });
-        } catch (RuntimeException error) {
-            try {
-                abandonScan(scope, publicationId, operationId, claim.epoch());
-            } catch (RuntimeException cleanup) {
-                error.addSuppressed(cleanup);
+        StreamScan scan = scan(scope, publicationId, streamId, -1,
+                heartbeat(key, scope, publicationId, token, operationId, claim.epoch()));
+        return transactions.execute(status -> {
+            authorize(key, scope, publicationId, token);
+            checkScanClaim(scope, publicationId, operationId, claim.epoch());
+            List<Map<String, Object>> seals = sealRows(scope, publicationId, streamId);
+            boolean sealed = !seals.isEmpty();
+            if (sealed) {
+                Map<String, Object> row = seals.get(0);
+                require(((Number) row.get("segment_count")).intValue() == scan.segmentCount()
+                        && ((Number) row.get("byte_length")).longValue() == scan.byteLength()
+                        && scan.digest().equals(row.get("sha256")), "Sealed stream changed");
             }
-            throw error;
-        }
+            ObjectNode receipt = JSON.createObjectNode().put("segmentCount", scan.segmentCount())
+                    .put("byteLength", scan.byteLength()).put("digest", scan.digest()).put("sealed", sealed);
+            finishScan(scope, publicationId, operationId, receipt);
+            return receipt;
+        });
     }
 
     public JsonNode operationStatus(JsonNode key, String publicationId, String token, String operationId) {
         require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
                 "Invalid publication operation ID");
         String scope = scope(key);
-        var rows = jdbc.query("SELECT o.state, o.result_json, o.failure_status, o.failure_code, CASE WHEN o.execution_mode = 'ASYNC' AND o.is_verification_ready THEN 1 ELSE 0 END AS ready, COALESCE(o.recovery_deadline, o.deadline) AS deadline, CASE WHEN o.claim_owner IS NULL OR o.claim_until < " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS retryable, p.tenant_id, p.token_hash, p.workspace_id, p.session_id FROM ma_operation o JOIN ma_output_capture p ON p.scope_key = o.scope_key AND p.publication_id = o.publication_id WHERE o.operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND o.scope_key = ? AND o.publication_id = ? AND o.operation_id = ?",
+        var rows = jdbc.query("SELECT o.state, o.result_json, o.failure_status, o.failure_code, CASE WHEN o.is_verification_ready THEN 1 ELSE 0 END AS ready, COALESCE(o.recovery_deadline, o.deadline) AS deadline, CASE WHEN o.claim_owner IS NULL OR o.claim_until < " + ManagedSchemaTime.SQL_NOW + " THEN 1 ELSE 0 END AS retryable, p.tenant_id, p.token_hash, p.workspace_id, p.session_id FROM ma_operation o JOIN ma_output_capture p ON p.scope_key = o.scope_key AND p.publication_id = o.publication_id WHERE o.operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND o.scope_key = ? AND o.publication_id = ? AND o.operation_id = ?",
                 (r, n) -> {
                     Map<String, Object> row = new HashMap<>();
                     for (String field : List.of("state", "tenant_id", "workspace_id", "session_id", "token_hash",
@@ -935,7 +876,7 @@ public final class ToolPublicationDataStore {
             jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", recovery_deadline = ?, claim_generation = claim_generation + 1, claim_owner = NULL, claim_until = NULL WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ? AND operation_id = ?",
                     new Timestamp(current.getTime() + verificationWindow(scope, publicationId,
                             row.slot()).toMillis()), scope, publicationId, operationId);
-            if (row.asynchronous() && row.ready()) {
+            if (row.ready()) {
                 jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", verification_next_at = ? WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ? AND operation_id = ?",
                         current, scope, publicationId, operationId);
             }
@@ -1030,9 +971,19 @@ public final class ToolPublicationDataStore {
                 publicationId, resourceId));
         require(outcome.path("envelope").equals(finished.path("result")),
                 "Original receipt result changed");
-        byte[] records = jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
-                + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
-                byte[].class, text(key, "tenantId"), text(key, "sessionId"), revision);
+        var journalRows = jdbc.query("SELECT record_bytes, record_digest, byte_length FROM"
+                + " ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
+                (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                text(key, "tenantId"), text(key, "sessionId"), revision);
+        require(journalRows.size() == 1, "Original receipt journal is missing");
+        byte[] records = (byte[]) journalRows.getFirst().get("record_bytes");
+        if (records == null) {
+            JdbcJournalPacks packs = sessions.journalPacks();
+            records = packs == null ? null : packs.resolveBytes(text(key, "tenantId"),
+                    text(key, "sessionId"), revision,
+                    (String) journalRows.getFirst().get("record_digest"),
+                    ((Number) journalRows.getFirst().get("byte_length")).longValue());
+        }
         require(records != null, "Original receipt journal is missing");
         boolean matched = false;
         for (String line : new String(records, StandardCharsets.UTF_8).split("\n")) {
@@ -1095,8 +1046,7 @@ public final class ToolPublicationDataStore {
         return response;
     }
 
-    public JsonNode prepareAdmission(JsonNode key, String publicationId,
-            String writerId, long writerGeneration, String writerToken, JsonNode outcome) {
+    public JsonNode prepareAdmission(JsonNode key, String publicationId, String writerId, long writerGeneration, String writerToken, JsonNode outcome) {
         requireStagedCall(key, publicationId);
         require(outcome != null && outcome.isObject()
                 && outcome.path("schemaVersion").asInt(-1) == 1,
@@ -1205,13 +1155,8 @@ public final class ToolPublicationDataStore {
                 .put("byteLength", bytes.length).put("digest", digest);
     }
 
-    public JsonNode finish(JsonNode key, String publicationId, String token,
-            String operationId, byte[] bytes) {
-        return finish(key, publicationId, token, operationId, bytes, false);
-    }
-
-    public JsonNode finish(JsonNode key, String publicationId, String token,
-            String operationId, byte[] bytes, boolean asynchronous) {
+    /** Admits a finish; inside the verifier context, verifies the accepted terminal instead. */
+    public JsonNode finish(JsonNode key, String publicationId, String token, String operationId, byte[] bytes) {
         requireStagedCall(key, publicationId);
         require(bytes != null, "Missing terminal result");
         JsonNode result = ToolPublicationContract.parseToolResult("result", bytes, MAX_TERMINAL);
@@ -1221,53 +1166,39 @@ public final class ToolPublicationDataStore {
                 "Only a started pending capture can finish");
         String digest = ToolPublicationContract.sha256(bytes);
         String scope = scope(key);
-        JsonNode accepted = submitVerification(key, publicationId, token, operationId, "terminal",
-                requestDigest("terminal", bytes.length, digest), JSON.createObjectNode(), null, bytes, digest, asynchronous);
-        if (accepted != null) {
-            return accepted;
+        if (verificationTask.get() == null) {
+            return submitVerification(key, publicationId, token, operationId, "terminal",
+                    requestDigest("terminal", bytes.length, digest), JSON.createObjectNode(), null, bytes, digest);
         }
         FinishClaim claim = transactions.execute(status -> beginFinish(key, scope,
-                publicationId, token, operationId, bytes.length, digest, false));
+                publicationId, token, operationId, bytes.length, digest));
         require(claim != null, "Finish operation unavailable");
         if (claim.receipt() != null) {
             finishedInternal(key, publicationId);
             return claim.receipt();
         }
-        try {
-            if (claim.predecessor() != null) {
-                List<Operation> previous = operation(scope, publicationId, claim.predecessor(), false);
-                requireContract(previous.isEmpty() || !"FAILED".equals(previous.get(0).state()),
-                        409, "managed_tool_publication_predecessor_failed", "Finish predecessor failed");
-                requireContract(previous.size() == 1 && "SUCCEEDED".equals(previous.get(0).state()),
-                        409, "managed_tool_publication_busy", "Finish predecessor has not completed");
-            }
-            validateFinished(key, publicationId, claim.binding(), result,
-                    heartbeat(key, scope, publicationId, token, operationId, claim.epoch()));
-            if (claim.objectKey() != null) {
-                if (verificationTask.get() == null) {
-                    retention.put(key, scope, publicationId, claim.objectKey(), bytes, objects);
-                }
-                try {
-                    verify(scope, publicationId, claim.objectKey(), bytes.length, digest);
-                } catch (CorruptObjectException error) {
-                    quarantineCandidate(scope, publicationId, "terminal", operationId);
-                    throw error;
-                }
-            }
-            return transactions.execute(status -> installFinish(key, scope, publicationId,
-                    token, operationId, claim, bytes, digest));
-        } catch (RuntimeException error) {
-            try {
-                abandonScan(scope, publicationId, operationId, claim.epoch());
-            } catch (RuntimeException cleanup) {
-                error.addSuppressed(cleanup);
-            }
-            throw error;
+        if (claim.predecessor() != null) {
+            List<Operation> previous = operation(scope, publicationId, claim.predecessor(), false);
+            requireContract(previous.isEmpty() || !"FAILED".equals(previous.get(0).state()),
+                    409, "managed_tool_publication_predecessor_failed", "Finish predecessor failed");
+            requireContract(previous.size() == 1 && "SUCCEEDED".equals(previous.get(0).state()),
+                    409, "managed_tool_publication_busy", "Finish predecessor has not completed");
         }
+        validateFinished(key, publicationId, claim.binding(), result,
+                heartbeat(key, scope, publicationId, token, operationId, claim.epoch()));
+        if (claim.objectKey() != null) {
+            try {
+                verify(scope, publicationId, claim.objectKey(), bytes.length, digest);
+            } catch (CorruptObjectException error) {
+                quarantineCandidate(scope, publicationId, "terminal", operationId);
+                throw error;
+            }
+        }
+        return transactions.execute(status -> installFinish(key, scope, publicationId,
+                token, operationId, claim, bytes, digest));
     }
 
-    private FinishClaim beginFinish(JsonNode key, String scope, String publicationId,
-            String token, String operationId, int length, String digest, boolean preparing) {
+    private FinishClaim beginFinish(JsonNode key, String scope, String publicationId, String token, String operationId, int length, String digest) {
         require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
                 "Invalid finish operation ID");
         var authorization = authorizeClaim(key, scope, publicationId, token);
@@ -1297,8 +1228,6 @@ public final class ToolPublicationDataStore {
         if (!prior.isEmpty()) {
             requireContract(!"FAILED".equals(prior.get(0).state()), 409,
                     "managed_tool_publication_failed", "Publication operation has failed");
-            requireContract(preparing || verificationTask.get() != null || !prior.get(0).asynchronous(),
-                    409, "managed_tool_publication_busy", "Publication operation is asynchronous");
         }
 
         if ("FINISHED".equals(phase)) {
@@ -1356,8 +1285,7 @@ public final class ToolPublicationDataStore {
         return new FinishClaim(epoch, predecessor, objectKey, resourceId, binding, null);
     }
 
-    private JsonNode installFinish(JsonNode key, String scope, String publicationId, String token,
-            String operationId, FinishClaim claim, byte[] bytes, String digest) {
+    private JsonNode installFinish(JsonNode key, String scope, String publicationId, String token, String operationId, FinishClaim claim, byte[] bytes, String digest) {
         authorize(key, scope, publicationId, token);
         List<Operation> current = operation(scope, publicationId, operationId, true);
         requireOperationClaim(current, claim.epoch(), now());
@@ -1399,8 +1327,7 @@ public final class ToolPublicationDataStore {
         return receipt;
     }
 
-    private void validateFinished(JsonNode key, String publicationId, JsonNode binding,
-            JsonNode result, Runnable heartbeat) {
+    private void validateFinished(JsonNode key, String publicationId, JsonNode binding, JsonNode result, Runnable heartbeat) {
         JsonNode capture = result.path("capture");
         JsonNode manifestRef = capture.path("manifest");
         if (manifestRef.isNull()) {
@@ -1487,8 +1414,7 @@ public final class ToolPublicationDataStore {
                 "Finished capture status conflicts with its streams");
     }
 
-    private ScanClaim claimScan(JsonNode key, String scope, String publicationId, String token,
-            String operationId, String slot, String requestDigest, boolean preparing) {
+    private ScanClaim claimScan(JsonNode key, String scope, String publicationId, String token, String operationId, String slot, String requestDigest) {
         require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
                 "Invalid publication operation ID");
         var authorization = authorizeClaim(key, scope, publicationId, token);
@@ -1510,8 +1436,6 @@ public final class ToolPublicationDataStore {
         if (!prior.isEmpty()) {
             requireContract(!"FAILED".equals(prior.get(0).state()), 409,
                     "managed_tool_publication_failed", "Publication operation has failed");
-            requireContract(preparing || verificationTask.get() != null || !prior.get(0).asynchronous(),
-                    409, "managed_tool_publication_busy", "Publication operation is asynchronous");
         }
 
         if (verificationTask.get() != null) {
@@ -1586,9 +1510,6 @@ public final class ToolPublicationDataStore {
     }
 
     private void abandonScan(String scope, String publicationId, String operationId, long epoch) {
-        if (verificationTask.get() != null) {
-            return;
-        }
         transactions.executeWithoutResult(status -> {
             retention.lockRetainedPublication(scope, publicationId);
             List<Operation> rows = operation(scope, publicationId, operationId, true);
@@ -1601,8 +1522,7 @@ public final class ToolPublicationDataStore {
         });
     }
 
-    private StreamScan scan(String scope, String publicationId, String streamId,
-            int expectedCount, Runnable heartbeat) {
+    private StreamScan scan(String scope, String publicationId, String streamId, int expectedCount, Runnable heartbeat) {
         List<Stored> rows = jdbc.query("SELECT slot_key, resource_id, byte_length, sha256, capture_object_key AS object_key,"
                         + " capture_state AS state, operation_id FROM ma_resource WHERE scope_key = ?"
                         + " AND publication_id = ? AND slot_key LIKE ?",
@@ -1654,8 +1574,7 @@ public final class ToolPublicationDataStore {
         return new StreamScan(count, length, HexFormat.of().formatHex(aggregate.digest()));
     }
 
-    private Runnable heartbeat(JsonNode key, String scope, String publicationId, String token,
-            String operationId, long epoch) {
+    private Runnable heartbeat(JsonNode key, String scope, String publicationId, String token, String operationId, long epoch) {
         long interval = Math.max(1, claimTimeout.toNanos() / 3);
         return new Runnable() {
             private long next = System.nanoTime() + interval;
@@ -1672,7 +1591,7 @@ public final class ToolPublicationDataStore {
                     requireOperationClaim(rows, epoch, current);
                     long until = Math.min(rows.get(0).deadline().getTime(),
                             current.getTime() + claimTimeout.toMillis());
-                    jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_until = ?, verification_next_at = CASE WHEN execution_mode = 'ASYNC' AND is_verification_ready THEN ? ELSE verification_next_at END WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ? AND operation_id = ?",
+                    jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_until = ?, verification_next_at = ? WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ? AND operation_id = ?",
                             new Timestamp(until), new Timestamp(until), scope, publicationId, operationId);
                 });
                 next = System.nanoTime() + interval;
@@ -1709,8 +1628,7 @@ public final class ToolPublicationDataStore {
         });
     }
 
-    private void quarantineCandidate(String scope, String publicationId,
-            String slot, String operationId) {
+    private void quarantineCandidate(String scope, String publicationId, String slot, String operationId) {
         transactions.executeWithoutResult(status -> {
             retention.lockRetainedPublication(scope, publicationId);
             requireVerificationClaim(scope, publicationId);
@@ -1721,8 +1639,7 @@ public final class ToolPublicationDataStore {
         });
     }
 
-    private JsonNode publish(JsonNode key, String publicationId, String token, String operationId,
-            String slot, String kind, byte[] input, String expectedDigest, int maximum, boolean asynchronous) {
+    private JsonNode publish(JsonNode key, String publicationId, String token, String operationId, String slot, String kind, byte[] input, String expectedDigest, int maximum) {
         requireStagedCall(key, publicationId);
         require(input != null && input.length > 0 && input.length <= maximum, "Invalid publication size");
         require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
@@ -1731,56 +1648,11 @@ public final class ToolPublicationDataStore {
         String digest = ToolPublicationContract.sha256(bytes);
         requireContract(expectedDigest == null || expectedDigest.equals(digest),
                 400, "managed_tool_result_digest_mismatch", "Publication digest mismatch");
-        String scope = scope(key);
-        JsonNode accepted = submitVerification(key, publicationId, token, operationId, slot,
-                requestDigest(slot, bytes.length, digest), JSON.createObjectNode(), kind, bytes, digest, asynchronous);
-        if (accepted != null) {
-            return accepted;
-        }
-        Candidate candidate = transactions.execute(status -> claim(key, scope, publicationId, token,
-                operationId, slot, kind, bytes.length, digest, false));
-        require(candidate != null, "Publication operation unavailable");
-        if (candidate.receipt() != null) {
-            if (candidate.objectKey() != null) {
-                try {
-                    verify(scope, publicationId, candidate.objectKey(), bytes.length, digest);
-                } catch (CorruptObjectException error) {
-                    try {
-                        quarantine(scope, publicationId, slot);
-                    } catch (RuntimeException cleanup) {
-                        error.addSuppressed(cleanup);
-                    }
-                    throw error;
-                }
-            } else if (kind != null) {
-                readResource(key, publicationId, candidate.resourceId());
-            }
-            return candidate.receipt();
-        }
-        try {
-            if (candidate.objectKey() != null) {
-                retention.put(key, scope, publicationId, candidate.objectKey(), bytes, objects);
-                try {
-                    verify(scope, publicationId, candidate.objectKey(), bytes.length, digest);
-                } catch (CorruptObjectException error) {
-                    quarantineCandidate(scope, publicationId, slot, operationId);
-                    throw error;
-                }
-            }
-            return transactions.execute(status -> install(key, scope, publicationId, token,
-                    operationId, candidate, kind, bytes.length, bytes, digest));
-        } catch (RuntimeException error) {
-            try {
-                abandonScan(scope, publicationId, operationId, candidate.epoch());
-            } catch (RuntimeException cleanup) {
-                error.addSuppressed(cleanup);
-            }
-            throw error;
-        }
+        return submitVerification(key, publicationId, token, operationId, slot,
+                requestDigest(slot, bytes.length, digest), JSON.createObjectNode(), kind, bytes, digest);
     }
 
-    private Candidate claim(JsonNode key, String scope, String publicationId, String token,
-            String operationId, String slot, String kind, int length, String digest, boolean preparing) {
+    private Candidate claim(JsonNode key, String scope, String publicationId, String token, String operationId, String slot, String kind, int length, String digest) {
         var authorization = authorizeClaim(key, scope, publicationId, token);
         JsonNode binding = authorization.binding();
         if (authorization.execution().getState()
@@ -1807,8 +1679,6 @@ public final class ToolPublicationDataStore {
         if (!prior.isEmpty()) {
             requireContract(!"FAILED".equals(prior.get(0).state()), 409,
                     "managed_tool_publication_failed", "Publication operation has failed");
-            requireContract(preparing || verificationTask.get() != null || !prior.get(0).asynchronous(),
-                    409, "managed_tool_publication_busy", "Publication operation is asynchronous");
         }
 
         if (!prior.isEmpty()) {
@@ -1872,8 +1742,7 @@ public final class ToolPublicationDataStore {
         return new Candidate(objectKey, resourceId, epoch, null);
     }
 
-    private JsonNode install(JsonNode key, String scope, String publicationId, String token,
-            String operationId, Candidate candidate, String kind, int length, byte[] bytes, String digest) {
+    private JsonNode install(JsonNode key, String scope, String publicationId, String token, String operationId, Candidate candidate, String kind, int length, byte[] bytes, String digest) {
         JsonNode binding = authorize(key, scope, publicationId, token);
         String active = jdbc.queryForObject("SELECT active_operation_id FROM ma_output_capture"
                 + " WHERE scope_key = ? AND publication_id = ?", String.class, scope, publicationId);
@@ -1903,8 +1772,7 @@ public final class ToolPublicationDataStore {
         return slot.startsWith("segment:") ? "capture" : "producer";
     }
 
-    private JsonNode receipt(JsonNode binding, String slot, String resourceId, String kind,
-            int length, String digest) {
+    private JsonNode receipt(JsonNode binding, String slot, String resourceId, String kind, int length, String digest) {
         ObjectNode result = JSON.createObjectNode();
         if (kind != null) {
             return result.put("resourceId", resourceId).put("kind", kind)
@@ -1922,8 +1790,7 @@ public final class ToolPublicationDataStore {
         return binding;
     }
 
-    private ToolPublicationStore.ProducerBinding authorizeClaim(JsonNode key, String scope,
-            String publicationId, String token) {
+    private ToolPublicationStore.ProducerBinding authorizeClaim(JsonNode key, String scope, String publicationId, String token) {
         var authorization = token == null ? verificationAuthorization(scope, publicationId)
                 : grants.producerClaimBindingLocked(scope, publicationId, token);
         require(authorization.binding().path("sessionKey").equals(key), "Publication scope conflicts");
@@ -1946,8 +1813,7 @@ public final class ToolPublicationDataStore {
         return grants.lockOriginalSettledResult(key, publicationId, finished);
     }
 
-    private JsonNode exactSucceededReplay(String scope, String publicationId, String operationId,
-            String slot, String requestDigest) {
+    private JsonNode exactSucceededReplay(String scope, String publicationId, String operationId, String slot, String requestDigest) {
         var publication = jdbc.query("SELECT producer_phase, finish_operation_id,"
                 + " terminal_resource_id, CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
                 + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
@@ -2026,8 +1892,7 @@ public final class ToolPublicationDataStore {
         return result;
     }
 
-    private void persistSeal(String scope, String publicationId, String stream, int count, long length,
-            String digest, String operationId) {
+    private void persistSeal(String scope, String publicationId, String stream, int count, long length, String digest, String operationId) {
         jdbc.query("SELECT publication_id FROM ma_output_capture WHERE scope_key = ?"
                 + " AND publication_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId);
         List<Map<String, Object>> rows = new ArrayList<>(sealRows(scope, publicationId, null));
@@ -2059,8 +1924,7 @@ public final class ToolPublicationDataStore {
         jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", seal_manifest_resource_key = ?, seal_manifest_sha256 = ? WHERE scope_key = ? AND publication_id = ?", resourceKey, sha, scope, publicationId);
     }
 
-    private void insertCaptureResource(String scope, String publicationId, String slot, String resourceId,
-            String kind, long length, String digest, String objectKey, String operationId, Timestamp createdAt) {
+    private void insertCaptureResource(String scope, String publicationId, String slot, String resourceId, String kind, long length, String digest, String objectKey, String operationId, Timestamp createdAt) {
         var capture = jdbc.query("SELECT tenant_id, workspace_id, session_id FROM ma_output_capture"
                 + " WHERE scope_key = ? AND publication_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId).getFirst();
         String tenant = (String) capture.get("tenant_id");
@@ -2118,15 +1982,15 @@ public final class ToolPublicationDataStore {
     }
 
     private List<Operation> operation(String scope, String publicationId, String operationId, boolean locked) {
-        return jdbc.query("SELECT request_digest, slot_key, state, claim_generation, claim_until, execution_mode,"
+        return jdbc.query("SELECT request_digest, slot_key, state, claim_generation, claim_until,"
                         + " is_verification_ready,"
                         + " COALESCE(recovery_deadline, deadline) AS deadline"
                         + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND scope_key = ? AND publication_id = ?"
                         + " AND operation_id = ?" + (locked ? " FOR UPDATE" : ""),
                 (r, n) -> new Operation(r.getString("request_digest"), r.getString("slot_key"),
                         r.getString("state"), r.getLong("claim_generation"), ManagedSchemaTime.timestamp(r, "claim_until"),
-                        ManagedSchemaTime.timestamp(r, "deadline"), "ASYNC".equals(r.getString("execution_mode")),
-                        r.getBoolean("is_verification_ready")), scope, publicationId, operationId);
+                        ManagedSchemaTime.timestamp(r, "deadline"), r.getBoolean("is_verification_ready")),
+                scope, publicationId, operationId);
     }
 
     private void verify(String scope, String publicationId, String objectKey, long length, String digest) {
@@ -2167,8 +2031,7 @@ public final class ToolPublicationDataStore {
         }
     }
 
-    byte[] readResource(JsonNode key, String publicationId, String resourceId,
-            com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
+    byte[] readResource(JsonNode key, String publicationId, String resourceId, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
         guard.run();
         byte[] bytes = readResourceInternal(key, publicationId, resourceId, lease, guard);
         lease.check();
@@ -2176,8 +2039,7 @@ public final class ToolPublicationDataStore {
         return bytes;
     }
 
-    private byte[] readResourceInternal(JsonNode key, String publicationId, String resourceId,
-            com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
+    private byte[] readResourceInternal(JsonNode key, String publicationId, String resourceId, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
         lease.requireScope(key);
         lease.check();
         String scope = scope(key);
@@ -2212,8 +2074,7 @@ public final class ToolPublicationDataStore {
         return bytes;
     }
 
-    public byte[] readRange(JsonNode key, String publicationId, String writerToken,
-            JsonNode manifestRef, JsonNode expectedIdentity, String streamId, long offset, int length) {
+    public byte[] readRange(JsonNode key, String publicationId, String writerToken, JsonNode manifestRef, JsonNode expectedIdentity, String streamId, long offset, int length) {
         sessions.restore(text(key, "tenantId"), text(key, "workspaceId"),
                 text(key, "sessionId"), writerToken);
         try (var lease = retention.read(key)) {
@@ -2260,8 +2121,7 @@ public final class ToolPublicationDataStore {
         return verifiedStream(key, publicationId, manifestRef, expectedIdentity, streamId, true, lease, guard);
     }
 
-    void requireReferenced(JsonNode key, String publicationId, JsonNode outcomeRef,
-            long revision, long sequence) {
+    void requireReferenced(JsonNode key, String publicationId, JsonNode outcomeRef, long revision, long sequence) {
         require(referenced(referencedPublications(key, List.of(publicationId)).get(publicationId),
                 outcomeRef, revision, sequence), "Publication receipt is unavailable");
     }
@@ -2301,8 +2161,7 @@ public final class ToolPublicationDataStore {
                 && row.get("receipt_sequence") instanceof Number q && q.longValue() == sequence;
     }
 
-    private VerifiedStream verifiedStream(JsonNode key, String publicationId,
-            JsonNode manifestRef, JsonNode expectedIdentity, String streamId, boolean requireFinished, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
+    private VerifiedStream verifiedStream(JsonNode key, String publicationId, JsonNode manifestRef, JsonNode expectedIdentity, String streamId, boolean requireFinished, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
         guard.run();
         String scope = scope(key);
         var publications = jdbc.query("SELECT binding_json, producer_phase,"
@@ -2501,15 +2360,13 @@ public final class ToolPublicationDataStore {
         }
     }
 
-    private byte[] referencedResource(JsonNode key, String publicationId, JsonNode ref,
-            String kind, int maximum) {
+    private byte[] referencedResource(JsonNode key, String publicationId, JsonNode ref, String kind, int maximum) {
         try (var lease = retention.read(key)) {
             return referencedResource(key, publicationId, ref, kind, maximum, lease, lease::check);
         }
     }
 
-    private byte[] referencedResource(JsonNode key, String publicationId, JsonNode ref,
-            String kind, int maximum, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
+    private byte[] referencedResource(JsonNode key, String publicationId, JsonNode ref, String kind, int maximum, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard) {
         guard.run();
         Resource resource = catalogResource(key, publicationId, text(ref, "resourceId"));
         require(refMatches(resource, ref, kind) && resource.length() <= maximum,
@@ -2645,8 +2502,7 @@ public final class ToolPublicationDataStore {
         return verificationBudget.timeout(operationTimeout, bytes);
     }
 
-    private static void requireContract(boolean valid, int status,
-            String code, String message) {
+    private static void requireContract(boolean valid, int status, String code, String message) {
         if (!valid) {
             throw new ManagedAgentException(status, code, message);
         }
@@ -2673,8 +2529,7 @@ public final class ToolPublicationDataStore {
     private record ScanClaim(long epoch, JsonNode receipt) {
     }
 
-    private record FinishClaim(long epoch, String predecessor, String objectKey,
-            String resourceId, JsonNode binding, JsonNode receipt) {
+    private record FinishClaim(long epoch, String predecessor, String objectKey, String resourceId, JsonNode binding, JsonNode receipt) {
     }
 
     private record AdmissionCandidate(String resourceId, String objectKey, boolean verified) {
@@ -2683,15 +2538,12 @@ public final class ToolPublicationDataStore {
     private record StreamScan(int segmentCount, long byteLength, String digest) {
     }
 
-    private record Stored(String slot, String resourceId, long length, String digest,
-            String objectKey, String state, String operationId) {
+    private record Stored(String slot, String resourceId, long length, String digest, String objectKey, String state, String operationId) {
     }
 
-    private record Operation(String digest, String slot, String state, long epoch,
-            Timestamp claimUntil, Timestamp deadline, boolean asynchronous, boolean ready) {
+    private record Operation(String digest, String slot, String state, long epoch, Timestamp claimUntil, Timestamp deadline, boolean ready) {
     }
 
-    private record Resource(String slot, String kind, long length, String digest, String objectKey,
-            byte[] inlineBytes, String state) {
+    private record Resource(String slot, String kind, long length, String digest, String objectKey, byte[] inlineBytes, String state) {
     }
 }

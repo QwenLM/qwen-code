@@ -112,6 +112,23 @@ class ManagedSessionResourcesServiceTest {
     }
 
     @Test
+    void boundsRetainedTombstonesInIndependentSelections() throws Exception {
+        ObjectNode active = bundle(1);
+        addSelections(active, 32, 64);
+        ObjectNode activeRef = resource("managed-extension-config-bundle", active);
+        latest(config(1, 1, "active", null, activeRef, null));
+        assertThat(get().path("configCoverage").asText()).isEqualTo("complete");
+
+        ObjectNode overfilled = bundle(1);
+        addSelections(overfilled, 32, 65);
+        ObjectNode overfilledRef = resource("managed-extension-config-bundle", overfilled);
+        latest(config(1, 1, "active", null, overfilledRef, null));
+        JsonNode rejected = get();
+        assertThat(rejected.path("configCoverage").asText()).isEqualTo("partial");
+        assertThat(rejected.path("coverageReasons").toString()).contains("invalid_resource");
+    }
+
+    @Test
     void boundsTheConfigurationChainAndDoesNotInventAnActiveBundle() throws Exception {
         ObjectNode activeRef = resource("managed-extension-config-bundle", bundle(0));
         ObjectNode previous = null;
@@ -160,6 +177,28 @@ class ManagedSessionResourcesServiceTest {
         assertThat(get().at("/servers/0/discovery/tools").asText()).isEqualTo("stale");
         selection(pin("server").put("state", "removed"));
         assertThat(get().at("/servers/0/selectionState").asText()).isEqualTo("removed");
+    }
+
+    @Test
+    void readsThirtyTwoLiveSelectionsPlusRetainedTombstonesAndRejectsAnOverfilledLiveCount() throws Exception {
+        ObjectNode settings = JSON.createObjectNode().put("kind", "hosted-mcp-settings");
+        ArrayNode servers = settings.putArray("servers");
+        for (int index = 0; index < 32; index++) {
+            servers.add(pin("live-" + index).put("state", "disabled"));
+        }
+        servers.add(pin("tombstone").put("state", "removed"));
+        latest(settings);
+        var accepted = get();
+        assertThat(accepted.path("availability").asText()).isEqualTo("available");
+        assertThat(accepted.path("servers")).hasSize(33);
+
+        servers.add(pin("live-32").put("state", "disabled"));
+        latest(settings);
+        var rejected = get();
+        assertThat(rejected.path("availability").asText()).isEqualTo("partial");
+        assertThat(rejected.path("configCoverage").asText()).isEqualTo("partial");
+        assertThat(rejected.path("coverageReasons").toString()).contains("invalid_resource");
+        assertThat(rejected.path("servers")).isEmpty();
     }
 
     @Test
@@ -288,6 +327,13 @@ class ManagedSessionResourcesServiceTest {
         bundle.putArray("mcpServers");
         bundle.putArray("independentMcpSelections");
         return bundle;
+    }
+
+    private static void addSelections(ObjectNode bundle, int live, int removed) {
+        for (int index = 0; index < live + removed; index++) {
+            bundle.withArray("independentMcpSelections").add(pin((index < live ? "live-" : "removed-") + index)
+                    .put("state", index == 0 ? "enabled" : index < live ? "disabled" : "removed"));
+        }
     }
 
     private ObjectNode config(int recordRevision, int configRevision, String phase, JsonNode previous, JsonNode bundle, JsonNode baseline) throws Exception {

@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -61,7 +62,7 @@ final class WorkspaceOperations {
         Object physical = data.get("physical_key");
         if (storage != null) {
             var aliases = jdbc.queryForList("SELECT storage_kind FROM ma_storage WHERE alias_key = ?", String.class,
-                    com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
+                    RuntimeAdmissionFences.storageAliasKey(tenant, storage));
             if (aliases.size() == 1 && "LOCAL".equals(aliases.getFirst())) {
                 physical = LocalStorageOwners.key(jdbc, tenant, storage);
                 if (kind == Kind.CHILD_WORKSPACE || kind == Kind.SESSION_WORKTREE) {
@@ -79,7 +80,7 @@ final class WorkspaceOperations {
                         ? ManagedSessionStore.sessionScopeKey(tenant, session) : null, kind.name(), id.getBytes(StandardCharsets.UTF_8),
                 tenant.getBytes(StandardCharsets.UTF_8), data.get("session_id"),
                 data.containsKey("binding_id") ? "RUNTIME_BINDING" : "STORAGE", hash(target), target.getBytes(StandardCharsets.UTF_8), revision,
-                storage == null ? null : com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
+                storage == null ? null : RuntimeAdmissionFences.storageAliasKey(tenant, storage),
                 physical, state, data.getOrDefault("phase", state), data.get("delivery_state"),
                 data.getOrDefault("request_digest", hash(request)), request, envelope(data), data.getOrDefault("available_at", 0L));
     }

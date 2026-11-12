@@ -38,6 +38,10 @@ import { useSharedNow } from '../../hooks/useSharedNow';
 import { useSubagentDetails } from '../../subagentDetailsContext';
 import { useMonitorDetails } from '../../monitorDetailsContext';
 import { useWorkflowDetails } from '../../workflowDetailsContext';
+import {
+  REVEAL_REMOUNT_GRACE_MS,
+  useToolRevealRequest,
+} from '../../toolRevealContext';
 import { findWorkflowTaskForTool } from '../../utils/workflowTasks';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import { WorkflowExecutionView } from './WorkflowExecutionView';
@@ -587,6 +591,8 @@ interface ToolLineProps {
   detailsVisible?: boolean;
   hideHeader?: boolean;
   hideCollapsedOutput?: boolean;
+  /** Bumped by the enclosing group to open this row from elsewhere. */
+  revealSeq?: number;
 }
 
 function WorkflowToolDetail({
@@ -1204,6 +1210,7 @@ function areToolLinePropsEqual(
   if (prev.detailsVisible !== next.detailsVisible) return false;
   if (prev.hideHeader !== next.hideHeader) return false;
   if (prev.hideCollapsedOutput !== next.hideCollapsedOutput) return false;
+  if (prev.revealSeq !== next.revealSeq) return false;
   const a = prev.tool;
   const b = next.tool;
   return (
@@ -1317,6 +1324,7 @@ export const ToolLine = memo(function ToolLine({
   detailsVisible = true,
   hideHeader = false,
   hideCollapsedOutput = false,
+  revealSeq,
 }: ToolLineProps) {
   const { t } = useI18n();
   const transcriptRenderMode = useTranscriptRenderMode();
@@ -1344,21 +1352,27 @@ export const ToolLine = memo(function ToolLine({
       (!summaryOnly && shouldAutoExpand(tool) && !locksPendingEditApproval),
   );
   const monitorDetailsRequestRef = useRef<object | null>(null);
-  // Set once the user explicitly toggles this row, so auto-collapse-on-
-  // completion never silently overrides their choice.
+  // Set once the user explicitly toggles this row, so regrouping or
+  // auto-collapse-on-completion never silently overrides their choice.
   const userToggledRef = useRef(false);
   const isWorkflow = isWorkflowToolName(tool.toolName);
 
+  useEffect(() => {
+    userToggledRef.current = false;
+  }, [locksPendingEditApproval, tool.callId, tool.toolName]);
+
   useEffect(
     () => {
-      setExpanded(
-        isForcedExpanded ||
-          (!summaryOnly && shouldAutoExpand(tool) && !locksPendingEditApproval),
-      );
+      if (!userToggledRef.current || isForcedExpanded) {
+        setExpanded(
+          isForcedExpanded ||
+            (!summaryOnly &&
+              shouldAutoExpand(tool) &&
+              !locksPendingEditApproval),
+        );
+      }
       setMonitorDetailsUnavailable(false);
       monitorDetailsRequestRef.current = null;
-      // A new tool identity resets the manual latch.
-      userToggledRef.current = false;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
@@ -1406,6 +1420,16 @@ export const ToolLine = memo(function ToolLine({
       setExpanded(false);
     }
   }, [isForcedExpanded, isAgent, tool.status]);
+
+  // The enclosing group was asked to open this row (the composer task chips
+  // locate a workflow). Runs after the reset and auto-collapse effects above
+  // so it wins on mount, and latches like a click so completion does not fold
+  // the row back.
+  useEffect(() => {
+    if (!revealSeq) return;
+    userToggledRef.current = true;
+    setExpanded(true);
+  }, [revealSeq]);
 
   if (isAgent) {
     const info = getAgentDisplayInfo(tool, now);
@@ -2147,6 +2171,27 @@ export const ToolGroup = memo(function ToolGroup({
       setChatExpanded(true);
     }
   }, [singleMcpAppResourceUri, hasMcpApp]);
+  // Another surface (the composer task chips) asked to open one of this
+  // group's calls: unfold the group and tell that call's row to open.
+  const [reveal, setReveal] = useState<{ callId: string; seq: number }>();
+  const revealSequence = useRef(0);
+  useToolRevealRequest(
+    (callId) => tools.some((tool) => toolContainsCallId(tool, callId)),
+    (callId) => {
+      setChatExpanded(true);
+      setReveal({ callId, seq: ++revealSequence.current });
+    },
+  );
+  useEffect(() => {
+    if (!reveal) return;
+    const timer = setTimeout(
+      () => setReveal(undefined),
+      REVEAL_REMOUNT_GRACE_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [reveal]);
+  const revealSeqFor = (tool: ACPToolCall) =>
+    reveal && toolContainsCallId(tool, reveal.callId) ? reveal.seq : undefined;
 
   const tryOpenMonitorDetails = () => {
     if (!singleMonitor || !monitorDetails) return;
@@ -2323,6 +2368,7 @@ export const ToolGroup = memo(function ToolGroup({
                           }
                           detailsVisible={showGroupContent}
                           hideHeader={!!singleTool && !compactToolLines}
+                          revealSeq={revealSeqFor(tool)}
                         />
                       )}
                     </Fragment>
@@ -2361,6 +2407,7 @@ export const ToolGroup = memo(function ToolGroup({
           onTurnOutputOpen={onTurnOutputOpen}
           onToolResultOpen={onToolResultOpen}
           forceExpanded={documentMode}
+          revealSeq={revealSeqFor(tool)}
         />
       ))}
     </div>
