@@ -190,20 +190,32 @@ test('ci.yml runs the check in lint_and_static on pull requests', () => {
     /^ {8}continue-on-error: true$/m,
     'test growth step must stay advisory',
   );
-  for (const expected of [
-    'github.event.pull_request.base.sha',
-    'github.event.pull_request.head.sha',
-    'node .github/scripts/check-test-growth.mjs',
-  ]) {
-    assert.ok(stepBlock.includes(expected), `step must include ${expected}`);
-  }
-  // Whole line, not just the key: an empty value or a mistyped secret name
-  // keeps the key in place and the report silently becomes a no-op.
-  assert.match(
-    stepBlock,
-    /^ {10}GITHUB_TOKEN: '\$\{\{ secrets\.GITHUB_TOKEN \}\}'$/m,
-    'test growth step must pass the GitHub token',
+  assert.ok(
+    stepBlock.includes('node .github/scripts/check-test-growth.mjs'),
+    'step must run the test growth script',
   );
+  // Whole lines, not keys or values: the script destructures these three names
+  // from process.env and returns early — one warning, exit 0, no summary — if
+  // any is missing. A key-only pin accepts an empty value or a mistyped secret;
+  // a value-only pin accepts a renamed key (`BASE_SHA` → `TEST_GROWTH_BASE_SHA`,
+  // a prefix this job already uses for LINT_BASE_SHA). Either keeps the report a
+  // permanent no-op behind a green check, since the step is continue-on-error.
+  for (const [line, label] of [
+    [
+      /^ {10}GITHUB_TOKEN: '\$\{\{ secrets\.GITHUB_TOKEN \}\}'$/m,
+      'the GitHub token',
+    ],
+    [
+      /^ {10}BASE_SHA: '\$\{\{ github\.event\.pull_request\.base\.sha \}\}'$/m,
+      'BASE_SHA',
+    ],
+    [
+      /^ {10}HEAD_SHA: '\$\{\{ github\.event\.pull_request\.head\.sha \}\}'$/m,
+      'HEAD_SHA',
+    ],
+  ]) {
+    assert.match(stepBlock, line, `test growth step must pass ${label}`);
+  }
   assert.ok(
     step < job.indexOf("- name: 'Install dependencies'"),
     'the check needs no dependencies and must run before the install',
