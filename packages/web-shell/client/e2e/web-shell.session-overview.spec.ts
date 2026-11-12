@@ -502,12 +502,8 @@ test('hover details preserve a focused search field @smoke', async ({
 test('shadow portal details keep focus in the overview after hover replacement @smoke', async ({
   page,
 }) => {
-  // This test boots the app twice — once in beforeEach and once on the
-  // shadow-DOM harness page — which exceeds the default 60s budget on a
-  // loaded CI host even when every assertion passes.
-  test.setTimeout(120_000);
   await page.goto('/e2e/session-overview-shadow-dom.html');
-  await page.getByRole('button', { name: 'More', exact: true }).click();
+  // A footer-only shell renders footer actions inline; there is no More menu.
   await page
     .getByRole('button', { name: 'Session Overview', exact: true })
     .click();
