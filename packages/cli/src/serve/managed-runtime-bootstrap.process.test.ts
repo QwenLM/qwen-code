@@ -46,6 +46,11 @@ import {
   type SshStorageIdentity,
   type SshStorageMarker,
 } from './managed-runtime-bootstrap.js';
+import {
+  MACHINE_ID,
+  PINNED_MACHINE_ID,
+  pinHostMachineId,
+} from './managed-runtime-bootstrap.test-helper.js';
 
 const api = pathToFileURL(
   createRequire(import.meta.url).resolve('tsx/esm/api'),
@@ -54,8 +59,6 @@ const source = new URL('./managed-runtime-bootstrap.ts', import.meta.url).href;
 const workerSource = new URL('./managed-runtime-ssh-worker.ts', import.meta.url)
   .href;
 const tsconfig = fileURLToPath(new URL('../../tsconfig.json', import.meta.url));
-const MACHINE_ID = '/etc/machine-id';
-const PINNED_MACHINE_ID = '0123456789abcdef0123456789abcdef';
 // The runtime refuses without a stable host identity; pin the host file so the
 // real-process suite runs on hosts that do not provide one.
 const pinMachineId =
@@ -76,11 +79,7 @@ describe.skipIf(!['linux', 'darwin'].includes(process.platform))(
     const pids = new Set<number>();
 
     beforeEach(async () => {
-      const delegateReadFile = fs.readFile;
-      vi.spyOn(fs, 'readFile').mockImplementation(async (...args) => {
-        if (String(args[0]) === MACHINE_ID) return PINNED_MACHINE_ID;
-        return delegateReadFile(...args);
-      });
+      pinHostMachineId();
       root = await mkdtemp(path.join(tmpdir(), 'qwen-ssh-bootstrap-'));
       // macOS's temporary directory may itself be a symlink.
       root = await (await import('node:fs/promises')).realpath(root);
