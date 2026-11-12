@@ -770,6 +770,10 @@ it.each([
   ['exec', { source: 'echo hi' }, 'echo hi'],
   ['Exec', { source: 'echo hi' }, 'echo hi'],
   ['EXEC', { source: 'echo hi' }, 'echo hi'],
+  // The guard is `source.trim()`, the value is the untouched string: the
+  // card has to keep the indentation and line structure the model wrote, or
+  // the text a reader copies is no longer the code that ran.
+  ['exec', { source: '\nif (a) {\n  b();\n}\n' }, '\nif (a) {\n  b();\n}\n'],
 ] as const)(
   'shows the JavaScript body of a code-mode %s call',
   (toolName, args, expected) => {
