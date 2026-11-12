@@ -58,18 +58,17 @@ function input() {
 }
 
 async function key(key: string, options: KeyboardEventInit = {}) {
-  let prevented = false;
+  let dispatched!: KeyboardEvent;
   await act(async () => {
-    const event = new KeyboardEvent('keydown', {
+    dispatched = new KeyboardEvent('keydown', {
       key,
       bubbles: true,
       cancelable: true,
       ...options,
     });
-    input().dispatchEvent(event);
-    prevented = event.defaultPrevented;
+    input().dispatchEvent(dispatched);
   });
-  return prevented;
+  return dispatched;
 }
 
 async function type(value: string) {
@@ -171,7 +170,9 @@ it('navigates results and opens the selected workspace even when IDs collide', a
 
 it('leaves modified arrow keys to the text input', async () => {
   await render();
-  expect(await key('ArrowDown', { shiftKey: true })).toBe(false);
+  expect((await key('ArrowDown', { shiftKey: true })).defaultPrevented).toBe(
+    false,
+  );
   expect(portal.querySelector('[aria-selected="true"]')?.textContent).toContain(
     'First chat',
   );
@@ -214,21 +215,45 @@ it.each([
   'keeps the dialog open when Escape cancels an IME composition (%s)',
   async (_name, init) => {
     await render();
-    await key('Escape', init);
+    const escape = await key('Escape', init);
+    expect(escape.defaultPrevented).toBe(false);
+    expect(escape.key).toBe('Escape');
     expect(props.onClose).not.toHaveBeenCalled();
     expect(portal.querySelector('[role="dialog"]')).not.toBeNull();
   },
 );
 
-it('suppresses the resting row hover tint while navigating by keyboard', async () => {
+it('resets the highlight to the first result when the query changes', async () => {
   await render();
   await key('ArrowDown');
-  const rows = Array.from(
+  let rows = Array.from(
     portal.querySelectorAll<HTMLElement>('[role="option"]'),
   );
-  expect(rows[0].className).not.toContain('hover:bg-accent/60');
-  expect(rows[0].className).not.toContain('bg-accent');
-  expect(rows[1].className).toContain('bg-accent');
+  expect(rows[1].getAttribute('aria-selected')).toBe('true');
+
+  await type('chat');
+  rows = Array.from(portal.querySelectorAll<HTMLElement>('[role="option"]'));
+  expect(rows[0].getAttribute('aria-selected')).toBe('true');
+  expect(rows[1].getAttribute('aria-selected')).toBe('false');
+});
+
+it('suppresses the resting row hover tint while navigating by keyboard', async () => {
+  await render();
+  let rows = Array.from(
+    portal.querySelectorAll<HTMLElement>('[role="option"]'),
+  );
+  // Pointer mode: the active row is filled, the resting row keeps the hover
+  // affordance.
+  expect(rows[0].classList.contains('bg-accent')).toBe(true);
+  expect(rows[1].classList.contains('bg-accent')).toBe(false);
+  expect(rows[1].classList.contains('hover:bg-accent/60')).toBe(true);
+
+  await key('ArrowDown');
+  rows = Array.from(portal.querySelectorAll<HTMLElement>('[role="option"]'));
+  expect(rows[1].classList.contains('bg-accent')).toBe(true);
+  expect(rows[1].classList.contains('hover:bg-accent/60')).toBe(false);
+  expect(rows[0].classList.contains('bg-accent')).toBe(false);
+  expect(rows[0].classList.contains('hover:bg-accent/60')).toBe(false);
 });
 
 it('matches a typed regex metacharacter literally', async () => {

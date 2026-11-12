@@ -440,4 +440,90 @@ describe('useListboxKeyboard', () => {
     expect(onConfirm).toHaveBeenCalledWith(0);
     outside.remove();
   });
+
+  it('resolves the active element through a shadow root for scoped dialogs', () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: 'open' });
+    const panel = document.createElement('div');
+    const inside = document.createElement('input');
+    panel.appendChild(inside);
+    shadow.appendChild(panel);
+    inside.focus();
+    // `document.activeElement` retargets to the host, not the panel's input.
+    expect(document.activeElement).toBe(host);
+
+    const onActiveIndexChange = vi.fn();
+    const onConfirm = vi.fn();
+    mount({
+      itemCount: 3,
+      activeIndex: 0,
+      onActiveIndexChange,
+      onConfirm,
+      scope: { current: panel },
+    });
+
+    press('ArrowDown');
+    expect(onActiveIndexChange).toHaveBeenLastCalledWith(1);
+    press('Enter');
+    expect(onConfirm).toHaveBeenCalledWith(0);
+    host.remove();
+  });
+
+  it('stays inert when a shadow-root scope has no focused element', () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: 'open' });
+    const panel = document.createElement('div');
+    panel.appendChild(document.createElement('input'));
+    shadow.appendChild(panel);
+    const outside = document.createElement('input');
+    document.body.appendChild(outside);
+    outside.focus();
+
+    const onActiveIndexChange = vi.fn();
+    mount({
+      itemCount: 3,
+      activeIndex: 0,
+      onActiveIndexChange,
+      onConfirm: vi.fn(),
+      scope: { current: panel },
+    });
+
+    // The panel's shadow root has no active element while focus sits outside
+    // it, so the list must stay inert rather than guess.
+    press('ArrowDown');
+    expect(onActiveIndexChange).not.toHaveBeenCalled();
+    outside.remove();
+    host.remove();
+  });
+
+  it('keeps scoped keys active when focus drops to the document body', () => {
+    const scopeRef = createRef<HTMLDivElement>();
+    const onActiveIndexChange = vi.fn();
+    function ScopedList() {
+      useListboxKeyboard({
+        itemCount: 3,
+        activeIndex: 0,
+        onActiveIndexChange,
+        onConfirm: vi.fn(),
+        scope: scopeRef,
+      });
+      return (
+        <div ref={scopeRef}>
+          <input aria-label="inside scope" />
+        </div>
+      );
+    }
+
+    mountNode(<ScopedList />);
+    act(() => {
+      scopeRef.current!.querySelector('input')!.focus();
+      (document.activeElement as HTMLElement).blur();
+    });
+    expect(document.activeElement).toBe(document.body);
+
+    press('ArrowDown');
+    expect(onActiveIndexChange).toHaveBeenLastCalledWith(1);
+  });
 });

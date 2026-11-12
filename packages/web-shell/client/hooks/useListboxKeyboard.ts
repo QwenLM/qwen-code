@@ -4,6 +4,7 @@ import {
   DialogShellIdContext,
   isTopDialogShellId,
 } from '../components/dialogs/DialogShell';
+import { getShadowAwareActiveElement } from '../utils/dom';
 
 export interface ListboxKeyboardOptions {
   /** Number of selectable items in the list. */
@@ -144,8 +145,15 @@ export function useListboxKeyboard({
       // focus may sit on either the search input or the list itself.
       if (!isTopDialogShellId(dialogShellId)) return;
       // Dialogs outside the DialogShell stack still need to yield while focus
-      // is in another dialog above them.
-      if (scope && !scope.current?.contains(document.activeElement)) return;
+      // is in another dialog above them. `document.activeElement` retargets to
+      // the shadow host in portal mode, so resolve it from the panel's root;
+      // body means focus was dropped on non-focusable dialog chrome, which
+      // still belongs to this dialog.
+      if (scope) {
+        const active = getShadowAwareActiveElement(scope.current);
+        if (active !== document.body && !scope.current?.contains(active))
+          return;
+      }
       // keyCode 229 is the cross-browser "this key belongs to the IME" marker.
       // WebKit fires `compositionend` BEFORE the committing Enter's keydown,
       // so that keydown arrives with isComposing === false — only the legacy

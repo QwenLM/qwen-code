@@ -837,8 +837,73 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     expect(onSearchQueryChange).toHaveBeenLastCalledWith('');
   });
 
+  it('clears the host query when search closes without the dialog', async () => {
+    const onSearchQueryChange = vi.fn();
+
+    function CollapsibleHost() {
+      const [collapsed, setCollapsed] = React.useState(false);
+      return (
+        <I18nProvider language="en">
+          <McpAppGeneratedUiOwnerContext.Provider value={generatedUiOwner}>
+            <WebShellSidebar
+              archivedSessionsTarget={null}
+              collapsed={collapsed}
+              onCollapsedChange={setCollapsed}
+              onOpenSettings={() => {}}
+              onOpenDaemonStatus={() => {}}
+              onOpenScheduledTasks={() => {}}
+              onOpenGoals={() => {}}
+              onOpenSessions={() => {}}
+              onOpenSplitView={() => {}}
+              onNewSession={() => false}
+              onLoadSession={loadSession}
+              onError={() => {}}
+              onSearchQueryChange={onSearchQueryChange}
+              sessionActions={{ inlineItems: ['delete'] }}
+            />
+          </McpAppGeneratedUiOwnerContext.Provider>
+        </I18nProvider>
+      );
+    }
+
+    act(() => root.render(<CollapsibleHost />));
+    await flushSidebar();
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Search sessions"]',
+        )!,
+      ),
+    );
+    await flushSidebar();
+    const input = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Search sessions"]',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Managed needle');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flushSidebar();
+    expect(onSearchQueryChange).toHaveBeenLastCalledWith('Managed needle');
+
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          '[data-web-shell-sidebar-collapse]',
+        )!,
+      ),
+    );
+    await flushSidebar();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(onSearchQueryChange).toHaveBeenLastCalledWith('');
+  });
+
   it('closes session search when a Managed row arrives through a portal', async () => {
     const onSearchQueryChange = vi.fn();
+    const selected: string[] = [];
 
     function PortalHost() {
       const [target, setTarget] = React.useState<HTMLElement | null>(null);
@@ -871,6 +936,7 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
                   data-managed-session-id="managed-1"
                   role="button"
                   tabIndex={0}
+                  onClick={() => selected.push('managed-1')}
                 >
                   Managed session
                 </div>,
@@ -908,6 +974,7 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     expect(row).not.toBeNull();
     act(() => (row as HTMLElement).click());
     await flushSidebar();
+    expect(selected).toEqual(['managed-1']);
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(onSearchQueryChange).toHaveBeenLastCalledWith('');
   });
@@ -954,6 +1021,9 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     act(() => root.render(<PortalHost />));
     await flushSidebar();
     expect(mounts).toHaveLength(1);
+    expect(
+      container.querySelector('[data-managed-session-id="managed-1"]'),
+    ).not.toBeNull();
 
     const searchButton = () =>
       container.querySelector<HTMLButtonElement>(
@@ -963,7 +1033,9 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     await flushSidebar();
     expect(mounts).toHaveLength(1);
     expect(
-      document.querySelector('[data-managed-session-id="managed-1"]'),
+      document.querySelector(
+        '[role="dialog"] [data-managed-session-id="managed-1"]',
+      ),
     ).not.toBeNull();
 
     await act(async () => {
@@ -976,10 +1048,18 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     await flushSidebar();
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(mounts).toHaveLength(1);
+    expect(
+      container.querySelector('[data-managed-session-id="managed-1"]'),
+    ).not.toBeNull();
 
     act(() => click(searchButton()));
     await flushSidebar();
     expect(mounts).toHaveLength(1);
+    expect(
+      document.querySelector(
+        '[role="dialog"] [data-managed-session-id="managed-1"]',
+      ),
+    ).not.toBeNull();
   });
 
   it('deletes the current session from the sidebar row when it is idle', async () => {
