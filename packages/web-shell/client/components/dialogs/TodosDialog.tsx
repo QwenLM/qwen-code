@@ -77,6 +77,7 @@ export function TodosDialog() {
   const actions = useWorkspaceActions();
   const { t } = useI18n();
   const [snapshot, setSnapshot] = useState<DaemonTodosSnapshot | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState<TodosView>('kanban');
   const [project, setProject] = useState('');
   const [query, setQuery] = useState('');
@@ -169,6 +170,11 @@ export function TodosDialog() {
       setSnapshot(await actions.listTodos(true));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      // The empty state must be able to tell "nothing loaded yet" apart
+      // from "loaded and there is nothing" — don't flash it while the
+      // first fetch is in flight.
+      setLoaded(true);
     }
   }, [actions]);
 
@@ -431,7 +437,12 @@ export function TodosDialog() {
               type="date"
               defaultValue={todo.dueDate ?? ''}
               onChange={(e) => {
-                const value = e.target.value || null;
+                const value = e.target.value;
+                // A native date input fires change with '' for every
+                // partial value (segment edits, backspace) — committing
+                // that as null would delete the stored date. Empty is
+                // ignored; the ✕ button is the explicit clear.
+                if (!value) return;
                 void update(todo.key, { dueDate: value });
                 setDateKey(null);
               }}
@@ -647,7 +658,8 @@ export function TodosDialog() {
         <input
           className={styles.search}
           type="search"
-          placeholder="…"
+          placeholder={t('todos.search')}
+          aria-label={t('todos.search')}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
@@ -738,10 +750,13 @@ export function TodosDialog() {
         <div className={styles.totals}>
           <span>
             <ListTodoIcon size={12} /> {snapshot.totals.projects}{' '}
-            {t('todos.allProjects').toLowerCase()}
+            {t('todos.projectsLabel')}
           </span>
           <span>
-            {snapshot.totals.sessions} {t('todos.sessions')}
+            {snapshot.totals.sessions}{' '}
+            {snapshot.totals.sessions === 1
+              ? t('todos.session')
+              : t('todos.sessions')}
           </span>
           <span className={styles.totalOpen}>{snapshot.totals.open}</span>
           <span className={styles.totalDone}>{snapshot.totals.completed}</span>
@@ -749,8 +764,12 @@ export function TodosDialog() {
       )}
 
       {error && <div className={styles.error}>{error}</div>}
-      {!error && items.length === 0 && (
-        <div className={styles.empty}>{t('todos.empty')}</div>
+      {!error && loaded && items.length === 0 && (
+        <div className={styles.empty}>
+          {/* items is already filter-narrowed: distinguish "filter matched
+              nothing" from "there are no todos at all". */}
+          {query.trim() || tagFilter ? t('todos.noMatches') : t('todos.empty')}
+        </div>
       )}
 
       {view === 'kanban' && board(items)}

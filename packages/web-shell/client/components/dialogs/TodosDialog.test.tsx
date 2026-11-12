@@ -103,6 +103,26 @@ describe('TodosDialog', () => {
     expect(buttons.length).toBeGreaterThan(0);
   });
 
+  it('ignores transient empty changes from the due-date editor', async () => {
+    render(<TodosDialog />);
+    await waitFor(() => {
+      expect(screen.getByText('Write the deployment guide')).toBeDefined();
+    });
+    // Open the inline due-date editor.
+    fireEvent.click(screen.getAllByTitle('todos.setDueDate')[0]);
+    const input = containerQueryDateInput();
+    expect(input).not.toBeNull();
+    // A native date input fires change with '' for every partial value
+    // (segment edits, backspace) — committing it as null would DELETE the
+    // stored date. The editor must ignore it and stay open.
+    fireEvent.change(input as HTMLInputElement, { target: { value: '' } });
+    expect(containerQueryDateInput()).not.toBeNull();
+  });
+
+  function containerQueryDateInput(): HTMLInputElement | null {
+    return document.querySelector('input[type="date"]');
+  }
+
   it('passes the daemon token in the URL hash, never the query string', async () => {
     vi.mocked(getDaemonToken).mockReturnValue('sekrit');
     const openSpy = vi.fn();

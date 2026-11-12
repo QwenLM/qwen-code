@@ -295,6 +295,44 @@ async function readTodoPlan(
 }
 
 /**
+ * Finds a store file whose *inner* `sessionId` field matches — for the
+ * rare copied/renamed entry where the id `GET /todos` reports (the inner
+ * one) disagrees with the file's name, so the update path can still
+ * resolve the id the page handed the client.
+ */
+async function findStoreByInnerSessionId(
+  todoDir: string,
+  sessionId: string,
+): Promise<string | null> {
+  let names: string[];
+  try {
+    names = await fs.readdir(todoDir);
+  } catch {
+    return null;
+  }
+  for (const name of names) {
+    if (
+      !name.endsWith('.json') ||
+      name === DUE_DATES_FILENAME ||
+      name === TAGS_FILENAME
+    ) {
+      continue;
+    }
+    const candidate = path.join(todoDir, name);
+    try {
+      const raw = JSON.parse(await fs.readFile(candidate, 'utf-8')) as Record<
+        string,
+        unknown
+      >;
+      if (raw['sessionId'] === sessionId) return candidate;
+    } catch {
+      // Unreadable candidate — not the store we are looking for.
+    }
+  }
+  return null;
+}
+
+/**
  * Resolves `sessionId → project cwd` for the given ids. Live registry
  * records win; for the rest the per-project chat runtime record is read
  * (`work_dir`). Unresolvable ids are simply absent from the map.
@@ -586,20 +624,21 @@ export function registerTodosRoutes(
     }
     const tagDefinition = body['tagDefinition'] as
       | { name?: unknown; color?: unknown }
+      | null
       | undefined;
-    if (tagDefinition !== undefined) {
-      if (
+    if (
+      tagDefinition !== undefined &&
+      (tagDefinition === null ||
         typeof tagDefinition.name !== 'string' ||
         !TAG_NAME_PATTERN.test(tagDefinition.name) ||
         typeof tagDefinition.color !== 'string' ||
-        !TAG_COLOR_PATTERN.test(tagDefinition.color)
-      ) {
-        res.status(400).json({
-          error: 'tagDefinition must be {name: string, color: #rrggbb}',
-          code: 'todos_bad_tag_definition',
-        });
-        return;
-      }
+        !TAG_COLOR_PATTERN.test(tagDefinition.color))
+    ) {
+      res.status(400).json({
+        error: 'tagDefinition must be {name: string, color: #rrggbb}',
+        code: 'todos_bad_tag_definition',
+      });
+      return;
     }
     const validatedTags: string[] | undefined = hasTags
       ? (rawTags as unknown[]).filter((t): t is string => typeof t === 'string')
@@ -619,14 +658,36 @@ export function registerTodosRoutes(
 
     return withTodoWriteLock(async () => {
       const todoDir = getTodoDir();
-      const filePath = path.join(todoDir, `${sessionId}.json`);
+      let filePath = path.join(todoDir, `${sessionId}.json`);
       try {
         // Read the plan file inside the lock: the overlay key needs the
         // planId, the todo must exist before either edit is applied, and
         // a concurrent writer may have changed the file since the lock
         // was acquired — so the read must happen under the same lock that
         // guards the write.
-        const content = await fs.readFile(filePath, 'utf-8');
+        let content: string;
+        try {
+          content = await fs.readFile(filePath, 'utf-8');
+        } catch (err) {
+          // An ended session or a stale page is a client condition, not a
+          // server fault: answer like the missing-todo branch below with
+          // 404 todos_not_found — never a 500 carrying a raw ENOENT and
+          // the store's absolute path on stderr. Before giving up, try
+          // resolving by the session id stored *inside* the plan files:
+          // GET reports that inner id, and a copied/renamed store entry
+          // can have it disagree with its file name.
+          if (!isMissingFileError(err)) throw err;
+          const resolved = await findStoreByInnerSessionId(todoDir, sessionId);
+          if (!resolved) {
+            res.status(404).json({
+              error: `session ${sessionId} not found`,
+              code: 'todos_not_found',
+            });
+            return;
+          }
+          filePath = resolved;
+          content = await fs.readFile(filePath, 'utf-8');
+        }
         const data = JSON.parse(content) as Record<string, unknown>;
         if (!data || !Array.isArray(data['todos'])) {
           throw Object.assign(new Error(`not a todo store file: ${filePath}`), {

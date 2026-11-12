@@ -32,6 +32,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 }));
 
 import { registerTodosRoutes } from './todos.js';
+import { listLiveSessions } from '@qwen-code/qwen-code-core/services/session-registry.js';
 
 function createMockApp() {
   const routes: Record<
@@ -186,6 +187,59 @@ describe('registerTodosRoutes', () => {
       expect(body.groups[0].sessions[0].sessionId).toBe('session-abc');
       expect(body.groups[0].sessions[0].cwd).toBe('/home/user/project-a');
     });
+
+    it('hides completed-only sessions by default and includes them with ?all=1', async () => {
+      const todoDir = path.join(tmpDir, 'todos');
+      fs.mkdirSync(todoDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(todoDir, 'session-done.json'),
+        JSON.stringify({
+          todos: [{ id: '1', content: 'Done task', status: 'completed' }],
+          sessionId: 'session-done',
+        }),
+      );
+      const route = app.routes['GET /todos'];
+      await route.handler({ query: {} }, res);
+      const defaultBody = res.body as { totals: { sessions: number } };
+      expect(defaultBody.totals.sessions).toBe(0);
+      const allRes = createMockRes();
+      await route.handler({ query: { all: '1' } }, allRes);
+      const allBody = allRes.body as { totals: { sessions: number } };
+      expect(allBody.totals.sessions).toBe(1);
+    });
+
+    it('attributes a live session by the registry over any sidecar', async () => {
+      const todoDir = path.join(tmpDir, 'todos');
+      fs.mkdirSync(todoDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(todoDir, 'session-abc.json'),
+        JSON.stringify({
+          todos: [{ id: '1', content: 'Task one', status: 'pending' }],
+          sessionId: 'session-abc',
+        }),
+      );
+      // A decoy sidecar must NOT win over the live registry record.
+      const decoyChats = path.join(
+        tmpDir,
+        'projects',
+        'decoy-project',
+        'chats',
+      );
+      fs.mkdirSync(decoyChats, { recursive: true });
+      fs.writeFileSync(
+        path.join(decoyChats, 'session-abc.runtime.json'),
+        JSON.stringify({ work_dir: '/decoy/project' }),
+      );
+      vi.mocked(listLiveSessions).mockResolvedValueOnce([
+        { sessionId: 'session-abc', cwd: '/live/workspace' },
+      ] as Awaited<ReturnType<typeof listLiveSessions>>);
+      const route = app.routes['GET /todos'];
+      await route.handler({ query: {} }, res);
+      expect(res.statusCode).toBe(200);
+      const body = res.body as { groups: Array<{ project: string }> };
+      expect(body.groups).toHaveLength(1);
+      expect(body.groups[0].project).toBe('/live/workspace');
+    });
   });
 
   describe('POST /todos/update', () => {
@@ -303,6 +357,179 @@ describe('registerTodosRoutes', () => {
       expect(res.statusCode).toBe(500);
       const written = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       expect(written.todos[0].status).toBe('pending');
+    });
+
+    it('rejects a null tagDefinition with 400, not a 500 TypeError', async () => {
+      const todoDir = path.join(tmpDir, 'todos');
+      fs.mkdirSync(todoDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(todoDir, 'session-abc.json'),
+        JSON.stringify({
+          planId: 'plan-1',
+          todos: [{ id: '1', content: 'Task', status: 'pending' }],
+          sessionId: 'session-abc',
+        }),
+      );
+      const route = app.routes['POST /todos/update'];
+      const mockReq = {
+        body: {
+          sessionId: 'session-abc',
+          todoId: '1',
+          tags: [],
+          tagDefinition: null,
+        },
+      };
+      await route.handler(mockReq, res);
+      expect(res.statusCode).toBe(400);
+      expect(res.body).toMatchObject({ code: 'todos_bad_tag_definition' });
+    });
+
+    it('answers 404 todos_not_found for an unknown session, not a 500 ENOENT', async () => {
+      fs.mkdirSync(path.join(tmpDir, 'todos'), { recursive: true });
+      const route = app.routes['POST /todos/update'];
+      const mockReq = {
+        body: {
+          sessionId: 'no-such-session',
+          todoId: '1',
+          status: 'completed',
+        },
+      };
+      await route.handler(mockReq, res);
+      expect(res.statusCode).toBe(404);
+      expect(res.body).toMatchObject({ code: 'todos_not_found' });
+    });
+
+    it('rejects a malformed dueDate with 400 todos_bad_due_date', async () => {
+      const todoDir = path.join(tmpDir, 'todos');
+      fs.mkdirSync(todoDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(todoDir, 'session-abc.json'),
+        JSON.stringify({
+          planId: 'plan-1',
+          todos: [{ id: '1', content: 'Task', status: 'pending' }],
+          sessionId: 'session-abc',
+        }),
+      );
+      const route = app.routes['POST /todos/update'];
+      const mockReq = {
+        body: {
+          sessionId: 'session-abc',
+          todoId: '1',
+          dueDate: 'not-a-date',
+        },
+      };
+      await route.handler(mockReq, res);
+      expect(res.statusCode).toBe(400);
+      expect(res.body).toMatchObject({ code: 'todos_bad_due_date' });
+    });
+
+    it('persists a tag definition and assignment through GET', async () => {
+      const todoDir = path.join(tmpDir, 'todos');
+      fs.mkdirSync(todoDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(todoDir, 'session-abc.json'),
+        JSON.stringify({
+          planId: 'plan-1',
+          todos: [{ id: '1', content: 'Task', status: 'pending' }],
+          sessionId: 'session-abc',
+        }),
+      );
+      const postRoute = app.routes['POST /todos/update'];
+      await postRoute.handler(
+        {
+          body: {
+            sessionId: 'session-abc',
+            todoId: '1',
+            tags: ['urgent'],
+            tagDefinition: { name: 'urgent', color: '#ff0000' },
+          },
+        },
+        res,
+      );
+      expect(res.statusCode).toBe(200);
+      const getRes = createMockRes();
+      await app.routes['GET /todos'].handler({ query: {} }, getRes);
+      const body = getRes.body as {
+        tagDefinitions?: Record<string, { color: string }>;
+        groups: Array<{
+          sessions: Array<{ todos: Array<{ tags?: string[] }> }>;
+        }>;
+      };
+      expect(body.tagDefinitions?.['urgent']).toEqual({ color: '#ff0000' });
+      expect(body.groups[0].sessions[0].todos[0].tags).toContain('urgent');
+    });
+
+    it('serializes concurrent status flips through the write lock', async () => {
+      const todoDir = path.join(tmpDir, 'todos');
+      fs.mkdirSync(todoDir, { recursive: true });
+      const filePath = path.join(todoDir, 'session-abc.json');
+      fs.writeFileSync(
+        filePath,
+        JSON.stringify({
+          planId: 'plan-1',
+          sessionId: 'session-abc',
+          todos: Array.from({ length: 8 }, (_, i) => ({
+            id: String(i + 1),
+            content: `Task ${i + 1}`,
+            status: 'pending',
+          })),
+        }),
+      );
+      const route = app.routes['POST /todos/update'];
+      const allRes = Array.from({ length: 8 }, () => createMockRes());
+      await Promise.all(
+        Array.from({ length: 8 }, (_, i) =>
+          route.handler(
+            {
+              body: {
+                sessionId: 'session-abc',
+                todoId: String(i + 1),
+                status: 'completed',
+              },
+            },
+            allRes[i],
+          ),
+        ),
+      );
+      for (const r of allRes) {
+        expect(r.statusCode).toBe(200);
+      }
+      const written = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      const statuses = (written.todos as Array<{ status: string }>).map(
+        (t) => t.status,
+      );
+      expect(statuses.filter((s) => s === 'completed')).toHaveLength(8);
+    });
+
+    it('resolves updates by the inner sessionId when it differs from the file name', async () => {
+      const todoDir = path.join(tmpDir, 'todos');
+      fs.mkdirSync(todoDir, { recursive: true });
+      const filePath = path.join(todoDir, 'name-a.json');
+      fs.writeFileSync(
+        filePath,
+        JSON.stringify({
+          planId: 'plan-1',
+          todos: [{ id: '1', content: 'Task', status: 'pending' }],
+          sessionId: 'name-b',
+        }),
+      );
+      // GET reports the inner id (name-b) — the update must resolve it
+      // back to the name-a.json store file, not 500 on a missing file.
+      const getRes = createMockRes();
+      await app.routes['GET /todos'].handler({ query: {} }, getRes);
+      const body = getRes.body as {
+        groups: Array<{ sessions: Array<{ sessionId: string }> }>;
+      };
+      expect(body.groups[0].sessions[0].sessionId).toBe('name-b');
+      const postRes = createMockRes();
+      await app.routes['POST /todos/update'].handler(
+        { body: { sessionId: 'name-b', todoId: '1', status: 'completed' } },
+        postRes,
+      );
+      expect(postRes.statusCode).toBe(200);
+      const written = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      expect(written.todos[0].status).toBe('completed');
+      expect(written.sessionId).toBe('name-b');
     });
   });
 });
