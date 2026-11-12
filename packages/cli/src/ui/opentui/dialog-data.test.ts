@@ -1426,9 +1426,9 @@ describe('applyMcpServerAction (real server actions)', () => {
   }
 
   it('reconnect rediscovers the server tools', async () => {
-    recordMCPServerLastError('srv', 'old connection failure');
     const discoverToolsForServer = vi.fn(async () => {
       updateMCPServerStatus('srv', MCPServerStatus.CONNECTED);
+      recordMCPServerLastError('srv', 'old connection failure');
     });
     const config = stubConfig({
       getToolRegistry: (() => ({
@@ -1487,9 +1487,9 @@ describe('applyMcpServerAction (real server actions)', () => {
         serverInfo({}),
         'reconnect',
       );
-      expect(result.message).toContain(`status: ${status}`);
-      expect(result.message).not.toContain('undefined');
-      expect(result.message).not.toContain('old connection failure');
+      expect(result.message).toBe(
+        `Reconnect to 'srv' finished without a live connection (status: ${status}).`,
+      );
       expect(result.changed).toBe(true);
     },
   );
