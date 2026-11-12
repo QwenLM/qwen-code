@@ -672,9 +672,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       expect(current.sharedSubagentRounds).toBe(0);
       expect(shared.sharedSubagentRounds).toBe(scenario.subagentRounds ?? 0);
       expect(current.sharedSubagentBatches).toBe(0);
-      expect(shared.sharedSubagentBatches).toBe(
-        scenario.subagentBatches ?? 0,
-      );
+      expect(shared.sharedSubagentBatches).toBe(scenario.subagentBatches ?? 0);
       const recovery = scenario.subagentRecovery;
       if (recovery) {
         for (const run of [current, shared]) {
