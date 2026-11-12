@@ -17,6 +17,24 @@ export interface ScrollActions {
    * the top cannot start replaying input history.
    */
   hasScrollableTranscript: () => boolean;
+  /**
+   * Scroll so `data[index]` lands at the top of the viewport (clamped at the
+   * end of the transcript). Used by structure navigation and by transcript
+   * search, which address items rather than scroll deltas.
+   *
+   * Returns false when item-level addressing is unavailable — the legacy
+   * <Static> path (ui.useTerminalBuffer off) has no viewport to anchor — so
+   * callers can say the feature is unavailable instead of failing silently.
+   * Optional because only the virtual viewport can implement it.
+   */
+  scrollToIndex?: (index: number) => boolean;
+  /** Follow the newest output again. No-op outside the virtual viewport. */
+  scrollToEnd?: () => void;
+  /**
+   * Index of the item currently at the top of the viewport, or null when the
+   * viewport is not virtualized or has not been measured yet.
+   */
+  getScrollIndex?: () => number | null;
 }
 
 export const ScrollContext = createContext<ScrollActions | null>(null);

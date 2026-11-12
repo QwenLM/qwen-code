@@ -22,6 +22,10 @@ import { useKeypress, type Key } from '../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
 import { useMouseEvents } from '../../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../../utils/mouse.js';
+import type {
+  AnchorDirection,
+  TranscriptAnchorKind,
+} from '../../utils/transcript-navigation.js';
 
 export { SCROLL_TO_ITEM_END } from './VirtualizedList.js';
 
@@ -30,6 +34,16 @@ interface ScrollableListProps<T> extends VirtualizedListProps<T> {
   width?: string | number;
   targetScrollIndex?: number;
   containerHeight?: number;
+  /**
+   * Structure navigation (turn / tool-output jumps). The list owns every
+   * scroll-adjacent keybinding but knows nothing about transcript semantics,
+   * so the item owner supplies the jump itself; leaving this unset keeps the
+   * new keys inert for non-transcript lists.
+   */
+  onNavigateStructure?: (
+    direction: AnchorDirection,
+    kind: TranscriptAnchorKind,
+  ) => void;
 }
 
 export type ScrollableListRef<T> = VirtualizedListRef<T>;
@@ -42,7 +56,7 @@ function ScrollableList<T>(
   // VirtualizedList. Spreading the full props would silently forward
   // `hasFocus` (which VirtualizedList does not declare) and create a
   // latent name collision if VirtualizedList ever adds the same prop.
-  const { hasFocus, ...virtualizedListProps } = props;
+  const { hasFocus, onNavigateStructure, ...virtualizedListProps } = props;
   const virtualizedListRef = useRef<VirtualizedListRef<T>>(null);
   const isDraggingScrollbar = useRef(false);
 
@@ -86,7 +100,25 @@ function ScrollableList<T>(
   useKeypress(
     useCallback(
       (key: Key) => {
-        if (keyMatchers[Command.SCROLL_UP](key)) {
+        // Structure jumps go first: the plain scroll bindings deliberately
+        // ignore modifiers, so Alt+PageUp ALSO matches Command.PAGE_UP. When
+        // no structure handler is supplied these branches are skipped and
+        // Alt+PageUp keeps its historical page-up behavior.
+        if (onNavigateStructure && keyMatchers[Command.PREV_TURN](key)) {
+          onNavigateStructure('previous', 'turn');
+        } else if (onNavigateStructure && keyMatchers[Command.NEXT_TURN](key)) {
+          onNavigateStructure('next', 'turn');
+        } else if (
+          onNavigateStructure &&
+          keyMatchers[Command.PREV_TOOL_OUTPUT](key)
+        ) {
+          onNavigateStructure('previous', 'tool');
+        } else if (
+          onNavigateStructure &&
+          keyMatchers[Command.NEXT_TOOL_OUTPUT](key)
+        ) {
+          onNavigateStructure('next', 'tool');
+        } else if (keyMatchers[Command.SCROLL_UP](key)) {
           virtualizedListRef.current?.scrollBy(-1);
         } else if (keyMatchers[Command.SCROLL_DOWN](key)) {
           virtualizedListRef.current?.scrollBy(1);
@@ -104,7 +136,7 @@ function ScrollableList<T>(
           virtualizedListRef.current?.scrollToEnd();
         }
       },
-      [getScrollState],
+      [getScrollState, onNavigateStructure],
     ),
     { isActive: hasFocus },
   );

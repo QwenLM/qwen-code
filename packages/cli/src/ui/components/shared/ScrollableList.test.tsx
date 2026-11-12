@@ -13,6 +13,10 @@ import { Text } from 'ink';
 import { ScrollableList, type ScrollableListRef } from './ScrollableList.js';
 import { SCROLL_TO_ITEM_END } from './VirtualizedList.js';
 import { KeypressProvider } from '../../contexts/KeypressContext.js';
+import type {
+  AnchorDirection,
+  TranscriptAnchorKind,
+} from '../../utils/transcript-navigation.js';
 
 vi.mock('../../utils/measure-element-position.js', () => ({
   measureElementPosition: () => ({ x: 0, y: 0, width: 40, height: 5 }),
@@ -569,5 +573,88 @@ describe('<ScrollableList /> keyboard scroll', () => {
     });
     await act(async () => {});
     expect(lastFrame()).toContain('item-49');
+  });
+});
+
+// Structure navigation reuses the same modifier encoding:
+// alt = bit 1 → modifier param = 3; ctrl+alt = bits 0|2 → param = 7.
+const ALT_PAGE_UP = `${ESC}[5;3~`;
+const ALT_PAGE_DOWN = `${ESC}[6;3~`;
+const CTRL_ALT_UP = `${ESC}[1;7A`;
+const CTRL_ALT_DOWN = `${ESC}[1;7B`;
+
+describe('<ScrollableList /> structure navigation', () => {
+  const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+
+  const renderList = (
+    onNavigateStructure?: (
+      direction: AnchorDirection,
+      kind: TranscriptAnchorKind,
+    ) => void,
+  ) => (
+    <ScrollableList<Item>
+      hasFocus
+      data={makeItems(20)}
+      renderItem={renderItem}
+      estimatedItemHeight={estimatedItemHeight}
+      keyExtractor={keyExtractor}
+      initialScrollIndex={5}
+      containerHeight={5}
+      width={40}
+      showScrollbar={false}
+      onNavigateStructure={onNavigateStructure}
+    />
+  );
+
+  it('forwards Alt+PageUp / Alt+PageDown as turn jumps', async () => {
+    const onNavigateStructure = vi.fn();
+    const Wrapper = () => renderList(onNavigateStructure);
+    const { stdin, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+
+    await act(async () => {
+      stdin.write(ALT_PAGE_UP);
+    });
+    expect(onNavigateStructure).toHaveBeenCalledWith('previous', 'turn');
+
+    await act(async () => {
+      stdin.write(ALT_PAGE_DOWN);
+    });
+    expect(onNavigateStructure).toHaveBeenCalledWith('next', 'turn');
+  });
+
+  it('forwards Ctrl+Alt+Up / Ctrl+Alt+Down as tool-output jumps', async () => {
+    const onNavigateStructure = vi.fn();
+    const Wrapper = () => renderList(onNavigateStructure);
+    const { stdin, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+
+    await act(async () => {
+      stdin.write(CTRL_ALT_UP);
+    });
+    expect(onNavigateStructure).toHaveBeenCalledWith('previous', 'tool');
+
+    await act(async () => {
+      stdin.write(CTRL_ALT_DOWN);
+    });
+    expect(onNavigateStructure).toHaveBeenCalledWith('next', 'tool');
+  });
+
+  it('keeps the historical page-up fallback when no handler is supplied', async () => {
+    const Wrapper = () => renderList();
+    const { stdin, lastFrame, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    expect(lastFrame()).toContain('item-5');
+
+    await act(async () => {
+      stdin.write(ALT_PAGE_UP);
+    });
+    await act(async () => {});
+    // Without a structure handler the key must not become a dead key or a
+    // no-op: it falls back to Command.PAGE_UP, exactly as before this change.
+    expect(lastFrame()).toContain('item-0');
   });
 });
