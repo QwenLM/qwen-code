@@ -31,6 +31,8 @@
 #                             predictor of the RPC flake.
 #   HOST_LOAD_MAX_WAIT_TRIES  default 6, samples taken before refusing
 #   HOST_LOAD_WAIT_SECONDS    default 10, gap between samples
+# Only the ceiling is wired to a repository variable (ci.yml passes
+# QWEN_CI_HOST_LOAD_MAX_RATIO); the other two take these defaults in CI.
 #
 # Calibration, from the five-minute load per CPU of the shards above and of
 # four shards that passed on the same pool in the same hour:
@@ -56,8 +58,8 @@
 #
 # A host that clears the ceiling on any sample is admitted immediately: the
 # wait exists to ride out a neighbour finishing, not to hold a healthy host.
-# `off` in either knob disables the gate for an operator who needs the pool to
-# admit everything while the fleet is being resized.
+# `off` in the ceiling or the wait count disables the gate for an operator who
+# needs the pool to admit everything while the fleet is being resized.
 set -u
 
 MAX_RATIO="${HOST_LOAD_MAX_RATIO:-2.0}"
@@ -78,9 +80,10 @@ fi
 # A positive number, or 'off'. The shape check alone is not enough: `0` and
 # `0.0` pass it, and `load < cpus * 0` is false for every host, so one typo in
 # the repo variable would refuse every self-hosted Linux unit lane. Reject it
-# here as the configuration error it is, before the first sample.
+# here as the configuration error it is, before the first sample. The zero test
+# is bash-only: an absent awk must not read as a bad threshold.
 if ! [[ "$MAX_RATIO" =~ ^[0-9]+(\.[0-9]+)?$ ]] ||
-  ! awk -v max="$MAX_RATIO" 'BEGIN { exit !(max > 0) }'; then
+  [[ "$MAX_RATIO" =~ ^0+(\.0+)?$ ]]; then
   echo "::error::HOST_LOAD_MAX_RATIO must be a positive number or 'off', got '${MAX_RATIO}'"
   exit 1
 fi
@@ -99,6 +102,12 @@ done
 # then die on the unbound `load5` under `set -u`. Decode once, here, so
 # validation and use agree (and `010` samples 10 times, not 8).
 WAIT_TRIES=$((10#$WAIT_TRIES))
+
+# A host the gate cannot measure is admitted with a warning, never refused.
+if ! command -v awk >/dev/null 2>&1; then
+  echo "::warning::awk is not available; admitting the job without a load gate"
+  exit 0
+fi
 
 cpus="$(nproc 2>/dev/null || true)"
 case "$cpus" in '' | *[!0-9]*) cpus='' ;; esac

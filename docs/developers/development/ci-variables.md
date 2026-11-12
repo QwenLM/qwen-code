@@ -108,9 +108,9 @@ and can be tuned or disabled separately.
 The ceiling is a ratio, not an absolute load, because the pool mixes host sizes.
 Set `off` to admit every host while the fleet is being resized. The gate runs
 only on self-hosted Linux; GitHub-hosted and macOS lanes are unaffected, and an
-unreadable CPU count or load average admits the job with a warning rather than
-blocking a lane. A malformed threshold fails as the configuration error it is
-instead of silently disabling the gate.
+unreadable CPU count or load average, or a missing `awk`, admits the job with a
+warning rather than blocking a lane. A malformed threshold fails as the
+configuration error it is instead of silently disabling the gate.
 
 ### Workspace test timeout
 

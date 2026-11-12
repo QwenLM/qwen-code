@@ -8,13 +8,19 @@ import { fileURLToPath } from 'node:url';
 
 const SCRIPT = fileURLToPath(new URL('./check-host-load.sh', import.meta.url));
 
+// Caller env must not reach the gate: an exported HOST_LOAD_MAX_RATIO=off
+// turned ten of the cases below red (#16945 R1-4). Only HOST_LOAD_* goes, so
+// an unset knob still falls through to its script default.
+const INHERITED = Object.fromEntries(
+  Object.entries(process.env).filter(([k]) => !k.startsWith('HOST_LOAD_')),
+);
+
 // The gate reads two host facts, /proc/loadavg and nproc, and neither has a
 // deterministic real-host trigger. nproc comes from PATH; /proc/loadavg is an
-// absolute path no PATH can shadow, so the script's own reads are pinned
-// through a copy that points at a fixture file. Copying, not editing: the copy
-// is byte-identical but for the path, so a change to the gate's logic still
-// reaches every case here.
-function runGate({ loadavg, cpus = '64', env = {}, script } = {}) {
+// absolute path no PATH can shadow, so every case runs its own copy of the
+// script whose only edit is that path. `cut` is stubbed for the same reason:
+// what the gate reads there is the case's input, not the host's.
+function runGate({ loadavg, cpus = '64', env = {}, cut } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'host-load-'));
   try {
     const bin = join(dir, 'bin');
@@ -24,24 +30,54 @@ function runGate({ loadavg, cpus = '64', env = {}, script } = {}) {
       `#!/usr/bin/env bash\nprintf '%s\\n' '${cpus}'\n`,
       { mode: 0o755 },
     );
+    // Records every gap the gate sleeps through, so the default sample count
+    // and the default gap have witnesses (#16945 R2-7). SLEEP_LOG is always
+    // set by the env block below, so the stub never runs without it.
+    writeFileSync(
+      join(bin, 'sleep'),
+      `#!/usr/bin/env bash\n[ -n "\${SLEEP_LOG:-}" ] && printf '%s\\n' "$1" >> "$SLEEP_LOG"\n`,
+      { mode: 0o755 },
+    );
+    // `cut` serves one line per read from the case's list, so a host that
+    // changes between samples needs no background writer racing the first
+    // sample; a status makes the read itself fail.
+    if (cut) {
+      const reads = join(dir, 'cut-reads');
+      const stream = join(dir, 'cut-stream');
+      writeFileSync(reads, '0');
+      writeFileSync(stream, `${[].concat(cut.stdout ?? '').join('\n')}\n`);
+      writeFileSync(
+        join(bin, 'cut'),
+        [
+          '#!/usr/bin/env bash',
+          `n=$(cat '${reads}'); n=$((n + 1)); printf '%s' "$n" > '${reads}'`,
+          `sed -n "\${n}p" '${stream}'`,
+          `exit ${cut.status ?? 0}`,
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+    }
     const loadFile = join(dir, 'loadavg');
     writeFileSync(loadFile, loadavg ?? '10.00 12.00 11.00 1/900 12345\n');
-    const source = (
-      script ?? spawnSync('cat', [SCRIPT], { encoding: 'utf8' }).stdout
-    ).replaceAll('/proc/loadavg', loadFile);
+    const source = spawnSync('cat', [SCRIPT], {
+      encoding: 'utf8',
+    }).stdout.replaceAll('/proc/loadavg', loadFile);
     const copy = join(dir, 'gate.sh');
     writeFileSync(copy, source);
     return spawnSync('bash', [copy], {
       encoding: 'utf8',
       env: {
-        ...process.env,
+        ...INHERITED,
         PATH: `${bin}:${process.env.PATH}`,
         RUNNER_NAME: 'ecs-qwen-hk1-9',
         GITHUB_RUN_ID: '43018456551',
         GITHUB_RUN_ATTEMPT: '1',
         GITHUB_JOB: 'test',
-        // The wait exists for the real pool; a test that exercises it says so.
-        HOST_LOAD_WAIT_SECONDS: '1',
+        // Every case but the gap witness leaves the script's own 10s default
+        // in place; the sleep stub keeps that from costing wall time, and
+        // setting the log here keeps the stub off an unset variable.
+        SLEEP_LOG: join(dir, 'sleeps'),
         ...env,
       },
     });
@@ -54,10 +90,16 @@ function samples(stdout) {
   return stdout.split('\n').filter((line) => line.startsWith('HOSTLOAD '));
 }
 
+// A PATH with nothing but bash: awk is absent on macOS and Linux alike.
+function withoutAwk() {
+  const bin = mkdtempSync(join(tmpdir(), 'host-load-noawk-'));
+  spawnSync('ln', ['-s', '/bin/bash', join(bin, 'bash')]);
+  return bin;
+}
+
 describe('check-host-load', () => {
   it('admits a host below the ceiling and emits a tagged sample', () => {
-    // The measured shape of a host that passed its suites: hk3-28 at load 43
-    // on 64 CPUs (run 43025091256, shard 1).
+    // A host that passed its suites: hk3-28 at load 40 on 64 CPUs, 0.62.
     const result = runGate({ loadavg: '38.00 40.00 41.00 1/900 1\n' });
 
     assert.equal(result.status, 0, result.stderr);
@@ -140,59 +182,24 @@ describe('check-host-load', () => {
   });
 
   it('admits as soon as a sample clears the ceiling', () => {
-    // A host that idles mid-wait must not be refused for its earlier reading.
-    const dir = mkdtempSync(join(tmpdir(), 'host-load-drop-'));
-    try {
-      const source = spawnSync('cat', [SCRIPT], { encoding: 'utf8' }).stdout;
-      const loadFile = join(dir, 'loadavg');
-      writeFileSync(loadFile, '140.00 140.00 140.00 1/900 1\n');
-      // The gate reads the load through `cut`, so a counting stub is the
-      // deterministic way to model a neighbour finishing: the first sample
-      // reports the contended host, every later one reports it idle. A
-      // background writer would race the first sample instead.
-      const bin = join(dir, 'bin');
-      spawnSync('mkdir', ['-p', bin]);
-      const counter = join(dir, 'reads');
-      writeFileSync(counter, '0');
-      writeFileSync(
-        join(bin, 'cut'),
-        [
-          '#!/usr/bin/env bash',
-          `n=$(cat '${counter}'); n=$((n + 1)); printf '%s' "$n" > '${counter}'`,
-          'if [ "$n" -ge 2 ]; then',
-          "  printf '10.00 10.00 10.00\\n'",
-          'else',
-          "  printf '140.00 140.00 140.00\\n'",
-          'fi',
-          '',
-        ].join('\n'),
-        { mode: 0o755 },
-      );
-      writeFileSync(
-        join(bin, 'nproc'),
-        "#!/usr/bin/env bash\nprintf '64\\n'\n",
-        { mode: 0o755 },
-      );
-      const copy = join(dir, 'gate.sh');
-      writeFileSync(copy, source.replaceAll('/proc/loadavg', loadFile));
-      const result = spawnSync('bash', [copy], {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          PATH: `${bin}:${process.env.PATH}`,
-          HOST_LOAD_WAIT_SECONDS: '1',
-          HOST_LOAD_MAX_WAIT_TRIES: '4',
-        },
-      });
+    // A host that idles mid-wait must not be refused for its earlier reading:
+    // the first read reports the contended host, the second an idle one. The
+    // stub serves those two lines in order, which a background writer could
+    // not do without racing that first sample.
+    const result = runGate({
+      cut: { stdout: ['140.00 140.00 140.00', '10.00 10.00 10.00'] },
+      env: { HOST_LOAD_MAX_WAIT_TRIES: '4' },
+    });
 
-      assert.equal(result.status, 0, result.stdout + result.stderr);
-      const lines = samples(result.stdout);
-      assert.equal(lines.length, 2, result.stdout);
-      assert.match(lines[0], /ratio\[2\.19\]/);
-      assert.match(lines[1], /ratio\[0\.16\]/);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const lines = samples(result.stdout);
+    assert.equal(lines.length, 2, result.stdout);
+    assert.match(lines[0], /ratio\[2\.19\]/);
+    assert.match(lines[1], /ratio\[0\.16\]/);
+    // The inline copy of the harness used to lose these tags.
+    assert.match(lines[0], /runner\[ecs-qwen-hk1-9\]/);
+    assert.match(lines[0], /job\[test\]/);
+    assert.doesNotMatch(lines[0], /runner\[unknown\]/);
   });
 
   it('samples the configured number of times before refusing', () => {
@@ -209,21 +216,80 @@ describe('check-host-load', () => {
   it('admits without a gate when the CPU count is unreadable', () => {
     // A ratio with no denominator would refuse or admit at random. The gate is
     // an optimisation over an honest failure, never a new way to block a lane.
-    const result = runGate({
-      loadavg: '900.00 900.00 900.00 1/900 1\n',
-      cpus: '',
-    });
+    // '' is an empty nproc, 'abc' the non-numeric branch of the sanitizer and
+    // '0' the `-lt 1` guard; each admits instead of sampling.
+    for (const [cpus, seen] of [
+      ['', 'unknown'],
+      ['abc', 'unknown'],
+      ['0', '0'],
+    ]) {
+      const result = runGate({
+        loadavg: '900.00 900.00 900.00 1/900 1\n',
+        cpus,
+      });
 
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /::warning::could not read the CPU count/);
-    assert.match(samples(result.stdout)[0], /cpus\[unknown\]/);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /::warning::could not read the CPU count/);
+      assert.match(samples(result.stdout)[0], new RegExp(`cpus\\[${seen}\\]`));
+    }
   });
 
   it('admits without a gate when the load average is unreadable', () => {
-    const result = runGate({ loadavg: '' });
+    // An empty fixture is what a missing /proc/loadavg looks like; a `cut`
+    // that fails outright takes the same path, error text and all.
+    for (const cut of [undefined, { status: 1 }]) {
+      const result = runGate({ loadavg: '', cut });
 
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /::warning::could not read .*loadavg/);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /::warning::could not read .*loadavg/);
+    }
+  });
+
+  it('admits with a warning when awk is missing instead of blaming the threshold', () => {
+    // A stripped image: the zero test used to go through awk, so a missing
+    // tool read as a bad HOST_LOAD_MAX_RATIO, which the infra signatures claim.
+    const bin = withoutAwk();
+    const result = runGate({ env: { PATH: bin } });
+    rmSync(bin, { recursive: true, force: true });
+
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /::warning::.*awk/);
+    assert.doesNotMatch(
+      result.stdout + result.stderr,
+      /must be a positive number/,
+    );
+  });
+
+  it('still rejects a malformed ceiling on a host without awk', () => {
+    // The guard has to stay after the threshold checks: a bad repo variable
+    // must not degrade to an admission just because awk is missing.
+    const bin = withoutAwk();
+    const result = runGate({
+      env: { PATH: bin, HOST_LOAD_MAX_RATIO: '2,0' },
+    });
+    rmSync(bin, { recursive: true, force: true });
+
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stdout + result.stderr, /must be a positive number/);
+    assert.doesNotMatch(result.stdout, /::warning::awk/);
+  });
+
+  it('takes the default six samples and waits the default gap', () => {
+    // #16945 R2-7: dropping the inter-sample sleep, or either script default
+    // (6 tries, 10s gap) down a step, stayed green. The stub records every gap
+    // the loop asked for, and this case overrides neither default.
+    const dir = mkdtempSync(join(tmpdir(), 'host-load-gap-'));
+    const result = runGate({
+      loadavg: '145.00 140.00 130.00 1/900 1\n',
+      env: { SLEEP_LOG: join(dir, 'calls') },
+    });
+    const gaps = readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n');
+    rmSync(dir, { recursive: true, force: true });
+
+    assert.equal(result.status, 1, result.stdout);
+    assert.equal(samples(result.stdout).length, 6, result.stdout);
+    assert.match(result.stdout, /after 6 samples/);
+    assert.deepEqual(gaps, ['10', '10', '10', '10', '10']);
   });
 
   it('lets an operator disable the gate without a PR', () => {

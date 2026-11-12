@@ -1332,9 +1332,12 @@ jobs:
       # immediately before the suites because the tmux/zip and linter
       # provisioning above are apt/network installs that slow down with the
       # same contention, so an earlier reading is minutes stale by then. Both
-      # are continue-on-error, so refusing here costs only their install time.
+      # provisioning steps are continue-on-error, so refusing here costs only
+      # their install time.
       - name: 'Host load gate (self-hosted)'
         if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' && runner.os == 'Linux' }}"
+        # tries x seconds (6 x 10 = 60s by default) must stay under this cap, or
+        # GitHub kills the step with no breach annotation to classify.
         timeout-minutes: 3
         env:
           HOST_LOAD_MAX_RATIO: "${{ vars.QWEN_CI_HOST_LOAD_MAX_RATIO || '2.0' }}"
