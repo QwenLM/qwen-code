@@ -40,6 +40,22 @@ public abstract class DelegatingBindingRepository implements RuntimeBindingRepos
         return delegate.isHarnessDraining(tenantId, harnessSessionId);
     }
 
+    // The legacy-Hook fence is JDBC's: during a Harness drain with no lifecycle
+    // claim it still admits the original Hook control, where the interface
+    // default would refuse every draining admission. Delegate it so a double
+    // over a JDBC repository keeps that distinction.
+    @Override
+    public void requireHookAdmission(RuntimeScope scope, String harnessSessionId,
+            RuntimeLifecycleAuthority authority) {
+        delegate.requireHookAdmission(scope, harnessSessionId, authority);
+    }
+
+    @Override
+    public void requireHookAdmission(RuntimeProvisionRequest bindingRequest, RuntimeScope scope,
+            String harnessSessionId, RuntimeLifecycleAuthority authority) {
+        delegate.requireHookAdmission(bindingRequest, scope, harnessSessionId, authority);
+    }
+
     @Override
     public List<RuntimeBindingRecord> findByHarnessSession(String tenantId,
             String harnessSessionId, String afterBindingId, int limit) {
