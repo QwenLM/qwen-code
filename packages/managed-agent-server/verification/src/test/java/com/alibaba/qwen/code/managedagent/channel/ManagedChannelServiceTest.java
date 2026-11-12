@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository.SegmentLedger;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannel;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannelDelivery;
@@ -1094,17 +1095,50 @@ class ManagedChannelServiceTest {
         plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
                 "The build is green.", 2);
         service.claimDeliveries(TENANT, channel, 16);
-        // The stored row keeps the first segment's id but a different ordinal:
-        // the ordinal clause of the identity guard must reject it.
+        // The stored row keeps the carried first segment's id but a different
+        // ordinal: the ordinal clause of the identity guard must reject it.
         String resentId = deliveryId + ":r1";
         new JdbcChannelDeliveryRepository(jdbc).findOrCreate(
                 new ChannelDeliveryRepository.ChannelDelivery(TENANT, channel,
-                        resentId, resentId + ":0", 5, "planned", null, 0, 0, 1));
-        assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
-                .isInstanceOf(IllegalStateException.class);
+                        resentId, deliveryId + ":0", 5, "planned", null, 0, 0, 1));
+        ch.qos.logback.classic.Logger serviceLog =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                        .getLogger(ManagedChannelService.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>
+                logged = new ch.qos.logback.core.read.ListAppender<>();
+        logged.start();
+        serviceLog.addAppender(logged);
+        try {
+            assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
+                    .isInstanceOf(ManagedAgentException.class)
+                    .satisfies(e -> {
+                        assertThat(((ManagedAgentException) e).getStatus()).isEqualTo(409);
+                        assertThat(((ManagedAgentException) e).getCode())
+                                .isEqualTo("channel_delivery_conflict");
+                    });
+        } finally {
+            serviceLog.detachAppender(logged);
+            logged.stop();
+        }
         // The guard must reject on the ordinal before planning: findOrCreate
         // would also reject, but only after orphan segment rows were written.
         assertThat(segmentLedger.list(TENANT, channel, resentId)).isEmpty();
+        // No claim row may survive the refusal either: the reconciler converges
+        // from claim rows without consulting this guard, so a stray claim would
+        // import the refused chain on the next sweep.
+        assertThat(instances.findClaim(TENANT, channel, resentId)).isEmpty();
+        // An ordinal-only divergence keeps the segment ids identical, so the
+        // conflict WARN must carry both ordinals to say what diverged, and name
+        // the old chain as delivery= and the new one as resent=.
+        assertThat(logged.list).anySatisfy(event -> {
+            assertThat(event.getLevel())
+                    .isEqualTo(ch.qos.logback.classic.Level.WARN);
+            assertThat(event.getFormattedMessage())
+                    .contains("channel resend identity conflict")
+                    .contains("delivery=" + deliveryId + " resent=" + resentId)
+                    .contains("storedOrdinal=5")
+                    .contains("resentOrdinal=0");
+        });
     }
 
     @Test
@@ -1123,12 +1157,192 @@ class ManagedChannelServiceTest {
                         resentId, "other:0", 0, "planned", null, 0, 0, 1));
         segmentLedger.plan(TENANT, channel, resentId,
                 List.of(new SegmentLedger("other:0", 0, null)));
-        assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
-                .isInstanceOf(IllegalStateException.class);
+        ch.qos.logback.classic.Logger serviceLog =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                        .getLogger(ManagedChannelService.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>
+                logged = new ch.qos.logback.core.read.ListAppender<>();
+        logged.start();
+        serviceLog.addAppender(logged);
+        try {
+            assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
+                    .isInstanceOf(ManagedAgentException.class)
+                    .satisfies(e -> {
+                        assertThat(((ManagedAgentException) e).getStatus()).isEqualTo(409);
+                        assertThat(((ManagedAgentException) e).getCode())
+                                .isEqualTo("channel_delivery_conflict");
+                    });
+        } finally {
+            serviceLog.detachAppender(logged);
+            logged.stop();
+        }
         // The refused chain planned nothing: only the original row remains.
         assertThat(segmentLedger.list(TENANT, channel, resentId))
                 .extracting(SegmentLedger::segmentId)
                 .containsExactly("other:0");
+        // No claim row may survive the refusal: the reconciler converges from
+        // claim rows without this guard, so a stray claim would import the
+        // refused chain on the next sweep.
+        assertThat(instances.findClaim(TENANT, channel, resentId)).isEmpty();
+        // The two segment ids genuinely differ here, so the WARN must name
+        // which side is the stored truth; swapping the two id arguments reds.
+        // It must also name the old chain as delivery= and the new as resent=.
+        assertThat(logged.list).anySatisfy(event -> {
+            assertThat(event.getLevel())
+                    .isEqualTo(ch.qos.logback.classic.Level.WARN);
+            assertThat(event.getFormattedMessage())
+                    .contains("channel resend identity conflict")
+                    .contains("delivery=" + deliveryId + " resent=" + resentId)
+                    .contains("storedSegment=other:0")
+                    .contains("resentSegment=" + deliveryId + ":0");
+        });
+    }
+
+    @Test
+    void aResendDivergingAfterTheFirstSegmentIsRejected() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:112", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 2);
+        service.claimDeliveries(TENANT, channel, 16);
+        // The stored chain under the resent id shares segment 0 with the
+        // Harness answer but diverges at ordinal 1. The first-segment guard
+        // alone would pass, and INSERT IGNORE (unique on segment_id, not
+        // ordinal) would splice the answer's second segment in beside the
+        // stored one — a mixed chain with two rows at ordinal 1.
+        String resentId = deliveryId + ":r1";
+        new JdbcChannelDeliveryRepository(jdbc).findOrCreate(
+                new ChannelDeliveryRepository.ChannelDelivery(TENANT, channel,
+                        resentId, deliveryId + ":0", 0, "planned", null, 0, 0, 2));
+        segmentLedger.plan(TENANT, channel, resentId, List.of(
+                new SegmentLedger(deliveryId + ":0", 0, null),
+                new SegmentLedger("other:1", 1, null)));
+        ch.qos.logback.classic.Logger serviceLog =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                        .getLogger(ManagedChannelService.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>
+                logged = new ch.qos.logback.core.read.ListAppender<>();
+        logged.start();
+        serviceLog.addAppender(logged);
+        try {
+            assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                        assertThat(error.getStatus()).isEqualTo(409);
+                        assertThat(error.getCode())
+                                .isEqualTo("channel_delivery_conflict");
+                        assertThat(error.getMessage())
+                                .isEqualTo("The resent delivery id already names a"
+                                        + " different stored chain.");
+                    });
+        } finally {
+            serviceLog.detachAppender(logged);
+            logged.stop();
+        }
+        // The divergent segment was refused, not spliced: the stored chain is
+        // intact and the answer's second segment was never planned.
+        assertThat(segmentLedger.list(TENANT, channel, resentId))
+                .extracting(SegmentLedger::segmentId)
+                .containsExactly(deliveryId + ":0", "other:1");
+        assertThat(instances.findClaim(TENANT, channel, resentId)).isEmpty();
+        // The WARN names the diverging position and both segment identities —
+        // the counts alone would be equal here and say nothing.
+        assertThat(logged.list).anySatisfy(event -> {
+            assertThat(event.getLevel())
+                    .isEqualTo(ch.qos.logback.classic.Level.WARN);
+            assertThat(event.getFormattedMessage())
+                    .contains("channel resend chain conflict")
+                    .contains("delivery=" + deliveryId + " resent=" + resentId)
+                    .contains("position=1")
+                    .contains("storedSegment=other:1")
+                    .contains("resentSegment=" + deliveryId + ":1");
+        });
+        // The refusal must be durable: the funnel committed the resent record
+        // as planned, and the sweep discovers pending work from the journal, so
+        // it would otherwise re-import the record and splice the divergent
+        // segment. The sweep must refuse it and settle it out of the pending set.
+        service.claimDeliveries(TENANT, channel, 16);
+        assertThat(segmentLedger.list(TENANT, channel, resentId))
+                .extracting(SegmentLedger::segmentId)
+                .containsExactly(deliveryId + ":0", "other:1");
+        assertThat(jdbc.queryForObject("SELECT delivery_state FROM ma_session_record"
+                        + " WHERE tenant_id = ? AND session_id = ? AND record_id = ?",
+                String.class, TENANT, admitted.sessionId(), resentId))
+                .isNotIn("planned", "partial");
+    }
+
+    @Test
+    void aResendWhoseStoredChainIsAPrefixConverges() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:113", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 2);
+        service.claimDeliveries(TENANT, channel, 16);
+        // A partly materialized chain is a valid transient: plan() inserts row
+        // by row and the claim sweep may have written segment 0 of the resent
+        // record before resend() reads the guard. The stored prefix must
+        // converge (the plan completes it), not be refused as a divergence.
+        String resentId = deliveryId + ":r1";
+        new JdbcChannelDeliveryRepository(jdbc).findOrCreate(
+                new ChannelDeliveryRepository.ChannelDelivery(TENANT, channel,
+                        resentId, deliveryId + ":0", 0, "planned", null, 0, 0, 1));
+        segmentLedger.plan(TENANT, channel, resentId,
+                List.of(new SegmentLedger(deliveryId + ":0", 0, null)));
+        ResendResponse resent = service.resend(TENANT, channel, deliveryId);
+        assertThat(resent.deliveryId()).isEqualTo(resentId);
+        assertThat(segmentLedger.list(TENANT, channel, resentId))
+                .extracting(SegmentLedger::segmentId)
+                .containsExactly(deliveryId + ":0", deliveryId + ":1");
+    }
+
+    @Test
+    void aResendWhoseStoredChainIsLongerThanThePlanIsRejected() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:115", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 2);
+        service.claimDeliveries(TENANT, channel, 16);
+        // The stored chain has an extra segment beyond the plan: a divergence,
+        // refused as 409 — not an index past the plan's end.
+        String resentId = deliveryId + ":r1";
+        new JdbcChannelDeliveryRepository(jdbc).findOrCreate(
+                new ChannelDeliveryRepository.ChannelDelivery(TENANT, channel,
+                        resentId, deliveryId + ":0", 0, "planned", null, 0, 0, 3));
+        segmentLedger.plan(TENANT, channel, resentId, List.of(
+                new SegmentLedger(deliveryId + ":0", 0, null),
+                new SegmentLedger(deliveryId + ":1", 1, null),
+                new SegmentLedger("extra:2", 2, null)));
+        assertThatThrownBy(() -> service.resend(TENANT, channel, deliveryId))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(409);
+                    assertThat(error.getCode())
+                            .isEqualTo("channel_delivery_conflict");
+                });
+        assertThat(segmentLedger.list(TENANT, channel, resentId))
+                .extracting(SegmentLedger::segmentId)
+                .containsExactly(deliveryId + ":0", deliveryId + ":1", "extra:2");
+    }
+
+    @Test
+    void aReplayOfAPartlyReceiptedChainConverges() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:114", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId, admitted.routeId(),
+                "The build is green.", 2);
+        service.claimDeliveries(TENANT, channel, 16);
+        ResendResponse resent = service.resend(TENANT, channel, deliveryId);
+        // The stored chain gains a receipt; the replayed resend carries none.
+        // The chain comparison ignores receipts, so the replay converges.
+        service.receipt(TENANT, channel, resent.deliveryId(),
+                new ReceiptRequest("accepted", 0, "<m0@example.com>", null));
+        ResendResponse replayed = service.resend(TENANT, channel, deliveryId);
+        assertThat(replayed.deliveryId()).isEqualTo(resent.deliveryId());
+        assertThat(segmentLedger.list(TENANT, channel, resent.deliveryId()))
+                .extracting(SegmentLedger::providerReceipt)
+                .containsExactly("<m0@example.com>", null);
     }
 
     @Test
@@ -1935,8 +2149,6 @@ class ManagedChannelServiceTest {
     }
 
     static final class RecordingHarness implements HarnessConnector {
-        private static final java.util.Set<String> TERMINAL = java.util.Set.of(
-                "delivered", "unknown", "rejected", "cancelled");
         final List<Map<String, Object>> operations = new ArrayList<>();
         final Map<String, String> replies = new LinkedHashMap<>();
         // Each chain's segments as the committed record holds them: ordinal,
@@ -2095,17 +2307,17 @@ class ManagedChannelServiceTest {
                 case "settle_delivery" -> {
                     String outcome = String.valueOf(body.get("outcome"));
                     String current = deliveryStates.get(deliveryId);
-                    // The H5a successor rules freeze a terminal line: the
-                    // real authority refuses an outcome that disagrees.
-                    if (current != null && TERMINAL.contains(current)
-                            && !current.equals(outcome)) {
-                        throw new IllegalStateException("Channel delivery"
-                                + " line " + outcome + " does not match its"
-                                + " run and segment receipts");
-                    }
+                    requireDeliveryStep(current, outcome);
                     deliveryStates.put(deliveryId, outcome);
                     projection.deliveryState(sessionId, deliveryId, outcome);
                     answer.put("delivery", delivery(deliveryId, outcome));
+                }
+                case "cancel_delivery" -> {
+                    String current = deliveryStates.get(deliveryId);
+                    requireDeliveryStep(current, "cancelled");
+                    deliveryStates.put(deliveryId, "cancelled");
+                    projection.deliveryState(sessionId, deliveryId, "cancelled");
+                    answer.put("delivery", delivery(deliveryId, "cancelled"));
                 }
                 case "resend_delivery" -> {
                     String resent = deliveryId + ":r1";
@@ -2155,6 +2367,22 @@ class ManagedChannelServiceTest {
                 default -> throw new IllegalArgumentException(kind);
             }
             return answer;
+        }
+
+        /** The delivery line is a two-language contract: refuse a step the
+         * real successor table forbids, not only a terminal freeze — the
+         * latter alone would let planned -> rejected through and hide the
+         * re-import loop. A same-state replay is a no-op, as in the funnel. */
+        private void requireDeliveryStep(String current, String target) {
+            if (current == null || current.equals(target)) {
+                return;
+            }
+            java.util.List<String> allowed = ManagedExtensionRecords.TRANSITIONS
+                    .get("delivery").get(current);
+            if (allowed == null || !allowed.contains(target)) {
+                throw new IllegalStateException("Channel delivery line " + target
+                        + " does not match its run and segment receipts");
+            }
         }
 
         private Map<String, Object> delivery(String deliveryId, String state) {
