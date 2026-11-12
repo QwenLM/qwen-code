@@ -87,11 +87,15 @@ Change only `createBackup` and `safeCopyFile` in
      exclusive copy; `'src-missing'` still returns a `null` backup, with a
      best-effort unlink of the temporary file (the copy may have created it
      before the source vanished).
-   - `chmod(temporaryPath, srcStats.mode)` — permissions applied **before**
-     publication.
+   - `chmod(temporaryPath, (srcStats.mode & 0o7777) | 0o600)` — make the
+     temporary writable for the flush: `copyFile` carries the source's
+     possibly read-only mode onto it, and `open('r+')` would fail `EACCES`.
    - `open(temporaryPath, 'r+')` + `handle.sync()` + `handle.close()` — flush
      the copied bytes before publication (issue #16896 triage note 1); a sync
-     failure routes through the same cleanup path.
+     failure routes through the same cleanup path. `'r+'` rather than `'r'`
+     because Windows `FlushFileBuffers` needs a write-access handle.
+   - `chmod(temporaryPath, srcStats.mode)` — the exact source mode, applied
+     **before** publication (`checkOriginFileChanged` compares modes).
    - `renameWithRetry(temporaryPath, backupPath, 3, 50)` — atomic publication
      on the same directory/filesystem, reusing the shared helper from
      `utils/atomicFileWrite.ts` (see below).
@@ -152,10 +156,12 @@ could still expose a zero-filled or short backup — the same silent
 wrong-restore one crash layer down. Issue #16896's triage note 1 therefore
 asks the port to match `atomicWriteFile`'s durability contract (`flush`
 defaults to true there) rather than transcribe preview's no-fsync sequence.
-The capture fsyncs the temporary file after `chmod` and before the
-publication rename, inside the existing `try` so a sync failure still cleans
-up and rethrows. The flush stays at this call site: `renameWithRetry` has no
-flush parameter and is shared by every other atomic publisher. The directory
+The capture makes the temporary writable (`copyFile` carries the source's
+possibly read-only mode onto it, which would fail the `open('r+')` with
+`EACCES`), fsyncs it inside the existing `try` so a sync failure still cleans
+up and rethrows, then re-applies the exact source mode before the publication
+rename. The flush stays at this call site: `renameWithRetry` has no flush
+parameter and is shared by every other atomic publisher. The directory
 entry itself is not separately fsynced (matching `atomicWriteFile`; the
 retained-storage CSI backend additionally syncs its directory handle) —
 journaling filesystems commit the rename through the journal.
@@ -275,10 +281,18 @@ this pilot.
 8. **Flush ordering**: spies on `open` / the returned handle's `sync` /
    `rename` record the call order over one successful capture; the temporary
    file (and only it) is synced before the publication rename.
-9. **Existing suite**: `fileHistoryService.test.ts` and the retained-storage
-   suite stay green (the `safeCopyFile` mode parameter defaults to today's
-   behavior).
-10. `npm run build && npm run bundle && npm run typecheck`, focused vitest
+9. **Read-only source**: a tracked file chmod'ed to `0444` is still captured
+   (the writable pre-chmod makes the flush possible), the blob is
+   byte-identical, and its published mode is still `0444`. Guarded by
+   `arePermissionBitsEnforced()` (kernel probe) rather than platform alone,
+   because a uid-0 runner ignores `0444` and would make the witness vacuous.
+10. **Flush failure**: an injected `handle.sync` rejection closes the handle
+    (spy on `close`), cleans up the temporary file, and records nothing —
+    pinning the cleanup-and-rethrow contract.
+11. **Existing suite**: `fileHistoryService.test.ts` and the retained-storage
+    suite stay green (the `safeCopyFile` mode parameter defaults to today's
+    behavior).
+12. `npm run build && npm run bundle && npm run typecheck`, focused vitest
     runs, and an interactive E2E sanity pass (capture + rewind via tmux) per
     the test plan in `.qwen/e2e-tests/`. E2E is interactive-only: file
     checkpointing defaults to `!sdkMode && interactive`, so headless runs do
@@ -289,18 +303,21 @@ this pilot.
 - Reproduction: four failure-injection probes failed on the base commit,
   including the end-to-end silent wrong-restore (rewind reported
   `filesFailed: []` while writing truncated bytes).
-- The permanent suite `file-history-atomic-backup.test.ts` (17 tests) passes
+- The permanent suite `file-history-atomic-backup.test.ts` (19 tests) passes
   with the fix. Mutation arms, re-run against the final suite: reverting
-  `createBackup` to the direct copy fails 13/17 (the 4 survivors are the
+  `createBackup` to the direct copy fails 14/19 (the 5 survivors are the
   behavior-preservation tests — transient-EPERM retry, concurrent success,
-  permissions, and the source-vanished-before-copy shape — which pass on both
-  implementations by design); a retries=0 mutation reddens the transient-
-  EPERM test; removing the source-vanished temporary cleanup reddens the
-  mid-copy cleanup test; removing the fsync block reddens the flush-ordering
-  test (`expected ['rename'] to deeply equal ['sync', 'rename']`); a shared
-  `${backupPath}.tmp` suffix reddens the gated distinct-destination test on
-  every run (3/3).
-- Focused regression: 510 core tests across 8 file-history-related files and
+  permissions, read-only source, and the source-vanished-before-copy shape —
+  which pass on both implementations by design); a retries=0 mutation reddens
+  the transient-EPERM test; removing the source-vanished temporary cleanup
+  reddens the mid-copy cleanup test; removing the fsync block reddens the
+  flush-ordering test (`expected ['rename'] to deeply equal ['sync',
+'rename']`); a shared `${backupPath}.tmp` suffix reddens the gated
+  distinct-destination test on every run (3/3); removing the writable
+  pre-chmod reddens the read-only-source test (EACCES on `open('r+')`);
+  hoisting the sync out of its `try` (dropping the `finally` close) reddens
+  the flush-failure test (`expected false to be true` on the close spy).
+- Focused regression: 512 core tests across 8 file-history-related files and
   81 cli tests across 2 consumer files passed; build, bundle, and typecheck
   passed.
 - Interactive E2E (tmux, `node dist/cli.js` vs global qwen 0.27.2 baseline):
@@ -331,6 +348,18 @@ this pilot.
   temporary suffix deterministically (the prior bare-`Promise.all` test
   caught a shared-suffix mutation 3/3 on this machine, but only by I/O
   timing). Each fix carries its own mutation arm above.
+- PR review round 3 (3 threads, all accepted and fixed): the round-2 fsync
+  had opened the temporary `'r+'` after applying the source's possibly
+  read-only mode, so capturing a read-only source failed with `EACCES` (a
+  fix-induced regression, confirmed by a local probe: `copyFile` carries
+  `0444` onto the destination and `open('r+')` then fails). The flush now
+  runs against a writable temporary (`(srcStats.mode & 0o7777) | 0o600`)
+  with the exact source mode re-applied before the rename, pinned by a
+  kernel-probe-guarded read-only-source test; a new flush-failure test pins
+  the close-and-cleanup contract; and the Chinese doc's `atomicFileWrite`
+  symbol typo is corrected to `atomicWriteFile`. The lint-gate freshness red
+  on the previous head was main's `ci.yml` moving ahead (#16951); resolved
+  by merging main, not by code changes.
 
 ## Acceptance criteria
 

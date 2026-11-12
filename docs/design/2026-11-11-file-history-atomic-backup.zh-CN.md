@@ -74,9 +74,14 @@ preview 分支（`packages/core/src/file-history/file-history.ts`）已解决此
    - `safeCopyFile(filePath, temporaryPath, constants.COPYFILE_EXCL)`——独占
      复制；`'src-missing'` 仍返回 `null` 备份，并尽力 unlink 临时文件（复制
      可能在源文件消失前已创建它）。
-   - `chmod(temporaryPath, srcStats.mode)`——权限在发布**之前**设置。
+   - `chmod(temporaryPath, (srcStats.mode & 0o7777) | 0o600)`——把临时文件
+     改为可写以供刷盘：`copyFile` 会把源文件可能只读的 mode 带到临时文件上，
+     `open('r+')` 否则会 `EACCES`。
    - `open(temporaryPath, 'r+')` + `handle.sync()` + `handle.close()`——发布前
      把复制的字节刷盘（issue #16896 分诊建议 1）；sync 失败走同一条清理路径。
+     用 `'r+'` 而非 `'r'`：Windows `FlushFileBuffers` 需要写权限句柄。
+   - `chmod(temporaryPath, srcStats.mode)`——精确的源文件权限，在发布**之前**
+     套用（`checkOriginFileChanged` 会比较 mode）。
    - `renameWithRetry(temporaryPath, backupPath, 3, 50)`——同目录/同文件系统
      上的原子发布，复用 `utils/atomicFileWrite.ts` 的共享助手（见下文）。
    - 任何失败：`unlink(temporaryPath)`（忽略 ENOENT，其他清理错误记日志），
@@ -125,11 +130,12 @@ workflow journal）都经 `utils/atomicFileWrite.ts` 的 `renameWithRetry` 发�
 （掉电、内核 panic）仍可能暴露全零或短备份——同一类静默错误恢复，只是换成
 掉电这一层触发。因此 issue #16896 分诊建议 1 要求移植对齐 `atomicWriteFile`
 的持久化契约（其 `flush` 默认 true），而不是照抄 preview 的无 fsync 序列。
-捕获在 `chmod` 之后、发布 rename 之前对临时文件 fsync，放在现有 `try` 内，
-sync 失败仍走清理 + 重抛。刷盘留在本调用点：`renameWithRetry` 没有 flush
-参数，且被其他所有原子发布方共享。目录项本身不单独 fsync（与
-`atomicWriteFile` 一致；留存存储 CSI 后端额外 sync 目录句柄）——日志文件系统
-通过日志提交 rename。
+捕获先把临时文件改为可写（`copyFile` 会把源文件可能只读的 mode 带到临时
+文件上，否则 `open('r+')` 会 `EACCES`），在现有 `try` 内 fsync（sync 失败仍走
+清理 + 重抛），再在发布 rename 之前回套精确的源文件权限。刷盘留在本调用点：
+`renameWithRetry` 没有 flush 参数，且被其他所有原子发布方共享。目录项本身不
+单独 fsync（与 `atomicWriteFile` 一致；留存存储 CSI 后端额外 sync 目录
+句柄）——日志文件系统通过日志提交 rename。
 
 ### 孤儿临时文件
 
@@ -189,7 +195,7 @@ issue 要求**仅在确认 enter/exit worktree 存在真实错误恢复缺陷时
   `fsync`），这是整机崩溃持久性契约的代价；捕获发生在每轮每个被编辑文件
   一次，而非每次读取。
 - **目录项持久性**：文件数据已 fsync，rename 的目录项不单独 sync（与
-  `atomicFileWrite` 一致）；日志文件系统通过日志提交它。既不日志也不保证
+  `atomicWriteFile` 一致）；日志文件系统通过日志提交它。既不日志也不保证
   目录项顺序的文件系统掉电后仍可能丢名字（而非内容）——备份随后按缺失读取，
   经现有 `failed` 语义暴露，绝不会是截断内容。
 
@@ -222,9 +228,15 @@ issue 要求**仅在确认 enter/exit worktree 存在真实错误恢复缺陷时
    持续 `EPERM` 耗尽重试后按失败捕获暴露，不发布任何内容。
 8. **刷盘顺序**：对 `open` / 返回句柄的 `sync` / `rename` 打点，记录一次
    成功捕获的调用顺序；临时文件（且仅它）在发布 rename 之前被 sync。
-9. **既有套件**：`fileHistoryService.test.ts` 与留存存储套件保持绿
-   （`safeCopyFile` 的 mode 参数默认即今天的行为）。
-10. `npm run build && npm run bundle && npm run typecheck`、聚焦 vitest，
+9. **只读源文件**：被跟踪文件 chmod 到 `0444` 仍能捕获（可写前置 chmod 使
+   刷盘可行），blob 字节一致，发布后的 mode 仍为 `0444`。守卫用
+   `arePermissionBitsEnforced()`（内核探针）而非仅平台判断，因为 uid-0 的
+   runner 会忽略 `0444`，让证据失效。
+10. **刷盘失败**：注入 `handle.sync` 拒绝后，句柄被关闭（对 `close` 打点）、
+    临时文件被清理、不记录任何条目——钉住清理 + 重抛契约。
+11. **既有套件**：`fileHistoryService.test.ts` 与留存存储套件保持绿
+    （`safeCopyFile` 的 mode 参数默认即今天的行为）。
+12. `npm run build && npm run bundle && npm run typecheck`、聚焦 vitest，
     以及按 `.qwen/e2e-tests/` 测试计划做一次交互式 E2E 冒烟（tmux 捕获 +
     rewind）。E2E 仅限交互模式：文件检查点默认 `!sdkMode && interactive`，
     headless 运行在两个二进制上都不捕获快照（既有门控）。
@@ -233,14 +245,17 @@ issue 要求**仅在确认 enter/exit worktree 存在真实错误恢复缺陷时
 
 - 复现：4 个故障注入探针在基线 commit 上失败，包括端到端的静默错误恢复
   （rewind 报告 `filesFailed: []` 却写入截断字节）。
-- 正式套件 `file-history-atomic-backup.test.ts`（17 个用例）在修复后全部
-  通过。变异臂对最终套件复跑：把 `createBackup` 回退为直接复制 13/17 失败
-  （4 个幸存者是行为保持用例——瞬态 EPERM 重试、并发成功、权限、复制前源
-  消失——按设计在两种实现下都通过）；retries=0 变异使瞬态 EPERM 用例变红；
-  删除源消失临时清理使复制中途清理用例变红；删除 fsync 块使刷盘顺序用例
-  变红（`expected ['rename'] to deeply equal ['sync', 'rename']`）；共享
-  `${backupPath}.tmp` 后缀使闸门目标不同用例每次运行都红（3/3）。
-- 聚焦回归：8 个 file-history 相关文件的 510 个 core 用例、2 个消费者文件
+- 正式套件 `file-history-atomic-backup.test.ts`（19 个用例）在修复后全部
+  通过。变异臂对最终套件复跑：把 `createBackup` 回退为直接复制 14/19 失败
+  （5 个幸存者是行为保持用例——瞬态 EPERM 重试、并发成功、权限、只读源、
+  复制前源消失——按设计在两种实现下都通过）；retries=0 变异使瞬态 EPERM
+  用例变红；删除源消失临时清理使复制中途清理用例变红；删除 fsync 块使刷盘
+  顺序用例变红（`expected ['rename'] to deeply equal ['sync', 'rename']`）；
+  共享 `${backupPath}.tmp` 后缀使闸门目标不同用例每次运行都红（3/3）；删除
+  可写前置 chmod 使只读源用例变红（`open('r+')` EACCES）；把 sync 提出
+  `try`（并删掉 `finally` close）使刷盘失败用例变红（close 打点
+  `expected false to be true`）。
+- 聚焦回归：8 个 file-history 相关文件的 512 个 core 用例、2 个消费者文件
   的 81 个 cli 用例通过；build、bundle、typecheck 通过。
 - 交互式 E2E（tmux，`node dist/cli.js` 对比全局 qwen 0.27.2 基线）：只发布
   完整备份、`<16-hex>@vN` 命名、字节精确、mode 保留、`@v2` 不扰动 `@v1`、
@@ -261,6 +276,15 @@ issue 要求**仅在确认 enter/exit worktree 存在真实错误恢复缺陷时
   fsync，附刷盘顺序用例；带闸门的并发捕获用例确定性钉住唯一临时后缀
   （此前裸 `Promise.all` 用例在本机 3/3 抓到共享后缀变异，但只靠 I/O 时序）。
   每条修复各带上述变异臂。
+- PR 评审第 3 轮（3 条线程，全部采纳并修复）：第 2 轮的 fsync 在套用源文件
+  可能只读的 mode 之后才以 `'r+'` 打开临时文件，导致只读源文件捕获以
+  `EACCES` 失败（修复引入的回归；本机探针证实：`copyFile` 把 `0444` 带到
+  目标文件，`open('r+')` 随即失败）。刷盘现在对可写临时文件
+  （`(srcStats.mode & 0o7777) | 0o600`）进行，rename 前回套精确源权限，以
+  内核探针守卫的只读源用例钉住；新增刷盘失败用例钉住关闭句柄 + 清理契约；
+  中文文档 `atomicFileWrite` 符号笔误更正为 `atomicWriteFile`。上一 head 的
+  lint 门新鲜度红是 main 的 `ci.yml` 前移（#16951）所致，合并 main 解决，
+  不改代码。
 
 ## 验收标准
 

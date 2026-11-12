@@ -330,7 +330,10 @@ async function createBackup(
       await unlink(temporaryPath).catch(() => undefined);
       return { backupFileName: null, version, backupTime: new Date() };
     }
-    await chmod(temporaryPath, srcStats.mode);
+    // copyFile carries the source's mode onto the temporary, which may be
+    // read-only; make it writable for the flush, then re-apply the exact
+    // source mode before publication (checkOriginFileChanged compares it).
+    await chmod(temporaryPath, (srcStats.mode & 0o7777) | 0o600);
     // Flush the copied bytes before publication: rename is atomic in the
     // metadata sense, but without fsync a host crash could still expose a
     // zero-filled backup (atomicWriteFile's flush contract, issue #16896
@@ -341,6 +344,7 @@ async function createBackup(
     } finally {
       await handle.close();
     }
+    await chmod(temporaryPath, srcStats.mode);
     // Same publication step as atomicWriteFile / mods store: transient
     // EPERM/EACCES (Windows concurrent access, AV scans) retry with backoff;
     // any other error rethrows into the caller's failed-entry semantics.

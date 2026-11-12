@@ -33,6 +33,7 @@ import {
   serializeSnapshot,
   deserializeSnapshots,
 } from './fileHistoryService.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 describe('atomic backup publication', () => {
   let projectDir: string;
@@ -303,6 +304,53 @@ describe('atomic backup publication', () => {
     const entry = service.getSnapshots()[0].trackedFileBackups['a.txt']!;
     expect(entry.failed).toBeUndefined();
     expect(await fs.readdir(backupDir)).toEqual([entry.backupFileName]);
+  });
+
+  // copyFile carries the source's mode onto the temporary; the flush must
+  // still work when that mode is read-only, and the published blob must
+  // keep the exact source mode. Guarded by the kernel probe because a
+  // uid-0 runner ignores 0444 and would make the witness vacuous.
+  it.runIf(arePermissionBitsEnforced())(
+    'captures a read-only source file and publishes its exact mode',
+    async () => {
+      const file = await primeTracked('original-content');
+      await fs.chmod(file, 0o444);
+      await service.trackEdit(file);
+
+      const entry = service.getSnapshots()[0].trackedFileBackups['a.txt']!;
+      expect(entry.failed).toBeUndefined();
+      expect(entry.backupFileName).toEqual(expect.any(String));
+      const blob = join(backupDir, entry.backupFileName!);
+      expect(await fs.readFile(blob, 'utf8')).toBe('original-content');
+      expect((await fs.stat(blob)).mode & 0o777).toBe(0o444);
+      expect(await fs.readdir(backupDir)).toEqual([entry.backupFileName]);
+    },
+  );
+
+  it('cleans up and closes the handle when the flush fails', async () => {
+    const file = await primeTracked('original-content');
+    const realOpen = fs.open;
+    let closed = false;
+    vi.spyOn(fs, 'open').mockImplementation(async (path, flags, mode) => {
+      const handle = await realOpen(path, flags, mode);
+      handle.sync = async () => {
+        throw new Error('simulated fsync failure');
+      };
+      const realClose = handle.close.bind(handle);
+      handle.close = async () => {
+        closed = true;
+        return realClose();
+      };
+      return handle;
+    });
+
+    await service.trackEdit(file);
+
+    expect(
+      service.getSnapshots()[0].trackedFileBackups['a.txt'],
+    ).toBeUndefined();
+    expect(await fs.readdir(backupDir)).toEqual([]);
+    expect(closed).toBe(true);
   });
 
   it('concurrent captures copy into distinct temporary files', async () => {
