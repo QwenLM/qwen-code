@@ -383,6 +383,15 @@ describe('ManagedRuntimeTerminals control', () => {
     });
     expect(internals.registry.readSnapshot('pending-1')).toBeUndefined();
     expect(internals.registry.isCreating('pending-1')).toBe(false);
+    // The cancelled creation left a release receipt, so a later status poll
+    // settles the hold with a proven end instead of answering unknown forever.
+    expect(
+      terminals!.control(op('terminal-status', 'pending-1', 'session-a')),
+    ).toEqual({
+      operationId: 'pending-1',
+      state: 'exited',
+      evidence: { exitCode: TERMINAL_RELEASE_EXIT_CODE, exitSignal: null },
+    });
   });
 
   it('answers unknown for a terminal it never admitted', async () => {
