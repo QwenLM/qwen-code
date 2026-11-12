@@ -3610,6 +3610,35 @@ describe('createHostedLoopFireClassifier', () => {
     expect(refreshAuth).toHaveBeenCalledWith('test-auth', true);
   });
 
+  it('pins the definition model when there is no modelConfig digest (R9-1)', async () => {
+    const switchModel = vi.fn(async () => undefined);
+    state.config['getAllConfiguredModels'] = () => [
+      { id: 'definition-model', authType: 'test-auth', isRuntimeModel: false },
+    ];
+    state.config['switchModel'] = switchModel;
+    vi.spyOn(classifier, 'classifyAction').mockResolvedValue({
+      shouldBlock: false,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    });
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+      model: { id: 'definition-model' },
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.allowed).toBe(true);
+    // With no digest the fire must pin the definition model exactly like the
+    // turn does; reverting the pin to undefined leaves switchModel uncalled.
+    expect(switchModel).toHaveBeenCalledWith(
+      'test-auth',
+      'definition-model',
+      expect.objectContaining({ requireCachedCredentials: true }),
+    );
+  });
+
   it('a classifier that cannot be built reports unavailable, not a denial (M12)', async () => {
     vi.mocked(loadCliConfig).mockRejectedValueOnce(new Error('config boom'));
     const classifyFire = createHostedLoopFireClassifier({

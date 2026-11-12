@@ -273,6 +273,9 @@ export function createHostedLoopFireClassifier(deps: {
   cwd: string;
   sessionId: string;
   modelConfig?: HostedModelConfigReader;
+  /** The Session's definition model pin, used when there is no
+   * modelConfigDigest — the same fallback the model turn resolves (R9-1). */
+  model?: HostedAgentDefinition['model'];
 }): HostedLoopClassifier {
   return async ({ delaySeconds, prompt, reason }) => {
     let config: Awaited<ReturnType<typeof loadCliConfig>> | undefined;
@@ -311,7 +314,9 @@ export function createHostedLoopFireClassifier(deps: {
             : {}),
         },
       );
-      if (!sessionModelConfig) await applyHostedModelPin(config, undefined);
+      // With no digest the turn falls back to the definition model pin; the
+      // fire must pin the same model, not leave the ambient default (R9-1).
+      if (!sessionModelConfig) await applyHostedModelPin(config, deps.model);
       // loadCliConfig only constructs the Config; the classifier's side query
       // reads config.getBaseLlmClient(), whose content generator is created
       // only by initialize()+refreshAuth() (D1). Without them every fire

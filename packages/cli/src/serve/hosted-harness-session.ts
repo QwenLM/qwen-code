@@ -6920,6 +6920,7 @@ export function registerHostedHarnessSessionRoutes(
             cwd: session.cwd,
             sessionId,
             modelConfig: session.modelConfig,
+            model: session.agentDefinition?.model,
           }),
         },
       );
