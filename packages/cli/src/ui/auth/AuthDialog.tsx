@@ -55,7 +55,7 @@ type MainOption =
 // Static data
 // ---------------------------------------------------------------------------
 
-const MAIN_ITEMS = [
+const getMainItems = () => [
   {
     key: 'QWENCLOUD',
     title: t('QwenCloud'),
@@ -124,12 +124,12 @@ function getStepLabel(step: string | null, p: ProviderConfig): string {
 // View titles
 // ---------------------------------------------------------------------------
 
-const VIEW_TITLES: Record<string, () => string> = {
-  main: () => t('Connect a Provider'),
-  'qwencloud-select': () => t('QwenCloud · Access Method'),
-  'alibaba-select': () => t('Alibaba ModelStudio · Access Method'),
-  'thirdparty-select': () => t('Third-party Providers · Provider'),
-};
+const getViewTitles = (): Record<string, string> => ({
+  main: t('Connect a Provider'),
+  'qwencloud-select': t('QwenCloud · Access Method'),
+  'alibaba-select': t('Alibaba ModelStudio · Access Method'),
+  'thirdparty-select': t('Third-party Providers · Provider'),
+});
 
 // ---------------------------------------------------------------------------
 // AuthDialog
@@ -250,7 +250,7 @@ export function AuthDialog(): React.JSX.Element {
       ),
       value: 'QWEN_SUBSCRIPTION' as MainOption,
     },
-    ...MAIN_ITEMS,
+    ...getMainItems(),
   ];
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -442,7 +442,8 @@ export function AuthDialog(): React.JSX.Element {
 
   const viewTitle = useMemo(() => {
     if (viewLevel !== 'provider-setup') {
-      return (VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'])();
+      const titles = getViewTitles();
+      return titles[viewLevel] ?? titles['main'];
     }
     const p = setupFlow.state.provider;
     if (!p) return t('Provider Setup');
