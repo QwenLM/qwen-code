@@ -11,7 +11,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -689,8 +689,8 @@ final class AgentTurnExecution {
                 "SELECT tenant_id, session_id, state, writer_lease_until FROM"
                         + " ma_session_head WHERE tenant_key = ? AND harness_key = ?"
                         + " AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId));
+                RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                RuntimeAdmissionFences.harnessDrainKey(sessionId));
         long now = storeRows.lifecycleDatabaseTime();
         if (heads.size() != 1 || !tenantId.equals(heads.getFirst().get("tenant_id"))
                 || !sessionId.equals(heads.getFirst().get("session_id"))
