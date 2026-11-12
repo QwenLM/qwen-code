@@ -7383,9 +7383,9 @@ describe('Server Config (config.ts)', () => {
         vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'yes');
         expect(
           makeConfig({
-            eventBusAgentLoopEnabled: true,
+            eventBusAgentLoopEnabled: false,
           }).isEventBusAgentLoopEnabled(),
-        ).toBe(true);
+        ).toBe(false);
       });
 
       it('is disabled by QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=0 even when the parameter is on', () => {
@@ -7456,9 +7456,9 @@ describe('Server Config (config.ts)', () => {
         vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'yes');
         expect(
           makeConfig({
-            unifiedAgentLoopEnabled: true,
+            unifiedAgentLoopEnabled: false,
           }).isUnifiedAgentLoopEnabled(),
-        ).toBe(true);
+        ).toBe(false);
       });
 
       it('is disabled by QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=false even when the parameter is on', () => {

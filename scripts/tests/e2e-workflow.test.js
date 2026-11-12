@@ -1175,6 +1175,11 @@ describe('e2e workflow', () => {
     it('keeps the Docker build environment', () => {
       expect(runStep.env.QWEN_SANDBOX).toContain("'docker'");
       expect(runStep.env.VERBOSE).toBe('true');
+      // The two matrix legs have to pin opposite arms. An empty value means
+      // "no override" and would let both legs follow the
+      // `experimental.unifiedAgentLoop` default, so the scheduled signal that
+      // gates the default flip would report green while comparing nothing.
+      expect(runStep.env.QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP).toContain("'0'");
     });
 
     it('reaps only the sandbox containers owned by its matrix job', () => {
