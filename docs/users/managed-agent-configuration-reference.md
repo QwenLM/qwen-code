@@ -231,6 +231,14 @@ Opt-in personal MemoryStores: server-side Mem0 access for explicitly bound, owne
 | `enabled` | — | boolean | `false` | Whether personal memory is available. Defaults to false. Enable only after qualifying a dedicated Mem0 service with cross-service sharing disabled. Requires Session Store and the Hosted session-memory/1 capability; Sessions must explicitly select a Store at creation. |
 | `endpoint` | — | string | — | Base URL of the dedicated Mem0 service, read only when memory is enabled. Requires HTTPS except for loopback HTTP tests; embedded credentials, query strings and fragments are refused. This address stays in the control plane. |
 
+## `qwen.managed-agent.object-storage`
+
+The generic Aliyun OSS object store shared by tool publication and Session resource / journal cold storage.
+
+| Property | Variable | Type | Default | Description |
+| --- | --- | --- | --- | --- |
+| `enabled` | `QWEN_MANAGED_AGENT_OBJECT_STORAGE_ENABLED` | boolean | follows `qwen.managed-agent.tool-publication.enabled` | Whether the generic Aliyun OSS object-store auto-configuration is active. Defaults to follow `qwen.managed-agent.tool-publication.enabled`; set it true with tool publication disabled to back Session resources and journal cold storage without enabling publication. The OSS endpoint, region and bucket are still read from `qwen.managed-agent.tool-publication.oss-*`. |
+
 ## `qwen.managed-agent.runtime-broker`
 
 The embedded Runtime Broker: its private HTTP listener for the Hosted Harness, the provisioner that places and recovers the Runtime workers that run Hosted tools, their Workspace mounts and isolation, and the keys that encrypt the Runtime credentials it persists.
