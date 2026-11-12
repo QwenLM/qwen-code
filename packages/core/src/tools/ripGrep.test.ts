@@ -158,6 +158,7 @@ describe('RipGrepTool', () => {
       getFileFilteringOptions: () => DEFAULT_FILE_FILTERING_OPTIONS,
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: () => false,
+      getPermissionManager: undefined,
     });
     grepTool = new RipGrepTool(mockConfig);
 

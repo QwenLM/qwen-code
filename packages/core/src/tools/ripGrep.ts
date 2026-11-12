@@ -30,7 +30,10 @@ import {
 import { recordGrepResultFileReads } from './grepReadTracking.js';
 import { logRipgrepRuntimeRecovery } from '../telemetry/loggers.js';
 import { RipgrepRuntimeRecoveryEvent } from '../telemetry/types.js';
-import { isPathDeniedByReadRule } from '../core/permission-helpers.js';
+import {
+  hasPermissionFilteringRules,
+  isPathDeniedByReadRule,
+} from '../core/permission-helpers.js';
 
 const debugLogger = createDebugLogger('RIPGREP');
 const RIPGREP_FIELD_SEPARATOR = '';
@@ -326,12 +329,10 @@ class GrepToolInvocation extends BaseToolInvocation<
       // Ripgrep is workspace-auto-approved, but its result set must still
       // honour path-scoped Read deny/ask rules before counts and truncation.
       const permissionManager = this.config.getPermissionManager?.();
-      const permissionFilteringActive = Boolean(
-        permissionManager &&
-          typeof permissionManager.hasDenyOrAskRuleForTool === 'function' &&
-          permissionManager.hasDenyOrAskRuleForTool(ToolNames.GREP),
+      const permissionFilteringActive = hasPermissionFilteringRules(
+        permissionManager,
+        ToolNames.GREP,
       );
-      let withheldMatchCount = 0;
 
       // Deduplicate lines from potentially overlapping workspace directories.
       if (searchPaths.length > 1) {
@@ -344,7 +345,6 @@ class GrepToolInvocation extends BaseToolInvocation<
       }
 
       if (permissionManager) {
-        const beforeFilterCount = allLines.length;
         const permittedLines: RipgrepMatchLine[] = [];
         const evaluatedPaths = new Map<string, boolean>();
         for (const line of allLines) {
@@ -361,6 +361,7 @@ class GrepToolInvocation extends BaseToolInvocation<
               absolutePath,
               this.config.getTargetDir(),
               ToolNames.GREP,
+              this.params as unknown as Record<string, unknown>,
             );
             evaluatedPaths.set(absolutePath, denied);
           }
@@ -369,7 +370,6 @@ class GrepToolInvocation extends BaseToolInvocation<
           }
         }
         allLines = permittedLines;
-        withheldMatchCount = beforeFilterCount - allLines.length;
       }
 
       const totalMatches = allLines.length;

@@ -35,7 +35,10 @@ import {
   type GlobDirectoryReply,
   type GlobPath,
 } from './glob-search.js';
-import { isPathDeniedByReadRule } from '../core/permission-helpers.js';
+import {
+  hasPermissionFilteringRules,
+  isPathDeniedByReadRule,
+} from '../core/permission-helpers.js';
 export type { GlobPath } from './glob-search.js';
 
 const debugLogger = createDebugLogger('GLOB');
@@ -292,10 +295,9 @@ class GlobToolInvocation extends BaseToolInvocation<
       // need to honour path-scoped Read deny rules. Filter before sorting and
       // counting so denied names cannot leak in result metadata either.
       const permissionManager = this.config.getPermissionManager?.();
-      const permissionFilteringActive = Boolean(
-        permissionManager &&
-          typeof permissionManager.hasDenyOrAskRuleForTool === 'function' &&
-          permissionManager.hasDenyOrAskRuleForTool(ToolNames.GLOB),
+      const permissionFilteringActive = hasPermissionFilteringRules(
+        permissionManager,
+        ToolNames.GLOB,
       );
       const filteredEntries: GlobPath[] = [];
       for (const entry of allFilteredEntries) {
@@ -306,19 +308,17 @@ class GlobToolInvocation extends BaseToolInvocation<
             entry.fullpath(),
             this.config.getTargetDir(),
             ToolNames.GLOB,
+            this.params as unknown as Record<string, unknown>,
           ))
         ) {
           filteredEntries.push(entry);
         }
       }
-      const withheldFileCount =
-        allFilteredEntries.length - filteredEntries.length;
-
       if (filteredEntries.length === 0) {
         if (hitCollectionLimit) {
           return {
-            llmContent: `Results truncated after scanning ${allFilteredEntries.length} matching files; ${withheldFileCount} collected file(s) were excluded by permission rules. Narrow the pattern or path.`,
-            returnDisplay: `Results truncated`,
+            llmContent: `Results truncated after scanning ${allFilteredEntries.length} matching files.${permissionFilteringActive ? ' Results may be omitted by permission rules.' : ''} Narrow the pattern or path.`,
+            returnDisplay: `Results truncated${permissionFilteringActive ? ' (permission-filtered)' : ''}`,
           };
         }
         if (allFilteredEntries.length === 0) {

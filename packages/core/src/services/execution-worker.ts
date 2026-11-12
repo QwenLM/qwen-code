@@ -6,7 +6,8 @@
 
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
-import { Config } from '../config/config.js';
+import { Config, deriveConfig } from '../config/config.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 import type {
   ExecutionEnvironment,
   ExecutionWorkerMessage,
@@ -19,10 +20,17 @@ import { LocalExecutionEnvironment } from './local-execution-environment.js';
 export function createExecutionWorkerEnvironment(
   options: ExecutionWorkerOptions,
 ): LocalExecutionEnvironment {
-  const config = new Config({
+  const baseConfig = new Config({
     targetDir: options.workspace,
     cwd: options.workspace,
     sessionId: options.sessionId,
+    permissions: options.permissions
+      ? {
+          allow: [...(options.permissions.allow ?? [])],
+          ask: [...(options.permissions.ask ?? [])],
+          deny: [...(options.permissions.deny ?? [])],
+        }
+      : undefined,
     debugMode: false,
     fileReadCacheDisabled: options.fileReadCacheDisabled,
     truncateToolOutputLines: options.truncateToolOutputLines,
@@ -42,6 +50,15 @@ export function createExecutionWorkerEnvironment(
     mcpServers: {},
     // The host does not register worker artifacts.
     artifactRecordingSupported: false,
+  });
+  // The worker is intentionally constructed without the host's full Config
+  // lifecycle, but its file tools still need the same permission rules when
+  // filtering search results. Initialise a worker-local manager over the
+  // resolved rules and expose it through a narrow Config overlay.
+  const permissionManager = new PermissionManager(baseConfig);
+  permissionManager.initialize();
+  const config = deriveConfig(baseConfig, {
+    getPermissionManager: () => permissionManager,
   });
   if (options.outputDirectory) {
     config.storage.getProjectTempDir = () => options.outputDirectory!;

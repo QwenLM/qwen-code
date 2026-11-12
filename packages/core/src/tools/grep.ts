@@ -29,7 +29,10 @@ import type { FileExclusions } from '../utils/ignorePatterns.js';
 import { ToolErrorType } from './tool-error.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 import { recordGrepResultFileReads } from './grepReadTracking.js';
-import { isPathDeniedByReadRule } from '../core/permission-helpers.js';
+import {
+  hasPermissionFilteringRules,
+  isPathDeniedByReadRule,
+} from '../core/permission-helpers.js';
 
 const debugLogger = createDebugLogger('GREP');
 
@@ -172,12 +175,10 @@ class GrepToolInvocation extends BaseToolInvocation<
       // from being returned. Filter complete files before truncation so a
       // denied file cannot leak through the line or character limits.
       const permissionManager = this.config.getPermissionManager?.();
-      const permissionFilteringActive = Boolean(
-        permissionManager &&
-          typeof permissionManager.hasDenyOrAskRuleForTool === 'function' &&
-          permissionManager.hasDenyOrAskRuleForTool(ToolNames.GREP),
+      const permissionFilteringActive = hasPermissionFilteringRules(
+        permissionManager,
+        ToolNames.GREP,
       );
-      let withheldMatchCount = 0;
       if (permissionManager) {
         const deniedPaths = new Set<string>();
         const evaluatedPaths = new Map<string, boolean>();
@@ -190,6 +191,7 @@ class GrepToolInvocation extends BaseToolInvocation<
               match.absoluteFilePath,
               this.config.getTargetDir(),
               ToolNames.GREP,
+              this.params as unknown as Record<string, unknown>,
             );
             evaluatedPaths.set(match.absoluteFilePath, denied);
           }
@@ -198,11 +200,9 @@ class GrepToolInvocation extends BaseToolInvocation<
           }
         }
         if (deniedPaths.size > 0) {
-          const beforeFilterCount = rawMatches.length;
           rawMatches = rawMatches.filter(
             (match) => !deniedPaths.has(match.absoluteFilePath),
           );
-          withheldMatchCount = beforeFilterCount - rawMatches.length;
         }
       }
 

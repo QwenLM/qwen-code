@@ -111,6 +111,32 @@ describe('execution worker protocol', () => {
     }
   });
 
+  it('enforces host-provided Read rules for worker search results', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'execution-permissions-'));
+    const environment = createExecutionWorkerEnvironment({
+      workspace,
+      sessionId: 'permission-test',
+      truncateToolOutputLines: 100,
+      fileReadCacheDisabled: false,
+      permissions: { deny: ['Read(./secret.txt)'] },
+    });
+    try {
+      await writeFile(join(workspace, 'secret.txt'), 'TOPSECRET');
+      await writeFile(join(workspace, 'public.txt'), 'PUBLIC');
+      const result = await run(environment, 'glob', ToolNames.GLOB, {
+        pattern: '*.txt',
+        path: workspace,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('public.txt');
+      expect(result.llmContent).not.toContain('secret.txt');
+      expect(result.resultFilePaths).toEqual([join(workspace, 'public.txt')]);
+    } finally {
+      await environment.dispose();
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it.each([undefined, 0, 40000])(
     'preserves default, disabled and explicit shell truncation (threshold=%s)',
     async (threshold) => {

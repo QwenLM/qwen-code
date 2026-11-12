@@ -531,6 +531,11 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
     const workerOptions: ExecutionWorkerOptions = {
       workspace,
       sessionId: `executor-${randomUUID()}`,
+      permissions: {
+        allow: config.getPermissionsAllow?.() ?? [],
+        ask: config.getPermissionsAsk?.() ?? [],
+        deny: config.getPermissionsDeny?.() ?? [],
+      },
       // Zero disables truncation; Infinity would become null on the wire.
       truncateToolOutputLines: Number.isFinite(lines) ? lines : 0,
       truncateToolOutputThreshold:

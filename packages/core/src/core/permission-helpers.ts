@@ -104,6 +104,20 @@ export function buildPermissionCheckContext(
 }
 
 /**
+ * Whether the manager may hide individual search results for this tool.
+ * Scoped manager shims intentionally expose only the evaluation surface, so
+ * the absence of the optional fast-path method must not disable filtering.
+ */
+export function hasPermissionFilteringRules(
+  pm: PermissionManager | null | undefined,
+  toolName: string,
+): boolean {
+  if (!pm) return false;
+  if (typeof pm.hasDenyOrAskRuleForTool !== 'function') return true;
+  return pm.hasDenyOrAskRuleForTool(toolName);
+}
+
+/**
  * Check whether a path-bearing search result is blocked by a Read rule.
  *
  * Search tools are allowed to scan a workspace by default, but their result
@@ -116,13 +130,11 @@ export async function isPathDeniedByReadRule(
   filePath: string,
   targetDir: string,
   toolName = 'read_file',
+  invocationParams?: Record<string, unknown>,
 ): Promise<boolean> {
   if (!pm) return false;
 
-  if (
-    typeof pm.hasDenyOrAskRuleForTool === 'function' &&
-    !pm.hasDenyOrAskRuleForTool(toolName)
-  ) {
+  if (!hasPermissionFilteringRules(pm, toolName)) {
     return false;
   }
 
@@ -137,14 +149,21 @@ export async function isPathDeniedByReadRule(
   if (decision !== 'ask') return false;
 
   // A bare tool-level ask rule already gated the search invocation. Only hide
-  // a result for an ask decision that comes from a path-scoped rule.
-  const invocationContext = buildPermissionCheckContext(
-    toolName,
-    {},
-    targetDir,
-  );
-  if (pm.hasRelevantRules(invocationContext)) {
-    return (await pm.evaluate(invocationContext)) !== 'ask';
+  // a result for an ask decision that comes from a path-scoped rule. When the
+  // invocation itself carried a matching path, that path was approved at the
+  // scheduler boundary and its results remain visible.
+  const pathScopedAsk =
+    typeof pm.hasPathScopedAskRule === 'function'
+      ? pm.hasPathScopedAskRule(context)
+      : true;
+  if (!pathScopedAsk) return false;
+  if (invocationParams && typeof pm.hasPathScopedAskRule === 'function') {
+    const invocationContext = buildPermissionCheckContext(
+      toolName,
+      invocationParams,
+      targetDir,
+    );
+    if (pm.hasPathScopedAskRule(invocationContext)) return false;
   }
   return true;
 }

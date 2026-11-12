@@ -716,8 +716,12 @@ describe('GlobTool', () => {
       const result = await run({ pattern: '*.streamlimit' }, tool);
 
       expect(result.llmContent).toContain('Results truncated after scanning');
-      expect(result.llmContent).toContain('excluded by permission rules');
-      expect(result.returnDisplay).toBe('Results truncated');
+      expect(result.llmContent).toContain(
+        'Results may be omitted by permission rules',
+      );
+      expect(result.returnDisplay).toBe(
+        'Results truncated (permission-filtered)',
+      );
     });
 
     it('should truncate results when more than 100 files are found', async () => {

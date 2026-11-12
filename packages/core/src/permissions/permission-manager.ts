@@ -634,6 +634,50 @@ export class PermissionManager {
   }
 
   /**
+   * Returns true when a path-scoped ask rule matches the context.
+   *
+   * Search tools use this to distinguish a result that needs a per-path
+   * confirmation (which they cannot present) from a bare tool-level ask that
+   * already gated the search invocation itself.
+   */
+  hasPathScopedAskRule(ctx: PermissionCheckContext): boolean {
+    ctx = this.normalizePermissionContext(ctx);
+    const {
+      toolName,
+      toolAliases,
+      mcpIdentity,
+      command,
+      cwd,
+      filePath,
+      domain,
+      specifier,
+      toolParams,
+    } = ctx;
+    const pathCtx: PathMatchContext | undefined =
+      this.config.getProjectRoot && this.config.getCwd
+        ? {
+            projectRoot: this.config.getProjectRoot(),
+            cwd: cwd ?? this.config.getCwd(),
+          }
+        : undefined;
+    const matchArgs = [
+      toolName,
+      command,
+      filePath,
+      domain,
+      pathCtx,
+      specifier,
+      toolParams,
+      toolAliases,
+    ] as const;
+    return [...this.sessionRules.ask, ...this.persistentRules.ask].some(
+      (rule) =>
+        rule.specifierKind === 'path' &&
+        matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true),
+    );
+  }
+
+  /**
    * Evaluate a compound command by splitting it into sub-commands,
    * evaluating each independently, and returning the most restrictive result.
    *

@@ -172,6 +172,12 @@ export interface ExecutionWorkerOptions {
   workspace: string;
   outputDirectory?: string;
   sessionId: string;
+  /** Permission rules resolved by the host and enforced inside the worker. */
+  permissions?: {
+    allow?: readonly string[];
+    ask?: readonly string[];
+    deny?: readonly string[];
+  };
   truncateToolOutputLines: number;
   truncateToolOutputThreshold?: number;
   fileReadCacheDisabled: boolean;
