@@ -143,11 +143,14 @@ function channel(
   };
 }
 
-async function renderPage(language: 'en' | 'zh-CN' = 'en') {
+async function renderPage(
+  language: 'en' | 'zh-CN' = 'en',
+  props: { clientId?: string; sessionWorkspaceCwd?: string } = {},
+) {
   await act(async () => {
     root.render(
       <I18nProvider language={language}>
-        <ChannelsManagerPage onClose={vi.fn()} />
+        <ChannelsManagerPage onClose={vi.fn()} {...props} />
       </I18nProvider>,
     );
   });
@@ -524,6 +527,65 @@ describe('ChannelsManagerPage', () => {
       autoLoad: true,
       enabled: true,
       workspaceCwd: '/workspace/secondary',
+    });
+  });
+
+  it('attributes QR logins only on the workspace this tab session lives on', async () => {
+    // The client id is registered with the session workspace's bridge, and the
+    // daemon validates the header against the TARGET workspace's bridge. A
+    // foreign id is a hard 400, so it must be withheld rather than sent.
+    workspaceState.current = {
+      ...workspaceState.current,
+      capabilities: {
+        features: ['channel_management'],
+        workspaces: [
+          {
+            id: 'primary',
+            cwd: '/workspace/main',
+            displayName: 'Main repo',
+            primary: true,
+            trusted: true,
+          },
+          {
+            id: 'secondary',
+            cwd: '/workspace/secondary',
+            displayName: 'Secondary repo',
+            primary: false,
+            trusted: true,
+          },
+        ],
+      },
+    };
+    await renderPage('en', {
+      clientId: 'tab-a',
+      sessionWorkspaceCwd: '/workspace/main',
+    });
+
+    expect(useChannelsMock).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      enabled: true,
+      workspaceCwd: '/workspace/main',
+      clientId: 'tab-a',
+    });
+
+    const trigger = document.querySelector<HTMLElement>(
+      '[aria-label="Workspace"]',
+    );
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const secondary = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.trim() === 'Secondary repo');
+    await act(async () => {
+      secondary?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(useChannelsMock).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      enabled: true,
+      workspaceCwd: '/workspace/secondary',
+      clientId: undefined,
     });
   });
 

@@ -24770,6 +24770,13 @@ export function App({
                             : returnToChat
                         }
                         initialFocusRef={panelHeadingRef}
+                        // A cleared session keeps clientId and workspaceCwd,
+                        // so the workspace comparison alone would still send
+                        // an id the daemon no longer knows (400).
+                        clientId={
+                          connection.sessionId ? connection.clientId : undefined
+                        }
+                        sessionWorkspaceCwd={connection.workspaceCwd}
                       />
                     ) : activePanel === 'channel-events' ? (
                       <ChannelEventsPage
