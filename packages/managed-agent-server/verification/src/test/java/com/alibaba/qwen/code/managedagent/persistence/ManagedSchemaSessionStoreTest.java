@@ -13,6 +13,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -389,6 +391,40 @@ public class ManagedSchemaSessionStoreTest {
         assertThat(jdbc.queryForObject(
                 "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND state = 'PENDING' AND tenant_id = ?",
                 Long.class, tenant)).isEqualTo(2);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void anOpenFirstRenameDoesNotHoldBackAnotherSessionsFirstRename(boolean sameTenant) throws Exception {
+        // Neither the tenant guard nor a gap lock left by the first admission's
+        // reads of its empty rename range may hold back another Session.
+        String otherTenant = sameTenant ? tenant : tenant + "-other";
+        String other = tx.execute(status -> store.insertSessionCommand(
+                otherTenant, "actor", "CREATE_SESSION", "create-other", "other-digest",
+                "qwen-code", null, "other", List.of(), null)).sessionId();
+        var held = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        try (var threads = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var first = threads.submit(() -> tx.execute(status -> {
+                var command = store.beginSessionRename(tenant, "first", "first-digest", session, "first");
+                held.countDown();
+                try {
+                    release.await(15, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                return command;
+            }));
+            assertThat(held.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            var second = threads.submit(() -> tx.execute(status -> store.beginSessionRename(
+                    otherTenant, "second", "second-digest", other, "second")));
+            try {
+                assertThat(second.get(3, java.util.concurrent.TimeUnit.SECONDS).renameRevision()).isEqualTo(1);
+            } finally {
+                release.countDown();
+            }
+            assertThat(first.get(10, java.util.concurrent.TimeUnit.SECONDS).renameRevision()).isEqualTo(1);
+        }
     }
 
     @Test

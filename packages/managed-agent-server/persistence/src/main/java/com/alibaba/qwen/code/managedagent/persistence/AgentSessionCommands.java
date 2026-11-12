@@ -223,22 +223,22 @@ final class AgentSessionCommands {
 
     SessionMutationCommand beginSessionRename(String tenantId, String key,
             String digest, String sessionId, String title, String actorId) {
-        // Empty operation ranges can share an InnoDB gap even across Session scopes.
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
-        // The Session lock serializes this Session's admissions without gap-locking missing index
-        // entries. A different Session reusing the tenant-scoped key loses on the receipt's unique
-        // key in beginSessionMutation and answers idempotency_conflict.
+        // The Session lock, this transaction's first, serializes its admissions; later reads see a snapshot
+        // after it. Another Session reusing the key loses on the receipt's unique key (idempotency_conflict).
+        // Nothing locks the rename range: a first rename's range is empty, and locking it gap-locked the
+        // shared target index up to other Sessions' and tenants' entries, holding back their first renames.
         Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
         if (previous.isPresent()
                 && sessionId.equals(previous.get().sessionId())) {
             requireRenameReplayOwner(session, previous.get(), actorId);
         }
+        // Only admission inserts renames, under the Session lock, so this read-only replay answer may use the snapshot.
         var retained =
                 jdbc.queryForList(
                         "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'RENAME' AND target_key"
                             + " = ? AND idempotency_digest = ? AND tenant_id = ? AND session_id = ?"
-                            + " ORDER BY target_revision DESC LIMIT 1 FOR UPDATE",
+                            + " ORDER BY target_revision DESC LIMIT 1",
                         AgentStoreRows.renameTarget(tenantId, sessionId),
                         com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
                                 key),
@@ -303,14 +303,14 @@ final class AgentSessionCommands {
                 next,
                 tenantId,
                 sessionId);
-        jdbc.update(
-                "UPDATE ma_operation SET state = 'SUPERSEDED', delivery_state = 'COMPLETED', phase"
-                    + " = 'SUPERSEDED', gmt_modified = ? WHERE operation_kind = 'RENAME' AND"
-                    + " target_key = ? AND target_revision < ? AND state IN ('PENDING', 'RUNNING',"
-                    + " 'RECOVERY_BLOCKED')",
-                now,
-                AgentStoreRows.renameTarget(tenantId, sessionId),
-                next);
+        // By exact key: rows join this state set only by admission, so the snapshot lists them all; the update rechecks.
+        for (String superseded : jdbc.queryForList("SELECT operation_key FROM ma_operation WHERE operation_kind = 'RENAME'"
+                + " AND target_key = ? AND target_revision < ? AND state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED')",
+                String.class, AgentStoreRows.renameTarget(tenantId, sessionId), next)) {
+            jdbc.update("UPDATE ma_operation SET state = 'SUPERSEDED', delivery_state = 'COMPLETED', phase = 'SUPERSEDED',"
+                    + " gmt_modified = ? WHERE operation_key = ? AND operation_kind = 'RENAME'"
+                    + " AND state IN ('PENDING', 'RUNNING', 'RECOVERY_BLOCKED')", now, superseded);
+        }
         jdbc.update(
                 "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key,"
                     + " operation_id, operation_kind, tenant_id, session_id, target_kind,"
