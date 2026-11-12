@@ -282,6 +282,8 @@ Interaction mode reminder: Use 'ask_user_question' when you need clarification o
 
 ---
 
+The following instructions come from the user's context files (QWEN.md / AGENTS.md). Where they conflict with the default guidance above, they take precedence. Check them before choosing a tool or spawning a subagent.
+
 This is custom user memory.
 Be extra polite."
 `;
@@ -1820,6 +1822,8 @@ Keep going until the user's query is completely resolved, or report the specific
 Interaction mode reminder: Use 'ask_user_question' when you need clarification or want to validate assumptions. Never include time estimates in options.
 
 ---
+
+The following instructions come from the user's context files (QWEN.md / AGENTS.md). Where they conflict with the default guidance above, they take precedence. Check them before choosing a tool or spawning a subagent.
 
 User prefers concise responses."
 `;
