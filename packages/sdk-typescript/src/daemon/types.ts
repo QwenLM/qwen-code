@@ -1857,6 +1857,8 @@ export interface DaemonSessionTurnIndexEntry {
   turnId: string;
   kind: 'prompt' | 'realtime' | 'scheduled';
   promptId?: string;
+  /** Canonical persisted identity for per-turn history queries. */
+  historyPromptId?: string;
   timestamp?: string;
   label: string;
   detail?: string;

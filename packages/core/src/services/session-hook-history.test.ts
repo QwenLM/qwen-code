@@ -147,6 +147,58 @@ describe('persisted hook turn pages', () => {
       reader.readTurnHooksPage(sessionId, promptId, { limit: 501 }),
     ).rejects.toThrow(RangeError);
   });
+  it('exposes explicit history identity for recorded and unrecorded navigation turns', async () => {
+    records = [];
+    append({ ...event('pre-prompt'), phase: 'started' });
+    const firstUser = append();
+    append(event('pre-prompt'));
+    const secondUser = append();
+    secondUser.promptId = `${sessionId}########2`;
+    secondUser.daemonPromptId = 'second-admission';
+    await write();
+    const reader = new SessionTranscriptReader(cwd);
+    const index = await reader.readTurnIndexPage(sessionId);
+    expect(index.turns).toMatchObject([
+      {
+        turnId: firstUser.uuid,
+        promptId: firstUser.daemonPromptId,
+        historyPromptId: promptId,
+      },
+      {
+        turnId: secondUser.uuid,
+        promptId: secondUser.daemonPromptId,
+        historyPromptId: secondUser.promptId,
+      },
+    ]);
+    const pages = await Promise.all(
+      index.turns.map((turn) =>
+        reader.readTurnHooksPage(sessionId, turn.historyPromptId!, {
+          snapshot: index.snapshot,
+        }),
+      ),
+    );
+    expect(pages).toMatchObject([
+      { promptId, coverage: 'recorded', totalExecutions: 1 },
+      { promptId: secondUser.promptId, coverage: 'unrecorded', summary: null },
+    ]);
+  });
+  it('exposes the queryable fallback identity for legacy navigation turns', async () => {
+    delete records[0]!.promptId;
+    await write();
+    const reader = new SessionTranscriptReader(cwd);
+    const index = await reader.readTurnIndexPage(sessionId);
+    const turn = index.turns[0]!;
+    expect(turn).toMatchObject({
+      turnId: records[0]!.uuid,
+      promptId: 'different-admission-id',
+      historyPromptId: `legacy-record:${records[0]!.uuid}`,
+    });
+    expect(
+      await reader.readTurnHooksPage(sessionId, turn.historyPromptId!, {
+        snapshot: index.snapshot,
+      }),
+    ).toMatchObject({ coverage: 'unrecorded', summary: null });
+  });
   it('reuses frozen aggregation across readers and pages without reading unrelated previews', async () => {
     for (let i = 0; i < 101; i++) append(event(String(i).padStart(3, '0')));
     append().promptId = `${sessionId}########2`;

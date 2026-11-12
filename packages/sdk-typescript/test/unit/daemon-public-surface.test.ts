@@ -204,6 +204,9 @@ import type {
 } from '../../src/daemon/index.js';
 
 it('exports hook page contracts from the root and daemon entry points', () => {
+  expectTypeOf<
+    Public.DaemonSessionTurnIndexEntry['historyPromptId']
+  >().toEqualTypeOf<string | undefined>();
   expectTypeOf<Public.DaemonSessionTurnHooksPage>().toEqualTypeOf<DaemonPublic.DaemonSessionTurnHooksPage>();
   expectTypeOf<Public.DaemonSessionTurnHooksPageOptions>().toEqualTypeOf<DaemonPublic.DaemonSessionTurnHooksPageOptions>();
   expectTypeOf<

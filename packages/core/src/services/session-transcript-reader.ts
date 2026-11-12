@@ -207,6 +207,7 @@ export interface SessionTranscriptNavigationTurn {
   turnId: string;
   kind: SessionTranscriptNavigationTurnKind;
   promptId?: string;
+  historyPromptId?: string;
   timestamp?: string;
   label: string;
   detail?: string;
@@ -3334,6 +3335,9 @@ export class SessionTranscriptReader {
     }
     const turns = selectedTurns.map((turn, offset) => {
       const preview = labels.get(turn.turnId);
+      const historyPromptId = projected
+        ? undefined
+        : index?.byUuid.get(turn.turnId)?.turnHint.turnPromptId;
       const detail = turn.finalAssistantRecordId
         ? details.get(turn.finalAssistantRecordId)
         : undefined;
@@ -3342,6 +3346,7 @@ export class SessionTranscriptReader {
         turnId: turn.turnId,
         kind: turn.kind,
         ...(turn.promptId ? { promptId: turn.promptId } : {}),
+        ...(historyPromptId ? { historyPromptId } : {}),
         ...(preview?.timestamp ? { timestamp: preview.timestamp } : {}),
         label: preview
           ? preview.label
