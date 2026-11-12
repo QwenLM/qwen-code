@@ -39,6 +39,7 @@ import { buildVirtualItems, type VpItem } from '../utils/virtual-items.js';
 import {
   anchorOrdinal,
   countAnchors,
+  createTranscriptNavCursor,
   findAdjacentAnchor,
   type AnchorDirection,
   type TranscriptAnchorKind,
@@ -171,6 +172,20 @@ export const MainContent = ({
   const selectionQueryRef = useRef<SelectionQuery | null>(null);
   const { menu: contextMenuOpen } = useContextMenu();
 
+  // Structure-navigation cursor. The viewport's scroll anchor clamps at the
+  // end of the transcript, so deriving repeated jumps from it would replay
+  // the same target forever; the cursor records the requested target instead
+  // and is reset whenever the reading position changes for another reason.
+  // Declared before the scroll-actions effect whose dependency list and
+  // callbacks reference it.
+  const navCursorRef = useRef<ReturnType<
+    typeof createTranscriptNavCursor
+  > | null>(null);
+  navCursorRef.current ??= createTranscriptNavCursor();
+  const resetNavCursor = useCallback(() => {
+    navCursorRef.current?.reset();
+  }, []);
+
   // Expose the transcript's scroll controls to sibling components (e.g.
   // InputPrompt) so bare Up/Down keys can scroll the conversation in VP mode
   // when the input is empty. The ref is populated here but the
@@ -179,7 +194,12 @@ export const MainContent = ({
   useEffect(() => {
     if (!scrollActionsRef) return;
     scrollActionsRef.current = {
-      scrollBy: (delta: number) => scrollRef.current?.scrollBy(delta),
+      scrollBy: (delta: number) => {
+        // Any scroll not caused by a structure jump moves the reading
+        // position, so the next jump starts from there.
+        resetNavCursor();
+        scrollRef.current?.scrollBy(delta);
+      },
       hasScrollableTranscript: () => {
         const state = scrollRef.current?.getScrollState();
         // innerHeight is 0 until the viewport has been measured.
@@ -196,10 +216,15 @@ export const MainContent = ({
         if (!useVirtualScroll) return false;
         const list = scrollRef.current;
         if (!list) return false;
+        // Search-driven jumps also move the reading position.
+        resetNavCursor();
         list.scrollToIndex({ index });
         return true;
       },
-      scrollToEnd: () => scrollRef.current?.scrollToEnd(),
+      scrollToEnd: () => {
+        resetNavCursor();
+        scrollRef.current?.scrollToEnd();
+      },
       getScrollIndex: () => {
         if (!useVirtualScroll) return null;
         return scrollRef.current?.getScrollIndex() ?? null;
@@ -208,7 +233,7 @@ export const MainContent = ({
     return () => {
       scrollActionsRef.current = null;
     };
-  }, [scrollActionsRef, useVirtualScroll]);
+  }, [scrollActionsRef, useVirtualScroll, resetNavCursor]);
 
   const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
     useMemo(() => {
@@ -354,6 +379,12 @@ export const MainContent = ({
   const allVirtualItemsRef = useRef(allVirtualItems);
   allVirtualItemsRef.current = allVirtualItems;
 
+  // New output moves the reading position (auto-follow), so a later jump must
+  // start from there rather than from a stale navigation target.
+  useEffect(() => {
+    resetNavCursor();
+  }, [allVirtualItems.length, resetNavCursor]);
+
   // Transient "Turn 12/48" / "At first turn" notice shown under the viewport.
   const [navNotice, setNavNotice] = useState<string | null>(null);
   const navNoticeTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -382,13 +413,13 @@ export const MainContent = ({
       if (!list) return;
       const items = allVirtualItemsRef.current;
       const label = kind === 'turn' ? 'turn' : 'output';
+      const cursor = navCursorRef.current;
       const target = findAdjacentAnchor(
         items,
-        // The reading-position anchor is what makes one keypress move exactly
-        // one boundary: it is the top row while scrolled up, and the tail
-        // while following output. So "previous" first lands on the prompt of
-        // the turn you are inside, then on the turn before it.
-        list.getScrollIndex(),
+        // Start from the recorded navigation target when there is one (the
+        // live scroll anchor cannot be trusted after a clamped jump), and
+        // otherwise from the current reading position.
+        cursor ? cursor.origin(list.getScrollIndex()) : list.getScrollIndex(),
         direction,
         kind,
       );
@@ -396,6 +427,7 @@ export const MainContent = ({
         if (direction === 'next') {
           // Running off the newest anchor means "back to the live tail":
           // scrollToEnd re-arms auto-follow, matching scroll-to-bottom.
+          cursor?.reset();
           list.scrollToEnd();
           showNavNotice(`At latest ${label}`);
         } else {
@@ -403,6 +435,7 @@ export const MainContent = ({
         }
         return;
       }
+      cursor?.record(target);
       list.scrollToIndex({ index: target });
       showNavNotice(
         `${kind === 'turn' ? 'Turn' : 'Output'} ${anchorOrdinal(
@@ -614,6 +647,7 @@ export const MainContent = ({
           measureAtFullHeight={hasPendingPlainTextConfirmation}
           showScrollbar={showScrollbar}
           onNavigateStructure={navigateTranscript}
+          onUserScroll={resetNavCursor}
         />
         <TextSelectionController
           isActive={!uiState.dialogsVisible}

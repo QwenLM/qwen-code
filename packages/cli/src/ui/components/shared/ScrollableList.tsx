@@ -44,6 +44,13 @@ interface ScrollableListProps<T> extends VirtualizedListProps<T> {
     direction: AnchorDirection,
     kind: TranscriptAnchorKind,
   ) => void;
+  /**
+   * Fired for every scroll the user performs by line/page keys, by mouse
+   * wheel or by dragging the scrollbar — but NOT for structure jumps. Lets
+   * the item owner invalidate position bookkeeping (e.g. its navigation
+   * cursor) precisely when the reader moves for another reason.
+   */
+  onUserScroll?: () => void;
 }
 
 export type ScrollableListRef<T> = VirtualizedListRef<T>;
@@ -56,7 +63,12 @@ function ScrollableList<T>(
   // VirtualizedList. Spreading the full props would silently forward
   // `hasFocus` (which VirtualizedList does not declare) and create a
   // latent name collision if VirtualizedList ever adds the same prop.
-  const { hasFocus, onNavigateStructure, ...virtualizedListProps } = props;
+  const {
+    hasFocus,
+    onNavigateStructure,
+    onUserScroll,
+    ...virtualizedListProps
+  } = props;
   const virtualizedListRef = useRef<VirtualizedListRef<T>>(null);
   const isDraggingScrollbar = useRef(false);
 
@@ -119,24 +131,30 @@ function ScrollableList<T>(
         ) {
           onNavigateStructure('next', 'tool');
         } else if (keyMatchers[Command.SCROLL_UP](key)) {
+          onUserScroll?.();
           virtualizedListRef.current?.scrollBy(-1);
         } else if (keyMatchers[Command.SCROLL_DOWN](key)) {
+          onUserScroll?.();
           virtualizedListRef.current?.scrollBy(1);
         } else if (keyMatchers[Command.PAGE_UP](key)) {
+          onUserScroll?.();
           const state = getScrollState();
           const delta = state.innerHeight > 0 ? state.innerHeight : 20;
           virtualizedListRef.current?.scrollBy(-delta);
         } else if (keyMatchers[Command.PAGE_DOWN](key)) {
+          onUserScroll?.();
           const state = getScrollState();
           const delta = state.innerHeight > 0 ? state.innerHeight : 20;
           virtualizedListRef.current?.scrollBy(delta);
         } else if (keyMatchers[Command.SCROLL_HOME](key)) {
+          onUserScroll?.();
           virtualizedListRef.current?.scrollTo(0);
         } else if (keyMatchers[Command.SCROLL_END](key)) {
+          onUserScroll?.();
           virtualizedListRef.current?.scrollToEnd();
         }
       },
-      [getScrollState, onNavigateStructure],
+      [getScrollState, onNavigateStructure, onUserScroll],
     ),
     { isActive: hasFocus },
   );
@@ -207,24 +225,28 @@ function ScrollableList<T>(
           // wheel/drag intent (and its timer) so a flush scheduled moments
           // earlier can't yank the view off the clicked row.
           cancelPendingScroll();
+          onUserScroll?.();
           virtualizedListRef.current.scrollToScrollbarRow(event.row);
         }
         return;
       }
       if (event.name === 'move' && isDraggingScrollbar.current) {
+        onUserScroll?.();
         pendingDragRow.current = event.row;
         scheduleScrollFlush();
         return;
       }
       if (event.name === 'scroll-up') {
+        onUserScroll?.();
         pendingWheelDelta.current -= WHEEL_LINES_PER_TICK;
         scheduleScrollFlush();
       } else if (event.name === 'scroll-down') {
+        onUserScroll?.();
         pendingWheelDelta.current += WHEEL_LINES_PER_TICK;
         scheduleScrollFlush();
       }
     },
-    [scheduleScrollFlush, cancelPendingScroll],
+    [scheduleScrollFlush, cancelPendingScroll, onUserScroll],
   );
 
   // The VP viewport owns the wheel (this IS the in-app scroller), so opt out

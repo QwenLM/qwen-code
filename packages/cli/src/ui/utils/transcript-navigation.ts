@@ -100,3 +100,36 @@ export function anchorOrdinal<T extends TranscriptNavItem>(
   }
   return ordinal;
 }
+
+/**
+ * Tracks where structure navigation currently is, *independently* of the
+ * viewport's scroll anchor. Needed because scrollToIndex clamps at the end of
+ * the transcript: once a target sits inside the last page, the anchor stops
+ * changing, so deriving the next step from the anchor would replay the same
+ * jump forever. The cursor records the requested target instead, so every
+ * keypress advances exactly one boundary even when the view cannot move.
+ *
+ * Reset it whenever the reading position changes for a reason that is not a
+ * structure jump (manual scrolling, new output, a different search).
+ */
+export interface TranscriptNavCursor {
+  /** Where the next previous/next search starts from. */
+  origin: (liveAnchor: number) => number;
+  /** Record a jump target as the new position, clamped or not. */
+  record: (target: number) => void;
+  /** Forget the position so the next jump starts from the live anchor. */
+  reset: () => void;
+}
+
+export function createTranscriptNavCursor(): TranscriptNavCursor {
+  let target: number | null = null;
+  return {
+    origin: (liveAnchor) => target ?? liveAnchor,
+    record: (next) => {
+      target = next;
+    },
+    reset: () => {
+      target = null;
+    },
+  };
+}

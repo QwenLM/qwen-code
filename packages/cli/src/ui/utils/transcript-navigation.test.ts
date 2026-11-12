@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   anchorOrdinal,
   countAnchors,
+  createTranscriptNavCursor,
   findAdjacentAnchor,
   isAnchorItem,
   isToolOutputItem,
@@ -140,5 +141,26 @@ describe('anchorOrdinal', () => {
   it('reports 0 for out-of-range indexes', () => {
     expect(anchorOrdinal(items, -1, 'turn')).toBe(0);
     expect(anchorOrdinal(items, items.length, 'turn')).toBe(0);
+  });
+});
+
+describe('createTranscriptNavCursor', () => {
+  it('starts from the live anchor, then keeps the requested target even when the anchor is clamped', () => {
+    const cursor = createTranscriptNavCursor();
+    expect(cursor.origin(27)).toBe(27);
+    cursor.record(12);
+    // The viewport clamped at the end of the transcript, so the live anchor
+    // no longer reflects where the jump went. Navigation must not replay the
+    // same step from that anchor on the next keypress.
+    expect(cursor.origin(27)).toBe(12);
+    cursor.record(11);
+    expect(cursor.origin(27)).toBe(11);
+  });
+
+  it('returns to the live anchor after a manual-scroll or new-output reset', () => {
+    const cursor = createTranscriptNavCursor();
+    cursor.record(12);
+    cursor.reset();
+    expect(cursor.origin(27)).toBe(27);
   });
 });

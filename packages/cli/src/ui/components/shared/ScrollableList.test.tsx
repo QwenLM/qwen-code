@@ -657,4 +657,44 @@ describe('<ScrollableList /> structure navigation', () => {
     // no-op: it falls back to Command.PAGE_UP, exactly as before this change.
     expect(lastFrame()).toContain('item-0');
   });
+
+  it('reports manual scrolling but not structure jumps to onUserScroll', async () => {
+    const onNavigateStructure = vi.fn();
+    const onUserScroll = vi.fn();
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        hasFocus
+        data={makeItems(20)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={5}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+        onNavigateStructure={onNavigateStructure}
+        onUserScroll={onUserScroll}
+      />
+    );
+
+    const { stdin, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+
+    await act(async () => {
+      stdin.write(ALT_PAGE_UP);
+    });
+    expect(onNavigateStructure).toHaveBeenCalledWith('previous', 'turn');
+    expect(onUserScroll).not.toHaveBeenCalled();
+
+    await act(async () => {
+      stdin.write(PAGE_DOWN);
+    });
+    expect(onUserScroll).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      stdin.write(SHIFT_UP);
+    });
+    expect(onUserScroll).toHaveBeenCalledTimes(2);
+  });
 });
