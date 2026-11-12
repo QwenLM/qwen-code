@@ -29,6 +29,20 @@ Project-hooks approval is mounted only for workspace session contexts; standalon
 chat must not probe a workspace-only hooks endpoint. Workspace sessions retain
 their existing approval checks.
 
+## Compatibility and theme access
+
+Public props and their defaults are unchanged. The intentional UI behavior change
+is limited to Home-only hosts that explicitly enable footer utilities: the rail
+and its More menu disappear, and the same utilities render inline. Hosts styling
+or querying that conditional rail/More DOM may need to adapt. This should not be
+described as identical rendering for every existing host.
+
+Generic users do not need host-specific settings to change theme. An explicitly
+enabled theme footer remains a native button; the full standalone app retains its
+More/theme action; `/theme` remains available with the unchanged minimal SDK
+defaults. Native settings can still edit `ui.theme` when the daemon exposes that
+setting. Moving theme into a host's own settings is an optional host decision.
+
 Affected areas are the shell's layout decision, the embedding README, and the
 existing browser navigation harness. Browser regressions cover Home-only hosts
 with footer tools, collapse/expand, theme changes, custom footer content, workspace
