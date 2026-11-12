@@ -932,6 +932,50 @@ describe('ANSI-C bytes that are not valid UTF-8', () => {
     ]);
   });
 
+  it.each([
+    [
+      'a double-quoted wrapper payload',
+      String.raw`bash -c "printf ok > $'\\xff'"`,
+      'write_file',
+    ],
+    [
+      'a double-quoted payload with an expansion',
+      String.raw`bash -c "printf $VALUE > $'\\xff'"`,
+      'write_file',
+    ],
+    [
+      'a backslash between raw surrogate fragments',
+      'cat ' + String.fromCharCode(0xd800, 0x5c, 0xdcff),
+      'read_file',
+    ],
+    [
+      'a hex-quoted wrapper payload',
+      String.raw`sh -c $'printf ok > $\x27\xff\x27'`,
+      'write_file',
+    ],
+    [
+      'an octal-quoted wrapper payload',
+      String.raw`sh -c $'printf ok > $\047\xff\047'`,
+      'write_file',
+    ],
+    ['raw surrogates separated by quotes', "cat '\uD800'\uDCFF", 'read_file'],
+    [
+      'a raw redirect target separated by quotes',
+      "printf ok > '\uD800'\uDCFF",
+      'write_file',
+    ],
+  ])(
+    'keeps an undecodable path unresolved through %s',
+    (_label, command, tool) => {
+      const operations = extractShellOperationsAcrossCommand(command, '/repo');
+      expect(operations).toHaveLength(1);
+      expect(operations[0]).toMatchObject({
+        virtualTool: tool,
+        pathUnknown: true,
+      });
+    },
+  );
+
   it('marks a redirect-only undecodable target unresolved', () => {
     expect(extractShellOperations(String.raw`> $'\xff'`, '/repo')).toEqual([
       { ...write('/repo/\udcff'), pathUnknown: true },
@@ -944,6 +988,8 @@ describe('ANSI-C wrapper payloads', () => {
     [String.raw`cat $'\xc3\xa9'`, [read('/repo/é')]],
     [String.raw`cat $'\xc3'$'\xa9'`, [read('/repo/é')]],
     ["sh -c 'cat 😀'$'\\x41'", [read('/repo/😀A')]],
+    [String.raw`cat \😀`, [read('/repo/😀')]],
+    ["cat '😀'", [read('/repo/😀')]],
     [String.raw`cat $'a\c\\tb'`, [read('/repo/a\x1ctb')]],
     [String.raw`cat $'\c?'`, [read('/repo/\x7f')]],
     [String.raw`cat $'\x3e'/etc/passwd`, [read('/repo/>/etc/passwd')]],

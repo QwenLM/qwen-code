@@ -784,6 +784,24 @@ describe('stripShellWrapper', () => {
     expect(stripShellWrapper(command)).toEqual('cat \uDC00\uDCFF');
   });
 
+  it('keeps raw surrogate fragments undecodable after wrapper quote removal', () => {
+    const command = `sh -c 'cat ${String.fromCharCode(0xd800)}'${String.fromCharCode(0xdcff)}`;
+    expect(hasUnpairedSurrogate(stripShellWrapper(command))).toBe(true);
+  });
+
+  it('preserves undecodable text when an ANSI-C payload is decoded again', () => {
+    const opaqueByte = String.fromCharCode(0xdcff);
+    expect(stripShellWrapper(`sh -c $'cat ${opaqueByte}'`)).toBe(
+      `cat ${opaqueByte}`,
+    );
+  });
+
+  it('removes wrapper quoting without discarding literal fragments beside expansions', () => {
+    expect(
+      stripShellWrapper(String.raw`bash -c "printf $VALUE > $'\\xff'"`),
+    ).toBe(String.raw`printf $VALUE > $'\xff'`);
+  });
+
   it('keeps valid surrogate pairs beside decoded ASCII in a wrapper', () => {
     expect(stripShellWrapper("sh -c 'cat 😀'$'\\x41'")).toEqual('cat 😀A');
   });

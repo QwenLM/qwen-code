@@ -3495,7 +3495,15 @@ describe('PermissionManager — compound shell write attribution', () => {
     [String.raw`printf x > $'\uD800'`, 'ask'],
     [String.raw`cat $'\U00110000'`, 'ask'],
     ["sh -c 'cat \uD800'" + String.raw`$'\xff'`, 'ask'],
+    [String.raw`bash -c "printf ok > $'\\xff'"`, 'ask'],
+    [String.raw`bash -c "printf $VALUE > $'\\xff'"`, 'ask'],
+    ['cat ' + String.fromCharCode(0xd800, 0x5c, 0xdcff), 'ask'],
+    [String.raw`sh -c $'printf ok > $\x27\xff\x27'`, 'ask'],
+    [String.raw`sh -c $'printf ok > $\047\xff\047'`, 'ask'],
+    ["cat '\uD800'\uDCFF", 'ask'],
+    ["printf ok > '\uD800'\uDCFF", 'ask'],
     [String.raw`cat $'\xc3\xa9'`, 'allow'],
+    [String.raw`sh -c 'cat 😀'$'\x41'`, 'allow'],
   ] as const)(
     'undecodable paths ask instead of matching an allow rule: %s → %s',
     async (command, expected) => {

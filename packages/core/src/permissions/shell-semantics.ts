@@ -188,7 +188,13 @@ function tokenize(
         continue;
       }
       const literal = String.fromCodePoint(command.codePointAt(i)!);
-      for (const byte of Buffer.from(literal)) ansiCBytes.push(byte);
+      if (hasUnpairedSurrogate(literal)) {
+        flushAnsiC();
+        current = concatAnsiCText(current, literal);
+        bare += '0'.repeat(literal.length);
+      } else {
+        for (const byte of Buffer.from(literal)) ansiCBytes.push(byte);
+      }
       i += literal.length - 1;
       continue;
     }
@@ -201,8 +207,10 @@ function tokenize(
       wordStarted = true;
     }
     if (escaped) {
-      current += ch;
-      bare += '0';
+      const literal = String.fromCodePoint(command.codePointAt(i)!);
+      current = concatAnsiCText(current, literal);
+      bare += '0'.repeat(literal.length);
+      i += literal.length - 1;
       escaped = false;
       continue;
     }
@@ -256,9 +264,11 @@ function tokenize(
       }
       continue;
     }
-    current += ch;
+    const literal = String.fromCodePoint(command.codePointAt(i)!);
+    current = concatAnsiCText(current, literal);
     wordStarted = true;
-    bare += inSingle || inDouble ? '0' : '1';
+    bare += (inSingle || inDouble ? '0' : '1').repeat(literal.length);
+    i += literal.length - 1;
   }
   flushAnsiC();
   if (tildeQuoted && current.startsWith('~')) bare = '0' + bare.slice(1);
