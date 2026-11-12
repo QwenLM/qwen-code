@@ -591,9 +591,16 @@ model, which `main` does not have.
   other six still do. Every one of the seven is plumbing-only and every one of the
   six changes the gate.
 - #16939's red is preserved.
-- `ci.yml` gains one step and one relocation, and its gate — the compared
-  document — is unchanged by either. Its freshness step keeps its `if:`, its
-  profile gating and its `::warning::` text.
+- `ci.yml` gains one step and one relocation, and neither changes the gate — the
+  compared document. Its freshness step keeps its `if:`, its profile gating and
+  its `::warning::` text.
+- The folded ESLint change (#17004) **does** change the gate, deliberately and in
+  the widening direction: `Run ESLint` gains the `github_ci_only` profile arm.
+  `Run ESLint`'s `if:` is inside the compared slice, so a base-side edit of this
+  kind stales in-flight branches — the correct direction, and the reason this is
+  listed apart from the two gate-neutral edits above rather than counted among
+  them. The `HELPER_TESTS_DEP_FREE` entry for the freshness suite is removed for
+  the same mechanical reason (it imports `yaml` now); the full list keeps it.
 
 ## Rollback
 

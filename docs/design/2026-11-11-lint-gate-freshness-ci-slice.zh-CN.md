@@ -272,7 +272,8 @@ merge base 取自该检查**已经做过**的包含比较，因此 narrowing 不
 - 十三个历史 `ci.yml` 提交中，十三个都从解析器得到的 stale-or-fresh 判定与被替换的行模型相同，且两侧都没有拒绝任何一对。
 - 在 `main` `2a9c4f8732` 上，其中七次不再要求 rebase，另外六次仍然要求。这七次全部属于纯 plumbing，那六次全部都改变了闸门。
 - #16939 的失败被保留。
-- `ci.yml` 只增加一个步骤、移动一个步骤，且两者都不改变它定义的闸门——被比对的那份文档。freshness 步骤保持其 `if:`、profile 门控与 `::warning::` 文案。
+- `ci.yml` 增加一个步骤、移动一个步骤，两者都不改变闸门——被比对的那份文档。freshness 步骤保持其 `if:`、profile 门控与 `::warning::` 文案。
+- 并入的 ESLint 改动（#17004）**确实**改变闸门，是有意为之、且是放宽方向：`Run ESLint` 增加了 `github_ci_only` 这个 profile 分支。`Run ESLint` 的 `if:` 就在被比对的切片内，所以 base 侧这类改动会让在飞分支 stale——方向正确，也是把它与上面两处闸门中性的改动分列、而不混在一起计数的原因。freshness 套件在 `HELPER_TESTS_DEP_FREE` 里的条目出于同样的机械原因被移除（它现在 import `yaml`）；完整列表仍保留它。
 
 ## 回退预案
 
