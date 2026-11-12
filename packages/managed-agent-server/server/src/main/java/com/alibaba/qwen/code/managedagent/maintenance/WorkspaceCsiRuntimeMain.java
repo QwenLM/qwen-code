@@ -107,9 +107,9 @@ public final class WorkspaceCsiRuntimeMain {
                 com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
                 null, null, null, null, null,
                 com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), bindings, null);
-        var application = new WorkspaceCsiApplicationStore(jdbc, manager, nativeStore, bindings, sessions, new com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport());
+        var application = new WorkspaceCsiApplicationStore(jdbc, manager, nativeStore, bindings, sessions, new com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport(), null);
         var access = new WorkspaceCsiRuntimeAccess(jdbc, manager, json, properties, request.registration(),
-                request.sessionId(), request.runtimeRequestKey(), bindings, sessions, http, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                request.sessionId(), request.runtimeRequestKey(), bindings, sessions, http, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), null);
         access.resolve(request.sessionId()).toCompletableFuture().join();
         var api = support.createClient(URI.create(required("K2_KUBERNETES_API_URL")),
                 Path.of(required("K2_KUBERNETES_TOKEN_FILE")), Path.of(required("K2_KUBERNETES_CA_FILE")));

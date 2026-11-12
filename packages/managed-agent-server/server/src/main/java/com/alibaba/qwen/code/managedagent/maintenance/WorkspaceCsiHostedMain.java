@@ -64,7 +64,7 @@ final class WorkspaceCsiHostedMain {
         var manager = new DataSourceTransactionManager(source);
         var access = new WorkspaceCsiRuntimeAccess(jdbc, manager,
                 json, properties, request.registration(), request.sessionId(), request.runtimeRequestKey(),
-                bindings, new JdbcRuntimeSessionRepository(source), new HttpRuntimeTransport(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                bindings, new JdbcRuntimeSessionRepository(source), new HttpRuntimeTransport(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), null);
         if (retiring) {
             UUID.fromString(args[2]);
             var ids = jdbc.queryForList("SELECT target_id FROM ma_operation WHERE operation_key = ?"
