@@ -100,14 +100,94 @@ function withoutAwk() {
 // The two workflows promise their INFRA_FAILURE_SIGNATURES lists stay equal;
 // read them from the workflows themselves instead of restating them. The
 // configuration class is autofix-only: main-ci deliberately files those.
-function readSignatures(name, key = 'INFRA_FAILURE_SIGNATURES') {
-  const workflow = readFileSync(
-    fileURLToPath(new URL(`../workflows/${name}`, import.meta.url)),
-    'utf8',
+function scalarValue(workflow, key, name) {
+  const match = new RegExp(
+    `^([ \\t]*)${key}:[ \\t]*(.*?)[ \\t]*(?:[ \\t]+#.*)?$`,
+    'm',
+  ).exec(workflow);
+  assert.ok(match, `${name}: ${key} not found`);
+  const [, indent, stripped] = match;
+  // The marker above starts a comment only at a `#` behind whitespace, so a
+  // plain `a#b` keeps its `#`. That same boundary can sit INSIDE a quoted value
+  // (`"a # b"`), which the regex cannot tell apart: a quote it left open means
+  // the `#` was data, so fall back to the line with only trailing whitespace
+  // removed and let the quoted-scalar branch below decide.
+  const lineValue = match[0]
+    .replace(new RegExp(`^[ \\t]*${key}:[ \\t]*`), '')
+    .trimEnd();
+  const raw =
+    /^['"]/.test(stripped) && !stripped.endsWith(stripped[0])
+      ? lineValue
+      : stripped;
+  // A value opening with a block-scalar indicator, an anchor, an alias or a
+  // tag keeps its text somewhere this reader cannot follow. Returning the
+  // indicator would pin a one-character "pattern" that matches nothing while
+  // the assertion above it still passes, so refuse instead.
+  assert.ok(
+    !/^[|>&*!]/.test(raw),
+    `${name}: ${key} uses the \`${raw[0]}\` form, which this dependency-free reader cannot resolve`,
   );
-  const signatures = new RegExp(`${key}: '([^']*)'`).exec(workflow)?.[1];
-  assert.ok(signatures, `${name}: ${key} not found`);
-  return signatures;
+  // A following line indented deeper than the key belongs to the same node.
+  // Blank lines are skipped first: a folded plain scalar may be separated from
+  // its continuation by one, and stopping at the blank line read the value as
+  // its first line while the tail of the list fell away unnoticed. Comment
+  // lines are skipped too — a `#` line is never part of a scalar, however deep
+  // its indent, so refusing one rejected a legal document.
+  const following = workflow
+    .slice(match.index + match[0].length)
+    .split('\n')
+    .slice(1);
+  const nextContent =
+    following.find((line) => {
+      const content = line.trim();
+      return content !== '' && !content.startsWith('#');
+    }) ?? '';
+  assert.ok(
+    !new RegExp(`^[ \\t]{${indent.length + 1},}\\S`).test(nextContent),
+    `${name}: ${key} continues on a deeper-indented line, which this reader cannot follow`,
+  );
+  let value;
+  if (raw.startsWith("'") && raw.endsWith("'")) {
+    value = raw.slice(1, -1).replaceAll("''", "'");
+  } else if (raw.startsWith('"') && raw.endsWith('"')) {
+    try {
+      value = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(
+        `${name}: ${key} is a double-quoted scalar this reader could not decode (${error.message}): ${raw}`,
+      );
+    }
+  } else {
+    assert.ok(
+      !/^["']/.test(raw),
+      `${name}: ${key} opens a quote it does not close on the same line`,
+    );
+    value = raw;
+  }
+  // Checked AFTER decoding, not before: `KEY: ''` is two characters of raw text
+  // and an empty pattern once decoded, and an empty ERE matches every
+  // annotation — the fail-open class this suite exists to prevent.
+  assert.ok(
+    value.length > 0,
+    `${name}: ${key} is empty; an empty pattern would match every annotation`,
+  );
+  return value;
+}
+
+function readSignatures(name, key = 'INFRA_FAILURE_SIGNATURES') {
+  // `yaml` is not importable here: this suite runs in the dependency-free helper
+  // battery (`HELPER_TESTS_DEP_FREE`, before `npm ci`), whose import closure
+  // must stay `node:` builtins. The value is therefore read by hand, and both
+  // quoting styles are accepted because one signature contains a single quote,
+  // which forces the workflow to double quotes.
+  return scalarValue(
+    readFileSync(
+      fileURLToPath(new URL(`../workflows/${name}`, import.meta.url)),
+      'utf8',
+    ),
+    key,
+    name,
+  );
 }
 
 describe('check-host-load', () => {
@@ -428,6 +508,114 @@ describe('check-host-load', () => {
       env: { HOST_LOAD_MAX_WAIT_TRIES: '1', HOST_LOAD_MAX_RATIO: '2.0' },
     });
     assert.equal(below.status, 0, below.stdout);
+  });
+
+  it('reads a plain or commented scalar, and refuses the forms it cannot follow', () => {
+    // R2-2: the reader replaced a quote-pinned regex, so it must fail closed
+    // rather than half-read a value. Each case below is a YAML form a workflow
+    // author could legally reach for; the first three must throw with a message
+    // naming the form (a silent truncation would pin a pattern that matches
+    // nothing, which is the fail-open class this suite exists to catch), and the
+    // last must return the value with the comment stripped.
+    const key = 'INFRA_FAILURE_SIGNATURES';
+    for (const [form, fixture] of [
+      ['>', `env:\n  ${key}: >\n    lost communication with the server\n`],
+      ['|', `env:\n  ${key}: |-\n    lost communication with the server\n`],
+      ['&', `env:\n  ${key}: &sigs lost communication with the server\n`],
+    ]) {
+      assert.throws(
+        () => scalarValue(fixture, key, 'fixture.yml'),
+        // A plain substring check, not `new RegExp` with the indicator
+        // interpolated: `|` is a regex operator there, so the assertion for that
+        // form would also accept `>`'s message.
+        (error) => error.message.includes(`uses the \`${form}\` form`),
+        `${form} must be refused, not read as the indicator`,
+      );
+    }
+    // A deeper-indented continuation is the same node, and this reader stops at
+    // the first line: refuse instead of reading a prefix.
+    assert.throws(
+      () =>
+        scalarValue(
+          `env:\n  ${key}: lost communication\n    with the server\n`,
+          key,
+          'fixture.yml',
+        ),
+      /continues on a deeper-indented line/,
+    );
+    // A folded plain scalar can put a blank line before its continuation. The
+    // reader stops at the first line, so this must refuse rather than silently
+    // return the head of the list.
+    assert.throws(
+      () =>
+        scalarValue(
+          `env:\n  ${key}: lost communication\n\n    |the server\n`,
+          key,
+          'fixture.yml',
+        ),
+      /continues on a deeper-indented line/,
+    );
+    // A comment line is not a continuation, however deep it is indented: YAML
+    // gives a `#` line no part in the value, so a mapping annotated after a
+    // blank line is legal and must read. The sibling key below it is the next
+    // content line and sits at the key's own indent.
+    assert.equal(
+      scalarValue(`env:\n  K: v\n\n      # note\n  NEXT: w\n`, 'K', 'f.yml'),
+      'v',
+    );
+    // `KEY: ''` decodes to the empty string, and an empty pattern matches every
+    // annotation: that is the fail-open case, so it has to throw.
+    assert.throws(
+      () => scalarValue(`env:\n  ${key}: ''\n`, key, 'fixture.yml'),
+      /is empty; an empty pattern would match every annotation/,
+    );
+    assert.throws(
+      () => scalarValue(`env:\n  ${key}: ""\n`, key, 'fixture.yml'),
+      /is empty; an empty pattern would match every annotation/,
+    );
+    // A trailing comment is legal YAML and is not part of the value.
+    assert.equal(
+      scalarValue(`env:\n  ${key}: 'a|b' # the rerun class\n`, key, 'f.yml'),
+      'a|b',
+    );
+    assert.equal(
+      scalarValue(
+        `env:\n  ${key}: "a|b" # quoted the other way\n`,
+        key,
+        'f.yml',
+      ),
+      'a|b',
+    );
+    // A `#` with no whitespace before it is part of the value: YAML only starts
+    // a comment at a token boundary. Reading it as one truncates `a#b` to `a`,
+    // which is the fail-open this marker used to have.
+    assert.equal(
+      scalarValue(`env:\n  ${key}: a#b\n`, key, 'f.yml'),
+      'a#b',
+      'a plain value may contain #',
+    );
+    assert.equal(
+      scalarValue(`env:\n  ${key}: 'a#b'\n`, key, 'f.yml'),
+      'a#b',
+      'a single-quoted # is data',
+    );
+    assert.equal(
+      scalarValue(`env:\n  ${key}: "a # b"\n`, key, 'f.yml'),
+      'a # b',
+      'a quoted value keeps its # even behind a space',
+    );
+    // The two remaining arms of the same branch: a double-quoted scalar YAML
+    // accepts and JSON does not, and a quote that never closes on the line.
+    // Each must surface as this reader's diagnostic, not a bare SyntaxError and
+    // not a value.
+    assert.throws(
+      () => scalarValue(`env:\n  ${key}: "a\\x41"\n`, key, 'f.yml'),
+      /could not decode/,
+    );
+    assert.throws(
+      () => scalarValue(`env:\n  ${key}: "a\n`, key, 'f.yml'),
+      /opens a quote it does not close on the same line/,
+    );
   });
 
   it('emits a breach the infrastructure classifiers recognise', () => {
