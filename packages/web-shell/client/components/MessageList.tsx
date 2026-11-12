@@ -827,12 +827,18 @@ function findFinalAnswerIndexForDisplay(
   items: readonly DisplayItem[],
   start: number,
   end: number,
+  includeBackgroundNotifications = true,
 ): number {
-  // A `background_notification` row stays a candidate here: a turn whose only
-  // content is the notification (no assistant reply) must still render its
+  // A `background_notification` row stays a candidate by default: a turn whose
+  // only content is the notification (no assistant reply) must still render its
   // result instead of nothing. The marker rule below is what keeps a real
   // reply from being replaced by a notice.
-  const answerIdx = findFinalAnswerIndex(items, start, end, true);
+  const answerIdx = findFinalAnswerIndex(
+    items,
+    start,
+    end,
+    includeBackgroundNotifications,
+  );
   if (answerIdx < 0) return answerIdx;
   let markerIdx = -1;
   for (let i = answerIdx - 1; i > start; i--) {
@@ -907,7 +913,11 @@ function collectFinalAssistantTurnIds(
       continue;
     }
     const turnHead = items[start];
-    const answerIdx = findFinalAnswerIndex(items, start, end, false);
+    // Must match what `applyTurnCollapse` keeps visible, or the footer controls
+    // (copy, rating, branch, sources) land on the folded acknowledgement while
+    // the deliverable renders without them. The `false` keeps a
+    // `background_notification` row out: only assistant rows are mapped here.
+    const answerIdx = findFinalAnswerIndexForDisplay(items, start, end, false);
     if (answerIdx < 0) continue;
     const item = items[answerIdx];
     if (

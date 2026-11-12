@@ -3443,9 +3443,52 @@ describe('turn collapse with a background notification ack', () => {
     ]);
   }
 
+  it('collapses an interior turn to the deliverable when only a notice follows the marker', () => {
+    // No assistant ack here: the primary scan elects the `background_notification`
+    // row and only the marker unwind puts the deliverable back. Restricting the
+    // unwind to assistant answers would render `<task-notification>` as the
+    // answer.
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      {
+        id: 'report',
+        role: 'assistant',
+        content: 'the deliverable report',
+      },
+      {
+        id: 'marker',
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification_turn_started',
+        content: 'Background result',
+        backgroundTurn: {
+          turnId: 'auto-task',
+          taskId: 'task',
+          kind: 'shell',
+          startedAt: 100,
+        },
+      },
+      {
+        id: 'notice',
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification',
+        content: '<task-notification>done</task-notification>',
+      },
+    ]);
+    const rows = collapseItems(items, { backgroundSummaryGraceActive: false });
+    expect(rowIds(rows)).toEqual(['u1', 'tc-u1', 'report']);
+    expect(collapseOf(rows, 'u1')).toMatchObject({
+      collapsed: true,
+      hiddenCount: 3,
+    });
+  });
+
   it('collapses the turn instead of waiting for a summary the ack already gave', () => {
-    // The ack is no longer the turn's answer, so it must not hold the turn open
-    // as pending summary narration.
+    // Pins only that the ack never becomes the collapsed answer: the turn
+    // already collapsed pre-change, with the ack visible, so the summary-wait
+    // path (`turnAwaitsBackgroundSummary` reads the raw resolver) is untouched.
     const rows = collapseItems(notificationAckShape());
     expect(rowIds(rows)).toEqual(['u1', 'tc-u1', 'report']);
   });
