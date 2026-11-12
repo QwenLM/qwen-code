@@ -4585,6 +4585,55 @@ describe('createDaemonSessionActions', () => {
     expect(pendingSessionLoadRef.current).toBeUndefined();
   });
 
+  describe('bindSessionPr', () => {
+    const pr = {
+      number: 16865,
+      url: 'https://github.com/QwenLM/qwen-code/pull/16865',
+      state: 'open' as const,
+    };
+
+    it('binds through the session metadata update and returns the result', async () => {
+      const result = { prs: [pr] };
+      const session = {
+        ...createMockSession('session-a'),
+        updateMetadata: vi.fn(async () => result),
+      };
+      const { actions } = createActionsHarness({ session });
+      await expect(actions.bindSessionPr(pr)).resolves.toBe(result);
+      expect(session.updateMetadata).toHaveBeenCalledWith({ pr });
+    });
+
+    it('dispatches a bind_session_pr notice and rethrows on failure', async () => {
+      const addNotice = vi.fn();
+      const session = {
+        ...createMockSession('session-a'),
+        updateMetadata: vi.fn(async () => {
+          throw new Error('locked');
+        }),
+      };
+      const { actions } = createActionsHarness({ session, addNotice });
+      await expect(actions.bindSessionPr(pr)).rejects.toThrow('locked');
+      expect(addNotice).toHaveBeenCalledWith(
+        expect.objectContaining({
+          severity: 'error',
+          operation: 'bind_session_pr',
+          code: 'daemon.bind_session_pr.failed',
+        }),
+      );
+    });
+
+    it('fails with a notice when no session is connected', async () => {
+      const addNotice = vi.fn();
+      const { actions } = createActionsHarness({ addNotice });
+      await expect(actions.bindSessionPr(pr)).rejects.toThrow(
+        'Daemon session is not connected',
+      );
+      expect(addNotice).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'daemon.bind_session_pr.failed' }),
+      );
+    });
+  });
+
   describe('continueSession', () => {
     function connection(): DaemonConnectionState {
       return {

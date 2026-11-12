@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
+import com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
@@ -107,14 +108,26 @@ public final class JdbcRuntimeBindingRepository
     private final DataSource dataSource;
     private final SecretProtector secretProtector;
     private final Supplier<String> idSupplier;
+    private final JdbcJournalPacks journalPacks;
 
     public JdbcRuntimeBindingRepository(DataSource dataSource,
             SecretProtector secretProtector) {
-        this(dataSource, secretProtector, () -> UUID.randomUUID().toString());
+        this(dataSource, secretProtector, null, () -> UUID.randomUUID().toString());
+    }
+
+    public JdbcRuntimeBindingRepository(DataSource dataSource,
+            SecretProtector secretProtector, JdbcJournalPacks journalPacks) {
+        this(dataSource, secretProtector, journalPacks, () -> UUID.randomUUID().toString());
     }
 
     public JdbcRuntimeBindingRepository(DataSource dataSource,
             SecretProtector secretProtector, Supplier<String> idSupplier) {
+        this(dataSource, secretProtector, null, idSupplier);
+    }
+
+    public JdbcRuntimeBindingRepository(DataSource dataSource,
+            SecretProtector secretProtector, JdbcJournalPacks journalPacks,
+            Supplier<String> idSupplier) {
         this.dataSource = JdbcRepositorySupport.requireDataSource(dataSource);
         if (secretProtector == null) {
             throw new IllegalArgumentException("secretProtector is required");
@@ -124,6 +137,11 @@ public final class JdbcRuntimeBindingRepository
             throw new IllegalArgumentException("idSupplier is required");
         }
         this.idSupplier = idSupplier;
+        this.journalPacks = journalPacks;
+    }
+
+    JdbcJournalPacks journalPacks() {
+        return journalPacks;
     }
 
     @Override
@@ -155,12 +173,7 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public RuntimeSessionRecord completeStoppedSessionRelease(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, RuntimeSessionRecord expected, RuntimeBindingRecord claim) {
-        if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
-                || !jdbcSessions.usesDataSource(dataSource)
-                || !(executions instanceof JdbcToolExecutionRepository jdbcExecutions)
-                || !jdbcExecutions.usesDataSource(dataSource)) {
-            throw new IllegalArgumentException("Release requires the same DataSource");
-        }
+        requireSameDataSource(sessions, executions, "Release requires the same DataSource");
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
             lockPlacementDomain(connection, claim.getRequest().getScope().getTenantId()); // binding, then storage rows
             RuntimeBindingRecord binding = selectById(connection, expected.getBindingId(), true);
@@ -229,12 +242,7 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public RuntimeSessionRecord beginSessionRelease(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, RuntimeSessionRecord expected) {
-        if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
-                || !jdbcSessions.usesDataSource(dataSource)
-                || !(executions instanceof JdbcToolExecutionRepository jdbcExecutions)
-                || !jdbcExecutions.usesDataSource(dataSource)) {
-            throw new IllegalArgumentException("Release requires the same DataSource");
-        }
+        requireSameDataSource(sessions, executions, "Release requires the same DataSource");
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
@@ -305,12 +313,7 @@ public final class JdbcRuntimeBindingRepository
 
     private RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, RuntimeBindingRecord expected, boolean holdersCleared) {
-        if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
-                || !jdbcSessions.usesDataSource(dataSource)
-                || !(executions instanceof JdbcToolExecutionRepository jdbcExecutions)
-                || !jdbcExecutions.usesDataSource(dataSource)) {
-            throw new IllegalArgumentException("Recovery requires the same DataSource");
-        }
+        requireSameDataSource(sessions, executions, "Recovery requires the same DataSource");
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
@@ -518,12 +521,7 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, ToolExecutionRecord candidate) {
-        if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
-                || !jdbcSessions.usesDataSource(dataSource)
-                || !(executions instanceof JdbcToolExecutionRepository jdbcExecutions)
-                || !jdbcExecutions.usesDataSource(dataSource)) {
-            throw new IllegalArgumentException("Admission requires the same DataSource");
-        }
+        requireSameDataSource(sessions, executions, "Admission requires the same DataSource");
         JdbcToolExecutionRepository.requireCandidate(candidate);
         ToolExecutionRecord existing = executions.findByIdempotencyKey(candidate.getIdempotencyKey());
         RuntimeBindingRecord original = findById(candidate.getBindingId());
@@ -545,7 +543,7 @@ public final class JdbcRuntimeBindingRepository
                         }
                         var csiOriginal =
                                 JdbcCsiActivationAdmission.lockForExecution(
-                                        connection, original, this);
+                                        connection, original, this, journalPacks);
                         JdbcCsiActivationAdmission.requireExecution(csiOriginal, candidate);
                         RuntimeBindingRecord binding =
                                 selectById(connection, candidate.getBindingId(), true);
@@ -607,13 +605,13 @@ public final class JdbcRuntimeBindingRepository
             ToolExecutionRecord candidate,
             byte[] input,
             byte[] definition) {
-        requireCsiRepositories(sessions, executions);
+        requireSameDataSource(sessions, executions, "CSI allocation requires the same DataSource");
         JdbcToolExecutionRepository.requireCandidate(candidate);
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
                     var admission =
-                            JdbcCsiActivationAdmission.lockForReservation(connection, hint, this);
+                            JdbcCsiActivationAdmission.lockForReservation(connection, hint, this, journalPacks);
                     var original = admission.original();
                     var resources = CsiNativeToolReservation.inventory(connection, original);
                     JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
@@ -655,12 +653,12 @@ public final class JdbcRuntimeBindingRepository
             RuntimeBindingRecord hint,
             String promptId,
             String batchId, Map<String, Object> recoveryOwner) {
-        requireCsiRepositories(sessions, executions);
+        requireSameDataSource(sessions, executions, "CSI allocation requires the same DataSource");
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
                     var admission =
-                            JdbcCsiActivationAdmission.lockForReservation(connection, hint, this);
+                            JdbcCsiActivationAdmission.lockForReservation(connection, hint, this, journalPacks);
                     var original = admission.original();
                     var resources = CsiNativeToolReservation.inventory(connection, original);
                     JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
@@ -683,7 +681,7 @@ public final class JdbcRuntimeBindingRepository
                     }
                     if (recoveryOwner != null) {
                         admission.head().requireRecoveryOwner(recoveryOwner);
-                        JdbcCsiActivationAdmission.requireRecoveryTail(connection, original, admission.head());
+                        JdbcCsiActivationAdmission.requireRecoveryTail(connection, original, admission.head(), journalPacks);
                     }
                     var result =
                             CsiNativeToolReservation.read(
@@ -698,13 +696,13 @@ public final class JdbcRuntimeBindingRepository
                 });
     }
 
-    private void requireCsiRepositories(
-            RuntimeSessionRepository sessions, ToolExecutionRepository executions) {
+    private void requireSameDataSource(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, String message) {
         if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
                 || !jdbcSessions.usesDataSource(dataSource)
                 || !(executions instanceof JdbcToolExecutionRepository jdbcExecutions)
                 || !jdbcExecutions.usesDataSource(dataSource)) {
-            throw new IllegalArgumentException("CSI allocation requires the same DataSource");
+            throw new IllegalArgumentException(message);
         }
     }
 
@@ -1183,7 +1181,7 @@ public final class JdbcRuntimeBindingRepository
                         lockPlacementDomain(connection, hint.getRequest().getScope().getTenantId());
                     }
                     var original =
-                            JdbcCsiActivationAdmission.lockForExecution(connection, hint, this);
+                            JdbcCsiActivationAdmission.lockForExecution(connection, hint, this, journalPacks);
                     JdbcCsiActivationAdmission.requireExecution(original, expected);
                     RuntimeBindingRecord binding =
                             selectById(connection, expected.getBindingId(), true, 10);
@@ -1206,7 +1204,7 @@ public final class JdbcRuntimeBindingRepository
                                     false);
                         }
                         return JdbcCsiExecutionAdmission.authorize(
-                                connection, original, binding, expected, owner, dispatchGeneration);
+                                connection, original, binding, expected, owner, dispatchGeneration, journalPacks);
                     }
                     return JdbcToolExecutionRepository.authorizeDispatch(
                             connection, expected, owner, dispatchGeneration, binding.getVersion());

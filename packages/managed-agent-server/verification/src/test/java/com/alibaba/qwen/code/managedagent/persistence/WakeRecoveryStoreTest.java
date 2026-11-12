@@ -60,7 +60,7 @@ public class WakeRecoveryStoreTest {
 
     @Test
     void discoversEverySourceWithoutMqAndOnlyMatchingSettlementConsumesIt() {
-        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "session_message")) {
+        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "session_message", "loop")) {
             append("input.accepted", "turn-" + source, source);
         }
         // Cross the journal page boundary; neither an attempt nor a different Turn settles this input.
@@ -70,7 +70,7 @@ public class WakeRecoveryStoreTest {
         jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id,"
                 + " wake_covered_sequence, gmt_modified) VALUES ('tenant', 'session', 'SESSION', '', 999, 1)");
         assertThat(store.hasPendingInput(candidate())).contains(true);
-        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation")) {
+        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "loop")) {
             append("turn.settled", "turn-" + source, null);
             assertThat(store.hasPendingInput(candidate())).contains(true);
         }
@@ -234,7 +234,7 @@ public class WakeRecoveryStoreTest {
 
     @Test
     void hintOnlyMarksSupportedInputAdmissions() {
-        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "session_message")) {
+        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "session_message", "loop")) {
             assertThat(JdbcWakeRecoveryStore.isWakeInput(event("input.accepted", "turn", source))).isTrue();
         }
         assertThat(JdbcWakeRecoveryStore.isWakeInput(event("input.accepted", "turn", "user"))).isFalse();
