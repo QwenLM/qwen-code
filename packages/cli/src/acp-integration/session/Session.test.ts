@@ -6563,8 +6563,21 @@ describe('Session', () => {
         expect(sends).toHaveLength(1);
         expect(sends[0][3]).toMatchObject({
           type: core.SendMessageType.Notification,
-          userTurn: { record: { kind: 'recorded' } },
+          userTurn: {
+            promptId: sends[0][2],
+            record: {
+              kind: 'existing',
+              promptId: sends[0][2],
+              taskId: 'task-1',
+            },
+          },
         });
+        expect(
+          mockChatRecordingService.recordNotificationStrict,
+        ).toHaveBeenCalledOnce();
+        expect(
+          mockChatRecordingService.recordNotification,
+        ).not.toHaveBeenCalled();
         expect(sends[0][3]).not.toHaveProperty('interactionSpan');
         expect(sends[0][0]).toContainEqual({ text: '<task-notification />' });
         expect(

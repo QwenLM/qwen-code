@@ -408,6 +408,8 @@ export function recordUserTurn(
         recorder?.recordNotification(record.message, record.displayText);
       }
       break;
+    default:
+      throw new Error('Unsupported user turn record');
   }
   return { kind: 'recorded', record };
 }
