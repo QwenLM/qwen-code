@@ -42,7 +42,7 @@
 
 `_— <model> via Qwen Code /verify-pr (v<cli-version>; skill <skill-hash>)_`
 
-- model 是本轮运行所用的身份，CLI 版本取 `qwen --version`，skill 版本取 `git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md` 的前 12 个字符。用内容哈希而不是提交号：lane 的树只有 depth-2，`.qwen` 又是 `git archive` 来的，没有任何历史可达；而内容哈希恰好指名本轮实际加载的那份指令——在工作站上还包括未提交的修改。`--no-filters` 是因为 prepare 把 `.git` 留给了 node 所有，否则一个被种下的 clean filter 就能决定被哈希的内容——甚至以 root 身份执行。
+- model 是本轮运行所用的身份，CLI 版本取 `qwen --version`，skill 版本取 `git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md` 的前 12 个字符。用内容哈希而不是提交号：skill 从 base 归档而来，base 不断前进时只要内容不变，哈希就不变；而且内容哈希恰好指名本轮实际加载的那份指令——在工作站上还包括未提交的修改。`--no-filters` 是因为 prepare 把 `.git` 留给了 node 所有，否则一个被种下的 clean filter 就能决定被哈希的内容——甚至以 root 身份执行。
 - 在 lane 里，三个值都是 run step 的 workflow 自有输出——配置的模型、runner 上的 CLI、重新钉住的 skill 文件——绝不从 agent 可写的产物树里读。它们在基线重新钉住之后、agent 启动之前采集：工作区父目录始终归 node 所有，因此 agent 运行期间 PR 代码可以整个替换 `.qwen` 目录（mv + mkdir）而不必碰里面 root 所有的文件，agent 之后再取哈希就可能指名本轮根本没加载过的指令。一条元测试钉住这个顺序，而不只是字符串。发布侧只在正文确实带有报告、且三个值都到达时才盖页脚；否则评论保留通用的 `— _Qwen Code · sandboxed verification_` 签名，各类弱通知（取消 / 基础设施故障 / 跳过 / 结果不可用 / 产物下载成功但没有报告）同样保留它：它们报告的是 lane，不是某一轮。
 - 本地轮次从 `$QWEN_CODE_MODEL_IDENTITY`（为空则 `$QWEN_CODE_MODEL`）解析模型，两者都取不到时省略页脚——空身份比没有更糟，而且工作站轮次绝不冒用 lane 的 `sandboxed verification` 签名。
 - `report.md` 本身不带页脚：两条发布路径都在发评论时追加，写进报告里的页脚会出现两次。
