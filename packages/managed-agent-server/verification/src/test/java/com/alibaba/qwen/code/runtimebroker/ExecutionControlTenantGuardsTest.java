@@ -16,6 +16,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -148,6 +149,76 @@ class ExecutionControlTenantGuardsTest {
         assertEquals(List.of(), calls.stream().filter(call -> call.startsWith("getTables")).toList());
         assertEquals(1, calls.stream().filter(call -> call.contains(" FROM ma_session WHERE")
                 && call.endsWith(" FOR UPDATE")).count(), calls.toString());
+    }
+
+    @Test
+    void aRequestKeyPinnedOrdinaryRootRefusesLeaseChanges() throws Exception {
+        // With an ordinary tool_profile only the generated is_csi_guard carries
+        // the request-key pin; dropping the flag term would let this claim commit.
+        var fixture = sessionFixture(true);
+        bindings.releaseOperation(fixture.binding.getBindingId(), "recovery", fixture.binding.getOperationGeneration());
+        try (Connection connection = source.getConnection(); var update = connection.prepareStatement(
+                "UPDATE ma_session SET runtime_request_key = ? WHERE tenant_id = ? AND session_id = ?")) {
+            update.setString(1, "f".repeat(64));
+            update.setBytes(2, ManagedSchemaKeys.identity(fixture.id));
+            update.setBytes(3, ManagedSchemaKeys.identity(fixture.id + "-harness"));
+            assertEquals(1, update.executeUpdate());
+        }
+        var refused = org.junit.jupiter.api.Assertions.assertThrows(RuntimeBrokerException.class,
+                () -> bindings.claimOperation(fixture.binding.getBindingId(), "control", Duration.ofMinutes(1)));
+        assertEquals("csi_original_binding_unavailable", refused.getCode());
+    }
+
+    @Test
+    void aRootVanishingBetweenTheProbeAndTheLockingReadIsRefused() throws Exception {
+        // null from the locking read must refuse: the root was deleted after the
+        // non-locking probe, and reading null as "unpinned" would let control pass.
+        var fixture = sessionFixture(true);
+        bindings.releaseOperation(fixture.binding.getBindingId(), "recovery", fixture.binding.getOperationGeneration());
+        String tenant = fixture.id;
+        String session = tenant + "-harness";
+        DataSource vanishing = new DelegatingDataSource(source) {
+            @Override
+            public Connection getConnection() throws SQLException {
+                Connection target = super.getConnection();
+                return (Connection) Proxy.newProxyInstance(getClass().getClassLoader(),
+                        new Class<?>[] {Connection.class}, (proxy, method, args) -> {
+                            Object result = invoke(target, method, args);
+                            if (method.getName().equals("prepareStatement")
+                                    && "SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ?"
+                                            .equals(args[0])) {
+                                PreparedStatement statement = (PreparedStatement) result;
+                                return Proxy.newProxyInstance(getClass().getClassLoader(),
+                                        new Class<?>[] {PreparedStatement.class}, (p, m, a) -> {
+                                            Object r = invoke(statement, m, a);
+                                            if (m.getName().equals("executeQuery")) {
+                                                try (Connection c = source.getConnection();
+                                                        var delete = c.prepareStatement("DELETE FROM ma_session"
+                                                                + " WHERE tenant_id = ? AND session_id = ?")) {
+                                                    delete.setBytes(1, ManagedSchemaKeys.identity(tenant));
+                                                    delete.setBytes(2, ManagedSchemaKeys.identity(session));
+                                                    delete.executeUpdate();
+                                                }
+                                            }
+                                            return r;
+                                        });
+                            }
+                            return result;
+                        });
+            }
+        };
+        var traced = new JdbcRuntimeBindingRepository(vanishing, new AesGcmSecretProtector("test", new byte[32]));
+        var refused = org.junit.jupiter.api.Assertions.assertThrows(RuntimeBrokerException.class,
+                () -> traced.claimOperation(fixture.binding.getBindingId(), "control", Duration.ofMinutes(1)));
+        assertEquals("csi_original_binding_unavailable", refused.getCode());
+    }
+
+    private static Object invoke(Object target, java.lang.reflect.Method method, Object[] args) throws Throwable {
+        try {
+            return method.invoke(target, args);
+        } catch (InvocationTargetException failure) {
+            throw failure.getCause();
+        }
     }
 
     /** Records prepared SQL and catalog table probes without changing either. */

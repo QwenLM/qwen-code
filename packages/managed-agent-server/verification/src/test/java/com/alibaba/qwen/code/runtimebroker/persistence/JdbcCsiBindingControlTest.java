@@ -31,8 +31,9 @@ class JdbcCsiBindingControlTest {
     private static final String RESERVATION = "cfd417c7-f9dc-450d-b880-5667c7a5b029";
     private static final Duration LEASE = Duration.ofSeconds(30);
 
-    // The catalog probe is gone; the decoy table now only pins that ordinary
-    // controls never reach into another schema's ma_session.
+    // The decoy is load-bearing: every statement and catalog probe is recorded,
+    // and none may name the other schema, so a re-introduced cross-schema read
+    // reds this test even though the decoy row itself is never selected.
     @Test
     void ordinarySessionControlsIgnoreADecoySessionTableInAnotherSchema() throws Exception {
         var source = source();
@@ -40,7 +41,8 @@ class JdbcCsiBindingControlTest {
             sql(connection, "CREATE SCHEMA other");
             sql(connection, "CREATE TABLE other.ma_session (is_csi_guard BOOLEAN)");
         }
-        var bindings = bindings(source);
+        var calls = new java.util.ArrayList<String>();
+        var bindings = bindings(recording(source, calls));
         var request = new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1", "/workspace",
                 "sha256:" + "b".repeat(64), "session"), SESSION, "test-supervisor", "storage");
         var created = bindings.findOrCreate(request);
@@ -53,6 +55,7 @@ class JdbcCsiBindingControlTest {
         var updated = bindings.compareAndSet(renewed, renewed.withLastHealthAt(Instant.now(), Instant.now()));
         assertNotNull(updated);
         assertNotNull(bindings.releaseOperation(created.getBindingId(), "owner", updated.getOperationGeneration()));
+        assertEquals(List.of(), calls.stream().filter(call -> call.contains("other")).toList(), calls.toString());
     }
 
     @Test
@@ -280,8 +283,38 @@ class JdbcCsiBindingControlTest {
         return source;
     }
 
-    private static JdbcRuntimeBindingRepository bindings(JdbcDataSource source) {
+    private static JdbcRuntimeBindingRepository bindings(javax.sql.DataSource source) {
         return new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+    }
+
+    /** Records prepared SQL and catalog probes (schema-qualified) without changing either. */
+    private static javax.sql.DataSource recording(javax.sql.DataSource source, List<String> calls) {
+        return new org.springframework.jdbc.datasource.DelegatingDataSource(source) {
+            @Override
+            public Connection getConnection() throws java.sql.SQLException {
+                return record(Connection.class, super.getConnection(), calls);
+            }
+        };
+    }
+
+    private static <T> T record(Class<T> type, T target, List<String> calls) {
+        return type.cast(java.lang.reflect.Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[] {type},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("prepareStatement")) {
+                        calls.add((String) args[0]);
+                    } else if (method.getName().equals("getTables")) {
+                        calls.add("getTables " + args[1] + "." + args[2]);
+                    }
+                    Object result;
+                    try {
+                        result = method.invoke(target, args);
+                    } catch (java.lang.reflect.InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                    return method.getName().equals("getMetaData")
+                            ? record(java.sql.DatabaseMetaData.class, (java.sql.DatabaseMetaData) result, calls)
+                            : result;
+                }));
     }
 
     private static int count(Connection connection, String table) throws Exception {

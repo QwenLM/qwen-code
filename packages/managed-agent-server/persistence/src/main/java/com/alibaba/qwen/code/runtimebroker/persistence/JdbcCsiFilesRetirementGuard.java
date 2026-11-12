@@ -182,8 +182,10 @@ public final class JdbcCsiFilesRetirementGuard {
             // request-key pin, so no separate cross-check is needed.
             // ManagedSchemaCatalog.validateGeneratedColumns enforces that exact
             // expression at startup; do not copy this trust where it does not hold.
-            if (!Boolean.FALSE.equals(lockRootPin(connection, tenant, session))
-                    || hasCsiRuntimeMarker(connection, tenant, session)) {
+            // null means the root vanished after the probe and must refuse, the
+            // opposite of readPin's "no pin, proceed" reading of the same helper.
+            Boolean rootPin = lockRootPin(connection, tenant, session);
+            if (rootPin == null || rootPin || hasCsiRuntimeMarker(connection, tenant, session)) {
                 throw unavailable();
             }
             return null;
@@ -475,11 +477,11 @@ public final class JdbcCsiFilesRetirementGuard {
     }
 
     private static Pin readPin(Connection connection, String tenantId, String sessionId) throws SQLException {
-        if (!Boolean.TRUE.equals(lockRootPin(connection, tenantId, sessionId))) {
-            return null;
-        }
+        // One full locking read of the root: it is the authoritative existence
+        // check and carries both pin columns, so a pinned root is not re-locked
+        // by a separate narrow probe first.
         try (PreparedStatement statement = statement(connection,
-                        "SELECT tenant_id, session_id, agent_id, tool_profile, runtime_request_key,"
+                        "SELECT tenant_id, session_id, agent_id, tool_profile, runtime_request_key, is_csi_guard,"
                             + " workspace_id, workspace_generation, workspace_storage_id,"
                             + " cwd_relative, context_config_ref, context_revision,"
                             + " workspace_config_ref, workspace_policy_ref FROM ma_session WHERE"
@@ -498,6 +500,9 @@ public final class JdbcCsiFilesRetirementGuard {
                     throw unavailable();
                 }
                 String profile = rows.getString("tool_profile");
+                if (!rows.getBoolean("is_csi_guard") && !CsiFilesRetirementProfile.isProfile(profile)) {
+                    return null;
+                }
                 if (!CsiFilesRetirementProfile.isProfile(profile)) {
                     return new Pin(profile, rows.getString("runtime_request_key"), null, sessionId);
                 }
