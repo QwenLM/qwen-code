@@ -449,6 +449,49 @@ describe('WebShellSidebar bind PR', () => {
     expect(mocks.actions.bindSessionPr).not.toHaveBeenCalled();
   });
 
+  it('hides Bind PR on a secondary-workspace session lacking workspace_qualified_rest_core', async () => {
+    // The second capability gate the sidebar-customization doc names: a
+    // locked/restricted secondary workspace needs workspace_qualified_rest_core
+    // on top of workspace_session_metadata. With only the metadata capability
+    // canMutateSessionMetadata falls through to canUseWorkspaceQualifiedActions,
+    // which is false here, so Bind PR must not be offered. Verified
+    // load-bearing: dropping the qualified-rest requirement from that
+    // predicate makes the row render a menu WITH Bind PR, reddening this test.
+    connection.sessionId = 'current';
+    connection.workspaceCwd = '/tmp/project';
+    const caps = {
+      qwenCodeVersion: '1.2.3',
+      features: ['workspace_session_metadata'],
+      workspaces: [
+        { id: 'w0', cwd: '/tmp/project', primary: true, trusted: true },
+        { id: 'w1', cwd: '/tmp/other-ws', primary: false, trusted: true },
+      ],
+    };
+    connection.capabilities = caps;
+    workspace.capabilities = caps;
+    active.sessions = [makeSession('s1', { workspaceCwd: '/tmp/other-ws' })];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    // Without the qualified-rest capability the secondary workspace's whole
+    // action menu collapses, so there may be no trigger; open it only if the
+    // row offers one. Either way Bind PR must not appear among the items.
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="More actions"]',
+    );
+    if (trigger) {
+      act(() => {
+        trigger.dispatchEvent(
+          new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+      });
+      await flushSidebar();
+    }
+    const menu = document.querySelector<HTMLElement>('[role="menu"]');
+    expect(menu ? menuItem(menu, 'Bind PR') : undefined).toBeUndefined();
+  });
+
   it('hides Bind PR on a standalone row even with metadata mutation enabled', async () => {
     connection.sessionId = null;
     // Register the standalone cwd as a trusted workspace and advertise the

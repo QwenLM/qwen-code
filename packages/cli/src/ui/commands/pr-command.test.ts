@@ -278,6 +278,33 @@ describe('prCommand', () => {
     ]);
   });
 
+  it('derives the degraded number from the canonical URL, not the raw dot-segment parse', async () => {
+    // /pull/5/../6 dot-normalizes to /pull/6: the raw matcher captures 5
+    // while the canonical url names 6. Both fields must come from one parse
+    // or the sidecar stores {number:5, url:.../pull/6} — a badge naming one
+    // PR and linking another. Deleting the rederivation reds this test.
+    mocks.fetchPullRequestByReference.mockResolvedValue({
+      status: 'error',
+      reason: 'failed',
+    });
+    const { context, sessionService } = createContext();
+    const result = await prCommand.action?.(
+      context,
+      'https://github.com/o/r/pull/5/../6',
+    );
+    expect(mocks.upsertSessionPrs).toHaveBeenCalledWith(PR_PATH, [
+      { number: 6, url: 'https://github.com/o/r/pull/6', source: 'create' },
+    ]);
+    expect(sessionService.emitSessionPrBound).toHaveBeenCalledWith(SESSION_ID, {
+      number: 6,
+      url: 'https://github.com/o/r/pull/6',
+    });
+    expect((result as { messageType: string }).messageType).toBe('info');
+    const content = (result as { content: string }).content;
+    expect(content).toContain('#6');
+    expect(content).toContain('https://github.com/o/r/pull/6');
+  });
+
   it('fails closed when the URL spelling cannot be canonicalized', async () => {
     // /PULL/5 is accepted by parsePRReference's looser /i match but rejected
     // by the canonical helper; forwarding the raw input would leak it (and
@@ -447,6 +474,27 @@ describe('prCommand', () => {
       { ...RESOLVED, source: 'create' },
     ]);
     expect((result as { messageType: string }).messageType).toBe('info');
+  });
+
+  it('treats a transcript-less session (undefined location) as active in both modes', async () => {
+    // A brand-new session has neither an active nor an archived transcript
+    // head, so getSessionLocation returns undefined. That must default to
+    // active: list mode answers an authoritative "No PRs bound" (not "could
+    // not read"), and bind mode writes the active sidecar. Mapping undefined
+    // to 'unresolved' instead reds the list arm.
+    const { context, sessionService } = createContext();
+    sessionService.getSessionLocation.mockResolvedValue(undefined);
+    const listed = await prCommand.action?.(context, '');
+    expect(listed).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: expect.stringContaining('No PRs bound to this session.'),
+    });
+    const bound = await prCommand.action?.(context, '16865');
+    expect(mocks.upsertSessionPrs).toHaveBeenCalledWith(PR_PATH, [
+      { ...RESOLVED, source: 'create' },
+    ]);
+    expect((bound as { messageType: string }).messageType).toBe('info');
   });
 
   it('reports a read failure in list mode instead of an empty list', async () => {

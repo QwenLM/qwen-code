@@ -38,7 +38,7 @@ These commands help you save, restore, and summarize work progress.
 
 > [!note]
 >
-> `/pr` with a bare number resolves the PR in the session's target-directory repository, which may not be where your work happened — the success message prints the resolved URL so you can check it. A full PR URL names its own repository. There is no unbind command; a wrong binding persists until the session's PR sidecar file is edited.
+> `/pr` with a bare number resolves the PR in the session's target-directory repository, which may not be where your work happened — the success message prints the resolved URL so you can check it. A full PR URL names its own repository. There is no unbind command; a wrong binding persists until you bind enough further PRs to push it past the session's 10-binding cap, or edit the session's PR sidecar file.
 
 > [!note]
 >

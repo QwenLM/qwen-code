@@ -595,6 +595,21 @@ describe('upsertSessionPrs', () => {
     expect(persisted?.[0]?.createdAt).toBe(entry(100).createdAt);
   });
 
+  it('preserves a terminal state when a same-URL re-bind offers no state', async () => {
+    // The candidate.state !== undefined half of the repair guard: /pr's
+    // degrade arm produces a stateless candidate, and re-binding an already
+    // merged PR while gh is down must NOT erase the known state. Dropping
+    // that clause makes upgraded.state = undefined and reds this test.
+    await seed({ ...entry(100), state: 'merged' }, entry(101));
+    const result = await offer(cand(100));
+    expect(result.added).toEqual([]);
+    expect(result.alreadyBound).toEqual([100]);
+    const persisted = await read();
+    expect(numbers(persisted)).toEqual([100, 101]);
+    expect(persisted?.[0]?.state).toBe('merged');
+    expect(persisted?.[0]?.createdAt).toBe(entry(100).createdAt);
+  });
+
   it('re-binds a number whose persisted entry points at another repository', async () => {
     // Same number, other repo = another PR: a gh-verified create colliding
     // with another repo's binding must replace it (fresh createdAt, source

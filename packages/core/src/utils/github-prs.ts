@@ -1108,14 +1108,18 @@ export function fetchPullRequestByReference(
   reference: string,
 ): Promise<PullRequestReferenceResolution> {
   const childEnv = ghEnv();
+  // A missing cwd spawns the same ENOENT as a missing gh binary; classify
+  // it as 'failed' so 'unavailable' keeps meaning "gh is not installed".
+  // Check the caller-named cwd BEFORE resolving the git root: findGitRoot
+  // only inspects ancestors' .git, so a deleted cwd under a surviving repo
+  // would resolve up to that repo and run gh in a checkout the session never
+  // referenced (a bare number then binds the ancestor repo's PR).
+  if (viewWorkingDirectoryProblem(cwd)) {
+    return Promise.resolve({ status: 'error', reason: 'failed' });
+  }
   // A URL names its own repo, but a bare number needs the checkout's repo
   // context; outside a repo gh still runs (and fails) in the given cwd.
   const runDir = findGitRoot(cwd) ?? cwd;
-  // A missing cwd spawns the same ENOENT as a missing gh binary; classify
-  // it as 'failed' so 'unavailable' keeps meaning "gh is not installed".
-  if (viewWorkingDirectoryProblem(runDir)) {
-    return Promise.resolve({ status: 'error', reason: 'failed' });
-  }
   return new Promise((resolve) => {
     execFile(
       resolveGhBinary(childEnv, runDir),

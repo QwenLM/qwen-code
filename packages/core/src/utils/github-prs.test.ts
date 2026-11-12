@@ -1509,6 +1509,26 @@ describe('fetchPullRequestByReference', () => {
     expect(mockExecFile).not.toHaveBeenCalled();
   });
 
+  it('refuses a deleted cwd inside a surviving repository instead of binding the ancestor repo', async () => {
+    // findGitRoot only inspects ancestors' .git, so a deleted cwd under a
+    // surviving repo resolves up to that repo. The pre-check must run on the
+    // caller-named cwd BEFORE that resolution, or a bare number binds the
+    // ancestor repo's PR (a checkout the session never referenced) and
+    // returns success. Reordering the check back after findGitRoot reds this.
+    const repo = tmp.repo();
+    const gone = path.join(repo, 'vendor', 'libfoo');
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/ancestor/repo/pull/77',
+      state: 'OPEN',
+    });
+    expect(await fetchPullRequestByReference(gone, '77')).toEqual({
+      status: 'error',
+      reason: 'failed',
+    });
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
   it('fails closed on an unrecognizable state', async () => {
     mockGhSuccess({
       number: 77,

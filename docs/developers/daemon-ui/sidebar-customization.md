@@ -258,7 +258,7 @@ Controls which action buttons appear on session rows:
 
 - **`items`**: Master control for all actions (both inline and dropdown). If an item is not in `items`, it's hidden everywhere.
 - **`inlineItems`**: Controls which items appear as **inline buttons** (on hover) on standard session rows. Defaults to `['pin']`. Only items with working inline handlers can be used: `'pin'`, `'rename'`, `'export'`, `'delete'`. `'details'`, `'bindPr'`, `'group'`, `'archive'`, and `'split'` are dropdown-only on standard rows.
-- **`bindPr` built-in condition**: shown only when the session supports metadata mutation (the `workspace_session_metadata` capability, or the current session in a mutable scope) and the row is not a standalone session (including recents rows) — standalone metadata routes only accept a display name. It is independent of the `rename` item: a host may whitelist `bindPr` without `rename`.
+- **`bindPr` built-in condition**: shown only when the session supports metadata mutation (the current session in a mutable scope, or the `workspace_session_metadata` capability — plus `workspace_qualified_rest_core` for sessions in a locked or restricted secondary workspace) and the row is not a standalone session (including recents rows) — standalone metadata routes only accept a display name. It is independent of the `rename` item: a host may whitelist `bindPr` without `rename`.
 
 Archived rows in Settings use Export conversation and Restore as inline buttons, with Rename and Delete in More. Their actions still follow `items` and built-in availability restrictions; `inlineItems` does not change this layout. The existing styles reveal these buttons on hover or keyboard focus and keep them visible on touch devices.
 

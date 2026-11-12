@@ -153,8 +153,15 @@ export const prCommand: SlashCommand = {
       };
     } else if (inputUrl && isValidSessionPrUrl(inputUrl)) {
       // inputUrl is already the canonical /pull/<N> spelling, so a later
-      // re-bind of the same PR matches the same sidecar key.
-      binding = { number, url: inputUrl };
+      // re-bind of the same PR matches the same sidecar key. The number must
+      // come from that same canonical URL, not the raw parse: a dot-segment
+      // spelling (/pull/5/../6) normalizes to /pull/6, and the raw matcher's
+      // 5 would otherwise name a different PR than the stored url. The
+      // /pull/<N> shape pullRequestViewUrl guarantees makes this parse total.
+      binding = {
+        number: GitWorktreeService.parsePRReference(inputUrl)!,
+        url: inputUrl,
+      };
     } else {
       // Environmental failures (gh missing, timeout) get their own message:
       // advising a PR-specific remedy for them sends the user hunting for
