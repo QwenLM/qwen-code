@@ -349,19 +349,20 @@ public class ManagedSchemaSessionStoreTest {
                                                             "SELECT COUNT(*) FROM ma_request_receipt"
                                                                     + " WHERE namespace = 'SESSION_COMMAND'",
                                                             Long.class);
-                                            winner.execute(ignored -> store.beginSessionRename(
-                                                    tenant, "shared", "digest", other, "theirs"));
-                                            store.beginSessionRename(tenant, "shared", "digest", session, "mine");
+                                            winner.execute(ignored -> store.settleRenameSync(
+                                                    tenant, "shared", "digest", other, "theirs", "actor"));
+                                            store.settleRenameSync(tenant, "shared", "digest", session, "mine", "actor");
                                         }))
                 .isInstanceOfSatisfying(
                         com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
         assertThat(store.requireSession(tenant, session).title()).isEqualTo("title");
+        // The synchronous settlement writes no delivery row at all.
         assertThat(jdbc.queryForObject(
                         "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ?",
                         Long.class,
                         tenant))
-                .isEqualTo(1);
+                .isZero();
     }
 
     @Test
@@ -373,75 +374,25 @@ public class ManagedSchemaSessionStoreTest {
             var start = new java.util.concurrent.CyclicBarrier(2);
             var first = threads.submit(() -> {
                 start.await(10, java.util.concurrent.TimeUnit.SECONDS);
-                return tx.execute(status -> store.beginSessionRename(
-                        tenant, "first", "first-digest", session, "first"));
+                return tx.execute(status -> store.settleRenameSync(
+                        tenant, "first", "first-digest", session, "first", "actor"));
             });
             var second = threads.submit(() -> {
                 start.await(10, java.util.concurrent.TimeUnit.SECONDS);
-                return tx.execute(status -> store.beginSessionRename(
-                        tenant, "second", "second-digest", other, "second"));
+                return tx.execute(status -> store.settleRenameSync(
+                        tenant, "second", "second-digest", other, "second", "actor"));
             });
-            assertThat(first.get(15, java.util.concurrent.TimeUnit.SECONDS).renameRevision())
+            assertThat(first.get(15, java.util.concurrent.TimeUnit.SECONDS).revision())
                     .isEqualTo(1);
-            assertThat(second.get(15, java.util.concurrent.TimeUnit.SECONDS).renameRevision())
+            assertThat(second.get(15, java.util.concurrent.TimeUnit.SECONDS).revision())
                     .isEqualTo(1);
         }
-        assertThat(jdbc.queryForObject(
-                "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND state = 'PENDING' AND tenant_id = ?",
-                Long.class, tenant)).isEqualTo(2);
-    }
-
-    @Test
-    void renameRevisionAndClaimGenerationFenceStaleWorkers() {
-        var command =
-                tx.execute(
-                        status ->
-                                store.beginSessionRename(tenant, "r1", "digest", session, "first"));
-        var candidate = store.deliverableRenames(clock.millis()).getFirst();
-        var old =
-                tx.execute(
-                                status ->
-                                        store.claimRename(
-                                                candidate, "same-owner", Duration.ofSeconds(1)))
-                        .orElseThrow();
-        jdbc.update(
-                "UPDATE ma_operation SET claim_until = 946684800000 WHERE"
-                        + " operation_kind = 'RENAME' AND tenant_id = ?",
-                tenant);
-        var current =
-                tx.execute(
-                                status ->
-                                        store.claimRename(
-                                                candidate, "same-owner", Duration.ofSeconds(1)))
-                        .orElseThrow();
-        store.retryRename(old, "same-owner", 0);
-        assertThatThrownBy(
-                        () ->
-                                tx.execute(
-                                        status ->
-                                                store.completeSessionRename(
-                                                        old, "same-owner", "boot")))
-                .hasMessageContaining("claim was lost");
-        tx.execute(status -> store.completeSessionRename(current, "same-owner", "boot"));
+        // Both titles settle synchronously; no delivery row is ever created.
         assertThat(store.requireSession(tenant, session).title()).isEqualTo("first");
-        var later =
-                tx.execute(
-                        status ->
-                                store.beginSessionRename(
-                                        tenant, "r2", "digest2", session, "second"));
-        assertThat(later.renameRevision()).isGreaterThan(command.renameRevision());
-        assertThatThrownBy(
-                        () ->
-                                tx.execute(
-                                        status ->
-                                                store.completeSessionRename(
-                                                        tenant,
-                                                        "r1",
-                                                        session,
-                                                        "first",
-                                                        "boot",
-                                                        command.renameRevision())))
-                .hasMessageContaining("later Session title");
+        assertThat(store.requireSession(tenant, other).title()).isEqualTo("second");
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ?",
+                Long.class, tenant)).isZero();
     }
 
     @Test
