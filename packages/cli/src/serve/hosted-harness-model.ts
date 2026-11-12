@@ -312,12 +312,33 @@ export function createHostedLoopFireClassifier(deps: {
         },
       );
       if (!sessionModelConfig) await applyHostedModelPin(config, undefined);
+      // loadCliConfig only constructs the Config; the classifier's side query
+      // reads config.getBaseLlmClient(), whose content generator is created
+      // only by initialize()+refreshAuth() (D1). Without them every fire
+      // reported unavailable and the loop never delivered guidance. Mirror the
+      // model turn's trust-pinned sequence so the re-review actually runs.
+      const fireAbort = new AbortController();
+      await config.initialize({
+        signal: fireAbort.signal,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+        lenientToolWarmup: true,
+      });
+      const authType = config.getModelsConfig().getCurrentAuthType();
+      if (!authType) {
+        throw new Error(
+          'Loop fire-time classifier authentication is unavailable.',
+        );
+      }
+      await config.refreshAuth(authType, true);
       const result = await classifyAction({
         toolName: 'loop_wakeup',
         toolParams: { delaySeconds, prompt, reason },
         messages: [{ role: 'user', parts: [{ text: prompt }] }],
         config,
-        signal: new AbortController().signal,
+        signal: fireAbort.signal,
       });
       return {
         allowed: !result.shouldBlock && !result.unavailable,

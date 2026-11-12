@@ -3549,9 +3549,14 @@ it('uses saved Skill results on continuation without loading the selection again
 });
 
 describe('createHostedLoopFireClassifier', () => {
+  const initialize = vi.fn(async () => undefined);
+  const refreshAuth = vi.fn(async () => undefined);
   beforeEach(() => {
     vi.clearAllMocks();
     state.config = {
+      initialize,
+      getModelsConfig: () => ({ getCurrentAuthType: () => 'test-auth' }),
+      refreshAuth,
       shutdown: vi.fn(async () => undefined),
     } as unknown as typeof state.config;
   });
@@ -3583,6 +3588,26 @@ describe('createHostedLoopFireClassifier', () => {
       modelConfiguration: sessionModelConfig,
     });
     expect(classify).toHaveBeenCalledOnce();
+  });
+
+  it('initializes and refreshes auth so the side query has a live model (D1)', async () => {
+    vi.spyOn(classifier, 'classifyAction').mockResolvedValue({
+      shouldBlock: false,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    });
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.allowed).toBe(true);
+    // loadCliConfig alone leaves no content generator; without initialize +
+    // refreshAuth the side query always reports unavailable (the dead gate).
+    expect(initialize).toHaveBeenCalledOnce();
+    expect(refreshAuth).toHaveBeenCalledWith('test-auth', true);
   });
 
   it('a classifier that cannot be built reports unavailable, not a denial (M12)', async () => {
