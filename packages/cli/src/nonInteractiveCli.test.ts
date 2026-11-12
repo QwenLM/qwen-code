@@ -9458,6 +9458,60 @@ describe('runNonInteractive', () => {
     expect(error).not.toHaveProperty('status');
   });
 
+  it('keeps the provider status on a drain item error result', async () => {
+    // The drain-item loop calls the same helper from its own error branch, so
+    // a queued follow-up that fails must carry the status too. Nothing else in
+    // the suite runs that line.
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      if (cb)
+        cb('Monitor ready', '<task-notification>ready</task-notification>', {
+          monitorId: 'mon_drain_status',
+          toolUseId: 'tool_monitor',
+          status: 'running',
+          eventCount: 1,
+        });
+    });
+    mockLlmClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents([...finishedEvents]))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Error,
+            value: { error: { message: '503 Service Unavailable', status: 503 } },
+          },
+        ]),
+      );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-drain-api-error-status',
+      ),
+    ).rejects.toMatchObject({ exitCode: 1 });
+
+    const messages = processStdoutSpy.mock.calls
+      .map((call) => String(call[0]).trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { [key: string]: unknown });
+    const results = messages.filter((message) => message['type'] === 'result');
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      subtype: 'error_during_execution',
+      is_error: true,
+      error: {
+        message: expect.stringContaining('503 Service Unavailable'),
+        status: 503,
+      },
+    });
+  });
+
   it('does not double-wrap or double-format an API error in non-interactive mode', async () => {
     // Regression test for the bug where a 4xx error event flowed through
     // both the stream handler and handleError, each calling

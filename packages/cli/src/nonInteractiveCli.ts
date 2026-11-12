@@ -3863,9 +3863,15 @@ export async function runNonInteractive(
               }
             })();
             drainPromise = p;
-            void p.finally(() => {
-              if (drainPromise === p) drainPromise = null;
-            });
+            // `finally` returns a new promise that rejects when `p` does, so
+            // the release has to swallow it: the rejection already reaches the
+            // run through `await drainLocalQueue()` or `onDrainError`, and an
+            // unobserved one would surface as an unhandled rejection.
+            void p
+              .finally(() => {
+                if (drainPromise === p) drainPromise = null;
+              })
+              .catch(() => undefined);
             return p;
           };
 
