@@ -34,6 +34,7 @@ import {
   type ToolCallResponseInfo,
   type Turn,
 } from './turn.js';
+import { runAgentLoopOnBus } from '../event-bus/adapter.js';
 
 type SchedulerOptions = ConstructorParameters<typeof CoreToolScheduler>[0];
 
@@ -189,6 +190,12 @@ export interface AgentLoopOptions {
   scheduler?: Partial<SchedulerOptions>;
   executor?: AgentLoopToolExecutor;
   runtimeView?: RuntimeContentGeneratorView;
+  /**
+   * Run the loop on the event-bus implementation instead of the procedural
+   * one. Opt-in; the two are behaviorally equivalent. See
+   * docs/design/2026-11-11-event-bus-agent-loop.md.
+   */
+  useEventBus?: boolean;
 }
 
 /**
@@ -200,6 +207,9 @@ export interface AgentLoopOptions {
 export async function runAgentLoop(
   options: AgentLoopOptions,
 ): Promise<AgentLoopResult> {
+  if (options.useEventBus) {
+    return runAgentLoopOnBus(options);
+  }
   const { client, config, signal, host = {} } = options;
   const duplicates = options.duplicates ?? {
     handled: new Map(client.getHistoryToolCallFingerprints()),
