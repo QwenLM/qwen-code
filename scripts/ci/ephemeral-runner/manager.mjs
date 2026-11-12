@@ -20,17 +20,21 @@ const sleep = (ms) =>
 export function command(
   program,
   args,
-  { env = process.env, input, timeout = 30000, binary = false } = {},
+  { env = process.env, input, timeout = 30000, binary = false, signal } = {},
 ) {
   return new Promise((resolveCommand, reject) => {
     const child = spawn(program, args, {
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
+      signal,
     });
     const output = [];
     let outputSize = 0;
     let stderr = '';
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
+    const timer =
+      timeout > 0
+        ? setTimeout(() => child.kill('SIGKILL'), timeout)
+        : undefined;
     child.stdout.on('data', (chunk) => {
       outputSize += chunk.length;
       if (outputSize > 4 * 1024 * 1024) child.kill('SIGKILL');
@@ -101,6 +105,8 @@ function validate(c) {
     !(c.ttlSeconds > 0) ||
     !Number.isFinite(c.shutdownGraceSeconds) ||
     !(c.shutdownGraceSeconds >= 0) ||
+    (c.drainTimeoutSeconds !== undefined &&
+      (!Number.isFinite(c.drainTimeoutSeconds) || c.drainTimeoutSeconds < 0)) ||
     !Number.isSafeInteger(c.minDiskBytes) ||
     c.minDiskBytes < 0 ||
     (c.stallAlertSeconds !== undefined &&
@@ -201,6 +207,20 @@ export function createManager(config, dependencies = {}) {
       const chunk = Math.min(1000, remaining);
       await wait(chunk);
       remaining -= chunk;
+    }
+  };
+  // Draining is a shutdown-only cost, so a five-second poll per slot is
+  // cheap. Two consecutive idle observations keep a runner that is about to
+  // receive a queued job from being killed in the gap between the check and
+  // the stop.
+  const drainPollMs = 5000;
+  const containerHasWorker = async (id) => {
+    try {
+      return /\bRunner\.Worker\b/.test(await run('docker', ['top', id]));
+    } catch {
+      // An unreadable process table is not proof of an idle runner. Keep
+      // waiting and let the drain deadline decide.
+      return true;
     }
   };
   function parseJson(text) {
@@ -858,28 +878,176 @@ export function createManager(config, dependencies = {}) {
         log(
           `slot ${slot}: started runner ${state.runnerName}, id ${state.runnerId}, container ${id}`,
         );
-        const deadline = Date.now() + config.ttlSeconds * 1000;
+        let nextHealthCheck = Date.now() + config.ttlSeconds * 1000;
+        let nextDrainCheck = 0;
+        let idleSince;
+        let retireRefusalLogged;
+        let stoppedIdle = false;
+        let stoppedByExit = false;
         let exitCode;
-        const watching = run('docker', ['wait', id], {
-          timeout: (config.ttlSeconds + 10) * 1000,
-        }).then(
-          (output) => {
-            const status = output.trim();
-            exitCode =
-              /^\d+$/.test(status) && Number(status) <= 255
-                ? Number(status)
-                : null;
-            return true;
-          },
-          () => {
-            exitCode = null;
-            return true;
-          },
-        );
-        while (Date.now() < Math.min(deadline, stopAt)) {
-          if (await Promise.race([watching, wait(1000).then(() => false)]))
-            break;
+        let waitWarningLogged = false;
+        // `docker top` observes processes, not the assignment queue, so an
+        // idle probe alone cannot prove GitHub will not hand this online
+        // runner a job in the gap before the container is removed. Deleting
+        // the registration is the server-side gate: only an accepted DELETE
+        // proves the runner is no longer assignable, and only then may the
+        // container stop. Busy (422) means a job may have just been
+        // assigned; 403/429 mean the answer is unknown. So does 404: GitHub
+        // hides resources the credential cannot see, so a revoked repo
+        // access looks exactly like a registration that is gone, and the
+        // registration may still be online taking jobs. Unconfirmed answers
+        // keep the container draining and retry, and the deadline still
+        // forces the shutdown. Cleanup keeps tolerating 404 after the
+        // container is stopped — that is a retry of a resource already given
+        // up, not this gate. Returns the refusal error, or undefined when
+        // GitHub accepted the deletion.
+        const retireRegistration = async () => {
+          try {
+            await gh([
+              '-X',
+              'DELETE',
+              `/repos/${config.repo}/actions/runners/${state.runnerId}`,
+            ]);
+            return undefined;
+          } catch (error) {
+            return error;
+          }
+        };
+        const controller = new AbortController();
+        const watch = () =>
+          run('docker', ['wait', id], {
+            timeout: 0,
+            signal: controller.signal,
+          }).then(
+            (output) => {
+              const status = output.trim();
+              return /^\d+$/.test(status) && Number(status) <= 255
+                ? { code: Number(status) }
+                : {};
+            },
+            () => ({}),
+          );
+        let watching = watch();
+        try {
+          while (Date.now() < stopAt) {
+            const result = await Promise.race([
+              watching,
+              wait(1000).then(() => null),
+            ]);
+            if (result) {
+              if (result.code !== undefined) {
+                exitCode = result.code;
+                stoppedByExit = true;
+                break;
+              }
+              // A failed wait client is not proof that the container exited.
+              try {
+                const status = parseJson(
+                  await run('docker', [
+                    'inspect',
+                    '--format',
+                    '{{json .State}}',
+                    id,
+                  ]),
+                );
+                if (status.Status === 'exited' || status.Status === 'dead') {
+                  exitCode = Number.isInteger(status.ExitCode)
+                    ? status.ExitCode
+                    : null;
+                  stoppedByExit = true;
+                  break;
+                }
+              } catch {
+                try {
+                  if (!(await listContainers(slot)).includes(id)) {
+                    exitCode = null;
+                    stoppedByExit = true;
+                    break;
+                  }
+                } catch {
+                  // Docker being unavailable is not proof of container exit.
+                }
+              }
+              if (!waitWarningLogged) {
+                log(
+                  `WATCHDOG ALERT slot ${slot}: container exit unconfirmed; keeping it and retrying`,
+                );
+                waitWarningLogged = true;
+              }
+              await wait(1000);
+              watching = watch();
+            }
+            if (Date.now() >= nextHealthCheck) {
+              nextHealthCheck = Date.now() + 300000;
+              try {
+                const runner = parseJson(
+                  await gh([
+                    `/repos/${config.repo}/actions/runners/${state.runnerId}`,
+                  ]),
+                );
+                if (
+                  runner.id !== state.runnerId ||
+                  runner.name !== state.runnerName ||
+                  runner.status !== 'online'
+                )
+                  throw new Error(
+                    'runner identity or online status unconfirmed',
+                  );
+              } catch {
+                log(
+                  `WATCHDOG ALERT slot ${slot}: runner health unconfirmed; container retained for inspection`,
+                );
+              }
+            }
+            if (
+              stopping &&
+              config.drainTimeoutSeconds > 0 &&
+              Date.now() >= nextDrainCheck
+            ) {
+              nextDrainCheck = Date.now() + drainPollMs;
+              if (await containerHasWorker(id)) idleSince = undefined;
+              else if (idleSince === undefined) idleSince = Date.now();
+              else if (Date.now() - idleSince >= drainPollMs) {
+                const refusal = await retireRegistration();
+                if (!refusal) {
+                  stoppedIdle = true;
+                  log(`slot ${slot}: idle; stopping the runner for shutdown`);
+                  break;
+                }
+                // A refused retirement is not proof the slot is free: a job
+                // could have been assigned after the probe. Start the idle
+                // window over so the next decision needs a fresh two-poll
+                // observation, and keep draining until the deadline.
+                idleSince = undefined;
+                const refusalKey = refusal.status ?? 'unknown';
+                if (refusalKey !== retireRefusalLogged) {
+                  retireRefusalLogged = refusalKey;
+                  log(
+                    `slot ${slot}: runner registration not retired${
+                      refusal.status ? ` (HTTP ${refusal.status})` : ''
+                    }; keeping the container and draining`,
+                  );
+                }
+                // Do not hammer the API at the poll cadence when GitHub is
+                // already rate-limiting this credential; reuse the same
+                // backoff ladder as the rest of the manager.
+                if (refusal.status === 403 || refusal.status === 429)
+                  nextDrainCheck = Date.now() + backoffDelay(1, true);
+              }
+            }
+          }
+        } finally {
+          controller.abort();
         }
+        if (
+          stopping &&
+          config.drainTimeoutSeconds > 0 &&
+          !stoppedIdle &&
+          !stoppedByExit
+        )
+          log(
+            `slot ${slot}: drain window elapsed; stopping a runner with a job in flight`,
+          );
         if (exitCode !== undefined && exitCode !== 0) {
           earlyExit = true;
           log(
@@ -1012,7 +1180,15 @@ export function createManager(config, dependencies = {}) {
   }
   function stop() {
     stopping = true;
-    stopAt = Math.min(stopAt, Date.now() + config.shutdownGraceSeconds * 1000);
+    const drainMs = (config.drainTimeoutSeconds ?? 0) * 1000;
+    if (drainMs > 0)
+      log(
+        `draining up to ${Math.round((drainMs + config.shutdownGraceSeconds * 1000) / 1000)}s for in-flight jobs`,
+      );
+    stopAt = Math.min(
+      stopAt,
+      Date.now() + drainMs + config.shutdownGraceSeconds * 1000,
+    );
   }
   return { start, stop, cycle, cleanup };
 }
