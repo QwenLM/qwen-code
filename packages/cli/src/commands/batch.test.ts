@@ -41,6 +41,13 @@ vi.mock('./channel/proxy.js', () => ({ resolveProxy: mockResolveProxy }));
 vi.mock('../utils/stdioHelpers.js', () => ({
   ignoreBrokenPipe: mockIgnoreBrokenPipe,
   writeStderrLine: mockWriteStderrLine,
+  writeStderrLineSafe: (message: string) => {
+    try {
+      mockWriteStderrLine(message);
+    } catch {
+      // Match the real safe writer when stderr is unavailable.
+    }
+  },
   writeStdoutLine: vi.fn(),
 }));
 

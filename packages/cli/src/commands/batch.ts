@@ -20,6 +20,7 @@ import {
 import {
   ignoreBrokenPipe,
   writeStderrLine,
+  writeStderrLineSafe,
   writeStdoutLine,
 } from '../utils/stdioHelpers.js';
 import { resolveProxy } from './channel/proxy.js';
@@ -220,7 +221,20 @@ async function run(fn: () => Promise<void>): Promise<void> {
   await Promise.all(
     [process.stdout, process.stderr].map(
       (stream) =>
-        new Promise<void>((resolve) => stream.write('', () => resolve())),
+        new Promise<void>((resolve) => {
+          try {
+            stream.write('', () => resolve());
+          } catch (error) {
+            const code = (error as NodeJS.ErrnoException)?.code;
+            if (
+              stream !== process.stderr ||
+              (code !== 'EPIPE' && code !== 'EBADF')
+            ) {
+              throw error;
+            }
+            resolve();
+          }
+        }),
     ),
   );
 }
@@ -232,7 +246,7 @@ function loadLocalBatchEnvironment(): void {
     loadSettings(process.cwd(), { preserveInvalidWorkspaceSettings: true });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    writeStderrLine(`warning: Could not load batch settings: ${reason}`);
+    writeStderrLineSafe(`warning: Could not load batch settings: ${reason}`);
   }
 }
 

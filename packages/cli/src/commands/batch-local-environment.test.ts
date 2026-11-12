@@ -130,16 +130,75 @@ describe('local batch commands with real settings loading', () => {
   };
 
   it.each(
-    (['user-env', 'invalid-workspace', 'invalid-user'] as const).flatMap(
-      (source) =>
-        (['list', 'clean'] as const).map((command) => ({ source, command })),
+    (['list', 'clean'] as const).flatMap((command) =>
+      (['EPIPE', 'EBADF'] as const).map((code) => ({ command, code })),
+    ),
+  )(
+    '$command continues when invalid settings and stderr fails with $code',
+    async ({ command, code }) => {
+      fs.writeFileSync(userSettings, '{ invalid json');
+      const { store, task } = createTask(
+        path.join(isolated.home, '.qwen', 'batch'),
+        'fallback',
+      );
+      vi.mocked(process.stderr.write).mockImplementation(() => {
+        throw Object.assign(new Error('stderr unavailable'), { code });
+      });
+
+      await yargs(
+        command === 'list' ? ['batch', 'list'] : ['batch', 'clean', task.id],
+      )
+        .command(batchCommand)
+        .exitProcess(false)
+        .fail(false)
+        .parseAsync();
+
+      expect(process.exitCode).toBeUndefined();
+      if (command === 'list') {
+        expect(stdout.join('')).toContain(task.id);
+        expect(fs.existsSync(store.fileOf(task.id))).toBe(true);
+      } else {
+        expect(fs.existsSync(store.fileOf(task.id))).toBe(false);
+      }
+    },
+  );
+
+  it('propagates an unexpected stderr flush error', async () => {
+    fs.writeFileSync(userSettings, '{ invalid json');
+    createTask(path.join(isolated.home, '.qwen', 'batch'), 'fallback');
+    vi.mocked(process.stderr.write).mockImplementation(() => {
+      throw Object.assign(new Error('unexpected stderr error'), {
+        code: 'EIO',
+      });
+    });
+
+    await expect(
+      yargs(['batch', 'list'])
+        .command(batchCommand)
+        .exitProcess(false)
+        .fail(false)
+        .parseAsync(),
+    ).rejects.toThrow('unexpected stderr error');
+  });
+
+  it.each(
+    (
+      ['user-env', 'settings-env', 'invalid-workspace', 'invalid-user'] as const
+    ).flatMap((source) =>
+      (['list', 'clean'] as const).map((command) => ({ source, command })),
     ),
   )(
     '$source: $command uses the available local task home',
     async ({ source, command }) => {
       const invalidBytes = '{\n  "theme": "dark",\n}\n';
       const workspaceSettings = path.join(workspace, '.qwen', 'settings.json');
-      if (source === 'invalid-workspace') {
+      if (source === 'settings-env') {
+        fs.rmSync(path.join(isolated.home, '.qwen', '.env'));
+        fs.writeFileSync(
+          userSettings,
+          JSON.stringify({ env: { QWEN_BATCH_HOME: configured } }),
+        );
+      } else if (source === 'invalid-workspace') {
         fs.mkdirSync(path.dirname(workspaceSettings), { recursive: true });
         fs.writeFileSync(workspaceSettings, invalidBytes);
       } else if (source === 'invalid-user') {
@@ -189,7 +248,7 @@ describe('local batch commands with real settings loading', () => {
         expect(fs.readFileSync(workspaceSettings, 'utf8')).toBe(invalidBytes);
         expect(fs.existsSync(`${workspaceSettings}.corrupted`)).toBe(false);
       }
-      if (source !== 'user-env') {
+      if (source === 'invalid-user' || source === 'invalid-workspace') {
         expect(stderr.join('')).toContain(
           'warning: Could not load batch settings',
         );
