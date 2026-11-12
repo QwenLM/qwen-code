@@ -83,6 +83,8 @@ import type {
   InputModalities,
   PromptCacheSharingParameters,
 } from './contentGenerator.js';
+import { getSystemPromptModel } from './request-model.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   clampOutputTokensToWindow,
   defaultOutputCeiling,
@@ -171,6 +173,8 @@ import {
   type ChatCompressionInfo,
   CompressionStatus,
   isCompressionFailureStatus,
+  TOOL_LOOP_SKIPPED_MESSAGE,
+  TOOL_LOOP_SKIPPED_METADATA,
 } from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 import {
@@ -197,6 +201,7 @@ import {
   collectToolCallIdsFromHistory,
   getFunctionCallFingerprint,
   normalizeModelToolCallIds,
+  PROVIDER_TOOL_CALL_ID_METADATA,
   reserveModelToolCallId,
 } from './toolCallIdUtils.js';
 import {
@@ -422,21 +427,22 @@ export function redactApprovedPlansInHistory(
 export function redactStructuredOutputArgsForRecording(part: Part): {
   functionCall: NonNullable<Part['functionCall']>;
   thoughtSignature?: string;
+  partMetadata?: Part['partMetadata'];
 } | null {
   if (!part.functionCall) return null;
-  const signed = part.thoughtSignature !== undefined;
-  if (part.functionCall.name !== ToolNames.STRUCTURED_OUTPUT) {
-    return {
-      functionCall: part.functionCall,
-      ...(signed ? { thoughtSignature: part.thoughtSignature } : {}),
-    };
-  }
+  const functionCall =
+    part.functionCall.name === ToolNames.STRUCTURED_OUTPUT
+      ? { ...part.functionCall, args: { ...STRUCTURED_OUTPUT_REDACTED_ARGS } }
+      : part.functionCall;
+  const providerId = part.partMetadata?.[PROVIDER_TOOL_CALL_ID_METADATA];
   return {
-    functionCall: {
-      ...part.functionCall,
-      args: { ...STRUCTURED_OUTPUT_REDACTED_ARGS },
-    },
-    ...(signed ? { thoughtSignature: part.thoughtSignature } : {}),
+    functionCall,
+    ...(part.thoughtSignature !== undefined
+      ? { thoughtSignature: part.thoughtSignature }
+      : {}),
+    ...(typeof providerId === 'string'
+      ? { partMetadata: { [PROVIDER_TOOL_CALL_ID_METADATA]: providerId } }
+      : {}),
   };
 }
 
@@ -749,6 +755,12 @@ export interface LlmChatSendOptions {
    * so it is re-appended when the send compacts.
    */
   suppressedHookContext?: string;
+}
+
+export interface DispatchedLlmRequest {
+  readonly model: string;
+  readonly generationConfig: GenerateContentConfig;
+  readonly runtimeView?: RuntimeContentGeneratorView;
 }
 
 export type ChatCompressionObserver = (
@@ -2098,6 +2110,14 @@ export function isSynthesizedRepairPart(part: Part): boolean {
   );
 }
 
+function isLegacyLoopSkippedResponse(part: Part | undefined): boolean {
+  const response = part?.functionResponse?.response;
+  return (
+    response?.['error'] === TOOL_LOOP_SKIPPED_MESSAGE &&
+    Object.keys(response).length === 1
+  );
+}
+
 /**
  * Walk `history` left-to-right and close every dangling
  * tool_use ↔ tool_result pair. For each `model[functionCall]`:
@@ -2432,6 +2452,10 @@ export class LlmChat {
     history: Content[];
   };
   private toolBudgetFixedInputVersion = 0;
+  private systemInstructionResolver?: (model: string) => string;
+  private sessionStartContext?: string;
+  private requestSystemInstruction?: GenerateContentConfig['systemInstruction'];
+  private dispatchedRequest?: DispatchedLlmRequest;
   /** Provenances already reported at dispatch, so a retry is not recounted. */
   private readonly injectedToolResults = new WeakSet<ToolOutputProvenance>();
 
@@ -3312,11 +3336,61 @@ export class LlmChat {
     this.generationConfig.systemInstruction = sysInstr;
   }
 
+  setSystemInstructionResolver(resolver: (model: string) => string): void {
+    this.systemInstructionResolver = resolver;
+  }
+
+  private resolveSystemInstruction(model: string): string {
+    const instruction = this.systemInstructionResolver!(model);
+    return this.sessionStartContext
+      ? stripTrailingSessionStartContextBlock(instruction) +
+          buildSessionStartContextBlock(this.sessionStartContext)
+      : instruction;
+  }
+
+  private prepareRequestParams(
+    model: string,
+    params: SendMessageParameters,
+    generation: ContentGeneratorConfig | undefined,
+    hasExplicitInstruction = Object.hasOwn(
+      params.config ?? {},
+      'systemInstruction',
+    ),
+  ): SendMessageParameters {
+    if (!this.systemInstructionResolver || hasExplicitInstruction) {
+      return params;
+    }
+    try {
+      return {
+        ...params,
+        config: {
+          ...params.config,
+          systemInstruction: this.resolveSystemInstruction(
+            getSystemPromptModel(generation ?? {}, model),
+          ),
+        },
+      };
+    } catch (cause) {
+      throw new LlmRequestPreparationError(cause);
+    }
+  }
+
+  private trackRequestSystemInstruction(
+    instruction: GenerateContentConfig['systemInstruction'],
+  ): void {
+    if (!isDeepStrictEqual(this.requestSystemInstruction, instruction)) {
+      this.toolBudgetUsageAnchor = undefined;
+      this.toolBudgetFixedInputVersion++;
+      this.requestSystemInstruction = structuredClone(instruction);
+    }
+  }
+
   setSessionStartContext(extraInstruction: string) {
     const trimmed = extraInstruction.trim();
     if (!trimmed) {
       return;
     }
+    this.sessionStartContext = trimmed;
 
     const current = this.generationConfig.systemInstruction;
     let baseInstruction = '';
@@ -3501,6 +3575,7 @@ export class LlmChat {
       ? this.generationConfig
       : undefined;
     let currentUserContent: Content | undefined;
+    const callerParams = params;
     try {
       if (options?.preparedRequest) {
         const saved = options.preparedRequest;
@@ -3526,6 +3601,14 @@ export class LlmChat {
           compressionStatus: CompressionStatus.NOOP,
         };
       } else {
+        params = this.prepareRequestParams(
+          model,
+          callerParams,
+          cgConfigForThresholds,
+        );
+        this.trackRequestSystemInstruction(
+          { ...this.generationConfig, ...params.config }.systemInstruction,
+        );
         // The send-lock above is held but the generator's `finally` (which
         // resolves it) has not run yet. Any setup error before returning the
         // generator must release the lock or subsequent sends will block forever
@@ -5779,7 +5862,15 @@ export class LlmChat {
                   for await (const event of self.makeFallbackStream(
                     resolvedFallbackModel,
                     fallbackRequestContents,
-                    params,
+                    self.prepareRequestParams(
+                      resolvedFallbackModel,
+                      params,
+                      fallbackConfig,
+                      Object.hasOwn(
+                        callerParams.config ?? {},
+                        'systemInstruction',
+                      ),
+                    ),
                     prompt_id,
                     fallbackGenerator,
                     fallbackRetryAuthType,
@@ -6006,7 +6097,6 @@ export class LlmChat {
     // Bound to the `request.config` snapshot below: `request` is built once and
     // every retry re-sends it, so re-reading this per dispatch would let a
     // setter that fires during backoff relabel stale usage as current.
-    const fixedInputVersion = this.toolBudgetFixedInputVersion;
     const request: PromptCacheSharingParameters = {
       model,
       contents: requestContents,
@@ -6015,6 +6105,8 @@ export class LlmChat {
         continuationInFlight: true,
       }),
     };
+    this.trackRequestSystemInstruction(request.config?.systemInstruction);
+    const fixedInputVersion = this.toolBudgetFixedInputVersion;
     const actualConfig =
       overrides?.contentGeneratorConfig ??
       this.config.getContentGeneratorConfig();
@@ -6096,6 +6188,22 @@ export class LlmChat {
           /* Telemetry is observational. */
         }
       }
+      const {
+        abortSignal: _signal,
+        httpOptions: _http,
+        ...dispatchedConfig
+      } = request.config ?? {};
+      const dispatchedModel = getSystemPromptModel(actualConfig ?? {}, model);
+      this.dispatchedRequest = {
+        model: dispatchedModel,
+        generationConfig: structuredClone(dispatchedConfig),
+        ...(actualConfig && {
+          runtimeView: {
+            contentGenerator: generator,
+            contentGeneratorConfig: { ...actualConfig, model: dispatchedModel },
+          },
+        }),
+      };
       onModelRequestDispatched?.();
       return generator.generateContentStream(request, prompt_id);
     };
@@ -6467,37 +6575,76 @@ export class LlmChat {
   /**
    * Map of handled tool-call id → (name, args) fingerprint for duplicate
    * provider-id replay detection: model-turn `functionCall`s whose id has a
-   * matching user-turn `functionResponse`. Walk-only, no clone, same
-   * rationale as {@link getHistoryFunctionResponseIds}; fingerprints of
-   * large args are cached per part object (see getFunctionCallFingerprint).
+   * matching user-turn `functionResponse`. Loop-skipped results pair with
+   * calls on the wire without making them count as handled.
+   * Filtering by result ids includes their provider-id aliases.
    */
-  getHistoryToolCallFingerprints(): Map<string, string> {
-    const fingerprintsById = new Map<string, string>();
-    const respondedIds = new Set<string>();
+  getHistoryToolCallFingerprints(
+    onlyCallIds?: ReadonlySet<string>,
+  ): Map<string, string> {
+    const responses = new Map<string, Part>();
     for (const entry of this.history) {
-      if (entry.role === 'user') {
-        for (const part of entry.parts ?? []) {
-          const id = part.functionResponse?.id;
-          if (id) respondedIds.add(id);
-        }
-        continue;
-      }
+      if (entry.role !== 'user') continue;
       for (const part of entry.parts ?? []) {
-        const functionCall = part.functionCall;
-        if (functionCall?.id && !fingerprintsById.has(functionCall.id)) {
-          fingerprintsById.set(
-            functionCall.id,
-            getFunctionCallFingerprint(functionCall),
-          );
+        const id = part.functionResponse?.id;
+        if (id && !responses.has(id)) responses.set(id, part);
+      }
+    }
+    // Older transcripts only marked the last result of the stopped batch.
+    // Scope the legacy error text to that batch so tool failures cannot
+    // opt out of replay detection by returning the same text.
+    const legacyLoopEnds = new Set(
+      this.completedToolCallIds.filter((id) =>
+        isLegacyLoopSkippedResponse(responses.get(id)),
+      ),
+    );
+    const handled = new Map<string, string>();
+    const aliasSources = new Map<string, string>();
+    for (const entry of this.history) {
+      if (entry.role === 'user') continue;
+      const parts = entry.parts ?? [];
+      const legacyStoppedBatch =
+        legacyLoopEnds.size > 0 &&
+        parts.some(
+          ({ functionCall }) =>
+            functionCall?.id && legacyLoopEnds.has(functionCall.id),
+        );
+      for (const { functionCall, partMetadata } of parts) {
+        if (!functionCall?.id || handled.has(functionCall.id)) continue;
+        const response = responses.get(functionCall.id);
+        if (!response) continue;
+        if (
+          response.partMetadata?.[TOOL_LOOP_SKIPPED_METADATA] === true ||
+          (legacyStoppedBatch && isLegacyLoopSkippedResponse(response))
+        ) {
+          continue;
+        }
+        handled.set(functionCall.id, getFunctionCallFingerprint(functionCall));
+        const providerId = partMetadata?.[PROVIDER_TOOL_CALL_ID_METADATA];
+        if (
+          typeof providerId === 'string' &&
+          !aliasSources.has(providerId) &&
+          !isSynthesizedRepairPart(response)
+        ) {
+          aliasSources.set(providerId, functionCall.id);
         }
       }
     }
-    const handled = new Map<string, string>();
-    for (const id of respondedIds) {
-      const fingerprint = fingerprintsById.get(id);
-      if (fingerprint !== undefined) handled.set(id, fingerprint);
+    const selected = onlyCallIds
+      ? new Map([...handled].filter(([id]) => onlyCallIds.has(id)))
+      : handled;
+    // Compaction can keep a renamed call and its result after dropping the
+    // original id. Use the earliest retained result unless that id has its
+    // own result, including when selecting only a retried continuation.
+    for (const [providerId, callId] of aliasSources) {
+      if (
+        !handled.has(providerId) &&
+        (!onlyCallIds || onlyCallIds.has(callId))
+      ) {
+        selected.set(providerId, handled.get(callId)!);
+      }
     }
-    return handled;
+    return selected;
   }
 
   /**
@@ -6916,7 +7063,32 @@ export class LlmChat {
 
   /** Returns a shallow copy of the current generation config (for cache param snapshots). */
   getGenerationConfig(): GenerateContentConfig {
-    return { ...this.generationConfig };
+    return {
+      ...this.generationConfig,
+      ...(this.systemInstructionResolver && {
+        systemInstruction: this.resolveSystemInstruction(
+          getSystemPromptModel(
+            this.config.getContentGeneratorConfig() ?? {},
+            this.config.getModel(),
+          ),
+        ),
+      }),
+    };
+  }
+
+  getDispatchedGenerationConfig(): GenerateContentConfig {
+    return structuredClone(
+      this.dispatchedRequest?.generationConfig ?? this.getGenerationConfig(),
+    );
+  }
+
+  getDispatchedRequest(): DispatchedLlmRequest | undefined {
+    return this.dispatchedRequest
+      ? {
+          ...this.dispatchedRequest,
+          generationConfig: this.getDispatchedGenerationConfig(),
+        }
+      : undefined;
   }
 
   async maybeIncludeSchemaDepthContext(error: StructuredError): Promise<void> {

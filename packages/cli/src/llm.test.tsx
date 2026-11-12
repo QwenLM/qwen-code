@@ -2240,7 +2240,11 @@ describe('llm.tsx main function', () => {
     expect(initializerModule.initializeApp).toHaveBeenCalledWith(
       configStub,
       expect.any(Object),
-      { deferIdeConnection: false, allowSubscriptionStartupFallback: true },
+      {
+        deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
+      },
     );
     expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
       configStub,
@@ -3018,7 +3022,11 @@ describe('llm.tsx main function', () => {
     expect(initializerModule.initializeApp).toHaveBeenCalledWith(
       configStub,
       expect.any(Object),
-      { deferIdeConnection: false, allowSubscriptionStartupFallback: true },
+      {
+        deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
+      },
     );
     expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
       validatedConfig,
@@ -3526,6 +3534,7 @@ describe('llm.tsx main function kitty protocol', () => {
       {
         deferIdeConnection: true,
         allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: true,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -3656,6 +3665,7 @@ describe('llm.tsx main function kitty protocol', () => {
       {
         deferIdeConnection: false,
         allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -3787,6 +3797,7 @@ describe('llm.tsx main function kitty protocol', () => {
       {
         deferIdeConnection: false,
         allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -3926,6 +3937,7 @@ describe('llm.tsx main function kitty protocol', () => {
       {
         deferIdeConnection: false,
         allowSubscriptionStartupFallback: false,
+        allowUnlistedSubscriptionModel: false,
       },
     );
     expect(mockRunAcpAgent).toHaveBeenCalledWith(
