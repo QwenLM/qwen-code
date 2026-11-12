@@ -28,8 +28,6 @@ export type ManagedTerminalLook = Identity & {
     | { readonly kind: 'terminal-terminate' }
   );
 
-export type ManagedTerminalControl = ManagedTerminalLook;
-
 export interface ManagedTerminalExitEvidence {
   readonly exitCode: number | null;
   readonly exitSignal: string | null;

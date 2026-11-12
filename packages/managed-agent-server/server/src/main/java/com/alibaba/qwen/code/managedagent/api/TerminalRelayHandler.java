@@ -76,15 +76,23 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
         URI workerUri = workerUri(lease.getEndpoint(), sessionId, terminalId);
         // Admit the durable hold before the worker terminal exists, so a close
         // racing the attach can never release the Runtime out from under it.
-        broker.admitTerminalHold(sessionId, terminalId).whenComplete((admission, holdError) -> {
-            if (holdError != null) {
-                relay.fail();
-                closeQuietly(session, CloseStatus.SERVER_ERROR);
-                return;
-            }
-            openWorker(session, relay, lease, workerUri, sessionId, terminalId,
-                    admission.created(), admission.hold().getExecutionCallId());
-        });
+        try {
+            broker.admitTerminalHold(sessionId, terminalId).whenComplete((admission, holdError) -> {
+                if (holdError != null) {
+                    relay.fail();
+                    closeQuietly(session, CloseStatus.SERVER_ERROR);
+                    return;
+                }
+                openWorker(session, relay, lease, workerUri, sessionId, terminalId,
+                        admission.created(), admission.hold().getExecutionCallId());
+            });
+        } catch (RuntimeException error) {
+            // admit validates synchronously (requireOpen / requirePathSafe); a
+            // throw here would otherwise escape the container callback after the
+            // 101, leaving the browser leg an abrupt 1006 with no server close.
+            relay.fail();
+            closeQuietly(session, CloseStatus.SERVER_ERROR);
+        }
     }
 
     private void openWorker(WebSocketSession session, Relay relay,

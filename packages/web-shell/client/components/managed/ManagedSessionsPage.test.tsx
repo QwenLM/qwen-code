@@ -524,7 +524,15 @@ describe('ManagedSessionsPage', () => {
       constructor(
         public url: string,
         public protocols?: string | string[],
-      ) {}
+      ) {
+        // Open the socket so the cleanup's readyState === OPEN release-frame
+        // guard is actually exercised; a never-open fake leaves `sent` empty
+        // and makes the no-release assertion below vacuous.
+        queueMicrotask(() => {
+          this.readyState = 1;
+          this.onopen?.();
+        });
+      }
       send(data: unknown) {
         sent.push(data);
       }
