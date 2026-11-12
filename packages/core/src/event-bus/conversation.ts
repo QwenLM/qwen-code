@@ -59,10 +59,11 @@ export class ConversationHandler {
         const round = currentRound(state, event.round);
         const model = state.model;
         if (round === undefined || !model) return;
-        host.onRoundEnd?.(round);
+        const hostStop = host.onRoundEnd?.(round);
+        const stop = model.stop ?? hostStop;
         const rounds = round + 1;
-        if (model.stop) {
-          this.finish(state, { reason: model.stop, rounds, turn: model.turn });
+        if (stop) {
+          this.finish(state, { reason: stop, rounds, turn: model.turn });
           return;
         }
         if (model.calls.length === 0) {
@@ -84,12 +85,14 @@ export class ConversationHandler {
         if (round === undefined || !batch) return;
         const rounds = round + 1;
         const turn = state.model?.turn;
+        const { parts, responses } = batch;
         if (batch.stop) {
           this.finish(state, {
             reason: batch.stop,
             rounds,
             turn,
-            parts: batch.parts,
+            parts,
+            responses,
           });
           return;
         }
@@ -99,7 +102,8 @@ export class ConversationHandler {
             reason: 'next_round',
             rounds,
             turn,
-            parts: batch.parts,
+            parts,
+            responses,
           });
           return;
         }
