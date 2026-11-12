@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedUserMessageStor
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionPrincipal;
 import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore.Command;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -617,6 +618,28 @@ class SessionPrincipalOwnershipTest {
             executor.shutdownNow();
             assertThat(executor.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
         }
+    }
+
+    // R17-1: a read that abandons its authority check must not leave the
+    // ownership row where a later decision on the same thread can consume it.
+    // The decision re-reads the row, so a revoked Session answers 404 even
+    // when the previous read saw the row.
+    @Test
+    void anAbandonedReadCannotAuthorizeAfterTheOwnershipRowIsRevoked() {
+        var f = new Fixture();
+        f.tx.executeWithoutResult(status -> {
+            String revoked = f.create(OWNER, "create");
+            assertThat(f.store.findSession("tenant", revoked)).isPresent();
+            f.jdbc.update("DELETE FROM ma_session_principal WHERE tenant_id=?"
+                    + " AND session_id=?", "tenant", revoked);
+            denied(() -> ManagedSessionPrincipal.requireReadAuthority(
+                    f.jdbc, "tenant", revoked, OWNER));
+            // A normal read followed by its authorization still succeeds: the
+            // fix must not turn a live Session into a false 404.
+            String live = f.create(OWNER, "create-2");
+            assertThat(f.store.findSession("tenant", live)).isPresent();
+            ManagedSessionPrincipal.requireReadAuthority(f.jdbc, "tenant", live, OWNER);
+        });
     }
 
     private static void denied(Runnable action) {

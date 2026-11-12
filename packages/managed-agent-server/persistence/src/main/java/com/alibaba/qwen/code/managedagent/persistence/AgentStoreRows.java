@@ -42,21 +42,6 @@ final class AgentStoreRows {
             return readSession(result, new StreamCounters(result.getLong("list_last_sequence"),
                     result.getLong("list_floor_sequence"), optionalLong(result, "list_last_activity")));
         };
-        this.sessionAuthorityMapper = (result, row) -> {
-            SessionRecord session = sessionMapper.mapRow(result, row);
-            ManagedSessionPrincipal.stashReadAuthority(
-                    new ManagedSessionPrincipal.ReadAuthority(
-                            session.tenantId(), session.sessionId(),
-                            result.getObject("authority_version") == null
-                                    ? null
-                                    : new ManagedSessionPrincipal.Row(
-                                            result.getInt("authority_version"),
-                                            result.getString("authority_user_id"),
-                                            result.getBoolean("authority_actor_present"),
-                                            result.getString("authority_subject")),
-                            result.getInt("authority_principal_created")));
-            return session;
-        };
         this.sessionListMapper = (result, row) ->
                         readSession(
                                 result,
@@ -114,40 +99,7 @@ final class AgentStoreRows {
     static final String SESSION_WITH_STREAM =
             "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence, es.gmt_modified AS list_last_activity FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = X''";
 
-    // The single-session read carries the ownership row and the
-    // legacy-creation mark in the same statement (R6-6), so the unbound
-    // read grant costs no extra round trip on the hot path.
-    static final String SESSION_WITH_AUTHORITY =
-            "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session")
-                    + ", es.last_sequence AS list_last_sequence,"
-                    + " es.replay_floor_sequence AS list_floor_sequence,"
-                    + " es.gmt_modified AS list_last_activity,"
-                    + " sp.version AS authority_version,"
-                    + " sp.user_id AS authority_user_id,"
-                    + " sp.actor_present AS authority_actor_present,"
-                    + " sp.actor_subject_id AS authority_subject,"
-                    + " (SELECT COUNT(*) FROM ma_request_receipt r JOIN"
-                    + " ma_session s ON s.tenant_id = r.tenant_id AND"
-                    + " s.session_id = r.session_id WHERE r.tenant_id ="
-                    + " ma_session.tenant_id AND r.session_id ="
-                    + " ma_session.session_id AND r.namespace ="
-                    + " 'SESSION_COMMAND' AND r.operation = 'CREATE_SESSION'"
-                    + " AND s.workspace_id IS NULL AND r.actor_id IS NOT NULL"
-                    + " AND LENGTH(r.actor_id) > 0 AND"
-                    + " (s.creator_actor_key IS NULL OR"
-                    + " r.actor_id <> s.creator_actor_key))"
-                    + " AS authority_principal_created"
-                    + " FROM ma_session LEFT JOIN ma_event_stream es ON"
-                    + " es.tenant_id = ma_session.tenant_id AND"
-                    + " es.session_id = ma_session.session_id AND"
-                    + " es.stream_kind = 'SESSION' AND es.stream_id = X''"
-                    + " LEFT JOIN ma_session_principal sp ON"
-                    + " sp.tenant_id = ma_session.tenant_id AND"
-                    + " sp.session_id = ma_session.session_id";
-
     final RowMapper<SessionRecord> sessionMapper;
-
-    private final RowMapper<SessionRecord> sessionAuthorityMapper;
 
     final RowMapper<SessionRecord> sessionListMapper;
 
@@ -221,9 +173,9 @@ final class AgentStoreRows {
             String sessionId) {
         List<SessionRecord> rows =
                 jdbc.query(
-                        SESSION_WITH_AUTHORITY + " WHERE ma_session.session_kind = 'PUBLIC' AND"
+                        SESSION_WITH_STREAM + " WHERE ma_session.session_kind = 'PUBLIC' AND"
                                 + " ma_session.tenant_id = ? AND ma_session.session_id = ?",
-                        sessionAuthorityMapper,
+                        sessionMapper,
                         tenantId,
                         sessionId);
         return rows.stream().findFirst();

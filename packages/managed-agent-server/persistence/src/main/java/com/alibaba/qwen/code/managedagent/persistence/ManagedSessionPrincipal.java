@@ -24,31 +24,6 @@ public final class ManagedSessionPrincipal {
             String actorSubjectId) {
     }
 
-    /**
-     * The authority columns fetched alongside the Session read (R6-6): the
-     * ownership row (null when none) plus the legacy-creation exclusion
-     * count. Scoped to the reading thread and consumed once by the grant,
-     * so the hot unbound read costs no extra statement.
-     */
-    public record ReadAuthority(String tenantId, String sessionId, Row row,
-            int principalCreated) {
-    }
-
-    private static final ThreadLocal<ReadAuthority> READ_AUTHORITY =
-            new ThreadLocal<>();
-
-    public static void stashReadAuthority(ReadAuthority authority) {
-        READ_AUTHORITY.set(authority);
-    }
-
-    public static ReadAuthority takeReadAuthority(String tenantId,
-            String sessionId) {
-        ReadAuthority authority = READ_AUTHORITY.get();
-        READ_AUTHORITY.remove();
-        return authority != null && authority.tenantId().equals(tenantId)
-                && authority.sessionId().equals(sessionId) ? authority : null;
-    }
-
     /** Writes the version-1 ownership row; rolls back with the creating tx. */
     public static void insert(JdbcTemplate jdbc, String tenantId,
             String sessionId, SessionPrincipal principal, long now) {
@@ -166,15 +141,8 @@ public final class ManagedSessionPrincipal {
     public static void requireReadAuthority(JdbcTemplate jdbc, String tenantId,
             String sessionId, SessionPrincipal principal) {
         if (principal != null && !principal.tenantId().equals(tenantId)) {
-            READ_AUTHORITY.remove();
             throw new ManagedAgentException(404,
                     "session_not_found", "The Session was not found.");
-        }
-        ReadAuthority stashed = takeReadAuthority(tenantId, sessionId);
-        if (stashed != null) {
-            requireFetched(tenantId, stashed.row(), stashed.principalCreated(),
-                    principal);
-            return;
         }
         AuthorityRow authority = fetchAuthority(jdbc, tenantId, sessionId);
         if (authority == null) {
@@ -193,12 +161,6 @@ public final class ManagedSessionPrincipal {
      */
     public static void requireReadAuthority(JdbcTemplate jdbc, String tenantId,
             String sessionId, String actorId) {
-        ReadAuthority stashed = takeReadAuthority(tenantId, sessionId);
-        if (stashed != null) {
-            requireFetchedRawActor(stashed.row(), stashed.principalCreated(),
-                    actorId);
-            return;
-        }
         AuthorityRow authority = fetchAuthority(jdbc, tenantId, sessionId);
         if (authority == null) {
             return;
