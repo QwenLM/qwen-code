@@ -12,6 +12,8 @@ import {
   registerSessionCommit,
   clearSessionCommits,
   amendNeedsApproval,
+  isAmendOfSessionCommit,
+  getSessionCommitGeneration,
 } from './destructive-commands.js';
 import { modelText, userText } from '../test-utils/model-fixtures.js';
 
@@ -245,9 +247,16 @@ describe('isDestructiveCommand — git commit --amend', () => {
 });
 
 describe('session commit tracking', () => {
-  it('registerSessionCommit and clearSessionCommits work', () => {
+  it('clearSessionCommits empties the registry and bumps the generation', () => {
+    // A no-throw smoke test asserted nothing: the registry has no reader that
+    // takes a SHA, so observe it through the exported cwd reader (a real repo)
+    // and through the generation counter a deferred writer checks.
     registerSessionCommit('abc123');
+    const generation = getSessionCommitGeneration();
+    expect(isAmendOfSessionCommit(process.cwd())).toBe(false);
     clearSessionCommits();
+    expect(getSessionCommitGeneration()).toBe(generation + 1);
+    expect(isAmendOfSessionCommit(process.cwd())).toBe(false);
   });
 
   it('asks for an amend even when this session made the commit', () => {

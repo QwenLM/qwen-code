@@ -6024,6 +6024,60 @@ describe('CoreToolScheduler', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it('does not reset AUTO denial counters when an amend approval is granted', async () => {
+    // The amend floor is a deterministic policy, not a recovery prompt: it is
+    // reached with the counters at any value, so approving one amend is not
+    // evidence that a denial streak is over. Arming this callId for the reset
+    // (as the denial-fallback reasons do) cleared a live streak on the main
+    // permission path only — the pending-tool sweep and the ACP host never
+    // armed it, so the same approval had two different effects.
+    const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue(textResult('executed'));
+    const setAutoModeDenialState = vi.fn();
+    const streak = denialState({ consecutiveBlock: 2, totalBlock: 5 });
+    const harness = autoScheduler(
+      askingTool({
+        kind: Kind.Execute,
+        getConfirmationDetails: vi
+          .fn()
+          .mockResolvedValue(
+            execDetails(
+              'Run command',
+              'git commit --amend',
+              'git',
+              onConfirmSpy,
+            ),
+          ),
+        execute,
+      }),
+      {
+        autoModeDenialState: streak,
+        setAutoModeDenialState,
+        disableHooks: true,
+      },
+    );
+
+    await harness.scheduler.schedule(
+      shellRequest('amend-counter-reset', 'git commit --amend --no-edit'),
+      new AbortController().signal,
+    );
+
+    const waiting = await waitForApproval(harness.onToolCallsUpdate);
+    // The dialog still carries the explanation and the hidden always-allow.
+    expect(waiting.confirmationDetails).toMatchObject({
+      hideAlwaysAllow: true,
+      autoModeFallback: { reason: 'safety_check' },
+    });
+
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    // The fallback path itself records no counter change, and the approval
+    // must not either: the streak survives.
+    expect(setAutoModeDenialState).not.toHaveBeenCalled();
+  });
+
   it('denies a destructive-command escalation in non-interactive STREAM_JSON instead of offering it to the host', async () => {
     // Counterpart to the test above for the other programmatic approver.
     // STREAM_JSON is exempt from the non-interactive deny because a host can
