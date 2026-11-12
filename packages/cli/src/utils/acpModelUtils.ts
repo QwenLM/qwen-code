@@ -280,10 +280,12 @@ function findAuthorityEnd(baseUrl: string, authorityStart: number): number {
  * and a later `@` — a contact address in error prose, say — is read as its
  * userinfo.
  *
- * The one exception is a password that holds a raw space, which users do paste
- * into a `baseUrl`. A space before the authority's only `@`, with the userinfo
- * colon already behind it, sits inside that password rather than after the
- * authority.
+ * The one exception is userinfo that holds a raw space, which users do paste
+ * into a `baseUrl`. A space belongs to the userinfo when the text from it up to
+ * the next `@` holds no further whitespace; prose before a contact address has
+ * words in between, so it falls through to the bound above. When the space is
+ * inside the userinfo, the authority still ends at the first whitespace after
+ * that `@`, so prose following the URL stays outside it.
  */
 function findAuthorityEndingWhitespace(
   baseUrl: string,
@@ -294,11 +296,12 @@ function findAuthorityEndingWhitespace(
     return -1;
   }
   const index = authorityStart + space;
-  const colon = baseUrl.indexOf(':', authorityStart);
-  const at = baseUrl.indexOf('@', authorityStart);
-  const insideUserinfo =
-    colon !== -1 && colon < index && (at === -1 || at > index);
-  return insideUserinfo ? -1 : index;
+  const at = baseUrl.indexOf('@', index);
+  if (at === -1 || /\s/.test(baseUrl.slice(index + 1, at))) {
+    return index;
+  }
+  const afterAt = baseUrl.slice(at + 1).search(/\s/);
+  return afterAt === -1 ? -1 : at + 1 + afterAt;
 }
 
 /**

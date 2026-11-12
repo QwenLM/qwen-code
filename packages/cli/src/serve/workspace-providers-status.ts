@@ -346,9 +346,10 @@ function findUrlSegmentEnd(
   const nextUrl = findNextUrlStart(value, afterMarker);
 
   // The segment may run past the URL into the sentence around it: the
-  // authority-bounded sanitizer reads the URL part and leaves the prose alone.
-  // Cutting at the first space instead would deny the space-in-password shape,
-  // where the space sits inside the userinfo.
+  // authority-bounded sanitizer reads the URL part and leaves the prose alone,
+  // because the authority ends at the first whitespace (or, when the space sits
+  // inside the userinfo, at the first whitespace after that userinfo's `@`).
+  // Cutting at the first space instead would deny the space-in-password shape.
   return Math.min(lineEnd, nextUrl?.index ?? value.length);
 }
 

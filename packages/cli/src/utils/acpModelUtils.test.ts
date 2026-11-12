@@ -393,6 +393,17 @@ describe('acpModelUtils', () => {
       'https://api.example/v1/@scope',
     ],
     ['https://user:p ass@api.example/v1', 'https://api.example/v1'],
+    ['https://user :pass@host.io/v1', 'https://host.io/v1'],
+    ['https:// user:pass@host.io/v1', 'https://host.io/v1'],
+    ['https://user:p@ss word@host.io/v1', 'https://host.io/v1'],
+    [
+      'https://api.example:8443 — contact admin@example.com',
+      'https://api.example:8443 — contact admin@example.com',
+    ],
+    [
+      'https://host.io: contact admin@example.com',
+      'https://host.io: contact admin@example.com',
+    ],
     [`https://user:p'ass@api.example/v1`, 'https://api.example/v1'],
     ['https://user:p%2Fx@api.example/v1', 'https://api.example/v1'],
     ['https://user:p/x@api.example/v1', 'https://api.example/v1'],
