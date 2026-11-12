@@ -2,10 +2,13 @@ package com.alibaba.qwen.code.managedagent.contracts.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -32,7 +35,7 @@ public final class ManagedHostedRecoveryRecords {
             }
         }
         for (String line : new String(records, StandardCharsets.UTF_8).split("\n")) {
-            JsonNode record = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(line);
+            JsonNode record = ManagedExtensionRecordStore.parse(line);
             if (record == null) {
                 continue;
             }
@@ -58,7 +61,7 @@ public final class ManagedHostedRecoveryRecords {
         if (!KINDS.contains(stored.kind()) && !"managed-action-options".equals(stored.kind())) {
             return;
         }
-        JsonNode body = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(stored.bytes(), StandardCharsets.UTF_8));
+        JsonNode body = ManagedExtensionRecordStore.parse(new String(stored.bytes(), StandardCharsets.UTF_8));
         require(body != null && stored.schemaVersion() == 1, "Invalid Hosted recovery resource.");
         if ("managed-action-options".equals(stored.kind()) && body.path("v").asInt() != 3 && body.path("v").asInt() != 4) {
             return;
@@ -160,7 +163,7 @@ public final class ManagedHostedRecoveryRecords {
             if (KINDS.contains(stored.kind()) || List.of("managed-action-options", "managed-checkpoint", ManagedCheckpointHistory.KIND, "managed-definition",
                     "managed-hook-plan", "managed-hook-message-chunks", "managed-message-chunks").contains(stored.kind())
                     || ManagedExtensionRecords.DOMAINS.stream().anyMatch(domain -> ("managed-" + domain).equals(stored.kind()))) {
-                JsonNode body = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(stored.bytes(), StandardCharsets.UTF_8));
+                JsonNode body = ManagedExtensionRecordStore.parse(new String(stored.bytes(), StandardCharsets.UTF_8));
                 require(body != null && stored.schemaVersion() == 1, "Invalid Hosted recovery resource.");
                 if (KINDS.contains(stored.kind())) {
                     validateBody(stored.kind(), body, tenant, workspace, session);
@@ -187,7 +190,7 @@ public final class ManagedHostedRecoveryRecords {
     }
 
     public static List<JsonNode> references(JsonNode body) {
-        var refs = new java.util.ArrayList<JsonNode>();
+        var refs = new ArrayList<JsonNode>();
         for (String field : List.of("definitionRef", "rootSnapshotRef", "assistantRef", "inputRef", "continuationRef")) {
             if (body.hasNonNull(field)) {
                 refs.add(body.get(field));
@@ -314,26 +317,39 @@ public final class ManagedHostedRecoveryRecords {
             }
             ManagedExtensionRecords.oneOf(body.get("stage"), List.of("approval", "final"), "stage");
             JsonNode runtime = body.get("runtime");
-            Set<String> runtimeFields = new HashSet<>(Set.of("runtimeSessionId", "bindingId", "generation", "workspaceGeneration"));
-            if (runtime != null && runtime.has("provisionerKind")) {
-                runtimeFields.add("provisionerKind");
-                ManagedExtensionRecords.oneOf(runtime.get("provisionerKind"), List.of("local-process"), "native Runtime provider");
-                require(!body.has("commandStep") && body.path("calls").isArray() && body.path("calls").size() == 1
-                        && "ask_user_question".equals(body.path("calls").get(0).path("call").path("name").asText()),
-                        "Native Runtime provider pin requires a single question.");
-            }
-            ManagedExtensionRecords.closed(runtime, runtimeFields, "native Runtime");
-            if (body.has("commandStep")) {
-                ManagedExtensionRecords.id(runtime.get("runtimeSessionId"), "command Runtime owner");
+            boolean memoryOnly = runtime != null && runtime.isNull();
+            if (memoryOnly) {
+                require(!body.has("commandStep") && !body.has("publicChildModel"), "Memory continuation cannot name Runtime work.");
             } else {
-                require(runtimeSessionId(body.get("promptId").asText()).equals(runtime.path("runtimeSessionId").asText()), "Native Runtime owner conflicts.");
+                Set<String> runtimeFields = new HashSet<>(Set.of("runtimeSessionId", "bindingId", "generation", "workspaceGeneration"));
+                if (runtime != null && runtime.has("provisionerKind")) {
+                    runtimeFields.add("provisionerKind");
+                    ManagedExtensionRecords.oneOf(runtime.get("provisionerKind"), List.of("local-process"), "native Runtime provider");
+                    require(!body.has("commandStep") && body.path("calls").isArray() && body.path("calls").size() == 1
+                            && "ask_user_question".equals(body.path("calls").get(0).path("call").path("name").asText()),
+                            "Native Runtime provider pin requires a single question.");
+                }
+                ManagedExtensionRecords.closed(runtime, runtimeFields, "native Runtime");
+                if (body.has("commandStep")) {
+                    ManagedExtensionRecords.id(runtime.get("runtimeSessionId"), "command Runtime owner");
+                } else {
+                    require(runtimeSessionId(body.get("promptId").asText()).equals(runtime.path("runtimeSessionId").asText()), "Native Runtime owner conflicts.");
+                }
+                ManagedExtensionRecords.id(runtime.get("bindingId"), "bindingId");
+                generation(runtime.get("generation"));
+                generation(runtime.get("workspaceGeneration"));
             }
-            ManagedExtensionRecords.id(runtime.get("bindingId"), "bindingId");
-            generation(runtime.get("generation"));
-            generation(runtime.get("workspaceGeneration"));
             require(body.path("calls").isArray() && !body.path("calls").isEmpty(), "Native batch is empty.");
             ManagedExtensionRecords.count(body.get("approvalOrdinal"), 0, body.path("calls").size() - 1, "approvalOrdinal");
             for (JsonNode call : body.get("calls")) {
+                if (memoryOnly) {
+                    require(Set.of("context_search", "context_remember", "context_get", "context_forget")
+                            .contains(call.path("call").path("name").asText()), "Memory continuation contains another tool.");
+                    String correlation = runtimeSessionId(body.get("promptId").asText());
+                    require(correlation.equals(call.path("prepareReference").path("sessionId").asText())
+                            && (correlation + ":" + call.path("runtimeCallId").asText()).equals(call.path("prepareKey").asText()),
+                            "Memory continuation correlation conflicts.");
+                }
                 require(!body.has("commandStep") || "skill".equals(call.path("call").path("name").asText()), "Command continuation must resume its Skill call.");
                 Set<String> callFields = new HashSet<>(Set.of("call", "runtimeCallId", "inputRef", "definitionRef",
                         "requestDigest", "argsDigest", "prepareKey", "prepareReference", "partIndex", "refusal", "actionId"));
@@ -353,7 +369,7 @@ public final class ManagedHostedRecoveryRecords {
 
     private static void generation(JsonNode node) {
         require(node != null && node.isTextual() && node.asText().matches("[1-9][0-9]{0,18}")
-                && new java.math.BigInteger(node.asText()).compareTo(java.math.BigInteger.valueOf(Long.MAX_VALUE)) <= 0,
+                && new BigInteger(node.asText()).compareTo(BigInteger.valueOf(Long.MAX_VALUE)) <= 0,
                 "Invalid Runtime generation.");
     }
 

@@ -1,1 +1,2 @@
 com.alibaba.qwen.code.managedagent.config.AliyunToolPublicationStorageAutoConfiguration
+com.alibaba.qwen.code.managedagent.config.ExtensionArchiveStorageAutoConfiguration

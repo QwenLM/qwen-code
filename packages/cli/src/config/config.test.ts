@@ -34,7 +34,10 @@ import {
 } from './config.js';
 import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
-import { isWorkspaceTrusted } from './trustedFolders.js';
+import {
+  getTrustFileDecisionBelowIdeRoot,
+  isWorkspaceTrusted,
+} from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
 import { getProjectHooksApprovalState } from './hook-approvals.js';
 import { addCommand } from '../commands/mcp/add.js';
@@ -160,6 +163,7 @@ const createNativeLspServiceInstance = () => ({
 
 vi.mock('./trustedFolders.js', () => ({
   isWorkspaceTrusted: vi.fn(() => ({ isTrusted: true, source: 'file' })), // Default to trusted
+  getTrustFileDecisionBelowIdeRoot: vi.fn(() => undefined),
 }));
 
 const nativeLspServiceMock = vi.mocked(NativeLspService);
@@ -2519,6 +2523,26 @@ describe('loadCliConfig', () => {
     ).rejects.toThrow("Advisor model 'missing-advisor' is not configured.");
   });
 
+  it('does not expose aux-selector credentials in the startup error', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const failure = await loadCliConfig(
+      {
+        advisorModel:
+          'openai:missing-advisor\0https://user:sk-secret@gw.example/v1',
+      },
+      argv,
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(FatalConfigError);
+    expect((failure as Error).message).toContain(
+      "Advisor model 'openai:missing-advisor (https://gw.example/v1)' is not configured.",
+    );
+    expect((failure as Error).message).not.toContain('sk-secret');
+    expect((failure as Error).message).not.toContain('\0');
+  });
+
   it('should use settings fallback models when the CLI flag is absent', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -2540,6 +2564,22 @@ describe('loadCliConfig', () => {
 
     expect(config.getAgentsSettings().maxParallelAgents).toBe(2);
   });
+
+  it.each([undefined, true, false])(
+    'passes agents.defaultBackground=%s from settings to core config',
+    async (defaultBackground) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { agents: { defaultBackground } },
+        argv,
+      );
+
+      expect(config.getAgentsSettings().defaultBackground).toBe(
+        defaultBackground,
+      );
+    },
+  );
 
   it('keeps cross-session messaging on when no suppression is in force', async () => {
     process.argv = ['node', 'script.js'];
@@ -3264,6 +3304,32 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it('keeps the event-bus agent loop disabled by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventBusAgentLoopEnabled: false,
+      }),
+    );
+  });
+
+  it('propagates the event-bus agent loop opt-in', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({ experimental: { eventBusAgentLoop: true } }, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventBusAgentLoopEnabled: true,
+      }),
+    );
+  });
+
   it('should not enable the session writer lease for invalid truthy values', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -3984,6 +4050,195 @@ describe('loadCliConfig', () => {
     expect(lspInstance).toBeDefined();
     expect(lspInstance?.discoverAndPrepare).toHaveBeenCalledTimes(1);
     expect(lspInstance?.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('should initialize native LSP service from tools.lspEnabled alone', async () => {
+    // The Desktop client cannot pass `--experimental-lsp` (its daemon argv is
+    // pinned in Rust), so the setting must be a complete entrance on its own.
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(true);
+    expect(nativeLspServiceMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('should keep LSP off when QWEN_CODE_DISABLE_LSP overrides the setting', async () => {
+    // Mirrors QWEN_CODE_DISABLE_WORKFLOWS: an operator off-switch must win over
+    // every other entrance, since LSP servers run with the user's permissions.
+    vi.stubEnv('QWEN_CODE_DISABLE_LSP', '1');
+    process.argv = ['node', 'script.js', '--experimental-lsp'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
+
+  it('should refuse an execution sandbox when only the LSP setting opts in', async () => {
+    // The guard has to see the same answer the session gets: the setting starts
+    // the same subsystem as the flag, so a sandboxed tool runner must refuse it
+    // even when no flag was passed.
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+    const policy = {
+      workspace: path.resolve(path.sep, 'sandbox-fixture', 'workspace'),
+      installation: path.resolve('/trusted-install'),
+      state: path.resolve('/trusted-state'),
+      maskedPaths: [
+        path.resolve(path.sep, 'sandbox-fixture', 'workspace', '.env'),
+      ],
+      filesystem: 'workspace-write' as const,
+      network: 'closed' as const,
+    };
+
+    await expect(
+      loadCliConfig(
+        settings,
+        argv,
+        policy.workspace,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { shellExecutionSandbox: policy },
+      ),
+    ).rejects.toThrow(
+      /does not yet support LSP enabled through tools\.lspEnabled/,
+    );
+  });
+
+  it('should refuse an execution sandbox when the LSP flag opts in', async () => {
+    // The flag-only entrance must keep refusing and keep the short wording, so
+    // the entrance-specific message cannot degrade into naming a setting the
+    // user never touched.
+    process.argv = ['node', 'script.js', '--experimental-lsp'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const policy = {
+      workspace: path.resolve(path.sep, 'sandbox-fixture', 'workspace'),
+      installation: path.resolve('/trusted-install'),
+      state: path.resolve('/trusted-state'),
+      maskedPaths: [
+        path.resolve(path.sep, 'sandbox-fixture', 'workspace', '.env'),
+      ],
+      filesystem: 'workspace-write' as const,
+      network: 'closed' as const,
+    };
+
+    await expect(
+      loadCliConfig(
+        settings,
+        argv,
+        policy.workspace,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { shellExecutionSandbox: policy },
+      ),
+    ).rejects.toThrow(/does not yet support LSP, ACP/);
+  });
+
+  it('should keep LSP off when the embedding host refuses it outright', async () => {
+    // `experimentalLsp: false` cannot express a refusal because the flag parser
+    // defaults it to false, so a host-owned helper Config needs its own
+    // off-switch that outranks the user's setting.
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { lspDisabled: true },
+    );
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+  });
+
+  it('should keep LSP off in safe mode even when the setting opts in', async () => {
+    // Safe mode distrusts ambient file-sourced state, so a standing setting
+    // must not start workspace-declared language servers there.
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+  });
+
+  it('should keep LSP off in bare mode even when the flag opts in', async () => {
+    // Bare mode shares safe mode's distrust of workspace-declared state, so the
+    // pre-existing `!bareMode` term has to keep refusing the flag entrance.
+    process.argv = ['node', 'script.js', '--bare', '--experimental-lsp'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+  });
+
+  it('should keep LSP off when QWEN_CODE_SAFE_MODE opts in', async () => {
+    vi.stubEnv('QWEN_CODE_SAFE_MODE', '1');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { tools: { lspEnabled: true } };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
+
+  it('should let a host refusal outrank the LSP env entrance', async () => {
+    // The refusal contract says "whatever the user's setting or the
+    // environment says"; resolving the env pair first would let a daemon-wide
+    // QWEN_CODE_ENABLE_LSP start servers in a Config that must never run them.
+    vi.stubEnv('QWEN_CODE_ENABLE_LSP', '1');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { lspDisabled: true },
+    );
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
   });
 
   it('should collect LSP status snapshots during debug-mode startup', async () => {
@@ -5717,6 +5972,7 @@ describe('loadCliConfig folderTrust', () => {
     process.argv = originalArgv;
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
+    ServerConfig.ideContextStore.clear();
   });
 
   it('should be false when folderTrust is false', async () => {
@@ -5753,6 +6009,131 @@ describe('loadCliConfig folderTrust', () => {
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getFolderTrust()).toBe(false);
+  });
+
+  it.each([undefined, false])(
+    'uses the ACP session workspace trust when launch-directory IDE trust is %s',
+    async (ideTrust) => {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      const sessionCwd = path.join(process.cwd(), 'other-workspace');
+      vi.mocked(isWorkspaceTrusted).mockImplementation(
+        (_settings, _trustConfig, workspacePath) => ({
+          isTrusted: workspacePath === sessionCwd,
+          source: 'file',
+        }),
+      );
+      vi.spyOn(ServerConfig.ideContextStore, 'get').mockReturnValue({
+        workspaceState: { isTrusted: ideTrust },
+      });
+
+      const config = await loadCliConfig(
+        { security: { folderTrust: { enabled: true } } },
+        argv,
+        sessionCwd,
+        [],
+      );
+
+      expect(config.isTrustedFolder()).toBe(true);
+      expect(config.isExplicitlyTrustedFolder()).toBe(true);
+    },
+  );
+
+  it('does not turn implicit trust into explicit trust for a foreign ACP workspace', async () => {
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+    const sessionCwd = path.dirname(process.cwd());
+    ServerConfig.ideContextStore.set({ workspaceState: { isTrusted: true } }, [
+      process.cwd(),
+    ]);
+
+    const config = await loadCliConfig(
+      { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'x' }] }] } },
+      argv,
+      sessionCwd,
+      [],
+    );
+
+    expect(config.isTrustedFolder()).toBe(true);
+    expect(config.isExplicitlyTrustedFolder()).toBe(false);
+    expect(config.isProjectHooksPendingApproval()).toBe(true);
+  });
+
+  it('honors IDE trust for an ACP session at the connected workspace root', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--approval-mode',
+      'auto-edit',
+    ];
+    const argv = await parseArguments();
+    const sessionCwd = path.dirname(process.cwd());
+    const { isWorkspaceTrusted: actualIsWorkspaceTrusted } =
+      await vi.importActual<typeof import('./trustedFolders.js')>(
+        './trustedFolders.js',
+      );
+    vi.mocked(isWorkspaceTrusted).mockImplementation(actualIsWorkspaceTrusted);
+    ServerConfig.ideContextStore.set({ workspaceState: { isTrusted: true } }, [
+      sessionCwd,
+    ]);
+
+    const config = await loadCliConfig(
+      { security: { folderTrust: { enabled: true } } },
+      argv,
+      sessionCwd,
+      [],
+    );
+
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
+    expect(config.isTrustedFolder()).toBe(true);
+    expect(config.isExplicitlyTrustedFolder()).toBe(true);
+
+    ServerConfig.ideContextStore.set({ workspaceState: { isTrusted: false } }, [
+      sessionCwd,
+    ]);
+    expect(config.isTrustedFolder()).toBe(false);
+  });
+
+  it.each([
+    ['an ACP session', ['--acp']],
+    ['an interactive session', []],
+  ])(
+    'lets a trust rule below the IDE root decide the runtime trust of %s',
+    async (_label, flags) => {
+      process.argv = ['node', 'script.js', ...flags];
+      const argv = await parseArguments();
+      const ideRoot = path.dirname(process.cwd());
+      vi.mocked(getTrustFileDecisionBelowIdeRoot).mockImplementation(
+        (_settings, location, root) =>
+          location === process.cwd() && root === ideRoot ? false : undefined,
+      );
+      ServerConfig.ideContextStore.set(
+        { workspaceState: { isTrusted: true } },
+        [ideRoot],
+      );
+
+      const config = await loadCliConfig(
+        { security: { folderTrust: { enabled: true } } },
+        argv,
+        process.cwd(),
+        [],
+      );
+
+      expect(config.isTrustedFolder()).toBe(false);
+      expect(config.isExplicitlyTrustedFolder()).toBe(false);
+    },
+  );
+
+  it('honors live IDE trust for an ACP session in the process workspace', async () => {
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, process.cwd(), []);
+    vi.spyOn(ServerConfig.ideContextStore, 'get').mockReturnValue({
+      workspaceState: { isTrusted: false },
+    });
+
+    expect(config.isTrustedFolder()).toBe(false);
   });
 });
 

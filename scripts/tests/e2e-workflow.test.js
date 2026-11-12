@@ -172,6 +172,7 @@ describe('TUI product evidence', () => {
     ['packages/core/src/core/coreToolScheduler.ts', lanes.slice(0, -1)],
     ['packages/core/src/core/client.ts', lanes.slice(0, -1)],
     ['packages/cli/src/ui/opentui/live-turn.ts', lanes.slice(0, -1)],
+    ['packages/cli/src/ui/opentui/shared-model-round.ts', lanes.slice(0, -1)],
     ['packages/cli/src/ui/opentui/opentui-runtime.ts', lanes],
     ['pnpm-lock.yaml', lanes],
     ['packages/cli/package.json', lanes],
@@ -230,6 +231,8 @@ describe('TUI product evidence', () => {
           selected.includes('recovery'),
         );
       }
+      if (selected.length === 0)
+        expect(outputs.reason).toBe('Outside the TUI build/test closure');
       if (selected.length === 1)
         expect(outputs.reason).toContain(
           'maintainers should consider manual full',
@@ -637,11 +640,16 @@ describe('TUI product evidence', () => {
   const excludedTrees = (yamlText) =>
     parse(yamlText)
       .packages.filter((entry) => entry.startsWith('!'))
-      .map((entry) => entry.slice(1));
+      .map((entry) => entry.slice(1))
+      .filter((tree) => !/[*?[\]{}]/.test(tree));
 
   it('excludes every tree the pnpm workspace itself leaves out', async () => {
     const excluded = excludedTrees(readFileSync('pnpm-workspace.yaml', 'utf8'));
-    expect(excluded.length).toBeGreaterThan(0);
+    expect([...excluded].sort()).toEqual([
+      'packages/desktop',
+      'packages/live-host',
+      'packages/mobile-shell',
+    ]);
     for (const tree of excluded) {
       const { outputs } = await impact([
         { filename: `${tree}/placeholder.ts` },
@@ -651,7 +659,7 @@ describe('TUI product evidence', () => {
     }
   });
 
-  it('reconciles negations spelled with a trailing comment or another scope', () => {
+  it('reconciles literal negations across YAML spellings and ignores globs', () => {
     expect(
       excludedTrees(
         [
@@ -659,6 +667,10 @@ describe('TUI product evidence', () => {
           "  - 'packages/*'",
           "  - '!packages/desktop' # promoted to its own release later",
           "  - '!integrations/generated-ui'",
+          "  - '!**/fixtures/**'",
+          "  - '!packages/fixture?'",
+          "  - '!packages/[ab]'",
+          "  - '!packages/{foo,bar}'",
           '',
         ].join('\n'),
       ),

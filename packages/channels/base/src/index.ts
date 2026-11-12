@@ -28,9 +28,11 @@ export {
   CHANNEL_TASK_RESULT_META_KEY,
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
   CHANNEL_TURN_NOTICE_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   MID_TURN_DRAIN_BATCH,
   MID_TURN_QUEUE_MAX_CHARS,
   MID_TURN_QUEUE_MAX_MESSAGES,
+  parseChannelWorkflowOrigin,
 } from './ChannelAgentBridge.js';
 export type {
   AvailableCommand,
@@ -43,6 +45,7 @@ export type {
   ChannelLoopToolResult,
   ChannelToolContext,
   ChannelToolDefinition,
+  ChannelWorkflowOrigin,
   PermissionRequestEvent,
   PermissionResolvedEvent,
   SessionDiedEvent,
@@ -77,6 +80,28 @@ export {
   BoundSessionQueueFullError,
   BoundSessionUnavailableError,
 } from './bound-session-delivery.js';
+export {
+  BOUND_ACTION_TEMPLATE_MAX_CODE_POINTS,
+  BOUND_ACTION_VARIABLE_MAX_CODE_POINTS,
+  BOUND_EVENT_PLATFORMS,
+  BOUND_PROMPT_BODY_MAX_CODE_POINTS,
+  DEFAULT_BOUND_ROLE_GUIDANCE,
+  DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE,
+  boundActionTemplateEntries,
+  buildBoundEventPrompt,
+  isBoundActionKey,
+  renderBoundActionTemplate,
+  resolveBoundActionTemplate,
+  validateBoundActionEntries,
+} from './bound-session-prompt.js';
+export type {
+  BoundActionKeyVocabulary,
+  BoundActionTemplateSource,
+  BoundActionValues,
+  BoundEventPlatform,
+  BoundEventPromptParts,
+  BoundPromptLanguage,
+} from './bound-session-prompt.js';
 export type {
   ChannelBaseOptions,
   ChannelMemoryRecallCacheStatus,
@@ -178,6 +203,8 @@ export type {
   ChannelPlugin,
   ChannelPromptOwner,
   ChannelProactiveTarget,
+  ChannelQrLoginDescriptor,
+  ChannelQrLoginHandlers,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
   ChannelTaskCancellationReason,

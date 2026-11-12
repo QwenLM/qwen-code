@@ -2,7 +2,9 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 
 /** Trusted proof of clean retirement of one original worker, not journal loss. */
 public record RuntimeDrainReceipt(String bindingId, long generation,
@@ -44,7 +46,7 @@ public record RuntimeDrainReceipt(String bindingId, long generation,
     }
 
     public String toJson() {
-        Map<String, Object> value = new java.util.LinkedHashMap<>();
+        Map<String, Object> value = new LinkedHashMap<>();
         value.put("version", executionMode == null ? 1 : 2);
         value.put("bindingId", bindingId);
         value.put("generation", generation);
@@ -66,11 +68,11 @@ public record RuntimeDrainReceipt(String bindingId, long generation,
         }
         var value = JsonCodec.parseObject(json.getBytes(StandardCharsets.UTF_8), "Runtime drain receipt");
         boolean extended = Integer.valueOf(2).equals(value.get("version"));
-        if (extended && (!java.util.Set.of("linux-cgroup", "developer-process-group").contains(value.get("executionMode"))
+        if (extended && (!Set.of("linux-cgroup", "developer-process-group").contains(value.get("executionMode"))
                 || !("linux-cgroup".equals(value.get("executionMode")) ? "process_tree" : "process_group").equals(value.get("stopScope")))) {
             throw new IllegalArgumentException("Invalid extension stop scope");
         }
-        if (extended ? !value.keySet().equals(java.util.Set.of("version", "bindingId", "generation", "provisionRequestId", "handleKind", "handleVersion", "handle", "stoppedAt", "executionMode", "stopScope")) : !Integer.valueOf(1).equals(value.get("version")) || !value.keySet().equals(java.util.Set.of("version", "bindingId", "generation", "provisionRequestId", "handleKind", "handleVersion", "handle", "stoppedAt"))) {
+        if (extended ? !value.keySet().equals(Set.of("version", "bindingId", "generation", "provisionRequestId", "handleKind", "handleVersion", "handle", "stoppedAt", "executionMode", "stopScope")) : !Integer.valueOf(1).equals(value.get("version")) || !value.keySet().equals(Set.of("version", "bindingId", "generation", "provisionRequestId", "handleKind", "handleVersion", "handle", "stoppedAt"))) {
             throw new IllegalArgumentException("Unsupported drain receipt");
         }
         return new RuntimeDrainReceipt((String) value.get("bindingId"),

@@ -114,6 +114,7 @@ vi.mock('../utils/retry.js', () => ({
 }));
 import {
   getCoreSystemPrompt,
+  loadCoreSystemPromptSource,
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
 } from './prompts.js';
@@ -222,6 +223,7 @@ vi.mock('./prompts', async (importOriginal) => {
     ...actual,
     getCustomSystemPrompt: vi.fn(),
     getCoreSystemPrompt: vi.fn(),
+    loadCoreSystemPromptSource: vi.fn(),
     getCompressionPrompt: vi.fn(),
     getProjectSummaryPrompt: vi.fn(),
     getPlanModeSystemReminder: vi.fn(),
@@ -780,6 +782,10 @@ describe('Gemini Client (client.ts)', () => {
     // The client concatenates these with the auto-memory suffix, so the
     // default mock must return a string, not undefined.
     vi.mocked(getCoreSystemPrompt).mockReturnValue('');
+    vi.mocked(loadCoreSystemPromptSource).mockReturnValue({
+      systemMdPath: '/tmp/system.md',
+      identity: null,
+    });
     vi.mocked(getCustomSystemPrompt).mockReturnValue('');
     sessionStartProfilerMocks.profilers.length = 0;
     sessionStartProfilerMocks.createSessionStartProfiler.mockImplementation(
@@ -1091,6 +1097,67 @@ describe('Gemini Client (client.ts)', () => {
     reg.preloadDeferredToolsWithinBudget.mockClear();
     return reg;
   };
+
+  describe('pending memory task ownership', () => {
+    it('returns an independent snapshot without transferring queue ownership', () => {
+      const task = Promise.resolve(1);
+      client['pendingMemoryTaskPromises'] = [task];
+
+      const snapshot = client.getPendingMemoryTaskPromises();
+      snapshot.length = 0;
+
+      expect(client.getPendingMemoryTaskPromises()).toHaveLength(1);
+      expect(client.getPendingMemoryTaskPromises()[0]).toBe(task);
+      expect(client.consumePendingMemoryTaskPromises()[0]).toBe(task);
+      expect(client.getPendingMemoryTaskPromises()).toEqual([]);
+    });
+
+    it('removes only the supplied identities and preserves newly queued work', () => {
+      const settled = Promise.resolve(2);
+      const retained = Promise.resolve(2);
+      const newTask = Promise.resolve(3);
+      client['pendingMemoryTaskPromises'] = [settled, retained];
+      const snapshot = client.getPendingMemoryTaskPromises();
+      client['pendingMemoryTaskPromises'].push(newTask);
+
+      client.removePendingMemoryTaskPromises([snapshot[0]!]);
+      client.removePendingMemoryTaskPromises([settled]);
+
+      const remaining = client.getPendingMemoryTaskPromises();
+      expect(remaining).toHaveLength(2);
+      expect(remaining[0]).toBe(retained);
+      expect(remaining[1]).toBe(newTask);
+      client.removePendingMemoryTaskPromises(snapshot);
+      const consumed = client.consumePendingMemoryTaskPromises();
+      expect(consumed).toHaveLength(1);
+      expect(consumed[0]).toBe(newTask);
+    });
+
+    it('delivers retained memory counts through the destructive consumer only once', async () => {
+      const alreadyObserved = Promise.resolve(2);
+      const retainedWrite = Promise.resolve(3);
+      const noWrite = Promise.resolve(0);
+      client['pendingMemoryTaskPromises'] = [
+        alreadyObserved,
+        retainedWrite,
+        noWrite,
+      ];
+      const abandonedSnapshot = client.getPendingMemoryTaskPromises();
+      client.removePendingMemoryTaskPromises([abandonedSnapshot[0]!]);
+
+      const firstDelivery = await Promise.all(
+        client.consumePendingMemoryTaskPromises(),
+      );
+      client.removePendingMemoryTaskPromises(abandonedSnapshot);
+      const secondDelivery = await Promise.all(
+        client.consumePendingMemoryTaskPromises(),
+      );
+
+      expect(firstDelivery.filter((count) => count > 0)).toEqual([3]);
+      expect(secondDelivery).toEqual([]);
+      expect(client.getPendingMemoryTaskPromises()).toEqual([]);
+    });
+  });
 
   describe('initialize', () => {
     const restoreFromRuntime = (runtime: object) =>
@@ -9900,6 +9967,139 @@ Other open files:
       }
     });
 
+    it.each([
+      { skipNextSpeakerCheck: false, skipMemoryExtraction: false },
+      { skipNextSpeakerCheck: false, skipMemoryExtraction: true },
+      { skipNextSpeakerCheck: true, skipMemoryExtraction: false },
+      { skipNextSpeakerCheck: true, skipMemoryExtraction: true },
+    ])(
+      'extracts at the stop of a turn unless it skips extraction (%o)',
+      async ({ skipNextSpeakerCheck, skipMemoryExtraction }) => {
+        vi.mocked(mockConfig.getSkipNextSpeakerCheck).mockReturnValue(
+          skipNextSpeakerCheck,
+        );
+        mockMemoryManager.scheduleExtract.mockClear();
+        mockMemoryManager.scheduleDream.mockClear();
+        mockMemoryManager.scheduleMetadataMigration.mockClear();
+        mockTurnRunFn.mockReturnValue(textTurn('Done'));
+        installChat({
+          getHistory: vi
+            .fn()
+            .mockReturnValue([userText('A comment.'), modelText('Done')]),
+        });
+
+        await run([{ text: 'A comment.' }], 'prompt-id-relayed-extract', {
+          type: SendMessageType.UserQuery,
+          ...(skipMemoryExtraction && { skipMemoryExtraction }),
+        });
+
+        const calls = skipMemoryExtraction ? 0 : 1;
+        expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledTimes(calls);
+        expect(mockMemoryManager.scheduleDream).toHaveBeenCalledTimes(calls);
+        // Recall still serves the turn.
+        expect(mockMemoryManager.recall).toHaveBeenCalledOnce();
+        // The metadata migration reads no turn: it still runs.
+        expect(
+          mockMemoryManager.scheduleMetadataMigration,
+        ).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it.each([false, true])(
+      'carries the extraction skip through a next-speaker continuation (skip: %s)',
+      async (skipMemoryExtraction) => {
+        mockMemoryManager.scheduleExtract.mockClear();
+        mockMemoryManager.scheduleDream.mockClear();
+        mockTurnRunFn.mockReturnValue(textTurn('Done'));
+        installChat({
+          getHistory: vi
+            .fn()
+            .mockReturnValue([userText('A comment.'), modelText('Done')]),
+        });
+        const { checkNextSpeaker } = await import(
+          '../utils/nextSpeakerChecker.js'
+        );
+        vi.mocked(checkNextSpeaker)
+          .mockResolvedValueOnce({ reasoning: 'forced', next_speaker: 'model' })
+          .mockResolvedValue(null);
+        const send = vi.spyOn(client, 'sendMessageStream');
+
+        await run([{ text: 'A comment.' }], 'prompt-id-relayed-next-speaker', {
+          type: SendMessageType.UserQuery,
+          ...(skipMemoryExtraction && { skipMemoryExtraction }),
+        });
+
+        // The continuation's stop ends the turn and schedules its memory work.
+        expect(send).toHaveBeenCalledTimes(2);
+        const calls = skipMemoryExtraction ? 0 : 1;
+        expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledTimes(calls);
+        expect(mockMemoryManager.scheduleDream).toHaveBeenCalledTimes(calls);
+      },
+    );
+
+    it.each([false, true])(
+      'carries the extraction skip through a Stop hook continuation (skip: %s)',
+      async (skipMemoryExtraction) => {
+        mockMemoryManager.scheduleExtract.mockClear();
+        mockMemoryManager.scheduleDream.mockClear();
+        installMessageBus(blockStopOnce(), 'Stop');
+        mockTurnRunFn.mockReturnValue(textTurn('Done'));
+        installChat({
+          getHistory: vi
+            .fn()
+            .mockReturnValue([userText('A comment.'), modelText('Done')]),
+        });
+        const send = vi.spyOn(client, 'sendMessageStream');
+
+        await run([{ text: 'A comment.' }], 'prompt-id-relayed-stop-hook', {
+          type: SendMessageType.UserQuery,
+          ...(skipMemoryExtraction && { skipMemoryExtraction }),
+        });
+
+        // The Stop hook's continuation ends the turn.
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(send.mock.calls[1][3]).toMatchObject({
+          type: SendMessageType.Hook,
+        });
+        const calls = skipMemoryExtraction ? 0 : 1;
+        expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledTimes(calls);
+        expect(mockMemoryManager.scheduleDream).toHaveBeenCalledTimes(calls);
+      },
+    );
+
+    it("carries a relayed turn's extraction skip to the continuation that ends it", async () => {
+      mockMemoryManager.scheduleExtract.mockClear();
+      mockMemoryManager.scheduleDream.mockClear();
+      mockTurnRunFn.mockReturnValue(textTurn('Done'));
+      installChat({
+        getHistory: vi
+          .fn()
+          .mockReturnValue([userText('A comment.'), modelText('Done')]),
+      });
+      const policy = {
+        continueAt: vi
+          .fn()
+          .mockResolvedValueOnce([{ text: 'Finish the todos.' }])
+          .mockResolvedValue(undefined),
+        onStopHookCap: vi.fn(),
+      };
+      const send = vi.spyOn(client, 'sendMessageStream');
+
+      await run([{ text: 'A comment.' }], 'prompt-id-relayed-continuation', {
+        type: SendMessageType.UserQuery,
+        skipMemoryExtraction: true,
+        stopPolicies: [policy],
+      });
+
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send.mock.calls[1][3]).toMatchObject({
+        type: SendMessageType.Hook,
+        skipMemoryExtraction: true,
+      });
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+    });
+
     it('should run managed auto-memory extraction after a completed user query', async () => {
       mockMemoryManager.scheduleExtract.mockResolvedValue({
         touchedTopics: ['user'],
@@ -15335,6 +15535,34 @@ Other open files:
   });
 
   describe('generateContent', () => {
+    it('builds a default instruction after resolving the target wire model', async () => {
+      vi.spyOn(
+        mockConfig.getBaseLlmClient(),
+        'resolveForModel',
+      ).mockResolvedValueOnce({
+        contentGenerator: mockContentGenerator,
+        contentGeneratorConfig: {
+          authType: AuthType.USE_OPENAI,
+          model: 'qwen3-vl',
+          extra_body: { model: 'qwen-vl-max' },
+        },
+        model: 'qwen3-vl',
+        retryAuthType: AuthType.USE_OPENAI,
+        retryErrorCodes: undefined,
+      });
+      vi.mocked(getCoreSystemPrompt).mockImplementation(
+        (_memory, model) => `prompt for ${model}`,
+      );
+      await generate({}, 'vision');
+      const request = vi
+        .mocked(mockContentGenerator.generateContent)
+        .mock.calls.at(-1)?.[0];
+      expect(request?.config?.systemInstruction).toContain(
+        'prompt for qwen-vl-max',
+      );
+      expect(mockConfig.getModel()).toBe('test-model');
+    });
+
     /** The positional args generateContent hands getCoreSystemPrompt. */
     const corePromptArgs = (
       mode = 'headless',
@@ -15343,7 +15571,7 @@ Other open files:
     ) =>
       [
         undefined,
-        'test-model',
+        DEFAULT_QWEN_FLASH_MODEL,
         undefined,
         mode,
         outputStyle,
@@ -15357,6 +15585,8 @@ Other open files:
           agentReachable: false,
           executionSandboxFilesystem: undefined,
           executionSandboxBackend: undefined,
+          executionSandboxNetwork: undefined,
+          source: expect.objectContaining({ identity: null }),
         },
       ] as const;
     /** generateContent args whose config carries `systemInstruction`. */

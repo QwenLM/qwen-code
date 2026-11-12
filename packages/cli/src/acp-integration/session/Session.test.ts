@@ -92,6 +92,7 @@ import {
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
   CHANNEL_TASK_RESULT_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
 } from '@qwen-code/channel-base';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { DAEMON_INPUT_ANNOTATIONS_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -628,6 +629,7 @@ describe('Session', () => {
     getRewindDaemonPromptId: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
+    setLastUserPromptRecordedCallback: ReturnType<typeof vi.fn>;
     getBranchCheckpointCursor: ReturnType<typeof vi.fn>;
     recordBranchCheckpointTransaction: ReturnType<typeof vi.fn>;
     flush: ReturnType<typeof vi.fn>;
@@ -1038,6 +1040,7 @@ describe('Session', () => {
       getRewindDaemonPromptId: vi.fn(),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
+      setLastUserPromptRecordedCallback: vi.fn(),
       getBranchCheckpointCursor: vi.fn().mockReturnValue({
         recordId: null,
         activeRecordCount: 0,
@@ -2988,7 +2991,15 @@ describe('Session', () => {
     at: 1,
   });
 
-  it('bridges workflow approvals through ACP permission requests', async () => {
+  const channelWorkflowOrigin = {
+    channelName: 'telegram',
+    chatId: 'launch-chat',
+    threadId: 'launch-thread',
+    senderId: 'launch-user',
+    userInitiated: true as const,
+  };
+
+  it('preserves the launch target on detached Channel workflow approvals', async () => {
     mockToolRegistry.getTool.mockReturnValue({
       displayName: 'Shell',
       kind: core.Kind.Execute,
@@ -3004,7 +3015,12 @@ describe('Session', () => {
     expect(callback).toBeTypeOf('function');
 
     await callback?.(
-      { runId: 'wf_1' } as core.WorkflowTask,
+      {
+        runId: 'wf_1',
+        isBackgrounded: true,
+        channelWorkflowOrigin,
+        sourceOriginatorClientId: 'launch-client',
+      } as core.WorkflowTask,
       {
         approvalId: 'wfap_1',
         subagentId: 'agent-1',
@@ -3027,6 +3043,9 @@ describe('Session', () => {
     expect(mockClient.requestPermission).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionId: 'test-session-id',
+        // Restricts the vote to the launching client under the
+        // designated permission policy.
+        _meta: { workflowOriginatorClientId: 'launch-client' },
         options: [
           expect.objectContaining({
             optionId: core.ToolConfirmationOutcome.ProceedOnce,
@@ -3044,6 +3063,8 @@ describe('Session', () => {
           _meta: expect.objectContaining({
             toolName: 'run_shell_command',
             workflowApproval: true,
+            backgroundWorkflowApproval: true,
+            [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: channelWorkflowOrigin,
           }),
         }),
       }),
@@ -3054,12 +3075,120 @@ describe('Session', () => {
       core.ToolConfirmationOutcome.ProceedOnce,
       undefined,
     );
+    // The terminal update carries the request's meta: the bridge clears a
+    // background approval's pending entry only on this flag.
     expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
       sessionId: 'test-session-id',
-      update: expect.objectContaining({
+      update: {
         sessionUpdate: 'tool_call_update',
         toolCallId: 'workflow:test-session-id:wf_1:wfap_1',
         status: 'completed',
+        content: [],
+        _meta: {
+          toolName: 'run_shell_command',
+          workflowApproval: true,
+          backgroundWorkflowApproval: true,
+          [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: channelWorkflowOrigin,
+          approvalOutcome: 'approved',
+        },
+      },
+    });
+  });
+
+  it.each([
+    [
+      'denied',
+      () =>
+        vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+          outcome: {
+            outcome: 'selected',
+            optionId: core.ToolConfirmationOutcome.Cancel,
+          },
+        }),
+    ],
+    [
+      'failed',
+      () =>
+        vi
+          .mocked(mockClient.requestPermission)
+          .mockRejectedValueOnce(new Error('client gone')),
+    ],
+  ])(
+    'ends a %s background workflow approval with its background meta',
+    async (label, arrange) => {
+      arrange();
+      mockToolRegistry.getTool.mockReturnValue(undefined);
+      const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
+        .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
+
+      await callback(
+        { runId: 'wf_1', isBackgrounded: true } as core.WorkflowTask,
+        makeWorkflowApproval('wfap_2'),
+        { command: 'echo safe' },
+        new AbortController().signal,
+      );
+
+      expect(
+        mockWorkflowRunRegistry.resolvePendingApproval,
+      ).toHaveBeenCalledWith(
+        'wf_1',
+        'wfap_2',
+        core.ToolConfirmationOutcome.Cancel,
+        ...(label === 'denied' ? [undefined] : []),
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'workflow:test-session-id:wf_1:wfap_2',
+          status: 'failed',
+          content: [],
+          _meta: {
+            toolName: 'run_shell_command',
+            workflowApproval: true,
+            backgroundWorkflowApproval: true,
+            approvalOutcome: 'denied',
+          },
+        },
+      });
+    },
+  );
+
+  // A run attached to a turn is approved by whoever drives that turn: no
+  // originator restriction, no background flag, no Channel launch target.
+  it('keeps attached workflow approvals free of background meta', async () => {
+    mockToolRegistry.getTool.mockReturnValue(undefined);
+    const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
+      .calls[0]?.[0] as core.WorkflowApprovalRequestCallback;
+
+    await callback(
+      {
+        runId: 'wf_1',
+        isBackgrounded: false,
+        channelWorkflowOrigin,
+        sourceOriginatorClientId: 'launch-client',
+      } as core.WorkflowTask,
+      makeWorkflowApproval('wfap_3'),
+      { command: 'echo safe' },
+      new AbortController().signal,
+    );
+
+    const [request] = vi.mocked(mockClient.requestPermission).mock.calls[0]!;
+    expect(request).not.toHaveProperty('_meta');
+    expect(request.toolCall._meta).toEqual({
+      toolName: 'run_shell_command',
+      workflowApproval: true,
+    });
+    expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+      sessionId: 'test-session-id',
+      update: expect.objectContaining({
+        toolCallId: 'workflow:test-session-id:wf_1:wfap_3',
+        status: 'completed',
+        _meta: {
+          toolName: 'run_shell_command',
+          workflowApproval: true,
+          approvalOutcome: 'approved',
+        },
       }),
     });
   });
@@ -3234,6 +3363,32 @@ describe('Session', () => {
     ).toEqual(['wf_second']);
 
     secondSession.dispose();
+  });
+
+  it('forwards persisted user prompt time and clears the observer on disposal', async () => {
+    const callback =
+      mockChatRecordingService.setLastUserPromptRecordedCallback.mock.calls.at(
+        -1,
+      )?.[0];
+    expect(callback).toBeTypeOf('function');
+    callback('2026-11-07T02:03:04.000Z', 'test-session-id');
+    expect(mockClient.extNotification).toHaveBeenCalledWith(
+      'qwen/notify/session/last-user-prompt',
+      {
+        v: 1,
+        sessionId: 'test-session-id',
+        timestamp: '2026-11-07T02:03:04.000Z',
+      },
+    );
+    callback(undefined, 'test-session-id');
+    expect(mockClient.extNotification).toHaveBeenCalledWith(
+      'qwen/notify/session/last-user-prompt',
+      { v: 1, sessionId: 'test-session-id', timestamp: null },
+    );
+    session.dispose();
+    expect(
+      mockChatRecordingService.setLastUserPromptRecordedCallback,
+    ).toHaveBeenLastCalledWith(undefined);
   });
 
   it('advances the permission queue when a request is aborted without waiting for the orphaned RPC', async () => {
@@ -4855,6 +5010,8 @@ describe('Session', () => {
       expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
       // The client runs its own tool-call guards for the shared tool batch.
       expect(send.mock.calls[0][3]).not.toHaveProperty('toolLoopGuardsByHost');
+      // The person's own prompt keeps its memory extraction.
+      expect(send.mock.calls[0][3]).not.toHaveProperty('skipMemoryExtraction');
       expect(agentText()).toContain('Hello');
       // The session snapshots its user turn; the option keeps the client's off.
       expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledOnce();
@@ -4884,6 +5041,9 @@ describe('Session', () => {
       expect(send).toHaveBeenCalledOnce();
       expect(send.mock.calls[0][3]).toMatchObject({
         type: core.SendMessageType.UserQuery,
+        // A channel's turn runs no memory extraction, but still recalls.
+        skipMemoryExtraction: true,
+        memoryRecallQuery: 'hello',
       });
       expect(send.mock.calls[0][3]).not.toHaveProperty('submittedPrompt');
       expect(send.mock.calls[0][3]).not.toHaveProperty('humanInput');
@@ -5038,6 +5198,35 @@ describe('Session', () => {
       expect(
         (parts as Part[]).map((part) => part.functionResponse?.id),
       ).toContain('call-read');
+    });
+
+    it("skips memory extraction on every round of a channel's turn", async () => {
+      useTool(core.Kind.Read, 'read_file');
+      const send = useSharedRounds(
+        [
+          toolCall({
+            id: 'call-read',
+            name: 'read_file',
+            args: { file_path: '/tmp/a.txt' },
+          }),
+          finished(),
+        ],
+        [text('Read it.'), finished()],
+      );
+
+      await prompt({ _meta: { [CHANNEL_PROMPT_META_KEY]: true } });
+
+      // The tool result's round is the one whose stop ends the turn.
+      expect(send.mock.calls.map((call) => call[3])).toEqual([
+        expect.objectContaining({
+          type: core.SendMessageType.UserQuery,
+          skipMemoryExtraction: true,
+        }),
+        expect.objectContaining({
+          type: core.SendMessageType.ToolResult,
+          skipMemoryExtraction: true,
+        }),
+      ]);
     });
 
     it('keeps its own tool step and tool-call guards in a session with live tools', async () => {
@@ -5411,36 +5600,44 @@ describe('Session', () => {
       ]);
     });
 
-    it('runs completion memory work when the client ends at the Stop hook cap', async () => {
-      const send = useSharedRounds();
-      send.mockImplementationOnce(
-        (
-          _parts: Part[],
-          _signal: AbortSignal,
-          _promptId: string,
-          options: { stopPolicies?: core.StopPolicy[] },
-        ) =>
-          (async function* () {
-            yield text('not done');
-            yield finished();
-            for (const policy of options.stopPolicies ?? []) {
-              policy.onStopHookCap?.();
-            }
-            // The client returns at the cap before scheduling memory tasks.
-            yield {
-              type: core.LlmEventType.HookSystemMessage,
-              value:
-                'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
-            };
-          })(),
-      );
+    it.each([false, true])(
+      'runs completion memory work when the client ends at the Stop hook cap (channel turn: %s)',
+      async (channel) => {
+        const send = useSharedRounds();
+        send.mockImplementationOnce(
+          (
+            _parts: Part[],
+            _signal: AbortSignal,
+            _promptId: string,
+            options: { stopPolicies?: core.StopPolicy[] },
+          ) =>
+            (async function* () {
+              yield text('not done');
+              yield finished();
+              for (const policy of options.stopPolicies ?? []) {
+                policy.onStopHookCap?.();
+              }
+              // The client returns at the cap before scheduling memory tasks.
+              yield {
+                type: core.LlmEventType.HookSystemMessage,
+                value:
+                  'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
+              };
+            })(),
+        );
 
-      await expect(prompt()).resolves.toEqual({ stopReason: 'end_turn' });
+        await expect(
+          prompt(channel ? { _meta: { [CHANNEL_PROMPT_META_KEY]: true } } : {}),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
 
-      expect(
-        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
-      ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery);
-    });
+        // A channel's turn has the client skip extraction and Dream.
+        expect(
+          mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+        ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery, {
+          skipMemoryExtraction: channel,
+        });
+      },
+    );
 
     it.each(['Stop hook', 'Todo Stop Guard'])(
       'records only the final answer after a %s continuation',
@@ -6575,6 +6772,36 @@ describe('Session', () => {
       ).toHaveBeenCalledOnce();
     });
 
+    it("schedules no extraction or Dream after a channel's turn", async () => {
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
+        { role: 'user', parts: [{ text: 'a comment' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'a comment' }],
+          _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+      // The metadata migration reads no turn: it still runs.
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      // Recall still serves the reply.
+      expect(mockLlmClient.beginManagedAutoMemoryRecall).toHaveBeenCalledWith(
+        'a comment',
+        expect.any(AbortSignal),
+      );
+    });
+
     it('drives the prepared recall-mode transition before the per-turn reset on a fresh user turn', async () => {
       mockChat.sendMessageStream = vi
         .fn()
@@ -7368,10 +7595,16 @@ describe('Session', () => {
     expect(textParts(notificationCall.message)).toContain(reminder);
   });
 
-  it('delivers background workflow completions through the session queue', async () => {
-    mockChat.sendMessageStream = vi
-      .fn()
-      .mockImplementation(async () => createEmptyStream());
+  it('retains the Channel route during a workflow completion turn', async () => {
+    const observeContext = vi.fn();
+    mockWorkflowRunRegistry.get.mockReturnValue({ channelWorkflowOrigin });
+    mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+      observeContext(
+        core.getInvocationContext(),
+        core.getChannelWorkflowOrigin(),
+      );
+      return createEmptyStream();
+    });
     const callback = mockWorkflowRunRegistry.setCompletionCallback.mock
       .calls[0][0] as (
       displayText: string,
@@ -7383,10 +7616,19 @@ describe('Session', () => {
       },
     ) => void;
 
-    callback('Workflow completed.', '<task-notification/>', {
-      runId: 'wf_1234abcd',
-      status: 'completed',
-    });
+    core.runWithInvocationContext(
+      {
+        version: 1,
+        sessionId: 'test-session-id',
+        promptId: 'original-prompt',
+        workflowModeWriteAllowed: true,
+      },
+      () =>
+        callback('Workflow completed.', '<task-notification/>', {
+          runId: 'wf_1234abcd',
+          status: 'completed',
+        }),
+    );
 
     await vi.waitFor(() =>
       expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
@@ -7399,6 +7641,77 @@ describe('Session', () => {
         }),
       ),
     );
+    await vi.waitFor(() =>
+      expect(observeContext).toHaveBeenCalledWith(
+        undefined,
+        channelWorkflowOrigin,
+      ),
+    );
+  });
+
+  it.each([
+    ['a session a channel drives', true],
+    ['a session no channel drives', false],
+  ])(
+    'blocks background workflows in an agent report turn of %s: %s',
+    async (_label, servesChannel) => {
+      const observeBlocked = vi.fn();
+      mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+        observeBlocked(
+          core.isBackgroundWorkflowBlocked(),
+          core.getChannelWorkflowOrigin(),
+        );
+        return createEmptyStream();
+      });
+      (session as unknown as { servesChannel: boolean }).servesChannel =
+        servesChannel;
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string },
+      ) => void;
+
+      callback('Background task completed.', '<task-notification/>', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+
+      await vi.waitFor(() =>
+        expect(observeBlocked).toHaveBeenCalledWith(servesChannel, undefined),
+      );
+    },
+  );
+
+  it('marks the session as channel-driven on a channel prompt and blocks an origin-less one', async () => {
+    const observeBlocked = vi.fn();
+    mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+      observeBlocked(core.isBackgroundWorkflowBlocked());
+      return createEmptyStream();
+    });
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'from Web Shell' }],
+    });
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'from a channel, no origin' }],
+      _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+    });
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'from a channel chat' }],
+      _meta: {
+        [CHANNEL_PROMPT_META_KEY]: true,
+        [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: channelWorkflowOrigin,
+      },
+    });
+
+    expect(observeBlocked.mock.calls).toEqual([[false], [true], [false]]);
+    expect(
+      (session as unknown as { servesChannel: boolean }).servesChannel,
+    ).toBe(true);
   });
 
   it('adds terminal workflow status changes to the session history cache', () => {
@@ -14322,15 +14635,14 @@ describe('Session', () => {
     );
 
     it.each([
-      [AuthType.USE_OPENAI, 'qwen3-coder-flash', false],
-      [AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max', true],
+      ['standalone', AuthType.USE_OPENAI, 'qwen3-coder-flash', false],
+      ['standalone', AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max', true],
+      [undefined, AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max', true],
     ] as const)(
-      'switches standalone %s using only the session config',
-      async (authType, modelId, refresh) => {
+      'switches %s session to %s using only the session config',
+      async (sourceType, authType, modelId, refresh) => {
         session.dispose();
-        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
-          'standalone',
-        );
+        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(sourceType);
         const refreshSubscriptionModels = vi.fn().mockResolvedValue({
           models: [modelId],
           cached: false,
@@ -14348,7 +14660,7 @@ describe('Session', () => {
             sessionId: 'test-session-id',
             modelId: `${modelId}(${authType})`,
           },
-          { persistDefault: true },
+          { persistDefault: sourceType === 'standalone' },
         );
 
         expect(mockConfig.switchModel).toHaveBeenCalledWith(
@@ -17823,6 +18135,7 @@ describe('Session', () => {
         taskId: string,
         chainId = workChainId,
         status: 'completed' | 'cancelled' = 'completed',
+        sourceTurnId = workChainId,
       ) => {
         const registry = {
           agent: mockBackgroundTaskRegistry,
@@ -17844,6 +18157,7 @@ describe('Session', () => {
           [idField]: taskId,
           status,
           todoWorkChainId: chainId,
+          ...(kind === 'workflow' ? { sourceTurnId } : {}),
         });
       };
       const expectMainReleased = async () => {
@@ -17941,6 +18255,12 @@ describe('Session', () => {
             workflow: mockWorkflowRunRegistry.list,
           }[kind];
           list.mockReturnValue([task]);
+          if (kind === 'workflow') {
+            mockWorkflowRunRegistry.get.mockReturnValue({
+              ...task,
+              channelWorkflowOrigin,
+            });
+          }
           mockChat.sendMessageStream = vi
             .fn()
             .mockResolvedValueOnce(textStream('Main result'))
@@ -17980,6 +18300,51 @@ describe('Session', () => {
           });
         },
       );
+
+      it('does not collect a workflow from an earlier prompt on the same work chain', async () => {
+        const task = {
+          id: 'earlier-workflow',
+          description: 'Background workflow',
+          todoWorkChainId: workChainId,
+          status: 'running',
+          isBackgrounded: true,
+          channelWorkflowOrigin,
+        };
+        mockWorkflowRunRegistry.list.mockReturnValue([task]);
+        mockWorkflowRunRegistry.get.mockReturnValue(task);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(textStream('Main result'))
+          .mockResolvedValueOnce(textStream('Earlier workflow result'));
+        const resultPromise = session.prompt(taskPrompt);
+        await expectMainReleased();
+
+        task.status = 'completed';
+        emitNotification(
+          'workflow',
+          task.id,
+          workChainId,
+          'completed',
+          'earlier-turn',
+        );
+
+        const result = await resultPromise;
+        expect(result.stopReason).toBe('end_turn');
+        expect(result._meta?.[CHANNEL_TASK_RESULT_META_KEY]).toBeUndefined();
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Earlier workflow result' },
+            _meta: expect.objectContaining({
+              backgroundTask: expect.objectContaining({
+                sourceTurnId: 'earlier-turn',
+                [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: channelWorkflowOrigin,
+              }),
+            }),
+          }),
+        });
+      });
 
       it('waits for the last related notification after its queue and registry drain', async () => {
         const task = {
@@ -31123,7 +31488,12 @@ describe('Session', () => {
               // The session runs the client's memory tasks once the turn ends.
               expect(
                 mockLlmClient.runManagedAutoMemoryBackgroundTasks,
-              ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery);
+              ).toHaveBeenCalledExactlyOnceWith(
+                core.SendMessageType.UserQuery,
+                {
+                  skipMemoryExtraction: false,
+                },
+              );
             },
           );
 
@@ -39131,7 +39501,9 @@ describe('Session', () => {
           expect(mockLlmClient.captureCacheSafeParams).toHaveBeenCalled();
           expect(
             mockLlmClient.runManagedAutoMemoryBackgroundTasks,
-          ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery);
+          ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery, {
+            skipMemoryExtraction: false,
+          });
         });
 
         it('marks a continuation delivered at its stop when no model event follows the request', async () => {
@@ -42735,6 +43107,91 @@ describe('Session', () => {
       );
     });
 
+    it('keeps the amend approval human-only in ACP', async () => {
+      const command = 'git commit --amend --no-edit';
+      const onConfirm = vi.fn();
+      const invocation = {
+        params: { command },
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Confirm shell command',
+          command,
+          rootCommand: 'git',
+          onConfirm,
+        }),
+        getDescription: vi.fn().mockReturnValue('Amend commit'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: vi.fn(),
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.AUTO);
+      mockConfig.getCwd = vi.fn().mockReturnValue('/repo');
+      mockConfig.getTargetDir = vi.fn().mockReturnValue('/repo');
+      mockConfig.getAutoModeDenialState = vi.fn().mockReturnValue({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 0,
+        totalUnavailable: 0,
+      });
+      mockConfig.setAutoModeDenialState = vi.fn();
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getAutoModeSettings = vi.fn().mockReturnValue({});
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getLlmClient = vi.fn().mockReturnValue({
+        ...mockLlmClient,
+        getHistoryTail: () => [
+          { role: 'user', parts: [{ text: 'amend the commit' }] },
+        ],
+      });
+      mockClient.requestPermission = vi.fn().mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-amend',
+                  name: core.ToolNames.SHELL,
+                  args: { command },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'amend the commit' }],
+      });
+
+      const request = vi.mocked(mockClient.requestPermission).mock.calls[0]![0];
+      expect(
+        request.options.every(
+          (option: { kind: string }) => option.kind !== 'allow_always',
+        ),
+      ).toBe(true);
+      expect(request.toolCall?.content).toContainEqual({
+        type: 'content',
+        content: {
+          type: 'text',
+          text: 'Rewriting a commit requires manual approval in AUTO mode.',
+        },
+      });
+      expect(onConfirm).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.ProceedOnce,
+        { answers: undefined },
+      );
+    });
+
     it('never requests ACP permission for the trusted Live Appshot tool', async () => {
       const directory = path.join(os.tmpdir(), 'qwen-live-appshot');
       await fs.mkdir(directory, { recursive: true, mode: 0o700 });
@@ -43805,6 +44262,76 @@ describe('Session', () => {
       expect(addToolArgumentsAttributesSpy).not.toHaveBeenCalled();
       expect(addToolCallResultAttributesSpy).not.toHaveBeenCalled();
     });
+
+    it.each([
+      { askRule: true, prompted: true },
+      { askRule: false, prompted: false },
+    ])(
+      'AUTO_EDIT honours a permissions.ask rule (askRule=$askRule) (#16795)',
+      async ({ askRule, prompted }) => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'contents',
+          returnDisplay: 'contents',
+        });
+        const invocation = {
+          params: { path: '/home/u/.qwen/settings.json' },
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+          getConfirmationDetails: vi.fn().mockResolvedValue({
+            type: 'info',
+            title: 'Read file',
+            prompt: 'Allow?',
+            onConfirm: vi.fn(),
+          }),
+          getDescription: vi.fn().mockReturnValue('Read settings'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: executeSpy,
+        };
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue(invocation),
+        });
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.AUTO_EDIT);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+          isToolEnabled: vi.fn().mockResolvedValue(true),
+          hasRelevantRules: vi.fn().mockReturnValue(true),
+          evaluate: vi.fn().mockResolvedValue('ask'),
+          hasMatchingAskRule: vi.fn().mockReturnValue(askRule),
+          findMatchingDenyRule: vi.fn(),
+        });
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-auto-edit-ask',
+                    name: 'read_file',
+                    args: { path: '/home/u/.qwen/settings.json' },
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read settings' }],
+        });
+
+        if (prompted) {
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        } else {
+          expect(mockClient.requestPermission).not.toHaveBeenCalled();
+          expect(executeSpy).toHaveBeenCalledOnce();
+        }
+      },
+    );
 
     it('threads MCP permission aliases into the L1 isToolEnabled gate', async () => {
       // A legacy-spelled MCP deny can only name the registered provider-safe
@@ -58074,7 +58601,12 @@ describe('Session', () => {
       const client = new BridgeClient(
         () => entry as BridgeClientSessionEntry,
         () => undefined,
-        { request: vi.fn(), cancelForPrompt: vi.fn() },
+        {
+          request: vi.fn(),
+          cancelForPrompt: vi.fn(),
+          cancelWorkflowApproval: vi.fn(),
+          policy: 'first-responder',
+        },
         0,
         Infinity,
       );
@@ -65886,6 +66418,30 @@ describe('Session', () => {
           ([method]) => method === 'qwen/notify/session/prompt-suggestion',
         ),
       ).toBeUndefined();
+    });
+
+    it("does not generate a suggestion after a channel's turn", async () => {
+      generateMock.mockResolvedValue({ suggestion: 'Run the tests next?' });
+
+      // It ends cleanly, so only the channel gate stops the suggestion.
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'a comment' }],
+          _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      // Give the (skipped) IIFE a chance to run.
+      await new Promise((r) => setTimeout(r, 10));
+      expect(generateMock).not.toHaveBeenCalled();
+
+      // The next prompt of the person's own still gets one.
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+      await vi.waitFor(() => expect(generateMock).toHaveBeenCalledOnce());
     });
 
     it('emits when the setting is unset (on by default)', async () => {

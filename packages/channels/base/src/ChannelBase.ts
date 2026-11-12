@@ -74,17 +74,22 @@ import type {
   ChannelPromptImage,
   ChannelLoopToolCreateInput,
   ChannelLoopToolResult,
+  ChannelWorkflowOrigin,
   PermissionRequestEvent,
   PermissionResolvedEvent,
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import {
+  BACKGROUND_WORKFLOW_APPROVAL_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   ChannelPromptCancelledError,
   MID_TURN_QUEUE_MAX_CHARS,
   MID_TURN_QUEUE_MAX_MESSAGES,
+  parseChannelWorkflowOrigin,
 } from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
+import type { BackgroundOutputTarget } from './background-output-coordinator.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
 import {
   buildChannelWebhookPrompt,
@@ -105,11 +110,6 @@ import {
   selectRelevantChannelMemoryFromIndex,
   type ChannelMemoryRecallIndex,
 } from './channel-memory-recall.js';
-
-interface BackgroundResponseDeliveryTarget {
-  target: SessionTarget;
-  sourceLabel?: string;
-}
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -218,6 +218,14 @@ interface PreflightInboundOptions {
    * public replies. Every other group, sender and pairing check still runs.
    */
   waiveGroupMention?: boolean;
+  /**
+   * Admit a private bound delivery that only fails the sender gate. For the
+   * comment watch delivering the channel account's own comments: the sender
+   * allowlist guidance excludes that account, but the watch is operator opt-in
+   * and private. Group, DM, pairing and route checks still run; only the sender
+   * gate is waived. The public path never sets this.
+   */
+  waiveGroupSender?: boolean;
 }
 
 interface ChannelMemoryRecallCacheEntry {
@@ -366,6 +374,7 @@ type PendingPermission = {
   sessionId: string;
   runId?: string;
   target: SessionTarget;
+  workflowOrigin?: ChannelWorkflowOrigin;
   request: PermissionRequestEvent['request'];
   sourceLabel?: string;
   taskName?: string;
@@ -649,6 +658,8 @@ export abstract class ChannelBase {
   };
   private readonly pendingPermissions = new Map<string, PendingPermission>();
   private readonly pendingPermissionsByChat = new Map<string, string[]>();
+  // A workflow may settle its approval while the named-task lookup awaits.
+  private readonly preparingWorkflowApprovals = new Set<string>();
   private readonly channelLoopToolHandler = {
     canHandle: (sessionId: string) =>
       this.router.getTarget(sessionId)?.channelName === this.name,
@@ -688,9 +699,20 @@ export abstract class ChannelBase {
   async dispatchBackgroundResponse(
     sessionId: string,
     text: string,
-    _context?: BackgroundResponseContext,
+    context?: BackgroundResponseContext,
   ): Promise<void> {
     if (text.trim().length === 0) return;
+    if (context?.kind === 'workflow') {
+      const origin = context.channelWorkflowOrigin;
+      if (!origin) return;
+      const delivery = await this.resolveBackgroundResponseDelivery(
+        sessionId,
+        origin,
+      );
+      if (!delivery || !this.workflowTarget(sessionId, origin)) return;
+      await this.deliverBackgroundResponseToTarget(sessionId, text, delivery);
+      return;
+    }
     const delivery = await this.resolveBackgroundResponseDelivery(sessionId);
     if (!delivery || this.router.getTarget(sessionId) !== delivery.target) {
       return;
@@ -700,8 +722,11 @@ export abstract class ChannelBase {
 
   protected getBackgroundResponseSourceLabel(
     sessionId: string,
+    workflowOrigin?: ChannelWorkflowOrigin,
   ): string | undefined {
-    const target = this.router.getTarget(sessionId);
+    const target = workflowOrigin
+      ? this.workflowTarget(sessionId, workflowOrigin)
+      : this.router.getTarget(sessionId);
     const presentation = this.namedSessions?.presentation(sessionId);
     if (
       !target ||
@@ -718,14 +743,19 @@ export abstract class ChannelBase {
 
   protected async resolveBackgroundResponseDelivery(
     sessionId: string,
-  ): Promise<BackgroundResponseDeliveryTarget | undefined> {
-    let target = this.router.getTarget(sessionId);
+    workflowOrigin?: ChannelWorkflowOrigin,
+  ): Promise<BackgroundOutputTarget | undefined> {
+    const getTarget = () =>
+      workflowOrigin
+        ? this.workflowTarget(sessionId, workflowOrigin)
+        : this.router.getTarget(sessionId);
+    let target = getTarget();
     if (!target || target.channelName !== this.name) return undefined;
     let sourceLabel: string | undefined;
     if (this.namedSessions) {
       const presentation =
         await this.namedSessions.resolvePresentation(sessionId);
-      const currentTarget = this.router.getTarget(sessionId);
+      const currentTarget = getTarget();
       const currentPresentation = this.namedSessions.presentation(sessionId);
       if (
         !presentation ||
@@ -743,21 +773,38 @@ export abstract class ChannelBase {
       target = currentTarget;
       sourceLabel = this.createSourceLabel(presentation, target);
     }
-    return { target, sourceLabel };
+    return {
+      target,
+      sourceLabel,
+      ...(workflowOrigin ? { workflowOrigin } : {}),
+    };
   }
 
   protected async deliverBackgroundResponseToTarget(
     sessionId: string,
     text: string,
-    delivery: BackgroundResponseDeliveryTarget,
+    delivery: BackgroundOutputTarget,
   ): Promise<void> {
-    const { target, sourceLabel } = delivery;
+    const { target, sourceLabel, workflowOrigin } = delivery;
+    if (workflowOrigin && !workflowOrigin.userInitiated) {
+      await this.pushProactive(target, text, sourceLabel);
+      return;
+    }
     if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
       if (sourceLabel) {
         await this.pushProactive(target, text, sourceLabel);
       } else {
         await this.pushProactive(target, text);
       }
+      return;
+    }
+    if (workflowOrigin) {
+      await this.sendThreadMessage(
+        target.chatId,
+        target.threadId,
+        text,
+        sourceLabel,
+      );
       return;
     }
     if (sourceLabel) {
@@ -958,7 +1005,22 @@ export abstract class ChannelBase {
   async dispatchPermissionRequest(
     event: PermissionRequestEvent,
   ): Promise<void> {
-    const target = this.permissionTargetForEvent(event);
+    const backgroundWorkflow =
+      event.request.toolCall._meta?.[BACKGROUND_WORKFLOW_APPROVAL_META_KEY] ===
+      true;
+    const workflowOrigin = backgroundWorkflow
+      ? parseChannelWorkflowOrigin(
+          event.request.toolCall._meta?.[CHANNEL_WORKFLOW_ORIGIN_META_KEY],
+        )
+      : undefined;
+    if (backgroundWorkflow && workflowOrigin?.channelName !== this.name) {
+      return;
+    }
+    const getTarget = () =>
+      workflowOrigin
+        ? this.workflowTarget(event.sessionId, workflowOrigin)
+        : this.permissionTargetForEvent(event.sessionId);
+    const target = getTarget();
     if (!target) {
       try {
         await this.bridge.respondToPermission?.(event.requestId, {
@@ -975,11 +1037,15 @@ export abstract class ChannelBase {
     let taskName: string | undefined;
     if (this.namedSessions) {
       let presentation: NamedSessionTaskReference | undefined;
+      if (backgroundWorkflow) {
+        this.preparingWorkflowApprovals.add(event.requestId);
+      }
       try {
         presentation = await this.namedSessions.resolvePresentation(
           event.sessionId,
         );
       } catch (err) {
+        this.preparingWorkflowApprovals.delete(event.requestId);
         try {
           await this.bridge.respondToPermission?.(event.requestId, {
             outcome: { outcome: 'cancelled' },
@@ -991,7 +1057,13 @@ export abstract class ChannelBase {
         }
         throw err;
       }
-      const currentTarget = this.permissionTargetForEvent(event);
+      if (
+        backgroundWorkflow &&
+        !this.preparingWorkflowApprovals.delete(event.requestId)
+      ) {
+        return;
+      }
+      const currentTarget = getTarget();
       const currentPresentation = this.namedSessions.presentation(
         event.sessionId,
       );
@@ -1017,7 +1089,9 @@ export abstract class ChannelBase {
         }
         return;
       }
-      const active = this.activePrompts.get(event.sessionId);
+      const active = backgroundWorkflow
+        ? undefined
+        : this.activePrompts.get(event.sessionId);
       sourceLabel = active
         ? active.sourceLabel
         : this.createSourceLabel(presentation, target);
@@ -1039,8 +1113,11 @@ export abstract class ChannelBase {
     const pending: PendingPermission = {
       requestId: event.requestId,
       sessionId: event.sessionId,
-      runId: this.activePrompts.get(event.sessionId)?.runId,
+      runId: backgroundWorkflow
+        ? undefined
+        : this.activePrompts.get(event.sessionId)?.runId,
       target,
+      ...(workflowOrigin ? { workflowOrigin } : {}),
       request: event.request,
       ...(sourceLabel ? { sourceLabel } : {}),
       ...(taskName ? { taskName } : {}),
@@ -1052,13 +1129,15 @@ export abstract class ChannelBase {
     requestIds.push(event.requestId);
     this.pendingPermissionsByChat.set(chatKey, requestIds);
     try {
-      const presentation = this.tryPresentUserInput(pending);
-      if (presentation && (await presentation)) {
-        return;
-      }
-      const permissionPresentation = this.tryPresentPermission(pending);
-      if (permissionPresentation && (await permissionPresentation)) {
-        return;
+      if (!backgroundWorkflow) {
+        const presentation = this.tryPresentUserInput(pending);
+        if (presentation && (await presentation)) {
+          return;
+        }
+        const permissionPresentation = this.tryPresentPermission(pending);
+        if (permissionPresentation && (await permissionPresentation)) {
+          return;
+        }
       }
       const text = this.formatPermissionRequest(pending);
       if (
@@ -1428,14 +1507,55 @@ export abstract class ChannelBase {
     return pending.responsePromise;
   }
 
-  private permissionTargetForEvent(
-    event: PermissionRequestEvent,
+  protected workflowTarget(
+    sessionId: string,
+    origin: ChannelWorkflowOrigin,
   ): SessionTarget | undefined {
-    const routeTarget = this.router.getTarget(event.sessionId);
+    const routed = this.router.getTarget(sessionId);
+    if (
+      origin.channelName !== this.name ||
+      routed?.channelName !== this.name ||
+      (origin.messageRoute !== undefined &&
+        !this.messageRoutes.has(origin.messageRoute)) ||
+      !this.router.isSessionLive(sessionId)
+    ) {
+      return undefined;
+    }
+    if (this.namedSessions) {
+      return this.sameTaskOwner(origin, routed) ? origin : undefined;
+    }
+    if (
+      this.router.getSession(
+        this.name,
+        origin.senderId,
+        origin.chatId,
+        origin.threadId,
+        origin.messageRoute,
+      ) === sessionId
+    ) {
+      return origin;
+    }
+    // Webhook sessions can have a synthetic routing key while retaining the
+    // actual delivery target.
+    if (
+      !origin.userInitiated &&
+      this.sameTaskOwner(origin, routed) &&
+      origin.threadId === routed.threadId &&
+      origin.messageRoute === routed.messageRoute
+    ) {
+      return origin;
+    }
+    return undefined;
+  }
+
+  private permissionTargetForEvent(
+    sessionId: string,
+  ): SessionTarget | undefined {
+    const routeTarget = this.router.getTarget(sessionId);
     if (!routeTarget || routeTarget.channelName !== this.name) {
       return undefined;
     }
-    const active = this.activePrompts.get(event.sessionId);
+    const active = this.activePrompts.get(sessionId);
     if (!active) {
       return routeTarget;
     }
@@ -1456,6 +1576,7 @@ export abstract class ChannelBase {
   }
 
   dispatchPermissionResolved(event: PermissionResolvedEvent): void {
+    this.preparingWorkflowApprovals.delete(event.requestId);
     const pending = this.pendingPermissions.get(event.requestId);
     if (!pending) {
       return;
@@ -1928,6 +2049,10 @@ export abstract class ChannelBase {
 
   protected supportsProactiveWebhookTarget(target: SessionTarget): boolean {
     return this.supportsProactiveTarget(target);
+  }
+
+  protected canDeliverBackgroundWorkflow(_target: SessionTarget): boolean {
+    return true;
   }
 
   protected async pushProactive(
@@ -2536,6 +2661,7 @@ export abstract class ChannelBase {
           sessionId,
           promptToSend,
           promptState,
+          job.target,
           job.id,
           options.timeoutMs,
         );
@@ -2836,6 +2962,7 @@ export abstract class ChannelBase {
           sessionId,
           promptToSend,
           promptState,
+          target,
           taskId,
           options.timeoutMs,
         );
@@ -2941,11 +3068,13 @@ export abstract class ChannelBase {
     sessionId: string,
     promptText: string,
     promptState: ActivePrompt,
+    workflowOrigin: SessionTarget,
     jobId: string,
     timeoutMs: number | undefined,
   ): Promise<string> {
     const prompt = promptBridge.prompt(sessionId, promptText, {
       displayText: sanitizeDisplayText(promptText),
+      workflowOrigin,
     });
     prompt.catch(() => {});
     if (timeoutMs === undefined) {
@@ -3092,7 +3221,9 @@ export abstract class ChannelBase {
         // down, so its queued injections are dropped with the collect buffer —
         // otherwise they would surface in the user's NEXT turn out of context.
         this.dropMidTurnInjections(sessionId);
-        this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
+        this.removePendingPermissionsForSession(sessionId, 'run_cancelled', {
+          preserveBackgroundWorkflows: reason !== 'clear',
+        });
         this.emitTaskCancellation(active, sessionId, reason);
         return true;
       });
@@ -3594,9 +3725,17 @@ export abstract class ChannelBase {
   private removePendingPermissionsForSession(
     sessionId: string,
     reason: UserInputSettlementReason = 'cancelled',
+    options?: { preserveBackgroundWorkflows: boolean },
   ): void {
     const requestIds = Array.from(this.pendingPermissions)
-      .filter(([, pending]) => pending.sessionId === sessionId)
+      .filter(
+        ([, pending]) =>
+          pending.sessionId === sessionId &&
+          (!options?.preserveBackgroundWorkflows ||
+            pending.request.toolCall._meta?.[
+              BACKGROUND_WORKFLOW_APPROVAL_META_KEY
+            ] !== true),
+      )
       .map(([requestId]) => requestId);
     for (const requestId of requestIds) {
       this.removePendingPermission(requestId, reason);
@@ -3604,6 +3743,7 @@ export abstract class ChannelBase {
   }
 
   private clearPendingPermissions(): void {
+    this.preparingWorkflowApprovals.clear();
     for (const requestId of Array.from(this.pendingPermissions.keys())) {
       this.removePendingPermission(requestId, 'cancelled');
     }
@@ -3709,7 +3849,16 @@ export abstract class ChannelBase {
     pending: PendingPermission,
     requireOwner: boolean,
   ): boolean {
-    if (requireOwner) {
+    const origin = pending.workflowOrigin;
+    if (origin) {
+      if (
+        !this.workflowTarget(pending.sessionId, origin) ||
+        (requireOwner &&
+          (!origin.userInitiated || origin.senderId !== envelope.senderId))
+      ) {
+        return false;
+      }
+    } else if (requireOwner) {
       const active = this.activePrompts.get(pending.sessionId);
       if (
         !active ||
@@ -4196,6 +4345,9 @@ export abstract class ChannelBase {
   }
 
   private bypassesNamedTurnBinding(envelope: Envelope): boolean {
+    // A tagged (automated) sender's text is prose, so it never takes a
+    // command/bang bypass: it binds a named turn like any other message.
+    if (envelope.senderTag) return false;
     const parsed = this.parseCommand(envelope.text);
     if (parsed && this.commands.has(parsed.command)) return true;
     const bangText = envelope.text.trimStart();
@@ -6794,6 +6946,13 @@ export abstract class ChannelBase {
       return true;
     }
 
+    // Private comment-watch delivery of the channel account's own comments: the
+    // group/DM/route checks above already ran; only the sender gate is waived.
+    if (options.waiveGroupSender === true) {
+      this.markPreflighted(envelope);
+      return true;
+    }
+
     const result = senderGate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairing !== undefined) {
@@ -7181,9 +7340,13 @@ export abstract class ChannelBase {
       await this.recordObservedContact(envelope);
       this.onObservedContact(envelope);
     }
-    const parsed = this.parseCommand(envelope.text);
+    // Automated senders (see Envelope.senderTag) get prose treatment: their
+    // command-shaped text reaches the model instead of this channel's local
+    // commands and memory intents.
+    const automated = envelope.senderTag !== undefined;
+    const parsed = automated ? null : this.parseCommand(envelope.text);
     let memoryIntent: ResolvedChannelMemoryIntent | null =
-      parsed?.command === 'btw'
+      automated || parsed?.command === 'btw'
         ? null
         : parseChannelMemoryIntent(envelope.text);
     let memoryIntentFromClassifier = false;
@@ -7191,6 +7354,7 @@ export abstract class ChannelBase {
       this.deletePendingChannelMemoryMutation(envelope);
     }
     if (
+      !automated &&
       !memoryIntent &&
       parsed?.command !== 'btw' &&
       this.shouldClassifyChannelMemoryIntent(envelope.text)
@@ -7275,7 +7439,9 @@ export abstract class ChannelBase {
     // Phase 0 has no per-sender trust model (the [sender] marker is NOT a trust
     // boundary). Any group is multi-operator — even a user-scope group, which is
     // NOT a "shared session" — so an allowed member could `!rm -rf /` the host.
-    const bangText = envelope.text.trimStart();
+    // An automated sender's text is never a shell command (Envelope.senderTag),
+    // so it skips both the refusal and the execution arms below.
+    const bangText = automated ? '' : envelope.text.trimStart();
     if (bangText.startsWith('!')) {
       if (envelope.isGroup || this.isSharedSession(envelope)) {
         // Audit a blocked host-shell attempt — a group/shared member trying `!`
@@ -7444,8 +7610,17 @@ export abstract class ChannelBase {
       }
 
       const recognizedSlashCommand =
+        !automated &&
         this.isSlashCommand(envelope.text) &&
         this.isRecognizedCommand(envelope.text, sessionId);
+      // Adapter-tagged automated sender (Envelope.senderTag): rendered here,
+      // after prompt sanitization, because a line-leading `[tag]` inside `text`
+      // would be peeled by unwrapStartOfLineTags. Self-prefixing adapters
+      // (`alreadyPrefixed`) render the tag themselves.
+      const senderTagBar =
+        !envelope.alreadyPrefixed && envelope.senderTag?.trim()
+          ? `[${sanitizeSenderName(envelope.senderTag)}] `
+          : '';
       // Prepend referenced (quoted) message text for reply context
       let promptText = envelope.text;
 
@@ -7478,7 +7653,7 @@ export abstract class ChannelBase {
         const who = sanitizeSenderName(
           envelope.senderName || envelope.senderId || 'unknown',
         );
-        promptText = `[${who}] ${sanitizePromptText(promptText)}`;
+        promptText = `${senderTagBar}[${who}] ${sanitizePromptText(promptText)}`;
         // Render the non-bot mention marker AFTER sanitization (like the
         // [Replying to:] wrapper below). Inside `text` it would pass through
         // sanitizePromptText, which strips brackets only on content <=64 chars
@@ -7497,6 +7672,10 @@ export abstract class ChannelBase {
             promptText = `[Mentioned ${ids.length} other group ${memberLabel}: ${ids.join(', ')}]\n\n${promptText}`;
           }
         }
+      } else if (senderTagBar) {
+        // No sender attribution to attach the tag to (per-user 1:1 DM), so the
+        // tag opens the prompt on its own.
+        promptText = `${senderTagBar}${promptText}`;
       }
 
       if (envelope.referencedText) {
@@ -7843,6 +8022,7 @@ export abstract class ChannelBase {
               this.removePendingPermissionsForSession(
                 sessionId,
                 'run_cancelled',
+                { preserveBackgroundWorkflows: true },
               );
             }
             // Diagnostic watchdog: if the predecessor turn is STILL the active prompt
@@ -8108,11 +8288,27 @@ export abstract class ChannelBase {
         promptBridge.on('responseBoundary', onResponseBoundary);
 
         let taskResultPartial = false;
+        let answerDelivered = false;
         try {
           if (!this.canStartInboundTurn()) {
             throw new ChannelPromptCancelledError();
           }
+          const workflowTarget: SessionTarget = {
+            channelName: this.name,
+            chatId: envelope.chatId,
+            threadId: envelope.threadId,
+            senderId: envelope.senderId,
+            isGroup: envelope.isGroup,
+            messageRoute: envelope.messageRoute,
+          };
           let response = await promptBridge.prompt(sessionId, promptToSend, {
+            workflowOrigin: {
+              ...workflowTarget,
+              userInitiated: true,
+              ...(!this.canDeliverBackgroundWorkflow(workflowTarget)
+                ? { backgroundWorkflowBlocked: true }
+                : {}),
+            },
             ...(this.config.outputMode === 'per_task'
               ? {
                   outputMode: 'per_task' as const,
@@ -8150,6 +8346,7 @@ export abstract class ChannelBase {
               sessionId,
               segment,
             );
+            answerDelivered = true;
             if (segment && promptState.activeSegmentId === segment.segmentId) {
               promptState.activeSegmentId = undefined;
             }
@@ -8157,12 +8354,27 @@ export abstract class ChannelBase {
           if (!promptState.cancelled && turnNotice) {
             // Keep notices out of stream buffers and let the answer consume
             // adapter-specific reply metadata (such as DingTalk mentions) first.
-            await this.sendResponseMessage(
-              envelope.chatId,
-              turnNotice,
-              sessionId,
-              sourceLabel,
-            );
+            try {
+              await this.sendResponseMessage(
+                envelope.chatId,
+                turnNotice,
+                sessionId,
+                sourceLabel,
+              );
+            } catch (err) {
+              // The prompt result is `turnNotice || body`, so on an empty body
+              // the notice is the turn's only delivery: rethrow instead of
+              // reporting a completed turn the user never received.
+              if (!answerDelivered) throw err;
+              // The answer is already delivered, so the turn's outcome is fixed
+              // (see the deliveryStarted invariant below): log the failed
+              // notice instead of letting it rewrite completed into failed.
+              // The notice was sliced out of the answer above, so this line is
+              // the only remaining record of what the user never received.
+              process.stderr.write(
+                `[${this.name}] turn notice delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(err)} (dropped notice: ${sanitizeLogText(turnNotice, 200)})\n`,
+              );
+            }
           }
           // Once delivery started the turn's outcome is fixed — don't let a
           // cancel settling during the send rewrite completed into cancelled.

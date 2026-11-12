@@ -29,6 +29,8 @@ Enable IMAP and SMTP for the mailbox and export its credentials into the environ
 
 Run `qwen channel start agent-mail`. Password fields support the existing `$ENV_VAR` references; keep plaintext passwords out of settings. The adapter disables protocol logging and reports connection failures without credentials.
 
+The same channel can be created and edited in the Web Shell's channel manager, which lists it alongside the other configured channels. Because every email delivery is a direct conversation, the editor shows no group policy, allowed group IDs, or group member controls for this channel; a `groupPolicy` or `groups` entry already present in `settings.json` is left untouched when you save.
+
 Implicit TLS defaults to IMAP port 993 and SMTP port 465. For STARTTLS, set `imapSecure` or `smtpSecure` to `false`; the default ports become 143 and 587 respectively. STARTTLS and certificate verification remain mandatory. Override `imapPort` and `smtpPort` when needed. For a private CA, configure Node's `NODE_EXTRA_CA_CERTS` before launching Qwen Code.
 
 | Option                | Default    | Meaning                                                            |

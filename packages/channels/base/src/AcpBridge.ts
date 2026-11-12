@@ -18,6 +18,7 @@ import type {
 import {
   ACP_PRIVATE_PARENT_CAPABILITY_ENV,
   ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
+  BACKGROUND_WORKFLOW_APPROVAL_META_KEY,
   CHANNEL_BTW_METHOD,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
@@ -26,6 +27,7 @@ import {
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
   CHANNEL_TURN_NOTICE_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   ChannelPromptCancelledError,
   MID_TURN_DRAIN_BATCH,
   MID_TURN_QUEUE_MAX_CHARS,
@@ -163,6 +165,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     string,
     {
       sessionId: string;
+      backgroundWorkflowToolCallId?: string;
       resolve: (response: RequestPermissionResponse) => void;
       timeout: ReturnType<typeof setTimeout>;
     }
@@ -523,6 +526,9 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         prompt: prompt as Array<{ type: 'text'; text: string }>,
         _meta: {
           [CHANNEL_PROMPT_META_KEY]: true,
+          ...(options?.workflowOrigin
+            ? { [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: options.workflowOrigin }
+            : {}),
           ...(options?.outputMode === 'per_task'
             ? { [CHANNEL_OUTPUT_MODE_META_KEY]: 'per_task' }
             : {}),
@@ -603,7 +609,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     try {
       await conn.cancel({ sessionId });
     } finally {
-      this.resolvePendingPermissions(sessionId);
+      this.resolvePendingPermissions(sessionId, (toolCallId) => !toolCallId);
     }
   }
 
@@ -815,6 +821,14 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           typeof update['kind'] === 'string' ? update['kind'] : '';
         const meta = update['_meta'] as Record<string, unknown> | undefined;
         if (
+          type === 'tool_call_update' &&
+          meta?.[BACKGROUND_WORKFLOW_APPROVAL_META_KEY] === true &&
+          (update['status'] === 'completed' || update['status'] === 'failed')
+        ) {
+          this.resolvePendingPermissions(sessionId, (id) => id === toolCallId);
+          break;
+        }
+        if (
           meta?.['toolLifecycle'] !== undefined &&
           update['status'] === undefined &&
           update['content'] === undefined
@@ -902,6 +916,10 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       typeof request.sessionId === 'string' && request.sessionId.length > 0
         ? request.sessionId
         : request.toolCall.toolCallId;
+    const backgroundWorkflowToolCallId =
+      request.toolCall._meta?.[BACKGROUND_WORKFLOW_APPROVAL_META_KEY] === true
+        ? request.toolCall.toolCallId
+        : undefined;
 
     return new Promise<RequestPermissionResponse>((resolve) => {
       const timeout = setTimeout(() => {
@@ -923,8 +941,13 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         });
       }, ACP_PERMISSION_RESPONSE_TIMEOUT_MS);
       timeout.unref?.();
-      this.pendingPermissions.set(requestId, { sessionId, resolve, timeout });
-      this.emitResponseBoundary(sessionId);
+      this.pendingPermissions.set(requestId, {
+        sessionId,
+        backgroundWorkflowToolCallId,
+        resolve,
+        timeout,
+      });
+      if (!backgroundWorkflowToolCallId) this.emitResponseBoundary(sessionId);
       this.emit('permissionRequest', {
         requestId,
         sessionId,
@@ -937,12 +960,20 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.emit('responseBoundary', sessionId);
   }
 
-  private resolvePendingPermissions(sessionId?: string): void {
+  private resolvePendingPermissions(
+    sessionId?: string,
+    matches: (
+      backgroundWorkflowToolCallId: string | undefined,
+    ) => boolean = () => true,
+  ): void {
     const response: RequestPermissionResponse = {
       outcome: { outcome: 'cancelled' },
     };
     for (const [requestId, pending] of this.pendingPermissions) {
-      if (sessionId !== undefined && pending.sessionId !== sessionId) {
+      if (
+        (sessionId !== undefined && pending.sessionId !== sessionId) ||
+        !matches(pending.backgroundWorkflowToolCallId)
+      ) {
         continue;
       }
       clearTimeout(pending.timeout);

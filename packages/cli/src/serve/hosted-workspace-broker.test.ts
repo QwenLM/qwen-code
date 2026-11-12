@@ -60,6 +60,111 @@ it('resolves and pins Harness capability once without acquiring or warming a Run
   expect(broker.runtime).toBeUndefined();
 });
 
+it('retains frozen measurements observed by a cancellation status poll', async () => {
+  const metadata = {
+    protocolVersion: 4,
+    executionProtocol: 2,
+    resultDigest: 'a'.repeat(64),
+    measurements: {
+      protocol: 'managed-tool-measurements/1',
+      executionDurationMs: 0,
+      executionOutcome: 'success',
+      file: null,
+    },
+  };
+  const broker = await fixture(() => ({
+    body: {
+      ...identity,
+      executionCallId: 'execution',
+      status: {
+        state: 'settled',
+        result: {
+          executionStatus: 'success',
+          responseParts: [],
+          diagnostics: metadata,
+        },
+      },
+    },
+  }));
+  expect(await broker.status('execution')).toEqual({
+    state: 'settled',
+    executionStatus: 'success',
+  });
+  expect(broker.toolMeasurements('execution')).toEqual({
+    resultDigest: metadata.resultDigest,
+    measurements: metadata.measurements,
+  });
+  broker.releaseToolMeasurements('execution');
+  expect(broker.toolMeasurements('execution')).toBeUndefined();
+});
+
+it('reads a fresh saved Workspace context after capabilities were cached', async () => {
+  let generation = 0;
+  const broker = await fixture(() => ({
+    body: {
+      protocolVersion: 1,
+      harnessSessionId: 'session',
+      scope: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        workspaceGeneration: '1',
+        capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+        isolationClass: 'session',
+      },
+      workspaceContext: {
+        cwdRelative: `project-${++generation}`,
+        contextRevision: String(generation),
+      },
+    },
+  }));
+  await broker.resolveCapabilities();
+  expect(await broker.readWorkspaceContext()).toEqual({
+    cwdRelative: 'project-2',
+    contextRevision: '2',
+  });
+  expect(await broker.readWorkspaceContext()).toEqual({
+    cwdRelative: 'project-3',
+    contextRevision: '3',
+  });
+  expect(broker.acquired).toBe(false);
+});
+
+it.each([
+  { cwdRelative: '.', contextRevision: 1 },
+  { cwdRelative: '.', contextRevision: '0' },
+  { cwdRelative: '.', contextRevision: '01' },
+  { cwdRelative: '.', contextRevision: '1.5' },
+  { cwdRelative: '.', contextRevision: '9'.repeat(20) },
+  { cwdRelative: '/absolute', contextRevision: '1' },
+  { cwdRelative: '../escape', contextRevision: '1' },
+  { cwdRelative: 'a\\b', contextRevision: '1' },
+  { cwdRelative: 'https://other', contextRevision: '1' },
+  { cwdRelative: 'a//b', contextRevision: '1' },
+  { cwdRelative: 'a\u0000b', contextRevision: '1' },
+])(
+  'rejects an invalid saved Workspace context %j without acquiring a Runtime',
+  async (workspaceContext) => {
+    const broker = await fixture(() => ({
+      body: {
+        protocolVersion: 1,
+        harnessSessionId: 'session',
+        scope: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          workspaceGeneration: '1',
+          capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+          isolationClass: 'session',
+        },
+        workspaceContext,
+      },
+    }));
+    await expect(broker.readWorkspaceContext()).rejects.toThrow(
+      'Invalid saved Workspace context.',
+    );
+    expect(broker.acquired).toBe(false);
+  },
+);
+
 it.each(['http503', 'connection-drop', 'scope-mismatch'])(
   'retries capability resolution after %s while sharing concurrent reads',
   async (failure) => {
@@ -719,6 +824,20 @@ it.each(['runtime_idempotency_conflict', 'runtime_execution_conflict'])(
     ]);
   },
 );
+
+it('preserves a definite payload-invalid start rejection without polling', async () => {
+  const paths: string[] = [];
+  const broker = await fixture((path) => {
+    paths.push(path);
+    return { code: 400, body: { code: 'runtime_payload_invalid' } };
+  });
+  await expect(
+    broker.execute('execution', '{}', new AbortController().signal, 50),
+  ).rejects.toMatchObject({ status: 400, code: 'runtime_payload_invalid' });
+  expect(paths).toEqual([
+    '/internal/runtime-broker/v1/executions/execution:start',
+  ]);
+});
 
 it('queries the original identity when start reports an unknown execution', async () => {
   const paths: string[] = [];
