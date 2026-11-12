@@ -352,8 +352,9 @@ Managed Session 今天无法运行这条路径：
 2. **profile 修订版号。** 本切片先落地，取 `hosted-workspace-shell/3`，
    跳过统一 Shell 生命周期（#15330）已退役的 `shell/2`；
    [固定间隔姊妹设计](2026-11-10-managed-loop-schedule.zh-CN.md)按其
-   落地顺序说明互换到更后的一批修订。切片落地时仍需与控制面的规范
-   Shell 准入核对，确认识别 `shell/3`。
+   落地顺序说明互换到更后的一批修订。控制面的规范 Shell 准入已随本切片
+   落地，将 `shell/3` 识别为生命周期协议 2 的公开 Shell
+   （`WorkspaceToolProfiles.isPublicShell`）；已退役的 `shell/2` 仍被拒绝。
 3. **开关默认值时间线。** 验收证据落地前为 false，之后像
    `qwen.managed-agent.automation.enabled` 一样默认 true；与部署负责人
    确认启用顺序。

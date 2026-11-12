@@ -433,8 +433,9 @@ The facts below are from this repository at `488845a4a81`.
    unified Shell lifecycle (#15330); the
    [fixed-interval sibling](2026-11-10-managed-loop-schedule.md) swaps to
    the later revision per its landing-order note. The control plane's
-   canonical Shell admission must still be confirmed to recognize
-   `shell/3` when the slice lands.
+   canonical Shell admission recognizes `shell/3` as a public Shell on
+   lifecycle protocol 2 (`WorkspaceToolProfiles.isPublicShell`), landed
+   with this slice; the retired `shell/2` stays refused.
 3. **Gate default timeline.** False until the acceptance evidence lands,
    then true by default like `qwen.managed-agent.automation.enabled`;
    confirm the enablement order with the deployment owners.
