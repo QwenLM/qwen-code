@@ -936,6 +936,26 @@ describe('WorkflowRunRegistry', () => {
     expect(r.cancelBackgroundRuns(1_700_000_002_000)).toEqual([]);
   });
 
+  // A start reserved before the controls went off would otherwise register
+  // afterwards, hidden and uncancellable.
+  it('cancelBackgroundRuns aborts background starts that have not registered', () => {
+    const r = new WorkflowRunRegistry();
+    const background = new AbortController();
+    const foreground = new AbortController();
+    r.reserveStart('wf_bg_starting', () => background, { background: true });
+    r.reserveStart('wf_fg_starting', () => foreground);
+
+    expect(r.cancelBackgroundRuns(1_700_000_001_000)).toEqual([
+      'wf_bg_starting',
+    ]);
+    expect(background.signal.aborted).toBe(true);
+    expect(foreground.signal.aborted).toBe(false);
+    // The reservation stays the runner's to release, as after abortAll.
+    expect(r.isStarting('wf_bg_starting')).toBe(true);
+    r.releaseStart('wf_bg_starting', background);
+    r.releaseStart('wf_fg_starting', foreground);
+  });
+
   it('aborts a workflow that has not registered yet', () => {
     const r = new WorkflowRunRegistry();
     const controller = new AbortController();

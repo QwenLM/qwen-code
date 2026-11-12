@@ -588,6 +588,8 @@ export class WorkflowRunRegistry {
   private readonly entries = new Map<string, WorkflowTask>();
   private readonly handles = new Map<string, WorkflowRunHandle>();
   private readonly starting = new Map<string, AbortController>();
+  /** Reserved controllers of runs that start in the background. */
+  private readonly backgroundStarts = new WeakSet<AbortController>();
 
   private registerCallback: WorkflowRunRegisterCallback | undefined;
   private statusChangeCallback: WorkflowRunStatusChangeCallback | undefined;
@@ -818,11 +820,13 @@ export class WorkflowRunRegistry {
   reserveStart(
     runId: string,
     createController: () => AbortController,
+    options: { background?: boolean } = {},
   ): AbortController {
     const refusal = this.describeLiveRun(runId);
     if (refusal) throw new Error(refusal);
     const controller = createController();
     this.starting.set(runId, controller);
+    if (options.background) this.backgroundStarts.add(controller);
     return controller;
   }
 
@@ -1708,13 +1712,19 @@ export class WorkflowRunRegistry {
 
   /**
    * Cancel every active background run (running, pausing or paused) and
-   * return their ids. For a host that turns its workflow controls off
-   * while such runs exist: a background run has no turn the user could
-   * cancel, so once the controls are gone it could be neither seen nor
-   * stopped. Foreground runs belong to a turn and are left alone.
+   * every background run still starting, and return their ids. For a host
+   * that turns its workflow controls off while such runs exist: a
+   * background run has no turn the user could cancel, so once the controls
+   * are gone it could be neither seen nor stopped. Foreground runs belong
+   * to a turn and are left alone.
    */
   cancelBackgroundRuns(endTime: number): string[] {
     const cancelled: string[] = [];
+    for (const [runId, controller] of Array.from(this.starting)) {
+      if (!this.backgroundStarts.has(controller)) continue;
+      this.cancelStarting(runId);
+      cancelled.push(runId);
+    }
     for (const entry of Array.from(this.entries.values())) {
       if (!entry.isBackgrounded || !isActiveWorkflowStatus(entry.status)) {
         continue;

@@ -374,7 +374,9 @@ export class WorkflowRunner {
         ? createAbortController()
         : createChildAbortController(options.signal);
     const controller = registry
-      ? registry.reserveStart(runId, createController)
+      ? registry.reserveStart(runId, createController, {
+          background: runInBackground,
+        })
       : createController();
     const releasePersistenceActivity = markWorkflowRunPersistenceActive(
       config,

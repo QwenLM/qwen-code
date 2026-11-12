@@ -1145,6 +1145,58 @@ describe('WorkflowRunner', () => {
     }
   });
 
+  it.each([true, false])(
+    'lets cancelBackgroundRuns stop a starting run only when it is backgrounded (background=%s)',
+    async (runInBackground) => {
+      const { config, registry } = await storedConfig();
+      let finishLoad:
+        | ((saved: {
+            name: string;
+            script: string;
+            scriptPath: string;
+          }) => void)
+        | undefined;
+      resolveSavedWorkflowScriptMock.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishLoad = resolve;
+          }),
+      );
+      const start = startRun(config, {
+        scriptPath: '/tmp/review.js',
+        runInBackground,
+        dispatch: unused,
+      });
+      const saved = {
+        name: 'review',
+        script: 'return "done"',
+        scriptPath: '/tmp/review.js',
+      };
+
+      try {
+        await vi.waitFor(() =>
+          expect(resolveSavedWorkflowScriptMock).toHaveBeenCalledOnce(),
+        );
+        expect(registry.cancelBackgroundRuns(Date.now())).toHaveLength(
+          runInBackground ? 1 : 0,
+        );
+        finishLoad?.(saved);
+        if (runInBackground) {
+          await expect(start).rejects.toBeInstanceOf(
+            WorkflowStartCancelledError,
+          );
+          expect(registry.list()).toEqual([]);
+        } else {
+          await expect(start).resolves.toBeDefined();
+        }
+      } finally {
+        finishLoad?.(saved);
+        await start.catch(() => undefined);
+        registry.abortAll();
+      }
+    },
+  );
+
   it('rejects a direct resume while history mutation owns the run', async () => {
     const { config, registry } = configWithRegistry();
     const runId = 'wf_1234abcd';
