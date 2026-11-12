@@ -19,13 +19,12 @@ describe('model-facing argument errors', () => {
     if (result.success) throw new Error('Expected invalid keys');
 
     const error = invalidArguments('cua.keypress', result.error);
-    // The sentence after the field prefix is Zod's, not this module's: Zod 3
-    // said "Expected array, received string", Zod 4 says "Invalid input:
-    // expected array, received string". Pin what this contract owns — the field
-    // is named, and the machine-readable half carries the type complaint — and
-    // leave the library's wording alone, so the next major does not redden a
-    // test that is only restating it.
-    expect(error.message).toContain('keys:');
+    // The sentence between the field prefix and the types is Zod's, not this
+    // module's: Zod 3 said "Expected array, received string", Zod 4 says
+    // "Invalid input: expected array, received string". Pin the field name and
+    // both types case-insensitively, leaving the library's own wording free to
+    // change so the next major does not redden a test that only restates it.
+    expect(error.message).toMatch(/keys: .*expected array, received string/i);
     expect(error.message).toContain('cua.keypress({ keys: ["Enter"] })');
     expect(error.message).not.toContain('private input');
     expect(error.details).toMatchObject({
