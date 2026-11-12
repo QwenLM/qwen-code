@@ -1133,6 +1133,52 @@ describe.each([false, true])(
       );
     });
 
+    it('restores the frames of the tool step when an approval is answered outside them', async () => {
+      // The tool step parks a call for approval inside the agent's frames;
+      // the UI answers from its own async chain, outside them, and the
+      // approved call must run back inside them.
+      const { core } = buildCore('frames');
+      const approvals = collectApprovals(core);
+      const view = {} as RuntimeContentGeneratorView;
+      let seen: unknown;
+      const onConfirm = vi.fn(async () => {
+        seen = {
+          view: getRuntimeContentGenerator(),
+          agentId: getCurrentAgentId(),
+          depth: getCurrentAgentDepth(),
+          teammate: getTeammateContext()?.agentName,
+        };
+      });
+      const req = request('frames');
+      const scheduleSpy = mockScheduleUpdates([[execWaiting(req, onConfirm)]]);
+      let run: ReturnType<typeof startCall> | undefined;
+      try {
+        await runWithRuntimeContentGenerator(view, () =>
+          runWithAgentContext('outer', () =>
+            runWithAgentContext('inner', () =>
+              runWithTeammateIdentity(teammate('scribe', 'crew'), async () => {
+                run = startCall(core, directCall(req), req.prompt_id);
+                await vi.waitFor(() => expect(approvals).toHaveLength(1));
+              }),
+            ),
+          ),
+        );
+        expect(getCurrentAgentId()).toBeNull();
+        await approvals[0].respond(ToolConfirmationOutcome.ProceedOnce);
+        expect(onConfirm).toHaveBeenCalledOnce();
+        expect(seen).toEqual({
+          view,
+          agentId: 'inner',
+          depth: 1,
+          teammate: 'scribe',
+        });
+      } finally {
+        run?.abortController.abort();
+        await run?.processing;
+        scheduleSpy.mockRestore();
+      }
+    });
+
     it('retires an old approval before delivering its replacement', async () => {
       const { core } = buildCore();
       const order: string[] = [];

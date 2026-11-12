@@ -3772,6 +3772,24 @@ describe('subagent.ts', () => {
         expect(shared).toEqual(current);
       });
 
+      it('cancels the run when its signal aborts during a tool batch', async () => {
+        const schedule = CoreToolScheduler.prototype.schedule;
+        const [current, shared] = await onBothPaths((run) => {
+          mockSendMessageStream.mockImplementation(async () =>
+            streamOf(callsChunk([listFiles('call_1')])),
+          );
+          // The parent cancels the run as the batch is scheduled.
+          vi.spyOn(CoreToolScheduler.prototype, 'schedule').mockImplementation(
+            function (this: CoreToolScheduler, ...args) {
+              run.abort();
+              return schedule.apply(this, args);
+            },
+          );
+        });
+        expect(shared.terminateMode).toBe(AgentTerminateMode.CANCELLED);
+        expect(shared).toEqual(current);
+      });
+
       it('drops the calls of a model the fallback replaced (intended difference)', async () => {
         const [current, shared] = await onBothPaths(() =>
           mockSendMessageStream
