@@ -22,6 +22,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
@@ -366,6 +368,41 @@ class ExternalWorkspaceRetirementServiceTest {
         assertThat(bindings.findActive(placement).getBindingId()).isEqualTo(original.getBindingId());
         assertThat(jdbc.queryForObject("SELECT state FROM ma_workspace", String.class)).isEqualTo("ACTIVE");
         assertThat(service.inspect(request)).isNull();
+    }
+
+    // R18-83: a session that ever projected a tool result or reclaimed a
+    // capture keeps a permanent-success operation row. Those rows are not
+    // live work, so they must not fence retirement forever.
+    @ParameterizedTest
+    @ValueSource(strings = {"READY", "SUCCEEDED", "RETURNED", "SUPPRESSED", "REMOVED"})
+    void permanentSuccessOperationDoesNotFenceRetirement(String state) {
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, operation_kind,"
+                + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
+                + " gmt_create, gmt_modified) VALUES (?, ?, NULL, ?, 'TOOL_RESULT_PROJECTION', ?, 'user-session', 'SESSION', ?,"
+                + " 'digest', '{}', ?, ?, 'DONE', 1, 1)",
+                (state + "-key").repeat(10).substring(0, 64), "b".repeat(64),
+                (state + "-op").getBytes(StandardCharsets.UTF_8),
+                "tenant".getBytes(StandardCharsets.UTF_8), "c".repeat(64), state, state);
+
+        var receipt = service.retire(request, this::terminated);
+
+        assertThat(receipt.state()).isEqualTo("RELEASED");
+        assertThat(bindings.findById(original.getBindingId()).getState())
+                .isEqualTo(RuntimeBindingRecord.State.RELEASED);
+    }
+
+    @Test
+    void aPendingOperationStillFencesRetirement() {
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, operation_kind,"
+                + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
+                + " gmt_create, gmt_modified) VALUES (?, ?, NULL, ?, 'SUBMIT_INPUT', ?, 'user-session', 'SESSION', ?,"
+                + " 'digest', '{}', 'PENDING', 'PENDING', 'PENDING', 1, 1)",
+                "d".repeat(64), "e".repeat(64), "pending-op".getBytes(StandardCharsets.UTF_8),
+                "tenant".getBytes(StandardCharsets.UTF_8), "f".repeat(64));
+
+        assertThatThrownBy(() -> service.retire(request, this::terminated))
+                .isInstanceOf(RuntimeBrokerException.class)
+                .hasFieldOrPropertyWithValue("code", "external_workspace_retirement_blocked");
     }
 
     @Test

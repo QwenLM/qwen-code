@@ -247,10 +247,17 @@ public final class ExternalWorkspaceRetirementService {
             // FAILED/CANCELLED operations deliberately retain BLOCKED delivery so
             // the relay never redispatches them. That delivery marker does not make
             // a terminal operation an unfinished effect; only nonterminal states
-            // fence retirement of the lost Worker. SUPERSEDED is terminal too:
-            // a rename supersedes its parked predecessors and never leaves it.
+            // fence retirement of the lost Worker. The terminal set covers every
+            // permanent outcome a session-scoped operation can reach: SUPERSEDED
+            // (a rename supersedes its parked predecessors), READY
+            // (TOOL_RESULT_PROJECTION / SESSION_WORKTREE success), SUCCEEDED
+            // (CAPTURE_GC / SESSION_RESOURCE_GC), RETURNED (OBJECT_PUT), SUPPRESSED
+            // (projection suppressed by session deletion) and REMOVED (worktree
+            // cleanup). Unknown states stay fencing: a new nonterminal state must
+            // block retirement, never silently pass it.
             empty("SELECT operation_id FROM ma_operation WHERE tenant_id = ? AND session_id = ?"
-                    + " AND state NOT IN ('COMPLETED','FAILED','CANCELLED','SUPERSEDED') LIMIT 1 FOR UPDATE",
+                    + " AND state NOT IN ('COMPLETED','FAILED','CANCELLED','SUPERSEDED',"
+                    + "'READY','SUCCEEDED','RETURNED','SUPPRESSED','REMOVED') LIMIT 1 FOR UPDATE",
                     request.tenantId(), session);
         }
         // 孤立 head 不能当作没有成员；常规 Hosted 写入在同一 placement guard 后串行提交。
