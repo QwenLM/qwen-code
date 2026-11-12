@@ -104,18 +104,40 @@ export class IdeContextStore {
   }
 
   getWorkspaceTrust(workspaceDir: string): boolean | undefined {
+    return this.getWorkspaceTrustScope(workspaceDir)?.isTrusted;
+  }
+
+  /**
+   * The IDE's trust decision for `workspaceDir`, with the IDE workspace root
+   * it comes from: the deepest root containing the directory. `root` is
+   * absent when the IDE named no roots and the directory is the process cwd.
+   */
+  getWorkspaceTrustScope(
+    workspaceDir: string,
+  ): { isTrusted: boolean; root?: string } | undefined {
     const isTrusted = this.get()?.workspaceState?.isTrusted;
     if (isTrusted === undefined) return undefined;
     if (!this.workspaceRoots && workspaceDir === process.cwd()) {
-      return isTrusted;
+      return { isTrusted };
     }
     try {
       const realpath = realpathSync.native ?? realpathSync;
       const canonicalDir = realpath(workspaceDir);
-      const matches = this.workspaceRoots
-        ? this.workspaceRoots.some((root) => isSubpath(root, canonicalDir))
-        : canonicalDir === realpath(process.cwd());
-      return matches ? isTrusted : undefined;
+      if (!this.workspaceRoots) {
+        return canonicalDir === realpath(process.cwd())
+          ? { isTrusted }
+          : undefined;
+      }
+      let root: string | undefined;
+      for (const candidate of this.workspaceRoots) {
+        if (
+          isSubpath(candidate, canonicalDir) &&
+          (root === undefined || candidate.length > root.length)
+        ) {
+          root = candidate;
+        }
+      }
+      return root === undefined ? undefined : { isTrusted, root };
     } catch {
       return undefined;
     }

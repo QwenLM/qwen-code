@@ -3296,6 +3296,8 @@ export class Config {
    * lazily on first use, never persisted. */
   private omniMediaResourceRegistry?: MediaResourceRegistry;
   private workflowsEnabled: boolean | undefined;
+  /** Workflows are on because the bundled review skill turned them on. */
+  private workflowsEnabledByReviewSkill = false;
   private workflowKeywordTriggerEnabled: boolean;
   private readonly sessionWorkflowEnabled: boolean;
   private sessionWorkflowEnabledProvider?: () => boolean;
@@ -11078,6 +11080,19 @@ export class Config {
     this.refreshWorkflowMode();
   }
 
+  /**
+   * Applies a reloaded `tools.workflowsEnabled`. When the settings leave it
+   * unset, workflows the bundled review skill turned on stay on: that enable
+   * never came from settings, and undoing it on an unrelated settings change
+   * would end the review's background runs. A value the settings do give
+   * replaces it.
+   */
+  applyWorkflowsEnabledSetting(enabled: boolean | undefined): void {
+    if (enabled === undefined && this.workflowsEnabledByReviewSkill) return;
+    this.workflowsEnabledByReviewSkill = false;
+    this.setWorkflowsEnabled(enabled);
+  }
+
   isWorkflowModeSupported(): boolean {
     return (
       !isDerivedConfig(this) &&
@@ -11296,6 +11311,7 @@ export class Config {
       return;
     }
     if (await this.registerWorkflowTool(this.getToolRegistry())) {
+      this.workflowsEnabledByReviewSkill ||= this.workflowsEnabled !== true;
       this.setWorkflowsEnabled(true);
       await this.getLlmClient().setTools();
     }

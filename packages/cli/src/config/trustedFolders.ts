@@ -18,7 +18,11 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
 import { parseJsoncObject, updateJsoncContent } from '../utils/jsonc-editor.js';
-import { getPathComparisonVariants } from './path-comparison.js';
+import {
+  arePathsEquivalent,
+  getPathComparisonVariants,
+  isWithinRoot,
+} from './path-comparison.js';
 import {
   buildTrustPrecedenceRules,
   resolveTrustDecision,
@@ -387,6 +391,35 @@ function trustStatusToResult(status: WorkspaceTrustStatus): TrustResult {
   };
 }
 
+/**
+ * Whether the trust file's deciding rule for `location` sits on a folder
+ * strictly inside the IDE workspace root `root`. The IDE decides for its
+ * whole workspace; a rule set on a folder below it is more specific and
+ * wins, as the most specific rule does within the file.
+ */
+function hasTrustRuleBelowRoot(
+  trustConfig: Record<string, TrustLevel> | undefined,
+  location: string,
+  root: string | undefined,
+): boolean {
+  // The root itself (or the cwd the IDE answered for) is the IDE's to decide;
+  // only a nested location reads the trust file.
+  if (root === undefined || arePathsEquivalent(location, root)) return false;
+  const folders = loadTrustedFoldersWithOverrides(trustConfig);
+  const rule = resolveTrustRule(
+    buildTrustPrecedenceRules(folders.rules),
+    getPathComparisonVariants(location),
+  );
+  if (!rule) return false;
+  const rootVariants = getPathComparisonVariants(root);
+  return [...rule.variants].some((ruleVariant) =>
+    [...rootVariants].some(
+      (rootVariant) =>
+        ruleVariant !== rootVariant && isWithinRoot(ruleVariant, rootVariant),
+    ),
+  );
+}
+
 export function getWorkspaceTrustStatus(
   settings: Settings,
   workspaceCwd: string,
@@ -403,14 +436,17 @@ export function getWorkspaceTrustStatus(
     };
   }
 
-  const ideTrust = ideContextStore.getWorkspaceTrust(workspaceCwd);
-  if (ideTrust !== undefined) {
+  const ideTrust = ideContextStore.getWorkspaceTrustScope(workspaceCwd);
+  if (
+    ideTrust !== undefined &&
+    !hasTrustRuleBelowRoot(trustConfig, workspaceCwd, ideTrust.root)
+  ) {
     return {
       v: 1,
       workspaceCwd,
       folderTrustEnabled: true,
       effective: {
-        state: ideTrust ? 'trusted' : 'untrusted',
+        state: ideTrust.isTrusted ? 'trusted' : 'untrusted',
         source: 'ide',
       },
       explicitTrustLevel: null,

@@ -15790,7 +15790,9 @@ class QwenAgent implements Agent {
             // Workflow admission and controls follow the live flag even
             // while a turn or a detached workflow is running.
             const workflowsWereEnabled = config.isWorkflowsEnabled();
-            config.setWorkflowsEnabled(newMerged.tools?.workflowsEnabled);
+            config.applyWorkflowsEnabledSetting(
+              newMerged.tools?.workflowsEnabled,
+            );
             if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
               if (!config.isWorkflowsEnabled()) {
                 // With the controls off, the tasks view hides a background

@@ -96,6 +96,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     ideContextStore: {
       get: () => undefined,
       getWorkspaceTrust: () => undefined,
+      getWorkspaceTrustScope: () => undefined,
     },
     isWithinRoot: (location: string, root: string) =>
       location === root || location.startsWith(`${root}/`),

@@ -5935,7 +5935,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       isWorkflowsEnabled: vi.fn().mockReturnValue(false),
-      setWorkflowsEnabled: vi.fn(),
+      applyWorkflowsEnabledSetting: vi.fn(),
       setWorkflowKeywordTriggerEnabled: vi.fn(),
       isSafeMode: vi.fn().mockReturnValue(false),
       getBareMode: vi.fn().mockReturnValue(false),
@@ -7074,7 +7074,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         innerConfig.setImageModel.mockClear();
         innerConfig.reloadModelProvidersConfig.mockClear();
         innerConfig.refreshAuth.mockClear();
-        innerConfig.setWorkflowsEnabled.mockClear();
+        innerConfig.applyWorkflowsEnabledSetting.mockClear();
         if (busy) lastSessionMock!.isIdle.mockReturnValue(false);
         if (scenario === 'setter-failure') {
           innerConfig.setImageModel.mockRejectedValueOnce(
@@ -7115,7 +7115,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           );
         }
         if (scenario === 'setter-failure') {
-          expect(innerConfig.setWorkflowsEnabled).toHaveBeenCalledOnce();
+          expect(
+            innerConfig.applyWorkflowsEnabledSetting,
+          ).toHaveBeenCalledOnce();
         }
         lastSessionMock!.isIdle.mockReturnValue(true);
         for (let reload = 0; reload < 2; reload++) {
@@ -36102,7 +36104,7 @@ describe('sessionLanguage multi-session propagation', () => {
       getWorkspaceContext: vi.fn().mockReturnValue({}),
       getDebugMode: vi.fn().mockReturnValue(false),
       isWorkflowsEnabled: vi.fn().mockReturnValue(false),
-      setWorkflowsEnabled: vi.fn(),
+      applyWorkflowsEnabledSetting: vi.fn(),
       setWorkflowKeywordTriggerEnabled: vi.fn(),
       ...overrides,
     };
@@ -38477,7 +38479,7 @@ describe('sessionLanguage multi-session propagation', () => {
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-wf-reload'),
       isWorkflowsEnabled: vi.fn(() => workflowsEnabled ?? false),
-      setWorkflowsEnabled: vi.fn((enabled: boolean | undefined) => {
+      applyWorkflowsEnabledSetting: vi.fn((enabled: boolean | undefined) => {
         workflowsEnabled = enabled;
       }),
       setDisabledTools: vi.fn(),
@@ -38546,8 +38548,11 @@ describe('sessionLanguage multi-session propagation', () => {
 
     expect(result).toMatchObject({ sessionsRefreshed: ['s-wf-reload'] });
     expect(
-      (cfg as typeof cfg & { setWorkflowsEnabled: ReturnType<typeof vi.fn> })
-        .setWorkflowsEnabled,
+      (
+        cfg as typeof cfg & {
+          applyWorkflowsEnabledSetting: ReturnType<typeof vi.fn>;
+        }
+      ).applyWorkflowsEnabledSetting,
     ).toHaveBeenCalledWith(false);
     // The `workflows` command left with the flag: the client is told.
     expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
@@ -38564,8 +38569,11 @@ describe('sessionLanguage multi-session propagation', () => {
     reloadedSettings = {};
     await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
     expect(
-      (cfg as typeof cfg & { setWorkflowsEnabled: ReturnType<typeof vi.fn> })
-        .setWorkflowsEnabled,
+      (
+        cfg as typeof cfg & {
+          applyWorkflowsEnabledSetting: ReturnType<typeof vi.fn>;
+        }
+      ).applyWorkflowsEnabledSetting,
     ).toHaveBeenLastCalledWith(undefined);
     expect(workflowsEnabled).toBeUndefined();
     expect(cfg.setWorkflowKeywordTriggerEnabled.mock.calls).toEqual([

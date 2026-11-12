@@ -668,6 +668,50 @@ describe('getWorkspaceTrustStatus', () => {
     });
   });
 
+  describe('under an IDE workspace root', () => {
+    let root: string;
+    let nested: string;
+    beforeEach(() => {
+      root = fs.realpathSync(
+        fs.mkdtempSync(path.join(osActual.tmpdir(), 'ide-trust-root-')),
+      );
+      nested = fs.mkdtempSync(path.join(root, 'nested-'));
+    });
+    afterEach(() => {
+      ideContextStore.clear();
+      fs.rmSync(root, { recursive: true, force: true });
+    });
+
+    it.each([
+      [true, TrustLevel.DO_NOT_TRUST, 'untrusted'],
+      [false, TrustLevel.TRUST_FOLDER, 'trusted'],
+    ] as const)(
+      'lets a rule on a nested folder beat IDE trust %s',
+      (isTrusted, level, state) => {
+        ideContextStore.set({ workspaceState: { isTrusted } }, [root]);
+        mockRules[nested] = level;
+
+        expect(getWorkspaceTrustStatus(mockSettings, nested)).toMatchObject({
+          effective: { state, source: 'file' },
+          explicitTrustLevel: level,
+        });
+      },
+    );
+
+    it('keeps the IDE decision over a rule on the root or above it', () => {
+      ideContextStore.set({ workspaceState: { isTrusted: true } }, [root]);
+      mockRules[root] = TrustLevel.DO_NOT_TRUST;
+      mockRules[path.dirname(root)] = TrustLevel.DO_NOT_TRUST;
+
+      for (const workspace of [root, nested]) {
+        expect(getWorkspaceTrustStatus(mockSettings, workspace)).toMatchObject({
+          effective: { state: 'trusted', source: 'ide' },
+          explicitTrustLevel: null,
+        });
+      }
+    });
+  });
+
   it('reports disabled folder trust as trusted disabled source', () => {
     expect(
       getWorkspaceTrustStatus(

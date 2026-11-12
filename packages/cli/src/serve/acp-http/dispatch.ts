@@ -6313,11 +6313,21 @@ export class AcpDispatcher {
       const originator = pending.backgroundWorkflowApproval.originatorClientId;
       // An observer's transport error leaves the approval retryable. The
       // originator's own ACP error ends its request and releases the workflow.
+      // A run launched by a turn with no originator (cron, a runtime goal, a
+      // background report) has no observers: like a turn's own approval, the
+      // error of the connection holding the request ends it, or nothing would.
       if (
         pendingConn !== conn ||
-        originator === undefined ||
-        conn.sessions.get(pending.sessionId)?.clientId !== originator
+        (originator !== undefined &&
+          conn.sessions.get(pending.sessionId)?.clientId !== originator)
       ) {
+        writeStderrLine(
+          `qwen serve: /acp background workflow approval error ignored: connection ${logSafe(
+            conn.connectionId.slice(0, 8),
+          )} is not its launching client (requestId ${logSafe(
+            pending.bridgeRequestId,
+          )})`,
+        );
         return;
       }
     }

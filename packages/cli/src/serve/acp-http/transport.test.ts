@@ -2858,6 +2858,50 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
+  it('ends an origin-less background workflow approval on the holding connection RPC error', async () => {
+    // A cron or runtime-goal turn has no originator, so its run's approval
+    // carries none: the holder's error must still settle it.
+    const vote = vi
+      .spyOn(bridge, 'respondToSessionPermission')
+      .mockReturnValue(true);
+    const ownerId = await initialize();
+    await newSession(ownerId);
+    const owner = acpHandle!.registry.get(ownerId)!;
+    const ownerReader = frameReader(await openStream(ownerId, 'sess-1'));
+    try {
+      await waitUntil(() => bridge.queues.has('sess-1'));
+      bridge.queues.get('sess-1')!.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'workflow-approval',
+          sessionId: 'sess-1',
+          toolCall: {
+            toolCallId: 'workflow-tool',
+            title: 'Edit fixture',
+            _meta: { workflowApproval: true, backgroundWorkflowApproval: true },
+          },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      const frame = (await ownerReader.next()) as { id: string };
+      expect(owner.pending.size).toBe(1);
+      await post(ownerId, {
+        jsonrpc: '2.0',
+        id: frame.id,
+        error: { code: -32603, message: 'Client failure' },
+      });
+      await waitUntil(() => owner.pending.size === 0);
+      expect(vote).toHaveBeenCalledExactlyOnceWith(
+        'sess-1',
+        'workflow-approval',
+        { outcome: { outcome: 'cancelled' } },
+        expect.any(Object),
+      );
+    } finally {
+      ownerReader.close();
+    }
+  });
+
   it('cross-connection permission response resolves for a co-owned session', async () => {
     let resolvedWith: unknown;
     let voteCount = 0;
