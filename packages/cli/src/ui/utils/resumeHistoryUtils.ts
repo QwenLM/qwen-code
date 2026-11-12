@@ -207,6 +207,7 @@ function convertToHistoryItems(
     args?: Record<string, unknown>;
     resultDisplay: ToolResultDisplay | undefined;
     visionBridgeNotice?: string;
+    renderOutputAsMarkdown?: boolean;
     detailedDisplay?: string;
     images?: InlineImageData[];
     omittedImageCount?: number;
