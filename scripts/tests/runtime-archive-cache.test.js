@@ -490,6 +490,16 @@ describe('the ephemeral image seeds the runtime archives', () => {
       .map((segment) => segment.trim())
       .filter((segment) => segment.includes('tar -tzf'));
     expect(listings, 'one listing per archive').toHaveLength(2);
+    // Each listing must target a DIFFERENT archive, and they must be the two
+    // the layer is supposed to carry: two copies of one command keep the exit
+    // checks below green while one archive is never read (that is the mutation
+    // doudouOUC ran — the Node line replaced by a second Bun line stayed
+    // green). The `-eq 2` count still proves both suffixes exist; this proves
+    // both were unpacked.
+    const globs = listings
+      .map((listing) => /\/([^/\s"']+\.(?:tar\.gz|tgz))/.exec(listing)?.[1])
+      .sort();
+    expect(globs).toEqual(['bun-linux-*.tgz', 'node-v*.tar.gz']);
     const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-listing-'));
     try {
       const source = path.join(workdir, 'src');
