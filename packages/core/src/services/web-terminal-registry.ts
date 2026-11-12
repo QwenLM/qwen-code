@@ -259,6 +259,10 @@ export class WebTerminalRegistry {
   // release receipt; the distinction keeps a failed spawn from being reported
   // as a clean exit.
   private readonly released = new Set<string>();
+  // Creations that ended without a session and were not released (a failed
+  // load/spawn). They carry a failure end receipt so the hold settles instead
+  // of answering unknown forever — but never the clean release code.
+  private readonly failedCreations = new Set<string>();
   private disposed = false;
 
   private readonly nextId = (() => {
@@ -287,6 +291,13 @@ export class WebTerminalRegistry {
       return { error: 'Web terminal limit reached', retryable: true };
     }
     this.creating.set(terminalId, options.workspaceCwd);
+    // A new lifecycle revokes any stale release receipt for this id: the Web
+    // Shell reuses one terminal id across panel reopenings, so an id released
+    // once must not keep certifying a later failed re-spawn as a proven exit.
+    // Clear only at creation admission — control() still needs the receipt of
+    // an already-released terminal until it consumes it.
+    this.released.delete(terminalId);
+    this.failedCreations.delete(terminalId);
     let ptyLoad: PtyLoadResult;
     try {
       ptyLoad = await loadPty();
@@ -725,6 +736,12 @@ export class WebTerminalRegistry {
     return this.released.has(terminalId);
   }
 
+  /** Whether a creation ended without a session and was not released (a failed
+   * load/spawn). It carries a failure end, never the clean release code. */
+  isFailedCreation(terminalId: string): boolean {
+    return this.failedCreations.has(terminalId);
+  }
+
   write(terminalId: string, data: string): WebTerminalWriteResult {
     const session = this.sessions.get(terminalId);
     if (!session || session.exited || session.failure) return 'unavailable';
@@ -851,6 +868,17 @@ export class WebTerminalRegistry {
   }
 
   private finishCreating(terminalId: string): void {
+    // A creation that ends without a session must leave a provable end receipt
+    // so the hold settles instead of answering unknown forever: a cancelled
+    // creation was released (clean release code), a failed load/spawn is a
+    // failure end. A successful creation already has its session, so no receipt.
+    if (!this.sessions.has(terminalId)) {
+      if (this.cancelledCreations.has(terminalId)) {
+        this.released.add(terminalId);
+      } else {
+        this.failedCreations.add(terminalId);
+      }
+    }
     this.creating.delete(terminalId);
     this.cancelledCreations.delete(terminalId);
   }

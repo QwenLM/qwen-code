@@ -430,16 +430,48 @@ describe('ManagedRuntimeTerminals control', () => {
     ws.terminate();
   });
 
-  it('does not claim a clean exit for a failed spawn', async () => {
+  it('settles a failed spawn with a failure end, never a clean exit', async () => {
     await start();
-    const internals = terminals as unknown as { owners: Map<string, string> };
-    // A failed spawn leaves an owner but no session, and was never released.
+    const internals = terminals as unknown as {
+      owners: Map<string, string>;
+      registry: WebTerminalRegistry;
+    };
+    // A failed load/spawn leaves an owner but no session and was never released;
+    // finishCreating records a failure end receipt for it.
     internals.owners.set('failed-spawn', 'session-a');
-    expect(
-      terminals!.control(op('terminal-status', 'failed-spawn', 'session-a')),
-    ).toMatchObject({ state: 'unknown' });
-    expect(
-      terminals!.control(op('terminal-terminate', 'failed-spawn', 'session-a')),
-    ).toMatchObject({ state: 'unknown' });
+    (
+      internals.registry as unknown as { failedCreations: Set<string> }
+    ).failedCreations.add('failed-spawn');
+    for (const kind of ['terminal-status', 'terminal-terminate'] as const) {
+      const view = terminals!.control(op(kind, 'failed-spawn', 'session-a'));
+      expect(view).toEqual({
+        operationId: 'failed-spawn',
+        state: 'exited',
+        evidence: {
+          exitCode: WEB_TERMINAL_FAILURE_EXIT_CODE,
+          exitSignal: null,
+        },
+      });
+      // A failure end must never be the clean release code.
+      expect(view.evidence?.exitCode).not.toBe(TERMINAL_RELEASE_EXIT_CODE);
+    }
+  });
+
+  it('revokes a stale release receipt when the same terminal id is re-admitted', async () => {
+    await start();
+    const internals = terminals as unknown as { registry: WebTerminalRegistry };
+    const registry = internals.registry;
+    // A prior lifecycle released this id (the Web Shell reuses one id per
+    // Session across panel reopenings).
+    (registry as unknown as { released: Set<string> }).released.add('reuse-id');
+    expect(registry.isReleased('reuse-id')).toBe(true);
+    // Re-admitting the id must revoke the stale receipt so a later failed
+    // re-spawn is not certified as the prior clean exit.
+    await registry.create({
+      terminalId: 'reuse-id',
+      workspaceCwd: WORKSPACE_CWD,
+    });
+    expect(registry.isReleased('reuse-id')).toBe(false);
+    registry.release('reuse-id');
   });
 });

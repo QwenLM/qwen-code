@@ -7,7 +7,10 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage, Server } from 'node:http';
 import type { Duplex } from 'node:stream';
-import { WebTerminalRegistry } from '@qwen-code/qwen-code-core/services/web-terminal-registry.js';
+import {
+  WebTerminalRegistry,
+  WEB_TERMINAL_FAILURE_EXIT_CODE,
+} from '@qwen-code/qwen-code-core/services/web-terminal-registry.js';
 import type {
   ManagedTerminalLook,
   ManagedTerminalOperationView,
@@ -359,8 +362,24 @@ export class ManagedRuntimeTerminals {
         evidence: { exitCode: TERMINAL_RELEASE_EXIT_CODE, exitSignal: null },
       };
     }
-    // A failed spawn, or anything else without provable exit evidence, must
-    // not claim an end the wire contract would accept as settled.
+    // A failed load/spawn left a failure end receipt: settle the hold with the
+    // failure code — never the clean release code — instead of unknown forever.
+    if (
+      owner !== undefined &&
+      !state &&
+      this.registry.isFailedCreation(terminalId)
+    ) {
+      return {
+        operationId: terminalId,
+        state: 'exited',
+        evidence: {
+          exitCode: WEB_TERMINAL_FAILURE_EXIT_CODE,
+          exitSignal: null,
+        },
+      };
+    }
+    // Anything else without provable exit evidence must not claim an end the
+    // wire contract would accept as settled.
     return { operationId: terminalId, state: 'unknown' };
   }
 
