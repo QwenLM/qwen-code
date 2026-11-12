@@ -259,12 +259,15 @@ describe('isolated browser runtime fixtures', () => {
     const lock = parse(
       fs.readFileSync(new URL('../../pnpm-lock.yaml', import.meta.url), 'utf8'),
     );
-    const zod = lock.importers['packages/browser-use'].devDependencies.zod;
+    const importer = lock.importers['packages/browser-use'];
+    const declared =
+      manifest.devDependencies?.zod ?? manifest.dependencies?.zod;
+    const zod = importer.devDependencies?.zod ?? importer.dependencies?.zod;
 
-    expect(manifest.devDependencies.zod).toMatch(/^\^4\./);
-    expect(zod.specifier).toBe(manifest.devDependencies.zod);
-    expect(zod.version).toMatch(/^4\./);
-    expect(lock.packages[`zod@${zod.version}`]).toBeDefined();
+    expect(declared ?? '').toMatch(/^\^4\./);
+    expect(zod?.specifier).toBe(declared);
+    expect(zod?.version ?? '').toMatch(/^4\./);
+    expect(lock.packages[`zod@${zod?.version}`]).toBeDefined();
   });
 
   function write(relativePath, contents) {
