@@ -2911,6 +2911,7 @@ export async function loadCliConfig(
     todoWriteEnabled: settings.tools?.todoWrite?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     unifiedAgentLoopEnabled: settings.experimental?.unifiedAgentLoop ?? false,
+    eventBusAgentLoopEnabled: settings.experimental?.eventBusAgentLoop ?? false,
     agentCollaborationEnabled:
       settings.experimental?.agentCollaboration ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,
