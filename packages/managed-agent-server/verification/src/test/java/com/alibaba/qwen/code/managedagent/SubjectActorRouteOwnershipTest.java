@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerIntegrationTest.FixtureHarness;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.session.SessionRenameCoordinator;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -70,6 +71,9 @@ class SubjectActorRouteOwnershipTest {
 
     @Autowired
     private FixtureHarness harness;
+
+    @Autowired
+    private JdbcManagedSessionStore journals;
 
     @AfterEach
     void restoreHarness() {
@@ -273,6 +277,82 @@ class SubjectActorRouteOwnershipTest {
                             .principal(bob))
                     .andExpect(status().isNotFound());
         }
+    }
+
+    @Test
+    void aSubjectBearingCallerReachesItsOwnActions() throws Exception {
+        String tenant = tenant();
+        AuthenticatedTenantActor alice = actor(tenant, "alice", "biz-alice");
+        AuthenticatedTenantActor bob = actor(tenant, "bob", "biz-bob");
+        String session = createPublic(tenant, alice);
+        var journal = new ActionJournal(journals, tenant, session,
+                System.currentTimeMillis(), 9_007_199_254_740_991L);
+        journal.change("requested", null);
+        String actions = PUBLIC + "/" + session + "/actions";
+        String body = "{\"kind\":\"permission\",\"input_revision\":1,"
+                + "\"policy_revision\":\"hosted-tool-approval/1\","
+                + "\"option_id\":\"allow\"}";
+
+        mvc.perform(get(actions).header(TENANT, tenant).principal(alice))
+                .andExpect(status().isOk());
+        mvc.perform(get(actions + "/" + journal.id).header(TENANT, tenant)
+                .principal(alice)).andExpect(status().isOk());
+        mvc.perform(post(WEB_SHELL + "/actions/query").header(TENANT, tenant)
+                .principal(alice).contentType(MediaType.APPLICATION_JSON)
+                .content(mapper.writeValueAsString(Map.of("sessionId", session))))
+                .andExpect(status().isOk());
+        mvc.perform(post(WEB_SHELL + "/actions/get").header(TENANT, tenant)
+                .principal(alice).contentType(MediaType.APPLICATION_JSON)
+                .content(mapper.writeValueAsString(Map.of("sessionId", session,
+                        "actionId", journal.id))))
+                .andExpect(status().isOk());
+        mvc.perform(post(actions + "/" + journal.id + "/responses")
+                .header(TENANT, tenant).principal(alice)
+                .header("Idempotency-Key", UUID.randomUUID().toString())
+                .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isAccepted());
+        mvc.perform(post(WEB_SHELL + "/actions/respond")
+                .header(TENANT, tenant).principal(alice)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(mapper.writeValueAsString(Map.of(
+                        "sessionId", session, "actionId", journal.id,
+                        "idempotencyKey", UUID.randomUUID().toString(),
+                        "response", Map.of("kind", "permission",
+                                "inputRevision", 1,
+                                "policyRevision", "hosted-tool-approval/1",
+                                "optionId", "allow")))))
+                .andExpect(status().isAccepted());
+
+        // A sibling user keeps the ownership refusal on every route.
+        mvc.perform(get(actions).header(TENANT, tenant).principal(bob))
+                .andExpect(status().isNotFound());
+        mvc.perform(get(actions + "/" + journal.id).header(TENANT, tenant)
+                .principal(bob)).andExpect(status().isNotFound());
+        mvc.perform(post(WEB_SHELL + "/actions/query").header(TENANT, tenant)
+                .principal(bob).contentType(MediaType.APPLICATION_JSON)
+                .content(mapper.writeValueAsString(Map.of("sessionId", session))))
+                .andExpect(status().isNotFound());
+        mvc.perform(post(WEB_SHELL + "/actions/get").header(TENANT, tenant)
+                .principal(bob).contentType(MediaType.APPLICATION_JSON)
+                .content(mapper.writeValueAsString(Map.of("sessionId", session,
+                        "actionId", journal.id))))
+                .andExpect(status().isNotFound());
+        mvc.perform(post(actions + "/" + journal.id + "/responses")
+                .header(TENANT, tenant).principal(bob)
+                .header("Idempotency-Key", UUID.randomUUID().toString())
+                .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isNotFound());
+        mvc.perform(post(WEB_SHELL + "/actions/respond")
+                .header(TENANT, tenant).principal(bob)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(mapper.writeValueAsString(Map.of(
+                        "sessionId", session, "actionId", journal.id,
+                        "idempotencyKey", UUID.randomUUID().toString(),
+                        "response", Map.of("kind", "permission",
+                                "inputRevision", 1,
+                                "policyRevision", "hosted-tool-approval/1",
+                                "optionId", "allow")))))
+                .andExpect(status().isNotFound());
     }
 
     private record Surface(String name,
