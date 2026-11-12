@@ -16,9 +16,8 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
 
+import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.net.URI;
@@ -36,10 +35,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DispatchAuthorizationEvidenceTest {
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void onlyAtomicAdmissionMintsEvidenceAndOriginalResultPreservesIt(boolean jdbc) {
-        var f = fixture(jdbc, "kubernetes-workspace");
+    @Test
+    void onlyAtomicAdmissionMintsEvidenceAndOriginalResultPreservesIt() {
+        var f = fixture("kubernetes-workspace");
         var prepared = f.prepare("original");
         assertNull(prepared.getAuthorizedDispatchGeneration());
         assertFalse(prepared.wasDispatchAuthorizedBefore(Long.MAX_VALUE));
@@ -57,17 +55,16 @@ class DispatchAuthorizationEvidenceTest {
         var settled = f.executions.compareAndSet(authorized,
                 authorized.withResult(Map.of("executionStatus", "success"), 1, Instant.now()), "owner", claim.getDispatchGeneration());
         assertEvidence(settled, claim.getDispatchGeneration(), f.binding.getVersion());
-        ToolExecutionRepository reader = jdbc ? new JdbcToolExecutionRepository(f.source) : f.executions;
+        ToolExecutionRepository reader = new JdbcToolExecutionRepository(f.source);
         assertEvidence(reader.findByExecutionCallId(claim.getExecutionCallId()), claim.getDispatchGeneration(), f.binding.getVersion());
         assertEvidence(reader.findByBinding(f.binding.getBindingId(), f.binding.getGeneration(), null, 100).getFirst(),
                 claim.getDispatchGeneration(), f.binding.getVersion());
         assertEvidence(f.bindings.admitExecution(f.sessions, f.executions, prepared), claim.getDispatchGeneration(), f.binding.getVersion());
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void renewalCancellationUnknownReconciliationAndAbandonmentRetainEvidence(boolean jdbc) {
-        var f = fixture(jdbc, "test-supervisor");
+    @Test
+    void renewalCancellationUnknownReconciliationAndAbandonmentRetainEvidence() {
+        var f = fixture("test-supervisor");
         var authorized = f.authorize(f.claim(f.prepare("original")));
         var renewed = f.executions.renewDispatch(authorized.getExecutionCallId(), "owner",
                 authorized.getDispatchGeneration(), Duration.ofMinutes(5));
@@ -89,10 +86,9 @@ class DispatchAuthorizationEvidenceTest {
         assertEquals(resolved.getResult(), f.executions.findByExecutionCallId(resolved.getExecutionCallId()).getResult());
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void genericCasCannotIntroduceEraseOrChangeEvidenceIncludingForgedExpected(boolean jdbc) {
-        var f = fixture(jdbc, "kubernetes-workspace");
+    @Test
+    void genericCasCannotIntroduceEraseOrChangeEvidenceIncludingForgedExpected() {
+        var f = fixture("kubernetes-workspace");
         var claim = f.claim(f.prepare("original"));
         assertThrows(IllegalArgumentException.class, () -> f.executions.compareAndSet(claim,
                 claim.authorizeDispatch(f.binding.getVersion()), "owner", claim.getDispatchGeneration()));
@@ -108,10 +104,9 @@ class DispatchAuthorizationEvidenceTest {
         assertEvidence(f.executions.findByExecutionCallId(marked.getExecutionCallId()), marked.getDispatchGeneration(), f.binding.getVersion());
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void forgedClaimCannotRetroactivelyAuthorizeAnUnmarkedExecutingOrCancelledRow(boolean jdbc) {
-        var f = fixture(jdbc, "kubernetes-workspace");
+    @Test
+    void forgedClaimCannotRetroactivelyAuthorizeAnUnmarkedExecutingOrCancelledRow() {
+        var f = fixture("kubernetes-workspace");
         var claim = f.claim(f.prepare("legacy"));
         var legacy = f.executions.compareAndSet(claim, claim.withState(ToolExecutionRecord.State.EXECUTING, false),
                 "owner", claim.getDispatchGeneration());
@@ -123,10 +118,9 @@ class DispatchAuthorizationEvidenceTest {
         assertEquals(cancelled.getVersion(), f.executions.findByExecutionCallId(legacy.getExecutionCallId()).getVersion());
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void sealWinnerCannotAuthorizeLateClaimAndUnmarkedOutcomesStayUnmarked(boolean jdbc) {
-        var f = fixture(jdbc, "kubernetes-workspace");
+    @Test
+    void sealWinnerCannotAuthorizeLateClaimAndUnmarkedOutcomesStayUnmarked() {
+        var f = fixture("kubernetes-workspace");
         var claim = f.claim(f.prepare("late"));
         assertNotNull(f.bindings.compareAndSet(f.binding, f.binding.withState(RuntimeBindingRecord.State.DRAINING,
                 f.binding.getLease(), Instant.now()).withDrainRequested(true, Instant.now())));
@@ -135,7 +129,7 @@ class DispatchAuthorizationEvidenceTest {
         var resolved = f.executions.resolveUnknown(unknown, Map.of("executionStatus", "error"), Instant.now());
         assertNull(resolved.getAuthorizedDispatchGeneration());
         assertFalse(resolved.wasDispatchAuthorizedBefore(Long.MAX_VALUE));
-        var other = fixture(jdbc, "test-supervisor");
+        var other = fixture("test-supervisor");
         var prepared = other.prepare("not-started");
         var cancelled = other.executions.requestCancel(prepared.getExecutionCallId(), prepared.getVersion());
         assertTrue(cancelled.isSettled());
@@ -143,32 +137,49 @@ class DispatchAuthorizationEvidenceTest {
     }
 
     @Test
-    void customMemoryRepositoriesPreserveLocalHooksButCannotMintCsiEvidence() {
+    void wrappedRepositoriesCannotBypassAtomicDispatchAdmission() {
         for (String kind : new String[] {"test-supervisor", "kubernetes-workspace"}) {
             for (boolean wrapSessions : new boolean[] {false, true}) {
-                var f = fixture(false, kind);
+                var f = fixture(kind);
                 var claim = f.claim(f.prepare("custom"));
                 var calls = new AtomicInteger();
                 var sessions = wrapSessions ? proxy(RuntimeSessionRepository.class, f.sessions, calls) : f.sessions;
                 var executions = wrapSessions ? f.executions : proxy(ToolExecutionRepository.class, f.executions, calls);
-                if ("kubernetes-workspace".equals(kind)) {
-                    assertEquals("runtime_dispatch_admission_unavailable", assertThrows(RuntimeBrokerException.class,
-                            () -> f.bindings.authorizeDispatch(sessions, executions, claim, "owner", claim.getDispatchGeneration())).getCode());
-                    assertEquals(ToolExecutionRecord.State.DISPATCHING, f.executions.findByExecutionCallId(claim.getExecutionCallId()).getState());
-                    assertEquals(0, calls.get());
-                } else {
-                    var result = f.bindings.authorizeDispatch(sessions, executions, claim, "owner", claim.getDispatchGeneration());
-                    assertEquals(ToolExecutionRecord.State.EXECUTING, result.getState());
-                    assertNull(result.getAuthorizedBindingVersion());
-                    assertEquals(wrapSessions ? 0 : 1, calls.get());
-                }
+                assertThrows(IllegalArgumentException.class,
+                        () -> f.bindings.authorizeDispatch(sessions, executions, claim, "owner", claim.getDispatchGeneration()));
+                assertEquals(ToolExecutionRecord.State.DISPATCHING,
+                        f.executions.findByExecutionCallId(claim.getExecutionCallId()).getState());
+                assertEquals(0, calls.get());
             }
         }
     }
 
     @Test
+    void customRepositoryDefaultCannotMintDispatchEvidence() {
+        var f = fixture("kubernetes-workspace");
+        var claim = f.claim(f.prepare("custom-default"));
+        RuntimeBindingRepository custom = (RuntimeBindingRepository) Proxy.newProxyInstance(
+                RuntimeBindingRepository.class.getClassLoader(),
+                new Class<?>[] {RuntimeBindingRepository.class},
+                (proxy, method, args) -> {
+                    if (method.isDefault()) {
+                        return InvocationHandler.invokeDefault(proxy, method, args);
+                    }
+                    try {
+                        return method.invoke(f.bindings, args);
+                    } catch (InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                });
+        assertEquals("runtime_dispatch_admission_unavailable", assertThrows(RuntimeBrokerException.class,
+                () -> custom.authorizeDispatch(f.sessions, f.executions, claim, "owner", claim.getDispatchGeneration())).getCode());
+        assertEquals(ToolExecutionRecord.State.DISPATCHING,
+                f.executions.findByExecutionCallId(claim.getExecutionCallId()).getState());
+    }
+
+    @Test
     void alteredSchemaIsRefusedWithoutBackfillingAuthorizationEvidence() throws Exception {
-        var f = fixture(true, "test-supervisor");
+        var f = fixture("test-supervisor");
         var prepared = f.prepare("legacy");
         try (var connection = f.source.getConnection(); var statement = connection.createStatement()) {
             statement.execute("ALTER TABLE ma_tool_execution DROP COLUMN authorized_dispatch_generation");
@@ -191,7 +202,7 @@ class DispatchAuthorizationEvidenceTest {
     void persistedMalformedEvidenceFailsDecode() throws Exception {
         for (String mutation : new String[] {"authorized_binding_version = NULL", "authorized_dispatch_generation = 0",
                 "authorized_dispatch_generation = 2", "authorized_binding_version = -1", "execution_state = 'DISPATCHING'"}) {
-            var f = fixture(true, "test-supervisor");
+            var f = fixture("test-supervisor");
             var marked = f.authorize(f.claim(f.prepare("corrupt")));
             try (var connection = f.source.getConnection(); var statement = connection.createStatement()) {
                 assertEquals(1, statement.executeUpdate("UPDATE ma_tool_execution SET " + mutation));
@@ -227,23 +238,13 @@ class DispatchAuthorizationEvidenceTest {
         }));
     }
 
-    private static Fixture fixture(boolean jdbc, String kind) {
-        JdbcDataSource source = null;
-        RuntimeBindingRepository bindings;
-        RuntimeSessionRepository sessions;
-        ToolExecutionRepository executions;
-        if (jdbc) {
-            source = new JdbcDataSource();
-            source.setURL("jdbc:h2:mem:authorization-" + UUID.randomUUID() + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
-            bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
-            sessions = new JdbcRuntimeSessionRepository(source);
-            executions = new JdbcToolExecutionRepository(source);
-        } else {
-            bindings = new InMemoryRuntimeBindingRepository();
-            sessions = new InMemoryRuntimeSessionRepository();
-            executions = new InMemoryToolExecutionRepository();
-        }
+    private static Fixture fixture(String kind) {
+        JdbcDataSource source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:authorization-" + UUID.randomUUID() + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        RuntimeBindingRepository bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+        RuntimeSessionRepository sessions = new JdbcRuntimeSessionRepository(source);
+        ToolExecutionRepository executions = new JdbcToolExecutionRepository(source);
         String id = UUID.randomUUID().toString();
         var scope = new RuntimeScope(id, "workspace", "7", "/workspace", "sha256:" + "a".repeat(64), "workspace");
         var created = bindings.findOrCreate(new RuntimeProvisionRequest(scope, null, kind, "storage"));

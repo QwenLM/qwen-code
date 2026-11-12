@@ -4,6 +4,10 @@ Channels let you interact with a Qwen Code agent from messaging platforms like T
 
 Code-hosting platforms (starting with [GitHub](./github)) and authenticated workspace accounts (starting with [DingTalk Workspace](./dws)) are also supported through channels. [Email](./email) connects a dedicated mailbox through IMAP and SMTP.
 
+For sending results without a conversational bot, [DingTalk Webhook Sending](./dingtalk-webhook)
+uses a custom robot's configured group destination. It shares the daemon's
+Channel delivery path and does not listen for incoming messages.
+
 ## How It Works
 
 When you run `qwen channel start`, Qwen Code:
@@ -51,7 +55,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 | Option              | Required         | Description                                                                                                                                                                                                                                                                                                                                           |
 | ------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`              | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dws`, `wecom`, `wecom-callback`, `feishu`, `github`, `gitlab`, `email`, or a custom type from an extension (see [Plugins](./plugins))                                                                                                                                                          |
+| `type`              | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dingtalk-webhook`, `dws`, `wecom`, `wecom-callback`, `feishu`, `github`, `gitlab`, `email`, or a custom type from an extension (see [Plugins](./plugins))                                                                                                                                      |
 | `token`             | See description  | Required for Telegram (bot token) and WeCom Callback (verification token). Supports `$ENV_VAR` syntax. See [WeCom Callback](./wecom-callback) for application credentials                                                                                                                                                                             |
 | `clientId`          | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                                                                                                                                                                                                          |
 | `clientSecret`      | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                                                                                                                                                                                                   |
@@ -376,7 +380,7 @@ All group settings use field-by-field inheritance: the specific group, then `"*"
 
 `pairing` is deliberately not a `senders` value: pairing approvals are stored per user, so approving someone through a group message would also unlock their direct messages. Use `groupPolicy: "pairing"` to admit an entire group instead.
 
-On the `github` and `gitlab` channels all inbound traffic is group traffic, so only `groupPolicy` and group member settings govern admission — see those channels' Security notes before using it on a public repository or project. Under `sessionScope: "single"` direct messages and groups share one conversation, so opening a group also exposes direct-message history to its members.
+On the `github` and `gitlab` channels all inbound traffic is group traffic, so only `groupPolicy` and group member settings govern admission — see those channels' Security notes before using it on a public repository or project. The `email` channel is the opposite: every delivery is a direct conversation, so `groupPolicy` and `groups` never govern it and the Web Shell editor hides those controls. Under `sessionScope: "single"` direct messages and groups share one conversation, so opening a group also exposes direct-message history to its members.
 
 In the Web Shell channel editor, **Who can talk in groups** and **Allowed group member IDs** edit `groups["*"]`, and **Session operators** edits `operators`. When `senders` is unset, the editor shows its effective default and writes nothing until you pick a value. On `github`, the editor also shows one row per allowlisted repository for that repository's `senders`, `allowedUsers`, and `requireMention` — see [GitHub](./github.md#editing-from-the-web-shell). Other per-group overrides (`dispatchMode`, `groupHistoryLimit`, and per-group `requireMention` on chat platforms) and an explicitly empty `"operators": []` are set in `settings.json`; saving from the editor keeps them.
 

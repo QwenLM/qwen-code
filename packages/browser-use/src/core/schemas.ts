@@ -38,8 +38,12 @@ const matcher = z.union([
 
 function locatorStepSchema(depth: number): z.ZodType<LocatorStep> {
   if (depth > 32) return z.never();
+  // Build the depth chain eagerly. A z.lazy() edge here leaves the shared
+  // nested-steps branch unresolved after the first parse, and Zod 4's
+  // recursive-schema memoizer then re-walks that shared subgraph on every
+  // later parse, multiplying by the four branches that embed it.
   const nestedSteps = z
-    .array(z.lazy(() => locatorStepSchema(depth + 1)))
+    .array(locatorStepSchema(depth + 1))
     .min(1)
     .max(32);
   const step = z.discriminatedUnion('kind', [
