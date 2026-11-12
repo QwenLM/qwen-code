@@ -2704,6 +2704,37 @@ describe('startSessionPrRefreshTimer', () => {
     }
   });
 
+  it('drainNow skips an untrusted non-primary workspace', async () => {
+    // The tick only watches trusted-or-primary workspaces. An on-demand drain
+    // must apply the same filter: the ledger runs git in the checkout, and an
+    // untrusted non-primary is never observed in the first place.
+    const untrusted = timerRuntime('un', untrustedCwd, false, false);
+    const primary = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([primary, untrusted]);
+    const scanBindings = vi.fn(async () => ({ bindings: [], partial: false }));
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      observationEnabled: true,
+      getPrDrainDeps: () => ({
+        watchDir: untrustedCwd,
+        locks: new PathMutexRegistry(),
+        scanBindings,
+        resolveRuntime: () => untrusted,
+        isSessionLive: () => false,
+        wakeSession: async () => ({ kind: 'unavailable' as const }),
+        admitPrompt: async () => ({ deduplicated: false }),
+        readPushedHeads: async () => undefined,
+      }),
+    });
+    try {
+      await handle?.drainNow(untrustedCwd);
+      expect(scanBindings).not.toHaveBeenCalled();
+    } finally {
+      handle?.dispose();
+    }
+  });
+
   it('drainNow is inert without drain deps or a registered workspace', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);

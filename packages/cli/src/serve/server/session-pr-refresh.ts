@@ -978,7 +978,10 @@ export function startSessionPrRefreshTimer(deps: {
       const runtime = deps.workspaceRegistry
         .listAll()
         .find((candidate) => candidate.workspaceCwd === workspaceCwd);
-      if (!runtime) return;
+      // Same trust filter as the tick's watch workspaces: an untrusted
+      // non-primary is never observed, so it must not be drained on demand
+      // either — the ledger would run git in its checkout.
+      if (!runtime || !(runtime.trusted || runtime.primary)) return;
       await runPrWatchDrainTick([runtime], drainDeps, prDrainState, true);
     },
   };
