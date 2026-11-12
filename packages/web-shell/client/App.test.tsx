@@ -1012,6 +1012,10 @@ const {
         manageLiveState?: boolean;
         onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
       } | null,
+      latestChannelsManagerProps: null as {
+        clientId?: string;
+        sessionWorkspaceCwd?: string;
+      } | null,
       latestToolApprovalDisabled: false,
       latestToolApprovalKeyboardActive: null as boolean | null,
       toolApprovalKeyboardActiveHistory: [] as Array<boolean | null>,
@@ -2487,8 +2491,15 @@ vi.doMock('./components/SessionOverviewPanel', async () => {
 vi.doMock('./components/channels/ChannelsManagerPage', async () => {
   const React = await import('react');
   return {
-    ChannelsManagerPage: () =>
-      React.createElement('div', { 'data-testid': 'channels-manager-page' }),
+    ChannelsManagerPage: (props: {
+      clientId?: string;
+      sessionWorkspaceCwd?: string;
+    }) => {
+      testState.latestChannelsManagerProps = props;
+      return React.createElement('div', {
+        'data-testid': 'channels-manager-page',
+      });
+    },
   };
 });
 vi.doMock('./components/channels/ChannelEventsPage', async () => {
@@ -12877,6 +12888,7 @@ beforeEach(() => {
   testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestSessionOverviewProps = null;
+  testState.latestChannelsManagerProps = null;
   testState.latestToolApprovalKeyboardActive = null;
   testState.toolApprovalKeyboardActiveHistory = [];
   testState.latestToolApprovalPlanTodos = [];
@@ -38844,6 +38856,46 @@ describe('App session callbacks', () => {
     expect(
       panel?.querySelector('[data-testid="channels-manager-page"]'),
     ).not.toBeNull();
+  });
+
+  it("attributes channel QR logins to the live session's tab", async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-channels"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestChannelsManagerProps).not.toBeNull();
+    expect(testState.latestChannelsManagerProps?.clientId).toBe('client-1');
+    expect(testState.latestChannelsManagerProps?.sessionWorkspaceCwd).toBe(
+      '/tmp/project',
+    );
+  });
+
+  it('withholds the tab id once the session is cleared', async () => {
+    // The terminal session paths keep clientId and workspaceCwd while dropping
+    // sessionId, so the page's workspace comparison still matches. Only the
+    // session gate keeps a dead id off the routes.
+    mockConnection.sessionId = undefined;
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-channels"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestChannelsManagerProps).not.toBeNull();
+    expect(testState.latestChannelsManagerProps?.sessionWorkspaceCwd).toBe(
+      '/tmp/project',
+    );
+    expect(testState.latestChannelsManagerProps?.clientId).toBeUndefined();
   });
 
   it('shadow-isolates the unified plugin manager body when plugins is enabled', async () => {
