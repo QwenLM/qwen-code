@@ -212,11 +212,11 @@ final class TerminalHolds {
                     } finally {
                         context.unlock();
                     }
-                    // The terminal's dedicated Runtime Session has no other
-                    // work once its hold settles; release it so per-terminal
-                    // sessions do not accumulate for the life of the Runtime.
-                    return broker.release(harness, runtime)
-                            .thenApply(ignored -> settled);
+                    // Leave the terminal's Runtime Session acquirable: after a
+                    // transient connect failure the browser retries the same
+                    // deterministic id, and a RELEASED row is not re-acquirable.
+                    // The Session-close drain owns its eventual release.
+                    return CompletableFuture.completedFuture(settled);
                 }))).exceptionally(error -> {
                     // A follow-up abandon after the session was released is a
                     // no-op: there is no active hold left to discharge.

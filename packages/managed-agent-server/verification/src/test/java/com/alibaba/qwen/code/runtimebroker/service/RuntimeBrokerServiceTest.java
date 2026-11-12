@@ -2146,13 +2146,20 @@ class RuntimeBrokerServiceTest {
             ToolExecutionRecord abandoned = join(fixture.service.abandonTerminalHold(
                     "harness", "term-1", hold.getExecutionCallId()));
             assertEquals(ToolExecutionRecord.State.SETTLED, abandoned.getState());
-            // The terminal's dedicated Runtime Session is released with the
-            // hold, not left READY to accumulate for the life of the Runtime.
-            assertEquals(RuntimeSessionRecord.State.RELEASED, fixture.sessionRepository
-                    .findById(WORKSPACE_SCOPE, "terminal-" + TERMINAL_KEY).getState());
-            // Abandoning again is a no-op: no active hold remains.
+            // The terminal's Runtime Session stays acquirable after abandon: a
+            // retry following a transient connect failure re-admits the same
+            // deterministic id. Releasing it here would leave a RELEASED row
+            // that admit can never reopen, wedging the terminal for the life of
+            // the Harness Session.
+            TerminalHoldAdmission retry = join(fixture.service.admitTerminalHold(
+                    "harness", "term-1"));
+            assertTrue(retry.created());
+            assertEquals(ToolExecutionRecord.State.PREPARED, retry.hold().getState());
+            // Abandoning the original settled hold again is a no-op.
             assertNull(join(fixture.service.abandonTerminalHold(
                     "harness", "term-1", hold.getExecutionCallId())));
+            join(fixture.service.abandonTerminalHold(
+                    "harness", "term-1", retry.hold().getExecutionCallId()));
             assertTrue(join(fixture.service.release("harness", "terminal-" + TERMINAL_KEY)));
         }
     }
