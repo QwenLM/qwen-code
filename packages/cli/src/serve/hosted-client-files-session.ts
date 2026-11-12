@@ -21,6 +21,11 @@ import type { FunctionDeclaration } from '@google/genai';
 export const CLIENT_FILES_CONNECT_TIMEOUT_MS = 25_000;
 export const CLIENT_FILES_REQUEST_TIMEOUT_MS = 600_000;
 export const CLIENT_FILES_MAX_RESULT_BYTES = 60 * 1024;
+// Mirror the durable MCP runtime's catalog bounds so a browser-registered
+// server cannot silently truncate a paginated tools/list or install an
+// unbounded catalog that every Turn re-advertises to the model.
+export const CLIENT_FILES_MAX_CATALOG_PAGES = 64;
+export const CLIENT_FILES_MAX_CATALOG_BYTES = 16 * 1024;
 
 export interface HostedClientFilesRegistration {
   readonly serverId: string;
@@ -107,9 +112,42 @@ export class HostedClientFilesSession {
       await client.connect(transport, {
         timeout: CLIENT_FILES_CONNECT_TIMEOUT_MS,
       });
-      const listed = await client.listTools(undefined, {
-        timeout: CLIENT_FILES_REQUEST_TIMEOUT_MS,
-      });
+      // Follow nextCursor up to the house page cap and enforce a catalog byte
+      // cap before installing, mirroring the durable MCP runtime: a paginated
+      // tools/list must not be silently truncated, and an oversized catalog
+      // fails the registration closed instead of inflating every Turn.
+      const tools: HostedClientFilesTool[] = [];
+      const cursors = new Set<string>();
+      let cursor: string | undefined;
+      do {
+        if (cursors.size >= CLIENT_FILES_MAX_CATALOG_PAGES) {
+          throw new Error('Client files catalog exceeds the page bound.');
+        }
+        const listed = await client.listTools(cursor ? { cursor } : undefined, {
+          timeout: CLIENT_FILES_REQUEST_TIMEOUT_MS,
+        });
+        for (const tool of listed.tools) {
+          const mapped: HostedClientFilesTool = {
+            name: tool.name,
+            ...(tool.description !== undefined
+              ? { description: tool.description }
+              : {}),
+            inputSchema: (tool.inputSchema ?? {}) as Record<string, unknown>,
+          };
+          if (
+            Buffer.byteLength(JSON.stringify([...tools, mapped])) >
+            CLIENT_FILES_MAX_CATALOG_BYTES
+          ) {
+            throw new Error('Client files catalog exceeds the size bound.');
+          }
+          tools.push(mapped);
+        }
+        cursor = listed.nextCursor;
+        if (cursor && cursors.has(cursor)) {
+          throw new Error('Client files catalog cursor cycle.');
+        }
+        if (cursor) cursors.add(cursor);
+      } while (cursor);
       // A close()/unregister() or a newer generation may have landed while
       // discovery was in flight; never install a client the session no longer
       // owns. The epoch check invalidates a registration that was already
@@ -122,13 +160,6 @@ export class HostedClientFilesSession {
         await client.close().catch(() => {});
         return this.catalog.tools.length;
       }
-      const tools: HostedClientFilesTool[] = listed.tools.map((tool) => ({
-        name: tool.name,
-        ...(tool.description !== undefined
-          ? { description: tool.description }
-          : {}),
-        inputSchema: (tool.inputSchema ?? {}) as Record<string, unknown>,
-      }));
       const previous = this.client;
       this.client = client;
       this.registration = registration;

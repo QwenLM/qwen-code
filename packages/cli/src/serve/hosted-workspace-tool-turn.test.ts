@@ -14046,6 +14046,74 @@ describe('client files tool execution', () => {
     await turn.finish();
   });
 
+  it('refuses a declared client-files call revoked mid-turn with the registration-inactive message', async () => {
+    // The resident guard runs before prepareRequests; a registration revoked
+    // between declaration and dispatch must be refused with the accurate
+    // registration-inactive text, not the misleading file-tool message (which
+    // would send the model retrying read_file against the Workspace).
+    broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+    const invoke = vi.fn(async () => ({ content: [] }));
+    let active = true;
+    const files = clientFilesSession(invoke, (name) =>
+      active && name === clientFilesToolName ? browserTool : undefined,
+    );
+    turn = clientFilesTurn(files);
+    const advertised = (
+      await turn.declarations(new AbortController().signal)
+    ).map((tool) => tool.name);
+    expect(advertised).toContain(clientFilesToolName);
+    active = false;
+    const responses = await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(responses)).toContain(
+      'The client filesystem registration is no longer active.',
+    );
+    expect(JSON.stringify(responses)).not.toContain(
+      'Resident Workspace supports only',
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    await turn.consumeResults();
+    await turn.finish();
+  });
+
+  it('fires PostToolUse for a client-files call outcome', async () => {
+    // The client-files accept path commits a durable tool_result, so the
+    // outcome hook must fire (PreToolUse already does). Removing the
+    // client-files arm from the dispatched disjunction turns this red.
+    const fire = vi.fn<HostedHookSession['fire']>(async () => ({}));
+    const invoke = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'file content' }],
+    }));
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      { settings: { mode: 'yolo', timeoutMs: 60_000 }, waiters },
+      { clientFiles: clientFilesSession(invoke), hooks: hookSession(fire) },
+    );
+    await turn.declarations(new AbortController().signal);
+    await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    const events = fire.mock.calls.map(([event]) => event);
+    expect(events).toContain(HookEventName.PreToolUse);
+    expect(events).toContain(HookEventName.PostToolUse);
+    await turn.consumeResults();
+    await turn.finish();
+  });
+
   it('advertises the registration tools on the main and read profiles', async () => {
     // The resident-profile push is witnessed above; the main and read-profile
     // declaration pushes must also hand the registration's tools to the model.

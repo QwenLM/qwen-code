@@ -419,20 +419,58 @@ export class ManagedClientFilesBridge {
     }
     const response = await this.options.server.handle(request);
     if (signal.aborted) return;
-    await this.options.fetch(this.url('responses'), {
-      method: 'POST',
-      headers: this.headers(true),
-      body: JSON.stringify({
-        sessionId: this.options.sessionId,
-        generation,
-        connectionId,
-        rpcRequestId: payload.requestId,
-        ...(response !== undefined
-          ? { responseJson: JSON.stringify(response) }
-          : { errorCode: 'client_files_offline' }),
-      }),
-      signal,
-    });
+    const post = (body: Record<string, unknown>) =>
+      this.options.fetch(this.url('responses'), {
+        method: 'POST',
+        headers: this.headers(true),
+        body: JSON.stringify({
+          sessionId: this.options.sessionId,
+          generation,
+          connectionId,
+          rpcRequestId: payload.requestId,
+          ...body,
+        }),
+        signal,
+      });
+    const posted = await post(
+      response !== undefined
+        ? { responseJson: JSON.stringify(response) }
+        : { errorCode: 'client_files_offline' },
+    );
+    if (!posted.ok) {
+      // A refused answer must never be silently dropped: the queued request
+      // would otherwise settle only at its TTL while the panel stays connected.
+      const refusal = (await posted.json().catch(() => ({}))) as {
+        code?: string;
+      };
+      if (refusal.code === 'client_files_payload_too_large') {
+        // The result exceeded the relay's payload bound. Deliver a small
+        // isError result so the model learns to page with offset/limit instead
+        // of receiving nothing; the bound is server-side, so keep this tiny.
+        const bounded = await post({
+          responseJson: JSON.stringify({
+            jsonrpc: '2.0',
+            id: request.id ?? null,
+            result: {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: 'The client file result exceeded the relay payload limit. Request a smaller range with offset/limit.',
+                },
+              ],
+            },
+          }),
+        });
+        if (!bounded.ok) {
+          throw new Error(
+            `client files answer refused with HTTP ${bounded.status}`,
+          );
+        }
+        return;
+      }
+      throw new Error(`client files answer refused with HTTP ${posted.status}`);
+    }
   }
 }
 

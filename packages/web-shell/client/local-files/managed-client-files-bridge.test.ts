@@ -35,6 +35,9 @@ interface PeerOptions {
    * replaces the binding after register settled, so only the poll-time identity
    * fence (not the reply-time one) can catch it. */
   statusConnectionId?: string;
+  /** Refuse any /responses POST whose responseJson exceeds this many bytes with
+   * 400 client_files_payload_too_large, mirroring the relay's requirePayloadSize. */
+  payloadBound?: number;
 }
 
 function startPeer(opts: PeerOptions = {}): Promise<Peer> {
@@ -137,6 +140,16 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
         responses.push(parsed);
         resolveFirst(parsed);
         resolveRegister?.();
+        const responseJson = parsed.responseJson as string | undefined;
+        if (
+          opts.payloadBound !== undefined &&
+          responseJson !== undefined &&
+          responseJson.length > opts.payloadBound
+        ) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ code: 'client_files_payload_too_large' }));
+          return;
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ settled: true }));
         return;
@@ -379,6 +392,41 @@ describe('ManagedClientFilesBridge', () => {
     expect(handled).toEqual([]);
     expect(p.responses).toEqual([]);
     expect(p.streamOpens).toBe(0);
+  });
+
+  it('a payload-too-large answer is not silently dropped', async () => {
+    // The relay refuses the oversized answer with 400 payload_too_large; the
+    // bridge must deliver a small isError result (so the model can page with
+    // offset/limit) instead of letting the request expire at its TTL while the
+    // panel stays connected. Removing the !posted.ok branch leaves a single
+    // refused POST and turns this red.
+    const p = await peer({ payloadBound: 61_440 });
+    const b = bridge(p, {
+      async handle(message) {
+        return {
+          jsonrpc: '2.0',
+          id: message.id ?? null,
+          result: { content: [{ type: 'text', text: 'x'.repeat(200_000) }] },
+        };
+      },
+    });
+    void b.connect();
+    await vi.waitFor(() => expect(p.registered.length).toBe(1));
+    p.push('r1', {
+      jsonrpc: '2.0',
+      id: 'r1',
+      method: 'tools/call',
+      params: { name: 'read_file', arguments: { path: 'big.txt' } },
+    });
+    // The oversized answer is refused; the bridge must re-post a small isError
+    // result rather than drop it silently (a single refused POST = red).
+    await vi.waitFor(() =>
+      expect(p.responses.length).toBeGreaterThanOrEqual(2),
+    );
+    const bounded = JSON.parse(p.responses[1].responseJson as string) as {
+      result?: { isError?: boolean };
+    };
+    expect(bounded.result?.isError).toBe(true);
   });
 
   it('disconnect during a pending register ends stopped, not failed', async () => {

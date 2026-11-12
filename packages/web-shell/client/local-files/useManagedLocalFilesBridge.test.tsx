@@ -37,7 +37,10 @@ vi.mock('./local-directory.js', () => ({
 }));
 
 import { useManagedLocalFilesBridge } from './useManagedLocalFilesBridge.js';
-import { pickDirectoryHandle } from './pick-directory.js';
+import {
+  ensureReadwritePermission,
+  pickDirectoryHandle,
+} from './pick-directory.js';
 import type { ManagedFetch } from './managed-client-files-bridge.js';
 
 const peerFetch = ((url: string, init?: RequestInit) =>
@@ -405,5 +408,139 @@ describe('useManagedLocalFilesBridge', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(registerCalls).toBe(0);
     expect(storeSpies.save).not.toHaveBeenCalled();
+  });
+
+  it('does not register when pagehide fires while the picker is open', async () => {
+    const peer = await startPeer();
+    servers.push(peer.server);
+    let registerCalls = 0;
+    const countingFetch = ((url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/client-files/register')) registerCalls += 1;
+      return nodeFetch(url, init);
+    }) as unknown as ManagedFetch;
+    let releasePicker!: (value: {
+      kind: 'picked';
+      handle: FileSystemDirectoryHandle;
+    }) => void;
+    const pickerGate = new Promise<{
+      kind: 'picked';
+      handle: FileSystemDirectoryHandle;
+    }>((resolve) => {
+      releasePicker = resolve;
+    });
+    vi.mocked(pickDirectoryHandle).mockImplementationOnce(
+      () => pickerGate as ReturnType<typeof pickDirectoryHandle>,
+    );
+    const listeners = new Map<string, () => void>();
+    const fakeWin = {
+      location: { origin: 'http://localhost' },
+      addEventListener: (event: string, handler: () => void) =>
+        listeners.set(event, handler),
+      removeEventListener: (event: string) => listeners.delete(event),
+    } as unknown as Window;
+    const { result } = renderHook(() =>
+      useManagedLocalFilesBridge({
+        sessionId: 'session-1',
+        baseUrl: peer.baseUrl,
+        fetch: countingFetch,
+        win: fakeWin,
+      }),
+    );
+    act(() => {
+      void result.current.connect();
+    });
+    // The picker is still open; closing the tab must bump the generation (like
+    // disconnect and the session cleanup) so the parked connect() bails before
+    // saving a grant or registering a binding the pagehide tried to release.
+    act(() => {
+      listeners.get('pagehide')?.();
+    });
+    releasePicker({ kind: 'picked', handle: fakeHandle });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(registerCalls).toBe(0);
+    expect(storeSpies.save).not.toHaveBeenCalled();
+  });
+
+  it('reaches the picker when a peer tab disconnected the stored grant', async () => {
+    const peer = await startPeer();
+    servers.push(peer.server);
+    vi.mocked(ensureReadwritePermission).mockResolvedValue({
+      state: 'granted',
+      requested: false,
+    });
+    storeSpies.load.mockResolvedValue(fakeHandle);
+    const fakeWin = {
+      location: { origin: 'http://localhost' },
+    } as unknown as Window;
+    const { result } = renderHook(() =>
+      useManagedLocalFilesBridge({
+        sessionId: 'session-1',
+        baseUrl: peer.baseUrl,
+        fetch: peerFetch,
+        win: fakeWin,
+      }),
+    );
+    // Let the restore retain the granted handle.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(vi.mocked(pickDirectoryHandle)).not.toHaveBeenCalled();
+    // A peer tab disconnects: the store no longer holds the grant, so Connect
+    // must drop the retained handle and reach the picker instead of re-registering.
+    storeSpies.load.mockResolvedValue(
+      undefined as unknown as FileSystemDirectoryHandle,
+    );
+    act(() => {
+      void result.current.connect();
+    });
+    await waitFor(() =>
+      expect(vi.mocked(pickDirectoryHandle)).toHaveBeenCalled(),
+    );
+    await act(async () => {
+      await result.current.disconnect();
+    });
+  });
+
+  it('does not register a retained handle whose permission lapsed to prompt', async () => {
+    const peer = await startPeer();
+    servers.push(peer.server);
+    let registerCalls = 0;
+    const countingFetch = ((url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/client-files/register')) registerCalls += 1;
+      return nodeFetch(url, init);
+    }) as unknown as ManagedFetch;
+    vi.mocked(ensureReadwritePermission).mockResolvedValue({
+      state: 'granted',
+      requested: false,
+    });
+    storeSpies.load.mockResolvedValue(fakeHandle);
+    const fakeWin = {
+      location: { origin: 'http://localhost' },
+    } as unknown as Window;
+    const { result } = renderHook(() =>
+      useManagedLocalFilesBridge({
+        sessionId: 'session-1',
+        baseUrl: peer.baseUrl,
+        fetch: countingFetch,
+        win: fakeWin,
+      }),
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    // The grant is revoked while the tab stays open: Connect must not register
+    // on the retained handle nor report connected.
+    vi.mocked(ensureReadwritePermission).mockResolvedValue({
+      state: 'prompt',
+      requested: false,
+    });
+    act(() => {
+      void result.current.connect();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(registerCalls).toBe(0);
+    expect(result.current.status.phase).not.toBe('connected');
   });
 });

@@ -162,6 +162,10 @@ export function useManagedLocalFilesBridge(
   useEffect(() => {
     if (!win || typeof win.addEventListener !== 'function') return;
     const onPageHide = () => {
+      // Bump the generation like disconnect() and the session cleanup do, so a
+      // connect() still parked in the picker fails its stale() checkpoints and
+      // cannot register a binding the closed tab is trying to release.
+      generationRef.current += 1;
       const bridge = bridgeRef.current;
       // Clear the ref so a later Connect cannot call disconnect() a second
       // time on the already-disconnected bridge (an identity-less teardown).
@@ -187,6 +191,28 @@ export function useManagedLocalFilesBridge(
       const generation = generationRef.current;
       const stale = () => generationRef.current !== generation;
       let handle = handleRef.current;
+      if (handle) {
+        // Reuse preconditions, mirroring the daemon hook: the store must still
+        // hold the grant (a peer tab may have disconnected it) and the browser
+        // permission must still be granted (it can be revoked while the tab
+        // stays open). Trusting handleRef outright would register a directory
+        // the user just disconnected or no longer allows.
+        const stored = await storeRef.current?.load();
+        if (stale()) return;
+        if (!stored) {
+          handleRef.current = undefined;
+          handle = undefined;
+        } else {
+          const permission = await ensureReadwritePermission(handle);
+          if (stale()) return;
+          if (permission.state !== 'granted') {
+            // Do not register on a handle the browser no longer allows, and do
+            // not report connected; surface the need for a fresh gesture.
+            setStatus(IDLE);
+            return;
+          }
+        }
+      }
       if (!handle) {
         const picked = await pickDirectoryHandle(win);
         if (stale()) return;

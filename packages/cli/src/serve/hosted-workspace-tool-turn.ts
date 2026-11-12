@@ -3389,6 +3389,11 @@ export class HostedWorkspaceToolTurn {
             callId: call.callId,
           })) ||
         intents.some((entry) => entry.payload['ordinal'] === ordinal) ||
+        // A client-files call commits its own durable tool_result on the
+        // harness-local accept path (no broker dispatch), so the declared
+        // request is its own dispatch evidence — like skill/todo_write/team
+        // tools. Not gated on success so PostToolUseFailure fires too.
+        this.clientFilesDeclaredNames.has(call.name) ||
         // A team tool commits only to the journal and answers a refusal as
         // its error, so its committed answer is its own dispatch evidence.
         (((call.name === 'skill' && this.skills !== undefined) ||
@@ -5165,7 +5170,9 @@ export class HostedWorkspaceToolTurn {
           (this.publicPlanMode && call.name === 'exit_plan_mode') ||
           this.clientFiles?.resolve(call.name)
             ? undefined
-            : 'Resident Workspace supports only read_file, write_file and edit.',
+            : this.clientFilesDeclaredNames.has(call.name)
+              ? 'The client filesystem registration is no longer active.'
+              : 'Resident Workspace supports only read_file, write_file and edit.',
         ),
         calls.map(() => 'denied'),
         parts,

@@ -15,6 +15,11 @@ import {
 
 interface Script {
   tools?: Array<{ name: string; description?: string; inputSchema?: object }>;
+  /** Paginated tools/list: one entry per page; the peer answers the page for the
+   * request cursor and sets nextCursor to the following page index. */
+  listPages?: Array<{
+    tools: Array<{ name: string; description?: string; inputSchema?: object }>;
+  }>;
   resultText?: string;
   refuseInitialize?: boolean;
   /** JSON-RPC error answered to tools/call, e.g. the relay offline error. */
@@ -95,6 +100,23 @@ function startPeer(script: Script): Promise<{ server: Server; url: string }> {
         if (script.listGate) await script.listGate;
         if (script.listError) {
           replyError({ code: -32000, message: 'client_files_offline' });
+          return;
+        }
+        if (script.listPages) {
+          const cursor = (message.params as { cursor?: string } | undefined)
+            ?.cursor;
+          const pageIndex = cursor ? Number.parseInt(cursor, 10) : 0;
+          const page = script.listPages[pageIndex];
+          reply({
+            tools: (page?.tools ?? []).map((tool) => ({
+              name: tool.name,
+              description: tool.description,
+              inputSchema: tool.inputSchema ?? { type: 'object' },
+            })),
+            ...(pageIndex + 1 < script.listPages.length
+              ? { nextCursor: String(pageIndex + 1) }
+              : {}),
+          });
           return;
         }
         reply({
@@ -192,6 +214,43 @@ describe('HostedClientFilesSession', () => {
     expect(declarations[0].description).toContain('read_file');
     expect(files.resolve(declarations[0]!.name!)?.name).toBe('read_file');
     expect(files.catalogs()[0].serverId).toBe('local-files');
+  });
+
+  it('follows tools/list pagination instead of truncating the catalog', async () => {
+    const url = await peer({
+      listPages: [
+        { tools: [{ name: 'read_file' }] },
+        { tools: [{ name: 'write_file' }] },
+      ],
+    });
+    const files = session();
+    const count = await files.register({
+      serverId: 'local-files',
+      generation: 1,
+      url,
+      token: 't',
+    });
+    expect(count).toBe(2);
+    expect(files.catalogs()[0].tools.map((tool) => tool.name)).toEqual([
+      'read_file',
+      'write_file',
+    ]);
+  });
+
+  it('refuses a catalog over the size bound instead of installing it', async () => {
+    const url = await peer({
+      tools: [{ name: 'read_file', description: 'x'.repeat(20_000) }],
+    });
+    const files = session();
+    await expect(
+      files.register({
+        serverId: 'local-files',
+        generation: 1,
+        url,
+        token: 't',
+      }),
+    ).rejects.toThrow('size bound');
+    expect(files.active).toBe(false);
   });
 
   it('invokes a browser tool and returns its result', async () => {

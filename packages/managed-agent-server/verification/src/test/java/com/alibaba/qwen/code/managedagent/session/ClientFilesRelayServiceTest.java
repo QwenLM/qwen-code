@@ -61,7 +61,10 @@ class ClientFilesRelayServiceTest {
                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
         properties = new ManagedAgentProperties();
         properties.getClientFiles().setEnabled(true);
-        properties.getClientFiles().setRequestTtl(Duration.ofMillis(300));
+        // The production default window: a short global TTL made any stall past
+        // it between mcp() and the drain expire the row and flake the suite under
+        // load. Only the expiry test needs a short TTL, and sets it itself.
+        properties.getClientFiles().setRequestTtl(Duration.ofSeconds(25));
         properties.getClientFiles().setRelayUrl("http://127.0.0.1:4170");
         agentService = mock(ManagedAgentService.class);
         workspaces = mock(ManagedWorkspaceRegistry.class);
@@ -244,6 +247,10 @@ class ClientFilesRelayServiceTest {
 
     @Test
     void mcpExpiresToTheStructuredOfflineError() throws Exception {
+        // This is the one test that needs a short TTL so the request expires
+        // within the assertion window; the rest of the suite runs on the
+        // production 25 s window set in setup.
+        properties.getClientFiles().setRequestTtl(Duration.ofMillis(300));
         Registration registration = service.register(tenant, ACTOR, session, CONNECTION);
         String answer = service.mcp(tenant, session, registration.token(), request("9"))
                 .get(5, TimeUnit.SECONDS);
