@@ -918,6 +918,9 @@ function ManagedSessionsContent({
     pendingElsewhereIntent.current = undefined;
     if (intent.action === 'retry') void submit();
     else discardPending();
+    // submit/discardPending are declared in this render and act on the record
+    // the deps above identify; re-running for their identity would be noise.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, pendingHere, sessionId]);
 
   // The Discard button unmounts itself, dropping focus to <body>: land it on
@@ -1615,8 +1618,7 @@ function ManagedSessionsContent({
     setError(undefined);
     // A create that committed server-side before an unconfirmed failure is
     // otherwise invisible until the user happens to press Refresh.
-    if (current.sessionId === undefined)
-      setListRevision((value) => value + 1);
+    if (current.sessionId === undefined) setListRevision((value) => value + 1);
     focusComposer.current = { sessionId };
     setDiscarded(true);
   }
@@ -2400,29 +2402,35 @@ function ManagedSessionsContent({
           {pendingElsewhere && !busy && (
             <div
               role="status"
-              className="mx-auto mt-auto mb-2 flex w-full max-w-[var(--chat-shell-width)] flex-wrap items-center gap-2 text-sm text-muted-foreground"
+              className="mx-auto mt-auto mb-2 flex w-full max-w-[var(--chat-shell-width)] flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center"
             >
-              <p className="min-w-0 flex-1">{t('managed.pendingElsewhere')}</p>
-              <Button
-                size="sm"
-                onClick={() => runPendingElsewhereAction('retry')}
-              >
-                {t('managed.retry')}
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => runPendingElsewhereAction('discard')}
-              >
-                {t('managed.discard')}
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => openPendingOwner(pending)}
-              >
-                {t('managed.openPendingOwner')}
-              </Button>
+              {/* Stacked on a narrow composer: three actions cannot share a
+                  row with the notice without squeezing it to a few chars. */}
+              <p className="min-w-0 sm:flex-1">
+                {t('managed.pendingElsewhere')}
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => runPendingElsewhereAction('retry')}
+                >
+                  {t('managed.retry')}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => runPendingElsewhereAction('discard')}
+                >
+                  {t('managed.discard')}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => openPendingOwner(pending)}
+                >
+                  {t('managed.openPendingOwner')}
+                </Button>
+              </div>
             </div>
           )}
           {pendingHere && !busy && (
@@ -2438,11 +2446,7 @@ function ManagedSessionsContent({
               >
                 {t('managed.retry')}
               </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => discardPending()}
-              >
+              <Button variant="ghost" size="sm" onClick={discardPending}>
                 {t('managed.discard')}
               </Button>
             </div>
