@@ -727,7 +727,10 @@ export interface ChatCompressionRecordPayload {
   contextPrefixLength?: number;
   /** Generated summary and restore entries preceding any retained raw input. */
   summaryPrefixLength?: number;
-  /** Prompt identities parallel to compressedHistory. */
+  /**
+   * Prompt identities parallel to compressedHistory. The first retained model
+   * response may carry its owning prompt's identity when that prompt was summarized.
+   */
   promptIds?: Array<string | null>;
   /** Internal directory context, without changing the model-facing snapshot. */
   directoryContextIndices?: number[];

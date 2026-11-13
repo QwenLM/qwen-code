@@ -43,6 +43,7 @@ import { getAutoMemorySnapshot } from '../memory/request-context.js';
 import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../memory/request-context.js';
 import { createUserPromptSubmitContextPart } from '../hooks/user-prompt-submit-context.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
+import { markApiHistoryPrompt } from '../utils/api-history-metadata.js';
 import {
   content,
   fnCall,
@@ -80,7 +81,11 @@ type CompressResult = Awaited<ReturnType<ChatCompressionService['compress']>>;
 
 /** Alternating user/model text turns, starting with the user. */
 const turns = (...texts: string[]): Content[] =>
-  texts.map((text, i) => (i % 2 ? modelText(text) : userText(text)));
+  texts.map((text, i) => {
+    const entry = i % 2 ? modelText(text) : userText(text);
+    if (entry.role === 'user') markApiHistoryPrompt(entry, `prompt-${i}`);
+    return entry;
+  });
 /** The first `n` of the `msg1`..`msg4` turns. */
 const msgs = (n = 4) => turns(...['msg1', 'msg2', 'msg3', 'msg4'].slice(0, n));
 /** Side-query usage; every fixture here has total = prompt + candidates. */
@@ -1393,10 +1398,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
   ];
 
   function makeHistory(length = 4): Content[] {
-    return Array.from({ length }, (_, index) => ({
-      role: index % 2 === 0 ? 'user' : 'model',
-      parts: [{ text: `message-${index}` }],
-    }));
+    return turns(...Array.from({ length }, (_, index) => `message-${index}`));
   }
 
   function makeMediaHistory(): Content[] {
@@ -2462,10 +2464,8 @@ describe('ChatCompressionService.compress cache sharing', () => {
     // few hundred tokens, the truncation guard drops the summary, and the
     // session never compacts.
     const chunk = 'x'.repeat(4_000);
-    const history = Array.from({ length: 196 }, (_, i) =>
-      i % 2
-        ? modelText(`chunk-${i} ${chunk}`)
-        : userText(`chunk-${i} ${chunk}`),
+    const history = turns(
+      ...Array.from({ length: 196 }, (_, i) => `chunk-${i} ${chunk}`),
     );
     const { coldSpy, result } = await expectCold(
       {
@@ -3008,7 +3008,7 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
     });
   /** The user prompt, then one Safari screenshot call/result pair per image. */
   const screenshotSession = (prompt: string, images: string[]): Content[] => [
-    userText(prompt),
+    ...turns(prompt),
     ...images.flatMap((data) => [
       content('model', fnCall('mcp__node-repl__node_repl', { app: 'Safari' })),
       screenshot(data),

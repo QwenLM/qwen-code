@@ -5,6 +5,7 @@
  */
 
 import type { Content, GenerateContentConfig } from '@google/genai';
+import { isDeepStrictEqual } from 'node:util';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type { GenerateTextResult } from '../core/baseLlmClient.js';
@@ -27,6 +28,10 @@ import { withModelObservationSource } from '../telemetry/model-observation.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
+} from '../utils/api-history-metadata.js';
 import {
   resolveCompactionTuning,
   resolveSlimmingConfig,
@@ -730,15 +735,50 @@ export class ChatCompressionService {
       candidateTailStart === undefined
         ? []
         : curatedHistory.slice(candidateTailStart);
+    let retainedPromptId = candidateTail[0]
+      ? getApiHistoryPromptId(candidateTail[0])
+      : undefined;
+    if (candidateTail.length > 0 && !retainedPromptId) {
+      // Curation coalesces adjacent user entries and can lose the newer
+      // prompt identity. Resolve ownership from the raw history instead.
+      const history = chat.getHistoryShallow();
+      const responseIndex = history.findLastIndex(
+        (entry) => entry.role === 'model',
+      );
+      const responseMatches =
+        responseIndex >= 0 &&
+        history[responseIndex - 1]?.role !== 'model' &&
+        isDeepStrictEqual(history[responseIndex].parts, candidateTail[0].parts);
+      for (
+        let index = responseMatches ? responseIndex - 1 : -1;
+        index >= 0;
+        index--
+      ) {
+        const entry = history[index];
+        retainedPromptId = getApiHistoryPromptId(entry);
+        if (
+          retainedPromptId ||
+          (entry.role === 'user' &&
+            !entry.parts?.some((part) => part.functionResponse))
+        ) {
+          break;
+        }
+      }
+    }
     // Bound the *whole* operation, including results not yet committed to
     // history. Never slice a tool call away from its result to fit a budget.
     const preserveTail =
       candidateTail.length > 0 &&
+      retainedPromptId !== undefined &&
       estimateContentTokens(
         [...candidateTail, ...visiblePendingHistory],
         slimmingConfig.imageTokenEstimate,
       ) <= Math.min(COMPACT_MAX_OUTPUT_TOKENS, contextLimit / 5);
     const retainedTail = preserveTail ? candidateTail : [];
+    if (preserveTail) markApiHistoryPrompt(retainedTail[0], retainedPromptId);
+    const originalHistoryTokenCount =
+      originalTokenCount +
+      (preserveTail ? (opts.unaccountedOutputTokens ?? 0) : 0);
     const sideQueryHistory = preserveTail
       ? curatedHistory.slice(0, candidateTailStart)
       : [...sideQueryBase, ...visiblePendingHistory];
@@ -1289,7 +1329,7 @@ export class ChatCompressionService {
       };
     }
 
-    let newTokenCount = originalTokenCount;
+    let newTokenCount = originalHistoryTokenCount;
     let extraHistory: Content[] = [];
     let canCalculateNewTokenCount = false;
     let restorationTokenCount = 0;
@@ -1461,10 +1501,7 @@ export class ChatCompressionService {
         );
         newTokenCount = Math.max(
           0,
-          originalTokenCount +
-            (retainedTail.length > 0
-              ? (opts.unaccountedOutputTokens ?? 0)
-              : 0) -
+          originalHistoryTokenCount -
             compressedHistoryTokenCount +
             compressionOutputTokenCount,
         );
@@ -1493,11 +1530,7 @@ export class ChatCompressionService {
         ) {
           const estimatedNonVisibleTokenCount = Math.max(
             0,
-            originalTokenCount +
-              (retainedTail.length > 0
-                ? (opts.unaccountedOutputTokens ?? 0)
-                : 0) -
-              estimatedOriginalVisibleTokenCount,
+            originalHistoryTokenCount - estimatedOriginalVisibleTokenCount,
           );
           // Keep the API-reported system/tool/prompt remainder intact. The
           // local estimator is only used for the visible conversation delta, so
@@ -1527,7 +1560,7 @@ export class ChatCompressionService {
     logChatCompression(
       config,
       makeChatCompressionEvent({
-        tokens_before: originalTokenCount,
+        tokens_before: originalHistoryTokenCount,
         tokens_after: newTokenCount,
         compression_input_token_count: compressionInputTokenCount,
         compression_output_token_count: compressionOutputTokenCount,
@@ -1540,8 +1573,8 @@ export class ChatCompressionService {
       return {
         newHistory: null,
         info: {
-          originalTokenCount,
-          newTokenCount: originalTokenCount,
+          originalTokenCount: originalHistoryTokenCount,
+          newTokenCount: originalHistoryTokenCount,
           compressionStatus: CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
         },
       };
@@ -1549,17 +1582,17 @@ export class ChatCompressionService {
       return {
         newHistory: null,
         info: {
-          originalTokenCount,
-          newTokenCount: originalTokenCount,
+          originalTokenCount: originalHistoryTokenCount,
+          newTokenCount: originalHistoryTokenCount,
           compressionStatus:
             CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
         },
       };
-    } else if (newTokenCount > originalTokenCount) {
+    } else if (newTokenCount > originalHistoryTokenCount) {
       return {
         newHistory: null,
         info: {
-          originalTokenCount,
+          originalTokenCount: originalHistoryTokenCount,
           newTokenCount,
           compressionStatus:
             CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
@@ -1572,7 +1605,7 @@ export class ChatCompressionService {
         // the side-query's analysis scratchpad or the resume trailer.
         summary: stripAnalysisBlock(summary),
         info: {
-          originalTokenCount,
+          originalTokenCount: originalHistoryTokenCount,
           newTokenCount,
           newTokenCountIsEstimated: true,
           compressionStatus: CompressionStatus.COMPRESSED,
