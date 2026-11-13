@@ -1,0 +1,170 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, it, vi } from 'vitest';
+import type { BridgeEvent } from './eventBus.js';
+import { makeBridge, makeChannel, WS_A } from './internal/testUtils.js';
+
+describe('daemon embedded-resource admission', () => {
+  it('admits an oversized direct text resource; the bound limits retention only', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const abort = new AbortController();
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      const collecting = (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId, {
+          signal: abort.signal,
+        })) {
+          events.push(event);
+        }
+      })();
+
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [
+            {
+              type: 'resource',
+              resource: {
+                uri: 'context://example/oversized',
+                text: 'x'.repeat(256 * 1024),
+              },
+            },
+          ],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+      expect(handle.agent.promptCalls).toHaveLength(1);
+      const forwarded = handle.agent.promptCalls[0]?.prompt[0];
+      expect(forwarded).toMatchObject({
+        type: 'resource',
+        resource: { uri: 'context://example/oversized' },
+      });
+      const forwardedText =
+        forwarded?.type === 'resource' && 'text' in forwarded.resource
+          ? forwarded.resource.text
+          : undefined;
+      expect(forwardedText).toHaveLength(256 * 1024);
+      await vi.waitFor(() =>
+        expect(
+          events.some((event) => {
+            if (event.type !== 'session_update') return false;
+            return (
+              (event.data as { update?: { sessionUpdate?: string } }).update
+                ?.sessionUpdate === 'user_message_chunk'
+            );
+          }),
+        ).toBe(true),
+      );
+      const echo = events.find(
+        (event) =>
+          event.type === 'session_update' &&
+          (event.data as { update?: { sessionUpdate?: string } }).update
+            ?.sessionUpdate === 'user_message_chunk',
+      );
+      expect(echo?.data as unknown).toMatchObject({
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'resource',
+            resource: { uri: 'context://example/oversized' },
+          },
+        },
+      });
+      abort.abort();
+      await collecting;
+    } finally {
+      abort.abort();
+      await bridge.shutdown();
+    }
+  });
+
+  it('accepts a large daemon-native text attachment without applying the inline replay limit', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const reference = await bridge.storeSessionAttachment(
+        session.sessionId,
+        new TextEncoder().encode('x'.repeat(256 * 1024)),
+        'text/plain',
+        { clientId: session.clientId },
+        'large-notes.txt',
+      );
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [reference],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+      expect(handle.agent.promptCalls).toHaveLength(1);
+      expect(handle.agent.promptCalls[0]).toMatchObject({
+        prompt: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'attachment:///large-notes.txt',
+              text: expect.any(String),
+            },
+          },
+        ],
+        _meta: { 'qwen.daemon.attachmentResourceIndexes': [0] },
+      });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('admits a direct oversized resource sharing a native attachment URI, exempting only the expansion', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const reference = await bridge.storeSessionAttachment(
+        session.sessionId,
+        new TextEncoder().encode('native'),
+        'text/plain',
+        { clientId: session.clientId },
+        'notes.txt',
+      );
+      await expect(
+        bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [
+            reference,
+            {
+              type: 'resource',
+              resource: {
+                uri: 'attachment:///notes.txt',
+                text: 'x'.repeat(256 * 1024),
+              },
+            },
+          ],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+      expect(handle.agent.promptCalls).toHaveLength(1);
+      expect(handle.agent.promptCalls[0]).toMatchObject({
+        prompt: [
+          {
+            type: 'resource',
+            resource: { uri: 'attachment:///notes.txt', text: 'native' },
+          },
+          {
+            type: 'resource',
+            resource: {
+              uri: 'attachment:///notes.txt',
+              text: 'x'.repeat(256 * 1024),
+            },
+          },
+        ],
+        _meta: { 'qwen.daemon.attachmentResourceIndexes': [0] },
+      });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+});

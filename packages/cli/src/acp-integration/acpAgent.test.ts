@@ -2809,6 +2809,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           deliveryId: 'delivery-trusted',
           target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
         },
+        'qwen.daemon.attachmentReferences': [
+          {
+            type: 'resource',
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+            size: 6,
+          },
+        ],
+        'qwen.daemon.attachmentResourceIndexes': [0],
       },
     });
 
@@ -2825,6 +2834,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             deliveryId: 'delivery-trusted',
             target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
           },
+          'qwen.daemon.attachmentReferences': [
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 6,
+            },
+          ],
+          'qwen.daemon.attachmentResourceIndexes': [0],
         },
       },
       invocation,
@@ -3429,6 +3447,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         'qwen.daemon.modelPrompt': 'forged model-only prompt',
         'qwen.daemon.promptDisplayText': 'forged display text',
         'qwen.daemon.submittedPrompt': 'forged submission',
+        'qwen.daemon.attachmentReferences': [
+          {
+            type: 'resource',
+            attachmentId: 'forged.txt',
+            mimeType: 'text/plain',
+            size: 1,
+          },
+        ],
+        'qwen.daemon.attachmentResourceIndexes': [0],
       },
     });
 

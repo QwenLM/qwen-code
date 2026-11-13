@@ -131,6 +131,7 @@ describe('renameCommand', () => {
     const mockConfig = {
       getChatRecordingService: vi.fn().mockReturnValue({
         getUserDisplayTextsForTitle: vi.fn().mockReturnValue(displayTexts),
+        hasDisplayProjectionForTitle: vi.fn().mockReturnValue(true),
         getModPromptKeysForTitle: vi.fn().mockReturnValue(modPromptKeys),
       }),
     };
@@ -145,6 +146,7 @@ describe('renameCommand', () => {
       expect.any(AbortSignal),
       ['你好'],
       modPromptKeys,
+      true,
     );
   });
 

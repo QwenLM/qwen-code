@@ -41,6 +41,7 @@ interface MockOptions {
 function makeConfig(opts: MockOptions): {
   config: Config;
   generateJson: ReturnType<typeof vi.fn>;
+  getHistoryShallow: ReturnType<typeof vi.fn>;
 } {
   const generateJson = vi.fn(async (...args: unknown[]) => {
     const r = opts.generateJsonResult;
@@ -48,12 +49,13 @@ function makeConfig(opts: MockOptions): {
     return typeof r === 'function' ? r(...args) : r;
   });
 
+  const getHistoryShallow = vi.fn(() => opts.history ?? []);
   const config = {
     getFastModel: vi.fn(() => opts.fastModel ?? undefined),
     getModel: vi.fn(() => 'qwen-plus'),
     getLlmClient: vi.fn(() => ({
       getHistoryShallow: (curated?: boolean) =>
-        opts.chat?.getHistoryShallow(curated) ?? opts.history ?? [],
+        opts.chat?.getHistoryShallow(curated) ?? getHistoryShallow(),
       getChat: () => ({
         getHistory: () => opts.history ?? [],
       }),
@@ -62,7 +64,7 @@ function makeConfig(opts: MockOptions): {
     getOutputLanguageFilePath: vi.fn(() => opts.outputLanguageFilePath),
   } as unknown as Config;
 
-  return { config, generateJson };
+  return { config, generateJson, getHistoryShallow };
 }
 
 const DIALOG_HISTORY: Content[] = [
@@ -182,9 +184,13 @@ describe('tryGenerateSessionTitle', () => {
     });
     expect(
       (
-        await tryGenerateSessionTitle(config, new AbortController().signal, [
-          'Visible parser request',
-        ])
+        await tryGenerateSessionTitle(
+          config,
+          new AbortController().signal,
+          ['Visible parser request'],
+          new Set(),
+          true,
+        )
       ).ok,
     ).toBe(true);
     const prompt = JSON.stringify(generateJson.mock.calls[0][0]);
@@ -456,9 +462,13 @@ describe('tryGenerateSessionTitle', () => {
       generateJsonResult: { title: 'Answer greeting' },
     });
 
-    await tryGenerateSessionTitle(config, new AbortController().signal, [
-      '你好',
-    ]);
+    await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+      ['你好'],
+      new Set(),
+      true,
+    );
 
     const call = generateJson.mock.calls[0][0] as {
       contents: Content[];
@@ -480,10 +490,13 @@ describe('tryGenerateSessionTitle', () => {
       generateJsonResult: { title: 'Answer greetings' },
     });
 
-    await tryGenerateSessionTitle(config, new AbortController().signal, [
-      '你好',
-      '再见',
-    ]);
+    await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+      ['你好', '再见'],
+      new Set(),
+      true,
+    );
 
     const call = generateJson.mock.calls[0][0] as { contents: Content[] };
     const prompt = call.contents[0]?.parts?.[0]?.text;
@@ -491,6 +504,40 @@ describe('tryGenerateSessionTitle', () => {
     expect(prompt).toContain('再见');
     expect(prompt).not.toContain('hidden first instructions');
     expect(prompt).not.toContain('hidden second instructions');
+  });
+
+  it('titles from the visible text of a mixed projection/raw-text history', async () => {
+    // R8-1: an empty projection entry means "user-authored text empty", not
+    // "no content": a following raw-text turn is fully visible and must carry
+    // the title on its own.
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden channel instructions' }] },
+        { role: 'model', parts: [{ text: 'Hello!' }] },
+      ],
+      generateJsonResult: { title: 'Advisor Review Session' },
+    });
+
+    const outcome = await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+      ['', '/advisor check my work'],
+      new Set(),
+      true,
+    );
+
+    expect(outcome).toEqual({
+      ok: true,
+      title: 'Advisor Review Session',
+      modelUsed: 'qwen-turbo',
+    });
+    const call = generateJson.mock.calls[0][0] as {
+      contents: Content[];
+    };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('/advisor check my work');
+    expect(prompt).not.toContain('hidden channel instructions');
   });
 
   it('treats an all-empty display projection as intentionally empty', async () => {
@@ -507,12 +554,43 @@ describe('tryGenerateSessionTitle', () => {
       config,
       new AbortController().signal,
       ['', ''],
+      new Set(),
+      true,
     );
 
     // `''` entries mean "projection recorded, user-authored text empty" —
     // stay in projection mode (`empty_history`) instead of falling back to
     // the raw history, which carries the hidden model context.
     expect(outcome).toEqual({ ok: false, reason: 'empty_history' });
+    expect(generateJson).not.toHaveBeenCalled();
+  });
+
+  it('never falls back to raw history for an all-undefined projection-mode array', async () => {
+    // R12-1: after the recorder's 20-slot ring shifts every recorded entry
+    // out, the texts array is all `undefined` while the session is still in
+    // projection mode. The recorder's authoritative flag — not the surviving
+    // entries — decides: falling back to the raw history would flatten the
+    // hidden channel instructions the client projected away into the title
+    // prompt.
+    const { config, generateJson, getHistoryShallow } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden channel instructions' }] },
+        { role: 'model', parts: [{ text: 'Hello!' }] },
+      ],
+      generateJsonResult: { title: 'Should never be used' },
+    });
+
+    const outcome = await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+      [undefined, undefined],
+      new Set(),
+      true,
+    );
+
+    expect(outcome).toEqual({ ok: false, reason: 'empty_history' });
+    expect(getHistoryShallow).not.toHaveBeenCalled();
     expect(generateJson).not.toHaveBeenCalled();
   });
 
@@ -572,10 +650,13 @@ describe('tryGenerateSessionTitle', () => {
       generateJsonResult: { title: 'Answer greeting' },
     });
 
-    await tryGenerateSessionTitle(config, new AbortController().signal, [
-      '你好',
-      null,
-    ]);
+    await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+      ['你好', null],
+      new Set(),
+      true,
+    );
 
     const call = generateJson.mock.calls[0][0] as { contents: Content[] };
     const prompt = call.contents[0]?.parts?.[0]?.text;
@@ -595,9 +676,13 @@ describe('tryGenerateSessionTitle', () => {
       generateJsonResult: { title: 'Answer greeting' },
     });
 
-    await tryGenerateSessionTitle(config, new AbortController().signal, [
-      'visible channel message',
-    ]);
+    await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+      ['visible channel message'],
+      new Set(),
+      true,
+    );
 
     const call = generateJson.mock.calls[0][0] as { contents: Content[] };
     const prompt = call.contents[0]?.parts?.[0]?.text;
@@ -622,11 +707,13 @@ describe('tryGenerateSessionTitle', () => {
 
     // Resumed sessions replay `undefined` for every user turn recorded before
     // display-projection tracking existed; only the newest turn projects.
-    await tryGenerateSessionTitle(config, new AbortController().signal, [
-      undefined,
-      undefined,
-      '当前消息',
-    ]);
+    await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+      [undefined, undefined, '当前消息'],
+      new Set(),
+      true,
+    );
 
     const call = generateJson.mock.calls[0][0] as { contents: Content[] };
     const prompt = call.contents[0]?.parts?.[0]?.text;

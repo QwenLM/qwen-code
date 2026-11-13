@@ -650,6 +650,16 @@ export interface UserPromptRecordPayload {
    * this payload when no projection, references, or input annotations exist.
    */
   displayText: string;
+  /**
+   * ACP record sites set this from whether the client supplied a display
+   * projection: false means displayText is the raw request text recorded so
+   * replay can render carried references/resources, and the title tracker
+   * must not treat the turn as a projection (a single raw-text marker would
+   * otherwise flip the whole session into title-projection mode and drop
+   * every payload-less turn from the title input). Absent on older journals
+   * and non-ACP paths, which keep the historical payload-shape heuristic.
+   */
+  displayProjection?: boolean;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
   /** The Mod that submitted the prompt; the record's provenance says so too. */
@@ -662,6 +672,10 @@ export interface UserPromptRecordPayload {
   attachmentReferences?: UserPromptAttachmentReference[];
   /** Original ACP resource references, independent of model-input expansion. */
   resourceLinks?: Array<Extract<ContentBlock, { type: 'resource_link' }>>;
+  /** Bounded original ACP text resources, independent of model-input expansion. */
+  embeddedResources?: Array<Extract<ContentBlock, { type: 'resource' }>>;
+  /** True when replayable embedded text resources exceeded the retention bounds and were not journaled. */
+  embeddedResourcesTruncated?: boolean;
 }
 
 export interface UserPromptAttachmentReference {
@@ -1196,6 +1210,22 @@ export interface BranchCheckpointCursor {
 export interface ChatRecordingRestoreState {
   lastCompletedUuid: string;
   turnParentUuids: Array<string | null>;
+  /**
+   * Per-turn projection state, index-aligned with `turnParentUuids`.
+   * `rewindRecording` prunes this array by turn index, so a restored
+   * recorder without it would re-derive the projection flag from an empty
+   * or offset slice.
+   */
+  turnTitleStates?: Array<{
+    projection: boolean;
+    displayText: string | undefined;
+  }>;
+  /** Projection mode of the restored session; see `restoreProjectedState`. */
+  displayProjectionForTitle?: boolean;
+  /** Surviving title texts, oldest first (already 20-capped). */
+  userDisplayTextsForTitle?: Array<string | null | undefined>;
+  /** Newest non-empty projected text, retained past ring eviction. */
+  lastProjectionTextForTitle?: string;
   turnPromptIds?: Array<string | undefined>;
   turnDaemonPromptIds?: Array<string | undefined>;
   customTitle?: string;
@@ -1330,6 +1360,38 @@ export class ChatRecordingService {
   // The Mods' prompts as the model read them, which a title drawn from the
   // conversation leaves out, as the projection does.
   private readonly modPromptKeysForTitle = new Set<string>();
+  /**
+   * Per-user-turn projection state, index-aligned with `turnParentUuids`.
+   * The ring above is 20-capped, so it cannot answer "does any surviving
+   * turn still project?" after eviction; this array can, and rewind slices
+   * it in lockstep with the turn boundaries.
+   */
+  private readonly turnTitleStates: Array<{
+    projection: boolean;
+    displayText: string | undefined;
+  }> = [];
+  /**
+   * Newest non-empty projected display text, kept beside the ring so a
+   * session whose 20-slot ring shifted every entry out still has one visible
+   * text to title from instead of reporting `empty_history`.
+   */
+  private lastProjectionTextForTitle: string | undefined;
+  /**
+   * Separate from the per-turn texts: one `string | undefined` slot cannot
+   * answer both "is this session in client-projection mode?" and "what text
+   * does this turn contribute?". A raw-text record (displayProjection ===
+   * false) contributes its text below without flipping this flag, so a
+   * session with no projection still titles from the full history, while a
+   * projection session never falls back to the hidden model context.
+   */
+  private displayProjectionForTitle = false;
+  /**
+   * Whether `turnTitleStates` is index-aligned with `turnParentUuids` for
+   * the whole session. A legacy restore state carries only the ring and the
+   * flag; with no per-turn provenance the current window cannot be bounded,
+   * so `hasDisplayProjectionForTitle` keeps the session-level answer.
+   */
+  private titleWindowBounded = true;
   /**
    * How many auto-title attempts have been made this process.
    *
@@ -1607,6 +1669,12 @@ export class ChatRecordingService {
     this.activeBranchBaseUuid = null;
     this.pendingBranchToolCalls = [];
     this.userDisplayTextsForTitle.length = 0;
+    this.turnTitleStates.length = 0;
+    this.displayProjectionForTitle = false;
+    this.lastProjectionTextForTitle = undefined;
+    // This path rebuilds both arrays from the record list below, so the
+    // window is bounded even when it ends up empty.
+    this.titleWindowBounded = true;
     this.modPromptKeysForTitle.clear();
     this.firstPromptUnknown = false;
     if (!sessionData) return;
@@ -1615,8 +1683,9 @@ export class ChatRecordingService {
     // only the newest 20 prompts, so its head is not the session's first turn.
     let firstPromptText: string | undefined;
     for (const record of sessionData.conversation.messages) {
+      // Title texts and Mod keys are tracked by rebuildTurnBoundaries above;
+      // this pass only recovers the label for the sidecar seed.
       if (record.type === 'user' && record.subtype === undefined) {
-        this.trackTitleText(record);
         if (firstPromptText === undefined) {
           firstPromptText = firstPromptLabelText(record);
         }
@@ -1669,16 +1738,41 @@ export class ChatRecordingService {
     this.seedTitleSidecar(firstPromptText);
   }
 
+  // A record whose displayText is raw request text (displayProjection
+  // === false) hides no model context, unlike a projection record — it
+  // contributes its text without flipping the session into projection mode.
+  // Legacy payloads predate the marker, so a marker-less payload keeps the
+  // historical behavior: any recorded displayText was a projection. A
+  // projection record must keep tracking its displayText even when it is ''
+  // (and even beside embedded resources): tracking undefined would read as
+  // "no projection" and fall back to the raw history the client hid.
+  // A Mod's prompt is neither: the person did not type it, so it offers the
+  // title no text and cannot establish projection mode on its own.
   private trackTitleText(record: ChatRecord): void {
-    this.userDisplayTextsForTitle.push(titleText(record));
-    if (this.userDisplayTextsForTitle.length > MAX_TITLE_USER_DISPLAY_TEXTS) {
-      this.userDisplayTextsForTitle.shift();
+    const payload = record.systemPayload as UserPromptRecordPayload | undefined;
+    const isModPrompt = record.provenance === 'mod_prompt';
+    const projection =
+      !isModPrompt &&
+      payload !== undefined &&
+      payload.displayProjection !== false;
+    const text = titleText(record);
+    const displayText =
+      text === '' && payload?.displayProjection === false ? undefined : text;
+    this.turnTitleStates.push({
+      projection,
+      displayText: displayText ?? undefined,
+    });
+    if (projection) {
+      this.displayProjectionForTitle = true;
+      if (displayText) {
+        this.lastProjectionTextForTitle = displayText;
+      }
     }
+    this.trackUserDisplayTextForTitle(displayText);
     // A prompt sent as the person's words reads as theirs to the model too,
     // and its bare text would also match a prompt the person typed alike.
     const key =
-      record.provenance === 'mod_prompt' &&
-      !(record.systemPayload as UserPromptRecordPayload | undefined)?.asUser
+      isModPrompt && !payload?.asUser
         ? modPromptTitleKey(record.message?.parts ?? [])
         : undefined;
     if (key?.trim()) {
@@ -1693,6 +1787,15 @@ export class ChatRecordingService {
     }
   }
 
+  private trackUserDisplayTextForTitle(
+    displayText: string | null | undefined,
+  ): void {
+    this.userDisplayTextsForTitle.push(displayText);
+    if (this.userDisplayTextsForTitle.length > MAX_TITLE_USER_DISPLAY_TEXTS) {
+      this.userDisplayTextsForTitle.shift();
+    }
+  }
+
   private restoreProjectedState(state: ChatRecordingRestoreState): void {
     // A projection only exists for a transcript that is already on disk, so
     // the first prompt (if any) predates this recorder. No record stream is
@@ -1703,6 +1806,33 @@ export class ChatRecordingService {
     this.resetExternalRecordIndex();
     this.activeBranchBaseUuid = state.lastCompletedUuid;
     this.turnParentUuids = [...state.turnParentUuids];
+    // A re-bound recorder must never inherit the previous session's marker.
+    this.userDisplayTextsForTitle.length = 0;
+    this.modPromptKeysForTitle.clear();
+    this.turnTitleStates.length = 0;
+    this.titleWindowBounded = false;
+    if (
+      state.turnTitleStates !== undefined &&
+      state.turnTitleStates.length === state.turnParentUuids.length
+    ) {
+      for (const turn of state.turnTitleStates) {
+        this.turnTitleStates.push({ ...turn });
+      }
+      this.titleWindowBounded = true;
+    }
+    this.displayProjectionForTitle = false;
+    this.lastProjectionTextForTitle = undefined;
+    if (state.userDisplayTextsForTitle !== undefined) {
+      for (const text of state.userDisplayTextsForTitle.slice(
+        -MAX_TITLE_USER_DISPLAY_TEXTS,
+      )) {
+        this.trackUserDisplayTextForTitle(text);
+      }
+    }
+    if (state.displayProjectionForTitle === true) {
+      this.displayProjectionForTitle = true;
+      this.lastProjectionTextForTitle = state.lastProjectionTextForTitle;
+    }
     this.turnPromptIds = state.turnPromptIds
       ? [...state.turnPromptIds]
       : Array.from(state.turnParentUuids, () => undefined);
@@ -2387,15 +2517,9 @@ export class ChatRecordingService {
         }
         const active = prepareTranscriptRecords(records)
           .records as ChatRecord[];
+        // Re-derives the title texts and the Mod keys with the boundaries.
         this.rebuildTurnBoundaries(active);
         this.notifyLastUserPromptRecorded(undefined, this.getSessionId());
-        this.userDisplayTextsForTitle.length = 0;
-        this.modPromptKeysForTitle.clear();
-        for (const record of active) {
-          if (record.type === 'user' && record.subtype === undefined) {
-            this.trackTitleText(record);
-          }
-        }
         return result;
       });
     } finally {
@@ -2750,7 +2874,38 @@ export class ChatRecordingService {
   }
 
   getUserDisplayTextsForTitle(): ReadonlyArray<string | null | undefined> {
+    if (
+      this.hasDisplayProjectionForTitle() &&
+      this.userDisplayTextsForTitle.every((text) => !text) &&
+      this.lastProjectionTextForTitle !== undefined
+    ) {
+      return [this.lastProjectionTextForTitle];
+    }
     return this.userDisplayTextsForTitle;
+  }
+
+  /**
+   * Whether the *current* title window is a client display projection.
+   *
+   * The session-level marker is establish-only, so it survives the 20-slot
+   * ring evicting the projected turn's text. Answering from it alone would
+   * title a session from one stale rescued sentence — or report
+   * `empty_history` when there is no rescued text — after the window moved
+   * on. The per-turn array is index-aligned with the turn boundaries, so
+   * the window can answer for itself: once it holds no projection, its raw
+   * turns are exactly what the model saw and the history is safe to title
+   * from. A recorder restored without per-turn state cannot bound the
+   * window, so it keeps the session-level answer rather than risk the
+   * history the client projected away.
+   */
+  hasDisplayProjectionForTitle(): boolean {
+    if (!this.displayProjectionForTitle) return false;
+    if (!this.titleWindowBounded) {
+      return true;
+    }
+    return this.turnTitleStates
+      .slice(-MAX_TITLE_USER_DISPLAY_TEXTS)
+      .some((turn) => turn.projection);
   }
 
   /** The keys of the messages the Mods submitted, which a title leaves out. */
@@ -3271,11 +3426,20 @@ export class ChatRecordingService {
 
     void (async () => {
       try {
+        // Outside projection mode the recorded texts must not stand in for
+        // the conversation: a raw-text record's displayText is the request
+        // text, and projecting only payload-carrying turns would drop every
+        // payload-less turn from the title input. The recorder's window-aware
+        // flag is authoritative: a projected turn that has left the ring no
+        // longer hides anything in the recent history, so the consumer must
+        // not re-derive the mode from the surviving texts.
+        const projectionMode = this.hasDisplayProjectionForTitle();
         const outcome = await tryGenerateSessionTitle(
           this.config,
           controller.signal,
-          this.userDisplayTextsForTitle,
+          projectionMode ? this.getUserDisplayTextsForTitle() : [],
           this.modPromptKeysForTitle,
+          projectionMode,
         );
         if (!outcome.ok) return;
         if (controller.signal.aborted) return;
@@ -3558,6 +3722,10 @@ export class ChatRecordingService {
       this.turnPromptIds = [];
       this.turnDaemonPromptIds = [];
       this.userDisplayTextsForTitle.length = 0;
+      this.turnTitleStates.length = 0;
+      this.displayProjectionForTitle = false;
+      this.lastProjectionTextForTitle = undefined;
+      this.titleWindowBounded = true;
       this.modPromptKeysForTitle.clear();
       for (const record of records) {
         if (
@@ -3573,11 +3741,10 @@ export class ChatRecordingService {
           ].includes(record.subtype ?? '')
         ) {
           this.turnParentUuids.push(record.parentUuid ?? null);
+          this.trackTitleText(record);
           this.turnPromptIds.push(getRecordRewindId(record));
           this.turnDaemonPromptIds.push(record.daemonPromptId);
         }
-        if (record.type === 'user' && record.subtype === undefined)
-          this.trackTitleText(record);
       }
     };
     let committed = false;
@@ -3870,6 +4037,40 @@ export class ChatRecordingService {
       this.userDisplayTextsForTitle.splice(
         Math.max(0, targetTurnIndex - projectionStart),
       );
+      // Prune the per-turn projection state with the same boundary and
+      // re-derive the flag: a rewind past the only projected turn must not
+      // leave the session in projection mode with an all-undefined ring.
+      // A restore state that pre-dates the per-turn array leaves the two
+      // arrays misaligned; fail closed by keeping the restored flag rather
+      // than clearing it, since dropping it titles from hidden raw context.
+      if (this.turnTitleStates.length === this.turnParentUuids.length) {
+        this.turnTitleStates.length = Math.min(
+          this.turnTitleStates.length,
+          targetTurnIndex,
+        );
+        this.displayProjectionForTitle = this.turnTitleStates.some(
+          (turn) => turn.projection,
+        );
+        this.lastProjectionTextForTitle = undefined;
+        for (const turn of this.turnTitleStates) {
+          if (
+            turn.projection &&
+            turn.displayText !== undefined &&
+            turn.displayText !== ''
+          ) {
+            this.lastProjectionTextForTitle = turn.displayText;
+          }
+        }
+      } else {
+        // Misaligned per-turn state: keep the flag (fail closed) but never
+        // keep a retained text for a turn this rewind discarded. A Mod's
+        // `null` offers the title nothing, so it is not a retained text.
+        this.lastProjectionTextForTitle = this.userDisplayTextsForTitle
+          .filter(
+            (text): text is string => typeof text === 'string' && text !== '',
+          )
+          .at(-1);
+      }
       // Trim future boundaries — they no longer exist in the active branch.
       this.turnParentUuids = this.turnParentUuids.slice(0, targetTurnIndex);
       this.turnPromptIds = this.turnPromptIds.slice(0, targetTurnIndex);
@@ -3936,7 +4137,9 @@ export class ChatRecordingService {
    *
    * Call this after resuming a session so that subsequent rewinds within
    * the resumed session have correct boundary data. Also updates
-   * `lastRecordUuid` to the last record in the chain.
+   * `lastRecordUuid` to the last record in the chain and re-derives the
+   * title projection state from the same list, keeping its per-turn array
+   * index-aligned with the boundaries.
    */
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
     this.resetExternalRecordIndex();
@@ -3946,6 +4149,15 @@ export class ChatRecordingService {
     this.activeBranchRecords = [...messages];
     this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;
     this.pendingBranchToolCalls = collectPendingBranchToolCalls(messages);
+    // Re-bind title state to this boundary list: a caller can pass fewer
+    // records than the restore state carried (compression-excluded turns),
+    // and stale, misaligned state disables every later rewind re-derivation.
+    this.userDisplayTextsForTitle.length = 0;
+    this.turnTitleStates.length = 0;
+    this.displayProjectionForTitle = false;
+    this.lastProjectionTextForTitle = undefined;
+    this.titleWindowBounded = true;
+    this.modPromptKeysForTitle.clear();
 
     for (let i = 0; i < messages.length; i++) {
       const record = messages[i];
@@ -3962,6 +4174,7 @@ export class ChatRecordingService {
         // Reconstructed histories can start mid-chain; the persisted edge is
         // the source of truth, not the previous item in this sliced list.
         this.turnParentUuids.push(record.parentUuid ?? null);
+        this.trackTitleText(record);
         this.turnPromptIds.push(getRecordRewindId(record));
         this.turnDaemonPromptIds.push(record.daemonPromptId);
       }
