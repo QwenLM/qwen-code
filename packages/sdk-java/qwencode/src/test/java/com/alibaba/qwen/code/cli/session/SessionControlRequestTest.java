@@ -18,6 +18,9 @@ import com.alibaba.qwen.code.cli.transport.Transport;
 import com.alibaba.qwen.code.cli.transport.TransportOptions;
 import com.alibaba.qwen.code.cli.utils.Timeout;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -59,7 +62,43 @@ class SessionControlRequestTest {
         assertErrorResponse(transport);
     }
 
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"", "another-request"})
+    void sendsCorrelatedErrorWhenControlHandlerReturnsAnUnrelatedRequestId(String requestId) throws Exception {
+        FixtureTransport transport = new FixtureTransport();
+        new Session(transport).sendPrompt("test", consumers(request -> success(requestId)));
+
+        assertErrorResponse(transport);
+        assertTrue(transport.resultConsumed);
+    }
+
     @Test
+    void sendsCorrelatedErrorWhenControlHandlerReturnsSuccessWithoutAPayload() throws Exception {
+        FixtureTransport transport = new FixtureTransport();
+        CLIControlResponse<ControlResponsePayload> response = new CLIControlResponse<>();
+        response.createResponse().setRequestId(REQUEST_ID);
+        new Session(transport).sendPrompt("test", consumers(request -> response));
+
+        assertErrorResponse(transport);
+        assertTrue(transport.resultConsumed);
+    }
+
+    @Test
+    void preservesAValidErrorResponseWithoutASuccessPayload() throws Exception {
+        FixtureTransport transport = new FixtureTransport();
+        CLIControlResponse<ControlResponsePayload> response = new CLIControlResponse<>();
+        response.createResponse().setRequestId(REQUEST_ID).setSubtype("error").setError("Callback denied the request");
+        String expectedJson = response.toString();
+        new Session(transport).sendPrompt("test", consumers(request -> response));
+
+        assertEquals(expectedJson, transport.written.get(0));
+        assertEquals("Callback denied the request", assertErrorResponse(transport).getString("error"));
+        assertTrue(transport.resultConsumed);
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 2, unit = TimeUnit.SECONDS)
     void sendsCorrelatedErrorWhenControlHandlerTimesOut() throws Exception {
         FixtureTransport transport = new FixtureTransport();
         CountDownLatch release = new CountDownLatch(1);
@@ -93,16 +132,18 @@ class SessionControlRequestTest {
     void preservesAValidControlResponseAndContinuesTheTurn() throws Exception {
         FixtureTransport transport = new FixtureTransport();
         CLIControlResponse<ControlResponsePayload> expected = success(REQUEST_ID);
+        String expectedJson = expected.toString();
         new Session(transport).sendPrompt("test", consumers(request -> expected));
 
         assertEquals(1, transport.written.size());
-        assertEquals(expected.toString(), transport.written.get(0));
+        assertEquals(expectedJson, transport.written.get(0));
+        assertEquals("success", JSON.parseObject(transport.written.get(0)).getJSONObject("response").getString("subtype"));
         assertFalse(JSON.parseObject(transport.written.get(0)).getJSONObject("response").containsKey("error"));
         assertTrue(transport.resultConsumed);
     }
 
     @Test
-    void propagatesFailureToWriteTheFallbackResponse() throws Exception {
+    void propagatesFallbackWriteFailureFromASynchronousTransport() throws Exception {
         FixtureTransport transport = new FixtureTransport();
         transport.writeFailure = new IOException("Pipe closed");
         Session session = new Session(transport);

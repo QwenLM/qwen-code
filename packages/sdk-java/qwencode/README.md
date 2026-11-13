@@ -165,7 +165,7 @@ The client permits only one active prompt identity per Session while allowing di
 
 The existing `com.alibaba.qwen.code.cli` API remains available.
 
-If a custom `SessionEventConsumers.onControlRequest` handler throws, times out or returns no response envelope, the session sends a correlated `control_response` error to the CLI. The error preserves the original `request_id`, so the pending control request can fail immediately instead of waiting for its own timeout. Valid callback responses are forwarded unchanged.
+If a custom `SessionEventConsumers.onControlRequest` handler throws, times out, returns no response envelope, returns a missing or mismatched request ID, or returns a success envelope without a response payload, the session sends a correlated `control_response` error to the CLI. The error preserves the original `request_id`, so a request still pending in the CLI can fail when the reply arrives. A callback timeout only produces that reply after its configured SDK timeout; it does not shorten the CLI's independent timeout. The default simple consumer allows 180 seconds and the session fallback allows 60 seconds, while the CLI's default permission timeout is 60 seconds. Configure a shorter callback timeout when the SDK error must arrive first. Valid success responses and error responses without a success payload are forwarded unchanged.
 
 ```java
 public static void runSimpleExample() {

@@ -235,6 +235,7 @@ public class Session {
                     }
                     return false;
                 } else if ("control_request".equals(messageType)) {
+                    String requestId = jsonObject.getString("request_id");
                     CLIControlResponse<? extends ControlResponsePayload> controlResponse;
                     try {
                         CLIControlRequest<? extends ControlRequestPayload> controlRequest = jsonObject.to(
@@ -245,11 +246,18 @@ public class Session {
                         if (controlResponse == null || controlResponse.getResponse() == null) {
                             throw new IllegalStateException("Control request handler returned no response");
                         }
+                        CLIControlResponse.Response<? extends ControlResponsePayload> response = controlResponse.getResponse();
+                        if (response.getRequestId() == null || !response.getRequestId().equals(requestId)) {
+                            throw new IllegalStateException("Control request handler returned an uncorrelated response");
+                        }
+                        if ("success".equals(response.getSubtype()) && response.getResponse() == null) {
+                            throw new IllegalStateException("Control request handler returned success without a response payload");
+                        }
                     } catch (Exception e) {
                         log.error("Failed to process control request", e);
                         controlResponse = new CLIControlResponse<>();
                         controlResponse.createResponse()
-                                .setRequestId(jsonObject.getString("request_id"))
+                                .setRequestId(requestId)
                                 .setSubtype("error")
                                 .setError(e.toString());
                     }
