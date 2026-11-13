@@ -27,7 +27,7 @@ import java.util.Set;
 public class JdbcWakeRecoveryStore
         implements WakeRecoveryStore {
     private static final Set<String> SOURCES = Set.of("monitor", "channel", "child_agent",
-            "workflow", "automation", "session_message");
+            "workflow", "automation", "session_message", "loop");
     private static final int JOURNAL_PAGE = 1;
     private static final int PROOF_PAGES = 32;
     private static final long RETRY_MS = 30_000;

@@ -13,7 +13,6 @@ import java.util.jar.JarInputStream;
 import java.util.zip.ZipFile;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class ManagedAgentPackagingIT {
     @TempDir
@@ -25,10 +24,7 @@ class ManagedAgentPackagingIT {
             assertThat(library.getEntry("application.yml")).isNull();
             assertThat(library.getEntry("application-managed-local.yml")).isNull();
         }
-        var classifiers = Boolean.getBoolean("managed.operator.tools.enabled")
-                ? List.of("exec", "workspace-bundle", "workspace-migration", "workspace-maintenance-recovery",
-                        "csi-session", "csi-runtime", "operator-recovery") : List.of("exec");
-        for (String classifier : classifiers) {
+        for (String classifier : List.of("exec")) {
             try (var executable = new ZipFile(Path.of(prefix + "-" + classifier + ".jar").toFile())) {
                 assertThat(executable.getEntry("BOOT-INF/classes/application.yml")).as(classifier).isNotNull();
                 assertThat(executable.getEntry("BOOT-INF/classes/application-managed-local.yml")).as(classifier).isNotNull();
@@ -88,12 +84,12 @@ class ManagedAgentPackagingIT {
 
     @Test
     void operatorRecoveryReadsDocumentedEnvironment() throws Exception {
-        assumeTrue(Boolean.getBoolean("managed.operator.tools.enabled"));
         Path jar = Path.of(System.getProperty("managed.artifact.directory") + "/qwen-managed-agent-server-" + System.getProperty("managed.artifact.version")
-                + "-operator-recovery.jar").toAbsolutePath();
+                + "-exec.jar").toAbsolutePath();
         Path log = directory.resolve("operator.log");
         var builder = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                "-jar", jar.toString(), "inspect", "unused", "1")
+                "-Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceRecoveryCommand",
+                "-cp", jar.toString(), "org.springframework.boot.loader.launch.PropertiesLauncher", "inspect", "unused", "1")
                 .redirectErrorStream(true).redirectOutput(log.toFile());
         builder.environment().put("SPRING_DATASOURCE_URL", "jdbc:h2:mem:packaging");
         builder.environment().put("SPRING_DATASOURCE_USERNAME", "sa");
