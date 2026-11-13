@@ -26,6 +26,7 @@ const harness = vi.hoisted(() => ({
   outcomes: [] as Array<{
     data: DaemonWorkspaceMemoryStatus | undefined;
     superseded: boolean;
+    error?: Error;
   }>,
 }));
 
@@ -175,8 +176,28 @@ describe('MemoryMessage refresh with the resource hook', () => {
     expect(harness.writeMemory).not.toHaveBeenCalled();
   });
 
+  it('reports a list-load error to both the panel and transcript', async () => {
+    await renderPanel();
+    const readsBefore = contentReads();
+    const failure = new Error('workspace not trusted');
+    harness.loadMemoryStatus.mockRejectedValue(failure);
+
+    await refresh();
+
+    expect(container.textContent).toContain('workspace not trusted');
+    expect(harness.onMessage).toHaveBeenCalledWith(
+      'workspace not trusted',
+      'error',
+    );
+    expect(harness.outcomes).toEqual([
+      { data: undefined, superseded: false, error: failure },
+    ]);
+    expect(contentReads()).toBe(readsBefore);
+    expect(harness.writeMemory).not.toHaveBeenCalled();
+  });
+
   it.each(['resolve', 'reject'] as const)(
-    'ignores an older refresh that %ss after a same-path workspace event',
+    'reports a retryable refresh that %ss after a same-path workspace event',
     async (completion) => {
       await renderPanel();
       const oldRefresh = deferred<DaemonWorkspaceMemoryStatus>();
@@ -209,10 +230,15 @@ describe('MemoryMessage refresh with the resource hook', () => {
 
       expect(harness.outcomes).toEqual([{ data: undefined, superseded: true }]);
       expect(contentReads()).toBe(readsBefore);
-      expect(container.textContent).not.toContain('Could not refresh memory');
+      expect(container.textContent).toContain(
+        'Could not refresh memory. Please try again.',
+      );
       expect(container.textContent).not.toContain('obsolete');
       expect(container.textContent).not.toContain('Memory refreshed.');
-      expect(harness.onMessage).not.toHaveBeenCalled();
+      expect(harness.onMessage).toHaveBeenCalledWith(
+        'Could not refresh memory. Please try again.',
+        'error',
+      );
       expect(harness.writeMemory).not.toHaveBeenCalled();
     },
   );

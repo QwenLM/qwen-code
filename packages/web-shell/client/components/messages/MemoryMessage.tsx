@@ -191,17 +191,18 @@ export function MemoryMessage({
     if (!selectedEntry) return;
     const refreshSeq = ++refreshSeqRef.current;
     const loadSeq = loadSeqRef.current;
-    reloadWithOutcome()
-      .then(({ data: nextStatus, superseded }) => {
+    void reloadWithOutcome().then(
+      ({ data: nextStatus, superseded, error: refreshError }) => {
         if (
-          superseded ||
           refreshSeq !== refreshSeqRef.current ||
           loadSeq !== loadSeqRef.current
         ) {
           return;
         }
-        if (!nextStatus) {
-          const text = t('memory.refreshFailed');
+        if (superseded || !nextStatus) {
+          const text = superseded
+            ? t('memory.refreshFailed')
+            : (refreshError?.message ?? t('memory.refreshFailed'));
           setMessage(text);
           onMessage?.(text, 'error');
           return;
@@ -215,21 +216,8 @@ export function MemoryMessage({
         } else {
           pendingRefreshRef.current = { ...nextEntry, refreshSeq };
         }
-      })
-      .catch((refreshError: unknown) => {
-        if (
-          refreshSeq !== refreshSeqRef.current ||
-          loadSeq !== loadSeqRef.current
-        ) {
-          return;
-        }
-        const text =
-          refreshError instanceof Error
-            ? refreshError.message
-            : String(refreshError);
-        setMessage(text);
-        onMessage?.(text, 'error');
-      });
+      },
+    );
   }, [loadContent, onMessage, reloadWithOutcome, selectedEntry, t]);
 
   useEffect(() => {
