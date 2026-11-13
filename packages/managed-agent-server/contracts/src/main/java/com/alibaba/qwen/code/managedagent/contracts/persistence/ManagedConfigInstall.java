@@ -1,9 +1,12 @@
 package com.alibaba.qwen.code.managedagent.contracts.persistence;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.commons.codec.digest.DigestUtils;
 
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -50,7 +53,7 @@ public final class ManagedConfigInstall {
         check(uuid(command.path("operationId").asText()) && command.get("operationId").equals(body.get("operationId"))
                 && command.path("actorKey").asText().matches("[a-f0-9]{64}"), "Invalid extension apply identity");
         check(count(command.get("expectedRevision"), 0) + (compensation ? 1 : 0) == before, "Extension apply revision conflicts");
-        check(body.path("phaseOperationId").asText().equals(compensation ? derivedOperationId("managed-extension-recoverPrevious:", command.path("operationId").asText().toLowerCase(java.util.Locale.ROOT))
+        check(body.path("phaseOperationId").asText().equals(compensation ? derivedOperationId("managed-extension-recoverPrevious:", command.path("operationId").asText().toLowerCase(Locale.ROOT))
                 : command.path("operationId").asText()), "Configuration phase operation conflicts");
         pins(command.get("extensions"));
         ref(body.get("previousBundleRef"), true);
@@ -95,19 +98,26 @@ public final class ManagedConfigInstall {
                 && change.path("serverId").asText().matches("[A-Za-z0-9._:-]{1,128}"), "Invalid independent MCP command");
         count(change.get("expectedRevision"), 0);
         JsonNode servers = change.get("servers");
-        check(servers.isArray() && servers.size() <= 32, "Invalid independent MCP selection");
+        check(servers.isArray() && servers.size() <= ManagedExtensionRecords.MAX_MCP_SELECTION_ENTRIES,
+                "Invalid independent MCP selection");
         Set<String> ids = new HashSet<>();
         int enabled = 0;
+        int selected = 0;
         for (JsonNode pin : servers) {
             ManagedExtensionRecords.closed(pin, Set.of("serverId", "serverRevision", "definitionDigest", "state"), "Independent MCP pin");
             check(pin.path("serverId").asText().matches("[A-Za-z0-9._:-]{1,128}") && ids.add(pin.get("serverId").asText())
                     && pin.path("definitionDigest").asText().matches("[a-f0-9]{64}")
                     && Set.of("enabled", "disabled", "removed").contains(pin.path("state").asText()), "Invalid independent MCP pin");
             count(pin.get("serverRevision"), 1);
-            if ("enabled".equals(pin.path("state").asText())) {
+            String state = pin.path("state").asText();
+            if (!"removed".equals(state)) {
+                selected++;
+            }
+            if ("enabled".equals(state)) {
                 enabled++;
             }
         }
+        check(selected <= 32, "Invalid independent MCP selection");
         check(enabled <= 16 && ids.contains(change.path("serverId").asText()), "Independent MCP selection conflicts");
     }
 
@@ -158,10 +168,10 @@ public final class ManagedConfigInstall {
     }
 
     public static String derivedOperationId(String prefix, String identity) {
-        byte[] bytes = org.apache.commons.codec.digest.DigestUtils.sha256(prefix + identity);
+        byte[] bytes = DigestUtils.sha256(prefix + identity);
         bytes[6] = (byte) ((bytes[6] & 15) | 80);
         bytes[8] = (byte) ((bytes[8] & 63) | 128);
-        String hex = java.util.HexFormat.of().formatHex(bytes, 0, 16);
+        String hex = HexFormat.of().formatHex(bytes, 0, 16);
         return hex.substring(0, 8) + "-" + hex.substring(8, 12) + "-" + hex.substring(12, 16) + "-" + hex.substring(16, 20) + "-" + hex.substring(20);
     }
 

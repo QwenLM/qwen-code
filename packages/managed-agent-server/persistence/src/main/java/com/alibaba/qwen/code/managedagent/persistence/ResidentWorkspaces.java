@@ -2,21 +2,30 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.RuntimeBroker.ResidentWorkspace;
 import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
 
 /** Explicit administrator selection; a CSI registration alone never enables public execution. */
 public final class ResidentWorkspaces extends com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog {
+    private static final ObjectMapper REGISTRATION_JSON = new ObjectMapper()
+            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+            .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+
     public ResidentWorkspaces(List<? extends ResidentWorkspace> configured) { super(configured); }
 
     public void requireCreation(JdbcTemplate jdbc, ContextBinding binding, String profile) {
         var selected = find(binding);
         if (selected == null || !WorkspaceToolProfiles.FILES.equals(profile)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         requireRegistration(jdbc, selected);
         // The caller already owns ma_workspace FOR UPDATE. Use locking reads under RR.
@@ -27,7 +36,7 @@ public final class ResidentWorkspaces extends com.alibaba.qwen.code.managedagent
                 + " JOIN ma_runtime_binding b ON b.binding_id = rs.binding_id"
                 + " WHERE b.tenant_id = ? AND b.workspace_id = ? AND rs.session_state <> 'RELEASED' FOR UPDATE",
                 String.class, binding.getTenantId(), binding.getWorkspaceId()).isEmpty()) {
-            throw WorkspaceExecutionStore.busy();
+            throw JdbcWorkspaceExecutionStore.busy();
         }
     }
 
@@ -39,15 +48,12 @@ public final class ResidentWorkspaces extends com.alibaba.qwen.code.managedagent
                 String.class, registration.aliasKey(), registration.tenantId(), registration.storageId(),
                 registration.physicalKey(), registration.revision());
         try {
-            if (rows.size() != 1 || !registration.equals(new com.fasterxml.jackson.databind.ObjectMapper()
-                    .enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
-                    .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-                    .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            if (rows.size() != 1 || !registration.equals(REGISTRATION_JSON
                     .readValue(rows.getFirst(), WorkspaceCsiRegistration.class))) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
         } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
@@ -76,7 +82,7 @@ public final class ResidentWorkspaces extends com.alibaba.qwen.code.managedagent
         if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND session_id = ?"
                 + " AND session_kind = 'PUBLIC' AND parent_session_id IS NULL AND tool_profile = ?"
                 + " AND status IN ('CLOSING', 'DELETING')", Long.class, tenantId, sessionId, WorkspaceToolProfiles.FILES) != 1) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         requireRegistration(jdbc, selected);
         var originals = jdbc.query("SELECT b.binding_id, b.runtime_generation, b.resource_handle_json FROM ma_runtime_binding b"
@@ -85,7 +91,7 @@ public final class ResidentWorkspaces extends com.alibaba.qwen.code.managedagent
                 + " AND b.canonical_cwd = ? AND b.storage_id = ? AND b.capability_digest = ?"
                 + " AND b.isolation_class = 'workspace' AND b.isolation_key IS NULL"
                 + " AND b.provisioner_kind = 'kubernetes-workspace' AND b.binding_state = 'READY'"
-                + " AND b.drain_requested = FALSE AND b.resource_handle_json IS NOT NULL"
+                + " AND b.is_drain_requested = FALSE AND b.resource_handle_json IS NOT NULL"
                 + " AND b.provision_seed_ciphertext IS NOT NULL AND b.attestation_generation > 0 FOR UPDATE",
                 (row, index) -> new Original(row.getString(1), row.getLong(2), row.getString(3)), request(binding).requestKey(), tenantId,
                 binding.getWorkspaceId(), Long.toString(binding.getWorkspaceGeneration()), selected.registration().mountRoot(),
@@ -95,12 +101,12 @@ public final class ResidentWorkspaces extends com.alibaba.qwen.code.managedagent
         if (originals.isEmpty()) {
             if (!owners.isEmpty() || !jdbc.queryForList("SELECT binding_id FROM ma_runtime_binding WHERE request_key = ? FOR UPDATE",
                     String.class, request(binding).requestKey()).isEmpty()) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             return true;
         }
         if (originals.size() != 1) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         var original = originals.getFirst();
         var storage = heldStorage(original.handle());
@@ -125,7 +131,7 @@ public final class ResidentWorkspaces extends com.alibaba.qwen.code.managedagent
                 || !jdbc.queryForList("SELECT execution_call_id FROM ma_tool_execution WHERE binding_id = ?"
                     + " AND runtime_generation = ? AND execution_state <> 'SETTLED' FOR UPDATE",
                     String.class, original.id(), original.generation()).isEmpty()) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return true;
     }
@@ -139,11 +145,11 @@ public final class ResidentWorkspaces extends com.alibaba.qwen.code.managedagent
                     || !com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision.residentReserved(Long.parseLong(revision))
                     || !(storage.get("reservationId") instanceof String reservation)
                     || !java.util.UUID.fromString(reservation).toString().equals(reservation)) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             return storage;
         } catch (IllegalArgumentException | ClassCastException failure) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 

@@ -30,7 +30,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 public class WakeRecoveryStoreTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     protected ManagedSchemaJdbcTemplate jdbc;
-    protected WakeRecoveryStore store;
+    protected JdbcWakeRecoveryStore store;
     private long revision;
     private long sequence;
 
@@ -46,7 +46,7 @@ public class WakeRecoveryStoreTest {
         var source = dataSource();
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
-        store = new WakeRecoveryStore(jdbc);
+        store = new JdbcWakeRecoveryStore(jdbc);
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create,"
                 + " gmt_modified) VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1)");
         jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, workspace_id,"
@@ -60,7 +60,7 @@ public class WakeRecoveryStoreTest {
 
     @Test
     void discoversEverySourceWithoutMqAndOnlyMatchingSettlementConsumesIt() {
-        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "session_message")) {
+        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "session_message", "loop")) {
             append("input.accepted", "turn-" + source, source);
         }
         // Cross the journal page boundary; neither an attempt nor a different Turn settles this input.
@@ -70,7 +70,7 @@ public class WakeRecoveryStoreTest {
         jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id,"
                 + " wake_covered_sequence, gmt_modified) VALUES ('tenant', 'session', 'SESSION', '', 999, 1)");
         assertThat(store.hasPendingInput(candidate())).contains(true);
-        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation")) {
+        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "loop")) {
             append("turn.settled", "turn-" + source, null);
             assertThat(store.hasPendingInput(candidate())).contains(true);
         }
@@ -90,7 +90,7 @@ public class WakeRecoveryStoreTest {
         append("input.accepted", "turn", "monitor");
         var pending = candidate();
         assertThat(store.claim(pending)).isTrue();
-        var restarted = new WakeRecoveryStore(jdbc);
+        var restarted = new JdbcWakeRecoveryStore(jdbc);
         assertThat(restarted.claim(pending)).isFalse();
         assertThat(restarted.findPending("workspace", 8)).isEmpty();
         assertThat(restarted.hasPendingInput(pending)).contains(true);
@@ -113,7 +113,7 @@ public class WakeRecoveryStoreTest {
                 if (!start.await(5, TimeUnit.SECONDS)) {
                     throw new IllegalStateException("claim did not start");
                 }
-                return new WakeRecoveryStore(jdbc).claim(pending);
+                return new JdbcWakeRecoveryStore(jdbc).claim(pending);
             };
             var first = workers.submit(claim);
             var second = workers.submit(claim);
@@ -143,7 +143,7 @@ public class WakeRecoveryStoreTest {
         append("input.accepted", "turn", "monitor");
         var pending = candidate();
         assertThat(store.claim(pending)).isTrue();
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
         for (String status : List.of("CLOSING", "CLOSED")) {
             jdbc.update("UPDATE ma_session SET status = ?", status);
@@ -214,7 +214,7 @@ public class WakeRecoveryStoreTest {
         jdbc.update("DELETE FROM ma_session_journal_tx");
         assertThatThrownBy(() -> store.hasPendingInput(pending)).hasMessageContaining("cannot prove");
         jdbc.update("UPDATE ma_session_head SET compacted_through_revision = 1");
-        var compacted = new WakeRecoveryStore.Candidate("tenant", "workspace", "session",
+        var compacted = new JdbcWakeRecoveryStore.Candidate("tenant", "workspace", "session",
                 pending.journalRevision(), pending.committedSequence(), 1, null, null);
         assertThatThrownBy(() -> store.hasPendingInput(compacted)).hasMessageContaining("cannot prove");
         assertThat(store.findPending("workspace", 8)).isEmpty();
@@ -229,21 +229,21 @@ public class WakeRecoveryStoreTest {
         jdbc.update("UPDATE ma_session_head SET journal_revision = 1, committed_sequence = 1");
         assertThat(store.hasPendingInput(candidate())).contains(true);
         jdbc.update("UPDATE ma_session_journal_tx SET workspace_id = 'other' WHERE journal_revision = 1");
-        assertThatThrownBy(() -> new WakeRecoveryStore(jdbc).hasPendingInput(candidate())).hasMessageContaining("cannot prove");
+        assertThatThrownBy(() -> new JdbcWakeRecoveryStore(jdbc).hasPendingInput(candidate())).hasMessageContaining("cannot prove");
     }
 
     @Test
     void hintOnlyMarksSupportedInputAdmissions() {
-        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "session_message")) {
-            assertThat(WakeRecoveryStore.isWakeInput(event("input.accepted", "turn", source))).isTrue();
+        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "session_message", "loop")) {
+            assertThat(JdbcWakeRecoveryStore.isWakeInput(event("input.accepted", "turn", source))).isTrue();
         }
-        assertThat(WakeRecoveryStore.isWakeInput(event("input.accepted", "turn", "user"))).isFalse();
-        assertThat(WakeRecoveryStore.isWakeInput(event("turn.settled", "turn", null))).isFalse();
+        assertThat(JdbcWakeRecoveryStore.isWakeInput(event("input.accepted", "turn", "user"))).isFalse();
+        assertThat(JdbcWakeRecoveryStore.isWakeInput(event("turn.settled", "turn", null))).isFalse();
     }
 
     @Test
     void hintedWorkPrecedesLazyBackfillEvenWhenItsKeySortsLast() {
-        jdbc.update("UPDATE ma_session_head SET wake_pending = TRUE");
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = TRUE");
         for (int index = 0; index < 12; index++) {
             String id = "idle-" + index;
             jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, gmt_create, gmt_modified)"
@@ -257,7 +257,7 @@ public class WakeRecoveryStoreTest {
                             + " FROM ma_session_head WHERE session_id = ?",
                     "0".repeat(60) + String.format("%04d", index), id, id, "session");
         }
-        assertThat(store.findPending("workspace", 1)).extracting(WakeRecoveryStore.Candidate::sessionId)
+        assertThat(store.findPending("workspace", 1)).extracting(JdbcWakeRecoveryStore.Candidate::sessionId)
                 .containsExactly("session");
         assertThat(store.findPending("workspace", 8)).hasSize(8);
     }
@@ -297,7 +297,7 @@ public class WakeRecoveryStoreTest {
         }
         var pending = candidate();
         var reads = new CountingJdbcTemplate(jdbc.getDataSource());
-        store = new WakeRecoveryStore(reads);
+        store = new JdbcWakeRecoveryStore(reads);
         for (int pass = 0; pass < 2; pass++) {
             assertThat(store.hasPendingInput(pending)).isEmpty();
             assertThat(reads.revisions).hasSize(32 * (pass + 1));
@@ -342,7 +342,7 @@ public class WakeRecoveryStoreTest {
         var before = candidate();
         assertThat(store.hasPendingInput(before)).isEmpty();
         var reads = new CountingJdbcTemplate(jdbc.getDataSource());
-        store = new WakeRecoveryStore(reads);
+        store = new JdbcWakeRecoveryStore(reads);
         assertThat(store.hasPendingInput(before)).isEmpty();
         assertThat(reads.revisions.getFirst()).isZero();
         append("turn.settled", "pending", null);
@@ -361,7 +361,7 @@ public class WakeRecoveryStoreTest {
         }
         var pending = candidate();
         var reads = new CountingJdbcTemplate(jdbc.getDataSource());
-        store = new WakeRecoveryStore(reads);
+        store = new JdbcWakeRecoveryStore(reads);
         assertThat(store.hasPendingInput(pending)).isEmpty();
         jdbc.update("UPDATE ma_session_journal_tx SET record_digest = ? WHERE journal_revision = 33", "c".repeat(64));
         assertThatThrownBy(() -> store.hasPendingInput(pending)).hasMessageContaining("cannot prove");
@@ -384,7 +384,7 @@ public class WakeRecoveryStoreTest {
             }
             var candidates = store.findPending("workspace", 200);
             assertThat(candidates).hasSize(129);
-            var completed = new HashSet<WakeRecoveryStore.Candidate>();
+            var completed = new HashSet<JdbcWakeRecoveryStore.Candidate>();
             for (int pass = 0; pass < 4 && completed.size() < candidates.size(); pass++) {
                 for (var row : candidates) {
                     if (!completed.contains(row) && store.hasPendingInput(row).equals(java.util.Optional.of(true))) {
@@ -394,7 +394,7 @@ public class WakeRecoveryStoreTest {
             }
             assertThat(completed).containsExactlyInAnyOrderElementsOf(candidates);
 
-            store = new WakeRecoveryStore(jdbc);
+            store = new JdbcWakeRecoveryStore(jdbc);
             for (var row : candidates.subList(0, 128)) {
                 assertThat(store.hasPendingInput(row)).isEmpty();
             }
@@ -402,7 +402,7 @@ public class WakeRecoveryStoreTest {
             jdbc.update("UPDATE ma_session SET status = 'CLOSED' WHERE session_id <> ?", waiting.sessionId());
             assertThat(store.hasPendingInput(waiting)).isEmpty();
             assertThat(store.hasPendingInput(waiting)).contains(true);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head WHERE wake_scan_pending = TRUE",
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head WHERE is_wake_scan_pending = TRUE",
                     Long.class)).isEqualTo(129L);
         });
     }
@@ -451,7 +451,7 @@ public class WakeRecoveryStoreTest {
         }
     }
 
-    private WakeRecoveryStore.Candidate candidate() {
+    private JdbcWakeRecoveryStore.Candidate candidate() {
         return store.findPending("workspace", 8).getFirst();
     }
 

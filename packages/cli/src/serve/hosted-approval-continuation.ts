@@ -28,7 +28,12 @@ import {
   hostedActionDenied,
   readHostedActionOptions,
 } from './hosted-tool-approval.js';
+import {
+  hostedQuestions,
+  readHostedQuestionDecision,
+} from './hosted-user-question.js';
 
+import { isHostedMemoryTool } from './hosted-memory-session.js';
 import { hostedRuntimeSessionId } from './hosted-workspace-broker.js';
 import { readHostedTurnApprovalSelection } from './hosted-approval-selection.js';
 
@@ -39,6 +44,7 @@ const NATIVE_TOOLS = new Set([
   'glob',
   'todo_write',
   'web_fetch',
+  'ask_user_question',
 ]);
 
 export interface HostedNativePlannedCall {
@@ -80,7 +86,8 @@ export interface HostedApprovalContinuation {
     readonly bindingId: string;
     readonly generation: string;
     readonly workspaceGeneration: string;
-  };
+    readonly provisionerKind?: 'local-process';
+  } | null;
   readonly batchId: string;
   readonly assistantRef: ManagedSessionDurableRef;
   readonly model: string;
@@ -120,6 +127,10 @@ export async function readHostedApprovalContinuation(
   );
   const plan = raw as unknown as HostedApprovalContinuation;
   const header = session.authority.sessionHeader;
+  const conflict =
+    'Hosted approval continuation conflicts with the original Turn.';
+  const runtimeSessionId =
+    plan.runtime?.runtimeSessionId ?? hostedRuntimeSessionId(promptId);
   if (
     Object.keys(raw).length !==
       15 + (plan.publicChildModel ? 1 : 0) + (plan.commandStep ? 1 : 0) ||
@@ -134,22 +145,41 @@ export async function readHostedApprovalContinuation(
     !Number.isSafeInteger(plan.approvalOrdinal) ||
     plan.approvalOrdinal < 0 ||
     plan.approvalOrdinal >= plan.calls.length ||
-    !plan.runtime ||
-    Object.keys(plan.runtime).length !== 4 ||
-    (!plan.commandStep &&
-      plan.runtime.runtimeSessionId !== hostedRuntimeSessionId(promptId)) ||
-    !/^[1-9][0-9]{0,18}$/u.test(plan.runtime.generation) ||
-    !/^[1-9][0-9]{0,18}$/u.test(plan.runtime.workspaceGeneration) ||
-    BigInt(plan.runtime.generation) > 2n ** 63n - 1n ||
-    BigInt(plan.runtime.workspaceGeneration) > 2n ** 63n - 1n ||
     !plan.sourceActivation ||
     Object.keys(plan.sourceActivation).length !== 2 ||
     !Number.isSafeInteger(plan.sourceActivation.epoch) ||
     plan.sourceActivation.epoch < 1
   )
-    throw new Error(
-      'Hosted approval continuation conflicts with the original Turn.',
-    );
+    throw new Error(conflict);
+  if (plan.runtime === null) {
+    if (
+      plan.commandStep ||
+      plan.publicChildModel ||
+      plan.calls.some((item) => !isHostedMemoryTool(item.call?.name))
+    )
+      throw new Error(conflict);
+  } else {
+    const providerPinned = Object.hasOwn(plan.runtime ?? {}, 'provisionerKind');
+    if (
+      !plan.runtime ||
+      Object.keys(plan.runtime).sort().join(',') !==
+        (providerPinned
+          ? 'bindingId,generation,provisionerKind,runtimeSessionId,workspaceGeneration'
+          : 'bindingId,generation,runtimeSessionId,workspaceGeneration') ||
+      (providerPinned &&
+        (plan.runtime.provisionerKind !== 'local-process' ||
+          plan.commandStep !== undefined ||
+          plan.calls.length !== 1 ||
+          plan.calls[0]?.call?.name !== 'ask_user_question')) ||
+      (!plan.commandStep &&
+        runtimeSessionId !== hostedRuntimeSessionId(promptId)) ||
+      !/^[1-9][0-9]{0,18}$/u.test(plan.runtime.generation) ||
+      !/^[1-9][0-9]{0,18}$/u.test(plan.runtime.workspaceGeneration) ||
+      BigInt(plan.runtime.generation) > 2n ** 63n - 1n ||
+      BigInt(plan.runtime.workspaceGeneration) > 2n ** 63n - 1n
+    )
+      throw new Error(conflict);
+  }
   if (plan.commandStep) {
     if (
       Object.keys(plan.commandStep).sort().join(',') !==
@@ -162,10 +192,7 @@ export async function readHostedApprovalContinuation(
     )
       throw new Error('Invalid command step continuation.');
     assertManagedSessionStableId(plan.commandStep.toolStageId, 'command step');
-    assertManagedSessionStableId(
-      plan.runtime.runtimeSessionId,
-      'command owner',
-    );
+    assertManagedSessionStableId(runtimeSessionId, 'command owner');
     assertManagedSessionDurableRef(
       plan.commandStep.inputRef as unknown as ManagedSessionJsonValue,
       'command approval input',
@@ -173,7 +200,7 @@ export async function readHostedApprovalContinuation(
   }
   for (const id of [
     plan.batchId,
-    plan.runtime.bindingId,
+    ...(plan.runtime ? [plan.runtime.bindingId] : []),
     plan.sourceActivation.activationId,
     plan.model,
   ])
@@ -219,7 +246,8 @@ export async function readHostedApprovalContinuation(
     );
     if (
       definition.publicChildAgentsVersion !== 1 ||
-      definition.toolProfile !== 'hosted-workspace-shell/1'
+      (definition.toolProfile !== 'hosted-workspace-shell/1' &&
+        definition.toolProfile !== 'hosted-workspace-shell/3')
     )
       throw new Error('Public child recovery profile changed.');
   }
@@ -232,6 +260,13 @@ export async function readHostedApprovalContinuation(
     plan.calls[0].call?.name === 'exit_plan_mode' &&
     (await readHostedTurnApprovalSelection(session, promptId))?.planMode ===
       true;
+  const questionBatch =
+    plan.calls.length === 1 && plan.calls[0].call?.name === 'ask_user_question';
+  if (
+    !questionBatch &&
+    plan.calls.some((item) => item.call?.name === 'ask_user_question')
+  )
+    throw new Error('Saved question cannot share a tool batch.');
   for (const [ordinal, item] of plan.calls.entries()) {
     if (
       Object.keys(item).length !==
@@ -247,6 +282,7 @@ export async function readHostedApprovalContinuation(
       !item.call ||
       !(
         NATIVE_TOOLS.has(item.call.name) ||
+        isHostedMemoryTool(item.call.name) ||
         (plan.commandStep && item.call.name === 'skill') ||
         publicPlanExit ||
         (publicShell && ['agent', 'run_shell_command'].includes(item.call.name))
@@ -263,9 +299,8 @@ export async function readHostedApprovalContinuation(
       item.partIndex < 0 ||
       parts[item.partIndex]?.functionCall?.id !== item.call.callId ||
       parts[item.partIndex]?.functionCall?.name !== item.call.name ||
-      item.prepareKey !==
-        `${plan.runtime.runtimeSessionId}:${item.runtimeCallId}` ||
-      item.prepareReference?.sessionId !== plan.runtime.runtimeSessionId ||
+      item.prepareKey !== `${runtimeSessionId}:${item.runtimeCallId}` ||
+      item.prepareReference?.sessionId !== runtimeSessionId ||
       item.prepareReference.promptId !== promptId ||
       item.prepareReference.callId !== item.runtimeCallId ||
       item.prepareReference.argsDigest !== item.requestDigest ||
@@ -297,7 +332,7 @@ export async function readHostedApprovalContinuation(
     };
     if (
       saved.harnessSessionId !== header.sessionKey.sessionId ||
-      saved.runtimeSessionId !== plan.runtime.runtimeSessionId ||
+      saved.runtimeSessionId !== runtimeSessionId ||
       typeof saved.payloadJson !== 'string' ||
       item.requestDigest !==
         `sha256:${createHash('sha256').update(saved.payloadJson).digest('hex')}`
@@ -324,6 +359,12 @@ export async function readHostedApprovalContinuation(
         !isDeepStrictEqual(item.call.args, payload.input))
     )
       throw new Error('Saved public plan is invalid.');
+    if (
+      questionBatch &&
+      (!isDeepStrictEqual(item.call.args, payload.input) ||
+        (item.actionId === null && item.refusal === null))
+    )
+      throw new Error('Saved question input or Action is missing.');
     const definition = JSON.parse(
       (await session.resources.read(item.definitionRef)).toString('utf8'),
     ) as { name?: string };
@@ -333,8 +374,18 @@ export async function readHostedApprovalContinuation(
       const action = session.authority.action(item.actionId);
       if (!action) throw new Error('Original approval is missing.');
       const options = await readHostedActionOptions(session, action);
+      if (options.v === 4) {
+        if (
+          !questionBatch ||
+          !isDeepStrictEqual(hostedQuestions(payload.input), options.questions)
+        )
+          throw new Error('Saved question does not match its original input.');
+        if (action.state === 'decided')
+          await readHostedQuestionDecision(session, action, options);
+      }
       if (
-        options.v !== 3 ||
+        (options.v !== 3 && options.v !== 4) ||
+        (questionBatch && options.v !== 4) ||
         options.functionCallId !== item.call.callId ||
         options.turnId !== promptId ||
         options.toolName !==
@@ -351,6 +402,7 @@ export async function readHostedApprovalContinuation(
               : item.inputRef,
           )) ||
         (action.state === 'decided' &&
+          options.v !== 4 &&
           !hostedActionAllowed(action, options.policyRevision) &&
           !hostedActionDenied(action, options.policyRevision)) ||
         (plan.stage === 'approval' &&
@@ -455,7 +507,7 @@ export async function findHostedApprovalContinuation(
       !callIds.includes(options.functionCallId)
     )
       continue;
-    if (options.v !== 3) return undefined;
+    if (options.v !== 3 && options.v !== 4) return undefined;
     approvalRef ??= options.continuationRef;
   }
   const planRef = batch

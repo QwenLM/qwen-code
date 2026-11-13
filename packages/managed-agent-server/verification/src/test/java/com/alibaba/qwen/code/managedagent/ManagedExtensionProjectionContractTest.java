@@ -28,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * independent of both languages. ManagedExtensionRecordStoreTest commits
  * their monitor chains through the Session store.
  */
-class ManagedExtensionProjectionContractTest {
+public class ManagedExtensionProjectionContractTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     @Test
@@ -279,7 +279,7 @@ class ManagedExtensionProjectionContractTest {
                         : view.required("settledAt").longValue());
     }
 
-    static JsonNode fixtures() throws IOException {
+    public static JsonNode fixtures() throws IOException {
         return contract("managed-extension-projection-v1.fixtures.json");
     }
 

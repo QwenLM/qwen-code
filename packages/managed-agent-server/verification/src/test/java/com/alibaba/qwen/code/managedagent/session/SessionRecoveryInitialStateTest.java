@@ -8,10 +8,10 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -41,11 +41,9 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -62,7 +60,7 @@ class SessionRecoveryInitialStateTest {
     private JdbcDataSource source;
     private JdbcTemplate jdbc;
     private ManagedAgentStore store;
-    private ManagedSessionStore journals;
+    private JdbcManagedSessionStore journals;
     private ManagedAgentService sessions;
     private String sessionId;
     private long generation;
@@ -79,10 +77,10 @@ class SessionRecoveryInitialStateTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
-        var registry = mock(ManagedWorkspaceRegistry.class);
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, json, Clock.systemUTC(), events -> {}, registry,
-                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
-        journals = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var registry = mock(JdbcManagedWorkspaceRegistry.class);
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), events -> {}, registry,
+                new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        journals = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         when(harness.isAvailable()).thenReturn(true);
         when(harness.supportsFencedTitles()).thenReturn(true);
         sessions = new ManagedAgentService(store, digests, coordinator, harness, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
@@ -92,14 +90,16 @@ class SessionRecoveryInitialStateTest {
 
     @Test
     void aPersistedEmptySessionRenameRemainsSendableAfterHarnessCacheLoss() throws Exception {
-        when(harness.createOrLoad(TENANT, sessionId, false, true)).thenAnswer(call -> {
-            genesis();
-            return new HarnessConnector.Attachment("boot", null, 0L, "epoch");
-        });
-        doAnswer(call -> {
-            rename();
-            return null;
-        }).when(harness).rename(eq(TENANT), eq(sessionId), eq("Renamed"), anyLong());
+        // The synchronous rename settles the title in one local SQL transaction
+        // and no longer establishes a Harness boot attachment, so it does not
+        // seed the journal through createOrLoad. Seed the pristine initial
+        // journal (genesis + rename) directly as the Harness state this recovery
+        // case pins; the best-effort title notification is a no-op here and must
+        // not append another commit. The guarantee under test is unchanged: an
+        // empty Session with a proven initial journal stays sendable after the
+        // Harness cache is lost, without re-attaching.
+        genesis();
+        rename();
         sessions.renameSession(TENANT, "actor", "rename", sessionId, "Renamed");
         assertThat(store.requireSession(TENANT, sessionId).title()).isEqualTo("Renamed");
         assertThat(store.findLatestTurns(TENANT, List.of(sessionId))).isEmpty();
@@ -140,7 +140,7 @@ class SessionRecoveryInitialStateTest {
     @ValueSource(strings = {"missing-journal", "pristine-journal"})
     void aLaterUnsubmittedCancellationCannotHideAnEarlierPossibleSubmission(String nativeHistory) throws Exception {
         String earlier = cancelBeforeSubmission("earlier");
-        jdbc.update("UPDATE ma_turn SET status = 'FAILED', submission_attempted = TRUE, harness_event_epoch = 'earlier-epoch'"
+        jdbc.update("UPDATE ma_turn SET status = 'FAILED', is_submission_attempted = TRUE, harness_event_epoch = 'earlier-epoch'"
                 + " WHERE turn_id = ?", earlier);
         if ("pristine-journal".equals(nativeHistory)) {
             genesis();
@@ -318,10 +318,10 @@ class SessionRecoveryInitialStateTest {
                 return result;
             }
         };
-        assertThat(recovery(com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(moving))).query(TENANT, "actor", sessionId).nextTurnAllowed()).isFalse();
+        assertThat(recovery(com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(moving)).query(TENANT, "actor", sessionId).nextTurnAllowed()).isFalse();
     }
 
-    private SessionRecoveryService recovery(ManagedSessionStore nativeStore) {
+    private SessionRecoveryService recovery(JdbcManagedSessionStore nativeStore) {
         return new SessionRecoveryService(sessions, store, coordinator, harness, new com.alibaba.qwen.code.managedagent.persistence.JdbcSessionRecoveryRepository(jdbc), nativeStore);
     }
 

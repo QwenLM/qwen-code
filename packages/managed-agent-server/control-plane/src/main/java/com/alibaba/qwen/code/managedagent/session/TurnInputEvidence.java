@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.AcceptanceEvidence;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
@@ -18,9 +18,9 @@ import java.util.Optional;
  */
 @Component
 public class TurnInputEvidence implements AcceptanceEvidence {
-    private final AgentStateStore store;
+    private final SessionLifecycleStore store;
 
-    public TurnInputEvidence(AgentStateStore store) {
+    public TurnInputEvidence(SessionLifecycleStore store) {
         this.store = store;
     }
 

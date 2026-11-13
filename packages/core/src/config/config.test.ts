@@ -43,12 +43,14 @@ import {
 } from './config.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { Storage } from './storage.js';
+import { ideContextStore } from '../ide/ideContext.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { setMemoryFilename as mockSetMemoryFilename } from '../utils/memory-constants.js';
+import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
@@ -74,7 +76,8 @@ import {
   resetPreloadedContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
-import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
+import { DEFAULT_TOKEN_LIMIT, tokenLimit } from '../core/tokenLimits.js';
+import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { LlmClient } from '../core/client.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { buildSessionAgentToolConfig } from '../agents/workspace-agents/capability.js';
@@ -123,6 +126,8 @@ import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
+import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
+import { resolveModelConfig } from '../models/modelConfigResolver.js';
 
 /**
  * A settled registration for the shared record, the shape
@@ -314,6 +319,10 @@ vi.mock('../hooks/index.js', () => {
   const HookSystemMock = vi.fn();
   HookSystemMock.prototype.runtimeId = 'test-hook-runtime';
   HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
+  HookSystemMock.prototype.close = vi.fn().mockResolvedValue(undefined);
+  HookSystemMock.prototype.refreshFileWatchingForWorkingDirectory = vi
+    .fn()
+    .mockResolvedValue(undefined);
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.isManaged = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
@@ -494,6 +503,9 @@ function mockAutoMemoryIndexRead(content: string) {
 vi.mock('../core/baseLlmClient.js');
 vi.mock('../core/toolHookTriggers.js', () => ({
   fireNotificationHook: vi.fn().mockResolvedValue({}),
+}));
+vi.mock('../models/model-catalog-refresh.js', () => ({
+  refreshModelCatalog: vi.fn().mockResolvedValue(undefined),
 }));
 
 type MemoryLoad = Awaited<ReturnType<typeof loadServerHierarchicalMemory>>;
@@ -1172,6 +1184,323 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  describe('subscription model switching', () => {
+    beforeEach(() => {
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getIdentity',
+      ).mockReturnValue('account-a');
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getModels',
+      ).mockResolvedValue({
+        models: ['qwen3.8-max', 'qwen3.8-flash'],
+        cached: false,
+      });
+      stubContentGenerator();
+    });
+
+    afterEach(() => {
+      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockRestore();
+      vi.mocked(QwenSubscriptionSession.prototype.getModels).mockRestore();
+    });
+
+    const subscriptionConfig = async () => {
+      const config = makeConfig({
+        cliVersion: '0.0.0-test',
+        model: 'qwen3.8-max',
+        generationConfig: { reasoning: { effort: 'high' } },
+        modelProvidersConfig: { openai: [{ id: 'other-model' }] },
+      });
+      await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
+      return config;
+    };
+
+    it.each([
+      ['old-project-model', 'qwen3.8-flash', 'qwen3.8-flash'],
+      ['qwen3.8-max', 'qwen3.8-flash', 'qwen3.8-max'],
+      ['old-project-model', 'removed-user-model', undefined],
+    ])(
+      'resolves startup model %s with saved user fallback %s',
+      async (projectModel, fallback, expectedModel) => {
+        const config = makeConfig({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: projectModel,
+        });
+        const refresh = config.refreshAuth(
+          AuthType.QWEN_SUBSCRIPTION,
+          true,
+          fallback,
+        );
+        if (expectedModel) {
+          await refresh;
+          expect(config.getContentGeneratorConfig()?.model).toBe(expectedModel);
+          expect(config.getWarnings()).toEqual([]);
+        } else {
+          await expect(refresh).rejects.toThrow(
+            `The selected model, ${projectModel}, is no longer available. Run /model to choose another model.`,
+          );
+          expect(config.getModel()).toBe(projectModel);
+        }
+        expect(
+          QwenSubscriptionSession.prototype.getModels,
+        ).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each([
+      { fallback: undefined, expected: 'qwen4' },
+      { fallback: 'removed-user-model', expected: 'qwen4' },
+      { fallback: 'qwen3.8-flash', expected: 'qwen3.8-flash' },
+    ])(
+      'initializes subscription model $expected with startup fallback $fallback',
+      async ({ fallback, expected }) => {
+        const { config: generationConfig, sources } = resolveModelConfig({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          settings: { model: 'qwen4' },
+          env: {},
+        });
+        const config = makeConfig({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: 'qwen4',
+          generationConfig,
+          generationConfigSources: sources,
+        });
+
+        await config.refreshAuth(
+          AuthType.QWEN_SUBSCRIPTION,
+          true,
+          fallback,
+          true,
+        );
+
+        expect(config.getContentGeneratorConfig()).toMatchObject({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: expected,
+        });
+        expect(
+          config
+            .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
+            .map(({ id }) => id),
+        ).toEqual(['qwen3.8-max', 'qwen3.8-flash']);
+        expect(config.getWarnings()).toEqual([]);
+      },
+    );
+
+    it('initializes an API model when switching from a signed-out subscription', async () => {
+      const config = makeConfig({
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        model: 'qwen3.8-max',
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'api-model',
+              generationConfig: { contextWindowSize: 64000 },
+            },
+          ],
+        },
+      });
+      expect(
+        config.getContentGenerator({ allowUninitialized: true }),
+      ).toBeUndefined();
+
+      await config.switchModel(AuthType.USE_OPENAI, 'api-model', {
+        initializeIfNeeded: true,
+      });
+      expect(
+        config.getContentGenerator({ allowUninitialized: true }),
+      ).toBeDefined();
+      expect(config.getContentGeneratorConfig()).toMatchObject({
+        authType: AuthType.USE_OPENAI,
+        model: 'api-model',
+        contextWindowSize: 64000,
+      });
+    });
+
+    it('reuses the same account catalog while rebuilding model capabilities and reasoning', async () => {
+      vi.mocked(
+        QwenSubscriptionSession.prototype.getModels,
+      ).mockResolvedValueOnce({
+        models: ['qwen3.8-max', 'qwen3.8-flash'],
+        modelMetadata: [
+          { id: 'qwen3.8-flash', modalities: {}, contextWindowSize: 262144 },
+        ],
+        cached: false,
+      });
+      const config = await subscriptionConfig();
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(
+        config.getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION),
+      ).toContainEqual(
+        expect.objectContaining({
+          id: 'qwen3.8-flash',
+          modalities: {},
+          contextWindowSize: 262144,
+        }),
+      );
+      expect(config.getContentGeneratorConfig()).toMatchObject({
+        model: 'qwen3.8-flash',
+        contextWindowSize: 262144,
+        reasoning: { effort: 'high' },
+      });
+      expect(config.getContentGeneratorConfig()?.modalities).toEqual({});
+      expect(
+        buildAgentContentGeneratorConfig(config, 'qwen3.8-max', {
+          authType: AuthType.QWEN_SUBSCRIPTION,
+        }).contextWindowSize,
+      ).toBe(tokenLimit('qwen3.8-max'));
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max');
+
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledWith(
+        undefined,
+        '0.0.0-test',
+      );
+      expect(createContentGenerator).toHaveBeenCalledTimes(4);
+      expect(config.getContentGeneratorConfig()).toMatchObject({
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        model: 'qwen3.8-max',
+        modalities: { image: true, video: true },
+        contextWindowSize: config
+          .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
+          .find((model) => model.id === 'qwen3.8-max')?.contextWindowSize,
+        reasoning: { effort: 'high' },
+      });
+    });
+
+    it('reloads the catalog after the login identity changes', async () => {
+      const config = await subscriptionConfig();
+      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockReturnValue(
+        'account-b',
+      );
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+    });
+
+    it('refuses a model unavailable to the replacement account', async () => {
+      const config = await subscriptionConfig();
+      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockReturnValue(
+        'account-b',
+      );
+      vi.mocked(QwenSubscriptionSession.prototype.getModels).mockResolvedValue({
+        models: ['qwen3.8-max'],
+        cached: false,
+      });
+      await expect(
+        config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash'),
+      ).rejects.toThrow('no longer available');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(config.getModel()).toBe('qwen3.8-max');
+    });
+
+    it('does not reuse the catalog after logout', async () => {
+      const config = await subscriptionConfig();
+      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockReturnValue(
+        undefined,
+      );
+      vi.mocked(QwenSubscriptionSession.prototype.getModels).mockRejectedValue(
+        new Error('session_changed'),
+      );
+      await expect(
+        config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash'),
+      ).rejects.toThrow('session_changed');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+    });
+
+    it('refreshes explicitly and when switching back from another provider', async () => {
+      const config = await subscriptionConfig();
+      await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+      await config.switchModel(AuthType.USE_OPENAI, 'other-model');
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        3,
+      );
+    });
+
+    it('invalidates reuse after a failed explicit catalog refresh', async () => {
+      const config = await subscriptionConfig();
+      vi.mocked(
+        QwenSubscriptionSession.prototype.getModels,
+      ).mockRejectedValueOnce(new Error('catalog rejected'));
+      await expect(config.refreshSubscriptionModels()).rejects.toThrow(
+        'catalog rejected',
+      );
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        3,
+      );
+    });
+
+    it('does not bind a catalog to a login that changed during refresh', async () => {
+      vi.mocked(
+        QwenSubscriptionSession.prototype.getModels,
+      ).mockImplementationOnce(async () => {
+        vi.mocked(
+          QwenSubscriptionSession.prototype.getIdentity,
+        ).mockReturnValue('account-b');
+        return { models: ['qwen3.8-max', 'qwen3.8-flash'], cached: false };
+      });
+      const config = await subscriptionConfig();
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+    });
+  });
+
+  it('clears active authentication and generators without erasing other providers', async () => {
+    const config = await initConfig({
+      modelProvidersConfig: {
+        openai: [
+          { id: 'saved-model', baseUrl: OPENAI_URL, envKey: 'SAVED_KEY' },
+        ],
+      },
+    });
+    stubContentGenerator();
+    await config.refreshAuth(AuthType.USE_GEMINI);
+    const providers = config
+      .getModelsConfig()
+      .getAvailableModelsForAuthType(AuthType.USE_OPENAI);
+    config.setSubscriptionPlan('pro');
+    const worker = backgroundTask('logout-worker', 'Active member worker');
+    config.getBackgroundTaskRegistry().register(worker);
+    const listener = vi.fn();
+    config.onModelChange(listener);
+
+    config.clearAuth();
+
+    expect(config.getAuthType()).toBeUndefined();
+    expect(config.getCurrentAuthType()).toBeUndefined();
+    expect(config.getSubscriptionPlan()).toBeUndefined();
+    expect(worker.abortController.signal.aborted).toBe(true);
+    expect(() => config.getContentGenerator()).toThrow('Run /auth');
+    expect(
+      config.getContentGenerator({ allowUninitialized: true }),
+    ).toBeUndefined();
+    expect(() => config.getBaseLlmClient()).toThrow('not initialized');
+    expect(
+      config
+        .getModelsConfig()
+        .getAvailableModelsForAuthType(AuthType.USE_OPENAI),
+    ).toEqual(providers);
+    expect(listener).toHaveBeenCalled();
+    await config.refreshAuth(AuthType.USE_GEMINI);
+    expect(config.getContentGenerator()).toBeDefined();
+    expect(config.getAuthType()).toBe(AuthType.USE_GEMINI);
+  });
+
   it('forwards usageStatisticsEnabled and proxy to the extension manager', () => {
     // installProxyDispatcher: false keeps this test from pinning a
     // process-global undici dispatcher; the wiring under test (the two
@@ -1223,6 +1552,205 @@ describe('Server Config (config.ts)', () => {
     }
   });
 
+  describe('project hooks approval gate', () => {
+    it('withholds project hooks while they await approval, never user hooks', () => {
+      const config = makeConfig({
+        userHooks,
+        projectHooks,
+        projectHooksPendingApproval: true,
+      });
+
+      expect(config.isProjectHooksPendingApproval()).toBe(true);
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getWithheldProjectHooks()).toBe(projectHooks);
+      expect(config.getUserHooks()).toBe(userHooks);
+
+      config.setProjectHooksPendingApproval(false);
+
+      expect(config.isProjectHooksPendingApproval()).toBe(false);
+      expect(config.getProjectHooks()).toBe(projectHooks);
+      expect(config.getWithheldProjectHooks()).toBeUndefined();
+    });
+
+    it.each([
+      ['not gated', undefined, false, false],
+      ['gated and approved', false, true, false],
+      ['gated and pending', true, true, true],
+    ])(
+      'reports a session that is %s',
+      (_label, projectHooksPendingApproval, gated, pending) => {
+        const config = makeConfig({ projectHooksPendingApproval });
+        expect(config.isProjectHooksApprovalGated()).toBe(gated);
+        expect(config.isProjectHooksPendingApproval()).toBe(pending);
+      },
+    );
+
+    it('re-arms a --yolo session once it leaves YOLO', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksPendingApproval: false,
+        projectHooksYoloExempt: true,
+      });
+      expect(config.isProjectHooksApprovalGated()).toBe(false);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.isProjectHooksApprovalGated()).toBe(true);
+    });
+
+    it('a stored approval authorizes the block inside a --yolo session with trust off', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksYoloExempt: true,
+        projectHooksApproved: true,
+        projectHooks,
+      });
+
+      expect(config.isProjectHooksApprovalGated()).toBe(false);
+      expect(config.getProjectHooks()).toBe(projectHooks);
+    });
+
+    it('replacing the block under --yolo drops the old approval authority', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksYoloExempt: true,
+        projectHooksApproved: true,
+        projectHooks,
+      });
+      const edited = {
+        SessionStart: [{ hooks: [{ type: 'command', command: 'echo new' }] }],
+      };
+
+      config.setHooksFromSettings({ projectHooks: edited });
+
+      // The exemption suppresses asking, not the authority check: the
+      // edited block never carries the previous block's approval.
+      expect(config.getProjectHooks()).toBeUndefined();
+
+      // The caller re-applies a genuine decision for the new block.
+      config.setProjectHooksPendingApproval(false);
+      expect(config.getProjectHooks()).toBe(edited);
+    });
+
+    it('a --yolo session without approval or trust still withholds the block', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksYoloExempt: true,
+        projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('the display-only block surfaces in diagnostics but never executes', () => {
+      const config = makeConfig({
+        folderTrust: true,
+        trustedFolder: false,
+        projectHooksDisplayOnly: projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toEqual(projectHooks);
+    });
+
+    it('the display-only block surfaces even when the empty execution block reads the gate as cleared', () => {
+      // Feature on + untrusted: the settings layer passes no execution
+      // block and pending=false ("nothing to approve"). The listing must
+      // still show the configured hooks as trust-withheld.
+      const config = makeConfig({
+        folderTrust: true,
+        trustedFolder: false,
+        projectHooksPendingApproval: false,
+        projectHooksDisplayOnly: projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toEqual(projectHooks);
+    });
+
+    it('withholds the legacy merged hooks from both getters while pending', () => {
+      const config = makeConfig({
+        hooks: projectHooks,
+        projectHooksPendingApproval: true,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getUserHooks()).toBeUndefined();
+
+      config.setProjectHooksPendingApproval(false);
+
+      expect(config.getProjectHooks()).toBe(projectHooks);
+      expect(config.getUserHooks()).toBe(projectHooks);
+    });
+
+    it('keeps a mid-session gate after the hooks are replaced', () => {
+      const config = makeConfig({ projectHooks });
+      config.setProjectHooksPendingApproval(true);
+
+      config.setHooksFromSettings({ projectHooks });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it.each([
+      ['the trust feature is off (default)', {}],
+      [
+        'the feature is on but the folder is untrusted',
+        { folderTrust: true, trustedFolder: false },
+      ],
+    ] as Array<[string, Partial<ConfigParameters>]>)(
+      'an approved block runs in an interactive session when %s',
+      (_label, trust) => {
+        const config = makeConfig({
+          interactive: true,
+          ...trust,
+          projectHooks,
+          projectHooksPendingApproval: false,
+        });
+
+        expect(config.getProjectHooks()).toBe(projectHooks);
+        // The registry loads the approved block; the listing must not add
+        // a second, trust-disabled copy of the same hooks.
+        expect(config.getTrustWithheldProjectHooks()).toBeUndefined();
+      },
+    );
+
+    it('a pending block stays withheld in an interactive untrusted session', () => {
+      const config = makeConfig({
+        interactive: true,
+        projectHooks,
+        projectHooksPendingApproval: true,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toBe(projectHooks);
+      // The approval reason stays reachable even though trust also withholds.
+      expect(config.getWithheldProjectHooks()).toBe(projectHooks);
+
+      config.setProjectHooksPendingApproval(true, true);
+      expect(config.isProjectHooksRejected()).toBe(true);
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getWithheldProjectHooks()).toBe(projectHooks);
+    });
+
+    it('an ungated interactive session still needs explicit folder trust', () => {
+      const config = makeConfig({
+        interactive: true,
+        projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toBe(projectHooks);
+
+      const trusted = makeConfig({
+        interactive: true,
+        folderTrust: true,
+        trustedFolder: true,
+        projectHooks,
+      });
+      expect(trusted.getProjectHooks()).toBe(projectHooks);
+      expect(trusted.getTrustWithheldProjectHooks()).toBeUndefined();
+    });
+  });
+
   describe('setHooksFromSettings', () => {
     it.each([
       [
@@ -1234,7 +1762,7 @@ describe('Server Config (config.ts)', () => {
       ],
       [
         'replaces project hooks without leaking them into user hooks',
-        {},
+        { interactive: true, folderTrust: true, trustedFolder: true },
         { projectHooks },
         undefined,
         projectHooks,
@@ -1266,9 +1794,13 @@ describe('Server Config (config.ts)', () => {
     });
 
     it.each([false, undefined])(
-      'keeps the project hook gate when folder trust is %s',
+      'keeps the interactive project hook gate when folder trust is %s',
       (trustedFolder) => {
-        const config = makeConfig({ folderTrust: true, trustedFolder });
+        const config = makeConfig({
+          interactive: true,
+          folderTrust: true,
+          trustedFolder,
+        });
 
         config.setHooksFromSettings({ userHooks, projectHooks });
 
@@ -1289,23 +1821,24 @@ describe('Server Config (config.ts)', () => {
 
   describe('per-scope hooks and the legacy merged fallback', () => {
     const mergedHooks = { ...systemHooks, ...userHooks, ...projectHooks };
+    const explicitTrust = { folderTrust: true, trustedFolder: true };
 
     it.each([
       [
         'does not read the merged hooks as project hooks when only user hooks are supplied',
-        { userHooks },
+        { ...explicitTrust, userHooks },
         userHooks,
         undefined,
       ],
       [
         'does not read the merged hooks as user hooks when only project hooks are supplied',
-        { projectHooks },
+        { ...explicitTrust, projectHooks },
         undefined,
         projectHooks,
       ],
       [
         'still serves the merged hooks as user and project hooks when no scope is supplied',
-        {},
+        explicitTrust,
         mergedHooks,
         mergedHooks,
       ],
@@ -1387,7 +1920,11 @@ describe('Server Config (config.ts)', () => {
         // A Config built from merged settings alone still registers the hook
         // under both the user and project sources. The planner is what keeps
         // that from running it twice.
-        const registry = await registryFor({ hooks: lintHook });
+        const registry = await registryFor({
+          folderTrust: true,
+          trustedFolder: true,
+          hooks: lintHook,
+        });
         expect(registry.getAllHooks().map(({ source }) => source)).toEqual([
           'user',
           'project',
@@ -1404,6 +1941,7 @@ describe('Server Config (config.ts)', () => {
 
     it('loads system hooks in an untrusted folder, where project hooks are withheld', () => {
       const config = makeConfig({
+        interactive: true,
         trustedFolder: false,
         systemHooks,
         projectHooks,
@@ -1411,6 +1949,133 @@ describe('Server Config (config.ts)', () => {
 
       expect(config.getSystemHooks()).toBe(systemHooks);
       expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it.each([
+      ['the trust feature is off', {}, false],
+      [
+        'the feature is on but the folder is undecided',
+        { folderTrust: true },
+        false,
+      ],
+      [
+        'the feature is on and the folder is explicitly trusted',
+        { folderTrust: true, trustedFolder: true },
+        true,
+      ],
+    ] as Array<[string, Partial<ConfigParameters>, boolean]>)(
+      'gates interactive settings-file project hooks when %s',
+      (_label, trust, explicit) => {
+        const config = makeConfig({
+          interactive: true,
+          ...trust,
+          projectHooks,
+        });
+
+        expect(config.getProjectHooks()).toEqual(
+          explicit ? projectHooks : undefined,
+        );
+        expect(config.getTrustWithheldProjectHooks()).toEqual(
+          explicit ? undefined : projectHooks,
+        );
+        expect(config.getUserHooks()).toBeUndefined();
+      },
+    );
+
+    it.each([
+      [
+        'the feature is on but the folder is undecided',
+        { folderTrust: true },
+        false,
+      ],
+      [
+        'the folder is explicitly untrusted',
+        { folderTrust: true, trustedFolder: false },
+        false,
+      ],
+      ['the trust feature is off (default)', {}, false],
+      [
+        'the feature is off and a trust flag was passed without it',
+        { trustedFolder: true },
+        false,
+      ],
+      [
+        'the feature is on and the folder is explicitly trusted',
+        { folderTrust: true, trustedFolder: true },
+        true,
+      ],
+    ] as Array<[string, Partial<ConfigParameters>, boolean]>)(
+      'applies the same explicit-trust gate to non-interactive hooks when %s',
+      (_label, trust, loaded) => {
+        const config = makeConfig({
+          interactive: false,
+          ...trust,
+          projectHooks,
+        });
+
+        expect(config.getProjectHooks()).toEqual(
+          loaded ? projectHooks : undefined,
+        );
+      },
+    );
+
+    it('exposes the withheld block to diagnostics only while trust withholds it', () => {
+      const withheld = makeConfig({ projectHooks });
+      expect(withheld.getProjectHooks()).toBeUndefined();
+      expect(withheld.getTrustWithheldProjectHooks()).toEqual(projectHooks);
+
+      const trusted = makeConfig({
+        folderTrust: true,
+        trustedFolder: true,
+        projectHooks,
+      });
+      expect(trusted.getProjectHooks()).toEqual(projectHooks);
+      expect(trusted.getTrustWithheldProjectHooks()).toBeUndefined();
+
+      expect(
+        makeConfig({
+          safeMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({
+          bareMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
+      ).toBeUndefined();
+    });
+
+    it('keeps safe and bare modes withholding in non-interactive sessions', () => {
+      expect(
+        makeConfig({ safeMode: true, projectHooks }).getProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({ bareMode: true, projectHooks }).getProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({
+          safeMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({
+          bareMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
+      ).toBeUndefined();
+    });
+
+    it('loads project hooks with IDE-granted trust even while the feature is off', () => {
+      ideContextStore.clear();
+      ideContextStore.set({ workspaceState: { isTrusted: true } });
+      try {
+        const config = makeConfig({ interactive: true, projectHooks });
+        expect(config.getProjectHooks()).toEqual(projectHooks);
+      } finally {
+        ideContextStore.clear();
+      }
     });
   });
 
@@ -5306,6 +5971,27 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
+    it.each([
+      ['the default', { usageStatisticsEnabled: true }, true],
+      [
+        'the operator refresh switch',
+        { usageStatisticsEnabled: true, modelCatalogRefreshEnabled: false },
+        false,
+      ],
+      [
+        'the usage-statistics opt-out',
+        { usageStatisticsEnabled: false },
+        false,
+      ],
+    ])(
+      'gates the model catalog refresh on %s',
+      async (_name, params, expected) => {
+        await initConfig(params, SKIP_ALL_INIT);
+
+        expect(refreshModelCatalog).toHaveBeenCalledTimes(expected ? 1 : 0);
+      },
+    );
+
     it('accepts managed handoff only after certified takeover is configured', async () => {
       const standalone = makeConfig();
       await standalone.closeSessionWriter({ handoff: true });
@@ -6093,6 +6779,19 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    it('loads bootstrap hooks with file watching disabled', async () => {
+      const config = makeConfig();
+      await config.initialize({
+        skipFileWatching: true,
+        skipLlmInitialization: true,
+        skipMcpDiscovery: true,
+      });
+      expect(HookSystem).toHaveBeenCalled();
+      expect(config.getHookSystem()?.initialize).toHaveBeenCalledWith({
+        skipFileWatching: true,
+      });
+    });
+
     it('should skip hook, skill, and file checkpointing side effects when requested', async () => {
       const config = makeConfig({ fileCheckpointingEnabled: true });
 
@@ -6653,6 +7352,39 @@ describe('Server Config (config.ts)', () => {
       expect(makeConfig().getWorkflowKeywordTriggerEnabled()).toBe(true);
     });
 
+    describe('isEventBusAgentLoopEnabled', () => {
+      beforeEach(() => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+      });
+      afterEach(() => vi.unstubAllEnvs());
+
+      it('defaults to off', () => {
+        expect(makeConfig().isEventBusAgentLoopEnabled()).toBe(false);
+      });
+
+      it('honors the constructor parameter', () => {
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: true,
+          }).isEventBusAgentLoopEnabled(),
+        ).toBe(true);
+      });
+
+      it('is enabled by QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1 even when the parameter is off', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '1');
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: false,
+          }).isEventBusAgentLoopEnabled(),
+        ).toBe(true);
+      });
+
+      it('ignores other env values', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '0');
+        expect(makeConfig().isEventBusAgentLoopEnabled()).toBe(false);
+      });
+    });
+
     describe('bundled review workflow activation', () => {
       beforeEach(() => {
         vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', undefined);
@@ -6688,6 +7420,26 @@ describe('Server Config (config.ts)', () => {
         expect(config.isWorkflowsEnabled()).toBe(false);
         await config.enableReviewWorkflow();
         expect(config.isWorkflowsEnabled()).toBe(true);
+      });
+
+      it('keeps a review activation through a settings reload that leaves the flag unset', async () => {
+        const config = await workflowConfig();
+        await config.enableReviewWorkflow();
+        await config.enableReviewWorkflow();
+        config.applyWorkflowsEnabledSetting(undefined);
+        expect(config.isWorkflowsEnabled()).toBe(true);
+        // A value the settings do give replaces the activation.
+        config.applyWorkflowsEnabledSetting(false);
+        expect(config.isWorkflowsEnabled()).toBe(false);
+        config.applyWorkflowsEnabledSetting(undefined);
+        expect(config.isWorkflowsEnabled()).toBe(false);
+      });
+
+      it('turns off settings-enabled workflows when the reloaded settings drop the flag', async () => {
+        const config = await workflowConfig({ workflowsEnabled: true });
+        await config.enableReviewWorkflow();
+        config.applyWorkflowsEnabledSetting(undefined);
+        expect(config.isWorkflowsEnabled()).toBe(false);
       });
 
       it.each(['registered', 'deferred', 'disabled'] as const)(
@@ -6876,6 +7628,8 @@ describe('Server Config (config.ts)', () => {
       afterEach(restoreEnv);
 
       const interactiveCli = { interactive: true, sdkMode: false };
+      // A host with no record_artifact tool and no artifact metadata route.
+      const workerHost = { artifactRecordingSupported: false };
       // `record` is the expected isRecordArtifactEnabled(), where asserted.
       it.each`
         title                                                                              | env                                                                    | params                                           | artifact | record
@@ -6887,6 +7641,8 @@ describe('Server Config (config.ts)', () => {
         ${'keeps the Artifact tool disabled for daemon CLI env enablement'}                | ${{ QWEN_CODE_ENABLE_ARTIFACT: '1' }}                                  | ${DAEMON}                                        | ${false} | ${true}
         ${'lets daemon sessions record metadata by default without publishing'}            | ${{}}                                                                  | ${DAEMON}                                        | ${false} | ${true}
         ${'lets QWEN_CODE_ENABLE_ARTIFACT force-enable interactive CLI use'}               | ${{ QWEN_CODE_ENABLE_ARTIFACT: '1' }}                                  | ${{ ...interactiveCli, artifactEnabled: false }} | ${true}  | ${undefined}
+        ${'keeps recording off for hosts that do not support it'}                          | ${{}}                                                                  | ${{ ...DAEMON, ...workerHost }}                  | ${false} | ${false}
+        ${'keeps recording off for those hosts even when force-enabled'}                   | ${{ QWEN_CODE_ENABLE_ARTIFACT: '1' }}                                  | ${{ ...interactiveCli, ...workerHost }}          | ${true}  | ${false}
       `('%s', ({ env, params, artifact, record }) => {
         Object.assign(process.env, env);
         const config = makeConfig(params);
@@ -7761,6 +8517,31 @@ describe('Server Config (config.ts)', () => {
       expect(config.getFastModel()).toBe(expected);
     });
 
+    it.each([true, false])(
+      'rejects a stale fast endpoint in strict mode (same-id alternative: %s)',
+      (alternative) => {
+        const config = makeConfig({
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          fastModel: 'openai:shared\0https://removed.example/v1',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: alternative ? 'shared' : 'other',
+                baseUrl: 'https://moved.example/v1',
+              },
+            ],
+          },
+        });
+        expect(() =>
+          config.getFastModel({ requirePinnedEndpoint: true }),
+        ).toThrow('no longer configured at the selected endpoint');
+        expect(config.getFastModel()).toBe(
+          alternative ? 'openai:shared' : undefined,
+        );
+      },
+    );
+
     const readAuxModel = (
       config: Config,
       key: 'fastModel' | 'compactionModel',
@@ -8079,6 +8860,23 @@ describe('Server Config (config.ts)', () => {
     expect(config.getAutoMemoryContext()).toContain(
       '[Project Memory](project.md)',
     );
+  });
+
+  // Every reader gets the same policy: the main session and a subagent's
+  // derived Config, whether or not that subagent may use the Skill tool.
+  it('sends the resident policy to the session and to a derived Config', async () => {
+    const config = makeConfig();
+    loadProjectRules();
+
+    await config.refreshHierarchicalMemory();
+
+    const policy = config.getAutoMemoryPrompt();
+    expect(policy).toContain('## Types and where they go');
+    expect(policy).not.toContain('<types>');
+    expect(policy).not.toContain('load the `auto-memory` skill');
+    const subagent = deriveConfig(config);
+    subagent.getSkillManager = () => null;
+    expect(subagent.getAutoMemoryPrompt()).toBe(policy);
   });
 
   it('delivers each memory tier in the request catalog while keeping indexes out of the policy', async () => {
@@ -8855,6 +9653,10 @@ describe('Server Config (config.ts)', () => {
 
   it('relocateWorkingDirectory should update the session working roots', async () => {
     const config = makeConfig();
+    const refreshFileWatchingForWorkingDirectory = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    internals(config).hookSystem = { refreshFileWatchingForWorkingDirectory };
     Object.assign(config, {
       memoryRecallMode: 'structured',
       memoryRecallModeInitialized: true,
@@ -8878,6 +9680,7 @@ describe('Server Config (config.ts)', () => {
 
     await config.relocateWorkingDirectory(NEW_DIR);
 
+    expect(refreshFileWatchingForWorkingDirectory).toHaveBeenCalledOnce();
     expect(cwd.chdirSpy).toHaveBeenCalledWith(NEW_DIR);
     expect(config.getTargetDir()).toBe(NEW_DIR);
     expect(config.getProjectRoot()).toBe(NEW_DIR);
@@ -9011,6 +9814,7 @@ describe('Server Config (config.ts)', () => {
       '.runtime.json',
       '.worktree.json',
       '.pr.json',
+      '.title.json',
     ]);
     mockProcessCwd(NEW_DIR);
     existingPaths(...from);
@@ -10276,6 +11080,62 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
+    it.each([
+      [{}, true],
+      [{ safeMode: true }, false],
+      [{ bareMode: true }, false],
+      [{ webSearch: { enabled: false } }, false],
+      [{ disabledTools: [ToolNames.WEB_SEARCH] }, false],
+    ] satisfies Array<[Partial<ConfigParameters>, boolean]>)(
+      'registers subscription search while respecting restrictions %j',
+      async (overrides, expected) => {
+        vi.stubEnv('DEV', true);
+        process.env['DEV'] = 'true';
+        try {
+          await initConfig({
+            authType: AuthType.QWEN_SUBSCRIPTION,
+            model: 'qwen3.8-max',
+            ...overrides,
+          });
+          expect(registeredToolNames().includes(ToolNames.WEB_SEARCH)).toBe(
+            expected,
+          );
+        } finally {
+          vi.unstubAllEnvs();
+        }
+      },
+    );
+
+    it('activates search immediately after login and removes it when switching away', async () => {
+      vi.stubEnv('DEV', true);
+      process.env['DEV'] = 'true';
+      try {
+        const config = await initConfig({
+          authType: AuthType.USE_GEMINI,
+          model: 'qwen3.8-max',
+        });
+        expect(registeredToolNames()).not.toContain(ToolNames.WEB_SEARCH);
+        vi.spyOn(config, 'refreshSubscriptionModels').mockResolvedValue({
+          models: ['qwen3.8-max'],
+          cached: false,
+        });
+        stubContentGenerator();
+        await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
+        expect(registeredToolNames()).toContain(ToolNames.WEB_SEARCH);
+        expect(config.getGeminiClient().setTools).toHaveBeenCalled();
+
+        registerFactory().mockClear();
+        vi.mocked(ToolRegistry.prototype.unregisterTool).mockClear();
+        await config.refreshAuth(AuthType.USE_GEMINI);
+        expect(ToolRegistry.prototype.unregisterTool).toHaveBeenCalledWith(
+          ToolNames.WEB_SEARCH,
+        );
+        expect(registeredToolNames()).not.toContain(ToolNames.WEB_SEARCH);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it('does not activate a legacy model-only web search configuration', async () => {
       vi.stubEnv('DASHSCOPE_API_KEY', 'sk-test');
       try {
@@ -10696,6 +11556,41 @@ describe('Server Config (config.ts)', () => {
         subagentRegistry.__mcpManagerMock.setOnBudgetEvent,
       ).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('explicit folder trust for repository execution', () => {
+  afterEach(() => ideContextStore.clear());
+
+  it.each([
+    [false, undefined, true, false],
+    [false, true, true, false],
+    [true, undefined, false, false],
+    [true, false, false, false],
+    [true, true, true, true],
+  ] as const)(
+    'distinguishes enabled=%s, trusted=%s from implicit trust',
+    (folderTrust, trustedFolder, legacy, explicit) => {
+      ideContextStore.clear();
+      const config = new Config({
+        ...MINIMAL_PARAMS,
+        folderTrust,
+        trustedFolder,
+      });
+      expect(config.isTrustedFolder()).toBe(legacy);
+      expect(config.isExplicitlyTrustedFolder()).toBe(explicit);
+    },
+  );
+
+  it('honors live IDE trust, including denial and disconnect', () => {
+    const config = new Config({ ...MINIMAL_PARAMS, folderTrust: false });
+    ideContextStore.set({ workspaceState: { isTrusted: true } });
+    expect(config.isExplicitlyTrustedFolder()).toBe(true);
+    ideContextStore.set({ workspaceState: { isTrusted: false } });
+    expect(config.isExplicitlyTrustedFolder()).toBe(false);
+    ideContextStore.clear();
+    expect(config.isTrustedFolder()).toBe(true);
+    expect(config.isExplicitlyTrustedFolder()).toBe(false);
   });
 });
 
@@ -12374,7 +13269,13 @@ describe('Model Switching and Config Updates', () => {
         const config = await withHookSystem(hookSystem);
         const warn = vi.spyOn(config.getDebugLogger(), 'warn');
 
-        const response = await hookRequest(config, eventName, {});
+        const response = await hookRequest(
+          config,
+          eventName,
+          eventName === 'FileChanged'
+            ? { file_path: '/tmp/notes.md', event: 'change' }
+            : {},
+        );
 
         expect(warn).not.toHaveBeenCalledWith(
           expect.stringContaining('Unknown hook event'),
@@ -12386,6 +13287,44 @@ describe('Model Switching and Config Updates', () => {
   });
 
   describe('direct-call hook events through the hook execution bridge', () => {
+    it.each(['add', 'change', 'unlink'] as const)(
+      'forwards a valid FileChanged %s input',
+      async (event) => {
+        const fireFileChangedEvent = vi.fn().mockResolvedValue({
+          success: true,
+          allOutputs: [],
+          errors: [],
+          totalDuration: 0,
+        });
+        const config = await withHookSystem({ fireFileChangedEvent });
+        const response = await hookRequest(config, 'FileChanged', {
+          file_path: path.resolve('/memory/topic.md'),
+          event,
+        });
+        expect(response.success).toBe(true);
+        expect(fireFileChangedEvent).toHaveBeenCalledWith(
+          path.resolve('/memory/topic.md'),
+          event,
+          undefined,
+        );
+      },
+    );
+
+    it.each([
+      {},
+      { file_path: 'relative.md', event: 'change' },
+      { file_path: '/memory/topic.md', event: 'rename' },
+      { file_path: 1, event: 'add' },
+    ])(
+      'rejects invalid FileChanged input %j before dispatch',
+      async (input) => {
+        const fireFileChangedEvent = vi.fn();
+        const config = await withHookSystem({ fireFileChangedEvent });
+        const response = await hookRequest(config, 'FileChanged', input);
+        expect(response.success).toBe(false);
+        expect(fireFileChangedEvent).not.toHaveBeenCalled();
+      },
+    );
     const dispatch = async (
       method: string,
       fire: ReturnType<typeof vi.fn>,

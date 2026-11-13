@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.AcceptanceEvidence;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
 import org.slf4j.Logger;
@@ -44,13 +44,13 @@ public class OperationReconciler {
     /** How often a parked operation reads its evidence again. */
     static final Duration RECHECK = Duration.ofMinutes(5);
 
-    private final AgentStateStore store;
+    private final SessionLifecycleStore store;
     private final Map<String, AcceptanceEvidence> evidence;
     private final ExecutorService executor;
     private final Clock clock;
     private final Set<String> active = ConcurrentHashMap.newKeySet();
 
-    public OperationReconciler(AgentStateStore store,
+    public OperationReconciler(SessionLifecycleStore store,
             List<AcceptanceEvidence> evidence, @Qualifier("managedAgentExecutor") ExecutorService executor,
             @Qualifier("managedAgentClock") Clock clock) {
         this.store = store;

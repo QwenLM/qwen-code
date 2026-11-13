@@ -11,17 +11,18 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedToolResultStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationArtifactReader;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -75,6 +76,7 @@ import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.check
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.ref;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.resource;
+import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -86,12 +88,12 @@ class ToolPublicationStoreTest {
     private PublicationJournalFixture journal;
     private JdbcTemplate jdbc;
     private DataSourceTransactionManager manager;
-    private ManagedSessionStore sessions;
-    private ManagedToolResultStore publicResults;
+    private JdbcManagedSessionStore sessions;
+    private JdbcManagedToolResultStore publicResults;
     private ManagedAgentStore publicSessions;
     private ManagedAgentProperties projectionProperties;
-    private ManagedWorkspaceRegistry publicWorkspaces;
-    private ManagedArtifactReader apiReader;
+    private JdbcManagedWorkspaceRegistry publicWorkspaces;
+    private ToolPublicationArtifactReader apiReader;
     private Map<String, byte[]> apiObjects;
     private String apiFailNextObject;
     private ToolPublicationDataStore apiPublications;
@@ -116,13 +118,32 @@ class ToolPublicationStoreTest {
     }
 
     private void initialize(javax.sql.DataSource source, boolean csiWorkspace) {
+        initialize(source, csiWorkspace, null);
+    }
+
+    private void initialize(javax.sql.DataSource source, boolean csiWorkspace,
+            ToolPublicationObjectStore objects) {
+        initialize(source, csiWorkspace, objects, false);
+    }
+
+    private void initialize(javax.sql.DataSource source, boolean csiWorkspace,
+            ToolPublicationObjectStore objects, boolean diagnostics) {
         com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         csiRegistration = csiWorkspace
                 ? new WorkspaceCsiRegistration("tenant-1", "fixture-storage", "fixture-cluster",
                         "fixture", "fixture-claim", "fixture-pvc", "fixture-volume", "fixture-pv",
                         "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial", "/workspace", 1)
                 : null;
-        journal = PublicationJournalFixture.create(source, csiRegistration);
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
+        manager = new DataSourceTransactionManager(source);
+        projectionProperties = new ManagedAgentProperties();
+        projectionProperties.getArtifacts().setEnabled(true);
+        publicWorkspaces = org.mockito.Mockito.mock(JdbcManagedWorkspaceRegistry.class);
+        publicSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, java.time.Clock.systemUTC(), events -> {},
+                publicWorkspaces, projectionProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        publicResults = new JdbcManagedToolResultStore(jdbc, manager, publicSessions);
+        journal = diagnostics ? PublicationJournalFixture.createWithExecutionDiagnostics(source, objects, publicResults)
+                : PublicationJournalFixture.create(source, csiRegistration, objects, publicResults);
         jdbc = journal.jdbc;
         manager = journal.manager;
         sessions = journal.sessions;
@@ -133,13 +154,6 @@ class ToolPublicationStoreTest {
         checkpoint = journal.checkpoint;
         csiStore = csiWorkspace ? new WorkspaceCsiReservationStore(jdbc, manager, JSON) : null;
         csiReservation = journal.csiReservation;
-        projectionProperties = new ManagedAgentProperties();
-        projectionProperties.getArtifacts().setEnabled(true);
-        publicWorkspaces = org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class);
-        publicSessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, java.time.Clock.systemUTC(), events -> {},
-                publicWorkspaces, projectionProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
-        publicResults = new ManagedToolResultStore(jdbc, manager, publicSessions);
-        sessions.setToolResults(publicResults);
     }
 
     javax.sql.DataSource publicationDataSource() {
@@ -150,37 +164,24 @@ class ToolPublicationStoreTest {
     }
 
     @Test
-    void localReservationWaitsForLifecyclePlacementBeforeLockingBrokerRows() throws Exception {
+    void localReservationDoesNotWaitForLifecyclePlacementOrThePublicationGuard() throws Exception {
+        // An ordinary original publishes below its Session root, without either
+        // tenant guard (design 2026-11-04-managed-publication-placement).
         try (var pool = Executors.newSingleThreadExecutor()) {
-            var publisher = new TransactionTemplate(manager).execute(status -> {
-                com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.lockPlacement(jdbc, "tenant-1");
+            new TransactionTemplate(manager).executeWithoutResult(status -> {
+                JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, "tenant-1");
                 String tenantKey = ToolPublicationContract.sha256("tenant-1".getBytes(StandardCharsets.UTF_8));
                 jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
                         + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, "tenant-1");
                 jdbc.queryForList("SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE",
                         tenantKey);
-                var entered = new CountDownLatch(1);
-                var pending = pool.submit(() -> {
-                    entered.countDown();
-                    return reserve();
-                });
                 try {
-                    assertThat(entered.await(3, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
-                    assertThatThrownBy(() -> pending.get(250, java.util.concurrent.TimeUnit.MILLISECONDS))
-                            .isInstanceOf(java.util.concurrent.TimeoutException.class);
-                } catch (InterruptedException error) {
-                    Thread.currentThread().interrupt();
-                    throw new IllegalStateException(error);
+                    assertThat(pool.submit(() -> reserve()).get(3, java.util.concurrent.TimeUnit.SECONDS)
+                            .path("publicationId").asText()).isEqualTo("pub-1");
+                } catch (Exception error) {
+                    throw new AssertionError("The reservation waited for a tenant guard", error);
                 }
-                RuntimeBindingRecord original = jdbc.execute(
-                        (org.springframework.jdbc.core.ConnectionCallback<RuntimeBindingRecord>) connection ->
-                                bindings.findByIdForUpdate(connection, "binding-1"));
-                assertThat(original.getBindingId()).isEqualTo("binding-1");
-                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture", Integer.class)).isZero();
-                return pending;
             });
-            assertThat(publisher.get(3, java.util.concurrent.TimeUnit.SECONDS).path("publicationId").asText())
-                    .isEqualTo("pub-1");
         }
     }
 
@@ -259,11 +260,11 @@ class ToolPublicationStoreTest {
         var objects = new java.util.HashMap<String, byte[]>();
         var data = csiData(objects);
         byte[] output = "original".getBytes(StandardCharsets.UTF_8);
-        data.publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
+        verified(data).publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
                 "segment-0", "stdout", 0, output, digest("original"));
         JsonNode terminal = blockedTerminal();
         ((ObjectNode) terminal.path("responseParts").get(0)).put("score", score);
-        data.finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "finish-1",
+        verified(data).finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "finish-1",
                 terminal.toString().getBytes(StandardCharsets.UTF_8));
         assertThat(data.finishedForBroker(execution).path("result")).isEqualTo(terminal);
         execution = executions.compareAndSet(execution, execution.withResult(
@@ -291,7 +292,7 @@ class ToolPublicationStoreTest {
         retireCsi();
         var data = csiData(new java.util.HashMap<>());
         JsonNode terminal = blockedTerminal();
-        data.finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "finish-1",
+        verified(data).finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "finish-1",
                 terminal.toString().getBytes(StandardCharsets.UTF_8));
         Map<String, Object> changed = JSON.convertValue(terminal,
                 new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
@@ -316,10 +317,10 @@ class ToolPublicationStoreTest {
         retireCsi();
         var data = csiData(new java.util.HashMap<>());
         byte[] output = "original".getBytes(StandardCharsets.UTF_8);
-        JsonNode receipt = data.publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
+        JsonNode receipt = verified(data).publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
                 "segment-0", "stdout", 0, output, digest("original"));
         JsonNode terminal = blockedTerminal();
-        JsonNode finish = data.finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "finish-1",
+        JsonNode finish = verified(data).finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "finish-1",
                 terminal.toString().getBytes(StandardCharsets.UTF_8));
         executions.compareAndSet(execution, execution.withResult(
                 JSON.convertValue(terminal, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {}),
@@ -327,13 +328,13 @@ class ToolPublicationStoreTest {
         var before = jdbc.queryForList(
                         "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') ORDER BY operation_id");
         var publication = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture");
-        assertThat(data.publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
+        assertThat(verified(data).publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
                 "segment-0", "stdout", 0, output, digest("original"))).isEqualTo(receipt);
-        assertThat(data.finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "finish-1",
+        assertThat(verified(data).finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "finish-1",
                 terminal.toString().getBytes(StandardCharsets.UTF_8))).isEqualTo(finish);
-        assertThatThrownBy(() -> data.publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
+        assertThatThrownBy(() -> verified(data).publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
                 "new-operation", "stdout", 0, output, digest("original"))).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> data.prefix(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
+        assertThatThrownBy(() -> verified(data).prefix(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
                 "new-prefix", "stdout")).isInstanceOf(IllegalArgumentException.class);
         assertThat(jdbc.queryForList(
                                 "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') ORDER BY operation_id")).usingRecursiveComparison().isEqualTo(before);
@@ -358,7 +359,7 @@ class ToolPublicationStoreTest {
         }
         var data = csiData(new java.util.HashMap<>());
         var before = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture");
-        assertThatThrownBy(() -> data.publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
+        assertThatThrownBy(() -> verified(data).publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
                 "segment-0", "stdout", 0, new byte[] {1}, null))
                 .isInstanceOf(RuntimeException.class);
         assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture")).isEqualTo(before);
@@ -386,7 +387,7 @@ class ToolPublicationStoreTest {
         authorizeCsi();
         var objects = new java.util.HashMap<String, byte[]>();
         var data = csiData(objects);
-        assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> data.publishSegment(
+        assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> verified(data).publishSegment(
                 binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "segment-0", "stdout", 0,
                 new byte[] {1}, null))).hasMessageContaining("ambient transaction");
         assertThat(objects).isEmpty();
@@ -413,6 +414,16 @@ class ToolPublicationStoreTest {
 
     private ToolPublicationDataStore csiData(Map<String, byte[]> objects) {
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] bytes) { objects.putIfAbsent(key, bytes.clone()); }
             @Override
@@ -522,14 +533,15 @@ class ToolPublicationStoreTest {
     }
 
     @Test
-    void newReservationRecreatesOnlyItsQualifiedPlacementWhenPublicSessionIsMissing() {
+    void newOrdinaryReservationDoesNotRecreatePlacementWhenPublicSessionIsMissing() {
+        // An ordinary original publishes below its Session root, without
+        // placement (design 2026-11-04-managed-publication-placement).
         jdbc.update("DELETE FROM ma_tenant_guard WHERE guard_domain = 'runtime_placement'");
         assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session WHERE session_kind = 'PUBLIC'")).isEmpty();
         assertThat(reserve().path("state").asText()).isEqualTo("OPEN");
         assertThat(jdbc.queryForList(
                                 "SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain ="
-                                        + " 'runtime_placement'"))
-                .containsExactly(Map.of("tenant_id", "tenant-1"));
+                                        + " 'runtime_placement'")).isEmpty();
         assertThat(reserve().path("state").asText()).isEqualTo("OPEN");
     }
 
@@ -537,6 +549,16 @@ class ToolPublicationStoreTest {
     void finishPreservesTheSubmittedTerminalBytes() {
         reserve();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] bytes) { throw new AssertionError("Unexpected OSS write"); }
 
@@ -558,7 +580,7 @@ class ToolPublicationStoreTest {
         String submitted = jackson.replace("\\u000B", "\\u000b").replace("\\u001F", "\\u001f");
         assertThat(submitted).isNotEqualTo(jackson);
         byte[] bytes = submitted.getBytes(StandardCharsets.UTF_8);
-        JsonNode receipt = data.finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
+        JsonNode receipt = verified(data).finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
                 "finish-raw", bytes);
         assertThat(receipt.path("terminal").path("digest").asText()).isEqualTo(digest(submitted));
         assertThat(data.finished(binding.get("sessionKey"), "pub-1", WRITER_TOKEN).path("result"))
@@ -571,6 +593,16 @@ class ToolPublicationStoreTest {
         Map<String, byte[]> objects = new java.util.HashMap<>();
         java.util.concurrent.atomic.AtomicInteger writes = new java.util.concurrent.atomic.AtomicInteger();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 if (writes.incrementAndGet() == 1) {
@@ -591,12 +623,12 @@ class ToolPublicationStoreTest {
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
         JsonNode key = binding.get("sessionKey");
         byte[] bytes = "retry".getBytes(StandardCharsets.UTF_8);
-        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+        assertThatThrownBy(() -> verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "original-operation", "stdout", 0, bytes, digest("retry")))
                 .hasMessageContaining("temporary object-store failure");
         assertThat(data.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "original-operation")
                 .path("state").asText()).isEqualTo("RETRYABLE");
-        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+        assertThatThrownBy(() -> verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "original-operation", "stdout", 0, bytes, digest("retry")))
                 .hasMessageContaining("original object write is unresolved");
         assertThat(writes.get()).isEqualTo(1);
@@ -615,6 +647,16 @@ class ToolPublicationStoreTest {
         CountDownLatch release = new CountDownLatch(1);
         var writes = new java.util.concurrent.atomic.AtomicInteger();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 objects.putIfAbsent(key, bytes.clone());
@@ -669,14 +711,10 @@ class ToolPublicationStoreTest {
                                     + " = X'7075622d31'");
                 assertThat(replacement.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "original")
                         .path("state").asText()).isEqualTo("EXPIRED");
-                assertThatThrownBy(() -> {
-                    if (terminal) {
-                        replacement.finish(key, "pub-1", PUBLICATION_TOKEN, "original", bytes);
-                    } else {
-                        replacement.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null);
-                    }
-                }).isInstanceOfSatisfying(ManagedAgentException.class, error ->
-                        assertThat(error.getCode()).isEqualTo("managed_tool_publication_operation_expired"));
+                JsonNode expiredReplay = terminal
+                        ? replacement.finish(key, "pub-1", PUBLICATION_TOKEN, "original", bytes)
+                        : replacement.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null);
+                assertThat(expiredReplay.path("state").asText()).isEqualTo("EXPIRED");
                 var recoveryStarted = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW + "", java.sql.Timestamp.class);
                 assertThat(replacement.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "original")
                         .path("state").asText()).isEqualTo("RETRYABLE");
@@ -698,9 +736,9 @@ class ToolPublicationStoreTest {
                                             + " = X'6f726967696e616c'", java.sql.Timestamp.class)).isEqualTo(recoveryDeadline);
                 assertThatThrownBy(() -> {
                     if (terminal) {
-                        replacement.finish(key, "pub-1", PUBLICATION_TOKEN, "other", bytes);
+                        verified(replacement).finish(key, "pub-1", PUBLICATION_TOKEN, "other", bytes);
                     } else {
-                        replacement.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "other", "stdout", 0, bytes, null);
+                        verified(replacement).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "other", "stdout", 0, bytes, null);
                     }
                 }).isInstanceOf(IllegalArgumentException.class);
                 byte[] changed = bytes.clone();
@@ -708,15 +746,15 @@ class ToolPublicationStoreTest {
                 assertThatThrownBy(() -> {
                     if (terminal) {
                         ObjectNode other = envelope.deepCopy().put("executionStatus", "error");
-                        replacement.finish(key, "pub-1", PUBLICATION_TOKEN, "original",
+                        verified(replacement).finish(key, "pub-1", PUBLICATION_TOKEN, "original",
                                 other.toString().getBytes(StandardCharsets.UTF_8));
                     } else {
-                        replacement.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, changed, null);
+                        verified(replacement).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, changed, null);
                     }
                 }).isInstanceOf(IllegalArgumentException.class);
                 JsonNode recovered = terminal
-                        ? replacement.finish(key, "pub-1", PUBLICATION_TOKEN, "original", bytes)
-                        : replacement.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null);
+                        ? verified(replacement).finish(key, "pub-1", PUBLICATION_TOKEN, "original", bytes)
+                        : verified(replacement).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null);
                 assertThat(writes).hasValue(1);
                 assertThat(jdbc.queryForObject(
                                         "SELECT state FROM ma_operation WHERE operation_kind ="
@@ -726,8 +764,8 @@ class ToolPublicationStoreTest {
                 assertThatThrownBy(() -> old.get(10, java.util.concurrent.TimeUnit.SECONDS))
                         .hasCauseInstanceOf(ManagedAgentException.class);
                 JsonNode receipt = terminal
-                        ? replacement.finish(key, "pub-1", PUBLICATION_TOKEN, "original", bytes)
-                        : replacement.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null);
+                        ? verified(replacement).finish(key, "pub-1", PUBLICATION_TOKEN, "original", bytes)
+                        : verified(replacement).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "original", "stdout", 0, bytes, null);
                 assertThat(receipt).isEqualTo(recovered);
                 assertThat(writes).hasValue(1);
                 assertThat(replacement.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "original")
@@ -747,7 +785,7 @@ class ToolPublicationStoreTest {
                 if (terminal) {
                     assertThat(replacement.finished(key, "pub-1", WRITER_TOKEN).path("result")).isEqualTo(envelope);
                 } else {
-                    replacement.seal(key, "pub-1", PUBLICATION_TOKEN, "seal-after-recovery", "stdout", 1,
+                    verified(replacement).seal(key, "pub-1", PUBLICATION_TOKEN, "seal-after-recovery", "stdout", 1,
                             bytes.length, ToolPublicationContract.sha256(bytes));
                 }
             } finally {
@@ -765,14 +803,18 @@ class ToolPublicationStoreTest {
         var release = new CountDownLatch(1);
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
-            public void putIfAbsent(String key, byte[] bytes) {
-                objects.putIfAbsent(key, bytes.clone());
-                if (!terminal) {
-                    hold();
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
                 }
             }
-
-            private void hold() {
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) {
+                objects.putIfAbsent(key, bytes.clone());
                 entered.countDown();
                 try {
                     if (!release.await(10, java.util.concurrent.TimeUnit.SECONDS)) {
@@ -786,9 +828,6 @@ class ToolPublicationStoreTest {
 
             @Override
             public InputStream open(String key) {
-                if (terminal) {
-                    hold();
-                }
                 return new ByteArrayInputStream(objects.get(key));
             }
 
@@ -834,8 +873,8 @@ class ToolPublicationStoreTest {
                 if (expired) {
                     data.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "held");
                 }
-                JsonNode receipt = terminal ? data.finish(key, "pub-1", PUBLICATION_TOKEN, "held", bytes)
-                        : data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "held", "stdout", 0, bytes, null);
+                JsonNode receipt = terminal ? verified(data).finish(key, "pub-1", PUBLICATION_TOKEN, "held", bytes)
+                        : verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "held", "stdout", 0, bytes, null);
                 assertThat(data.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "held").path("receipt"))
                         .isEqualTo(receipt);
                 assertThat(jdbc.queryForMap(
@@ -857,6 +896,16 @@ class ToolPublicationStoreTest {
         reserve();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
             public void putIfAbsent(String key, byte[] bytes) { throw new IllegalStateException("lost PUT reply"); }
 
             @Override
@@ -868,9 +917,9 @@ class ToolPublicationStoreTest {
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
         JsonNode key = binding.get("sessionKey");
-        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+        assertThatThrownBy(() -> verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "candidate", "stdout", 0, new byte[] {1}, null)).hasMessageContaining("lost PUT reply");
-        data.prefix(key, "pub-1", PUBLICATION_TOKEN, "prefix", "stderr");
+        verified(data).prefix(key, "pub-1", PUBLICATION_TOKEN, "prefix", "stderr");
         jdbc.update("UPDATE ma_operation SET deadline = (" + ManagedSchemaTime.SQL_NOW + " + -1000), state = 'PENDING'");
         assertThatThrownBy(() -> data.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "prefix"))
                 .hasMessageContaining("prefix cannot be recovered");
@@ -887,6 +936,34 @@ class ToolPublicationStoreTest {
     @ValueSource(booleans = {false, true})
     void commitsLargeBlockedOutcomeThroughVerifiedCatalogObject(boolean ambient) {
         List<String> lockOrder = new java.util.ArrayList<>();
+        Map<String, byte[]> objects = new java.util.HashMap<>();
+        var objectReads = new java.util.concurrent.atomic.AtomicInteger();
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) {
+                objects.putIfAbsent(key, bytes.clone());
+            }
+
+            @Override
+            public InputStream open(String key) {
+                objectReads.incrementAndGet();
+                return new ByteArrayInputStream(objects.get(key));
+            }
+
+            @Override
+            public void validateConfiguration() {
+            }
+        };
         initialize(new DelegatingDataSource(publicationDataSource()) {
             @Override
             public Connection getConnection() throws SQLException {
@@ -924,25 +1001,8 @@ class ToolPublicationStoreTest {
                             }
                         });
             }
-        });
+        }, false, bucket, true);
         reserve();
-        Map<String, byte[]> objects = new java.util.HashMap<>();
-        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
-            @Override
-            public void putIfAbsent(String key, byte[] bytes) {
-                objects.putIfAbsent(key, bytes.clone());
-            }
-
-            @Override
-            public InputStream open(String key) {
-                return new ByteArrayInputStream(objects.get(key));
-            }
-
-            @Override
-            public void validateConfiguration() {
-            }
-        };
-        sessions.setPublicationObjects(bucket);
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
         JsonNode key = binding.get("sessionKey");
@@ -952,7 +1012,7 @@ class ToolPublicationStoreTest {
         ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "error");
         envelope.putArray("responseParts").add("x".repeat(100_000));
         envelope.set("capture", capture);
-        data.finish(key, "pub-1", PUBLICATION_TOKEN, "large-finish",
+        verified(data).finish(key, "pub-1", PUBLICATION_TOKEN, "large-finish",
                 envelope.toString().getBytes(StandardCharsets.UTF_8));
         ObjectNode outcome = JSON.createObjectNode().put("schemaVersion", 1)
                 .put("decision", "blocked").putNull("manifestRef");
@@ -984,9 +1044,25 @@ class ToolPublicationStoreTest {
                 : admissions.commitReceipt(key, "pub-1", WRITER_TOKEN, commit);
         assertThat(receipt.path("decision").asText()).isEqualTo("blocked");
         if (ambient) {
-            assertThat(lockOrder).contains("retention");
-            assertThat(lockOrder.getFirst()).isEqualTo("placement");
+            // An ordinary receipt takes neither tenant guard (designs
+            // 2026-11-04-managed-publication-tenant-guards and -placement).
+            assertThat(lockOrder).isEmpty();
         }
+        var diagnostics = new JdbcManagedExtensionRecordStore(jdbc);
+        JsonNode statistics = diagnostics.findActivityStatistics("tenant-1", "session-1").deepCopy();
+        assertThat(statistics.path("tools").path("requested").asLong()).isEqualTo(1);
+        assertThat(statistics.path("coverageReasons")).contains(JSON.getNodeFactory().textNode("receipt_outcome_not_inline"));
+        assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", byte[].class,
+                "tenant-1", "session-1", admission.path("resourceId").asText())).isNull();
+        int readsBeforeRebuild = objectReads.get();
+        new TransactionTemplate(manager).executeWithoutResult(status -> {
+            jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'SESSION_RECORD' AND tenant_id = ? AND session_id = ?", "tenant-1", "session-1");
+            jdbc.update("DELETE FROM ma_session_record WHERE tenant_id = ? AND session_id = ?", "tenant-1", "session-1");
+        });
+        sessions.acquireWriter("tenant-1", "session-1", WRITER_TOKEN,
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "writer-1", 300000L));
+        assertThat(diagnostics.findActivityStatistics("tenant-1", "session-1")).isEqualTo(statistics);
+        assertThat(objectReads.get()).isEqualTo(readsBeforeRebuild);
         var changedReplay = new ManagedSessionStoreModels.CommitTransactionRequest("workspace-1", "writer-1", 1,
                 journal.revision, journal.sequence, "different-transaction", "recordToolResult", "execution-1",
                 admission.path("digest").asText(), journal.sequence + 1, journal.sequence + 1, 1,
@@ -1014,7 +1090,7 @@ class ToolPublicationStoreTest {
         objects.get(objectKey)[0] = 'z';
         assertThatThrownBy(() -> sessions.readResource("tenant-1", "workspace-1", "session-1",
                 admission.path("resourceId").asText(), WRITER_TOKEN)).hasMessageContaining("verification");
-        assertThat(jdbc.queryForObject("SELECT quarantined FROM ma_output_capture"
+        assertThat(jdbc.queryForObject("SELECT is_quarantined FROM ma_output_capture"
                 + " WHERE publication_id = X'7075622d31'", Boolean.class)).isTrue();
         assertThatThrownBy(() -> sessions.readResource("tenant-1", "workspace-1", "session-1",
                 admission.path("resourceId").asText(), WRITER_TOKEN)).hasMessageContaining("verification");
@@ -1039,6 +1115,16 @@ class ToolPublicationStoreTest {
         Map<String, byte[]> objects = new java.util.HashMap<>();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 objects.putIfAbsent(key, bytes.clone());
             }
@@ -1061,38 +1147,38 @@ class ToolPublicationStoreTest {
         JsonNode key = binding.get("sessionKey");
         String firstSegment = large ? segmentText : "ab";
         byte[] segment = firstSegment.getBytes(StandardCharsets.UTF_8);
-        JsonNode first = data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+        JsonNode first = verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "operation-1", "stdout", 0, segment, digest(firstSegment));
         segment[0] = 'x';
-        assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+        assertThat(verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "operation-1", "stdout", 0, firstSegment.getBytes(StandardCharsets.UTF_8), digest(firstSegment)))
                 .isEqualTo(first);
         assertThat(data.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "operation-1")
                 .path("receipt")).isEqualTo(first);
         assertThat(objects.values()).singleElement().satisfies(bytes ->
                 assertThat(bytes).isEqualTo(firstSegment.getBytes(StandardCharsets.UTF_8)));
-        assertThat(data.prefix(key, "pub-1", PUBLICATION_TOKEN, "operation-prefix", "stdout")
+        assertThat(verified(data).prefix(key, "pub-1", PUBLICATION_TOKEN, "operation-prefix", "stdout")
                 .path("byteLength").asLong()).isEqualTo(firstSegment.length());
         if (!large) {
-            data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "operation-second", "stdout", 1,
+            verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "operation-second", "stdout", 1,
                     "c".getBytes(StandardCharsets.UTF_8), digest("c"));
         }
         if (!contentBody) {
-            assertThat(data.seal(key, "pub-1", PUBLICATION_TOKEN, "operation-seal", "stdout", large ? 1 : 2,
+            assertThat(verified(data).seal(key, "pub-1", PUBLICATION_TOKEN, "operation-seal", "stdout", large ? 1 : 2,
                     segmentLength, digest(segmentText)).path("segmentCount").asInt()).isEqualTo(large ? 1 : 2);
         }
         if (!partial) {
-            data.seal(key, "pub-1", PUBLICATION_TOKEN, "operation-seal-empty", "stderr", 0,
+            verified(data).seal(key, "pub-1", PUBLICATION_TOKEN, "operation-seal-empty", "stderr", 0,
                     0, digest(""));
         }
-        assertThat(data.prefix(key, "pub-1", PUBLICATION_TOKEN, "operation-prefix-2", "stdout")
+        assertThat(verified(data).prefix(key, "pub-1", PUBLICATION_TOKEN, "operation-prefix-2", "stdout")
                 .path("sealed").asBoolean()).isEqualTo(!contentBody);
         if (!contentBody) {
-            assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+            assertThatThrownBy(() -> verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                     "operation-extra", "stdout", large ? 1 : 2, "x".getBytes(StandardCharsets.UTF_8), null))
                     .hasMessageContaining("sealed");
         }
-        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+        assertThatThrownBy(() -> verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "operation-2", "stdout", 0, "abd".getBytes(StandardCharsets.UTF_8), null))
                 .hasMessageContaining("conflicts");
         ObjectNode page = JSON.createObjectNode().put("toolResult", "managed-tool-result/1")
@@ -1103,11 +1189,11 @@ class ToolPublicationStoreTest {
         if (!large) {
             pageSegments.add(JSON.createObjectNode().put("byteLength", 1).put("digest", digest("c")));
         }
-        assertThatThrownBy(() -> data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
+        assertThatThrownBy(() -> verified(data).publishResource(key, "pub-1", PUBLICATION_TOKEN,
                 "wrong-page-slot", "page:stdout:1", "managed-tool-result-page",
                 page.toString().getBytes(StandardCharsets.UTF_8)))
                 .hasMessageContaining("slot conflicts");
-        JsonNode ref = data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
+        JsonNode ref = verified(data).publishResource(key, "pub-1", PUBLICATION_TOKEN,
                 "operation-3", "page:stdout:0", "managed-tool-result-page",
                 page.toString().getBytes(StandardCharsets.UTF_8));
         assertThat(data.readResource(key, "pub-1", ref.path("resourceId").asText()))
@@ -1134,7 +1220,7 @@ class ToolPublicationStoreTest {
         ObjectNode pageLink = JSON.createObjectNode().put("segmentCount", large ? 1 : 2).put("byteLength", segmentLength);
         pageLink.set("ref", ref);
         if (contentBody) {
-            body.set("ref", data.publishResource(key, "pub-1", PUBLICATION_TOKEN, "operation-content", "content:stdout",
+            body.set("ref", verified(data).publishResource(key, "pub-1", PUBLICATION_TOKEN, "operation-content", "content:stdout",
                     "managed-tool-result-content", segmentText.getBytes(StandardCharsets.UTF_8)));
         } else {
             body.putArray("pages").add(pageLink);
@@ -1149,7 +1235,7 @@ class ToolPublicationStoreTest {
         emptyBody.putArray("pages");
         stderr.set("body", emptyBody);
         ((com.fasterxml.jackson.databind.node.ArrayNode) manifest.path("contents")).add(stderr);
-        JsonNode manifestRef = data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
+        JsonNode manifestRef = verified(data).publishResource(key, "pub-1", PUBLICATION_TOKEN,
                 "operation-manifest", "manifest:1", "managed-tool-result-manifest",
                 manifest.toString().getBytes(StandardCharsets.UTF_8));
         ObjectNode capture = JSON.createObjectNode().put("captureStatus", partial ? "partial" : "complete")
@@ -1159,7 +1245,7 @@ class ToolPublicationStoreTest {
         ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "success");
         envelope.putArray("responseParts");
         envelope.set("capture", capture);
-        assertThat(data.finish(key, "pub-1", PUBLICATION_TOKEN,
+        assertThat(verified(data).finish(key, "pub-1", PUBLICATION_TOKEN,
                 "operation-finish", envelope.toString().getBytes(StandardCharsets.UTF_8))
                 .path("producerPhase").asText()).isEqualTo("FINISHED");
         assertThat(data.finished(key, "pub-1", WRITER_TOKEN).path("result")).isEqualTo(envelope);
@@ -1267,7 +1353,7 @@ class ToolPublicationStoreTest {
         if (!large) {
             if (quarantineBeforeProjection) {
                 jdbc.update(
-                        "UPDATE ma_output_capture SET quarantined = TRUE WHERE publication_id ="
+                        "UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id ="
                                 + " X'7075622d31'");
             }
             JsonNode projected = projectPublicReceipt(data);
@@ -1278,7 +1364,7 @@ class ToolPublicationStoreTest {
                 assertThat(projected.has("preview")).isFalse();
                 assertThat(projected.path("artifacts")).isEmpty();
                 apiPublications = data;
-                apiReader = new ManagedArtifactReader(publicationProvider(data));
+                apiReader = new ToolPublicationArtifactReader(publicationProvider(data));
                 return;
             }
             assertThat(projected.path("preview").path("text").asText()).isEqualTo("abc");
@@ -1292,7 +1378,7 @@ class ToolPublicationStoreTest {
             assertThat(remaining.hasMore()).isFalse();
             assertThat(publicResults.findArtifact("other-tenant", "session-1", last.descriptor().path("id").asText())).isEmpty();
             var provider = publicationProvider(data);
-            var publicReader = new ManagedArtifactReader(provider);
+            var publicReader = new ToolPublicationArtifactReader(provider);
             var stdout = publicResults.listArtifacts("tenant-1", "session-1", null, null, null, 100).artifacts()
                     .stream().filter(artifact -> artifact.streamId().equals("stdout")).findFirst().orElseThrow();
             jdbc.update("UPDATE ma_session_head SET writer_lease_until = ?",
@@ -1349,7 +1435,7 @@ class ToolPublicationStoreTest {
         try (var stream = apiReader.open(artifact)) {
             assertThat(stream.readNBytes(2)).isEqualTo("ab".getBytes(StandardCharsets.UTF_8));
             jdbc.update(
-                    "UPDATE ma_output_capture SET quarantined = TRUE WHERE publication_id ="
+                    "UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id ="
                             + " X'7075622d31'");
             byte[] target = new byte[] {'?'};
             assertThatThrownBy(() -> stream.read(target)).hasMessageContaining("receipt is unavailable");
@@ -1392,7 +1478,7 @@ class ToolPublicationStoreTest {
         }
     }
 
-    private ManagedToolResultStore.Artifact preparePublicReader() {
+    private JdbcManagedToolResultStore.Artifact preparePublicReader() {
         keepApiFixture = true;
         publishesImmutableSegmentAndResourceUnderOriginalAuthorization("intact");
         return publicResults.listArtifacts("tenant-1", "session-1", null, null, null, 100).artifacts().stream()
@@ -1405,6 +1491,16 @@ class ToolPublicationStoreTest {
         Map<String, byte[]> objects = new java.util.HashMap<>();
         boolean[] corruptNext = {false};
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 byte[] stored = bytes.clone();
@@ -1427,20 +1523,20 @@ class ToolPublicationStoreTest {
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
         JsonNode key = binding.get("sessionKey");
-        data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "good-segment",
+        verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "good-segment",
                 "stdout", 0, "abc".getBytes(StandardCharsets.UTF_8), digest("abc"));
         corruptNext[0] = true;
-        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+        assertThatThrownBy(() -> verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "bad-segment", "stdout", 1, "def".getBytes(StandardCharsets.UTF_8), digest("def")))
-                .hasMessageContaining("digest changed");
+                .hasMessageContaining("invalid_request");
         assertThat(jdbc.queryForObject("SELECT capture_state FROM ma_resource"
                 + " WHERE slot_key = X'7365676d656e743a7374646f75743a31'", String.class)).isEqualTo("QUARANTINED");
-        assertThat(jdbc.queryForObject("SELECT quarantined FROM ma_output_capture"
+        assertThat(jdbc.queryForObject("SELECT is_quarantined FROM ma_output_capture"
                 + " WHERE publication_id = X'7075622d31'", Boolean.class)).isFalse();
-        assertThat(data.prefix(key, "pub-1", PUBLICATION_TOKEN, "good-prefix", "stdout")
+        assertThat(verified(data).prefix(key, "pub-1", PUBLICATION_TOKEN, "good-prefix", "stdout")
                 .path("byteLength").asLong()).isEqualTo(3);
         assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
-                "bad-segment", "stdout", 1, "def".getBytes(StandardCharsets.UTF_8), digest("def")))
+                "bad-segment-retry", "stdout", 1, "def".getBytes(StandardCharsets.UTF_8), digest("def")))
                 .hasMessageContaining("quarantined");
     }
 
@@ -1449,6 +1545,16 @@ class ToolPublicationStoreTest {
         reserve();
         Map<String, byte[]> objects = new java.util.HashMap<>();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 objects.putIfAbsent(key, bytes.clone());
@@ -1467,29 +1573,29 @@ class ToolPublicationStoreTest {
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
         JsonNode key = binding.get("sessionKey");
         byte[] abc = "abc".getBytes(StandardCharsets.UTF_8);
-        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+        assertThatThrownBy(() -> verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "bad-digest", "stdout", 0, abc, digest("other")))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_result_digest_mismatch"));
-        data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment-0", "stdout", 0, abc, digest("abc"));
-        data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment-1", "stderr", 0, abc, digest("abc"));
-        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+        verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment-0", "stdout", 0, abc, digest("abc"));
+        verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment-1", "stderr", 0, abc, digest("abc"));
+        assertThatThrownBy(() -> verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "segment-1", "stdout", 0, abc, digest("abc")))
                 .hasMessageContaining("operation conflicts");
-        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
+        assertThatThrownBy(() -> verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN,
                 "other-segment", "stdout", 0, "abd".getBytes(StandardCharsets.UTF_8), null))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_result_conflict"));
-        assertThatThrownBy(() -> data.seal(key, "pub-1", PUBLICATION_TOKEN,
+        assertThatThrownBy(() -> verified(data).seal(key, "pub-1", PUBLICATION_TOKEN,
                 "missing-segment", "stdout", 2, 3, digest("abc")))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_result_conflict"));
-        assertThatThrownBy(() -> data.seal(key, "pub-1", PUBLICATION_TOKEN,
+        assertThatThrownBy(() -> verified(data).seal(key, "pub-1", PUBLICATION_TOKEN,
                 "wrong-length", "stdout", 1, 4, digest("abc")))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_result_digest_mismatch"));
-        data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal-correct", "stdout", 1, 3, digest("abc"));
-        assertThatThrownBy(() -> data.seal(key, "pub-1", PUBLICATION_TOKEN,
+        verified(data).seal(key, "pub-1", PUBLICATION_TOKEN, "seal-correct", "stdout", 1, 3, digest("abc"));
+        assertThatThrownBy(() -> verified(data).seal(key, "pub-1", PUBLICATION_TOKEN,
                 "seal-conflict", "stdout", 1, 3, digest("abd")))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo("managed_tool_result_conflict"));
@@ -1501,6 +1607,16 @@ class ToolPublicationStoreTest {
         byte[] segment = "abc".getBytes(StandardCharsets.UTF_8);
         boolean[] slow = {false};
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] bytes) {
             }
@@ -1533,10 +1649,10 @@ class ToolPublicationStoreTest {
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofSeconds(2), Duration.ofMillis(90), VERIFICATION_BUDGET);
         JsonNode key = binding.get("sessionKey");
-        data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "slow-segment",
+        verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "slow-segment",
                 "stdout", 0, segment, digest("abc"));
         slow[0] = true;
-        assertThat(data.seal(key, "pub-1", PUBLICATION_TOKEN, "slow-seal", "stdout",
+        assertThat(verified(data).seal(key, "pub-1", PUBLICATION_TOKEN, "slow-seal", "stdout",
                 1, segment.length, digest("abc")).path("segmentCount").asInt()).isEqualTo(1);
     }
 
@@ -1544,6 +1660,16 @@ class ToolPublicationStoreTest {
     void finishBudgetIncludesRetainedUnconfirmedCandidate() {
         reserve();
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 throw new IllegalStateException("Lost candidate PUT reply");
@@ -1559,7 +1685,7 @@ class ToolPublicationStoreTest {
                 Duration.ofSeconds(1), Duration.ofMillis(500),
                 new ToolPublicationDataStore.VerificationBudget(512, Duration.ofSeconds(5)));
         JsonNode key = binding.get("sessionKey");
-        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "candidate",
+        assertThatThrownBy(() -> verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "candidate",
                 "stdout", 0, new byte[512], null)).hasMessageContaining("Lost candidate PUT reply");
         ObjectNode capture = JSON.createObjectNode().put("captureStatus", "unavailable")
                 .put("captureReason", "storage_failed").put("previewTruncated", false)
@@ -1567,7 +1693,7 @@ class ToolPublicationStoreTest {
         ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "success");
         envelope.putArray("responseParts");
         envelope.set("capture", capture);
-        data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", envelope.toString().getBytes(StandardCharsets.UTF_8));
+        verified(data).finish(key, "pub-1", PUBLICATION_TOKEN, "finish", envelope.toString().getBytes(StandardCharsets.UTF_8));
         var deadline = jdbc.queryForObject(
                         "SELECT deadline FROM ma_operation WHERE operation_kind IN"
                                 + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND"
@@ -1586,6 +1712,16 @@ class ToolPublicationStoreTest {
         boolean[] slow = {false};
         long[] verificationTime = {0};
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] bytes) { }
 
@@ -1618,7 +1754,7 @@ class ToolPublicationStoreTest {
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
         JsonNode key = binding.get("sessionKey");
         String digest = ToolPublicationContract.sha256(segment);
-        publisher.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment", "stdout", 0, segment, digest);
+        verified(publisher).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment", "stdout", 0, segment, digest);
         verificationTime[0] = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW + "", java.sql.Timestamp.class)
                 .getTime() / 1000 * 1000;
         // Advance verification time with fixture reads, excluding JDBC latency.
@@ -1636,7 +1772,7 @@ class ToolPublicationStoreTest {
                 Duration.ofSeconds(3), Duration.ofSeconds(2),
                 new ToolPublicationDataStore.VerificationBudget(256, Duration.ofSeconds(10)));
         slow[0] = true;
-        assertThat(data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal", "stdout", 1, segment.length, digest)
+        assertThat(verified(data).seal(key, "pub-1", PUBLICATION_TOKEN, "seal", "stdout", 1, segment.length, digest)
                 .path("digest").asText()).isEqualTo(digest);
         var deadline = jdbc.queryForObject(
                         "SELECT deadline FROM ma_operation WHERE operation_kind IN"
@@ -1683,6 +1819,16 @@ class ToolPublicationStoreTest {
             }
         };
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             private Path file(String key) { return root.resolve(digest(key)); }
 
             @Override
@@ -1734,14 +1880,14 @@ class ToolPublicationStoreTest {
         var pageLinks = JSON.createArrayNode();
         String unitDigest = ToolPublicationContract.sha256(unit);
         for (int ordinal = 0; ordinal < segments; ordinal++) {
-            data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment-" + ordinal,
+            verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment-" + ordinal,
                     "stdout", ordinal, unit, unitDigest);
             hash.update(unit);
             descriptors.add(JSON.createObjectNode().put("byteLength", unit.length)
                     .put("digest", unitDigest));
             if (descriptors.size() == 512 || ordinal == segments - 1) {
                 int pageIndex = pageLinks.size();
-                JsonNode pageRef = data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
+                JsonNode pageRef = verified(data).publishResource(key, "pub-1", PUBLICATION_TOKEN,
                         "page-stdout-" + pageIndex, "page:stdout:" + page.path("firstOrdinal").asInt(),
                         "managed-tool-result-page", page.toString().getBytes(StandardCharsets.UTF_8));
                 ObjectNode pageLink = JSON.createObjectNode().put("segmentCount", descriptors.size())
@@ -1757,9 +1903,9 @@ class ToolPublicationStoreTest {
         }
         String outputDigest = HexFormat.of().formatHex(hash.digest());
         slow[0] = true;
-        data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal-stdout", "stdout",
+        verified(data).seal(key, "pub-1", PUBLICATION_TOKEN, "seal-stdout", "stdout",
                 segments, captureBytes, outputDigest);
-        data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal-stderr", "stderr", 0,
+        verified(data).seal(key, "pub-1", PUBLICATION_TOKEN, "seal-stderr", "stderr", 0,
                 0, digest(""));
         ObjectNode manifest = JSON.createObjectNode().put("toolResult", "managed-tool-result/1")
                 .put("type", "manifest").put("tenantId", "tenant-1")
@@ -1784,7 +1930,7 @@ class ToolPublicationStoreTest {
         stderr.putArray("missingRanges");
         stderr.set("body", JSON.createObjectNode().set("pages", JSON.createArrayNode()));
         manifest.putArray("contents").add(stdout).add(stderr);
-        JsonNode manifestRef = data.publishResource(key, "pub-1", PUBLICATION_TOKEN,
+        JsonNode manifestRef = verified(data).publishResource(key, "pub-1", PUBLICATION_TOKEN,
                 "manifest-1", "manifest:1", "managed-tool-result-manifest",
                 manifest.toString().getBytes(StandardCharsets.UTF_8));
         ObjectNode capture = JSON.createObjectNode().put("captureStatus", "complete")
@@ -1794,7 +1940,7 @@ class ToolPublicationStoreTest {
         ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "success");
         envelope.putArray("responseParts");
         envelope.set("capture", capture);
-        data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish-1",
+        verified(data).finish(key, "pub-1", PUBLICATION_TOKEN, "finish-1",
                 envelope.toString().getBytes(StandardCharsets.UTF_8));
         assertThat(metadataQueries[0]).isGreaterThanOrEqualTo(segments);
         ToolPublicationDataStore reopened = new ToolPublicationDataStore(jdbc, manager, store, sessions,
@@ -2005,10 +2151,12 @@ class ToolPublicationStoreTest {
         // A damaged write zeroed a revision's byte_length between the
         // intent's and the head must refuse the evidence with
         // the journal-corruption fault (500), not a client request fault.
+        byte[] zeroed = new byte[0];
         jdbc.update(
-                "UPDATE ma_session_journal_tx SET byte_length = 0 WHERE tenant_id ="
-                        + " X'74656e616e742d31' AND session_id = X'73657373696f6e2d31' AND"
-                        + " journal_revision = 3");
+                "UPDATE ma_session_journal_tx SET record_bytes = ?, byte_length = 0, record_digest = ?"
+                        + " WHERE tenant_id = X'74656e616e742d31' AND session_id = X'73657373696f6e2d31' AND"
+                        + " journal_revision = 3",
+                zeroed, ExtensionRecordJournal.sha256(zeroed));
         assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getCode())
@@ -2530,10 +2678,10 @@ class ToolPublicationStoreTest {
         jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
                 + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
                 + " expires_at, capture_bytes, producer_bytes, admission_bytes, capture_held_bytes,"
-                + " producer_held_bytes, admission_held_bytes, write_evidence) SELECT scope_key, tenant_key,"
+                + " producer_held_bytes, admission_held_bytes, is_write_evidence) SELECT scope_key, tenant_key,"
                 + " tenant_id, workspace_id, session_id, ?, ?, ?, binding_json, binding_digest, token_hash, state,"
                 + " expires_at, capture_bytes, producer_bytes, admission_bytes, capture_held_bytes,"
-                + " producer_held_bytes, admission_held_bytes, write_evidence FROM ma_output_capture"
+                + " producer_held_bytes, admission_held_bytes, is_write_evidence FROM ma_output_capture"
                 + " WHERE publication_id = ?", to.getBytes(StandardCharsets.UTF_8), digest(to),
                 to.getBytes(StandardCharsets.UTF_8), from.getBytes(StandardCharsets.UTF_8));
     }
@@ -2720,9 +2868,9 @@ class ToolPublicationStoreTest {
                 sessionKey, v);
     }
 
-    record ApiFixture(JdbcTemplate jdbc, DataSourceTransactionManager manager, ManagedToolResultStore results,
-            ManagedAgentStore sessions, ManagedArtifactReader reader, ManagedAgentProperties properties,
-            ManagedArtifactPolicy policy, ManagedWorkspaceRegistry workspaces,
+    record ApiFixture(JdbcTemplate jdbc, DataSourceTransactionManager manager, JdbcManagedToolResultStore results,
+            ManagedAgentStore sessions, ToolPublicationArtifactReader reader, ManagedAgentProperties properties,
+            ManagedArtifactPolicy policy, JdbcManagedWorkspaceRegistry workspaces,
             ToolPublicationDataStore publications) {}
 
     static ApiFixture largeApiFixture(int total) throws Exception {
@@ -2775,6 +2923,16 @@ class ToolPublicationStoreTest {
         ToolPublicationObjectStore bucket =
                 new ToolPublicationObjectStore() {
                     @Override
+                    public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                        guard.run();
+                        try (InputStream full = open(key)) {
+                            byte[] bytes = full.readAllBytes();
+                            return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                        } catch (java.io.IOException error) {
+                            throw new IllegalStateException(error);
+                        }
+                    }
+                    @Override
                     public void putIfAbsent(String key, byte[] bytes) {
                         objects.putIfAbsent(key, bytes.clone());
                     }
@@ -2804,7 +2962,7 @@ class ToolPublicationStoreTest {
                         VERIFICATION_BUDGET);
         JsonNode key = binding.get("sessionKey");
         byte[] segment = "A".repeat(total / 2).getBytes(StandardCharsets.UTF_8);
-        data.publishSegment(
+        verified(data).publishSegment(
                 key,
                 "pub-1",
                 PUBLICATION_TOKEN,
@@ -2814,7 +2972,7 @@ class ToolPublicationStoreTest {
                 segment,
                 digest("A".repeat(total / 2)));
 
-        data.publishSegment(
+        verified(data).publishSegment(
                 key,
                 "pub-1",
                 PUBLICATION_TOKEN,
@@ -2823,7 +2981,7 @@ class ToolPublicationStoreTest {
                 1,
                 "A".repeat(total / 2).getBytes(StandardCharsets.UTF_8),
                 digest("A".repeat(total / 2)));
-        data.seal(
+        verified(data).seal(
                         key,
                         "pub-1",
                         PUBLICATION_TOKEN,
@@ -2834,7 +2992,7 @@ class ToolPublicationStoreTest {
                         digest("A".repeat(total)))
                 .path("segmentCount")
                 .asInt();
-        data.seal(
+        verified(data).seal(
                 key,
                 "pub-1",
                 PUBLICATION_TOKEN,
@@ -2863,7 +3021,7 @@ class ToolPublicationStoreTest {
                                 .put("digest", digest("A".repeat(total / 2))));
 
         JsonNode ref =
-                data.publishResource(
+                verified(data).publishResource(
                         key,
                         "pub-1",
                         PUBLICATION_TOKEN,
@@ -2925,7 +3083,7 @@ class ToolPublicationStoreTest {
         stderr.set("body", emptyBody);
         ((com.fasterxml.jackson.databind.node.ArrayNode) manifest.path("contents")).add(stderr);
         JsonNode manifestRef =
-                data.publishResource(
+                verified(data).publishResource(
                         key,
                         "pub-1",
                         PUBLICATION_TOKEN,
@@ -2943,7 +3101,7 @@ class ToolPublicationStoreTest {
         ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "success");
         envelope.putArray("responseParts");
         envelope.set("capture", capture);
-        data.finish(
+        verified(data).finish(
                         key,
                         "pub-1",
                         PUBLICATION_TOKEN,
@@ -3029,7 +3187,7 @@ class ToolPublicationStoreTest {
                         results,
                         jdbc,
                         provider,
-                        new ManagedArtifactReader(provider),
+                        new ToolPublicationArtifactReader(provider),
                         policy,
                         properties)
                 .project(results.claim().orElseThrow());
@@ -3038,7 +3196,7 @@ class ToolPublicationStoreTest {
                 manager,
                 results,
                 fixture.publicSessions,
-                new ManagedArtifactReader(provider),
+                new ToolPublicationArtifactReader(provider),
                 properties,
                 policy,
                 fixture.publicWorkspaces,
@@ -3076,12 +3234,12 @@ class ToolPublicationStoreTest {
     void acceptedProducerEvidenceFeedsRetirementEligibility() {
         var fixture = apiFixture();
         assertThat(fixture.jdbc().queryForObject(
-                                        "SELECT write_evidence AND accepted_complete FROM"
+                                        "SELECT is_write_evidence AND is_accepted_complete FROM"
                                                 + " ma_output_capture",
                 Boolean.class)).isTrue();
         fixture.jdbc().update(
                         "UPDATE ma_session SET retirement_operation_id = X'64656c6574652d31',"
-                                + " retirement_generation = 1, retired_at = 1, recovery_protected ="
+                                + " retirement_generation = 1, retired_at = 1, is_recovery_protected ="
                                 + " FALSE WHERE tenant_id = X'74656e616e742d31' AND session_id ="
                                 + " X'73657373696f6e2d31'");
         fixture.jdbc().update("UPDATE ma_output_capture SET retention_state = 'RETIRING'");
@@ -3110,7 +3268,7 @@ class ToolPublicationStoreTest {
         var artifacts = fixture.jdbc().queryForList("SELECT " + ManagedSchemaProjection.ARTIFACT.columns() + " FROM ma_artifact");
         var events = fixture.jdbc().queryForList("SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event");
         var projection =
-                new ManagedToolResultStore.Projection(
+                new JdbcManagedToolResultStore.Projection(
                         JSON.createObjectNode(),
                         "pub-1",
                         JSON.createObjectNode(),
@@ -3144,8 +3302,8 @@ class ToolPublicationStoreTest {
         var claim = fixture.results().claim().orElseThrow();
         var source = claim.source();
         var foreign =
-                new ManagedToolResultStore.Claim(
-                        new ManagedToolResultStore.Source(
+                new JdbcManagedToolResultStore.Claim(
+                        new JdbcManagedToolResultStore.Source(
                                 source.id(),
                                 "foreign",
                                 source.workspaceId(),
@@ -3168,7 +3326,7 @@ class ToolPublicationStoreTest {
         var artifacts = fixture.jdbc().queryForList("SELECT " + ManagedSchemaProjection.ARTIFACT.columns() + " FROM ma_artifact");
         var events = fixture.jdbc().queryForList("SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event");
         var projection =
-                new ManagedToolResultStore.Projection(
+                new JdbcManagedToolResultStore.Projection(
                         JSON.createObjectNode(),
                         "pub-1",
                         JSON.createObjectNode(),
@@ -3202,6 +3360,33 @@ class ToolPublicationStoreTest {
                 .isEqualTo(events);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"tool_profile = 'csi-files-retirement/1'", "runtime_request_key = 'fixture-request'"})
+    void projectionClaimSkipsPrivateCsiSessions(String privateMarker) {
+        // csi_guard is generated from these two columns, so the seed sets one of them.
+        var fixture = apiFixture();
+        fixture.jdbc()
+                .update(
+                        "UPDATE ma_operation SET state = 'PENDING', available_at = 0 WHERE"
+                            + " operation_kind = 'TOOL_RESULT_PROJECTION'");
+        var original = fixture.jdbc().queryForMap("SELECT tool_profile, runtime_request_key FROM ma_session");
+        fixture.jdbc().update("UPDATE ma_session SET " + privateMarker);
+        var before =
+                fixture.jdbc()
+                        .queryForMap(
+                                "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'");
+        assertThat(fixture.results().claim()).isEmpty();
+        assertThat(
+                        fixture.jdbc()
+                                .queryForMap(
+                                        "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'"))
+                .usingRecursiveComparison()
+                .isEqualTo(before);
+        fixture.jdbc().update("UPDATE ma_session SET tool_profile = ?, runtime_request_key = ?",
+                original.get("tool_profile"), original.get("runtime_request_key"));
+        assertThat(fixture.results().claim()).isPresent();
+    }
+
     @Test
     void retiredRootRejectsProjectionWhilePublicSessionIsStillReadable() {
         var fixture = apiFixture();
@@ -3215,10 +3400,10 @@ class ToolPublicationStoreTest {
         var claim = fixture.results().claim().orElseThrow();
         fixture.jdbc().update(
                         "UPDATE ma_session SET retirement_operation_id = X'64656c6574652d31',"
-                                + " retirement_generation = 1, retired_at = 1, recovery_protected ="
+                                + " retirement_generation = 1, retired_at = 1, is_recovery_protected ="
                                 + " FALSE WHERE tenant_id = X'74656e616e742d31' AND session_id ="
                                 + " X'73657373696f6e2d31'");
-        var projection = new ManagedToolResultStore.Projection(JSON.createObjectNode(), "pub-1",
+        var projection = new JdbcManagedToolResultStore.Projection(JSON.createObjectNode(), "pub-1",
                 artifact.binding(), artifact.manifestRef(), List.of(artifact), fixture.policy().version());
         assertThat(fixture.results().complete(claim, projection, fixture.policy().version())).isFalse();
         assertThat(fixture.jdbc().queryForMap(
@@ -3255,7 +3440,7 @@ class ToolPublicationStoreTest {
                         "UPDATE ma_operation SET state='PENDING', available_at=0 WHERE"
                                 + " operation_kind = 'TOOL_RESULT_PROJECTION'");
         new ManagedToolResultProjector(fixture.results(), fixture.jdbc(), provider,
-                new ManagedArtifactReader(provider), fixture.policy(), fixture.properties())
+                new ToolPublicationArtifactReader(provider), fixture.policy(), fixture.properties())
                 .project(fixture.results().claim().orElseThrow());
         assertThat(fixture.jdbc().queryForObject(
                                         "SELECT state FROM ma_operation WHERE operation_kind ="
@@ -3314,7 +3499,7 @@ class ToolPublicationStoreTest {
         var calls = new java.util.concurrent.atomic.AtomicInteger();
         org.mockito.Mockito.doAnswer(call -> {
             if (calls.incrementAndGet() == 2) {
-                fixture.jdbc().update("UPDATE ma_output_capture SET quarantined=TRUE");
+                fixture.jdbc().update("UPDATE ma_output_capture SET is_quarantined=TRUE");
             }
             return fixture.policy().version();
         }).when(policy).version();
@@ -3350,7 +3535,7 @@ class ToolPublicationStoreTest {
         var policy = org.mockito.Mockito.spy(publicationPolicy());
         org.mockito.Mockito.doReturn("policy-before", "policy-after").when(policy).version();
         var provider = publicationProvider(null);
-        new ManagedToolResultProjector(publicResults, jdbc, provider, new ManagedArtifactReader(provider), policy,
+        new ManagedToolResultProjector(publicResults, jdbc, provider, new ToolPublicationArtifactReader(provider), policy,
                 projectionProperties).project(publicResults.claim().orElseThrow());
         assertThat(jdbc.queryForMap(
                                 "SELECT state, failure_code FROM ma_operation WHERE operation_kind"
@@ -3366,7 +3551,7 @@ class ToolPublicationStoreTest {
         insertPublicSession();
         jdbc.update("DELETE FROM ma_output_capture");
         var provider = publicationProvider(null);
-        new ManagedToolResultProjector(publicResults, jdbc, provider, new ManagedArtifactReader(provider),
+        new ManagedToolResultProjector(publicResults, jdbc, provider, new ToolPublicationArtifactReader(provider),
                 publicationPolicy(), projectionProperties).project(publicResults.claim().orElseThrow());
         assertThat(jdbc.queryForMap(
                                 "SELECT state, failure_code FROM ma_operation WHERE operation_kind"
@@ -3420,7 +3605,7 @@ class ToolPublicationStoreTest {
         insertPublicSession();
         jdbc.update("UPDATE ma_session SET status = 'DELETING'");
         var provider = publicationProvider(null);
-        var reader = org.mockito.Mockito.mock(ManagedArtifactReader.class);
+        var reader = org.mockito.Mockito.mock(ToolPublicationArtifactReader.class);
         var policy = org.mockito.Mockito.mock(ManagedArtifactPolicy.class);
         new ManagedToolResultProjector(publicResults, jdbc, provider, reader, policy,
                 projectionProperties).project(publicResults.claim().orElseThrow());
@@ -3446,7 +3631,7 @@ class ToolPublicationStoreTest {
             public boolean readOriginal(String tenant, String actor, String workspace, String session) { return true; }
         };
         var provider = publicationProvider(null);
-        new ManagedToolResultProjector(publicResults, jdbc, provider, new ManagedArtifactReader(provider), policy,
+        new ManagedToolResultProjector(publicResults, jdbc, provider, new ToolPublicationArtifactReader(provider), policy,
                 projectionProperties).project(publicResults.claim().orElseThrow());
         assertThat(jdbc.queryForObject(
                                 "SELECT state FROM ma_operation WHERE operation_kind ="
@@ -3486,7 +3671,7 @@ class ToolPublicationStoreTest {
                         publicResults,
                         jdbc,
                         provider,
-                        new ManagedArtifactReader(provider),
+                        new ToolPublicationArtifactReader(provider),
                         publicationPolicy(),
                         projectionProperties)
                 .project(claim);
@@ -3513,7 +3698,7 @@ class ToolPublicationStoreTest {
                         publicResults,
                         jdbc,
                         provider,
-                        new ManagedArtifactReader(provider),
+                        new ToolPublicationArtifactReader(provider),
                         publicationPolicy(),
                         projectionProperties)
                 .project(publicResults.claim().orElseThrow());
@@ -3530,7 +3715,7 @@ class ToolPublicationStoreTest {
         insertPublicSession();
         var provider = publicationProvider(null);
         var projector = new ManagedToolResultProjector(publicResults, jdbc, provider,
-                new ManagedArtifactReader(provider), publicationPolicy(), projectionProperties);
+                new ToolPublicationArtifactReader(provider), publicationPolicy(), projectionProperties);
         projectionProperties.getArtifacts().setEnabled(false);
         projector.tick();
         assertThat(jdbc.queryForObject(
@@ -3568,7 +3753,7 @@ class ToolPublicationStoreTest {
     private JsonNode projectPublicReceipt(ToolPublicationDataStore data) {
         insertPublicSession();
         var provider = publicationProvider(data);
-        var projector = new ManagedToolResultProjector(publicResults, jdbc, provider, new ManagedArtifactReader(provider),
+        var projector = new ManagedToolResultProjector(publicResults, jdbc, provider, new ToolPublicationArtifactReader(provider),
                 publicationPolicy(), projectionProperties);
         var crashedClaim = publicResults.claim().orElseThrow();
         jdbc.update("UPDATE ma_operation SET claim_until = 1000 WHERE operation_id = ?", crashedClaim.source().id());

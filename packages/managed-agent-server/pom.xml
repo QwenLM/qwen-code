@@ -32,9 +32,6 @@
     </developers>
     <properties>
         <java.version>21</java.version>
-        <managed.operator-tools.attach>true</managed.operator-tools.attach>
-        <managed.operator-tools.jar.phase>package</managed.operator-tools.jar.phase>
-        <managed.operator-tools.skip>false</managed.operator-tools.skip>
         <druid.version>1.2.25</druid.version>
         <qwencode-sdk.version>0.1.0-alpha</qwencode-sdk.version>
         <fastjson2.version>2.0.65</fastjson2.version>
@@ -55,12 +52,54 @@
         <module>control-plane</module>
         <module>runtime-broker</module>
         <module>persistence</module>
+        <module>runtime-http</module>
+        <module>runtime-host</module>
+        <module>runtime-local</module>
+        <module>runtime-external</module>
+        <module>runtime-kubernetes</module>
+        <module>runtime-ssh</module>
+        <module>runtime-static</module>
         <module>adapters</module>
         <module>server</module>
         <module>verification</module>
     </modules>
     <dependencyManagement>
         <dependencies>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>qwen-managed-agent-runtime-http</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>qwen-managed-agent-runtime-host</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>qwen-managed-agent-runtime-local</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>qwen-managed-agent-runtime-external</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>qwen-managed-agent-runtime-kubernetes</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>qwen-managed-agent-runtime-ssh</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>qwen-managed-agent-runtime-static</artifactId>
+                <version>${project.version}</version>
+            </dependency>
             <dependency>
                 <groupId>com.aliyun.oss</groupId>
                 <artifactId>aliyun-sdk-oss</artifactId>
@@ -180,25 +219,7 @@
     </build>
     <profiles>
         <profile>
-            <id>no-operator-tools</id>
-            <activation>
-                <property>
-                    <name>managed.operator-tools.attach</name>
-                    <value>false</value>
-                </property>
-            </activation>
-            <properties>
-                <managed.operator-tools.jar.phase>none</managed.operator-tools.jar.phase>
-                <managed.operator-tools.skip>true</managed.operator-tools.skip>
-            </properties>
-        </profile>
-        <profile>
             <id>central-release</id>
-            <properties>
-                <managed.operator-tools.attach>false</managed.operator-tools.attach>
-                <managed.operator-tools.jar.phase>none</managed.operator-tools.jar.phase>
-                <managed.operator-tools.skip>true</managed.operator-tools.skip>
-            </properties>
             <build>
                 <plugins>
                     <plugin>

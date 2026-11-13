@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
@@ -47,7 +48,7 @@ public final class ToolPublicationCollector {
     }
 
     @Scheduled(fixedDelay = 1000, scheduler = "managedToolOutputScheduler")
-    public synchronized void tick() {
+    public void tick() {
         try {
             runOnce();
         } catch (RuntimeException error) {
@@ -116,7 +117,7 @@ public final class ToolPublicationCollector {
 
     private static JsonNode progress(java.util.Map<String, Object> row) {
         return row.get("result_json") == null ? JSON.createObjectNode()
-                : ManagedToolResultStore.parse((String) row.get("result_json"));
+                : JdbcManagedToolResultStore.parse((String) row.get("result_json"));
     }
 
     private void ensureOperations() {
@@ -126,8 +127,8 @@ public final class ToolPublicationCollector {
                             + " c.session_id FROM ma_output_capture c WHERE c.retention_state ="
                             + " 'RETIRING' AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE"
                             + " s.tenant_id = c.tenant_id AND s.session_id = c.session_id AND"
-                            + " s.csi_guard = TRUE) AND NOT EXISTS (SELECT 1 FROM ma_operation o"
-                            + " USE INDEX (ix_ma_operation_publication) WHERE o.scope_key ="
+                            + " s.is_csi_guard = TRUE) AND NOT EXISTS (SELECT 1 FROM ma_operation o"
+                            + " USE INDEX (idx_ma_operation_publication) WHERE o.scope_key ="
                             + " c.scope_key AND o.publication_id = c.publication_id AND"
                             + " o.operation_kind = 'CAPTURE_GC' LIMIT 1) LIMIT 32",
                 (row, index) -> ManagedSchemaRows.read(row));
@@ -149,7 +150,7 @@ public final class ToolPublicationCollector {
                         jdbc.update(
                                 "INSERT IGNORE INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, publication_id, tenant_id, workspace_id, session_id, target_kind, target_key, request_digest, request_json, phase, state, gmt_create, gmt_modified) VALUES (?, ?, ?, 'CAPTURE_GC', ?, ?, ?, ?, ?, 'OUTPUT_CAPTURE', ?, ?, ?, 'COLLECTING', 'PENDING', ?, ?)",
                                 operationKey(scope, publication),
-                                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(
+                                ManagedSessionStore.sessionScopeKey(
                                         (String) capture.get("tenant_id"),
                                         (String) capture.get("session_id")),
                                 scope,
@@ -206,7 +207,7 @@ public final class ToolPublicationCollector {
         long time = ToolPublicationRetentionStore.now(jdbc);
         var candidates =
                 jdbc.query(
-                        "SELECT scope_key, publication_id, tenant_id, session_id FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_operation.tenant_id AND s.session_id = ma_operation.session_id AND s.csi_guard = TRUE) AND state <> 'SUCCEEDED' AND available_at >= 0 AND available_at <= ? AND (claim_owner = ? OR claim_until IS NULL OR claim_until <= ?) ORDER BY available_at, operation_key LIMIT 32",
+                        "SELECT scope_key, publication_id, tenant_id, session_id FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND NOT EXISTS (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_operation.tenant_id AND s.session_id = ma_operation.session_id AND s.is_csi_guard = TRUE) AND state <> 'SUCCEEDED' AND available_at >= 0 AND available_at <= ? AND (claim_owner = ? OR claim_until IS NULL OR claim_until <= ?) ORDER BY available_at, operation_key LIMIT 32",
                         (row, index) -> ManagedSchemaRows.read(row),
                         time,
                         owner,
@@ -333,7 +334,7 @@ public final class ToolPublicationCollector {
 
     private boolean sessionCollectionPending(String tenant, String session) {
         return !Boolean.TRUE.equals(jdbc.queryForObject(
-                "SELECT resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id"
+                "SELECT is_resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id"
                         + " = ?", Boolean.class, tenant, session));
     }
 

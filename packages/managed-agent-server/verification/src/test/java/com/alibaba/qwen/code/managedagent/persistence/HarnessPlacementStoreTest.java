@@ -36,8 +36,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 public class HarnessPlacementStoreTest {
     protected JdbcTemplate jdbc;
     protected TransactionTemplate tx;
-    protected HarnessPlacementStore placements;
-    protected ManagedSessionStore store;
+    protected JdbcHarnessPlacementStore placements;
+    protected JdbcManagedSessionStore store;
     protected WriterCredentialPolicy credentials;
     private static final String TENANT = "tenant";
     private static final String SESSION = "session";
@@ -56,12 +56,11 @@ public class HarnessPlacementStoreTest {
         ManagedSchema.initialize(source);
         jdbc = new ReleaseFaultJdbc(source);
         tx = new TransactionTemplate(new DataSourceTransactionManager(source));
-        placements = new HarnessPlacementStore(jdbc);
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        placements = new JdbcHarnessPlacementStore(jdbc);
         var properties = new ManagedAgentProperties();
         properties.getSessionStore().setBindingKey("0123456789abcdef0123456789abcdef");
         credentials = new WriterCredentialPolicy(properties);
-        store.setCredentials(credentials);
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc, credentials);
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'qwen-code', 1, 1)", TENANT, SESSION);
     }
@@ -96,7 +95,7 @@ public class HarnessPlacementStoreTest {
                 + " claim_generation, claim_until, lifecycle_protocol_version, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'close', ?, ?, ?, 'SESSION', ?, ?, '{}', 'PENDING', 'LIFECYCLE_ONLY',"
                 + " 'LEASED', 'worker', 7, ?, 1, 1, 1)", "c".repeat(64), "d".repeat(64), kind.name(), TENANT, SESSION,
-                "e".repeat(64), "f".repeat(64), HarnessPlacementStore.now(jdbc) + 60_000);
+                "e".repeat(64), "f".repeat(64), JdbcHarnessPlacementStore.now(jdbc) + 60_000);
         var operation = new OperationRecord(TENANT, SESSION, "close", kind, "request", "PENDING",
                 "ADMITTED", "LEASED", "ACTIVE", null, "worker", 7, 0, null, 1);
         assertThatThrownBy(() -> tx.execute(status -> placements.takeover(TENANT, SESSION, owner, "pod-b", "boot-b")))
@@ -291,7 +290,7 @@ public class HarnessPlacementStoreTest {
                 .isInstanceOf(ManagedAgentException.class).extracting("code").isEqualTo("harness_session_scope_ambiguous");
     }
 
-    private String token(HarnessPlacementStore.Placement placement) {
+    private String token(JdbcHarnessPlacementStore.Placement placement) {
         return credentials.issue(TENANT, WORKSPACE, SESSION, placement.instanceId(), placement.bootId(), placement.epoch());
     }
 

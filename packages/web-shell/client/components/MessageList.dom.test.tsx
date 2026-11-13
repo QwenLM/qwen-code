@@ -580,17 +580,24 @@ const dispatchTopScroll = async (list: HTMLElement) => {
   });
 };
 const mockMessageListWidth = (width: number) =>
-  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
-    width,
-    height: 600,
-    top: 0,
-    right: width,
-    bottom: 600,
-    left: 0,
-    x: 0,
-    y: 0,
-    toJSON: () => ({}),
-  });
+  vi
+    .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+    .mockImplementation(function (this: HTMLElement) {
+      const isContent = this.hasAttribute('data-web-shell-message-row');
+      const left = isContent ? 64 : 0;
+      const contentWidth = isContent ? Math.max(0, width - 128) : width;
+      return {
+        width: contentWidth,
+        height: 600,
+        top: 0,
+        right: left + contentWidth,
+        bottom: 600,
+        left,
+        x: left,
+        y: 0,
+        toJSON: () => ({}),
+      };
+    });
 const simpleTurns = (count: number): Message[] =>
   Array.from({ length: count }, (_, index) => {
     const turn = index + 1;
@@ -1346,7 +1353,9 @@ describe('MessageList — turn collapse (DOM)', () => {
     await act(async () => vi.advanceTimersByTimeAsync(15_000));
     expect(reloadSignal?.aborted).toBe(false);
 
-    const list = container.firstElementChild as HTMLElement;
+    const list = container.querySelector<HTMLElement>(
+      '[data-web-shell-message-list]',
+    )!;
     list.scrollTop = 400;
     act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
     expect(reloadSignal?.aborted).toBe(true);
@@ -4787,6 +4796,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(buttons[0]?.getAttribute('aria-label')).toBe(
       'Turn 1: q. Current turn',
     );
+    expect(c.querySelector('button')).toBe(buttons[0]);
     expect(buttons[0]?.hasAttribute('title')).toBe(false);
     expect(entries[0]?.getAttribute('data-in-current-range')).toBe('true');
     expect(entries[1]?.getAttribute('data-in-current-range')).toBe('true');
@@ -4926,6 +4936,9 @@ describe('MessageList — turn collapse (DOM)', () => {
         }
         const item = this.closest('[data-testid="session-timeline-entry"]');
         if (item) return rect(58, 16, 20, 12);
+        if (this.hasAttribute('data-web-shell-message-row')) {
+          return rect(1072, 600, 0, 64);
+        }
         return rect(1200, 600, 0);
       });
     Object.defineProperty(window, 'innerHeight', {
@@ -4946,6 +4959,7 @@ describe('MessageList — turn collapse (DOM)', () => {
         '[data-testid="session-timeline-detail"]',
       );
       expect(detail?.style.top).toBe('45px');
+      expect(detail?.style.left).toBe('48px');
 
       focusOut(firstEntryButton!);
       detailRect = rect(240, 100, 30, 80);
@@ -5067,6 +5081,9 @@ describe('MessageList — turn collapse (DOM)', () => {
         if (item) {
           const index = Number(item.getAttribute('data-timeline-index'));
           return rect(58, 16, 40 + index * 60 - markerOffset);
+        }
+        if (this.hasAttribute('data-web-shell-message-row')) {
+          return rect(1072, 600, 0, 64);
         }
         return rect(1200, 600, 0);
       });
@@ -5257,13 +5274,46 @@ describe('MessageList — turn collapse (DOM)', () => {
     scrollIntoView.mockRestore();
   });
 
-  it('hides the session timeline below the default content width', async () => {
-    const rectSpy = mockMessageListWidth(999);
+  it('hides the session timeline below the minimum content width', async () => {
+    const rectSpy = mockMessageListWidth(560);
 
     const c = mount(simpleTurns(4));
     await nextFrame();
 
     expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();
+    rectSpy.mockRestore();
+  });
+
+  it('shows the session timeline above the minimum content width', async () => {
+    const rectSpy = mockMessageListWidth(700);
+
+    const c = mount(simpleTurns(4));
+    await nextFrame();
+
+    expect(c.querySelector('[data-testid="session-timeline"]')).not.toBeNull();
+    rectSpy.mockRestore();
+  });
+
+  it('coalesces transcript mutations into one navigation measurement per frame', async () => {
+    const rectSpy = mockMessageListWidth(700);
+    const measure = rectSpy.getMockImplementation()!;
+    const reads: HTMLElement[] = [];
+    rectSpy.mockImplementation(function (this: HTMLElement) {
+      reads.push(this);
+      return measure.call(this);
+    });
+    const c = mount([userMsg('u1')]);
+    await nextFrame();
+    const list = c.querySelector<HTMLElement>('[data-web-shell-message-list]')!;
+    reads.length = 0;
+
+    for (let index = 0; index < 3; index++) {
+      list.append(document.createElement('span'));
+      await Promise.resolve();
+    }
+    await nextFrame();
+
+    expect(reads.filter((element) => element === list)).toHaveLength(1);
     rectSpy.mockRestore();
   });
 
@@ -6450,6 +6500,146 @@ describe('MessageList — turn collapse (DOM)', () => {
     },
   );
 
+  it.each([
+    ['session switch', 'with a replay'],
+    ['session switch', 'without a replay'],
+    ['/clear', 'with a replay'],
+    ['/clear', 'without a replay'],
+  ])('resumes follow after a %s while paused, %s', async (reset, replay) => {
+    let scrollHeight = 1200;
+    let scrollTop = 600;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
+      },
+    });
+    const transcriptA = [userMsg('u1'), asstMsg('a1')];
+    const c = mount(transcriptA, undefined, { sessionKey: 'session-a' });
+    const list = c.querySelector<HTMLElement>('[data-web-shell-message-list]')!;
+    act(() => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -300 }));
+      list.scrollTop = 300;
+      list.dispatchEvent(new Event('scroll'));
+    });
+    // A same-session catch-up cycle must keep the pause; this pins that the
+    // gesture above actually paused following.
+    rerenderMessages(c, transcriptA, {
+      sessionKey: 'session-a',
+      catchingUp: true,
+    });
+    rerenderMessages(c, transcriptA, {
+      sessionKey: 'session-a',
+      catchingUp: false,
+    });
+    await nextFrame();
+    expect(scrollTop).toBe(300);
+
+    // The /clear leg keeps the session key, so only the empty-transcript
+    // effect can drop the pause the gesture armed.
+    const nextSessionKey = reset === '/clear' ? 'session-a' : 'session-b';
+    if (reset === '/clear') {
+      rerenderMessages(c, [], { sessionKey: nextSessionKey });
+    }
+    // Reuse the user id on the /clear leg: a fresh id would let the new-user
+    // scroll resume follow on its own and hide a pause the reset failed to
+    // drop.
+    const nextTranscript = [
+      userMsg(reset === '/clear' ? 'u1' : 'u2'),
+      asstMsg('a2'),
+    ];
+    if (replay === 'with a replay') {
+      rerenderMessages(c, nextTranscript, {
+        sessionKey: nextSessionKey,
+        catchingUp: true,
+      });
+      rerenderMessages(c, nextTranscript, {
+        sessionKey: nextSessionKey,
+        catchingUp: false,
+      });
+    } else {
+      rerenderMessages(c, nextTranscript, { sessionKey: nextSessionKey });
+    }
+    await nextFrame();
+    expect(scrollTop).toBe(600);
+
+    scrollHeight = 1800;
+    rerenderMessages(c, [...nextTranscript, asstMsg('a3')], {
+      sessionKey: nextSessionKey,
+    });
+    await nextFrame();
+    expect(scrollTop).toBe(1200);
+  });
+
+  it.each([
+    ['disclosure', 'session switch'],
+    ['disclosure', '/clear'],
+    ['turn toggle', 'session switch'],
+    ['turn toggle', '/clear'],
+  ])(
+    'keeps following after an old %s callback was queued before a %s',
+    (action, reset) => {
+      vi.useFakeTimers();
+      resizeObserversFireOnObserve = false;
+      let scrollHeight = 1200;
+      let scrollTop = 600;
+      Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+        configurable: true,
+        get: () => scrollHeight,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+        configurable: true,
+        value: 600,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => {
+          scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
+        },
+      });
+      const c = mount(
+        action === 'disclosure'
+          ? [userMsg('u1'), thinkingMsg('t1')]
+          : [userMsg('u1'), toolMsg('g1'), asstMsg('a1')],
+        undefined,
+        { sessionKey: 'session-a' },
+      );
+      act(() => vi.advanceTimersByTime(500));
+      click(action === 'disclosure' ? disclosure(c, 't1') : toggle(c, 'u1'));
+      // Reuse the user id so the new-user scroll cannot bypass the queued
+      // recheck and conceal a stale reading pause. The /clear leg keeps the
+      // session key, so only the empty-transcript effect can reset it.
+      const nextSessionKey = reset === '/clear' ? 'session-a' : 'session-b';
+      if (reset === '/clear') {
+        rerenderMessages(c, [], { sessionKey: nextSessionKey });
+      }
+      const nextTranscript = [userMsg('u1'), asstMsg('a2')];
+      scrollHeight = 1800;
+      rerenderMessages(c, nextTranscript, { sessionKey: nextSessionKey });
+      expect(scrollTop).toBe(1200);
+
+      // Content can grow before its next render. An old animation timer
+      // must not interpret that geometry as a new user reading pause.
+      scrollHeight = 2400;
+      act(() => vi.advanceTimersByTime(500));
+      rerenderMessages(c, [...nextTranscript, asstMsg('a3')], {
+        sessionKey: nextSessionKey,
+      });
+      act(() => vi.advanceTimersByTime(500));
+      expect(scrollTop).toBe(1800);
+    },
+  );
+
   it('finishes cooldown following unless the user scrolls up', () => {
     resizeObserversFireOnObserve = false;
     let scrollHeight = 1200;
@@ -6740,7 +6930,9 @@ describe('MessageList — turn collapse (DOM)', () => {
     });
     await nextFrame();
 
-    const list = container.firstElementChild as HTMLElement;
+    const list = container.querySelector<HTMLElement>(
+      '[data-web-shell-message-list]',
+    )!;
     list.scrollTop = 600;
     act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
     await nextFrame();
@@ -6780,7 +6972,9 @@ describe('MessageList — turn collapse (DOM)', () => {
       isResponding: true,
       onCanScrollToBottomChange,
     });
-    const list = container.firstElementChild as HTMLElement;
+    const list = container.querySelector<HTMLElement>(
+      '[data-web-shell-message-list]',
+    )!;
 
     act(() => {
       list.dispatchEvent(new WheelEvent('wheel', { deltaY: -8 }));
@@ -6968,7 +7162,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     await nextFrame();
     await nextFrame();
 
-    const list = c.firstElementChild as HTMLElement;
+    const list = c.querySelector<HTMLElement>('[data-web-shell-message-list]')!;
     scrollTop = 0;
     act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
     await nextFrame();

@@ -16,9 +16,10 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocolTest;
@@ -784,27 +785,32 @@ class HttpRuntimeTransportTest {
     @Test
     void closesTheConnectionOnTheDeadlineAndOnCallerCancel() throws Exception {
         for (boolean callerCancels : new boolean[] {false, true}) {
+            CountDownLatch responseStarted = new CountDownLatch(1);
             CountDownLatch closed = new CountDownLatch(1);
             HttpServer drip = HttpServer.create(
                     new InetSocketAddress("127.0.0.1", 0), 0);
-            drip.setExecutor(Executors.newCachedThreadPool());
+            var executor = Executors.newCachedThreadPool();
+            drip.setExecutor(executor);
             drip.createContext("/", exchange -> {
-                exchange.getRequestBody().readAllBytes();
-                exchange.getResponseHeaders().set("Cache-Control", "no-store");
-                exchange.getResponseHeaders().set("Content-Type",
-                        "application/json");
-                exchange.sendResponseHeaders(200, 1 << 20);
-                OutputStream out = exchange.getResponseBody();
                 try {
+                    exchange.getRequestBody().readAllBytes();
+                    exchange.getResponseHeaders().set("Cache-Control", "no-store");
+                    exchange.getResponseHeaders().set("Content-Type",
+                            "application/json");
+                    exchange.sendResponseHeaders(200, 1 << 20);
+                    OutputStream out = exchange.getResponseBody();
                     for (int tick = 0; tick < 200; tick++) {
                         out.write(' ');
                         out.flush();
+                        responseStarted.countDown();
                         Thread.sleep(25);
                     }
                 } catch (IOException gone) {
                     closed.countDown();
                 } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
+                } finally {
+                    exchange.close();
                 }
             });
             drip.start();
@@ -817,13 +823,17 @@ class HttpRuntimeTransportTest {
                         attest(client, drip.getAddress().getPort())
                                 .toCompletableFuture();
                 if (callerCancels) {
-                    Thread.sleep(200);
-                    pending.cancel(true);
+                    assertTrue(responseStarted.await(2, TimeUnit.SECONDS),
+                            "streaming response started before caller cancel");
+                    assertFalse(pending.isDone());
+                    assertTrue(pending.cancel(true));
+                    assertTrue(pending.isCancelled());
                 }
                 assertTrue(closed.await(2, TimeUnit.SECONDS),
                         callerCancels ? "caller cancel" : "deadline");
             } finally {
                 drip.stop(0);
+                executor.shutdownNow();
             }
         }
     }
@@ -1131,9 +1141,14 @@ class HttpRuntimeTransportTest {
         RuntimeScope scope = session.getScope();
         RuntimeLease lease = toolLease(server.getAddress().getPort());
         var clock = java.time.Clock.systemUTC();
-        var bindings = new InMemoryRuntimeBindingRepository(clock, () -> "size-probe-binding");
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository(clock);
+        var sizeSource = new org.h2.jdbcx.JdbcDataSource();
+        sizeSource.setURL("jdbc:h2:mem:size-probe-" + java.util.UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(sizeSource);
+        var bindings = new JdbcRuntimeBindingRepository(sizeSource,
+                new AesGcmSecretProtector("test", new byte[32]), () -> "size-probe-binding");
+        var sessions = new JdbcRuntimeSessionRepository(sizeSource);
+        var executions = new JdbcToolExecutionRepository(sizeSource);
         RuntimeProvisioner provisioner = request -> CompletableFuture.completedFuture(lease);
         try (var service = RuntimeBrokerTestAccess.service(harness -> CompletableFuture.completedFuture(scope),
                 provisioner, transport, bindings, sessions, executions, "size-probe",

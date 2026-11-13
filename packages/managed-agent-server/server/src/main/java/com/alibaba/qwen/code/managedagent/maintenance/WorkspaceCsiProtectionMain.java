@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.maintenance;
 
-import com.alibaba.qwen.code.managedagent.adapters.runtime.WorkspaceCsiResourceGuard;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -8,7 +7,6 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.Map;
 
 /** Offline renderer; output must be reviewed and validated against the target API. */
@@ -42,7 +40,7 @@ public final class WorkspaceCsiProtectionMain {
         } catch (Exception error) {
             throw new IllegalArgumentException("CSI registration could not be read");
         }
-        System.out.println(json.writeValueAsString(Map.of("apiVersion", "v1", "kind", "List", "items", List.of(
-                WorkspaceCsiResourceGuard.policy(registration, args[1]), WorkspaceCsiResourceGuard.binding(args[1], args[2])))));
+        System.out.println(json.writeValueAsString(Map.of("apiVersion", "v1", "kind", "List", "items", new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry()
+                        .kubernetes().protectionObjects(registration, args[1], args[2]))));
     }
 }

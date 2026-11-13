@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -29,14 +30,14 @@ public final class WorkspaceCsiRuntimeConstructionFixture {
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
         jdbc.update(
                 "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("construction-fixture/1");
         var created = com.alibaba.qwen.code.managedagent.persistence.PrivateCsiFixture.create(jdbc, manager, json, properties,
                 new com.alibaba.qwen.code.managedagent.contracts.workspace.PrivateCsiSession.Request(registration, "actor", "create", null, null,
                         new WorkspaceSelection("workspace", ".")));
-        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         return new TransactionTemplate(manager).execute(status -> managed.requireCsiRequest(registration, created.sessionId()));
     }
 }

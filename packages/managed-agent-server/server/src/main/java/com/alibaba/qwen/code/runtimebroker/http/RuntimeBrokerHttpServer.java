@@ -33,11 +33,13 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 
@@ -54,6 +56,8 @@ import java.util.function.Function;
 public final class RuntimeBrokerHttpServer implements AutoCloseable {
     public static final String ROUTE_PREFIX = "/internal/runtime-broker/v1";
     private static final int MAXIMUM_REQUEST_BYTES = 8 * 1024 * 1024;
+    private static final int MAXIMUM_HTTP_THREADS = 32;
+    private static final int MAXIMUM_QUEUED_REQUESTS = 64;
     private final RuntimeBrokerService service;
     private final byte[] authorization;
     private final HttpServer server;
@@ -96,11 +100,10 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 .getBytes(StandardCharsets.UTF_8);
         this.service = service;
         this.server = HttpServer.create(address, 0);
-        this.executor = Executors.newCachedThreadPool(task -> {
-            Thread thread = new Thread(task, "runtime-broker-http");
-            thread.setDaemon(true);
-            return thread;
-        });
+        this.executor = new ThreadPoolExecutor(MAXIMUM_HTTP_THREADS, MAXIMUM_HTTP_THREADS,
+                0, TimeUnit.SECONDS, new ArrayBlockingQueue<>(MAXIMUM_QUEUED_REQUESTS),
+                Thread.ofPlatform().daemon().name("runtime-broker-http-", 0).factory(),
+                new ThreadPoolExecutor.AbortPolicy());
         server.setExecutor(executor);
         server.createContext(ROUTE_PREFIX, this::handle);
         if (nativeReadback != null) {
@@ -271,11 +274,18 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 if (!body.keySet().equals(Set.of("protocolVersion", "requestId", "harnessSessionId"))) {
                     throw new IllegalArgumentException("Invalid capabilities request");
                 }
-                complete(exchange, service.capabilities(sessionId, lifecycleAuthority(exchange)), scope -> Map.of(
-                        "protocolVersion", 1, "harnessSessionId", sessionId,
-                        "scope", Map.of("tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId(),
-                                "workspaceGeneration", scope.getWorkspaceGeneration(),
-                                "isolationClass", scope.getIsolationClass(), "capabilityDigest", scope.getCapabilityDigest())));
+                complete(exchange, service.capabilitiesContext(sessionId, lifecycleAuthority(exchange)), value -> {
+                    var scope = value.scope();
+                    Map<String, Object> result = new java.util.LinkedHashMap<>(Map.of(
+                            "protocolVersion", 1, "harnessSessionId", sessionId,
+                            "scope", Map.of("tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId(),
+                                    "workspaceGeneration", scope.getWorkspaceGeneration(),
+                                    "isolationClass", scope.getIsolationClass(), "capabilityDigest", scope.getCapabilityDigest())));
+                    if (value.workspaceContext() != null) {
+                        result.put("workspaceContext", Map.of("cwdRelative", value.workspaceContext().cwdRelative(), "contextRevision", value.workspaceContext().contextRevision()));
+                    }
+                    return result;
+                });
                 return;
             }
             if ("POST".equals(exchange.getRequestMethod())
@@ -291,7 +301,8 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                                 "workspaceGeneration", record.getRequest().getScope().getWorkspaceGeneration(),
                                 "isolationClass", record.getRequest().getScope().getIsolationClass(),
                                 "capabilityDigest", record.getRequest().getScope().getCapabilityDigest()),
-                        "runtime", Map.of("bindingId", record.getBindingId(), "generation", Long.toString(record.getGeneration()))));
+                        "runtime", Map.of("bindingId", record.getBindingId(), "generation", Long.toString(record.getGeneration()),
+                                "provisionerKind", record.getRequest().getProvisionerKind())));
                 return;
             }
             if ("POST".equals(exchange.getRequestMethod()) && "/runtimes:authorize-lifecycle".equals(relative)) {
@@ -394,12 +405,13 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                     "workspaceId", scope.getWorkspaceId(), "workspaceGeneration", scope.getWorkspaceGeneration(),
                     "isolationClass", scope.getIsolationClass(),
                     "capabilityDigest", scope.getCapabilityDigest()));
-            if (CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())) {
+            if (CsiFilesRetirementProfile.isProfile(scope)) {
                 savedScope.put("canonicalCwd", scope.getCanonicalCwd());
             }
             response.put("scope", savedScope);
             response.put("runtime", Map.of("bindingId", record.getBindingId(),
-                    "generation", Long.toString(record.getRuntimeGeneration())));
+                    "generation", Long.toString(record.getRuntimeGeneration()),
+                    "provisionerKind", service.runtimeProvisionerKind(record)));
             return response;
         });
     }
@@ -1003,6 +1015,8 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                     "runtime_broker_closed",
                     "Runtime Broker is closed.", false);
         } else {
+            System.getLogger(RuntimeBrokerHttpServer.class.getName()).log(
+                    System.Logger.Level.ERROR, "Unexpected Runtime Broker operation failure.", actual);
             failure = new RuntimeBrokerException(500,
                     "runtime_broker_internal_error",
                     "Runtime Broker operation failed.", false);

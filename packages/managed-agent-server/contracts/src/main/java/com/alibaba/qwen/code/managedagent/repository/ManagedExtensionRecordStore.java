@@ -18,7 +18,7 @@ import java.util.Map;
 import java.util.Optional;
 
 public interface ManagedExtensionRecordStore {
-    public com.fasterxml.jackson.databind.JsonNode currentMcpSettings(String tenant, String session);
+    public JsonNode currentMcpSettings(String tenant, String session);
 
     public static final String ERROR_MESSAGE_LINEAGE =
             "session_message_lineage_refused";
@@ -45,8 +45,31 @@ public interface ManagedExtensionRecordStore {
     public List<JsonNode> listRecords(String tenantId, String sessionId,
             String domain);
 
+    public String diagnosticReadRevision(String tenantId, String sessionId);
+
+    public Optional<JsonNode> diagnosticConfigRef(String tenantId, String sessionId);
+
+    public List<JsonNode> diagnosticMcpRecordRefs(String tenantId, String sessionId, int limit);
+
+    public JsonNode readExtensionContributions(String tenantId, String sessionId, JsonNode ref);
+
     public Map<String, WebShellModelContext> findModelContexts(
             String tenantId, List<String> sessionIds);
+
+    public record ModelDiagnostics(JsonNode context, JsonNode statistics,
+            Long contextSequence, Long statisticsSequence, Long observedAt,
+            Long readRevision, boolean stale, List<String> coverageGaps) { }
+
+    public ModelDiagnostics findModelDiagnostics(String tenantId, String sessionId);
+
+    public record ActivityPage(List<JsonNode> items, boolean hasMore, boolean partial, Long lastTime, String lastKey) { }
+
+    public JsonNode findActivityStatistics(String tenantId, String sessionId);
+
+    public String diagnosticCommittedSequence(String tenantId, String sessionId);
+
+    public ActivityPage listActivity(String tenantId, String sessionId, String domain, long upperSequence,
+            Long beforeCreatedAt, String beforeKey, int limit);
 
     public Optional<JsonNode> latestHookRegistration(String tenantId, String sessionId);
 
@@ -60,6 +83,9 @@ public interface ManagedExtensionRecordStore {
             JsonNode ref);
 
     public TaskPage listTasks(String tenantId, String sessionId,
+            Long beforeCreatedAt, String beforeTaskId, int limit);
+
+    public TaskPage listChildTasks(String tenantId, String sessionId,
             Long beforeCreatedAt, String beforeTaskId, int limit);
 
     public Optional<TaskRow> findTask(String tenantId, String sessionId,
