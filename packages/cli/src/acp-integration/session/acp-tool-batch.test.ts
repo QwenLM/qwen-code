@@ -19,7 +19,11 @@ import {
   startSharedLoopRound,
   type SharedLoopBatch,
 } from '../../ui/hooks/shared-loop-round.js';
-import { runAcpToolBatch, type AcpToolBatchHost } from './acp-tool-batch.js';
+import {
+  deferredToolUpdateContext,
+  runAcpToolBatch,
+  type AcpToolBatchHost,
+} from './acp-tool-batch.js';
 
 type SchedulerOptions = {
   onToolCallsUpdate: (calls: unknown[]) => void;
@@ -136,6 +140,7 @@ describe('runAcpToolBatch', () => {
   let host: AcpToolBatchHost;
   let requestPermission: ReturnType<typeof vi.fn>;
   const isEventBusAgentLoopEnabled = vi.fn();
+  const getToolOutputBatchBudget = vi.fn();
   const recordToolResult = vi.fn();
   const recordCompletedToolCall = vi.fn();
 
@@ -144,6 +149,7 @@ describe('runAcpToolBatch', () => {
     recordToolResult.mockClear();
     recordCompletedToolCall.mockClear();
     isEventBusAgentLoopEnabled.mockReturnValue(false);
+    getToolOutputBatchBudget.mockReturnValue(Number.POSITIVE_INFINITY);
     log = [];
     const record =
       (name: string, result?: unknown) =>
@@ -161,6 +167,7 @@ describe('runAcpToolBatch', () => {
       setApprovalMode: vi.fn(),
       getLlmClient: () => ({ recordCompletedToolCall }),
       isEventBusAgentLoopEnabled,
+      getToolOutputBatchBudget,
     };
     host = {
       ctx: { sessionId: 'session', config, sendUpdate: vi.fn() },
@@ -331,49 +338,109 @@ describe('runAcpToolBatch', () => {
     }
   });
 
-  it('keeps the completed sibling once when the next tool exceeds the cancellation deadline', async () => {
-    vi.useFakeTimers();
-    const abort = new AbortController();
-    const started = deferred<void>();
-    const stalled = deferred<[]>();
-    batch.execute = async (_requests, _signal, hooks) => {
-      const completed = { ...executed(read), status: 'success' as const };
-      hooks.beforeLaunch(read, []);
-      batch.options.onToolCallsUpdate([completed]);
-      hooks.beforeLaunch(write, [completed]);
-      started.resolve();
-      await stalled.promise;
-      return [completed];
-    };
-    const running = runOnKernel([read, write], abort.signal);
-    try {
-      await started.promise;
-      abort.abort();
-      await vi.advanceTimersByTimeAsync(CANCEL_SETTLEMENT_CAP_MS);
-      const result = await running;
-      expect(events()).toContainEqual(['result', true]);
-      expect(result.stop).toBe('cancelled');
-      expect(result.parts).toEqual(response(read).responseParts);
-      expect(result.results).toEqual([executed(read)]);
-      expect(recordToolResult).toHaveBeenCalledExactlyOnceWith(
-        response(read).responseParts,
-        expect.objectContaining({ callId: read.callId, status: 'success' }),
-        undefined,
-      );
-      expect(recordCompletedToolCall).toHaveBeenCalledExactlyOnceWith(
-        read.name,
-        read.args,
-      );
-      stalled.resolve([]);
-      await vi.advanceTimersByTimeAsync(0);
-      expect(recordToolResult).toHaveBeenCalledTimes(1);
-      expect(recordCompletedToolCall).toHaveBeenCalledTimes(1);
-    } finally {
-      stalled.resolve([]);
-      await running;
-      vi.useRealTimers();
-    }
-  });
+  it.each([Number.POSITIVE_INFINITY, 512])(
+    'keeps and delivers the completed sibling once after the cancellation deadline (budget %s)',
+    async (budget) => {
+      vi.useFakeTimers();
+      getToolOutputBatchBudget.mockReturnValue(budget);
+      const abort = new AbortController();
+      const started = deferred<void>();
+      const stalled = deferred<[]>();
+      const pendingUpdate = deferred<void>();
+      const emitStart = host.toolCallEmitter.emitStart;
+      host.toolCallEmitter.emitStart = async (params) => {
+        const emitted = await emitStart(params);
+        await pendingUpdate.promise;
+        return emitted;
+      };
+      const emitResult = host.toolCallEmitter.emitResult;
+      const deferredDelivery = vi.fn();
+      host.toolCallEmitter.emitResult = (params) => {
+        deferredDelivery(deferredToolUpdateContext.getStore());
+        return emitResult(params);
+      };
+      const fullOutput = 'abcdefghij'.repeat(120);
+      const readResult = executed(read);
+      const completed = {
+        ...readResult,
+        status: 'success' as const,
+        response: {
+          ...readResult.response,
+          responseParts: [
+            {
+              functionResponse: {
+                id: read.callId,
+                name: read.name,
+                response: { output: fullOutput },
+              },
+            },
+          ],
+        },
+      };
+      batch.execute = async (_requests, _signal, hooks) => {
+        hooks.beforeLaunch(read, []);
+        batch.options.onToolCallsUpdate([
+          { status: 'executing', request: read },
+        ]);
+        batch.options.onToolExecutionStarted(read.callId, 1);
+        batch.options.onToolCallsUpdate([completed]);
+        hooks.beforeLaunch(write, [completed]);
+        started.resolve();
+        await stalled.promise;
+        return [completed];
+      };
+      const running = runOnKernel([read, write], abort.signal);
+      const settled = vi.fn<(result: Awaited<typeof running>) => void>();
+      void running.then(settled);
+      try {
+        await started.promise;
+        abort.abort();
+        await vi.advanceTimersByTimeAsync(CANCEL_SETTLEMENT_CAP_MS);
+        expect(events()).toContainEqual(['start', 'in_progress']);
+        expect(events()).not.toContainEqual(['result', true]);
+        const result = settled.mock.calls[0]?.[0];
+        expect(result?.stop).toBe('cancelled');
+        if (!result) throw new Error('Batch did not return at the deadline');
+        const output = result.parts[0]?.functionResponse?.response?.['output'];
+        if (typeof output !== 'string') throw new Error('Missing tool output');
+        if (Number.isFinite(budget)) {
+          expect(output.length).toBeLessThanOrEqual(budget);
+          expect(output).toContain('Tool output truncated.');
+        } else {
+          expect(output).toBe(fullOutput);
+        }
+        expect(result.results).toEqual([
+          {
+            ...completed,
+            response: { ...completed.response, responseParts: result.parts },
+          },
+        ]);
+        expect(recordToolResult).toHaveBeenCalledExactlyOnceWith(
+          result.parts,
+          expect.objectContaining({ callId: read.callId, status: 'success' }),
+          undefined,
+        );
+        expect(recordCompletedToolCall).toHaveBeenCalledExactlyOnceWith(
+          read.name,
+          read.args,
+        );
+        pendingUpdate.resolve();
+        stalled.resolve([]);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(events().filter(([name]) => name === 'result')).toEqual([
+          ['result', true],
+        ]);
+        expect(deferredDelivery).toHaveBeenCalledExactlyOnceWith(true);
+        expect(recordToolResult).toHaveBeenCalledTimes(1);
+        expect(recordCompletedToolCall).toHaveBeenCalledTimes(1);
+      } finally {
+        pendingUpdate.resolve();
+        stalled.resolve([]);
+        await running;
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('reports a call as it starts and as it settles', async () => {
     batch.run = async (shared) => {

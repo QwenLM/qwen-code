@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type {
   AgentEventEmitter,
   ToolCallConfirmationDetails,
@@ -18,6 +19,7 @@ import {
   canonicalToolName,
   ToolNames,
 } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import { enforceFunctionResponseBudget } from '@qwen-code/qwen-code-core/tools/tool-response-finalizer.js';
 import {
   isShellProgressData,
   ToolConfirmationOutcome,
@@ -56,6 +58,7 @@ import { SubAgentTracker } from './SubAgentTracker.js';
 import type { SessionContext } from './types.js';
 
 const debugLogger = createDebugLogger('ACP_TOOL_BATCH');
+export const deferredToolUpdateContext = new AsyncLocalStorage<true>();
 
 /** A Session Workflow plan an `exit_plan_mode` approval carries. */
 export interface TodoPlanApproval {
@@ -151,19 +154,24 @@ export async function runAcpToolBatch(
 
   let stopAfterPermissionCancel = false;
   let closed = false;
+  let drainCompletedUpdates = false;
   const stopBatch = () => {
     if (closed) return;
     stopAfterPermissionCancel = true;
     tools.abort(USER_CANCEL_ABORT_REASON);
   };
 
-  // Updates go out in the order the scheduler reports them.
+  // A completed card can drain after cancellation without delaying the turn.
   let emissions = Promise.resolve();
-  const emit = (task: () => Promise<unknown> | unknown, what: string) => {
+  const emit = (
+    task: () => Promise<unknown> | unknown,
+    what: string,
+    deliverAfterClose = false,
+  ) => {
     emissions = emissions.then(async () => {
-      if (closed) return;
+      if (closed && !(drainCompletedUpdates && deliverAfterClose)) return;
       try {
-        await task();
+        await (closed ? deferredToolUpdateContext.run(true, task) : task());
       } catch (error) {
         debugLogger.debug(`Failed to emit ${what}`, error);
       }
@@ -379,7 +387,9 @@ export async function runAcpToolBatch(
     const status = call.status as 'success' | 'error' | 'cancelled';
     state.settleRelatedAgent?.(status === 'success');
     state.cleanupTracker?.();
-    if (canonicalToolName(request.name) === ToolNames.TODO_WRITE) {
+    const isTodoWrite =
+      canonicalToolName(request.name) === ToolNames.TODO_WRITE;
+    if (isTodoWrite) {
       host.onTodoWriteSettled(status, response.resultDisplay);
     }
     const planModeChanged =
@@ -389,12 +399,10 @@ export async function runAcpToolBatch(
       state.approvalModeAtStart !== undefined &&
       config.getApprovalMode() !== state.approvalModeAtStart;
     if (planModeChanged) {
-      emit(async () => {
-        await host.sendModeUpdate();
-        if (config.getApprovalMode() === ApprovalMode.PLAN) {
-          host.onPlanModeEntered();
-        }
-      }, 'mode update');
+      if (config.getApprovalMode() === ApprovalMode.PLAN) {
+        host.onPlanModeEntered();
+      }
+      emit(() => host.sendModeUpdate(), 'mode update');
     }
     if (response.visionBridgeNotice) {
       const notice = response.visionBridgeNotice;
@@ -409,10 +417,14 @@ export async function runAcpToolBatch(
       state.execution?.durationMs,
     );
     if (lifecycle) {
-      emit(() => host.toolCallEmitter.emitLifecycle(lifecycle), 'lifecycle');
+      emit(
+        () => host.toolCallEmitter.emitLifecycle(lifecycle),
+        'lifecycle',
+        true,
+      );
     }
     const executed = response.executionStatus !== 'not_started';
-    if (!executed && canonicalToolName(request.name) !== ToolNames.TODO_WRITE) {
+    if (!executed && !isTodoWrite) {
       emit(
         () =>
           host.toolCallEmitter.emitError(
@@ -425,21 +437,20 @@ export async function runAcpToolBatch(
               ),
           ),
         'tool error update',
+        true,
       );
       return;
     }
+    const durationMs =
+      call.startTime === undefined ? undefined : Date.now() - call.startTime;
     emit(
       () =>
         host.toolCallEmitter.emitResult({
           callId: request.callId,
           toolName: request.name,
           args: request.args,
-          ...(call.startTime !== undefined
-            ? {
-                startedAt: call.startTime,
-                durationMs: Date.now() - call.startTime,
-              }
-            : {}),
+          startedAt: call.startTime,
+          durationMs,
           message: response.responseParts,
           resultDisplay: response.resultDisplay,
           error: response.error,
@@ -448,6 +459,8 @@ export async function runAcpToolBatch(
           persistedOutputFiles: response.persistedOutputFiles,
         }),
       'tool result update',
+      // A todo result can publish a new plan revision, so it stays turn-scoped.
+      !isTodoWrite,
     );
   };
 
@@ -554,7 +567,7 @@ export async function runAcpToolBatch(
       onToolResult: (result) => {
         results.set(result.request, result);
         if (result.origin === 'replayed' || result.origin === 'duplicate') {
-          emitDuplicate(host, result, emit);
+          emitDuplicate(host, result, (task, what) => emit(task, what, true));
         }
       },
     });
@@ -590,12 +603,28 @@ export async function runAcpToolBatch(
           }
         }
         seen.add(request.callId);
-        if (!result) continue;
+        if (result) completed.push(result);
+      }
+      // Budget the saved results without waiting for output persistence.
+      const budgeted = enforceFunctionResponseBudget(
+        completed.map(({ request, response, executionRequest }) => ({
+          callId: request.callId,
+          toolName: executionRequest.name,
+          responseParts: response.responseParts,
+          persistedOutputFiles: response.persistedOutputFiles,
+          artifacts: response.artifacts,
+        })),
+        config.getToolOutputBatchBudget(),
+        false,
+        false,
+      );
+      const kept = completed.map((result, index) => {
         const { response, status, executionRequest } = result;
+        const { responseParts } = budgeted[index];
         config.getChatRecordingService()?.recordToolResult(
-          response.responseParts,
+          responseParts,
           {
-            callId: request.callId,
+            callId: result.request.callId,
             status,
             resultDisplay: response.resultDisplay,
             persistedOutputFiles: response.persistedOutputFiles,
@@ -604,15 +633,16 @@ export async function runAcpToolBatch(
             errorType: response.errorType,
             executionStatus: response.executionStatus,
           },
-          goalToolResultProvenance(executionRequest, response.responseParts),
+          goalToolResultProvenance(executionRequest, responseParts),
         );
-        completed.push(result);
-      }
+        return { ...result, response: { ...response, responseParts } };
+      });
+      drainCompletedUpdates = true;
       return {
-        parts: completed.flatMap(({ response }) => response.responseParts),
+        parts: budgeted.flatMap(({ responseParts }) => responseParts),
         stop: batch.stop,
         stopAfterPermissionCancel,
-        results: completed,
+        results: kept,
       };
     }
     if (!signal.aborted || config.isEventBusAgentLoopEnabled?.() !== true) {

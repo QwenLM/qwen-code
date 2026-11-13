@@ -548,7 +548,11 @@ import {
   unrestorableGoalStatus,
 } from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
-import { runAcpToolBatch, type AcpToolBatchHost } from './acp-tool-batch.js';
+import {
+  deferredToolUpdateContext,
+  runAcpToolBatch,
+  type AcpToolBatchHost,
+} from './acp-tool-batch.js';
 import {
   buildPermissionRequestContent,
   interactionMetaFields,
@@ -10877,15 +10881,34 @@ export class Session implements SessionContext {
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
     const execution = backgroundTurnContext.getStore();
+    const deferredToolUpdate =
+      update.sessionUpdate === 'tool_call_update' &&
+      deferredToolUpdateContext.getStore();
+    if (deferredToolUpdate && (this.closing || this.disposed)) return;
     if (
-      execution?.active &&
-      execution.sessionId === this.sessionId &&
+      execution?.sessionId === this.sessionId &&
+      (execution.active || deferredToolUpdate) &&
       update._meta?.['source'] !== 'background_task_completed' &&
       update._meta?.['backgroundWorkflowApproval'] !== true
     ) {
       update = {
         ...update,
         _meta: { ...update._meta, backgroundTurn: { ...execution.turn } },
+      };
+    } else if (deferredToolUpdate) {
+      const invocation = getInvocationContext();
+      const owner =
+        invocation?.sessionId === this.sessionId ? invocation : undefined;
+      const promptId = owner?.promptId ?? promptIdContext.getStore();
+      update = {
+        ...update,
+        _meta: {
+          ...update._meta,
+          ...(promptId ? { promptId } : {}),
+          ...(owner?.originatorClientId
+            ? { originatorClientId: owner.originatorClientId }
+            : {}),
+        },
       };
     }
     const projectedUpdate = projectAcpToolResultUpdate(update);

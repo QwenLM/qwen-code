@@ -22,6 +22,7 @@ import {
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
+import { deferredToolUpdateContext } from './acp-tool-batch.js';
 import {
   getStartupContextLength,
   markCompressedHistory,
@@ -150,7 +151,8 @@ const structuredErrorCauses = vi.hoisted(() => new WeakMap<object, unknown>());
 const runAcpToolBatchSpy = vi.hoisted(() => vi.fn());
 
 // The shared tool batch has its own tests; here it runs each call's tool.
-vi.mock('./acp-tool-batch.js', () => ({
+vi.mock('./acp-tool-batch.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./acp-tool-batch.js')>()),
   runAcpToolBatch: (...args: unknown[]) => runAcpToolBatchSpy(...args),
 }));
 
@@ -2328,6 +2330,49 @@ describe('Session', () => {
       'Unable to reload model-provider settings from disk.',
     );
     expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
+  });
+
+  it('keeps a deferred tool update on its original prompt or background turn', async () => {
+    const update = {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'old-tool',
+      status: 'completed',
+    } as const;
+    const owner = {
+      version: 1,
+      sessionId: 'test-session-id',
+      promptId: 'old-prompt',
+      originatorClientId: 'old-client',
+    } as const;
+    await core.runWithInvocationContext(owner, () =>
+      deferredToolUpdateContext.run(true, () => session.sendUpdate(update)),
+    );
+    expect(mockClient.sessionUpdate).toHaveBeenLastCalledWith({
+      sessionId: owner.sessionId,
+      update: {
+        ...update,
+        _meta: {
+          promptId: owner.promptId,
+          originatorClientId: owner.originatorClientId,
+        },
+      },
+    });
+
+    const turn = {
+      turnId: 'old-background-turn',
+      taskId: 'task',
+      kind: 'agent',
+      startedAt: 1,
+    } as const;
+    await core.backgroundTurnContext.run(
+      { sessionId: owner.sessionId, active: false, turn },
+      () =>
+        deferredToolUpdateContext.run(true, () => session.sendUpdate(update)),
+    );
+    expect(mockClient.sessionUpdate).toHaveBeenLastCalledWith({
+      sessionId: owner.sessionId,
+      update: { ...update, _meta: { backgroundTurn: turn } },
+    });
   });
 
   it('bounds textual tool results at the live ACP delivery boundary', async () => {
