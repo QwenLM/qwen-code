@@ -15,7 +15,10 @@ import type {
   ManagedAutomationResult,
   ManagedPublicAutomation,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
-import type { HostedLoopSession } from './hosted-loop-session.js';
+import type {
+  HostedLoopClassifier,
+  HostedLoopSession,
+} from './hosted-loop-session.js';
 
 const automation: ManagedPublicAutomation = {
   id: 'asch_abc',
@@ -73,11 +76,14 @@ function fakeLoops(
   } as unknown as HostedLoopSession;
 }
 
-const allow = async () => ({ allowed: true, reason: null });
+const allow: HostedLoopClassifier = async () => ({
+  allowed: true,
+  reason: null,
+});
 const session = (
   store: HostedCronStore,
   loops?: HostedLoopSession,
-  classify = allow,
+  classify: HostedLoopClassifier = allow,
 ) => new HostedCronSession(store, loops, { classify });
 
 const validParams = {
@@ -123,6 +129,27 @@ describe('HostedCronSession', () => {
       session(store).create({ ...validParams, cron: 'not a cron' }, 'call-1'),
     ).rejects.toBeInstanceOf(HostedCronError);
     expect(created).toHaveLength(0);
+  });
+
+  it('refuses a cron that parses but can never fire', async () => {
+    const { store, created } = fakeStore();
+    await expect(
+      session(store).create({ ...validParams, cron: '0 0 30 2 *' }, 'call-1'),
+    ).rejects.toBeInstanceOf(HostedCronError);
+    expect(created).toHaveLength(0);
+  });
+
+  it('truncates a long non-ASCII goal on a code-point boundary within the bound', async () => {
+    const { store, created } = fakeStore();
+    // 4101 bytes of CJK: a naive byte slice splits a 3-byte code point and the
+    // U+FFFD replacement would re-encode past the 4096-byte goal bound.
+    const prompt = '中'.repeat(1367);
+    expect(Buffer.byteLength(prompt, 'utf8')).toBe(4101);
+    await session(store).create({ ...validParams, prompt }, 'call-1');
+    expect(created).toHaveLength(1);
+    const goal = (created[0]!.definition as { goal: string }).goal;
+    expect(Buffer.byteLength(goal, 'utf8')).toBeLessThanOrEqual(4096);
+    expect(goal).not.toContain('\uFFFD');
   });
 
   it('refuses when the arm-time classifier denies the continuation', async () => {

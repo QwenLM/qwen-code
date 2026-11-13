@@ -2007,13 +2007,17 @@ function skipsRuntimeBroker(request: HostedPreparedRequest): boolean {
   );
 }
 
-// Decision 9: a definitive refusal (a typed tool error or a non-503 store
-// 4xx) is terminal; a transport fault or a 503 leaves the execution pending
-// so its re-drive derives the same Idempotency-Key and meets the replay.
+// Decision 9: a definitive refusal (a typed tool error or a definitive store
+// 4xx) is terminal; an outcome-unknown failure leaves the execution pending so
+// its re-drive derives the same Idempotency-Key and meets the claim or replay.
+// The uncertain set mirrors the store channel's isUncertainStoreFailure: 429,
+// every 5xx, and transport/abort faults may have reached the store, so treating
+// them as terminal would settle a lost create answer and let a retry mint a
+// second durable schedule.
 function isTerminalCronError(cause: unknown): boolean {
   if (cause instanceof HostedCronError) return true;
   if (cause instanceof ManagedSessionStoreHttpError)
-    return cause.status !== 503;
+    return cause.status !== 429 && cause.status < 500;
   return false;
 }
 
@@ -6611,10 +6615,16 @@ export class HostedWorkspaceToolTurn {
             const union = this.crons
               ? await this.crons.list()
               : { definitions: [], wakeups: await this.loops!.list() };
+            // The goal is omitted from both the text and the payload: it is
+            // up to 4 KiB per definition and the Session holds up to 32, so
+            // carrying it twice would push the committed tool_result past the
+            // inline bound and leave the Session unable to list (and thus
+            // delete) its own schedules. id/cron/timezone/state are what
+            // cron_delete needs.
             const lines = [
               ...union.definitions.map(
                 (definition) =>
-                  `${definition.id} — cron "${definition.cron}" (${definition.timezone}) [${definition.state}]: ${definition.goal ?? ''}`,
+                  `${definition.id} — cron "${definition.cron}" (${definition.timezone}) [${definition.state}]`,
               ),
               ...union.wakeups.map(
                 (wakeup) =>
@@ -6639,7 +6649,14 @@ export class HostedWorkspaceToolTurn {
               throw new Error('Hosted cron_list result is missing.');
             response.response = {
               ...response.response,
-              definitions: union.definitions,
+              definitions: union.definitions.map((definition) => ({
+                id: definition.id,
+                sessionId: definition.sessionId,
+                cron: definition.cron,
+                timezone: definition.timezone,
+                state: definition.state,
+                enabled: definition.enabled,
+              })),
               wakeups: union.wakeups,
               executionStatus: 'success',
             };

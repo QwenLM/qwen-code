@@ -2349,6 +2349,9 @@ it('cron_create rides its arm-time review, not the interactive approval dialog',
     shouldBlock: true,
     reason: 'would block an ordinary tool',
     unavailable: false,
+    model: 'test',
+    durationMs: 0,
+    stage: 'fast',
   }));
   await turn.declarations(new AbortController().signal);
   const call = {
@@ -2370,6 +2373,144 @@ it('cron_create rides its arm-time review, not the interactive approval dialog',
   expect(responses[0].functionResponse?.response?.['executionStatus']).toBe(
     'success',
   );
+});
+
+it.each(['hosted-workspace-files/4', 'hosted-workspace-team-lead/2'])(
+  'declares and drives cron_create on %s',
+  async (profile) => {
+    const automation = {
+      id: 'asch_p',
+      sessionId: 'session-a',
+      cron: '*/5 * * * *',
+      timezone: 'UTC',
+      goal: 'check',
+      state: 'active',
+      enabled: true,
+    };
+    const created: Array<{ key: string }> = [];
+    const store = {
+      automationsCreate: async (_d: unknown, key: string) => {
+        created.push({ key });
+        return { automation, replayed: false };
+      },
+      automationsList: async () => ({
+        data: [],
+        hasMore: false,
+        nextCursor: null,
+      }),
+      automationsRetire: async () => ({ automation, replayed: false }),
+    };
+    const crons = new HostedCronSession(store, undefined, {
+      classify: async () => ({ allowed: true, reason: null }),
+    });
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile, crons },
+    );
+    const declared = await turn.declarations(new AbortController().signal);
+    expect(declared.map((tool) => tool.name)).toContain('cron_create');
+    const call = {
+      ...calls[0],
+      callId: 'call-cron_create',
+      name: 'cron_create',
+      args: { cron: '*/5 * * * *', prompt: '/loop check', recurring: true },
+    };
+    const responses = await turn.execute(
+      [call],
+      [
+        {
+          functionCall: {
+            id: call.callId,
+            name: 'cron_create',
+            args: call.args,
+          },
+        },
+      ],
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['executionStatus']).toBe(
+      'success',
+    );
+    expect(created).toHaveLength(1);
+  },
+);
+
+it('cron_list stays within the inline bound at full capacity with large goals', async () => {
+  const goal = 'g'.repeat(4096);
+  const definitions = Array.from({ length: 32 }, (_, i) => ({
+    id: `asch_${i}`,
+    sessionId: 'session-a',
+    cron: '*/5 * * * *',
+    timezone: 'UTC',
+    goal,
+    state: 'active',
+    enabled: true,
+  }));
+  const store = {
+    automationsCreate: async () => ({
+      automation: definitions[0],
+      replayed: false,
+    }),
+    automationsList: async () => ({
+      data: definitions,
+      hasMore: false,
+      nextCursor: null,
+    }),
+    automationsRetire: async () => ({
+      automation: definitions[0],
+      replayed: false,
+    }),
+  };
+  const crons = new HostedCronSession(store, undefined, {
+    classify: async () => ({ allowed: true, reason: null }),
+  });
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-shell/4', crons },
+  );
+  await turn.declarations(new AbortController().signal);
+  // Enforce the real inline bound for this drive: carrying each 4 KiB goal in
+  // both the text and the payload would exceed it at full capacity.
+  messageFitsInline.mockImplementationOnce(
+    (_type, parts) =>
+      Buffer.byteLength(JSON.stringify(parts), 'utf8') <= 64 * 1024,
+  );
+  const call = {
+    ...calls[0],
+    callId: 'call-cron_list',
+    name: 'cron_list',
+    args: {},
+  };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: 'cron_list', args: {} } }],
+    'model',
+    new AbortController().signal,
+  );
+  const response = responses[0].functionResponse?.response;
+  expect(response?.['executionStatus']).toBe('success');
+  const listed = response?.['definitions'] as Array<Record<string, unknown>>;
+  expect(listed).toHaveLength(32);
+  for (const definition of listed) {
+    expect(definition).not.toHaveProperty('goal');
+  }
 });
 
 it('a lone loop_wakeup batch acquires no Runtime mount', async () => {

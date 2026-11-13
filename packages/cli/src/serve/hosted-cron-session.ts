@@ -10,6 +10,7 @@ import {
   type AutomationDefinition,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-operations.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { nextFireTime } from '@qwen-code/qwen-code-core/utils/cronParser.js';
 import type {
   ManagedAutomationDefinitionInput,
   ManagedAutomationPage,
@@ -140,6 +141,18 @@ export class HostedCronSession {
       throw cause;
     }
 
+    // Refuse an expression that parses but can never match a real date
+    // (e.g. "0 0 30 2 *"): otherwise the definition commits, occupies one of
+    // the 32 live slots, and silently never fires. The daemon's own cron_create
+    // applies the same check; it belongs at create time, never per scanner tick.
+    try {
+      nextFireTime(definition.cron, new Date());
+    } catch {
+      throw new HostedCronError(
+        `Cron schedule "${definition.cron}" has no matching fire time; it would never run.`,
+      );
+    }
+
     // Arm-time review (decision 4): scheduling future model input is
     // side-effectful, so the continuation and the gate command are vetted
     // before the definition is admitted.
@@ -209,10 +222,15 @@ export class HostedCronSession {
   }
 }
 
-/** A byte-safe truncation for a display label; a split code point renders as
- * the replacement character, which is acceptable for a goal. */
+/** A byte-safe truncation for a display label. The cut lands on a code-point
+ * boundary so the result re-encodes within the bound: a split sequence would
+ * decode to U+FFFD (3 bytes) and could overrun the very limit it truncates to. */
 function byteTruncate(value: string, maxBytes: number): string {
   const bytes = Buffer.from(value, 'utf8');
   if (bytes.byteLength <= maxBytes) return value;
-  return bytes.subarray(0, maxBytes).toString('utf8');
+  let end = maxBytes;
+  // bytes[end] is the first excluded byte; while it is a UTF-8 continuation
+  // byte (10xxxxxx) the cut would split a code point, so back up to its start.
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString('utf8');
 }

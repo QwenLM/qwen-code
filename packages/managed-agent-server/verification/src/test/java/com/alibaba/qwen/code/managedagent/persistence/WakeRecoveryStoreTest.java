@@ -472,8 +472,10 @@ public class WakeRecoveryStoreTest {
         ObjectNode future = event("input.accepted", "loop-future", "loop");
         ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
         appendBatch(future);
-        // The only pending input is a not-yet-due wakeup: recovery must not attach.
-        assertThat(store.hasPendingInput(candidate())).contains(false);
+        // The only unsettled wake input is a not-yet-due wakeup: the proof
+        // certifies nothing (empty keeps the durable hint) rather than clearing
+        // it, so recovery must not attach yet but must not drop the wakeup.
+        assertThat(store.hasPendingInput(candidate())).isEmpty();
         // Once the fire time passes, the same journal attaches the Harness.
         store.setNowMillis(() -> 3_000_000L);
         assertThat(store.hasPendingInput(candidate())).contains(true);
@@ -514,9 +516,55 @@ public class WakeRecoveryStoreTest {
         ObjectNode sentinel = event("input.accepted", "loop:wakeup-sentinel", "loop");
         ((ObjectNode) sentinel.get("payload")).put("notBefore", 5_000_000L);
         appendBatch(sentinel);
-        assertThat(store.hasPendingInput(candidate())).contains(false);
+        assertThat(store.hasPendingInput(candidate())).isEmpty();
         store.setNowMillis(() -> 6_000_000L);
         assertThat(store.hasPendingInput(candidate())).contains(true);
+    }
+
+    @Test
+    void aDeferredOnlyJournalKeepsTheRecoveryHintUntilTheWakeupIsDue() {
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode future = event("input.accepted", "loop-future", "loop");
+        ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
+        appendBatch(future);
+        var deferred = candidate();
+        var answer = store.hasPendingInput(deferred);
+        assertThat(answer).isEmpty();
+        // WakeRecovery.scan records only a present answer; an empty proof keeps
+        // the durable hint. Clearing it here (the old false answer) would make
+        // findPending drop the Session and the armed wakeup would never fire.
+        answer.ifPresent(pending -> store.recordPending(deferred, pending));
+        assertThat(store.findPending("workspace", 8)).isNotEmpty();
+        // Once due, the same journal is discovered and recorded pending.
+        store.setNowMillis(() -> 3_000_000L);
+        var due = candidate();
+        assertThat(store.hasPendingInput(due)).contains(true);
+        assertThat(store.recordPending(due, true)).isTrue();
+        assertThat(store.findPending("workspace", 8)).isNotEmpty();
+    }
+
+    @Test
+    void aPagedProofDoesNotForgetADeferredLoopWakeup() {
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode future = event("input.accepted", "loop-future", "loop");
+        ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
+        appendBatch(future);
+        // Push the journal past the 32-revision per-call proof bound so the
+        // deferred input and the head land in different proof pages.
+        for (int i = 0; i < 33; i++) {
+            append("turn.settled", "settled-" + i, null);
+        }
+        // The first scan pages past the deferred input and certifies nothing.
+        assertThat(store.hasPendingInput(candidate())).isEmpty();
+        // Once due, the re-proof must still discover the wakeup across the page
+        // boundary. A cached proof that skipped the input would resume past it
+        // and certify "nothing pending", dropping the wakeup a second way.
+        store.setNowMillis(() -> 3_000_000L);
+        var answer = store.hasPendingInput(candidate());
+        for (int i = 0; i < 4 && answer.isEmpty(); i++) {
+            answer = store.hasPendingInput(candidate());
+        }
+        assertThat(answer).contains(true);
     }
 
     private void append(String kind, String turn, String source) {

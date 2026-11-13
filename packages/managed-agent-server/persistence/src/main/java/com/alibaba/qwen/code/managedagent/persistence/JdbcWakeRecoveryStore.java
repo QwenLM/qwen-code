@@ -65,6 +65,9 @@ public class JdbcWakeRecoveryStore
         private long revision;
         private long sequence;
         private boolean complete;
+        /** A deferred loop input was skipped; this proof must not be cached,
+         * because resuming it would page past the input and forget it. */
+        private boolean deferred;
     }
 
     public List<Candidate> findPending(String defaultWorkspace, int limit) {
@@ -201,8 +204,12 @@ public class JdbcWakeRecoveryStore
                         if (turnId == null || turnId.isEmpty()) {
                             throw corrupt();
                         }
-                        if (!settled.contains(turnId) && !isDeferredLoopInput(event)) {
-                            pending.add(turnId);
+                        if (!settled.contains(turnId)) {
+                            if (isDeferredLoopInput(event)) {
+                                proof.deferred = true;
+                            } else {
+                                pending.add(turnId);
+                            }
                         }
                     }
                 }
@@ -218,11 +225,22 @@ public class JdbcWakeRecoveryStore
                 throw corrupt();
             }
             if (pending.isEmpty()) {
-                return Optional.of(false);
+                // A journal whose only unsettled wake input is a deferred loop
+                // wakeup certifies nothing: keep the hint so recovery re-proves
+                // and attaches once the wakeup is due. Answering false here would
+                // clear the durable hint and silently drop the armed wakeup.
+                return proof.deferred ? Optional.empty() : Optional.of(false);
             }
             proof.complete = true;
             pending.clear();
             settled.clear();
+        }
+        // A proof that skipped a deferred loop input must not be cached: a
+        // resumed proof would page past the input and later certify "nothing
+        // pending", dropping the wakeup a second way. Re-prove from the start
+        // each scan until the input is due (counted) or settled.
+        if (proof.deferred) {
+            return proof.complete ? Optional.of(true) : Optional.empty();
         }
         // The complete Candidate fences every continuation to the same immutable
         // prefix. Losing it restarts proof at zero; it never clears a durable hint.
