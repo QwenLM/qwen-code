@@ -9,9 +9,9 @@ import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type {
   AgentLoopToolResult,
-  ToolBatchOptions,
+  ToolBatchResult,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
-import type { Part } from '@google/genai';
+import type { SharedLoopBatch } from '../../ui/hooks/shared-loop-round.js';
 import { runAcpToolBatch, type AcpToolBatchHost } from './acp-tool-batch.js';
 
 type SchedulerOptions = {
@@ -28,9 +28,8 @@ type SchedulerOptions = {
 const batch = vi.hoisted(() => ({
   options: undefined as unknown as SchedulerOptions,
   run: undefined as unknown as (
-    requests: ToolCallRequestInfo[],
-    options: ToolBatchOptions,
-  ) => Promise<{ parts: Part[]; stop?: string }>,
+    shared: SharedLoopBatch,
+  ) => Promise<ToolBatchResult>,
 }));
 
 vi.mock('@qwen-code/qwen-code-core/core/agent-loop.js', () => ({
@@ -38,9 +37,10 @@ vi.mock('@qwen-code/qwen-code-core/core/agent-loop.js', () => ({
     batch.options = options;
     return {};
   },
-  runToolBatch: (requests: ToolCallRequestInfo[], options: ToolBatchOptions) =>
-    batch.run(requests, options),
 }));
+
+/** The loop call of the batch's round, which runs what it is handed. */
+const loop = { runBatch: (shared: SharedLoopBatch) => batch.run(shared) };
 
 const read: ToolCallRequestInfo = {
   callId: 'call_read',
@@ -165,7 +165,7 @@ describe('runAcpToolBatch', () => {
     ]);
 
   it('reports a call as it starts and as it settles', async () => {
-    batch.run = async (_requests, options) => {
+    batch.run = async (shared) => {
       const { onToolCallsUpdate, onToolExecutionStarted } = batch.options;
       onToolCallsUpdate([{ status: 'scheduled', request: read, invocation }]);
       onToolCallsUpdate([{ status: 'executing', request: read, invocation }]);
@@ -174,12 +174,13 @@ describe('runAcpToolBatch', () => {
       onToolCallsUpdate([
         { status: 'success', request: read, response: response(read) },
       ]);
-      options.host?.onToolResult?.(executed(read));
+      shared.onToolResult(executed(read));
       return { parts: response(read).responseParts };
     };
 
     const result = await runAcpToolBatch(host, {
       requests: [read],
+      loop,
       signal: new AbortController().signal,
       duplicates: { handled: new Map(), responded: new Set() },
     });
@@ -212,6 +213,7 @@ describe('runAcpToolBatch', () => {
 
     await runAcpToolBatch(host, {
       requests: [write],
+      loop,
       signal: new AbortController().signal,
       duplicates: { handled: new Map(), responded: new Set() },
     });
@@ -241,8 +243,8 @@ describe('runAcpToolBatch', () => {
     requestPermission.mockResolvedValue({ outcome: { outcome: 'cancelled' } });
     const onConfirm = vi.fn().mockResolvedValue(undefined);
     let toolSignal: AbortSignal | undefined;
-    batch.run = async (_requests, options) => {
-      toolSignal = options.toolSignal;
+    batch.run = async (shared) => {
+      toolSignal = shared.toolSignal;
       batch.options.onToolCallsUpdate([
         {
           status: 'awaiting_approval',
@@ -268,6 +270,7 @@ describe('runAcpToolBatch', () => {
 
     const result = await runAcpToolBatch(host, {
       requests: [write],
+      loop,
       signal: new AbortController().signal,
       duplicates: { handled: new Map(), responded: new Set() },
     });
@@ -285,6 +288,49 @@ describe('runAcpToolBatch', () => {
         new Error('Tool "write_file" was canceled by the user.'),
       ],
     ]);
+  });
+
+  it('stops the batch at a call whose plan approval went stale before its launch', async () => {
+    const exitPlan: ToolCallRequestInfo = {
+      callId: 'call_exit',
+      name: 'exit_plan_mode',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt',
+    };
+    let stale = false;
+    host.todoPlanApproval = () => ({
+      revision: { planId: 'plan', sourceCallId: 'call_todo' },
+      generation: 1,
+    });
+    host.isTodoPlanApprovalStale = () => stale;
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    let launched: boolean | undefined;
+    batch.run = async (shared) => {
+      batch.options.onToolCallsUpdate([
+        {
+          status: 'awaiting_approval',
+          request: exitPlan,
+          tool: { kind: 'think' },
+          invocation,
+          confirmationDetails: editDetails(onConfirm),
+        },
+      ]);
+      await vi.waitFor(() => expect(onConfirm).toHaveBeenCalled());
+      stale = true;
+      launched = shared.beforeToolLaunch?.(exitPlan, []);
+      return { parts: [] };
+    };
+
+    const result = await runAcpToolBatch(host, {
+      requests: [exitPlan],
+      loop,
+      signal: new AbortController().signal,
+      duplicates: { handled: new Map(), responded: new Set() },
+    });
+
+    expect(launched).toBe(false);
+    expect(result.stopAfterPermissionCancel).toBe(true);
   });
 
   it('tells the client the mode changed before an edit allowed always starts', async () => {
@@ -312,6 +358,7 @@ describe('runAcpToolBatch', () => {
 
     await runAcpToolBatch(host, {
       requests: [write],
+      loop,
       signal: new AbortController().signal,
       duplicates: { handled: new Map(), responded: new Set() },
     });
@@ -339,6 +386,7 @@ describe('runAcpToolBatch', () => {
 
     await runAcpToolBatch(host, {
       requests: [write],
+      loop,
       signal: new AbortController().signal,
       duplicates: { handled: new Map(), responded: new Set() },
     });
@@ -355,8 +403,8 @@ describe('runAcpToolBatch', () => {
   });
 
   it('reports a replayed call as failed', async () => {
-    batch.run = async (_requests, options) => {
-      options.host?.onToolResult?.({
+    batch.run = async (shared) => {
+      shared.onToolResult({
         ...executed(read),
         status: 'error',
         origin: 'replayed',
@@ -366,6 +414,7 @@ describe('runAcpToolBatch', () => {
 
     await runAcpToolBatch(host, {
       requests: [read],
+      loop,
       signal: new AbortController().signal,
       duplicates: { handled: new Map(), responded: new Set() },
     });
@@ -385,6 +434,7 @@ describe('runAcpToolBatch', () => {
 
     await runAcpToolBatch(host, {
       requests: [read],
+      loop,
       signal: new AbortController().signal,
       duplicates: { handled: new Map(), responded: new Set() },
     });

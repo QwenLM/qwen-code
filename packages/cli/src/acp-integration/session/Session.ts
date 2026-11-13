@@ -33,6 +33,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
 import {
+  runAgentLoop,
   runModelRound,
   type AgentLoopStopReason,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
@@ -469,6 +470,10 @@ import {
   type NonInteractiveSlashCommandPolicy,
 } from '../../ui/commands/types.js';
 import { extractAtPathCommands } from '../../ui/hooks/atCommandProcessor.js';
+import {
+  startSharedLoopRound,
+  type SharedLoopRound,
+} from '../../ui/hooks/shared-loop-round.js';
 import {
   ACP_ROUTE_ID_PREFIX,
   buildAcpModelOptions,
@@ -990,6 +995,11 @@ interface SharedRound {
   modelOverride?: string;
   stopPolicies?: StopPolicy[];
   sharedToolBatch: boolean;
+  /**
+   * Takes the `runAgentLoop` call a round on the shared batch runs in with
+   * its batch: the turn hands it the batch, or closes it when it leaves.
+   */
+  onLoop: (loop: SharedLoopRound) => void;
   /** The turn's signal. */
   signal: AbortSignal;
   /**
@@ -7638,9 +7648,14 @@ export class Session implements SessionContext {
                 });
               if (promptAdmission.blocked) {
                 // The first round reports the block without sending anything.
-                await runModelRound(
-                  this.config.getLlmClient(),
-                  {
+                debugLogger.debug(
+                  `model round on the shared agent loop (prompt ${promptId})`,
+                );
+                await runAgentLoop({
+                  client: this.config.getLlmClient(),
+                  config: this.config,
+                  signal: pendingSend.signal,
+                  first: {
                     parts,
                     promptId,
                     options: {
@@ -7650,8 +7665,10 @@ export class Session implements SessionContext {
                       interactionSpan: getActiveInteractionSpan(promptId),
                     },
                   },
-                  pendingSend.signal,
-                  {
+                  maxRounds: 1,
+                  useEventBus:
+                    this.config.isEventBusAgentLoopEnabled?.() === true,
+                  host: {
                     onModelEvent: async (event) => {
                       if (event.type === LlmEventType.UserPromptSubmitBlocked) {
                         await this.messageEmitter.emitAgentMessage(
@@ -7660,7 +7677,7 @@ export class Session implements SessionContext {
                       }
                     },
                   },
-                );
+                });
                 return { stopReason: 'end_turn' };
               }
             } else if (
@@ -8140,6 +8157,8 @@ export class Session implements SessionContext {
             // rather than by gating this loop), so unlike the CLI reference
             // (use-llm-stream.ts, which only emits in YOLO) this is
             // intentionally emitted for every mode.
+            // The loop call of the turn's latest round on the shared batch.
+            let roundLoop: SharedLoopRound | undefined;
             try {
               if (isRestoreAskUserQuestion) {
                 const restorable = findRestorableAskUserQuestion(
@@ -8408,6 +8427,9 @@ export class Session implements SessionContext {
                     modelOverride: fullTurnModelOverride,
                     stopPolicies,
                     sharedToolBatch,
+                    onLoop: (loop) => {
+                      roundLoop = loop;
+                    },
                     signal: pendingSend.signal,
                     responseCapture,
                     responseInterrupt,
@@ -8711,6 +8733,7 @@ export class Session implements SessionContext {
                             pendingSend.signal,
                             promptId,
                             toolRequests,
+                            roundLoop!,
                             toolLoopState,
                             onFullTurnModel,
                           )
@@ -8832,6 +8855,9 @@ export class Session implements SessionContext {
               );
               return { stopReason: result.stopReason };
             } finally {
+              // A turn that left before handing its round the batch ends the
+              // round's loop call.
+              void roundLoop?.close();
               logConversationFinishedEvent(
                 this.config,
                 new ConversationFinishedEvent(
@@ -8954,13 +8980,36 @@ export class Session implements SessionContext {
       usageMetadata = null;
     };
     round.onOpen?.({ requestUnsent, emitResponseUsage });
+    // A round on the shared batch runs with its batch in one `runAgentLoop`
+    // call, which the turn takes to hand the batch over.
+    const sendRound: typeof runModelRound = round.sharedToolBatch
+      ? (_client, request, roundSignal, host) => {
+          debugLogger.debug(
+            `model round on the shared agent loop (prompt ${request.promptId})`,
+          );
+          const loop = startSharedLoopRound(
+            this.config.getLlmClient(),
+            request,
+            {
+              config: this.config,
+              signal: roundSignal,
+              // Each result is recorded as the batch settles it.
+              deferRecording: false,
+              useEventBus: this.config.isEventBusAgentLoopEnabled?.() === true,
+              onModelEvent: host.onModelEvent!,
+            },
+          );
+          round.onLoop(loop);
+          return loop.model;
+        }
+      : runModelRound;
     // Open from the send, as `watch` is open once the request is
     // out: input sent before the model answers cuts the wait.
     responseInterrupt.begin();
     // Whether the round's request reached history, on every exit.
     let pushed = false;
     try {
-      ({ stop: roundStop } = await runModelRound(
+      ({ stop: roundStop } = await sendRound(
         this.config.getLlmClient(),
         {
           parts: message.parts ?? [],
@@ -9326,6 +9375,8 @@ export class Session implements SessionContext {
     };
     let nextMessage: Content | null = turn.message;
     let rounds = 0;
+    // The loop call of the turn's latest round on the shared batch.
+    let roundLoop: SharedLoopRound | undefined;
     try {
       while (nextMessage !== null) {
         rounds++;
@@ -9364,6 +9415,9 @@ export class Session implements SessionContext {
           },
           stopPolicies,
           sharedToolBatch,
+          onLoop: (loop) => {
+            roundLoop = loop;
+          },
           signal,
           signalAbortedBySession: true,
           responseCapture,
@@ -9413,6 +9467,7 @@ export class Session implements SessionContext {
               signal,
               promptId,
               toolRequests,
+              roundLoop!,
               toolLoopState,
             )
           : await this.runToolCalls(
@@ -9461,6 +9516,9 @@ export class Session implements SessionContext {
       await this.messageRewriter?.waitForPendingRewrites();
       return { stopReason: getAbortAwareEndTurnStopReason(signal) };
     } finally {
+      // A turn that left before handing its round the batch ends the round's
+      // loop call.
+      void roundLoop?.close();
       // The client started a cron turn's memory recall.
       if (turn.type === SendMessageType.Cron) {
         this.config.getLlmClient().finishManagedAutoMemoryRecall();
@@ -15821,7 +15879,8 @@ export class Session implements SessionContext {
   }
 
   /**
-   * A fresh prompt's tool batch on the shared loop's batch. The client checks
+   * A fresh prompt's tool batch on the shared loop's batch, in the
+   * `runAgentLoop` call of the round that requested it. The client checks
    * the tool-call patterns, the per-turn cap and the exploration budget; ACP
    * keeps its repeated parameter-error and partial-edit stops, per turn.
    */
@@ -15829,6 +15888,7 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     promptId: string,
     requests: ToolCallRequestInfo[],
+    loop: SharedLoopRound,
     toolLoopState: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<RunToolResult> {
@@ -15838,6 +15898,7 @@ export class Session implements SessionContext {
     );
     const batch = await runAcpToolBatch(this.#toolBatchHost(), {
       requests,
+      loop,
       signal: abortSignal,
       onFullTurnModel,
       duplicates: {

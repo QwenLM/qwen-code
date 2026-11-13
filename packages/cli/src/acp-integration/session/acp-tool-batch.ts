@@ -25,7 +25,6 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.j
 import { USER_CANCEL_ABORT_REASON } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   createSchedulerExecutor,
-  runToolBatch,
   type AgentLoopDuplicateState,
   type AgentLoopStopReason,
   type AgentLoopToolResult,
@@ -42,6 +41,7 @@ import type {
   SessionUpdate,
 } from '@agentclientprotocol/sdk';
 import type { Part } from '@google/genai';
+import type { SharedLoopRound } from '../../ui/hooks/shared-loop-round.js';
 import type { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import type { MessageEmitter } from './emitters/MessageEmitter.js';
 import {
@@ -122,7 +122,8 @@ interface CallState {
 }
 
 /**
- * Runs one tool batch of an ACP prompt turn on the shared loop's batch: one
+ * Runs one tool batch of an ACP prompt turn on the shared loop's batch, in
+ * the `runAgentLoop` call of the round that requested it: one
  * `CoreToolScheduler` for the whole batch, whose state changes become ACP
  * `tool_call` updates and whose approvals become `session/request_permission`
  * requests.
@@ -131,6 +132,8 @@ export async function runAcpToolBatch(
   host: AcpToolBatchHost,
   options: {
     requests: ToolCallRequestInfo[];
+    /** The loop call of the round that requested `requests`. */
+    loop: Pick<SharedLoopRound, 'runBatch'>;
     signal: AbortSignal;
     duplicates: AgentLoopDuplicateState;
     onFullTurnModel?: (model: string) => boolean;
@@ -518,13 +521,9 @@ export async function runAcpToolBatch(
 
   const results: AgentLoopToolResult[] = [];
   try {
-    const batch = await runToolBatch(options.requests, {
-      config,
-      client: config.getLlmClient(),
-      signal,
+    const batch = await options.loop.runBatch({
+      ...options.duplicates,
       toolSignal: tools.signal,
-      duplicates: options.duplicates,
-      keepCancelledResults: true,
       executor: createSchedulerExecutor(config, {
         onToolCallsUpdate,
         outputUpdateHandler,
@@ -538,21 +537,19 @@ export async function runAcpToolBatch(
         onPermissionPromptTerminalSequence: (sequence) =>
           host.sendTerminalSequence(sequence),
       }),
-      host: {
-        beforeToolLaunch: (request) => {
-          const approval = states.get(request.callId)?.todoPlanApproval;
-          if (approval && host.isTodoPlanApprovalStale(approval)) {
-            stopBatch();
-            return false;
-          }
-          return true;
-        },
-        onToolResult: (result) => {
-          results.push(result);
-          if (result.origin === 'replayed' || result.origin === 'duplicate') {
-            emitDuplicate(host, result, emit);
-          }
-        },
+      beforeToolLaunch: (request) => {
+        const approval = states.get(request.callId)?.todoPlanApproval;
+        if (approval && host.isTodoPlanApprovalStale(approval)) {
+          stopBatch();
+          return false;
+        }
+        return true;
+      },
+      onToolResult: (result) => {
+        results.push(result);
+        if (result.origin === 'replayed' || result.origin === 'duplicate') {
+          emitDuplicate(host, result, emit);
+        }
       },
     });
     await Promise.all(approvals);

@@ -367,6 +367,8 @@ prompt 循环里的共享模型轮改为三个循环共用的方法。prompt 循
 
 这一步对 core 的改动：`userTurnRecordedByHost` 也覆盖 `Cron` 和 `Notification` 发送，表示由宿主记录 prompt 或通知。
 
+#17045 的第 3 步让 ACP 轮次的每次模型请求和它的工具批在一次 `runAgentLoop` 调用中运行，prompt、Goal、cron 和后台通知轮次都是如此，与两个 TUI 相同。同时开启 `experimental.eventBusAgentLoop` 时，调用走事件总线内核。轮次仍通过会话的回调报告每个事件，之后做什么仍由轮次决定。工具批在 `onRoundEnd` 中等待，直到轮次交出会话的调度器、历史中已应答的调用、这一批自己的工具 signal、启动检查和结果回调；与之前相同，工具批自己记录它的结果。轮次如果在交接之前离开（因为模型轮结束了轮次，或轮次被取消），就在它的 `finally` 中关闭这一轮的调用，工具批随之跳过。工具批的工具在交接时的 async 上下文中运行，其中带有轮次的 prompt ID、todo 工作链和整轮模型覆盖。模型轮仍在排队输入会截断的 signal 下运行；这个 signal 只截断没有调用的响应，所以工具批运行时它只会随轮次一起中止，内核的取消也只作用于被取消的轮次。被 UserPromptSubmit 拦下的 prompt 的第一轮不发送任何内容，也在它自己的一次调用中运行。有 live tools 的会话和只读的 Agent Host 会话保留 ACP 自己的工具步骤，单独调用模型轮。ACP 对拍套件把每个场景在两个设置都开启时再跑一次，并按 prompt ID 把事件总线适配器的日志与会话的轮次对应起来。
+
 ### Ink TUI 迁到共享 loop（PR 3）
 
 Ink TUI 的每个模型轮已经通过 `LlmClient.sendMessageStream` 发送，所有类型的轮次都由同一个函数 `submitQuery` 发出。它的 loop 是被 React 拆开的：请求了工具的响应把工具交给 scheduler 后就返回，由 scheduler 的完成回调把结果作为新的 `ToolResult` 轮次发出。迁移 TUI 就是要等待这个工具批，因此分以下几步：
