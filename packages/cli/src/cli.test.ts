@@ -189,6 +189,18 @@ describe('resolveBootstrapRoute', () => {
     ).toBe('mcp');
   });
 
+  it.each([
+    ['mcp', '--debug', 'list'],
+    ['mcp', '-d', 'add', 'server', 'command'],
+    ['mcp', '--safe-mode', 'list'],
+    ['mcp', '--model', 'test-model', 'list'],
+  ])(
+    'uses the full parser for options before an MCP subcommand: %j',
+    (...argv) => {
+      expect(resolveBootstrapRoute(argv)).toBe('default');
+    },
+  );
+
   it('falls back to the default route for normal interactive startup', async () => {
     expect(resolveBootstrapRoute([])).toBe('default');
     expect(resolveBootstrapRoute(['--model', 'gpt-4', 'Hello'])).toBe(
@@ -1051,6 +1063,17 @@ describe('runCliEntry', () => {
     expect(mocks.main).toHaveBeenCalledTimes(1);
     expect(mocks.mcpListHandler).not.toHaveBeenCalled();
   });
+
+  it.each(['--debug', '--safe-mode'])(
+    'dispatches MCP commands through the full parser when %s precedes the subcommand',
+    async (option) => {
+      await runCliEntry(['mcp', option, 'list']);
+
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+      expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+      expect(stdout.join('')).not.toContain('Usage: qwen mcp');
+    },
+  );
 
   it('lets the entrypoint report a fatal MCP configuration failure once', async () => {
     const error = new FatalError('Repair operator settings and restart.', 52);

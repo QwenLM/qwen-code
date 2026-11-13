@@ -405,6 +405,17 @@ export function resolveBootstrapRoute(
   // positional data the fast path persists verbatim.
   if (firstArg === 'memory') return 'memory';
   if (firstArg === 'mcp') {
+    const nextArg = argv[1];
+    // Global options belong to the full parser. The MCP-only parser neither
+    // registers them nor recognizes a subcommand after an intervening flag.
+    if (
+      nextArg?.startsWith('-') &&
+      nextArg !== '--' &&
+      nextArg !== '--help' &&
+      nextArg !== '-h'
+    ) {
+      return 'default';
+    }
     return 'mcp';
   }
   if (firstArg === 'managed-runtime-worker') {

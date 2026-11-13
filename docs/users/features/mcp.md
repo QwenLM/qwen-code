@@ -541,6 +541,8 @@ instead of adjusting its limits.
 
 You can always configure MCP servers by manually editing `settings.json`, but the CLI is usually faster.
 
+Global options can appear before the MCP subcommand; for example, `qwen mcp --debug list` runs the list command with debug mode enabled.
+
 #### Adding a server (`qwen mcp add`)
 
 ```bash
