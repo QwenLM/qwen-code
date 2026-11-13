@@ -293,6 +293,27 @@ describe('EditTool', () => {
       );
     });
 
+    it('recovers text immediately after a completed backslash pair', async () => {
+      const filePath = path.join(rootDir, 'paired-backslash.txt');
+      const content = String.raw`{"p": "C:\\share\u4f60\u597d"}`;
+      const expected = String.raw`{"p": "C:\\client\u4f60\u597d"}`;
+      seedFile(filePath, content);
+      const params = edit(filePath, 'share你好', 'client你好');
+
+      expect(
+        await tool
+          .getModifyContext(new AbortController().signal)
+          .getProposedContent(params),
+      ).toBe(expected);
+      expect(readText(filePath)).toBe(content);
+
+      const result = await run(params);
+
+      expect(result.error).toBeUndefined();
+      expect(readText(filePath)).toBe(expected);
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledOnce();
+    });
+
     it('keeps whole-line matching boundaries in editor proposals', async () => {
       const filePath = path.join(rootDir, 'fuzzy-proposal.txt');
       const content = ' const x = 1 \nfoo\nconst x = 1 \nbar\n';
@@ -316,6 +337,8 @@ describe('EditTool', () => {
       [String.raw`a\x41\u4f60\u597d`, '41你好'],
       [String.raw`x = "\u4f60\x41";`, '你\\'],
       [String.raw`a\u{4f60}\u4f60\u597d`, 'f60}你好'],
+      [String.raw`x\u{1F600}\u4f60`, '1F600}你'],
+      [String.raw`a\u{4f60}\u4f60\u597d`, '}你好'],
     ])('refuses recovery that splits an escape in %j', async (content, old) => {
       const filePath = path.join(rootDir, 'partial-escape.txt');
       seedFile(filePath, content);

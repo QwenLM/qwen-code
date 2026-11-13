@@ -321,6 +321,9 @@ function decodeUnicodeEscapes(text: string): string | null {
 function splitsEscapeSequence(text: string, offset: number): boolean {
   for (let start = Math.max(0, offset - 9); start < offset; start++) {
     if (text[start] !== '\\') continue;
+    let runStart = start;
+    while (runStart > 0 && text[runStart - 1] === '\\') runStart--;
+    if ((start - runStart) % 2 === 1) continue;
     const escape =
       /^\\(?:u\{[0-9a-fA-F]{1,6}\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[\s\S])/.exec(
         text.slice(start, start + 10),

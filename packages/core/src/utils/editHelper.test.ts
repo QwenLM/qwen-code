@@ -66,6 +66,8 @@ const two = 2;
       [String.raw`a\x41\u4f60\u597d`, '41你好'],
       [String.raw`a\x41\u4f60\u597d`, '1你好'],
       [String.raw`a\u{4f60}\u4f60\u597d`, 'f60}你好'],
+      [String.raw`x\u{1F600}\u4f60`, '1F600}你'],
+      [String.raw`a\u{4f60}\u4f60\u597d`, '}你好'],
       ['你好\\\\', String.raw`\u4f60\u597d` + '\\'],
       ['你好', String.raw`\u4f6\u597d`],
       ['你好', String.raw`\u{4f60}\u{597d}`],
@@ -87,6 +89,23 @@ const two = 2;
       expect(result).toEqual({ oldString: '你好', newString: '再见' });
       expect(countOccurrences('你好\n你好', result.oldString)).toBe(2);
     });
+
+    it.each([2, 4, 10])(
+      'recovers text after a completed run of %i backslashes',
+      (length) => {
+        const prefix = 'C:' + '\\'.repeat(length);
+        expect(
+          normalizeEditStrings(
+            prefix + String.raw`share\u4f60\u597d`,
+            'share你好',
+            'client你好',
+          ),
+        ).toEqual({
+          oldString: String.raw`share\u4f60\u597d`,
+          newString: String.raw`client\u4f60\u597d`,
+        });
+      },
+    );
 
     it.each([
       'n',
