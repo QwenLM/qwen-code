@@ -994,6 +994,16 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
     }
 
+    /** Registers or unregisters the Session's client filesystem relay. */
+    public Map<String, Object> clientFilesOperation(HarnessSessionRef session, Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/client-files";
+        HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/client-files",
+                body, ref.getHarnessSessionId(), ref.getHarnessClientId(), operation);
+        DaemonClient.requireStatus(response, 200, operation);
+        return JsonSupport.parseObject(response.getBody(), operation);
+    }
+
     public Map<String, Object> mcpManagementOperation(HarnessSessionRef session, String operationId) {
         HarnessSessionRef ref = requireSessionRef(session);
         String id = requireUuid(operationId, "operationId");
