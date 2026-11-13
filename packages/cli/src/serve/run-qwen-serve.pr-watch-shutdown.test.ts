@@ -312,6 +312,11 @@ describe('runQwenServe PR-watch shutdown wiring', () => {
     for (const [, options] of revokedCalls) {
       const opts = typeof options === 'object' ? options : undefined;
       expect(opts?.skipWorkspaceSettings).toBe(true);
+      // Both opt-outs must hold on the untrusted arm too. Making the env
+      // opt-out conditional on trust would keep the trusted arm green while
+      // this workspace's .env reached the daemon-wide process.env, where a
+      // GH_CONFIG_DIR redirects every gh read and widens allowedHosts.
+      expect(opts?.skipLoadEnvironment).toBe(true);
     }
   });
 

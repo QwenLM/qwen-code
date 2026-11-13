@@ -9,7 +9,7 @@
 drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、registry 与自推访问都作为注入依赖，而生产中没有任何东西填充它们：`getPrWatchDeps` 与 `getPrDrainDeps` 没有生产调用方，`defaultPrWatchDir()` 与 `releasePrWatchOwnershipSync()` 只被测试引用。PR B 打开开关后有三个后果——两个是正确性问题，一个是延迟问题：
 
 - 休眠接收者永远无法被唤醒。真实 restore 原先位于 `restoreSessionHandler`——`registerSessionRoutes` 内的一个路由闭包，只能经 HTTP 到达；§1 已把它的可复用核心移入 `server/session-restore.ts`。channel 经 SDK 调用它（`commands/channel/daemon-worker.ts:1057-1063`），而 daemon 不能用这条跨进程路径做自己的进程内投递。
-- `wakeDormant: false` 会把投递推迟最多一个 refresh interval，**不会**永久搁浅条目：drain 在每个 tick 的观测之后运行、重新读取每个 watch 文件的 `pending` 列表，且只有 `isSessionLive` 为假时才进休眠分支——所以会话一旦 live，下一个 tick 就投递。缺的是即时性：没有任何东西在 resume 那一刻触发 drain，因此一条转换可能要为一个用户正在看的会话等满一个 interval（默认 5 分钟）。
+- `wakeDormant: false` 会把投递推迟最多一个 refresh interval，对**接收者未被标记 `Gone`** 的条目**不会**永久搁浅：drain 在每个 tick 的观测之后运行、重新读取每个 watch 文件的 `pending` 列表，且只有 `isSessionLive` 为假时才进休眠分支——所以会话一旦 live，下一个 tick 就投递。被早先失败投递标记 `Gone` 的接收者是例外：候选过滤与存活无关地把它丢掉，直到 rejoin 窗口到期，这正是 §2 那处重置要解决的。其余情况下缺的是即时性：没有任何东西在 resume 那一刻触发 drain，因此一条转换可能要为一个用户正在看的会话等满一个 interval（默认 5 分钟）。
 - 关停会与后继者重叠。没有任何东西停止 watch 或释放 owner 记录，因此后继 daemon 可能在前任的 restore 与准入仍在途时就 claim（主 §2）。
 
 另有两处缺口曾关乎正确性而非可达性，现均已在 §5 定案：观测丢弃的 `partial` 标志无需透传（它不做任何负面决策，加选项不会有任何读取方），而 slim listing 现在会把 `state` 写进 watch 文件并提供 `listedKeys`，因此 listing 已返回的 closed PR 会离开 view 轮转。该写入还会触发它所替代的那次 view 本会触发的 `state_change`。

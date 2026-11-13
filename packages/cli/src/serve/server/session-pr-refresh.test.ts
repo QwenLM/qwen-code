@@ -2915,6 +2915,10 @@ describe('startSessionPrRefreshTimer', () => {
         wakeSession,
         admitPrompt,
         readPushedHeads: async () => undefined,
+        // The drain reads its own `now ?? Date.now`. Without this the fixture's
+        // literal detectedAt ages against the real wall clock and the case
+        // starts failing seven days after that date.
+        now: () => clock,
       }),
     });
     const settle = async (): Promise<void> => {
