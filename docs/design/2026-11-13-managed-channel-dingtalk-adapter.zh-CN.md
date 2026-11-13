@@ -56,12 +56,17 @@ managed channel 路径目前只有 email 一个适配器。路由策略的 `adap
 - **命令。** `managed-dingtalk` CLI 命令把适配器接到
   `HttpManagedChannelControlPlane`，仿照 `managed-email`。
 
-### 交付与回执纪律（与 email 一致）
+### 交付与回执纪律（出站与 email 一致）
 
 适配器绝不驱动模型。入站由控制面准入（Session journal 中的路由绑定 + input +
 wake）；回复经适配器拉取的带回执 outbox 返回。每段的发送结果先于其回执持久化，故
 发送与回执之间崩溃会重放为 `unknown`，绝不重复发送。#17002 的领取预算与重领协议
 原样适用。
+
+有一处入站分歧是承重的。email 的待决领取只存消息 UID，因为重启后信箱能重新提供该
+消息。DingTalk 流在收到每条消息时即 ack、绝不再投递，也没有可重拉的信箱——因此待决
+领取持久化完整的入站事件。重启重驱的正是这条持久化事件；绝不能丢弃一条已无法重建的
+准入。
 
 ## 涉及文件
 

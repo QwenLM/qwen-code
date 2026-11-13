@@ -69,7 +69,7 @@ adapter contract into `channel-base` so both providers and the CLI share it.
 - **Command.** A `managed-dingtalk` CLI command wires the adapter to
   `HttpManagedChannelControlPlane`, mirroring `managed-email`.
 
-### Delivery and receipt discipline (unchanged from email)
+### Delivery and receipt discipline (outbound unchanged from email)
 
 The adapter never drives a model. Inbound is admitted by the control plane
 (route binding + input + wake in the Session journal); the reply returns through
@@ -77,6 +77,13 @@ the receipted outbox the adapter pulls. Each segment's send result is persisted
 before its receipt, so a crash between send and receipt replays as `unknown`,
 never a duplicate send. The claim budget and re-claim protocol from #17002 apply
 unchanged.
+
+One inbound divergence from email is load-bearing. Email's pending claim stores
+only the message UID, because the mailbox can re-serve that message after a
+restart. The DingTalk stream acks each message on receipt and never redelivers
+it, and there is no mailbox to re-fetch from — so the pending claim persists the
+full inbound event. A restart re-drives that exact persisted event; it must not
+drop an admission it can no longer rebuild.
 
 ## Files affected
 
