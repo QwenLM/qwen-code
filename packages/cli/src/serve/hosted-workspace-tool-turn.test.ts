@@ -64,6 +64,7 @@ import {
   HOSTED_INPUT_PREVIEW_TOOLS,
   HOSTED_TODO_WRITE_TOOL,
   HOSTED_LOOP_WAKEUP_TOOL,
+  HOSTED_CRON_CREATE_TOOL,
   HOSTED_CRON_LIST_TOOL,
   HOSTED_CRON_DELETE_TOOL,
   HOSTED_MEMBER_PLAN_TOOL,
@@ -100,6 +101,7 @@ import {
 import { readHostedApprovalContinuation } from './hosted-approval-continuation.js';
 import { writeHostedTodos } from './hosted-todo-session.js';
 import { HostedLoopSession } from './hosted-loop-session.js';
+import { HostedCronSession } from './hosted-cron-session.js';
 import { HostedCsiToolTurn } from './hosted-csi-tool-turn.js';
 import * as hostedPlan from './hosted-plan-mode.js';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
@@ -2196,6 +2198,111 @@ it('cron_list and cron_delete drive the loop funnel end to end on shell/3', asyn
     const paddedDel = await drive('cron_delete', { id: `  ${id2}  ` });
     expect(paddedDel?.['cancelled']).toBe(true);
     expect((await drive('cron_list', {}))?.['wakeups']).toEqual([]);
+  } finally {
+    if (gateBefore === undefined) delete process.env[gateKey];
+    else process.env[gateKey] = gateBefore;
+  }
+});
+
+it('cron_create/list/delete drive the automation union on shell/4', async () => {
+  const gateKey = 'QWEN_MANAGED_AGENT_LOOP_ENABLED';
+  const gateBefore = process.env[gateKey];
+  process.env[gateKey] = 'true';
+  try {
+    const created: Array<{ definition: unknown; key: string }> = [];
+    const retired: Array<{ id: string; key: string }> = [];
+    const automation = {
+      id: 'asch_x',
+      sessionId: 'session-a',
+      cron: '*/5 * * * *',
+      timezone: 'UTC',
+      goal: 'check the deploy',
+      state: 'active',
+      enabled: true,
+    };
+    const store = {
+      automationsCreate: async (definition: unknown, key: string) => {
+        created.push({ definition, key });
+        return { automation, replayed: false };
+      },
+      automationsList: async () => ({
+        data: [automation],
+        hasMore: false,
+        nextCursor: null,
+      }),
+      automationsRetire: async (id: string, key: string) => {
+        retired.push({ id, key });
+        return {
+          automation: { ...automation, state: 'retired' },
+          replayed: false,
+        };
+      },
+    };
+    const loops = new HostedLoopSession(
+      {
+        authority: session.authority,
+        resources: session.resources,
+        sink: session.sink,
+      },
+      session.authority.sessionHeader.sessionKey,
+      { cwd: root, classify: async () => ({ allowed: true, reason: null }) },
+    );
+    const crons = new HostedCronSession(store, loops, {
+      classify: async () => ({ allowed: true, reason: null }),
+    });
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile: 'hosted-workspace-shell/4', loops, crons },
+    );
+    const declared = await turn.declarations(new AbortController().signal);
+    expect(declared.map((tool) => tool.name)).toContain('cron_create');
+    const drive = async (name: string, args: Record<string, unknown>) => {
+      const call = { ...calls[0], callId: `call-${name}`, name, args };
+      const responses = await turn.execute(
+        [call],
+        [{ functionCall: { id: call.callId, name, args } }],
+        'model',
+        new AbortController().signal,
+      );
+      return responses[0].functionResponse?.response;
+    };
+    const createdResp = await drive('cron_create', {
+      cron: '*/5 * * * *',
+      prompt: '/loop check the deploy',
+      recurring: true,
+    });
+    expect(createdResp?.['executionStatus']).toBe('success');
+    expect(created).toHaveLength(1);
+    expect(created[0]?.key).toBe('loop:call-cron_create:create');
+    // The union lists the definition plus a pending wakeup.
+    await drive('loop_wakeup', { delaySeconds: 60, prompt: '/loop tick' });
+    const listed = await drive('cron_list', {});
+    expect(
+      (listed?.['definitions'] as Array<{ id: string }>).map((d) => d.id),
+    ).toEqual(['asch_x']);
+    expect((listed?.['wakeups'] as unknown[]).length).toBe(1);
+    // A definition id routes to the ledger retire, not the wakeup cancel.
+    const del = await drive('cron_delete', { id: 'asch_x' });
+    expect(del?.['retired']).toBe(true);
+    expect(retired).toEqual([
+      { id: 'asch_x', key: 'loop:call-cron_delete:retire' },
+    ]);
+    // A one-shot is refused with a typed tool error, not a store call.
+    const oneShot = await drive('cron_create', {
+      cron: '*/5 * * * *',
+      prompt: '/loop once',
+      recurring: false,
+    });
+    expect(oneShot?.['executionStatus']).not.toBe('success');
+    expect(created).toHaveLength(1);
   } finally {
     if (gateBefore === undefined) delete process.env[gateKey];
     else process.env[gateKey] = gateBefore;
@@ -6254,6 +6361,7 @@ it('admits exactly the declared native tools to the version 3 input preview', ()
     'run_shell_command',
     'todo_write',
     'loop_wakeup',
+    'cron_create',
     'cron_list',
     'cron_delete',
     ...HOSTED_MEMORY_TOOLS,
@@ -6271,6 +6379,7 @@ it('admits exactly the declared native tools to the version 3 input preview', ()
     ...HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name),
     HOSTED_TODO_WRITE_TOOL.name,
     HOSTED_LOOP_WAKEUP_TOOL.name,
+    HOSTED_CRON_CREATE_TOOL.name,
     HOSTED_CRON_LIST_TOOL.name,
     HOSTED_CRON_DELETE_TOOL.name,
     ...HOSTED_MEMORY_TOOLS,

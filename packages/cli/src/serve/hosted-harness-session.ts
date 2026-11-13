@@ -351,6 +351,7 @@ import {
   LOOP_INPUT_SOURCE,
   type HostedLoopClassifier,
 } from './hosted-loop-session.js';
+import { HostedCronSession } from './hosted-cron-session.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import {
   parseHookExecution,
@@ -820,6 +821,8 @@ interface HostedSession {
   automations?: HostedAutomationSession;
   /** Self-paced /loop wakeups: the Session's single unfired loop input. */
   loops?: HostedLoopSession;
+  /** Fixed-interval /loop: the cron trio over the internal automation routes. */
+  crons?: HostedCronSession;
   /** The active turn's permission classifier, adapted for loop arming; the
    * model turn refreshes it so a wakeup is vetted by the same classifier
    * that vets the turn's other side-effectful tools. */
@@ -4217,6 +4220,7 @@ async function executeHostedTurn(
                   childRuns: session.childRuns,
                   monitors: session.monitors,
                   loops: session.loops,
+                  crons: session.crons,
                   wakeKick: () => session.monitorWake?.kick(),
                   backgroundLane: session.backgroundLane,
                   childAgents: childAgentsOf(session),
@@ -6929,6 +6933,20 @@ export function registerHostedHarnessSessionRoutes(
           }),
         },
       );
+      // Fixed-interval /loop: the cron trio rides the internal automation
+      // routes over the store channel; the arm-time review reuses the active
+      // turn's permission classifier, refused when none is active.
+      session.crons = session.stores
+        ? new HostedCronSession(session.stores, session.loops, {
+            classify: (input) =>
+              session.loopClassify
+                ? session.loopClassify(input)
+                : Promise.resolve({
+                    allowed: false,
+                    reason: 'No active permission classifier for cron arming.',
+                  }),
+          })
+        : undefined;
       // H5b: every hosted Session owns its channel funnel — a channel input
       // needs no Runtime, and its reply plans from the settled turn alone.
       session.channels = new HostedChannelSession(
@@ -11968,6 +11986,7 @@ export function registerHostedHarnessSessionRoutes(
             childRuns: session.childRuns,
             monitors: session.monitors,
             loops: session.loops,
+            crons: session.crons,
             wakeKick: () => session.monitorWake?.kick(),
             backgroundLane: session.backgroundLane,
             childAgents: childAgentsOf(session),

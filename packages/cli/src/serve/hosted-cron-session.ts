@@ -64,8 +64,6 @@ export class HostedCronError extends Error {
 export interface HostedCronSessionOptions {
   /** The active turn's permission classifier (the sibling's decision 9). */
   readonly classify: HostedLoopClassifier;
-  /** The deployment gate gates creation only; list/retire stay available. */
-  readonly createEnabled: () => boolean;
 }
 
 /** The union list answer: the bound Session's definitions plus the pending
@@ -105,11 +103,9 @@ export class HostedCronSession {
     params: HostedCronCreateParams,
     executionCallId: string,
   ): Promise<ManagedAutomationResult> {
-    if (!this.options.createEnabled()) {
-      throw new HostedCronError(
-        'Cron schedules are disabled on this deployment (set QWEN_MANAGED_AGENT_AUTOMATION_ENABLED=true in the Harness environment).',
-      );
-    }
+    // The deployment gate (automation.enabled) is enforced by the control
+    // plane's create route, which answers automation_mode_disabled; list and
+    // retire stay available with the gate off (design decision 2).
     if (params.recurring === false) {
       throw new HostedCronError(
         'A Managed cron schedule must be recurring; one-shot schedules are not supported. Use loop_wakeup for a single future wakeup.',

@@ -78,8 +78,7 @@ const session = (
   store: HostedCronStore,
   loops?: HostedLoopSession,
   classify = allow,
-  createEnabled = () => true,
-) => new HostedCronSession(store, loops, { classify, createEnabled });
+) => new HostedCronSession(store, loops, { classify });
 
 const validParams = {
   cron: '*/5 * * * *',
@@ -114,14 +113,6 @@ describe('HostedCronSession', () => {
     const { store, created } = fakeStore();
     await expect(
       session(store).create({ ...validParams, durable: false }, 'call-1'),
-    ).rejects.toBeInstanceOf(HostedCronError);
-    expect(created).toHaveLength(0);
-  });
-
-  it('refuses creation while the deployment gate is off', async () => {
-    const { store, created } = fakeStore();
-    await expect(
-      session(store, undefined, allow, () => false).create(validParams, 'c'),
     ).rejects.toBeInstanceOf(HostedCronError);
     expect(created).toHaveLength(0);
   });
