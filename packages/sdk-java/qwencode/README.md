@@ -163,7 +163,9 @@ The client permits only one active prompt identity per Session while allowing di
 
 ## Legacy stdio API
 
-The existing `com.alibaba.qwen.code.cli` API remains available:
+The existing `com.alibaba.qwen.code.cli` API remains available.
+
+If a custom `SessionEventConsumers.onControlRequest` handler throws, times out or returns no response envelope, the session sends a correlated `control_response` error to the CLI. The error preserves the original `request_id`, so the pending control request can fail immediately instead of waiting for its own timeout. Valid callback responses are forwarded unchanged.
 
 ```java
 public static void runSimpleExample() {

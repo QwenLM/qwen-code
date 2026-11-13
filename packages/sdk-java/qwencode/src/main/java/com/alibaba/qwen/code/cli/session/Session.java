@@ -242,13 +242,19 @@ public class Session {
                         controlResponse = MyConcurrentUtils.runAndWait(
                                 () -> sessionEventConsumers.onControlRequest(this, controlRequest),
                                 Optional.ofNullable(sessionEventConsumers.onControlRequestTimeout(this, controlRequest)).orElse(defaultEventTimeout));
+                        if (controlResponse == null || controlResponse.getResponse() == null) {
+                            throw new IllegalStateException("Control request handler returned no response");
+                        }
                     } catch (Exception e) {
                         log.error("Failed to process control request", e);
                         controlResponse = new CLIControlResponse<>();
+                        controlResponse.createResponse()
+                                .setRequestId(jsonObject.getString("request_id"))
+                                .setSubtype("error")
+                                .setError(e.toString());
                     }
                     try {
-                        transport.inputNoWaitResponse(Optional.ofNullable(controlResponse).map(CLIControlResponse::toString)
-                                .orElse(new CLIControlResponse<ControlResponsePayload>().toString()));
+                        transport.inputNoWaitResponse(controlResponse.toString());
                     } catch (Exception e) {
                         throw new RuntimeException("Failed to send control response", e);
                     }
