@@ -37,7 +37,7 @@ export class ConversationHandler {
     );
   }
 
-  private handle(event: AnyBusEvent): void {
+  private async handle(event: AnyBusEvent): Promise<void> {
     const state = this.store.get(event.runId);
     if (!state || state.finished) return;
     const host = state.input.host ?? {};
@@ -59,7 +59,7 @@ export class ConversationHandler {
         const round = currentRound(state, event.round);
         const model = state.model;
         if (round === undefined || !model) return;
-        const hostStop = host.onRoundEnd?.(round, {
+        const hostStop = await host.onRoundEnd?.(round, {
           calls: model.calls,
           ...(model.stop ? { stop: model.stop } : {}),
         });

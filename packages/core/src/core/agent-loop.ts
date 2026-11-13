@@ -180,8 +180,9 @@ export interface AgentLoopHost {
   ): ModelEventResult | Promise<ModelEventResult>;
   /**
    * After each model round, before its tool batch, with the round's calls
-   * and its stop. Returning a stop reason ends the loop there; a stop of the
-   * round itself takes precedence.
+   * and its stop. The loop waits for this hook before starting the batch.
+   * Returning a stop reason ends the loop there; a stop of the round itself
+   * takes precedence.
    */
   onRoundEnd?(
     round: number,
@@ -189,7 +190,7 @@ export interface AgentLoopHost {
       calls: readonly ToolCallRequestInfo[];
       stop?: AgentLoopStopReason;
     },
-  ): AgentLoopStopReason | void;
+  ): ModelEventResult | Promise<ModelEventResult>;
   /**
    * Builds the next request, which defaults to the previous batch's parts.
    * When recording was deferred, `responses` carries the recording callbacks.
@@ -310,7 +311,7 @@ export async function runAgentLoop(
       calls,
       stop: modelStop,
     } = await runModelRound(client, round, signal, host);
-    const hostStop = host.onRoundEnd?.(index, {
+    const hostStop = await host.onRoundEnd?.(index, {
       calls,
       ...(modelStop ? { stop: modelStop } : {}),
     });

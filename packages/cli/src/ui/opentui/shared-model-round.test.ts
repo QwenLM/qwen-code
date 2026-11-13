@@ -143,6 +143,7 @@ describe.each([false, true])('sharedModelRound (kernel=%s)', (kernel) => {
       'finished',
     ]);
     expect(shared.result()).toEqual({ calls: [call('c1').value] });
+    await shared.close();
   });
 
   it('reads the next event only once the turn took the one before', async () => {
@@ -150,13 +151,15 @@ describe.each([false, true])('sharedModelRound (kernel=%s)', (kernel) => {
       { type: 'content', value: 'a' },
       { type: 'content', value: 'b' },
     ]);
-    const events = open(client).events[Symbol.asyncIterator]();
+    const shared = open(client);
+    const events = shared.events[Symbol.asyncIterator]();
     await events.next();
     // Give the round every chance to read ahead.
     for (let i = 0; i < 10; i++) await Promise.resolve();
     expect(progress.pulled).toBe(1);
     await events.next();
     expect(progress.pulled).toBe(2);
+    await events.return?.();
   });
 
   it('keeps only the calls of the attempt a retry replaced them with', async () => {
@@ -170,6 +173,7 @@ describe.each([false, true])('sharedModelRound (kernel=%s)', (kernel) => {
       // drain
     }
     expect(shared.result()?.calls.map((c) => c.callId)).toEqual(['fresh']);
+    await shared.close();
   });
 
   it('reports the stop reason of a round that detected a loop', async () => {
@@ -234,7 +238,7 @@ describe.each([false, true])('sharedModelRound (kernel=%s)', (kernel) => {
     });
   });
 
-  it('answers a replay in place without waiting for the executor', async () => {
+  it('answers a replay in place without running the executor', async () => {
     const { client } = fakeClient([call('c1')]);
     const shared = sharedModelRound(
       client,
@@ -262,7 +266,7 @@ describe.each([false, true])('sharedModelRound (kernel=%s)', (kernel) => {
     expect(batch.responses?.map(({ callId }) => callId)).toEqual(['c1']);
   });
 
-  it('calls beforeBatch only for a round with calls to run', async () => {
+  it('calls beforeBatch only when the turn hands off a batch to run', async () => {
     for (const [events, expected] of [
       [[call('c1')], 1],
       [[{ type: 'content', value: 'a' }], 0],
@@ -274,19 +278,29 @@ describe.each([false, true])('sharedModelRound (kernel=%s)', (kernel) => {
       for await (const _ of shared.events) {
         // drain
       }
-      await shared.close();
+      expect(beforeBatch).not.toHaveBeenCalled();
+      await shared.runBatch(okExecutor());
       expect(beforeBatch).toHaveBeenCalledTimes(expected);
     }
   });
 
   it('settles the run, running nothing, when the turn closes the round', async () => {
     const { client } = fakeClient([call('c1')]);
-    const shared = open(client);
+    const beforeBatch = vi.fn();
+    const shared = open(client, undefined, { beforeBatch });
     for await (const _ of shared.events) {
       // drain
     }
     // The batch waits for an executor the turn never hands it.
-    await expect(shared.close()).resolves.toBeUndefined();
+    await shared.close();
+    const executor = okExecutor();
+    await expect(shared.runBatch(executor)).resolves.toEqual({
+      parts: [],
+      stop: 'surface_ended',
+    });
+    expect(beforeBatch).not.toHaveBeenCalled();
+    expect(executor.run).not.toHaveBeenCalled();
+    expect(shared.answered).toEqual([]);
   });
 
   it('settles the run when the turn closes the round mid-stream', async () => {

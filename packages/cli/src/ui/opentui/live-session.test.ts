@@ -4565,6 +4565,44 @@ describe.each([false, true])(
       expect(send).toHaveBeenCalledOnce();
     });
 
+    it('does not finalize a replay when the turn is cancelled before the batch', async () => {
+      const abort = new AbortController();
+      const send = vi.fn(function* () {
+        yield call('replay');
+        abort.abort();
+      });
+      const config = shared(
+        createFakeConfig(send),
+        new Map([['replay', getToolCallFingerprint('test_tool', {})]]),
+      );
+      const dir = await mkdtemp(path.join(tmpdir(), 'opentui-replay-'));
+      const trackToolResultBytes = vi.fn();
+      Object.assign(config, {
+        getToolOutputBatchBudget: () => 100,
+        getToolResultBytesWritten: () => 0,
+        trackToolResultBytes,
+        storage: { getToolResultsDir: () => dir },
+      });
+      try {
+        const events = await drain(
+          livePromptEvents(config, 'start', abort.signal),
+        );
+        await vi.mocked(runAgentLoop).mock.results[0].value;
+
+        expect(events).toContainEqual(
+          expect.objectContaining({ type: 'tool-start', id: 'replay' }),
+        );
+        expect(send).toHaveBeenCalledOnce();
+        expect(
+          config.getGeminiClient().recordCompletedToolCall,
+        ).not.toHaveBeenCalled();
+        expect(await readdir(dir)).toEqual([]);
+        expect(trackToolResultBytes).not.toHaveBeenCalled();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
     it("rethrows the round's stream failure", async () => {
       const send = vi.fn(function* () {
         yield { type: 'content', value: 'a' };

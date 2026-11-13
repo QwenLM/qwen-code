@@ -157,9 +157,22 @@ const PARITY_CASE_OPTIONS = { retry: 0, timeout: 240_000 };
 
 /** What the TUI logs for each model round it sends on the shared loop. */
 const SHARED_ROUND_LOG = 'model round on the shared agent loop';
-/** What the TUI logs for each model round it runs on the event-bus kernel. */
-const KERNEL_ROUND_LOG =
-  'model round on the shared agent loop on the event bus';
+/** Match the adapter's execution marker against prompt IDs owned by OpenTUI. */
+function countOpenTuiKernelRounds(debugLog: string): number {
+  const promptIds = new Set(
+    Array.from(
+      debugLog.matchAll(
+        /\[OPENTUI_LIVE\][^\n]* model round on the shared agent loop \(prompt ([^)]+)\)/g,
+      ),
+      ([, promptId]) => promptId,
+    ),
+  );
+  return Array.from(
+    debugLog.matchAll(
+      /\[EVENT_BUS\][^\n]* runAgentLoopOnBus started \S+ \(prompt ([^)]+)\)/g,
+    ),
+  ).filter(([, promptId]) => promptIds.has(promptId)).length;
+}
 /** The first option of a tool approval. */
 const APPROVAL_PROMPT = 'Yes, allow once';
 
@@ -639,7 +652,7 @@ describeTui(SUITE, () => {
       sharedBatches: debugLog.split(SHARED_BATCH_LOG).length - 1,
       sharedSubagentBatches:
         debugLog.match(SHARED_SUBAGENT_BATCH_LOG)?.length ?? 0,
-      kernelRounds: debugLog.split(KERNEL_ROUND_LOG).length - 1,
+      kernelRounds: countOpenTuiKernelRounds(debugLog),
     };
   }
 
@@ -1216,6 +1229,7 @@ describeTui(SUITE, () => {
     expect(shared.sharedBatches).toBe(scenario.batches);
     expect(current.sharedSubagentBatches).toBe(0);
     expect(shared.sharedSubagentBatches).toBe(scenario.subagentBatches ?? 0);
+    expect(current.kernelRounds).toBe(0);
     expect(shared.kernelRounds).toBe(0);
     // OpenTUI also runs each round on the event-bus kernel, which must send
     // and record what the shared loop does.

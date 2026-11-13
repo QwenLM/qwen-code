@@ -36,8 +36,7 @@ export interface SharedRoundOptions {
   /** Run the round on the event-bus kernel. */
   useEventBus: boolean;
   /**
-   * Right after the model round, when it has calls and did not stop, before
-   * its batch reads `duplicates`.
+   * After the turn hands off its executor, before the batch reads `duplicates`.
    */
   beforeBatch(): void;
 }
@@ -62,10 +61,9 @@ class SharedModelRoundClosed extends Error {
  * stops reading ends the round, which closes the client's stream. `result`
  * is set once the events ran out.
  *
- * The batch starts right after the round, but runs no call until the turn
- * hands it the executor over its scheduler with `runBatch`; replays it
- * answers in place are in `answered`. A turn that leaves without running the
- * batch must `close` the round, which lets the batch run nothing.
+ * The batch waits for the turn to hand off its scheduler with `runBatch`
+ * before processing any calls, including replays. A turn that leaves
+ * before handing it off must `close` the round to skip the batch.
  */
 export function sharedModelRound(
   client: LlmClient,
@@ -129,14 +127,17 @@ export function sharedModelRound(
             offered = { event, take, refuse };
             wake?.();
           }),
-        onRoundEnd: (_round, model) => {
+        onRoundEnd: async (_round, model) => {
           result = {
             calls: [...model.calls],
             ...(model.stop ? { stop: model.stop } : {}),
           };
           done = true;
           wake?.();
-          if (!model.stop && model.calls.length > 0) options.beforeBatch();
+          if (model.stop || model.calls.length === 0) return;
+          if (!(await executor)) return 'surface_ended';
+          options.beforeBatch();
+          return undefined;
         },
         onToolResult: ({ request, response, origin }) => {
           if (origin !== 'executed') answered.push({ request, response });

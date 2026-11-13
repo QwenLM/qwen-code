@@ -1138,7 +1138,7 @@ export async function* livePromptEvents(
             : undefined;
         if (sharedRound)
           liveLogger.debug(
-            `model round on the shared agent loop${useEventBus ? ' on the event bus' : ''} (prompt ${promptId})`,
+            `model round on the shared agent loop (prompt ${promptId})`,
           );
         const stream =
           sharedRound?.events ??
