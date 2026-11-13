@@ -1417,6 +1417,12 @@ export class ShellExecutionService {
         };
         const stdoutHandler = (data: Buffer) => captureData(data, 'stdout');
         const stderrHandler = (data: Buffer) => captureData(data, 'stderr');
+        const stdoutEndHandler = () => {
+          stdoutEnded = true;
+        };
+        const stderrEndHandler = () => {
+          stderrEnded = true;
+        };
         const errorHandler = (err: Error) => {
           error = err;
           void handleExit(1, null);
@@ -1450,17 +1456,15 @@ export class ShellExecutionService {
         child.stdout?.on('data', stdoutHandler);
         child.stderr?.on('data', stderrHandler);
         // The drain reports a stdout still held, not a held stderr.
-        child.stdout?.on('end', () => {
-          stdoutEnded = true;
-        });
-        child.stderr?.on('end', () => {
-          stderrEnded = true;
-        });
+        child.stdout?.on('end', stdoutEndHandler);
+        child.stderr?.on('end', stderrEndHandler);
         child.on('error', errorHandler);
 
         const detachServiceListeners = () => {
           child.stdout?.off('data', stdoutHandler);
           child.stderr?.off('data', stderrHandler);
+          child.stdout?.off('end', stdoutEndHandler);
+          child.stderr?.off('end', stderrEndHandler);
           child.off('error', errorHandler);
           child.off('exit', exitHandler);
           child.off('close', closeHandler);

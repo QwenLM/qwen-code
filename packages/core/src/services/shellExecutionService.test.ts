@@ -2504,6 +2504,7 @@ describe('ShellExecutionService child_process fallback', () => {
     });
 
     it('keeps buffered stdout and stderr until post-exit close', async () => {
+      vi.useFakeTimers();
       const handle = await exec('late-output', { usePty: false });
       const settled = vi.fn();
       void handle.result.then(settled);
@@ -2519,6 +2520,9 @@ describe('ShellExecutionService child_process fallback', () => {
         mockChildProcess.stderr?.emit('end');
         mockChildProcess.emit('close', 0, null);
 
+        await Promise.resolve();
+        expect(settled).toHaveBeenCalledOnce();
+
         const result = await handle.result;
         expect(result.output).toBe('€\nlate diagnostic');
         expect(result.exitCode).toBe(0);
@@ -2528,6 +2532,7 @@ describe('ShellExecutionService child_process fallback', () => {
         );
       } finally {
         mockChildProcess.emit('close', 0, null);
+        vi.useRealTimers();
       }
     });
 
@@ -2875,16 +2880,26 @@ describe('ShellExecutionService child_process fallback', () => {
       // promote, post-promote bytes re-enter handleOutput and either hit the
       // finalized decoder (TypeError crash) or reach the foreground
       // onOutputEvent (ownership leak / duplicated emit).
+      const stdoutEndObserver = vi.fn();
+      const stderrEndObserver = vi.fn();
+      mockChildProcess.stdout?.on('end', stdoutEndObserver);
+      mockChildProcess.stderr?.on('end', stderrEndObserver);
       const { result } = await simulateExecution(
         'tail -f /tmp/never.log',
-        (_cp, ac) => {
+        (cp, ac) => {
           emitOut('pre-promote\n');
           ac.abort(bg('bg_test123'));
+          expect(cp.stdout?.listeners('end')).toEqual([stdoutEndObserver]);
+          expect(cp.stderr?.listeners('end')).toEqual([stderrEndObserver]);
           // More data on the live streams: no onOutputEvent, no decoder throw.
           const eventCountAtPromote = onOutputEventMock.mock.calls.length;
           emitOut('post-promote-stdout\n');
           emitOut('post-promote-stderr\n', 'stderr');
           expect(onOutputEventMock.mock.calls.length).toBe(eventCountAtPromote);
+          cp.stdout?.emit('end');
+          cp.stderr?.emit('end');
+          expect(stdoutEndObserver).toHaveBeenCalledOnce();
+          expect(stderrEndObserver).toHaveBeenCalledOnce();
         },
       );
 
