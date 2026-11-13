@@ -4,20 +4,40 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockState = vi.hoisted(() => ({
   behavior: 'ok' as 'ok' | 'fail',
   calls: 0,
+  instance: null as unknown as { onDownStream: (data: unknown) => void },
+  registered: null as null | { topic: unknown; cb: (m: unknown) => void },
+  acks: [] as Array<{ id: string; payload: { status: string } }>,
 }));
 
 vi.mock('dingtalk-stream-sdk-nodejs', () => {
   class DWClient {
     config = { autoReconnect: true };
     debug = false;
-    onDownStream(_data: unknown): void {}
-    registerCallbackListener(_topic: unknown, _cb: unknown): void {}
-    send(_id: string, _payload: unknown): void {}
+    constructor() {
+      mockState.instance = this as unknown as typeof mockState.instance;
+    }
+    // Simulate the SDK dispatch: JSON.parse + route with NO error boundary —
+    // the deps wrapper must provide it (R3-1).
+    onDownStream(data: unknown): void {
+      const msg = JSON.parse(data as string) as {
+        type?: string;
+        headers?: { messageId?: string };
+      };
+      if (msg.type === 'CALLBACK' && mockState.registered) {
+        mockState.registered.cb(msg);
+      }
+    }
+    registerCallbackListener(topic: unknown, cb: (m: unknown) => void): void {
+      mockState.registered = { topic, cb };
+    }
+    send(id: string, payload: { status: string }): void {
+      mockState.acks.push({ id, payload });
+    }
     async connect(): Promise<void> {
       mockState.calls += 1;
       if (mockState.behavior === 'fail') {
@@ -29,7 +49,7 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => {
   return {
     DWClient,
     TOPIC_ROBOT: 'robot',
-    EventAck: { SUCCESS: 'SUCCESS' },
+    EventAck: { SUCCESS: 'SUCCESS', LATER: 'LATER' },
   };
 });
 
@@ -41,33 +61,118 @@ const SETTINGS = {
   pollInterval: 2_000,
 };
 
+function robotFrame(messageId: string): string {
+  return JSON.stringify({
+    type: 'CALLBACK',
+    headers: { messageId, topic: 'robot' },
+    data: '{"msgId":"m1"}',
+  });
+}
+
 beforeEach(() => {
   mockState.behavior = 'ok';
   mockState.calls = 0;
+  mockState.registered = null;
+  mockState.acks = [];
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe('managed DingTalk stream connect (R1-9)', () => {
   it('the first connect failure propagates — no healthy start on a dead stream', async () => {
     mockState.behavior = 'fail';
     const { createStreamClient } = createManagedDingtalkDeps();
-    const stream = createStreamClient(SETTINGS, () => {});
+    const stream = createStreamClient(SETTINGS, () => true);
     await expect(stream.connect()).rejects.toThrow('getEndpoint failed');
   });
 
   it('a reconnect failure after a successful connect is swallowed', async () => {
     const { createStreamClient } = createManagedDingtalkDeps();
-    const stream = createStreamClient(SETTINGS, () => {});
+    const stream = createStreamClient(SETTINGS, () => true);
     await stream.connect(); // success arms everConnected
     mockState.behavior = 'fail';
     await expect(stream.connect()).resolves.toBeUndefined();
+    stream.disconnect();
+  });
+
+  it('a failed reconnect re-arms a retry instead of going permanently deaf', async () => {
+    vi.useFakeTimers();
+    const { createStreamClient } = createManagedDingtalkDeps();
+    const stream = createStreamClient(SETTINGS, () => true);
+    await stream.connect(); // call 1 succeeds
+    mockState.behavior = 'fail';
+    await stream.connect(); // call 2 (reconnect) fails, re-arms the retry
     expect(mockState.calls).toBe(2);
+    await vi.advanceTimersByTimeAsync(5_000); // the re-armed retry fires
+    expect(mockState.calls).toBeGreaterThanOrEqual(3);
+    stream.disconnect();
   });
 
   it('after disconnect a pending connect no-ops instead of reopening a socket', async () => {
     const { createStreamClient } = createManagedDingtalkDeps();
-    const stream = createStreamClient(SETTINGS, () => {});
+    const stream = createStreamClient(SETTINGS, () => true);
     stream.disconnect();
     await stream.connect();
     expect(mockState.calls).toBe(0);
+  });
+});
+
+describe('managed DingTalk stream frame path (R3-1 / R3-3 / R3-4)', () => {
+  it('a queued robot frame is acked SUCCESS and dispatched without logging', () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const received: Array<{ id: string; data: string }> = [];
+    const { createStreamClient } = createManagedDingtalkDeps();
+    createStreamClient(SETTINGS, (id, data) => {
+      received.push({ id, data });
+      return true;
+    });
+    mockState.instance.onDownStream(robotFrame('msg-1'));
+    expect(received).toEqual([{ id: 'msg-1', data: '{"msgId":"m1"}' }]);
+    expect(mockState.acks.map((ack) => [ack.id, ack.payload.status])).toEqual([
+      ['msg-1', 'SUCCESS'],
+    ]);
+    expect(logSpy).not.toHaveBeenCalled();
+  });
+
+  it('an unqueued frame is acked LATER so the provider redelivers it (R3-3)', () => {
+    const { createStreamClient } = createManagedDingtalkDeps();
+    createStreamClient(SETTINGS, () => false); // inbox full / not running
+    mockState.instance.onDownStream(robotFrame('msg-full'));
+    expect(mockState.acks.map((ack) => [ack.id, ack.payload.status])).toEqual([
+      ['msg-full', 'LATER'],
+    ]);
+  });
+
+  it('a malformed frame is swallowed, not thrown through the socket handler (R3-1)', () => {
+    const received: string[] = [];
+    const { createStreamClient } = createManagedDingtalkDeps();
+    createStreamClient(SETTINGS, (id) => {
+      received.push(id);
+      return true;
+    });
+    expect(() => mockState.instance.onDownStream('null')).not.toThrow();
+    expect(() => mockState.instance.onDownStream('{oops')).not.toThrow();
+    expect(received).toEqual([]);
+    expect(mockState.acks).toEqual([]);
+  });
+
+  it('a CALLBACK frame without a messageId is dropped without acking (R3-1)', () => {
+    const received: string[] = [];
+    const { createStreamClient } = createManagedDingtalkDeps();
+    createStreamClient(SETTINGS, (id) => {
+      received.push(id);
+      return true;
+    });
+    const noMessageId = JSON.stringify({
+      type: 'CALLBACK',
+      headers: { topic: 'robot' },
+      data: '{}',
+    });
+    expect(() => mockState.instance.onDownStream(noMessageId)).not.toThrow();
+    expect(received).toEqual([]);
+    expect(mockState.acks).toEqual([]);
   });
 });

@@ -57,7 +57,7 @@ export interface DingtalkWebhookFailure extends Error {
 export interface ManagedDingtalkAdapterDeps {
   readonly createStreamClient: (
     settings: DingtalkSettings,
-    onMessage: (messageId: string, data: string) => void,
+    onMessage: (messageId: string, data: string) => boolean,
   ) => ManagedDingtalkStreamClient;
   readonly sendWebhook: (webhook: string, text: string) => Promise<void>;
   readonly lock: (
@@ -281,15 +281,19 @@ export class ManagedDingtalkAdapter {
     await this.pullOutbox();
   }
 
-  private onMessage(messageId: string, data: string): void {
-    if (!this.running) return;
+  // Returns whether the frame was queued. Acceptance is the commit point: the
+  // caller acks SUCCESS only on true, so an overflow leaves the frame unacked
+  // and the provider's own redelivery is the backstop instead of a silent drop.
+  private onMessage(messageId: string, data: string): boolean {
+    if (!this.running) return false;
     if (this.inbox.length >= INBOX_LIMIT) {
       this.log(
-        `Managed DingTalk inbox is full; message ${messageId} is dropped.`,
+        `Managed DingTalk inbox is full; message ${messageId} is left unacked for redelivery.`,
       );
-      return;
+      return false;
     }
     this.inbox.push({ messageId, data });
+    return true;
   }
 
   private async runLoop(): Promise<void> {
@@ -766,9 +770,20 @@ function extractText(parsed: Record<string, unknown>): string | undefined {
 function fitInboundText(text: string): string {
   const bounded = text.slice(0, MAX_WIRE_TEXT_CHARS);
   const byteLimit = ENVELOPE_BYTE_LIMIT - TEXT_ENVELOPE_OVERHEAD_BYTES;
-  if (Buffer.byteLength(bounded, 'utf8') <= byteLimit) return bounded;
-  const bytes = Buffer.from(bounded, 'utf8');
-  let end = byteLimit;
-  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
-  return bytes.subarray(0, end).toString('utf8');
+  // The bound is enforced on the JSON-serialized envelope, where a control
+  // character costs six bytes and a quote/backslash two — not on the raw UTF-8
+  // length. Budget the escaped length and cut by code points until it fits, so
+  // escape-heavy text is admitted truncated instead of refused whole.
+  const encodedBytes = (s: string): number =>
+    Buffer.byteLength(JSON.stringify(s), 'utf8') - 2;
+  if (encodedBytes(bounded) <= byteLimit) return bounded;
+  const chars = Array.from(bounded);
+  let lo = 0;
+  let hi = chars.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (encodedBytes(chars.slice(0, mid).join('')) <= byteLimit) lo = mid;
+    else hi = mid - 1;
+  }
+  return chars.slice(0, lo).join('');
 }

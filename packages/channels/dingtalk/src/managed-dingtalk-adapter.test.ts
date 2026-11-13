@@ -783,4 +783,25 @@ describe('managed DingTalk adapter review fixes', () => {
     );
     await second.adapter.disconnect();
   });
+
+  it('clamps escape-heavy text by its JSON-serialized length (R3-2)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    // 32,000 U+0001 control chars are 32,000 raw bytes but ~192 KB once
+    // JSON-escaped; the clamp must budget the escaped length, not the raw one.
+    fake.push(
+      'msg-esc',
+      messageData({
+        msgId: 'msg-esc',
+        text: { content: '\u0001'.repeat(32_000) },
+      }),
+    );
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(1);
+    const text = plane.submit[0]!.text;
+    expect(Buffer.byteLength(JSON.stringify(text), 'utf8')).toBeLessThanOrEqual(
+      64 * 1024,
+    );
+    expect(text.length).toBeLessThan(32_000);
+    await adapter.disconnect();
+  });
 });

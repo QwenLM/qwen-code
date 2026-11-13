@@ -20,10 +20,11 @@ import { splitChunks } from './markdown.js';
 import { isRetryableDingtalkStatus } from './interactive-card-client.js';
 
 const WEBHOOK_TIMEOUT_MS = 30_000;
+const RECONNECT_RETRY_MS = 5_000;
 
 function createStreamClient(
   settings: DingtalkSettings,
-  onMessage: (messageId: string, data: string) => void,
+  onMessage: (messageId: string, data: string) => boolean,
 ): ManagedDingtalkStreamClient {
   const client = new DWClient({
     clientId: settings.clientId,
@@ -37,34 +38,47 @@ function createStreamClient(
   };
   internals.debug = false;
   client.registerCallbackListener(TOPIC_ROBOT, (msg: DWClientDownStream) => {
-    // Ack first so the provider does not redeliver while the admission is
-    // still queued; the admission itself is durable before its side effect.
-    client.send(msg.headers.messageId, {
-      status: EventAck.SUCCESS,
-      message: 'ok',
+    // A frame without a routing messageId cannot be acked or admitted; drop it
+    // instead of letting client.send throw through the socket handler.
+    const messageId = msg?.headers?.messageId;
+    if (!messageId) return;
+    // Acceptance is the commit point: queue first, then ack SUCCESS only if the
+    // frame was queued. An overflow leaves it unacked (LATER) so the provider
+    // redelivers it rather than it being acked and silently dropped.
+    const queued = onMessage(messageId, msg.data);
+    client.send(messageId, {
+      status: queued ? EventAck.SUCCESS : EventAck.LATER,
+      message: queued ? 'ok' : 'busy',
     });
-    onMessage(msg.headers.messageId, msg.data);
   });
-  // The SDK's onDownStream console.log()s every raw frame (user text, sender
-  // id, the sessionWebhook capability) before dispatching it to the listener
-  // above. Wrap the dispatch so the frame is routed without being logged.
+  // The SDK's onDownStream console.log()s every raw frame (user text, sender id,
+  // the sessionWebhook capability) and its dispatch JSON.parses + reads routing
+  // headers with no error boundary. Wrap it so frames are routed without being
+  // logged, and a malformed frame is logged and swallowed instead of throwing
+  // through the socket handler — that would exit the process and crash-loop on
+  // the unacked redelivery.
   const sdkOnDownStream = internals.onDownStream.bind(client);
   internals.onDownStream = (data: unknown) => {
-    withConsoleLogSuppressedSync(() => sdkOnDownStream(data));
+    try {
+      withConsoleLogSuppressedSync(() => sdkOnDownStream(data));
+    } catch (error) {
+      process.stderr.write(
+        `Managed DingTalk downstream frame ignored: ${String(error)}\n`,
+      );
+    }
   };
   // The SDK reconnects by calling this.connect, whose getEndpoint() logs the
-  // clientSecret; connect() also resets userDisconnect, so a timer pending at
-  // disconnect would reopen a socket. Route every connect through the logging
-  // suppression and stop once the adapter disconnects. The adapter's FIRST
-  // connect must surface its failure (a bad credential or unreachable gateway
-  // creates no socket and arms no retry, so swallowing it would report a
-  // healthy start that is permanently deaf); only a reconnect after a
-  // successful connect may fail quietly, since the SDK's close-handler timer
-  // owns the retry.
+  // clientSecret. The adapter's FIRST connect must surface its failure (a bad
+  // credential creates no socket and arms no retry, so swallowing it would
+  // report a healthy start that is permanently deaf). A reconnect after a
+  // successful connect may fail, but the SDK arms its retry timer only from the
+  // socket close event — a getEndpoint() failure creates no socket and no timer,
+  // so re-arm the retry here or one transient error leaves the adapter deaf.
   let stopped = false;
   let everConnected = false;
+  let retry: ReturnType<typeof setTimeout> | undefined;
   const sdkConnect = internals.connect.bind(client);
-  const guardedConnect = () => {
+  const guardedConnect = (): Promise<void> => {
     if (stopped) return Promise.resolve();
     return withConnectLoggingSuppressed(sdkConnect).then(
       (result) => {
@@ -73,6 +87,17 @@ function createStreamClient(
       },
       (error) => {
         if (!everConnected) throw error;
+        // Do not echo the error: it can carry the endpoint/ticket.
+        void error;
+        process.stderr.write(
+          `Managed DingTalk stream reconnect failed; retrying in ${RECONNECT_RETRY_MS} ms.\n`,
+        );
+        if (!stopped && retry === undefined) {
+          retry = setTimeout(() => {
+            retry = undefined;
+            void guardedConnect();
+          }, RECONNECT_RETRY_MS);
+        }
         return undefined;
       },
     );
@@ -82,6 +107,7 @@ function createStreamClient(
     connect: () => guardedConnect(),
     disconnect: () => {
       stopped = true;
+      if (retry !== undefined) clearTimeout(retry);
       client.disconnect();
     },
   };
