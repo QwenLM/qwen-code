@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicAutomation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -32,7 +33,7 @@ public class ManagedAutomationSessionController {
             @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
-            @RequestBody AutomationSessionModels.Create request) {
+            @Valid @RequestBody AutomationSessionModels.Create request) {
         return service.create(tenant.tenantId(), sessionId, writerToken,
                 idempotencyKey, request);
     }
@@ -41,7 +42,7 @@ public class ManagedAutomationSessionController {
     public PublicList<PublicAutomation> list(TenantContext tenant,
             @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
-            @RequestBody AutomationSessionModels.ListRequest request) {
+            @Valid @RequestBody AutomationSessionModels.ListRequest request) {
         return service.list(tenant.tenantId(), sessionId, writerToken, request);
     }
 
@@ -50,7 +51,7 @@ public class ManagedAutomationSessionController {
             @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
-            @RequestBody AutomationSessionModels.Retire request) {
+            @Valid @RequestBody AutomationSessionModels.Retire request) {
         return service.retire(tenant.tenantId(), sessionId, writerToken,
                 idempotencyKey, request);
     }

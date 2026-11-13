@@ -22,6 +22,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -121,5 +122,32 @@ class ManagedAutomationSessionControllerTest {
         verify(service).retire(eq("tenant"), eq("session"), eq("synthetic-writer"),
                 eq("loop:call-2:retire"), captor.capture());
         assertThat(captor.getValue().automationId()).isEqualTo("asch_abc");
+    }
+
+    @Test
+    void malformedWriterBindingIsA400BeforeTheServiceRuns() throws Exception {
+        // Missing writerId: the declared @NotBlank must answer 400, not reach
+        // the writer-fencing path (which would NPE into a 500 internal_error).
+        String create = "{\"workspaceId\":\"workspace-a\",\"writerGeneration\":1,"
+                + "\"definition\":{\"cron\":\"*/5 * * * *\",\"prompt\":\"/loop check\","
+                + "\"session_mode\":\"persistent\"}}";
+        mvc.perform(post("/internal/managed-session-store/v1/sessions/session/automations:create")
+                        .header("X-Qwen-Tenant-Id", "tenant")
+                        .header("X-Qwen-Managed-Writer-Token", "synthetic-writer")
+                        .header("Idempotency-Key", "loop:call-3:create")
+                        .contentType(MediaType.APPLICATION_JSON).content(create))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+        // Blank writerId on retire: same validation, same refusal shape.
+        String retire = "{\"workspaceId\":\"workspace-a\",\"writerId\":\"  \","
+                + "\"writerGeneration\":1,\"automationId\":\"asch_abc\"}";
+        mvc.perform(post("/internal/managed-session-store/v1/sessions/session/automations:retire")
+                        .header("X-Qwen-Tenant-Id", "tenant")
+                        .header("X-Qwen-Managed-Writer-Token", "synthetic-writer")
+                        .header("Idempotency-Key", "loop:call-3:retire")
+                        .contentType(MediaType.APPLICATION_JSON).content(retire))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+        verifyNoInteractions(service);
     }
 }
