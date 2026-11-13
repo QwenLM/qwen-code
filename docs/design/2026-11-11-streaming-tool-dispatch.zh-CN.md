@@ -40,7 +40,7 @@ main 把一个模型轮跑完、收集其工具调用，然后作为一批执行
 
 - **Chat Completions 在结束帧发出工具调用。** Qwen 和百炼的预设以及对拍套件的假服务器使用该协议。Main 的转换层在 `finish_reason` 到达时一次性发出调用（`openaiContentGenerator/converter.ts:2058`）。Provider 可能交错或复用索引，因此不能把下一个 `index` 当作调用边界。Preview 同样在 `finish_reason` 关闭工具块，此时执行可以与用量帧等流尾数据的接收重叠。
 - **生成器及时转发调用时，单调用结束事件才有帮助。** Preview 可以根据 Messages 的 `content_block_stop` 和 Responses 的 `response.output_item.done` 派发调用。它的 Qoder provider 使用 Responses。Main 的 Anthropic 生成器会缓存已完成的调用，成功响应要等停止原因到达才发出（`anthropicContentGenerator/anthropicContentGenerator.ts:1610`）。Responses 转换层在 `response.output_item.done` 发出调用（`openaiResponsesContentGenerator/responses-converter.ts:278`）。即使是唯一或最后一个调用，也能和 `response.completed` 之前的工作重叠。Gemini 直接转发 SDK 的流式分片，可重叠的时间取决于分片何时携带完整调用。
-- **符合条件的调用范围有限。** 读取、搜索和只读 shell 命令可提前启动。Agent、需要审批的获取工具和会写入的命令等到批次执行。评估依据是 provider 发出调用的时机和符合条件的工具范围。
+- **符合条件的调用范围有限。** 读取、搜索和前台只读 shell 命令可提前启动。Agent、需要审批的获取工具、会写入的命令和后台命令等到批次执行。
 - **丢弃结果可能影响后续调用。** 完整的 `read_file` 在结果进入历史前就会更新文件读取缓存。结果被丢弃后，再读同一文件可能返回 `file_unchanged`，指向模型从未见过的正文，后续编辑也可能通过先读检查。执行还可能留下工具调用日志。
 
 评估中的三个决策点，按后续 issue 的做法答复如下：
@@ -53,10 +53,10 @@ main 把一个模型轮跑完、收集其工具调用，然后作为一批执行
 
 **哪些调用提前启动。** Headless 通过 `--max-tool-calls` 或 `model.maxToolCalls` 配置有限预算时走正常批处理。预算限制实际执行次数，事后丢弃结果无法挽回超额执行。符合条件的运行按流的顺序派发回复开头的调用，遇到第一个不符合条件的调用就停止，以免后续读取越过可能写入的调用。每个提前启动的调用都须满足以下条件。
 
-- 只读：读取、搜索或获取类工具，或者通过 scheduler 只读检查的 shell 命令；agent 虽然会被 scheduler 并行运行，但不在此列；
-- 工具的默认权限和权限规则不经询问即允许它；这项检查不调用任何模型；
-- 没有注册任何工具事件的 hook（PreToolUse、PostToolUse、PostToolUseFailure、PostToolBatch、PermissionRequest），也没有 Mod 的工具检查，因为它们可能询问、拒绝或替换调用的输入，而且触发时外部可见；
-- 不是重放，也不是重复的 id。
+- 执行读取、搜索或获取，或运行通过 scheduler 只读检查的前台 shell 命令。后台 shell 调用（`is_background: true`）会注册任务、将输出写入磁盘，并使用独立于本次尝试的 signal。Agent 调用也等到批次执行。
+- 通过入口原有的执行准入检查，包括 AgentCore 的工具声明和执行白名单检查。Scheduler 的完整权限判断必须允许直接执行，无需确认或调用模型。凡是无法在本地确定可直接执行的调用，都留给批处理，包括 `AUTO` 模式下因 `permissions.autoMode.classifyAllShell` 而必须交给分类器的 shell 调用。
+- 没有注册任何工具事件的 hook（PreToolUse、PostToolUse、PostToolUseFailure、PostToolBatch、PermissionRequest），也没有 Mod 的工具检查。它们可能询问、拒绝或替换调用的输入，且触发时外部可见。
+- 调用 ID 在本次尝试中首次出现，且调用通过现有的重放检查。
 
 **由工具批取用结果。** 执行器适配器在符合条件的调用到达时启动它，并暂存结果和输出。轮次结束后，工具批继续负责去重和 `selectCalls`。在正常的启动环节，按批次顺序对选中的调用各执行一次 `beforeToolLaunch`，包括已经提前启动的调用。适配器在此处交付提前执行的结果，必要时等待完成，其余调用照常运行。工具批跳过调用时，例如 `enter_plan_mode` 的同批调用、被 `structured_output` 排除的调用，或宿主拒绝启动的调用，丢弃提前结果并采用正常的批处理结果。批次按原有顺序通过 `onToolResult` 交付接纳的结果。已接纳调用的入口通知和暂存输出按正常批处理阶段发出。被丢弃的调用仍可能留下执行日志。
 
@@ -68,7 +68,7 @@ main 把一个模型轮跑完、收集其工具调用，然后作为一批执行
 
 **入口。** 内核在轮次开始前创建 headless 的默认执行器，headless 可以基于它接入。AgentCore 也在轮次开始前提供执行器。启用前，执行器须改用传入的尝试 signal，并将直接发布的 `TOOL_CALL` 和 `TOOL_RESULT` 事件留到批次接纳调用后再发。这两个事件会进入 AgentCore 的会话记录。Ink TUI 和 OpenTUI 在 `onRoundEnd` 中交出 scheduler，ACP 分开运行模型轮和工具批。这些入口须先能在轮次开始时提供执行器。
 
-**设置与验收测试。** `experimental.streamingToolDispatch` 默认关闭，只在内核上读取（`experimental.eventBusAgentLoop`）。对照开关两种状态，验证符合条件的调用前缀、启动钩子的调用次数和结果顺序。覆盖 headless 的有限预算（含零）、完整读取结果被丢弃后再次读取同一文件，以及调用被跳过时 AgentCore 会话记录的一致性。验证重试复用尚在执行的调用 ID、有提前调用在执行时中止，以及运行 signal 尚未中止、执行器忽略取消时的请求抛错。检查原始错误仍可返回，且清理在截止时间内完成。
+**设置与验收测试。** `experimental.streamingToolDispatch` 默认关闭，只在内核上读取（`experimental.eventBusAgentLoop`）。对照开关两种状态，验证符合条件的调用前缀、启动钩子的调用次数和结果顺序。验证只读后台 shell、`AUTO` 模式下须经分类的 shell，以及 AgentCore 未声明或禁止执行的工具都不会提前启动。覆盖 headless 的有限预算（含零）、完整读取结果被丢弃后再次读取同一文件，以及调用被跳过时 AgentCore 会话记录的一致性。验证重试复用尚在执行的调用 ID、有提前调用在执行时中止，以及运行 signal 尚未中止、执行器忽略取消时的请求抛错。检查原始错误仍可返回，且清理在截止时间内完成。
 
 ## 2026-11-11 的建议
 
