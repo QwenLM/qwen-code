@@ -222,6 +222,43 @@ it('exports native Skill archive contracts without widening legacy runtime sourc
   >().toEqualTypeOf<{ type: 'zip-file'; path: string; sha256?: string }>();
 });
 
+describe('memory import public types', () => {
+  it('exports the complete wire contract through both entries', () => {
+    expectTypeOf<Public.DaemonMemoryImportScope>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportScope>();
+    expectTypeOf<Public.DaemonMemoryImportSourceFile>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportSourceFile>();
+    expectTypeOf<Public.DaemonMemoryImportSource>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportSource>();
+    expectTypeOf<Public.DaemonMemoryImportSection>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportSection>();
+    expectTypeOf<Public.DaemonMemoryImportEstimate>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportEstimate>();
+    expectTypeOf<Public.DaemonMemoryImportPreview>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportPreview>();
+    expectTypeOf<Public.DaemonMemoryImportSelection>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportSelection>();
+    expectTypeOf<Public.DaemonMemoryImportRequest>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportRequest>();
+    expectTypeOf<Public.DaemonMemoryImportItemResult>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportItemResult>();
+    expectTypeOf<Public.DaemonMemoryImportResult>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportResult>();
+    expectTypeOf<Public.DaemonMemoryImportTask>().toEqualTypeOf<DaemonPublic.DaemonMemoryImportTask>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['previewMemoryImport']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportPreview>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['submitMemoryImport']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportTask>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['listMemoryImports']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportTask[]>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['getMemoryImport']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportTask>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['getMemoryImportSource']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportSection>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['cancelMemoryImport']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportTask>>();
+    expectTypeOf<
+      Public.WorkspaceDaemonClient['retryMemoryImport']
+    >().returns.toEqualTypeOf<Promise<Public.DaemonMemoryImportTask>>();
+  });
+});
+
 describe('resource-link public surface', () => {
   it('keeps the ACP discriminator and nullable metadata in the daemon API', () => {
     const resourceLink: DaemonResourceLink = {

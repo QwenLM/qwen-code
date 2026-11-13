@@ -147,6 +147,8 @@
     "pre-commit": "node scripts/pre-commit.js"
   },
   "overrides": {
+    "glob@10 || 13": "14.0.6",
+    "minimatch@9 || 10": "11.0.8",
     "qs": "6.17.1",
     "fast-uri": "3.1.9",
     "ip-address": "10.7.4",
@@ -214,7 +216,7 @@
     "eslint-plugin-license-header": "^0.8.0",
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^5.2.0",
-    "glob": "^10.5.0",
+    "glob": "^14.0.6",
     "globals": "^16.0.0",
     "husky": "^9.1.7",
     "jsdom": "^26.1.0",
