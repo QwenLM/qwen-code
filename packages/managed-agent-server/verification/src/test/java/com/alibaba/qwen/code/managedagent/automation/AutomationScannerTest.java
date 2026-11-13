@@ -180,6 +180,34 @@ class AutomationScannerTest {
         return ledger.findOccurrence(tenant, automationId, key).orElseThrow();
     }
 
+    // The fixed-interval /loop entry path: the internal automations:create
+    // route delegates to this create, which mirrors the definition into the
+    // scanner's index. The witness is that a tool-created definition fires at
+    // its next due slot, and that the mirror — not the journal — is what the
+    // scanner discovers: a definition with no mirror row never fires.
+    @Test
+    void aToolCreatedDefinitionIsMirroredAndFiresAtItsNextDueSlot() {
+        PublicAutomation automation = service.create(tenant, ACTOR,
+                "key-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true,
+                        null)).body();
+        assertThat(ledger.findSchedule(tenant, automation.id())).isPresent();
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(occurrence(automation.id(), "schedule:2026-06-01T10:01:00Z")
+                .outcome()).isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(fake.fires()).isEqualTo(1);
+
+        // Removing the mirror row (a journal-only definition) makes the
+        // definition undiscoverable: the next due slot fires nothing.
+        jdbc.update("DELETE FROM ma_schedule WHERE tenant_id=? AND schedule_id=?",
+                tenant, automation.id());
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        assertThat(fake.fires()).isEqualTo(1);
+    }
+
     @Test
     void aGatedDefinitionFiresOnlyWhenItsProbePrints() {
         PublicAutomation automation = defineGated("./probe.sh --gate");
