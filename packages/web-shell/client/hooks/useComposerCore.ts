@@ -5302,7 +5302,7 @@ export function useComposerCore(
     (match: string) => {
       if (
         disabledRef.current ||
-      submitDisabledRef.current ||
+        submitDisabledRef.current ||
         activeDraftAttachmentRestoreRef.current !== null ||
         (sharedDraftRef.current?.session.pendingBatches ??
           imageIngestionLaneRef.current.pendingBatches) > 0 ||
