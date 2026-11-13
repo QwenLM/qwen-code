@@ -195,6 +195,10 @@ export function normalize(model: string): string {
   // remove trailing build / date / revision suffixes:
   // - dates (e.g., -20250219), -v1, version numbers, 'latest', 'preview' etc.
   s = s.replace(/-preview/g, '');
+  // DeepSeek V3.x names its minor version with a dot (`DeepSeek-V3.1`), which
+  // the suffix strip below removes along with the generation, dropping the id
+  // onto the generic `deepseek` row. Fold it to the catalog's dashed key.
+  s = s.replace(/^(deepseek-v3)\.(\d+)/, '$1-$2');
   // Special handling for model names that include date/version as part of the model identifier
   // - Qwen models: qwen-plus-latest, qwen-flash-latest, qwen-vl-max-latest
   // - Kimi models: kimi-k2-0905, kimi-k2-0711, etc. (keep date for version distinction)

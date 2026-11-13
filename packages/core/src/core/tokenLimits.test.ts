@@ -100,7 +100,7 @@ describe('normalize', () => {
     expect(normalize('qwen3-coder-7b-4bit')).toBe('qwen3-coder-7b');
     expect(normalize('llama-4-scout-int8')).toBe('llama-4-scout');
     expect(normalize('mistral-large-2-bf16')).toBe('mistral-large-2');
-    expect(normalize('deepseek-v3.1-q4')).toBe('deepseek-v3.1');
+    expect(normalize('deepseek-v3.1-q4')).toBe('deepseek-v3-1');
     expect(normalize('qwen2.5-quantized')).toBe('qwen2.5');
   });
 
@@ -138,7 +138,7 @@ describe('normalize', () => {
 
   it('should remove literal "-latest" "-exp" suffixes', () => {
     expect(normalize('gpt-4.1-latest')).toBe('gpt-4.1');
-    expect(normalize('deepseek-v3.2-exp')).toBe('deepseek-v3.2');
+    expect(normalize('deepseek-v3.2-exp')).toBe('deepseek-v3-2');
   });
 
   it('should remove suffix version numbers with "v" prefix', () => {
@@ -149,6 +149,14 @@ describe('normalize', () => {
   it('should keep the DeepSeek V4 generation suffix the limit table keys on', () => {
     expect(normalize('deepseek-v4')).toBe('deepseek-v4');
     expect(normalize('deepseek-v4.1')).toBe('deepseek-v4.1');
+  });
+
+  it('should fold the DeepSeek V3 minor version onto the catalog key', () => {
+    expect(normalize('deepseek-v3.1')).toBe('deepseek-v3-1');
+    expect(normalize('deepseek-ai/DeepSeek-V3.1')).toBe('deepseek-v3-1');
+    expect(normalize('deepseek-v3.1-terminus')).toBe('deepseek-v3-1-terminus');
+    expect(normalize('deepseek-v3.2')).toBe('deepseek-v3-2');
+    expect(normalize('deepseek-v3')).toBe('deepseek');
   });
 
   it('should remove suffix version numbers w/o "v" prefix only if they are preceded by another dash', () => {
