@@ -437,6 +437,12 @@ describe('normalize', () => {
     expect(plain.systemPayload.uiEvent['raw_content_length']).toBe(
       launchText(99).length,
     );
+    expect(plain.systemPayload.uiEvent['raw_estimated_tokens']).toBe(
+      Math.ceil(launchText(99).length / 4),
+    );
+    expect(plain.systemPayload.uiEvent['processed_estimated_tokens']).toBe(
+      Math.ceil((launchText(99).length + 64) / 4),
+    );
   });
 });
 
@@ -1163,9 +1169,7 @@ describeTui(SUITE, () => {
                 fakeToolCall(
                   'run_shell_command',
                   {
-                    // A generous bound: the prompt turn's duration is
-                    // unbounded under CI load, and the job must outlast it.
-                    command: 'sleep 10; echo job done',
+                    command: 'sleep 3; echo job done',
                     description: 'Run the job',
                     is_background: true,
                   },
@@ -1325,6 +1329,18 @@ describeTui(SUITE, () => {
   const scenarios = allScenarios.filter(
     (scenario) => renderer === 'ink' || !scenario.laterTurns,
   );
+
+  // The byte-count case pins the constant; this pins the scenario's use of
+  // it, which the parity run alone only notices when the two pids differ in
+  // width.
+  it('uses the normalizer the byte-count case pins', () => {
+    const scenario = allScenarios.find(
+      (candidate) =>
+        candidate.name ===
+        'a background shell whose result starts a notification turn',
+    );
+    expect(scenario?.volatile).toBe(BACKGROUND_SHELL_VOLATILE);
+  });
 
   it.each(scenarios)('$name', PARITY_CASE_OPTIONS, async (scenario) => {
     const current = await run(scenario, false);
