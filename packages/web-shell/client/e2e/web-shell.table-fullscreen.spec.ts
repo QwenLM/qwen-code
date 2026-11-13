@@ -36,18 +36,19 @@ async function openFixture(
   page: Page,
   testInfo: TestInfo,
   options: {
-    narrow?: boolean;
+    width?: number;
     shadow?: boolean;
     theme?: 'light' | 'dark';
+    language?: 'en' | 'zh-CN';
+    markdown?: string;
   } = {},
 ) {
-  await page.setViewportSize(
-    options.narrow ? { width: 390, height: 844 } : { width: 1280, height: 800 },
-  );
+  const { width = 1280, language = 'en' } = options;
+  await page.setViewportSize({ width, height: width < 768 ? 844 : 800 });
   const scenario = createWebShellDaemonScenario({
     events: [
       userTextEvent('Show a wide and tall table.', { id: 1 }),
-      assistantTextEvent(fixture, { id: 2 }),
+      assistantTextEvent(options.markdown ?? fixture, { id: 2 }),
       turnCompleteEvent('prompt-table', { id: 3 }),
     ],
   });
@@ -60,7 +61,7 @@ async function openFixture(
     );
   } else {
     await page.goto(
-      `/session/${encodeURIComponent(scenario.sessionId)}?theme=${options.theme ?? 'dark'}&lang=en`,
+      `/session/${encodeURIComponent(scenario.sessionId)}?theme=${options.theme ?? 'dark'}&lang=${language}`,
     );
   }
   await daemon.sse.waitForConnection(scenario.sessionId);
@@ -73,14 +74,13 @@ async function openFixture(
   await expect(
     page.getByRole('heading', { name: 'Fullscreen table acceptance' }),
   ).toBeVisible();
-  await expect(
-    page
-      .locator('[data-selection-copy-table]')
-      .getByRole('button', { name: 'Copy', exact: true }),
-  ).toBeVisible();
+  const copy = page.locator('[data-selection-copy-table]').getByRole('button', {
+    name: language === 'zh-CN' ? '复制' : 'Copy',
+    exact: true,
+  });
+  await expect(copy).toBeVisible();
   await page
-    .locator('[data-selection-copy-table]')
-    .getByRole('button', { name: 'Copy', exact: true })
+    .locator('[data-selection-copy-table] > [data-selection-copy-ignore]')
     .scrollIntoViewIfNeeded();
   return { daemon, scenario };
 }
@@ -338,6 +338,166 @@ test.describe('enhanced table fullscreen', () => {
     ).toEqual([]);
   });
 
+  test('@smoke keeps the inline toolbar from overlapping after selecting a cell in a narrow window', async ({
+    page,
+  }, testInfo) => {
+    await openFixture(page, testInfo, {
+      width: 620,
+      language: 'zh-CN',
+      theme: 'light',
+    });
+    const table = page.locator('[data-selection-copy-table]');
+    const rowCount = table.getByText('共80行', { exact: true });
+    const copySelection = table.getByRole('button', { name: '复制文本' });
+    const density = table.getByRole('button', { name: '表格密度' });
+    const copyTable = table.getByRole('button', { name: '复制', exact: true });
+    const rowCountBefore = (await rowCount.boundingBox())!;
+    await expect(copySelection).toHaveCount(0);
+
+    await table.getByRole('cell', { name: 'Item 01', exact: true }).click();
+
+    await expect(copySelection).toBeVisible();
+    const selectionBox = (await copySelection.boundingBox())!;
+    const densityBox = (await density.boundingBox())!;
+    expect(selectionBox.x + selectionBox.width).toBeLessThanOrEqual(
+      densityBox.x,
+    );
+    expect((await rowCount.boundingBox())!.height).toBe(rowCountBefore.height);
+    await expect(copyTable).toBeInViewport({ ratio: 1 });
+  });
+
+  test('@smoke keeps English numeric selection actions visible in a narrow window', async ({
+    page,
+  }, testInfo) => {
+    await openFixture(page, testInfo, { width: 570, theme: 'light' });
+    const table = page.locator('[data-selection-copy-table]');
+    const toolbar = table.locator(':scope > [data-selection-copy-ignore]');
+    const statistics = toolbar.getByRole('group', {
+      name: 'Numeric selection statistics',
+      includeHidden: true,
+    });
+
+    await table.getByRole('cell', { name: '80', exact: true }).click();
+
+    for (const width of [570, 600]) {
+      await test.step(`check the toolbar at ${width} px`, async () => {
+        await page.setViewportSize({ width, height: 844 });
+        await toolbar.scrollIntoViewIfNeeded();
+        await expect(
+          toolbar.getByText('Selected 1', { exact: true }),
+        ).toBeInViewport({ ratio: 1 });
+        await expect(
+          toolbar.getByText('Non-empty 1', { exact: true }),
+        ).toBeHidden();
+        await expect(
+          toolbar.getByText('Numeric 1', { exact: true }),
+        ).toBeHidden();
+        await expect(
+          toolbar.getByRole('button', { name: 'Copy text', exact: true }),
+        ).toBeInViewport({ ratio: 1 });
+        await expect(
+          toolbar.getByRole('button', { name: 'Copy', exact: true }),
+        ).toBeInViewport({ ratio: 1 });
+        expect(
+          await toolbar.evaluate((el) => el.scrollWidth - el.clientWidth),
+        ).toBe(0);
+        await expect(statistics).toHaveCount(1);
+        await expect(statistics).toBeHidden();
+      });
+    }
+  });
+
+  test('@smoke keeps the English toolbar actions in view without a selection', async ({
+    page,
+  }, testInfo) => {
+    await openFixture(page, testInfo, { width: 1010, theme: 'light' });
+    const table = page.locator('[data-selection-copy-table]');
+    const toolbar = table.locator(':scope > [data-selection-copy-ignore]');
+
+    await expect(
+      toolbar.getByRole('button', { name: 'Copy', exact: true }),
+    ).toBeInViewport({ ratio: 1 });
+    expect(
+      await toolbar.evaluate((el) => el.scrollWidth - el.clientWidth),
+    ).toBe(0);
+  });
+
+  test('@smoke compacts the mid-width toolbar only while cells are selected', async ({
+    page,
+  }, testInfo) => {
+    await openFixture(page, testInfo, { width: 700, theme: 'light' });
+    const table = page.locator('[data-selection-copy-table]');
+    const toolbar = table.locator(':scope > [data-selection-copy-ignore]');
+    const copy = toolbar.getByRole('button', { name: 'Copy', exact: true });
+    const copyLabel = copy.getByText('Copy', { exact: true });
+    await expect(copyLabel).toBeVisible();
+
+    await table.getByRole('cell', { name: '80', exact: true }).click();
+
+    await expect(copyLabel).toBeHidden();
+    await expect(copy).toBeInViewport({ ratio: 1 });
+    expect(
+      await toolbar.evaluate((el) => el.scrollWidth - el.clientWidth),
+    ).toBe(0);
+
+    await page
+      .getByRole('heading', { name: 'Fullscreen table acceptance' })
+      .click();
+    await expect(copyLabel).toBeVisible();
+  });
+
+  test('@smoke keeps every toolbar action in view after selecting a numeric cell at desktop width', async ({
+    page,
+  }, testInfo) => {
+    const longScore = '1234567890.123456';
+    await openFixture(page, testInfo, {
+      width: 1280,
+      theme: 'light',
+      markdown: fixture.replace(' | 79 | ', ` | ${longScore} | `),
+    });
+    const table = page.locator('[data-selection-copy-table]');
+    const statistics = table.getByRole('group', {
+      name: 'Numeric selection statistics',
+    });
+    const expectActionsInView = async () => {
+      await expect(table.getByText('Numeric 1', { exact: true })).toBeVisible();
+      for (const name of [
+        'Copy text',
+        'Table density',
+        'Custom columns',
+        'Expand text',
+        'Copy',
+      ]) {
+        await expect(
+          table.getByRole('button', { name, exact: true }),
+        ).toBeInViewport({ ratio: 1 });
+      }
+    };
+
+    await table.getByRole('cell', { name: '80', exact: true }).click();
+    await expect(
+      statistics.getByText('Sum 80', { exact: true }),
+    ).toBeInViewport({ ratio: 1 });
+    await expectActionsInView();
+
+    await table.getByRole('cell', { name: longScore, exact: true }).click();
+    await expectActionsInView();
+    await statistics.press('ArrowRight');
+    await expect
+      .poll(() => statistics.evaluate((element) => element.scrollLeft))
+      .toBeGreaterThan(0);
+    await expectActionsInView();
+
+    await table
+      .getByRole('button', { name: 'Fullscreen', exact: true })
+      .click();
+    await expect(
+      page.getByRole('dialog', { name: 'Fullscreen' }).getByText('Copy', {
+        exact: true,
+      }),
+    ).toBeVisible();
+  });
+
   test('keeps narrow-screen controls and Shadow DOM portals usable', async ({
     page,
   }, testInfo) => {
@@ -345,7 +505,7 @@ test.describe('enhanced table fullscreen', () => {
       process.env['TABLE_FULLSCREEN_BUILT'] === '1',
       'The production bundle does not include test-only host harnesses.',
     );
-    await openFixture(page, testInfo, { narrow: true, shadow: true });
+    await openFixture(page, testInfo, { width: 390, shadow: true });
     const copy = page
       .locator('[data-selection-copy-table]')
       .getByRole('button', { name: 'Copy', exact: true });

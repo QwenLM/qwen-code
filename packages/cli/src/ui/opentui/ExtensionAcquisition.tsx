@@ -16,6 +16,7 @@ import type { ClaudeMarketplaceConfig } from '@qwen-code/qwen-code-core/extensio
 import { redactUrlCredentials } from '@qwen-code/qwen-code-core/extension/redaction.js';
 import { requestConsentOrFail } from '../../commands/extensions/consent.js';
 import { t } from '../../i18n/index.js';
+import { keyMatchers, Command } from '../keyMatchers.js';
 import { getErrorMessage } from '../../utils/errors.js';
 import {
   sanitizeTerminalLine,
@@ -322,6 +323,11 @@ export function ExtensionSettingInput({
         settled.current = true;
         permission.resolve(state.current.text);
       }
+    } else if (
+      !permission.setting.sensitive &&
+      keyMatchers[Command.CLEAR_INPUT](key)
+    ) {
+      update(endOfLine(''));
     } else if (key.ctrl && key.name === 'u') update(endOfLine(''));
     else {
       const next = applyLineKey(state.current, key);
