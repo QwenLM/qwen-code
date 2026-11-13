@@ -510,7 +510,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1, hosted-workspace-files/3 or hosted-workspace-shell/1. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. Classifier auto requires auto-approval/1. Optional permissionRules requires permission-rules/1 and an idle Session. Omitted rules preserve the current selection; three empty arrays clear it. Mode, Plan and rules share one approval revision and receipt. Persisted rules are also snapshotted at Turn admission; replay preserves the original policy. Empty rules are omitted from responses and Harness payloads. */
+        /** @description Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1, hosted-workspace-files/3, hosted-workspace-shell/1 or hosted-workspace-shell/3. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. Classifier auto requires auto-approval/1. Optional permissionRules requires permission-rules/1 and an idle Session. Omitted rules preserve the current selection; three empty arrays clear it. Mode, Plan and rules share one approval revision and receipt. Persisted rules are also snapshotted at Turn admission; replay preserves the original policy. Empty rules are omitted from responses and Harness payloads. */
         post: operations["changeWebShellSessionApproval"];
         delete?: never;
         options?: never;
@@ -1385,6 +1385,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/client-files/register": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Registers the calling actor's client directory grant into the Session and dispatches the one-time relay credential to the Harness server-side for the Runtime MCP leg; the credential is never part of the browser response. Requires the deployment opt-in and current execution authority on the bound ACTIVE Workspace. Registration is ephemeral session state: the bounded TTL queue holds the size-bounded JSON-RPC bodies (which may include file content) only until they settle or expire, no credential or directory path is persisted, and no file content enters the journal or public events beyond the normal durable tool-result policy. */
+        post: operations["registerWebShellClientFiles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/client-files/unregister": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Closes the calling actor's registration (or an operator's teardown of it) and fails every queued request with the structured offline error. */
+        post: operations["unregisterWebShellClientFiles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/client-files/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Reads the Session's binding summary without the credential; an absent binding answers an empty 200. */
+        post: operations["queryWebShellClientFilesStatus"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/client-files/requests/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description The browser downlink: SSE events named request carrying opaque JSON-RPC payloads for the registering actor's own active binding generation. Each poll revalidates the read grant. */
+        post: operations["streamWebShellClientFilesRequests"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/client-files/responses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description The browser uplink: settles one queued JSON-RPC request with either a response payload or a structured error code, never both. */
+        post: operations["respondWebShellClientFiles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/session-side-queries/create": {
         parameters: {
             query?: never;
@@ -1787,7 +1872,7 @@ export interface components {
             foregroundShell?: boolean;
             /** @description The caller may change the Session model selection for later Turns using the server model catalog, including while a Turn or approval is active. Missing means unsupported; authorization, recovery and revision admission still apply. */
             modelChange?: boolean;
-            /** @description The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1, hosted-workspace-files/3 or hosted-workspace-shell/1 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false. */
+            /** @description The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1, hosted-workspace-files/3, hosted-workspace-shell/1 or hosted-workspace-shell/3 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false. */
             approvalModeChange?: boolean;
             /** @description Optional deployment capability; missing means false. */
             inputAttachments?: boolean;
@@ -1815,6 +1900,11 @@ export interface components {
             btw?: boolean;
             /** @default false */
             recap?: boolean;
+            /**
+             * @description Browser local-files registration is available for this Session: the Session is bound to a Workspace, the caller holds current execution authority, the deployment enables the client-files relay and the Harness supports it. A Workspace-less Session never advertises this capability. Registration admission still checks the actor grant and idle state separately.
+             * @default false
+             */
+            clientFiles?: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];
@@ -3789,6 +3879,71 @@ export interface components {
             cursor?: string;
             limit?: number;
             requestId?: string;
+        };
+        WebShellClientFilesRegisterRequest: {
+            sessionId: string;
+            /** @description Browser-generated identity correlating this registration's downlink and teardown with its own binding. */
+            connectionId: string;
+        };
+        WebShellClientFilesUnregisterRequest: {
+            sessionId: string;
+            /** @description The unregistering bridge's owned registration identity; a stale teardown of a replaced binding is a no-op. */
+            connectionId?: string;
+        };
+        WebShellClientFilesStatusRequest: {
+            sessionId: string;
+            /** @description The caller's own registration identity. The response echoes the live generation and identity only when this matches the binding; a merely readable session learns that a binding exists, not how to attach to it. */
+            connectionId?: string;
+        };
+        WebShellClientFilesStreamRequest: {
+            sessionId: string;
+            generation: number;
+            /** @description The downlink's owned registration identity; a stream omitting it or naming another tab's binding is refused. */
+            connectionId: string;
+        };
+        WebShellClientFilesRespondRequest: {
+            sessionId: string;
+            generation: number;
+            /** @description The settling client's owned registration identity; a response omitting it or naming another tab's binding is refused, so a second client of the same actor cannot answer this registration's queued requests. */
+            connectionId: string;
+            /** @description The JSON-RPC request identity being settled; distinct from the HTTP request id echo field. */
+            rpcRequestId: string;
+            responseJson?: string;
+            errorCode?: string;
+        };
+        /** @description The browser-facing registration ack. The relay credential is dispatched server-to-harness and is never part of this response; the bridge correlates on generation, toolCount and connectionId. */
+        WebShellClientFilesRegistration: {
+            serverId: string;
+            generation: number;
+            /**
+             * Format: int64
+             * @description Binding deadline in Unix epoch milliseconds.
+             */
+            expiresAt: number;
+            /** @description Number of browser tools the Harness discovered during registration. */
+            toolCount: number;
+            /** @description Echo of the registration identity the caller supplied, for downlink correlation. */
+            connectionId: string;
+        };
+        /** @description The binding summary. Every field is optional because an absent binding answers 200 with an empty body, which a client reads as an empty object. The generation and connectionId are the fence for the downlink and settlement, so they are echoed only when the request's connectionId proves the caller owns the binding (owned=true); otherwise they are 0 / absent and only the non-secret summary is returned. */
+        WebShellClientFilesStatus: {
+            serverId?: string;
+            /** @description The binding generation, echoed only when owned; 0 otherwise. */
+            generation?: number;
+            /** @enum {unknown} */
+            state?: "active" | "closed";
+            /**
+             * Format: int64
+             * @description Binding deadline in Unix epoch milliseconds.
+             */
+            expiresAt?: number;
+            /** @description The binding's registration identity, echoed only when the request proved it (owned=true); absent otherwise. */
+            connectionId?: string;
+            /** @description Whether the request's connectionId matched the live binding, gating the generation/connectionId echo. */
+            owned?: boolean;
+        };
+        WebShellClientFilesRespondReceipt: {
+            settled: boolean;
         };
     };
     responses: {
@@ -6636,6 +6791,153 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
             413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    registerWebShellClientFiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellClientFilesRegisterRequest"];
+            };
+        };
+        responses: {
+            /** @description The registration ack (generation, toolCount, connectionId); the relay credential stays on the server-to-harness path. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellClientFilesRegistration"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    unregisterWebShellClientFiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellClientFilesUnregisterRequest"];
+            };
+        };
+        responses: {
+            /** @description The closed binding summary. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellClientFilesStatus"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    queryWebShellClientFilesStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellClientFilesStatusRequest"];
+            };
+        };
+        responses: {
+            /** @description The binding summary, or an empty body when nothing is registered. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellClientFilesStatus"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    streamWebShellClientFilesRequests: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellClientFilesStreamRequest"];
+            };
+        };
+        responses: {
+            /** @description Queued JSON-RPC requests as SSE events. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    respondWebShellClientFiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellClientFilesRespondRequest"];
+            };
+        };
+        responses: {
+            /** @description The request was settled. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellClientFilesRespondReceipt"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
         };
     };
     createWebShellSessionSideQuery: {

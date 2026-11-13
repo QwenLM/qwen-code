@@ -4602,7 +4602,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Run the shared agent loop on the event-bus architecture (experimental). Applies to headless sessions (`-p` and stream-json) when experimental.unifiedAgentLoop is also enabled; other surfaces keep their current loop internals. The QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP environment variable overrides this setting: `1` enables it, `0` disables it, and a comma-separated list such as `headless=0` forces individual surfaces. Only `headless` is wired today, so other surface names are accepted but have no effect until their kernel step lands. A bare `1`/`0` is only recognized as the whole value, not inside a list; surfaces the list does not name fall back to this setting.',
+          'Run the shared agent loop on the event-bus architecture (experimental). Applies to headless sessions (`-p` and stream-json), OpenTUI, and subagents when experimental.unifiedAgentLoop is also enabled; other surfaces keep their current loop internals. The QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP environment variable overrides this setting: `1` enables it, `0` disables it, and a comma-separated list such as `headless=0` forces individual surfaces. Only those wired surfaces take effect today; a bare `1`/`0` is only recognized as the whole value, not inside a list, and surfaces the list does not name fall back to this setting.',
         showInDialog: true,
       },
       agentCollaboration: {

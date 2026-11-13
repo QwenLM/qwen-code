@@ -2,7 +2,7 @@
 
 [English](2026-11-11-event-bus-agent-loop.md) | [简体中文](2026-11-11-event-bus-agent-loop.zh-CN.md)
 
-- **状态**：PR 1–3 已合入（#16935 原语、#16938 handler、#16949 流式评估）；PR 4（headless opt-in 设置）已在 #16994 合入；不改变任何 surface 的默认行为。
+- **状态**：PR 1–3 已合入（#16935 原语、#16938 handler、#16949 流式评估）；PR 4（headless opt-in 设置）已在 #16994 合入；从统一 loop 的 PR 5c 起，同一设置下 AgentCore 的轮次也跑在内核上；不改变任何 surface 的默认行为。
 - **日期**：2026-11-11，基于 `origin/main` `da270e434957`。
 - **关联**：
   - [Unified agent loop](2026-10-23-unified-agent-loop.zh-CN.md) —— 本设计对其做内部架构升级的已批准设计；跟踪 issue #15327，#15343 批准，headless 已在 #15369 合入，ACP 模型轮已在 #15509 合入；
@@ -155,7 +155,7 @@ handler 按今天的方式读取 run 的 `signal` 与 `toolSignal` 并传给 `ru
 1. **PR 1 —— 原语。** `event-bus/{bus,events,state}.ts` + 单元测试（移植 preview 的 `bus.test.ts`；新增串行投递、跨 run 隔离、失败重发布、迟到轮次测试）。尚无消费方；零行为变化。本设计文档随此 PR 落地。`runtime.ts`（handler 接线）与 `handler-support.ts` 随 PR 2 的 handler 一起到来。
 2. **PR 2 —— opt-in 标志后的 handler。** 把 `runAgentLoop` 内部重新表达为 Conversation/Llm/Tool handler 加 host 适配器，由新增的 `AgentLoopOptions.useEventBus` 标志选择（默认关，因此在统一循环内过程式路径仍是默认，直到 parity 被证明）。`runModelRound`/`runToolBatch` 保留导出与签名（ACP #15509 依赖它们），并被 handler 原样复用。一个等价测试对脚本化场景同时跑两条路径，断言结果与 host 回调顺序完全一致；headless parity 套件与 ACP 轮测试是验收门。
 3. **PR 3 —— 流式派发评估（可选，独立门控）。** preview 在流仍在运行时执行 `tool_use` 块。main 在轮结束后跑批次，且审批按批排序；流式派发改变审批时机与输出交错。此切片先写下 parity 差异并取得明确决定；架构移植本身不依赖它。
-4. **PR 4 —— headless opt-in。** 新增 `experimental.eventBusAgentLoop` 设置（环境变量覆盖 `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP`，由 `Config.isEventBusAgentLoopEnabled(surface)` 读取），让 headless 的共享循环路径传入 `useEventBus`。该环境变量与 unified 一样按入口强制开关——`1` 开、`0` 关、或 `surface=0/1` 列表——但今天只接线了 `headless`。该标志只在完整共享循环运行处生效：headless 是今天唯一的 `runAgentLoop` 调用方，而 ACP、Ink TUI 与 OpenTUI 直接使用 `runModelRound`，不受影响。适配器经 `debugLogger` 记录一条 `[EVENT_BUS]` 执行标记，因此开启 `QWEN_DEBUG_LOG_FILE` 后，一次 run 走哪条路径可由调试日志证明而非假设。默认关；过程式路径仍是默认，且单独开启该标志（不开 `experimental.unifiedAgentLoop`）不改变任何行为。两个开关的按入口解析见 `2026-11-12-loop-rollout-switches.md`（#17045 B 块）。
+4. **PR 4 —— headless opt-in。** 新增 `experimental.eventBusAgentLoop` 设置（环境变量覆盖 `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP`，由 `Config.isEventBusAgentLoopEnabled(surface)` 读取），让共享循环路径传入 `useEventBus`。该环境变量与 unified 一样按入口强制开关——`1` 开、`0` 关、或 `surface=0/1` 列表。headless 最先接线；AgentCore 和 OpenTUI 在统一循环迁移的后续阶段接入。该标志只在完整共享循环运行处（`runAgentLoop`）生效；仍直接使用 `runModelRound` 的入口不受影响。适配器经 `debugLogger` 记录一条 `[EVENT_BUS]` 执行标记，因此开启 `QWEN_DEBUG_LOG_FILE` 后，一次 run 走哪条路径可由调试日志证明而非假设。默认关；过程式路径仍是默认，且单独开启该标志（不开 `experimental.unifiedAgentLoop`）不改变任何行为。两个开关的按入口解析见 `2026-11-12-loop-rollout-switches.md`（#17045 B 块）。
 5. **后续 —— surface 收敛**继续在 unified-agent-loop 计划下进行（TUI、OpenTUI、AgentCore、speculation、Hosted）。总线让循环级挂接（hooks、Mods、保护、录制）成为单点，这正是该计划的既定目标；这里不排任何 surface 工作。
 
 ## 测试

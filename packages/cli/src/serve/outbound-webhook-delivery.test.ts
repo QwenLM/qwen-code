@@ -30,9 +30,20 @@ afterEach(() => {
   resetHomeEnvBootstrapForTesting();
 });
 
-it('delivers authorized prompt and scheduled results to the configured webhook through the worker', async () => {
+it.each([
+  {
+    type: 'dingtalk-webhook',
+    url: 'https://oapi.dingtalk.com/robot/send?access_token=test-token',
+    response: '{"errcode":0}',
+  },
+  {
+    type: 'feishu-webhook',
+    url: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-token',
+    response: '{"code":0}',
+  },
+])('delivers authorized results through the $type worker', async (platform) => {
   const root = fs.realpathSync(
-    fs.mkdtempSync(path.join(os.tmpdir(), 'dingtalk-webhook-delivery-')),
+    fs.mkdtempSync(path.join(os.tmpdir(), `${platform.type}-delivery-`)),
   );
   const workspace = path.join(root, 'workspace');
   const qwenHome = path.join(root, 'home');
@@ -58,9 +69,8 @@ it('delivers authorized prompt and scheduled results to the configured webhook t
     JSON.stringify({
       channels: {
         reports: {
-          type: 'dingtalk-webhook',
-          webhookUrl:
-            'https://oapi.dingtalk.com/robot/send?access_token=test-token',
+          type: platform.type,
+          webhookUrl: platform.url,
         },
       },
     }),
@@ -77,7 +87,7 @@ it('delivers authorized prompt and scheduled results to the configured webhook t
         body: JSON.parse(Buffer.concat(chunks).toString('utf8')),
       });
       response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end('{"errcode":0}');
+      response.end(platform.response);
     });
   });
   let worker: ChannelDaemonWorkerHandle | undefined;
@@ -89,7 +99,7 @@ it('delivers authorized prompt and scheduled results to the configured webhook t
     const realFetch = globalThis.fetch;
     const transport = vi.fn<typeof fetch>((input, init) => {
       const url = new URL(String(input));
-      if (url.origin !== 'https://oapi.dingtalk.com') {
+      if (url.origin !== new URL(platform.url).origin) {
         throw new Error('Unexpected network request');
       }
       return realFetch(
@@ -204,8 +214,19 @@ it('delivers authorized prompt and scheduled results to the configured webhook t
         { title: 'Notification', text: 'Notification' },
       ].map((markdown) => ({
         method: 'POST',
-        url: '/robot/send?access_token=test-token',
-        body: { msgtype: 'markdown', markdown },
+        url: new URL(platform.url).pathname + new URL(platform.url).search,
+        body:
+          platform.type === 'dingtalk-webhook'
+            ? { msgtype: 'markdown', markdown }
+            : {
+                msg_type: 'interactive',
+                card: {
+                  schema: '2.0',
+                  body: {
+                    elements: [{ tag: 'markdown', content: markdown.text }],
+                  },
+                },
+              },
       })),
     );
   } finally {
