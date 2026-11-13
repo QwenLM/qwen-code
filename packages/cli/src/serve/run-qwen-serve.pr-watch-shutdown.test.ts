@@ -20,6 +20,7 @@ import type {
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
 import * as settingsModule from '../config/settings.js';
+import * as serverModule from './server.js';
 
 // The sibling run-qwen-serve.test.ts mocks the refresh chunk to throw for its
 // degradation cases, so the ordered-stop wiring is pinned here instead.
@@ -283,6 +284,35 @@ describe('runQwenServe PR-watch shutdown wiring', () => {
     // github channel this daemon was never asked to host; its host must not
     // widen the allowed set.
     expect(allowedHosts?.has('unselected.fixture.example.com')).toBe(false);
+
+    // Trust revoked after listen. This is the only reachable shape for the
+    // untrusted arm: the grouping itself rejects an untrusted owner, so a
+    // workspace that starts untrusted never produces a group at all. Here the
+    // groups are already computed, so the loop still visits this workspace and
+    // its settings must stop widening the daemon-wide allowlist.
+    const runtime = timerOptions?.workspaceRegistry
+      .listAll()
+      .find((candidate) => candidate.workspaceCwd === workspace);
+    expect(runtime).toBeDefined();
+    (runtime as { trusted: boolean }).trusted = false;
+    loadSettingsSpy.mockClear();
+    await vi.waitFor(
+      () => {
+        const revoked = timerOptions?.getPrWatchDeps?.()?.allowedHosts;
+        expect(revoked?.has('ghe.fixture.example.com')).toBe(false);
+      },
+      { timeout: 15_000 },
+    );
+    // Positive control: the loop still ran for this workspace, so the absence
+    // above is the gate rather than an empty group list.
+    const revokedCalls = loadSettingsSpy.mock.calls.filter(
+      ([cwd]) => cwd === workspace,
+    );
+    expect(revokedCalls.length).toBeGreaterThan(0);
+    for (const [, options] of revokedCalls) {
+      const opts = typeof options === 'object' ? options : undefined;
+      expect(opts?.skipWorkspaceSettings).toBe(true);
+    }
   });
 
   it('rebuilds the watch deps when a hosted channel changes, keeping the locks', async () => {
@@ -407,11 +437,119 @@ describe('runQwenServe PR-watch shutdown wiring', () => {
       { timeout: 15_000 },
     );
     expect(rebuilt).not.toBe(first);
+    // Replace, not accumulate: the channel that left the settings must leave
+    // the allowed set too. Accumulating is tempting precisely because `locks`
+    // IS carried over, and it would keep a decommissioned workspace's GHE host
+    // in the daemon-wide allowlist until restart.
+    expect(rebuilt?.allowedHosts.has('first.fixture.example.com')).toBe(false);
     // The rebuild must carry the registry over: a fresh one would hand the
     // observation and the drain different in-process locks for the same files
     // if a rebuild landed between their two reads.
     expect(rebuilt?.locks).toBe(first?.locks);
     const drainDeps = timerOptions?.getPrDrainDeps?.();
     expect(drainDeps?.locks).toBe(rebuilt?.locks);
+
+    // Down to no github channel at all: both fixture hosts must be gone, so the
+    // set shrinks back to github.com plus the gh hosts rather than ratcheting.
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({ channels: { telegram: { type: 'telegram' } } }),
+    );
+    await vi.waitFor(
+      () => {
+        const shrunk = timerOptions?.getPrWatchDeps?.();
+        expect(shrunk?.allowedHosts.has('second.fixture.example.com')).toBe(
+          false,
+        );
+        expect(shrunk?.allowedHosts.has('first.fixture.example.com')).toBe(
+          false,
+        );
+        expect(shrunk?.allowedHosts.has('github.com')).toBe(true);
+      },
+      { timeout: 15_000 },
+    );
+  });
+
+  it('installs prWatchDrainNow on the app and forwards to the timer', async () => {
+    // The link that turns a real resume into timer.drainNow. The route-side
+    // hook is pinned in the multi-workspace suite against a local it assigns
+    // itself; nothing there observes this installation, so dropping or renaming
+    // it would leave every resume answering 200 while the reader's `?.()`
+    // silently no-ops.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pr-watch-install-')),
+    );
+    const workspace = path.join(tmpDir, 'project');
+    fs.mkdirSync(workspace);
+    const drainNow = vi.fn(async () => {});
+    vi.spyOn(refreshModule, 'startSessionPrRefreshTimer').mockReturnValue({
+      dispose: vi.fn(),
+      stopWatch: vi.fn(async () => {}),
+      drainNow,
+    });
+    let app: { locals: Record<string, unknown> } | undefined;
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      const created = originalCreateServeApp(...args);
+      app = created as unknown as { locals: Record<string, unknown> };
+      return created;
+    });
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(
+      () => bridge() as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        maxSessions: 1,
+        token: 'secret-token',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+    await fetch(`${handle.url}/health`, {
+      headers: { authorization: 'Bearer secret-token' },
+    });
+    await expect(handle.runtimeReady).resolves.toBeUndefined();
+
+    type DrainNow = (cwd: string, sessionId?: string) => void;
+    let installed: DrainNow | undefined;
+    await vi.waitFor(
+      () => {
+        installed = app?.locals['prWatchDrainNow'] as DrainNow | undefined;
+        expect(installed).toBeTypeOf('function');
+      },
+      { timeout: 15_000 },
+    );
+
+    installed?.(workspace, 'session-install');
+    await vi.waitFor(() =>
+      expect(drainNow).toHaveBeenCalledWith(workspace, 'session-install'),
+    );
+
+    // A rejecting drain must be swallowed by the installer's own catch: the
+    // serve fast path installs no process-level unhandledRejection handler, so
+    // an escaping rejection would take the daemon down.
+    const escaped: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      escaped.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      drainNow.mockRejectedValueOnce(new Error('drain blew up'));
+      installed?.(workspace, 'session-reject');
+      for (let i = 0; i < 20; i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      expect(escaped).toEqual([]);
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled);
+    }
   });
 });

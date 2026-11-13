@@ -296,14 +296,16 @@ export function createPrWatchDeps(sources: PrWatchDepsSources): PrWatchDeps {
       const slash = identity.repo.indexOf('/');
       if (slash <= 0) return undefined;
       // The ledger keeps a non-default port on purpose — a GHE instance on
-      // :8443 serves its pages there — and sameRepository preserves it.
-      // identity.host comes from URL.hostname, which drops the port, so using
-      // it here would never match such a ledger and self-push suppression
-      // would silently fail. URL.host keeps a non-default port and omits the
-      // default one, which is the spelling the ledger normalizes to. A
+      // :8443 serves its pages there — and sameRepository preserves it, so the
+      // coordinate must come from URL.host (port kept, default omitted) rather
+      // than identity.host, which drops the port. It must also drop `www.` the
+      // way pullRequestKey does: both spellings are one watch identity, and
+      // normalizeGhHostForUrl folds `www.` only for github.com, so a GHE host
+      // spelled with it would otherwise never match the bare-host ledger.
+      // normalizeGhHostForUrl alone is therefore not enough here. A
       // non-undefined identity already proves the URL parsed.
       const coordinate = {
-        host: new URL(recipient.url).host,
+        host: new URL(recipient.url).host.replace(/^www\./, ''),
         owner: identity.repo.slice(0, slash),
         repo: identity.repo.slice(slash + 1),
       };

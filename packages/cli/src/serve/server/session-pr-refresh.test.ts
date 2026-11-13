@@ -2862,6 +2862,91 @@ describe('startSessionPrRefreshTimer', () => {
     }
   });
 
+  it('drainNow clears the resumed session Gone mark only when given its id', async () => {
+    // The reset this seam exists for. Without the clear, a session excluded by
+    // an earlier archive or worktree loss stays filtered out for the whole
+    // rejoin horizon even after the user resumes it.
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-gone-'),
+    );
+    const clock = Date.parse('2026-11-08T00:00:00.000Z');
+    const identity = { host: 'github.com', repo: 'o/r', number: 42 };
+    writePrWatchStateSync(watchDir, identity, {
+      pr: identity,
+      observedAt: new Date(clock).toISOString(),
+      state: 'open',
+      headSha: 'a'.repeat(40),
+      checks: 'passing',
+      pending: [
+        {
+          type: 'ci_failure',
+          key: 'k-drain-now-gone',
+          summary: 'CI failing',
+          detectedAt: new Date(clock).toISOString(),
+        },
+      ],
+    });
+    let live = false;
+    const wakeSession = vi.fn(async () => ({ kind: 'gone' as const }));
+    const admitPrompt = vi.fn(async () => ({ deduplicated: false }));
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      now: () => clock,
+      observationEnabled: true,
+      getPrDrainDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        scanBindings: async () => ({
+          bindings: [
+            {
+              sessionId: SESSION_A,
+              workspaceCwd: trustedCwd,
+              prs: [{ number: 42, url: 'https://github.com/o/r/pull/42' }],
+            },
+          ],
+          partial: false,
+        }),
+        resolveRuntime: () => trustedRuntime,
+        isSessionLive: () => live,
+        wakeSession,
+        admitPrompt,
+        readPushedHeads: async () => undefined,
+      }),
+    });
+    const settle = async (): Promise<void> => {
+      for (let i = 0; i < 20; i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    };
+    try {
+      // Dormant and the wake reports Gone: the recipient is marked, not admitted.
+      await handle?.drainNow(trustedCwd);
+      await vi.waitFor(() => expect(wakeSession).toHaveBeenCalledTimes(1));
+      await settle();
+      expect(admitPrompt).not.toHaveBeenCalled();
+
+      // The session is live again, but a drain that does not name it must still
+      // respect the mark. If the mark had never been set this arm would admit,
+      // so the pair below is self-proving rather than vacuous.
+      live = true;
+      await handle?.drainNow(trustedCwd);
+      await settle();
+      expect(admitPrompt).not.toHaveBeenCalled();
+
+      // Naming the restored session clears the mark and delivers.
+      await handle?.drainNow(trustedCwd, SESSION_A);
+      await settle();
+      expect(admitPrompt).toHaveBeenCalledTimes(1);
+    } finally {
+      handle?.dispose();
+      await removeTempTree(watchDir);
+    }
+  });
+
   it('threads the watch log into the listing write seam', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);

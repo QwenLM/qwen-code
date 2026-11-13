@@ -307,15 +307,21 @@ describe('createPrWatchDeps', () => {
     expect(input.idempotencyKey).toBe('key-1');
   });
 
-  it('holds the coordinator shared lock across the admission', async () => {
-    // The archive lane is refused only while a shared holder exists, so
-    // attempting it from inside the admission is the witness. Without the
-    // envelope it succeeds: a concurrent archive kills the session and drops
-    // the turn this admission enqueues, while the drain records it delivered.
-    let attempt: Promise<{ ran?: string; refused?: unknown }> | undefined;
+  it('holds a shared, not exclusive, coordinator lock across the admission', async () => {
+    // Two arms, because runExclusiveMany is refused by either lock kind and so
+    // cannot tell them apart on its own. runSharedMany is refused only by an
+    // exclusive hold, so its success is what pins the hold as shared.
+    let exclusive: Promise<{ ran?: string; refused?: unknown }> | undefined;
+    let shared: Promise<{ ran?: string; refused?: unknown }> | undefined;
     admitSessionPromptMock.mockImplementation(() => {
-      attempt = coordinator
+      exclusive = coordinator
         .runExclusiveMany([SESSION], async () => 'archived')
+        .then(
+          (ran) => ({ ran }),
+          (refused: unknown) => ({ refused }),
+        );
+      shared = coordinator
+        .runSharedMany([SESSION], async () => 'second-reader')
         .then(
           (ran) => ({ ran }),
           (refused: unknown) => ({ refused }),
@@ -325,7 +331,11 @@ describe('createPrWatchDeps', () => {
     const { drain } = build();
     await drain.admitPrompt(runtime(), SESSION, 'text', 'key-1');
     expect(admitSessionPromptMock).toHaveBeenCalledTimes(1);
-    expect((await attempt)?.refused).toBeInstanceOf(SessionArchivingError);
+    // Without the envelope the archive lane succeeds: it kills the session and
+    // drops the turn this admission enqueues, while the drain records it
+    // delivered.
+    expect((await exclusive)?.refused).toBeInstanceOf(SessionArchivingError);
+    expect(await shared).toEqual({ ran: 'second-reader' });
   });
 
   it('rejects a sealed coordinator so the entry stays pending', async () => {
@@ -490,6 +500,41 @@ describe('createPrWatchDeps', () => {
           sessionId: SESSION,
           workspaceCwd: CWD,
           url: 'https://ghe.example.com:8443/o/r/pull/42',
+        }),
+      ).toEqual(new Set(['b'.repeat(40)]));
+    });
+
+    it('matches a bare-host ledger when the binding URL spells www', async () => {
+      // pullRequestKey strips `www.`, so both spellings are one watch identity.
+      // normalizeGhHostForUrl folds `www.` only for github.com, so a GHE host
+      // spelled with it must be stripped here or the ledger never matches and
+      // the session is re-prompted for its own push on every push.
+      const root = path.join(dir, 'clone');
+      await fs.mkdir(root, { recursive: true });
+      await seedState(root, { host: 'ghe.example.com' });
+      cloneWorktreesOfMock.mockResolvedValue([root]);
+      const { drain } = build();
+      expect(
+        await drain.readPushedHeads({
+          sessionId: SESSION,
+          workspaceCwd: CWD,
+          url: 'https://www.ghe.example.com/o/r/pull/42',
+        }),
+      ).toEqual(new Set(['b'.repeat(40)]));
+    });
+
+    it('matches a ledger when the URL carries both www and a port', async () => {
+      // The two normalizations must compose: strip www, keep the port.
+      const root = path.join(dir, 'clone');
+      await fs.mkdir(root, { recursive: true });
+      await seedState(root, { host: 'ghe.example.com:8443' });
+      cloneWorktreesOfMock.mockResolvedValue([root]);
+      const { drain } = build();
+      expect(
+        await drain.readPushedHeads({
+          sessionId: SESSION,
+          workspaceCwd: CWD,
+          url: 'https://www.ghe.example.com:8443/o/r/pull/42',
         }),
       ).toEqual(new Set(['b'.repeat(40)]));
     });

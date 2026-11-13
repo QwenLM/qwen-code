@@ -2210,22 +2210,54 @@ describe('multi-workspace session dispatch', () => {
       '22222222-2222-4222-a222-222222222222',
     );
 
-    // A restore that never succeeded must not schedule a drain: the hook sits
-    // after the response, so every failure exit skips it. An untrusted
-    // workspace is refused by the route's own trust gate.
-    const untrusted = makeHarness({ secondaryTrusted: false });
-    const untrustedDrain = vi.fn();
+    // A restore that is attempted and then fails must not schedule a drain.
+    // The failure has to come from the restore itself: an earlier refusal (an
+    // untrusted workspace, say) is rejected long before the hook, so it would
+    // stay green even with the hook moved above restoreSessionCore.
+    const failing = makeHarness();
+    const failingDrain = vi.fn();
     (
-      untrusted.app.locals as {
-        prWatchDrainNow?: (workspaceCwd: string) => void;
+      failing.app.locals as {
+        prWatchDrainNow?: (workspaceCwd: string, sessionId?: string) => void;
       }
-    ).prWatchDrainNow = untrustedDrain;
-    const failed = await request(untrusted.app)
+    ).prWatchDrainNow = failingDrain;
+    vi.spyOn(failing.secondaryBridge, 'resumeSession').mockRejectedValue(
+      new Error('bridge restore failed'),
+    );
+    const failed = await request(failing.app)
       .post('/session/22222222-2222-4222-a222-222222222222/resume')
       .set('Host', host())
       .send({ cwd: SECONDARY_CWD });
     expect(failed.status).not.toBe(200);
-    expect(untrustedDrain).not.toHaveBeenCalled();
+    // Proves the core reached the bridge, so the absence below is about the
+    // hook's placement rather than an earlier exit. Asserted on the spy: the
+    // rejection replaces the implementation, so the bridge's own restoreCalls
+    // log is no longer written.
+    expect(failing.secondaryBridge.resumeSession).toHaveBeenCalled();
+    expect(failingDrain).not.toHaveBeenCalled();
+  });
+
+  it('answers a resume without waiting for the drain it scheduled', async () => {
+    // §2 forbids awaiting the hook: the watch's per-PR lock is not re-entrant,
+    // so a restore the drain dispatched would deadlock against its own drain.
+    // A local that never settles is the witness — an awaited hook would hang
+    // this request instead of answering it.
+    const { app } = makeHarness();
+    let scheduled = false;
+    (
+      app.locals as {
+        prWatchDrainNow?: (workspaceCwd: string, sessionId?: string) => void;
+      }
+    ).prWatchDrainNow = () => {
+      scheduled = true;
+      return new Promise<void>(() => {});
+    };
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+    expect(res.status).toBe(200);
+    expect(scheduled).toBe(true);
   });
 
   it('restores cold Live load and resume sessions into their server-derived conversation directories', async () => {
