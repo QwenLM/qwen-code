@@ -15,6 +15,7 @@ import {
   getAllSettingKeys,
   getDialogSettingKeys,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
+  WORKSPACE_RESTRICTED_ROOT_SETTINGS,
   WORKSPACE_TIGHTEN_ONLY_SETTINGS,
   // Business logic utilities
   TEST_ONLY,
@@ -477,6 +478,30 @@ describe('SettingsUtils', () => {
           ).toEqual(allKeys);
           expect(allKeys).toContain(restrictedKey);
         });
+
+        it.each(WORKSPACE_RESTRICTED_ROOT_SETTINGS)(
+          'hides the root-level %s only in Workspace scope',
+          (key) => {
+            vi.mocked(getSettingsSchema).mockReturnValue({
+              [key]: {
+                type: 'number',
+                label: key,
+                category: 'General',
+                requiresRestart: false,
+                default: 5,
+                showInDialog: true,
+              },
+            } as unknown as ReturnType<typeof getSettingsSchema>);
+
+            expect(getDialogSettingKeys()).toContain(key);
+            expect(
+              getDialogSettingKeys({ excludeWorkspaceRestricted: false }),
+            ).toContain(key);
+            expect(
+              getDialogSettingKeys({ excludeWorkspaceRestricted: true }),
+            ).not.toContain(key);
+          },
+        );
       });
 
       it('should return only settings marked for dialog display', () => {
