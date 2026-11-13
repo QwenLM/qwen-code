@@ -212,6 +212,9 @@ const VOLATILE_KEYS = new Set([
   'backupTime',
   // A shell command's process.
   'pid',
+  // The byte counts of a shell result's text, whose process id width varies.
+  'content_length',
+  'raw_content_length',
 ]);
 
 // Timings, such as the telemetry recorded with each response.
@@ -305,6 +308,20 @@ describe('normalize', () => {
         '/workspace',
         '/scratch',
       ),
+    );
+  });
+
+  // A shell result names its process, whose width the kernel picks, so the
+  // byte count of that text differs between two runs even after the text
+  // itself is normalized.
+  it('normalizes a byte count derived from a process id', () => {
+    const launch = (pid: number) => ({
+      call_id: 'call_job',
+      content_length: 1024 + String(pid).length,
+      raw_content_length: 1024 + String(pid).length,
+    });
+    expect(normalize(launch(9999), '/workspace', '/scratch')).toEqual(
+      normalize(launch(10000), '/workspace', '/scratch'),
     );
   });
 });
