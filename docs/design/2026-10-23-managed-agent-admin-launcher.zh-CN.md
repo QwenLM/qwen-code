@@ -2,7 +2,7 @@
 
 [English](2026-10-23-managed-agent-admin-launcher.md) | [简体中文](2026-10-23-managed-agent-admin-launcher.zh-CN.md)
 
-状态：已提出，并在同一变更中实现。
+状态：已提出，并在同一变更中实现。带 classifier 的 jar 与专用 operator-recovery 启动脚本其后已被 pre-production 单 jar 收敛移除；包括 operator-recovery 在内的每条命令现在都从可执行 server jar 运行。
 
 ## 问题
 
@@ -25,7 +25,7 @@ server 有十二个离线维护入口，包括 Workspace storage 注册、Worksp
 ## 非目标
 
 - 改变任何入口的参数或行为。
-- 从模块构建中删除带 classifier 的 jar，或从发行包中删除 operator-recovery 的 jar 和启动脚本。
+- 从模块构建中删除带 classifier 的 jar，或从发行包中删除 operator-recovery 的 jar 和启动脚本。（已被取代：pre-production 单 jar 收敛已移除它们。）
 - 让任何命令可以在线运行。每条命令仍是有自身前提条件的离线流程。
 
 ## 设计
@@ -100,4 +100,4 @@ server 有十二个离线维护入口，包括 Workspace storage 注册、Worksp
 
 ## 后续工作
 
-- 等模块构建的文档不再引用带 classifier 的 jar 之后，删除这些 jar。
+- 等模块构建的文档不再引用带 classifier 的 jar 之后，删除这些 jar。（已完成：pre-production 单 jar 收敛删除了全部带 classifier 的 jar 与专用 operator-recovery 启动脚本。）

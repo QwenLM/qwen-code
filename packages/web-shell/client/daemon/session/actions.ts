@@ -3214,6 +3214,28 @@ export function createDaemonSessionActions({
       }
     },
 
+    async bindSessionPr(pr) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Bind PR failed',
+        'bind_session_pr',
+      );
+      try {
+        return await withActionTimeout(
+          session.updateMetadata({ pr }),
+          'Bind PR timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Bind PR failed',
+          error,
+          'bind_session_pr',
+        );
+      }
+    },
+
     async recapSession(): Promise<DaemonSessionRecapResult> {
       const session = requireSessionForAction(
         addNotice,
