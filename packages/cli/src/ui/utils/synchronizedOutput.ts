@@ -4,31 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as os from 'node:os';
-
 export const BEGIN_SYNCHRONIZED_UPDATE = '\u001B[?2026h';
 export const END_SYNCHRONIZED_UPDATE = '\u001B[?2026l';
-
-/**
- * DECSET 2026 shipped in Windows Terminal 1.23, and Windows Terminal publishes
- * no variable carrying its version. The Windows OS build is not a substitute:
- * the terminal installs from the Store and updates on its own, so a 1.12 host
- * and a 1.24 host run on the same build (the reporter on #11929 upgraded
- * 1.12.10983 to 1.24.11911 on Windows 11 build 22631).
- *
- * WSL is the same story from the other side: a session inside it carries
- * `WSL_DISTRO_NAME` but no `WT_SESSION` on a stock setup, and the kernel is a
- * real Linux one whose release carries no Windows build at all. There is
- * therefore no signal on that path to gate on, so WSL2 keeps the legacy path
- * and reaches the wrappers through QWEN_CODE_FORCE_SYNCHRONIZED_OUTPUT.
- *
- * What is left is native Windows: `os.release()` there does track the OS, and
- * Windows Terminal has shipped inbox with Windows since 11 22H2, so a host at
- * or above build 26100 always has a Windows Terminal that implements the mode.
- * Older hosts are not excluded — the terminal may have been upgraded past 1.23
- * independently — they just are not detected without the override.
- */
-const WINDOWS_BUILD_WITH_INBOX_TERMINAL_1_23 = 26100;
 
 /**
  * Windows Terminal sets `WT_SESSION` on every session it launches and,
@@ -66,30 +43,8 @@ export function resetSynchronizedOutputStats(): void {
   synchronizedOutputStats.synchronizedOutputEndCount = 0;
 }
 
-/**
- * Reads the Windows build from an `os.release()` string. Only the native
- * release carries it: a WSL kernel reports a real Linux version, so there is
- * nothing to read there and the caller stays undetected.
- */
-export function windowsBuildNumber(
-  osRelease: string,
-  platform: NodeJS.Platform = process.platform,
-): number | undefined {
-  if (platform !== 'win32') {
-    return undefined;
-  }
-  const raw = /^\d+\.\d+\.(\d+)(?:\.|$)/.exec(osRelease.trim())?.[1];
-  if (raw === undefined) {
-    return undefined;
-  }
-  const build = Number.parseInt(raw, 10);
-  return Number.isFinite(build) ? build : undefined;
-}
-
 export function terminalSupportsSynchronizedOutput(
   env: NodeJS.ProcessEnv = process.env,
-  osRelease?: string,
-  platform: NodeJS.Platform = process.platform,
 ): boolean {
   if (
     env['QWEN_CODE_DISABLE_SYNCHRONIZED_OUTPUT'] === '1' ||
@@ -113,17 +68,8 @@ export function terminalSupportsSynchronizedOutput(
 
   const termProgram = env['TERM_PROGRAM'];
 
-  // Windows Terminal is identified by `WT_SESSION`, the variable it sets on
-  // every session it launches; it does not set `TERM_PROGRAM` at all. The
-  // build is a lower bound on the inbox terminal, never a statement about the
-  // terminal's own version — see the constant's comment.
   if (isWindowsTerminal(env)) {
-    const build = osRelease
-      ? windowsBuildNumber(osRelease, platform)
-      : undefined;
-    return (
-      build !== undefined && build >= WINDOWS_BUILD_WITH_INBOX_TERMINAL_1_23
-    );
+    return true;
   }
 
   // Warp's DECRQM 2026 probe answers status 2 (recognized, reset), so
@@ -147,14 +93,7 @@ export function installSynchronizedOutput(
   stdout: NodeJS.WriteStream = process.stdout,
   env: NodeJS.ProcessEnv = process.env,
 ): () => void {
-  // The OS build is only consulted for Windows Terminal; other terminals skip
-  // the syscall.
-  const osRelease = isWindowsTerminal(env) ? os.release() : undefined;
-  if (
-    installed ||
-    !stdout.isTTY ||
-    !terminalSupportsSynchronizedOutput(env, osRelease)
-  ) {
+  if (installed || !stdout.isTTY || !terminalSupportsSynchronizedOutput(env)) {
     return () => {};
   }
 
