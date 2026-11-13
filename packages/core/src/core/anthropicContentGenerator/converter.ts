@@ -107,12 +107,31 @@ export interface ConvertLlmRequestToAnthropicOptions {
    */
   normalizeAssistantThinkingSignature?: boolean;
   /**
+   * Same `signature: ''` fill as `normalizeAssistantThinkingSignature`, for
+   * the non-DeepSeek, non-4.6 Anthropic-compatible proxy quadrant: strict
+   * backends (verified against SGLang v0.5.19, #11772; llama.cpp/vLLM
+   * expected to behave the same but untested) reject a `thinking` block
+   * that carries no `signature` field at all (HTTP 400, e.g. SGLang
+   * `thinking.signature`) while accepting an empty signature. The repaired
+   * blocks come from history, so the caller does not gate this on the
+   * outgoing `thinking` parameter. The caller gates it off 4.6+ adaptive
+   * models (whose unsigned blocks are owned by
+   * `dropUnsignedAssistantThinking`) and off native base URLs, so the two
+   * passes stay disjoint. Native requests remove unsigned thinking instead.
+   * https://github.com/QwenLM/qwen-code/issues/11772
+   */
+  fillUnsignedThinkingSignature?: boolean;
+  /**
    * Remove assistant thinking blocks whose opaque signature is missing or
    * empty. Completed turns can safely omit thinking during replay. The active
    * tool loop fails instead because Claude requires all of its thinking blocks
    * to be passed back complete and unmodified.
    */
   dropUnsignedAssistantThinking?: boolean;
+  /**
+   * Preserve foreign Responses reasoning summaries as text on adaptive proxies.
+   */
+  demoteForeignThoughtToText?: boolean;
   /**
    * On assistant turns containing `tool_use` but lacking any thinking block,
    * prepend a synthetic empty thinking block. Required by DeepSeek's
@@ -196,7 +215,8 @@ export interface ConvertLlmRequestToAnthropicOptions {
    * When `true`, emit `cache_control: { type: 'ephemeral', scope: 'global' }`
    * on the system text and last tool entry so prefixes cache across
    * sessions; when `false` (or omitted), emit the SDK-standard per-session
-   * shape `{ type: 'ephemeral' }`. Must be a strict subset of
+   * shape `{ type: 'ephemeral' }`, which is what every caller passes unless
+   * the user explicitly opted in (issue #15039). Must be a strict subset of
    * `enableCacheControl` (no scope without a cache_control entry to
    * attach it to) and should mirror the generator's
    * `prompt-caching-scope-2026-01-05` beta-header gate — both ship
@@ -206,8 +226,8 @@ export interface ConvertLlmRequestToAnthropicOptions {
   useGlobalCacheScope?: boolean;
   /**
    * The cross-session-stable prefix of the system prompt (everything the
-   * client assembles before appending volatile tails like git status or
-   * session-start context). When it exactly matches the beginning of the
+   * client assembles before appending the managed auto-memory section).
+   * When it exactly matches the beginning of the
    * request's system text and a suffix follows, the system prompt is split
    * into two text blocks with one cache breakpoint each, making the stable
    * prefix independently cacheable. No match (subagent prompts, stale
@@ -269,15 +289,20 @@ export class AnthropicContentConverter {
     this.processContents(
       request.contents,
       messages,
-      !!options.dropUnsignedAssistantThinking,
+      !!options.demoteForeignThoughtToText,
     );
 
     if (options.stripAssistantThinking) {
       this.stripThinkingFromAssistantMessages(messages);
     }
     // Normalization runs before injection so non-compliant blocks are seen
-    // as already-present (and not duplicated) by the injection pass.
-    if (options.normalizeAssistantThinkingSignature) {
+    // as already-present (and not duplicated) by the injection pass. The
+    // two flags share the same fill: normalize is the DeepSeek path,
+    // fillUnsignedThinkingSignature is the non-DeepSeek proxy path.
+    if (
+      options.normalizeAssistantThinkingSignature ||
+      options.fillUnsignedThinkingSignature
+    ) {
       this.fillMissingThinkingSignatures(messages);
     }
     if (options.injectThinkingOnToolUseTurns) {
@@ -299,7 +324,7 @@ export class AnthropicContentConverter {
     // Must run BEFORE dropEmptyTextThinkingBlocks: dropUnsignedThinking...
     // throws when an unsigned thinking block belongs to a turn that's part
     // of an unbroken, still-active tool_use/tool_result chain reaching the
-    // end of history -- a real proxy bug that should fail loudly rather
+    // end of history -- invalid replay that should fail loudly rather
     // than silently continue. An empty-text thinking block with no
     // signature is unsigned by this same definition; if the empty-text
     // guard ran first it would delete the block outright before this
@@ -449,9 +474,11 @@ export class AnthropicContentConverter {
     // identical tool prefixes are cached across sessions — tools tend to
     // be the largest, slowest-changing prefix (often 5K+ tokens), so
     // cross-session reuse is where most of the hit-rate improvement under
-    // `prompt-caching-scope-2026-01-05` shows up. Non-Anthropic baseURLs
-    // ship the standard per-session shape so they don't see a scope
-    // extension they may not recognize.
+    // `prompt-caching-scope-2026-01-05` shows up. By default every baseURL
+    // ships the standard per-session shape: the API only accepts a global
+    // breakpoint when every preceding block is globally scoped too, and the
+    // four-breakpoint-per-request cap rules that out for a real tool list
+    // (issue #15039).
     // Per-call overrides mirror the request-shape gates in
     // `convertLlmRequestToAnthropic` so a qwen-oauth-style hot flip of
     // `enableCacheControl` (the only field `Config.handleModelChange()`
@@ -548,6 +575,12 @@ export class AnthropicContentConverter {
     if (finishReason) {
       candidate.finishReason = finishReason;
     }
+    const finishMessage = this.mapAnthropicStopDetailsToFinishMessage(
+      (response as Anthropic.Message & { stop_details?: unknown }).stop_details,
+    );
+    if (finishMessage) {
+      candidate.finishMessage = finishMessage;
+    }
 
     llmResponse.candidates = [candidate];
     llmResponse.responseId = response.id;
@@ -632,15 +665,13 @@ export class AnthropicContentConverter {
               debugLogger.debug(
                 'Dropping a Responses reasoning replay payload from thoughtSignature',
               );
-              // When the caller asked to drop unsigned thinking
-              // (`dropUnsignedAssistantThinking`), an unsigned `thinking`
-              // block is exactly the shape the pass below treats as a proxy
-              // protocol violation, so do not emit one — keep the visible
-              // summary as plain text when present. Otherwise leave the block
-              // unsigned (never attach the foreign payload as a signature) so
-              // `stripThinkingFromAssistantMessages` removes it under
+              // Adaptive proxies preserve the foreign summary as plain text
+              // when `demoteForeignThoughtToText` is enabled. Otherwise leave
+              // the block unsigned, without the foreign payload as its
+              // signature, so `stripThinkingFromAssistantMessages` removes it under
               // `stripAssistantThinking` and `fillMissingThinkingSignatures`
-              // fills `signature: ''` under DeepSeek normalization.
+              // fills `signature: ''` under DeepSeek normalization or on
+              // non-4.6 proxy-hosted Claude, while native cleanup drops it.
               if (demoteForeignThoughtToText) {
                 dropThinkingBlock = true;
                 if (part.text) {
@@ -993,6 +1024,34 @@ export class AnthropicContentConverter {
     return mapping[reason] || FinishReason.FINISH_REASON_UNSPECIFIED;
   }
 
+  mapAnthropicStopDetailsToFinishMessage(
+    stopDetails?: unknown,
+  ): string | undefined {
+    if (!stopDetails || typeof stopDetails !== 'object') return undefined;
+    const details = stopDetails as Record<string, unknown>;
+    if (details['type'] !== 'refusal') return undefined;
+
+    const messages: Record<string, string> = {
+      cyber: 'Response refused due to cyber-related safety policy.',
+      bio: 'Response refused due to biological safety policy.',
+      frontier_llm:
+        'Response refused due to frontier model development policy.',
+      reasoning_extraction:
+        'Response refused because it requested hidden reasoning.',
+      general_harms: 'Response refused due to a general safety policy.',
+    };
+    const category = details['category'];
+    if (typeof category !== 'string') {
+      return 'Response refused due to safety reasons.';
+    }
+    // `category` is provider text: an own-property check keeps `__proto__` /
+    // `constructor` on the unknown-category fallback instead of returning an
+    // object that would render as `[object Object]`.
+    return Object.prototype.hasOwnProperty.call(messages, category)
+      ? messages[category]
+      : 'Response refused due to safety reasons.';
+  }
+
   private isContentObject(
     content: unknown,
   ): content is { role: string; parts: Part[] } {
@@ -1054,22 +1113,24 @@ export class AnthropicContentConverter {
    * When `useGlobalCacheScope` is set, attach `scope: 'global'` so the
    * system prefix participates in cross-session caching under the
    * `prompt-caching-scope-2026-01-05` beta. Otherwise emit the standard
-   * per-session shape so non-Anthropic baseURLs aren't sent a scope
-   * extension they may not recognize.
+   * per-session shape, which is what every baseURL ships by default —
+   * a global breakpoint is only accepted when every preceding block is
+   * globally scoped too, and the tool list cannot satisfy that within
+   * Anthropic's four-breakpoint cap (issue #15039).
    *
    * When `staticSystemPrefix` matches the beginning of the system text and
-   * a suffix follows (git status, session-start context — the volatile
-   * tails the client appends after the stable prompt), the text is split
-   * into two blocks carrying one breakpoint each:
+   * a suffix follows (the managed auto-memory section the client appends
+   * after the stable prompt), the text is split into two blocks carrying
+   * one breakpoint each:
    *   1. the stable prefix — scoped per `useGlobalCacheScope`, so new
    *      sessions reuse it even though their suffix differs;
    *   2. the end of the full system prompt — always the per-session
-   *      `{ type: 'ephemeral' }` shape. The suffix varies across sessions,
+   *      `{ type: 'ephemeral' }` shape. The suffix can vary across sessions,
    *      so a global-scope entry here would churn cache for zero hits
    *      (same reasoning as `addCacheControlToMessages`). Within a session
    *      it still caches the suffix, and when the suffix changes mid-session
-   *      (/cd refreshes git status, session-start context lands) the prefix
-   *      breakpoint keeps the big block from re-billing.
+   *      (a memory recall mode switch) the prefix breakpoint keeps the big
+   *      block from re-billing.
    * The split only shapes the outgoing request; stored history and
    * non-Anthropic transports keep seeing a single system string.
    */
@@ -1249,10 +1310,8 @@ export class AnthropicContentConverter {
 
       if (activeToolUseTurns.has(index)) {
         throw new Error(
-          'Anthropic-compatible proxy omitted the thinking signature for a ' +
-            'tool-use turn that is still in progress. Configure the proxy to ' +
-            'preserve thinking signatures, or start a new session with ' +
-            'reasoning disabled.',
+          'Cannot replay a tool-use turn that is still in progress because a ' +
+            'thinking signature is missing. Start a new session to continue.',
         );
       }
 
@@ -1380,8 +1439,9 @@ export class AnthropicContentConverter {
    * no `scope: 'global'`. The last user message changes every turn (it's
    * the live prompt and any tool_result blocks from the immediately prior
    * round), so cross-session reuse here has effectively zero hit rate and
-   * paying the global-scope overhead would just churn cache. The static
-   * system prefix and tool prefixes (which DO repeat across sessions) carry
+   * paying the global-scope overhead would just churn cache. Under an
+   * explicit `forceGlobalCacheScope` opt-in the static system prefix and
+   * the last tool (which DO repeat across sessions) carry
    * `scope: 'global'` instead.
    */
   private addCacheControlToMessages(

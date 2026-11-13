@@ -5,13 +5,14 @@
  */
 
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, matchesGlob, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
 
 import externalContextConfig from '../../integrations/external-context/vitest.config.js';
 import externalContextMem0Config from '../../integrations/external-context-mem0/vitest.config.js';
+import generatedUiConfig from '../../integrations/generated-ui/vitest.config.js';
 import acpBridgeConfig from '../../packages/acp-bridge/vitest.config.js';
 import audioCaptureConfig from '../../packages/audio-capture/vitest.config.js';
 import browserUseConfig from '../../packages/browser-use/vitest.config.js';
@@ -44,17 +45,61 @@ import scriptsTestsConfig from './vitest.config.js';
 // witness pins the flag in every guarded config so removing it from any
 // one of them fails the scripts suite on every platform.
 type ExemptionConfig = {
+  root?: string;
   test?: {
     dangerouslyIgnoreUnhandledErrors?: boolean;
+    outputFile?: { junit?: string };
+    reporters?: (string | [string, unknown])[];
     testTimeout?: number;
     pool?: 'threads' | 'forks' | 'vmThreads';
     poolOptions?: { threads?: { maxThreads?: number } };
   };
 };
 
+/**
+ * Workspace directories declared by `pnpm-workspace.yaml` and `package.json`,
+ * expanded through their single `*` segment and minus the `!` exclusions. The
+ * two files are kept in lockstep by the repo, so a mismatch is a config bug
+ * and the union below is the workspace set a report can appear in.
+ */
+function declaredWorkspaceDirs(repoRoot: string): string[] {
+  const pnpm = parse(
+    readFileSync(join(repoRoot, 'pnpm-workspace.yaml'), 'utf8'),
+  ) as { packages?: string[] };
+  const pkg = JSON.parse(
+    readFileSync(join(repoRoot, 'package.json'), 'utf8'),
+  ) as { workspaces?: string[] };
+  const patterns = new Set([
+    ...(pnpm.packages ?? []),
+    ...(pkg.workspaces ?? []),
+  ]);
+  const dirs = new Set<string>();
+  const excluded = new Set<string>();
+  for (const pattern of patterns) {
+    if (pattern.startsWith('!')) {
+      excluded.add(pattern.slice(1).replace(/\/$/, ''));
+      continue;
+    }
+    if (!pattern.includes('*')) {
+      dirs.add(pattern.replace(/\/$/, ''));
+      continue;
+    }
+    const [head, tail] = pattern.split('*');
+    const base = head.replace(/\/$/, '');
+    for (const entry of readdirSync(join(repoRoot, base), {
+      withFileTypes: true,
+    })) {
+      if (!entry.isDirectory()) continue;
+      dirs.add(`${base}/${entry.name}${tail}`.replace(/\/$/, ''));
+    }
+  }
+  return [...dirs].filter((dir) => !excluded.has(dir)).sort();
+}
+
 const configs: Record<string, ExemptionConfig> = {
   'integrations/external-context': externalContextConfig,
   'integrations/external-context-mem0': externalContextMem0Config,
+  'integrations/generated-ui': generatedUiConfig,
   'packages/acp-bridge': acpBridgeConfig,
   'packages/audio-capture': audioCaptureConfig,
   'packages/browser-use': browserUseConfig,
@@ -91,6 +136,136 @@ describe('unhandled-error exemption on the platform lanes', () => {
   }
 });
 
+// The unit-test job's report steps collect every lane workspace's `junit.xml`
+// (ci.yml) relative to the repo root, and `if-no-files-found: ignore` turns a
+// wrong path into a silent no-op: the suite still runs, the artifact is just
+// empty. Pin each reporter's output to the package root so a relocated output
+// fails here, not silently in CI, and pin that every lane workspace reports at
+// all: a suite without a junit reporter stays invisible to the badge however
+// red it runs (on run 42994647525 the badge counted only the three workspaces
+// that reported).
+describe('JUnit report upload paths', () => {
+  const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+  const junitConfigs = Object.entries(configs).filter(
+    ([, config]) => config.test?.outputFile?.junit,
+  );
+
+  it.each(junitConfigs)(
+    '%s writes its report at the package root',
+    (name, config) => {
+      expect(
+        resolve(
+          repoRoot,
+          name,
+          config.root ?? '.',
+          config.test!.outputFile!.junit!,
+        ),
+      ).toBe(resolve(repoRoot, name, 'junit.xml'));
+    },
+  );
+
+  it('every lane workspace beside scripts/tests emits a badge-visible report', async () => {
+    // configModules is cross-checked below to cover every test:ci workspace,
+    // so a new lane workspace cannot join without a report. scripts/tests is
+    // the documented exception: its report would land outside both globs,
+    // and extending the badge to the scripts suite is a separate decision.
+    for (const [name, load] of Object.entries(configModules)) {
+      if (name === 'scripts/tests') continue;
+      const config = (await load()).default;
+      const test = config.test ?? {};
+      expect(name).toMatch(/^(packages|integrations)\//);
+      const junit = test.outputFile?.junit;
+      expect(junit, `${name} emits no JUnit report`).toBeTruthy();
+      expect(
+        resolve(repoRoot, name, config.root ?? '.', junit!),
+        `${name} writes its report outside its own root`,
+      ).toBe(resolve(repoRoot, name, 'junit.xml'));
+      const reporters = test.reporters ?? ['default'];
+      expect(
+        reporters.some(
+          (reporter) =>
+            (Array.isArray(reporter) ? reporter[0] : reporter) === 'junit',
+        ),
+        `${name} does not enable the junit reporter`,
+      ).toBe(true);
+    }
+  });
+
+  it('matches every lane report with a positive glob at a bounded depth', () => {
+    // The publisher (dorny/test-reporter) splits `path` on commas and globs
+    // each segment on its own (`src/main.ts` -> `local-file-provider.ts`) with
+    // `followSymbolicLinks` on by default. Two consequences, both blockers:
+    // a `!` segment has no positive set to subtract from and matches nothing,
+    // and `**` walks through pnpm's workspace link copies, counting one
+    // report once per dependent. So the publisher lists each workspace depth
+    // explicitly, and the coupling is pinned here in both directions.
+    const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+    const ci = parse(
+      readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8'),
+    ) as {
+      jobs: Record<
+        string,
+        { steps: { name?: string; with?: { path?: string } }[] }
+      >;
+    };
+    const publisher = ci.jobs['test']?.steps.find(
+      (step) => step.name === 'Publish Test Report (for non-forks)',
+    );
+    const segments = String(publisher?.with?.path).split(',');
+    expect(
+      segments.filter((segment) => segment.startsWith('!')),
+      'a negation segment matches nothing in this action',
+    ).toEqual([]);
+    expect(
+      segments.filter((segment) => segment.includes('**')),
+      'a `**` segment follows pnpm link copies',
+    ).toEqual([]);
+
+    // Expected reports come from the workspace declarations, not from the
+    // pattern list: a workspace added at any depth joins this set and turns
+    // the coverage assertion below red until the publisher learns its depth.
+    const laneWorkspaces = Object.keys(configModules).filter(
+      (name) => name !== 'scripts/tests',
+    );
+    const declared = declaredWorkspaceDirs(repoRoot);
+    expect(
+      laneWorkspaces.filter((name) => !declared.includes(name)),
+      'lane workspace missing from pnpm-workspace.yaml/package.json',
+    ).toEqual([]);
+    const laneReports = laneWorkspaces.map((name) => `${name}/junit.xml`);
+    const declaredReports = declared.map((dir) => `${dir}/junit.xml`);
+    // Cover the whole declared workspace set, not only the lane ones: the
+    // artifact step reaches all of them through `packages/**`, so the badge
+    // must agree with the raw evidence a workspace reports into.
+    expect(
+      declaredReports.filter(
+        (path) => !segments.some((segment) => matchesGlob(path, segment)),
+      ),
+      'workspace report no publisher glob reaches',
+    ).toEqual([]);
+    expect(laneReports.length, 'lane workspace list is empty').toBeGreaterThan(
+      0,
+    );
+
+    // The other direction: every segment must reach at least one lane report,
+    // and none may reach a pnpm link copy (`packages/**` used to return 7
+    // matches for 4 reports on exactly this shape).
+    for (const segment of segments) {
+      expect(
+        declaredReports.some((path) => matchesGlob(path, segment)),
+        `${segment} matches no workspace report`,
+      ).toBe(true);
+      expect(
+        matchesGlob(
+          'packages/cli/node_modules/@qwen-code/core/junit.xml',
+          segment,
+        ),
+        `${segment} reaches a pnpm link copy`,
+      ).toBe(false);
+    }
+  });
+});
+
 // Every workspace that `npm run test:ci --workspaces` runs lands on the same
 // shared ECS pool, where the identical suite takes ~5x longer depending only on
 // which host it draws (#10490). Five configs were given a raised ceiling there
@@ -112,6 +287,8 @@ const configModules: Record<
     import('../../integrations/external-context-mem0/vitest.config.js'),
   'integrations/test-failure-explorer': () =>
     import('../../integrations/test-failure-explorer/vitest.config.js'),
+  'integrations/generated-ui': () =>
+    import('../../integrations/generated-ui/vitest.config.js'),
   'packages/acp-bridge': () =>
     import('../../packages/acp-bridge/vitest.config.js'),
   'packages/audio-capture': () =>
@@ -206,6 +383,7 @@ describe('shared-pool test timeout', () => {
     'integrations/external-context',
     'integrations/external-context-mem0',
     'integrations/test-failure-explorer',
+    'integrations/generated-ui',
     'packages/acp-bridge',
     'packages/audio-capture',
     'packages/browser-use',
@@ -457,12 +635,18 @@ describe('autofix gate load clamps', () => {
 });
 
 describe('bundle-guard timeout ceiling', () => {
-  it('keeps the bundle-guard timeout ceiling in packages/vscode-ide-companion', async () => {
+  it('keeps the bundle-guard timeout ceiling and worker cap in packages/vscode-ide-companion', async () => {
     // The config reads RUNNER_NAME at import time, so re-import it under
-    // each stub to pin both branches, not only the ambient one.
-    for (const [runnerName, expected] of [
-      ['ecs-qwen-parity', 60_000],
-      ['ubuntu-latest-runner', 15_000],
+    // each stub to pin both branches, not only the ambient one; the unset
+    // arm also catches a ternary that treats a missing variable as pool.
+    // maxWorkers is the default for runs carrying no VITEST_MAX_THREADS —
+    // CI lanes export it and vitest resolves it before config.maxWorkers —
+    // and must stay undefined off the pool so a flat '25%' cannot cap
+    // developer machines.
+    for (const [runnerName, expectedTimeout, expectedWorkers] of [
+      ['ecs-qwen-parity', 60_000, '25%'],
+      ['ubuntu-latest-runner', 15_000, undefined],
+      [undefined, 15_000, undefined],
     ] as const) {
       vi.stubEnv('RUNNER_NAME', runnerName);
       vi.resetModules();
@@ -470,7 +654,10 @@ describe('bundle-guard timeout ceiling', () => {
         '../../packages/vscode-ide-companion/vitest.config.js'
       );
       expect(mod.default.test?.testTimeout, `RUNNER_NAME=${runnerName}`).toBe(
-        expected,
+        expectedTimeout,
+      );
+      expect(mod.default.test?.maxWorkers, `RUNNER_NAME=${runnerName}`).toBe(
+        expectedWorkers,
       );
       vi.unstubAllEnvs();
     }

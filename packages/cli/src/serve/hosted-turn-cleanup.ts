@@ -7,6 +7,8 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { parseHostedRecoveryResource } from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
+import { parseChildRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
+import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
@@ -16,6 +18,7 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   HostedWorkspaceBroker,
+  HostedWorkspaceBrokerRejection,
   hostedRuntimeSessionId,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
@@ -30,6 +33,27 @@ interface CleanupDescriptor {
   generation: string;
   workspaceGeneration: string;
   fileHistoryTurnId: string;
+}
+
+export interface HostedCleanupHold {
+  cleanupId: string;
+  descriptorRef: ManagedSessionDurableRef;
+  runtimeSessionId: string;
+}
+
+export interface HostedCleanupResult {
+  states: Map<string, 'owed' | 'confirmed'>;
+  held: Map<string, HostedCleanupHold>;
+}
+
+function cleanupIdentity(promptId: string, runtimeSessionId: string) {
+  const originalId = `hosted-cleanup:${promptId}:${runtimeSessionId}`;
+  const cleanupId =
+    Buffer.byteLength(`${originalId}:confirmed`) >
+    MANAGED_SESSION_LIMITS.maxIdBytes
+      ? `hosted-cleanup:${createHash('sha256').update(originalId).digest('hex')}`
+      : originalId;
+  return { originalId, cleanupId };
 }
 
 async function commitCleanup(
@@ -78,13 +102,10 @@ export async function oweHostedTurnCleanup(
   broker: HostedWorkspaceBroker,
 ): Promise<void> {
   if (!broker.runtime) return;
-  const originalId = `hosted-cleanup:${promptId}:${broker.runtimeSessionId}`;
-  let cleanupId = originalId;
-  if (
-    Buffer.byteLength(`${cleanupId}:confirmed`) >
-    MANAGED_SESSION_LIMITS.maxIdBytes
-  )
-    cleanupId = `hosted-cleanup:${createHash('sha256').update(cleanupId).digest('hex')}`;
+  const { originalId, cleanupId } = cleanupIdentity(
+    promptId,
+    broker.runtimeSessionId,
+  );
   const existing = session.authority
     .eventsInSequenceRange(1, session.authority.committedSequence)
     .findLast(
@@ -126,6 +147,53 @@ export async function oweHostedTurnCleanup(
     Buffer.from(JSON.stringify(descriptor)),
   );
   await commitCleanup(session, cleanupId, ref, 'owed');
+}
+
+export async function confirmReplacedHostedTurnOwner(
+  session: ManagedSession,
+  promptId: string,
+  broker: HostedWorkspaceBroker,
+  options: HostedWorkspaceBrokerOptions,
+): Promise<boolean> {
+  if (!broker.runtime) return false;
+  const { originalId, cleanupId } = cleanupIdentity(
+    promptId,
+    broker.runtimeSessionId,
+  );
+  const existing = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .findLast(
+      (event) =>
+        event.kind === 'hosted.cleanup' &&
+        [originalId, cleanupId].includes(event.payload['cleanupId'] as string),
+    );
+  if (existing?.payload['state'] !== 'owed') return false;
+  const descriptor = await readDescriptor(
+    session,
+    existing.payload['descriptorRef'],
+  );
+  if (
+    descriptor.promptId !== promptId ||
+    descriptor.runtimeSessionId !== broker.runtimeSessionId
+  )
+    throw new Error('Invalid cleanup owner.');
+  if (descriptor.workspaceGeneration !== broker.runtime.workspaceGeneration)
+    throw new Error('Original Workspace generation changed.');
+  if (
+    descriptor.bindingId === broker.runtime.bindingId &&
+    descriptor.generation === broker.runtime.generation &&
+    descriptor.workspaceGeneration === broker.runtime.workspaceGeneration
+  )
+    return false;
+  await new HostedWorkspaceBroker(
+    options,
+    descriptor.sessionKey,
+    descriptor.runtimeSessionId,
+  ).release({
+    bindingId: descriptor.bindingId,
+    generation: descriptor.generation,
+  });
+  return true;
 }
 
 async function readDescriptor(
@@ -171,18 +239,106 @@ export function hasHostedCleanupDebt(session: ManagedSession): boolean {
   return [...states.values()].some((state) => state === 'owed');
 }
 
+async function hasBackgroundHoldEvidence(
+  session: ManagedSession,
+  descriptor: CleanupDescriptor,
+): Promise<boolean> {
+  const authority = session.authority;
+  const sequence = authority.committedSequence;
+  const intents = new Map(
+    authority
+      .eventsInSequenceRange(1, sequence)
+      .filter((event) => event.kind === 'tool.intent')
+      .map((event) => [
+        event.payload['executionCallId'],
+        event.payload['argsRef'],
+      ]),
+  );
+  let held = false;
+  for (const domain of ['child_run', 'monitor_run'] as const) {
+    for (const entry of authority.extensionRecordsInDomain(domain)) {
+      const record =
+        domain === 'child_run'
+          ? parseChildRun(entry.record)
+          : parseMonitorRun(entry.record);
+      if ('kind' in record && record.kind !== 'shell') continue;
+      const run = record.run;
+      if (['settled', 'not_started_proven'].includes(run.execution ?? ''))
+        continue;
+      const inputRef = intents.get(run.executionCallId);
+      if (!inputRef) return false;
+      const ref = assertManagedSessionDurableRef(inputRef, 'background owner');
+      if (ref.kind !== 'managed-tool-input') return false;
+      const input = JSON.parse(
+        (await session.resources.read(ref)).toString('utf8'),
+      ) as {
+        harnessSessionId?: unknown;
+        runtimeSessionId?: unknown;
+      };
+      if (
+        input.harnessSessionId !== descriptor.sessionKey.sessionId ||
+        typeof input.runtimeSessionId !== 'string'
+      )
+        return false;
+      if (input.runtimeSessionId !== descriptor.runtimeSessionId) continue;
+      if (
+        !run.runtime ||
+        run.runtime.runtimeBindingId !== descriptor.bindingId ||
+        run.runtime.generation !== descriptor.generation ||
+        !record.startReceiptRef ||
+        !['running', 'waiting'].includes(run.state) ||
+        run.execution !== 'running_attached'
+      )
+        return false;
+      held = true;
+    }
+  }
+  return held && authority.committedSequence === sequence;
+}
+
+export async function hasBlockingHostedCleanupDebt(
+  session: ManagedSession,
+  holds?: ReadonlyMap<string, HostedCleanupHold>,
+): Promise<boolean> {
+  const sequence = session.authority.committedSequence;
+  const latest = new Map(
+    session.authority
+      .eventsInSequenceRange(1, sequence)
+      .filter((event) => event.kind === 'hosted.cleanup')
+      .map((event) => [event.payload['cleanupId'], event]),
+  );
+  for (const event of latest.values()) {
+    if (event.payload['state'] !== 'owed') continue;
+    const descriptor = await readDescriptor(
+      session,
+      event.payload['descriptorRef'],
+    );
+    const hold = holds?.get(descriptor.promptId);
+    if (
+      !hold ||
+      hold.cleanupId !== event.payload['cleanupId'] ||
+      hold.runtimeSessionId !== descriptor.runtimeSessionId ||
+      !isDeepStrictEqual(hold.descriptorRef, event.payload['descriptorRef']) ||
+      !(await hasBackgroundHoldEvidence(session, descriptor))
+    )
+      return true;
+  }
+  return session.authority.committedSequence !== sequence;
+}
+
 export async function reconcileHostedTurnCleanup(
   session: ManagedSession,
   options: HostedWorkspaceBrokerOptions,
   promptId?: string,
   drain = false,
-): Promise<Map<string, 'owed' | 'confirmed'>> {
+): Promise<HostedCleanupResult> {
   const events = session.authority.eventsInSequenceRange(
     1,
     session.authority.committedSequence,
   );
   const latest = new Map<string, (typeof events)[number]>();
   const states = new Map<string, 'owed' | 'confirmed'>();
+  const held = new Map<string, HostedCleanupHold>();
   for (const event of events)
     if (event.kind === 'hosted.cleanup')
       latest.set(event.payload['cleanupId'] as string, event);
@@ -214,11 +370,31 @@ export async function reconcileHostedTurnCleanup(
       descriptor.sessionKey,
       descriptor.runtimeSessionId,
     );
-    await broker.release({
-      bindingId: descriptor.bindingId,
-      generation: descriptor.generation,
-      ...(drain ? { drain: true } : {}),
-    });
+    try {
+      await broker.release({
+        bindingId: descriptor.bindingId,
+        generation: descriptor.generation,
+        ...(drain ? { drain: true } : {}),
+      });
+    } catch (cause) {
+      if (
+        drain ||
+        !(cause instanceof HostedWorkspaceBrokerRejection) ||
+        cause.status !== 409 ||
+        cause.code !== 'runtime_session_held' ||
+        !(await hasBackgroundHoldEvidence(session, descriptor))
+      )
+        throw cause;
+      held.set(descriptor.promptId, {
+        cleanupId,
+        descriptorRef: assertManagedSessionDurableRef(
+          event.payload['descriptorRef'],
+          'cleanup descriptor',
+        ),
+        runtimeSessionId: descriptor.runtimeSessionId,
+      });
+      continue;
+    }
     await commitCleanup(
       session,
       cleanupId,
@@ -230,5 +406,5 @@ export async function reconcileHostedTurnCleanup(
     );
     states.set(descriptor.promptId, 'confirmed');
   }
-  return states;
+  return { states, held };
 }

@@ -71,6 +71,7 @@ function normalizeBasicCharacters(text: string): string {
 interface MatchedSliceResult {
   slice: string;
   removedTrailingFinalEmptyLine: boolean;
+  lineBasedMatch?: boolean;
 }
 
 /**
@@ -203,10 +204,12 @@ function findLineBasedMatch(
         offsets,
         lines,
         matchIndex,
-        patternLines.length,
+        // The trailing split element is covered by the newline flag.
+        patternLines.length - (endsWithNewline ? 1 : 0),
         endsWithNewline,
       ),
       removedTrailingFinalEmptyLine: false,
+      lineBasedMatch: true,
     };
   }
 
@@ -227,6 +230,7 @@ function findLineBasedMatch(
           false,
         ),
         removedTrailingFinalEmptyLine: true,
+        lineBasedMatch: true,
       };
     }
   }
@@ -295,6 +299,131 @@ function adjustNewStringForTrailingLine(
 export interface NormalizedEditStrings {
   oldString: string;
   newString: string;
+  lineBasedMatch?: boolean;
+}
+
+const UNICODE_ESCAPE_PATTERN = /\\\\|\\u[0-9a-fA-F]{4}/g;
+const MAX_UNICODE_RECOVERY_CODE_UNITS = 256;
+
+function decodeUnicodeEscapes(text: string): string | null {
+  const decoded = text.replace(UNICODE_ESCAPE_PATTERN, (escape) => {
+    if (escape.length === 2) return escape;
+    const code = parseInt(escape.slice(2), 16);
+    return code >= 128 ? String.fromCharCode(code) : escape;
+  });
+  return /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+    decoded,
+  )
+    ? null
+    : decoded;
+}
+
+function splitsEscapeSequence(text: string, offset: number): boolean {
+  if (text[offset - 1] === '\\' && /[\\'"/bfnrtv0]/.test(text[offset] ?? '')) {
+    return true;
+  }
+  for (let start = Math.max(0, offset - 5); start < offset; start++) {
+    if (
+      text[start] === '\\' &&
+      /^\\u[0-9a-fA-F]{4}$/.test(text.slice(start, start + 6))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function findUnicodeEscapeMatch(
+  fileContent: string,
+  oldString: string,
+  newString: string,
+): NormalizedEditStrings | null {
+  const decoded = decodeUnicodeEscapes(oldString);
+  if (
+    decoded === null ||
+    decoded.length > MAX_UNICODE_RECOVERY_CODE_UNITS ||
+    !/[\u0080-\uffff]/.test(decoded)
+  ) {
+    return null;
+  }
+  if (decoded === oldString && !fileContent.includes('\\u')) return null;
+
+  const pattern = decoded
+    .split('')
+    .map((char) => {
+      const literal = char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (char.charCodeAt(0) < 128) return literal;
+      const hex = char
+        .charCodeAt(0)
+        .toString(16)
+        .padStart(4, '0')
+        .replace(/[a-f]/g, (digit) => `[${digit}${digit.toUpperCase()}]`);
+      return `(?:${literal}|(?<!\\\\)\\\\u${hex})`;
+    })
+    .join('');
+
+  let canonical: string | undefined;
+  let literalSearchStart = 0;
+  const trailingBackslash = /(?:^|[^\\])(?:\\\\)*\\$/.test(newString);
+  for (const match of fileContent.matchAll(new RegExp(pattern, 'g'))) {
+    const end = match.index + match[0].length;
+    if (
+      splitsEscapeSequence(fileContent, match.index) ||
+      splitsEscapeSequence(fileContent, end) ||
+      (trailingBackslash && fileContent[end] === '\\')
+    ) {
+      return null;
+    }
+    // A single canonical slice cannot represent different escaping styles.
+    if (canonical !== undefined && canonical !== match[0]) return null;
+    canonical = match[0];
+    // Literal replacement must use exactly the same eligible positions.
+    if (fileContent.indexOf(canonical, literalSearchStart) !== match.index) {
+      return null;
+    }
+    literalSearchStart = match.index + canonical.length;
+  }
+  if (canonical === undefined) return null;
+  if (fileContent.indexOf(canonical, literalSearchStart) !== -1) return null;
+
+  const escapes = Array.from(
+    canonical.matchAll(UNICODE_ESCAPE_PATTERN),
+    (match) => match[0],
+  ).filter(
+    (escape) => escape.length === 6 && parseInt(escape.slice(2), 16) >= 128,
+  );
+  if (escapes.length === 0) {
+    return {
+      oldString: canonical,
+      newString: decodeUnicodeEscapes(newString) ?? newString,
+    };
+  }
+  if (/[\u0080-\uffff]/.test(canonical)) return null;
+  if (/(?:^|[^\\])(?:\\\\)*\\[\u0080-\uffff]/.test(newString)) return null;
+
+  const byChar = new Map(
+    escapes.map((escape) => [
+      String.fromCharCode(parseInt(escape.slice(2), 16)),
+      escape,
+    ]),
+  );
+  const digits = escapes.join('').replace(/\\u/g, '');
+  const uppercase =
+    (digits.match(/[A-F]/g)?.length ?? 0) >
+    (digits.match(/[a-f]/g)?.length ?? 0);
+  return {
+    oldString: canonical,
+    newString: newString
+      .split('')
+      .map((char) => {
+        if (char.charCodeAt(0) < 128) return char;
+        const hex = char.charCodeAt(0).toString(16).padStart(4, '0');
+        return (
+          byChar.get(char) ?? '\\u' + (uppercase ? hex.toUpperCase() : hex)
+        );
+      })
+      .join(''),
+  };
 }
 
 /**
@@ -303,7 +432,9 @@ export interface NormalizedEditStrings {
  *   2. If found through a relaxed match (smart quotes, line trims, etc.),
  *      return the canonical slice from disk so later replacements operate on
  *      exact bytes.
- *   3. Preserve newString as-is (it represents the LLM's intent).
+ *   3. If those matches fail, recover non-ASCII Unicode escape representations
+ *      only when all candidates have the same bytes and Unicode style.
+ *      Otherwise preserve newString as-is (it represents the LLM's intent).
  *
  * Note: Trailing whitespace in newString is intentionally NOT stripped.
  * While LLMs may sometimes accidentally add trailing whitespace, stripping it
@@ -330,13 +461,16 @@ export function normalizeEditStrings(
         newString,
         canonicalOriginal.removedTrailingFinalEmptyLine,
       ),
+      ...(canonicalOriginal.lineBasedMatch ? { lineBasedMatch: true } : {}),
     };
   }
 
-  return {
-    oldString,
-    newString,
-  };
+  return (
+    findUnicodeEscapeMatch(fileContent, oldString, newString) ?? {
+      oldString,
+      newString,
+    }
+  );
 }
 
 /**
@@ -348,6 +482,7 @@ export function maybeAugmentOldStringForDeletion(
   fileContent: string | null,
   oldString: string,
   newString: string,
+  lineBasedMatch = false,
 ): string {
   if (
     fileContent === null ||
@@ -359,7 +494,10 @@ export function maybeAugmentOldStringForDeletion(
   }
 
   const candidate = `${oldString}\n`;
-  return fileContent.includes(candidate) ? candidate : oldString;
+  const hasCandidate = lineBasedMatch
+    ? findLineBasedMatchOffsets(fileContent, candidate).length > 0
+    : fileContent.includes(candidate);
+  return hasCandidate ? candidate : oldString;
 }
 
 /**
@@ -378,6 +516,32 @@ export function countOccurrences(source: string, substr: string): number {
     index = source.indexOf(substr, index + substr.length);
   }
   return count;
+}
+
+/** Exact canonical slices from fuzzy line matching must remain whole lines. */
+export function findLineBasedMatchOffsets(
+  source: string,
+  substr: string,
+): number[] {
+  const offsets: number[] = [];
+  if (substr === '') {
+    return offsets;
+  }
+
+  let index = source.indexOf(substr);
+  while (index !== -1) {
+    const end = index + substr.length;
+    const startsLine = index === 0 || source[index - 1] === '\n';
+    const endsLine =
+      substr.endsWith('\n') || end === source.length || source[end] === '\n';
+    if (startsLine && endsLine) {
+      offsets.push(index);
+      index = source.indexOf(substr, end);
+    } else {
+      index = source.indexOf(substr, index + 1);
+    }
+  }
+  return offsets;
 }
 
 /**

@@ -20,6 +20,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MAX_SNAPSHOT_BYTES, MAX_SOURCE_BYTES } from './contracts.js';
 import { ReportStore } from './report-store.js';
 import { parseVitestReport } from './vitest-report.js';
+import { arePermissionBitsEnforced } from './test-utils/permission-bits.js';
 
 const roots: string[] = [];
 async function workspace(): Promise<string> {
@@ -319,7 +320,7 @@ describe('workspace report snapshots', () => {
     expect(await readFile(path, 'utf8')).toBe(altered);
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'reports an actually unwritable cache without claiming an import',
     async () => {
       const root = await workspace();

@@ -35,8 +35,8 @@ import { runOutsideAgentContext } from './runtime/agent-context.js';
 import {
   AgentEventType,
   type AgentApprovalRequestEvent,
+  type AgentApprovalResolvedEvent,
   type AgentEventEmitter,
-  type AgentToolResultEvent,
 } from './runtime/agent-events.js';
 import type { AgentExternalInput } from './runtime/agent-types.js';
 import type { TaskBase, TaskRegistration, TaskStatus } from './tasks/types.js';
@@ -272,6 +272,23 @@ export interface BackgroundActivity {
 }
 
 /**
+ * A tool call a foreground agent is waiting on through the parent session's
+ * inline confirmation prompt. Display-only: unlike {@link BackgroundApproval}
+ * it carries no `respond`, because the prompt is answered inline, not from
+ * the Background tasks dialog.
+ */
+export interface InlineApprovalNotice {
+  /** Tool-call id the prompt belongs to. */
+  callId: string;
+  /** Tool name (e.g. `grep_search`). */
+  name: string;
+  /** Render-friendly one-line description of the call. */
+  description: string;
+  /** Emission timestamp (ms). */
+  at: number;
+}
+
+/**
  * Agent kind of `TaskState`. Tracks one running subagent — either a
  * synchronous foreground run (`isBackgrounded: false`, awaited by the
  * parent's tool-call) or an async background run (`isBackgrounded: true`,
@@ -328,6 +345,8 @@ export interface AgentTask extends TaskBase {
    * question every read site asks.
    */
   isBackgrounded: boolean;
+  /** The live run has its own working directory and survives session relocation. */
+  workspacePinned?: boolean;
   status: TaskStatus;
   result?: string;
   error?: string;
@@ -336,6 +355,16 @@ export interface AgentTask extends TaskBase {
    * one-shot executors and paused tasks blocked from recovery.
    */
   resumeBlockedReason?: string;
+  /**
+   * Asked once, as the terminal notification is built: text the session
+   * adds to it for the model, outside the agent's own result, or undefined.
+   */
+  notificationFollowUp?: () => string | undefined;
+  /**
+   * Present when `send_message` must not reach the running task, though
+   * its own inputs (a Monitor it started) still do.
+   */
+  messagesBlockedReason?: string;
   stats?: AgentCompletionStats;
   toolUseId?: string;
   /**
@@ -361,6 +390,14 @@ export interface AgentTask extends TaskBase {
    * Newest last, mirroring `recentActivities`.
    */
   pendingApprovals?: readonly BackgroundApproval[];
+  /**
+   * Tool calls this FOREGROUND agent is waiting on through the parent
+   * session's inline confirmation prompt, newest last. Display-only, so
+   * the live panel can say the agent is waiting for approval instead of
+   * showing its last activity as if it were still running. Set by
+   * {@link BackgroundTaskRegistry.trackInlineApprovals}.
+   */
+  inlineApprovals?: readonly InlineApprovalNotice[];
   /** Absolute path to the agent's sidecar metadata file. */
   metaPath?: string;
   /**
@@ -1396,9 +1433,9 @@ export class BackgroundTaskRegistry {
         });
       }
     };
-    const onResult = (event: AgentToolResultEvent) => {
-      // A result for a parked call means it settled elsewhere — clear the
-      // stale prompt (without responding again). Stamp the nested runtime
+    const onSettled = (event: AgentApprovalResolvedEvent) => {
+      // Scheduler resolution can precede the batch's tool results. Clear
+      // the stale prompt without responding again. Stamp the nested runtime
       // exactly as onWaiting does so one runtime's result cannot clear a
       // colliding callId parked by another runtime.
       this.clearPendingApproval(
@@ -1408,11 +1445,72 @@ export class BackgroundTaskRegistry {
       );
     };
     emitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
-    emitter.on(AgentEventType.TOOL_RESULT, onResult);
+    emitter.on(AgentEventType.TOOL_APPROVAL_RESOLVED, onSettled);
+    emitter.on(AgentEventType.TOOL_RESULT, onSettled);
     return () => {
       emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
-      emitter.off(AgentEventType.TOOL_RESULT, onResult);
+      emitter.off(AgentEventType.TOOL_APPROVAL_RESOLVED, onSettled);
+      emitter.off(AgentEventType.TOOL_RESULT, onSettled);
     };
+  }
+
+  /**
+   * Record a FOREGROUND agent's inline approval prompts on its entry.
+   * The prompt itself stays inline in the parent session; this only keeps
+   * `inlineApprovals` in step with it: a `TOOL_WAITING_APPROVAL` adds the
+   * call (re-emissions for a call already listed are ignored). Scheduler
+   * resolution removes it before the batch ends, including automatic or IDE
+   * decisions. The prompt's owner also removes it when the user answers
+   * ({@link clearInlineApproval}); `TOOL_RESULT` and terminal transitions
+   * provide fallback cleanup.
+   * Returns an unsubscribe function the caller MUST invoke when the agent
+   * terminates.
+   */
+  trackInlineApprovals(
+    agentId: string,
+    emitter: AgentEventEmitter,
+  ): () => void {
+    const onWaiting = (event: AgentApprovalRequestEvent) => {
+      const entry = this.agents.get(agentId);
+      if (!entry || entry.isBackgrounded || entry.status !== 'running') return;
+      const prior = entry.inlineApprovals ?? [];
+      if (prior.some((notice) => notice.callId === event.callId)) return;
+      entry.inlineApprovals = [
+        ...prior,
+        {
+          callId: event.callId,
+          name: event.name,
+          description: event.description,
+          at: event.timestamp,
+        },
+      ];
+      this.emitApprovalChange(entry);
+    };
+    const onSettled = (event: AgentApprovalResolvedEvent) =>
+      this.clearInlineApproval(agentId, event.callId);
+    emitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
+    emitter.on(AgentEventType.TOOL_APPROVAL_RESOLVED, onSettled);
+    emitter.on(AgentEventType.TOOL_RESULT, onSettled);
+    return () => {
+      emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
+      emitter.off(AgentEventType.TOOL_APPROVAL_RESOLVED, onSettled);
+      emitter.off(AgentEventType.TOOL_RESULT, onSettled);
+    };
+  }
+
+  /**
+   * Drop a call from a foreground agent's `inlineApprovals` once its
+   * inline prompt has been answered. No-op if it is not listed.
+   */
+  clearInlineApproval(agentId: string, callId: string): void {
+    const entry = this.agents.get(agentId);
+    if (!entry?.inlineApprovals?.length) return;
+    const next = entry.inlineApprovals.filter(
+      (notice) => notice.callId !== callId,
+    );
+    if (next.length === entry.inlineApprovals.length) return;
+    entry.inlineApprovals = next;
+    this.emitApprovalChange(entry);
   }
 
   get(agentId: string): AgentTask | undefined {
@@ -1930,6 +2028,12 @@ export class BackgroundTaskRegistry {
     // sees the flag and short-circuits, rather than firing twice.
     if (entry.notified) return;
     entry.notified = true;
+    let followUp: string | undefined;
+    try {
+      followUp = entry.notificationFollowUp?.();
+    } catch (error) {
+      debugLogger.error('Failed to build a notification follow-up:', error);
+    }
 
     // Foreground entries return their result through the parent's normal
     // tool-result channel (the `returnDisplay` field on the synchronous
@@ -1994,6 +2098,9 @@ export class BackgroundTaskRegistry {
         `<duration_ms>${entry.stats.durationMs}</duration_ms>`,
         '</usage>',
       );
+    }
+    if (followUp) {
+      xmlParts.push(`<follow-up>${escapeXml(followUp)}</follow-up>`);
     }
     xmlParts.push('</task-notification>');
 
@@ -2140,8 +2247,15 @@ export class BackgroundTaskRegistry {
    * with no parked approvals.
    */
   private rejectPendingApprovals(entry: AgentTask): void {
+    // A foreground agent's inline prompts are answered (or torn down) by
+    // the parent session; only the display record needs clearing here.
+    const hadInline = (entry.inlineApprovals?.length ?? 0) > 0;
+    if (hadInline) entry.inlineApprovals = [];
     const parked = entry.pendingApprovals;
-    if (!parked?.length) return;
+    if (!parked?.length) {
+      if (hadInline) this.emitApprovalChange(entry);
+      return;
+    }
     entry.pendingApprovals = [];
     for (const approval of parked) {
       // `respond` is async — a `.catch()` on the promise is the only thing

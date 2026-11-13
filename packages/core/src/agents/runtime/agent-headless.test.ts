@@ -36,7 +36,8 @@ import {
   AuthType,
 } from '../../core/contentGenerator.js';
 import { LlmChat } from '../../core/llm-chat.js';
-import { LlmEventType } from '../../core/turn.js';
+import { LlmEventType, Turn } from '../../core/turn.js';
+import { CoreToolScheduler } from '../../core/coreToolScheduler.js';
 import {
   getToolCallFingerprint,
   normalizeModelToolCallIds,
@@ -62,8 +63,14 @@ import type {
   ToolConfig,
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
+import { AgentCore } from './agent-core.js';
+import { runAgentLoop } from '../../core/agent-loop.js';
 import { beginRetryWait } from '../../utils/retry-wait.js';
-import { DEFAULT_STALL_MS, runStallResilient } from './workflow-stall.js';
+import {
+  attachStallWatchdog,
+  DEFAULT_STALL_MS,
+  runStallResilient,
+} from './workflow-stall.js';
 import {
   isWorkflowAgentFailedError,
   WorkflowAgentFailedError,
@@ -72,7 +79,10 @@ import { WriteFileTool } from '../../tools/write-file.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { normalizeToolNameForProvider } from '../../utils/tool-name-utils.js';
 import { LoopDetectionService } from '../../services/loopDetectionService.js';
-import { logSubagentExecution } from '../../telemetry/loggers.js';
+import {
+  logLoopProtection,
+  logSubagentExecution,
+} from '../../telemetry/loggers.js';
 import type { SubagentExecutionEvent } from '../../telemetry/types.js';
 import {
   fnCall,
@@ -81,6 +91,11 @@ import {
   userText,
 } from '../../test-utils/model-fixtures.js';
 
+vi.mock('../../core/agent-loop.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../core/agent-loop.js')>();
+  return { ...actual, runAgentLoop: vi.fn(actual.runAgentLoop) };
+});
 vi.mock('../../core/llm-chat.js');
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
   const actual =
@@ -129,6 +144,7 @@ vi.mock('../../core/client.js');
 vi.mock('../../telemetry/loggers.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../telemetry/loggers.js')>()),
   logSubagentExecution: vi.fn(),
+  logLoopProtection: vi.fn(),
 }));
 
 vi.mock('../../skills/skill-manager.js', () => {
@@ -175,6 +191,8 @@ async function createMockConfig(
     cwd: process.cwd(),
     // Avoid writing any chat recording records from tests (e.g. via tool-call telemetry).
     chatRecording: false,
+    // The loop tests below pin the stop points; one test switches to `warn`.
+    loopProtection: 'stop',
   });
   await config.initialize();
   await config.refreshAuth(AuthType.USE_GEMINI);
@@ -240,6 +258,17 @@ const createMockStream = (
     );
   });
 };
+
+/**
+ * The loops a test runs on: the current loop, the shared loop, and the shared
+ * loop on the event-bus kernel.
+ */
+type Loop = { name: string; shared: boolean; kernel: boolean };
+const LOOPS: Loop[] = [
+  { name: 'current', shared: false, kernel: false },
+  { name: 'shared', shared: true, kernel: false },
+  { name: 'kernel', shared: true, kernel: true },
+];
 
 const contextWith = (values: Record<string, unknown> = {}) => {
   const context = new ContextState();
@@ -546,6 +575,33 @@ describe('subagent.ts', () => {
     /** The message parts sent to the model on call `n` (0-based). */
     const sentParts = (n: number) =>
       mockSendMessageStream.mock.calls[n][1].message as Part[];
+    /**
+     * Sets `experimental.unifiedAgentLoop` for the test. The returned check
+     * asserts that the run took the loop it was set to: on the shared loop
+     * each round, its model request on a `Turn` and its tool batch, runs in
+     * one `runAgentLoop` call, and the current tool step never runs; on the
+     * current loop neither the loop nor a `Turn` runs.
+     */
+    const useAgentLoop = ({ shared, kernel }: Loop) => {
+      vi.spyOn(Config.prototype, 'isUnifiedAgentLoopEnabled').mockReturnValue(
+        shared,
+      );
+      vi.spyOn(Config.prototype, 'isEventBusAgentLoopEnabled').mockReturnValue(
+        kernel,
+      );
+      const turn = vi.spyOn(Turn.prototype, 'run');
+      const toolSteps = vi.spyOn(AgentCore.prototype, 'processFunctionCalls');
+      vi.mocked(runAgentLoop).mockClear();
+      return () => {
+        const rounds = shared ? mockSendMessageStream.mock.calls.length : 0;
+        expect(turn).toHaveBeenCalledTimes(rounds);
+        expect(vi.mocked(runAgentLoop)).toHaveBeenCalledTimes(rounds);
+        for (const [options] of vi.mocked(runAgentLoop).mock.calls) {
+          expect(options.useEventBus).toBe(kernel);
+        }
+        if (shared) expect(toolSteps).not.toHaveBeenCalled();
+      };
+    };
     const expectExecuteError = async (
       scope: AgentHeadless,
       message: string,
@@ -1102,818 +1158,1175 @@ describe('subagent.ts', () => {
       });
     });
 
-    describe('execute - Execution and Tool Use', () => {
-      type Waiter = Parameters<AgentHeadless['setExternalMessageWaiter']>[0];
-      // Idle-wait wiring: no queued inputs, `waiter` delivers wake-ups and
-      // `predicate` decides whether to wait at all.
-      const idleWaiter =
-        (waiter: Waiter, predicate: () => boolean) =>
-        (scope: AgentHeadless) => {
-          scope.setExternalMessageProvider(() => []);
-          scope.setExternalMessageWaiter(waiter);
-          scope.setExternalMessageWaitPredicate(predicate);
+    describe.each(LOOPS)(
+      'execute - Execution and Tool Use ($name loop)',
+      (loop) => {
+        let expectLoop: () => void;
+        beforeEach(() => {
+          expectLoop = useAgentLoop(loop);
+        });
+        afterEach(() => expectLoop());
+
+        type Waiter = Parameters<AgentHeadless['setExternalMessageWaiter']>[0];
+        // Idle-wait wiring: no queued inputs, `waiter` delivers wake-ups and
+        // `predicate` decides whether to wait at all.
+        const idleWaiter =
+          (waiter: Waiter, predicate: () => boolean) =>
+          (scope: AgentHeadless) => {
+            scope.setExternalMessageProvider(() => []);
+            scope.setExternalMessageWaiter(waiter);
+            scope.setExternalMessageWaitPredicate(predicate);
+          };
+        const notification = (tag: string) => ({
+          kind: 'notification' as const,
+          text: `<task-notification>${tag}</task-notification>`,
+        });
+        const DUP_CALL_1 = 'Duplicate provider tool call id "call_1"';
+        // A list_files call reusing provider id 'call_1', normalized as the chat
+        // would with `usedIds` already taken.
+        const collidingCall = (
+          args: Record<string, unknown>,
+          usedIds = new Set(['call_1']),
+        ) =>
+          normalizeModelToolCallIds(
+            [fnCall('list_files', args, 'call_1')],
+            usedIds,
+            new Set<string>(),
+          )[0]!.functionCall!;
+        const historyHasCall1 = () =>
+          mockGetHistoryToolCallFingerprints.mockReturnValue(
+            new Map([
+              ['call_1', getToolCallFingerprint('list_files', { path: '.' })],
+            ]),
+          );
+        // The first part sent on model call `n` is the duplicate-id error for `id`.
+        const expectDuplicateResponse = (n: number, id: string) => {
+          const response = sentParts(n)[0].functionResponse;
+          expect(response?.id).toBe(id);
+          expect(response?.response?.['error']).toContain(DUP_CALL_1);
         };
-      const notification = (tag: string) => ({
-        kind: 'notification' as const,
-        text: `<task-notification>${tag}</task-notification>`,
-      });
-      const DUP_CALL_1 = 'Duplicate provider tool call id "call_1"';
-      // A list_files call reusing provider id 'call_1', normalized as the chat
-      // would with `usedIds` already taken.
-      const collidingCall = (
-        args: Record<string, unknown>,
-        usedIds = new Set(['call_1']),
-      ) =>
-        normalizeModelToolCallIds(
-          [fnCall('list_files', args, 'call_1')],
-          usedIds,
-          new Set<string>(),
-        )[0]!.functionCall!;
-      const historyHasCall1 = () =>
-        mockGetHistoryToolCallFingerprints.mockReturnValue(
-          new Map([
-            ['call_1', getToolCallFingerprint('list_files', { path: '.' })],
-          ]),
-        );
-      // The first part sent on model call `n` is the duplicate-id error for `id`.
-      const expectDuplicateResponse = (n: number, id: string) => {
-        const response = sentParts(n)[0].functionResponse;
-        expect(response?.id).toBe(id);
-        expect(response?.response?.['error']).toContain(DUP_CALL_1);
-      };
-      const responseFor = (parts: Part[], id: string) =>
-        parts.find((part) => part.functionResponse?.id === id)
-          ?.functionResponse;
-      const errorFor = (parts: Part[], id: string) =>
-        responseFor(parts, id)?.response?.['error'];
-      // Runs a 'fork' agent over one round of `calls` then a stop, with getTool
-      // backed by `getTool`; returns the parts sent back on the second call.
-      const runFork = async (
-        getTool: (name: string) => unknown,
-        calls: FunctionCall[],
-        tools: ToolConfig,
-        options: Parameters<typeof runAgent>[1] = {},
-      ) => {
-        const { config } = await createMockConfig({ getTool: vi.fn(getTool) });
-        respond(calls, 'stop');
-        await runAgent(config, {
-          name: 'fork',
-          prompt: FORK_PROMPT,
-          tools,
-          ...options,
-        });
-        return sentParts(1);
-      };
-      // A fork whose only tool is read_file, called once on README.md.
-      const runReadFileFork = async (executionAllowedTools: string[]) => {
-        const toolDef = decl(ToolNames.READ_FILE, 'Reads a file');
-        const tool = mockTool(toolDef);
-        const parts = await runFork(
-          () => tool,
-          [call(ToolNames.READ_FILE, { path: 'README.md' }, 'call_read')],
-          { tools: [toolDef], executionAllowedTools },
-        );
-        return { tool, response: parts[0]?.functionResponse };
-      };
-      /** `count` single-call rounds with ids `${prefix}_1`, `${prefix}_2`, ... */
-      const rounds = (
-        count: number,
-        name: string,
-        args: Record<string, unknown>,
-        prefix: string,
-      ) =>
-        Array.from({ length: count }, (_, index) => [
-          call(name, args, `${prefix}_${index + 1}`),
-        ]);
-      const setupTaskList = async (execute: Mock) => {
-        const args = { status: 'in_progress', owner: 'peer-a', blockedBy: '' };
-        const setup = await setupReadTool(
-          decl('task_list', 'Lists team tasks'),
-          invocation(args, 'List tasks', execute),
-          'Task List',
-          'List tasks in the team task list',
-          false,
-        );
-        return {
-          ...setup,
-          args,
-          polls: (count: number) => rounds(count, 'task_list', args, 'poll'),
+        const responseFor = (parts: Part[], id: string) =>
+          parts.find((part) => part.functionResponse?.id === id)
+            ?.functionResponse;
+        const errorFor = (parts: Part[], id: string) =>
+          responseFor(parts, id)?.response?.['error'];
+        // Runs a 'fork' agent over one round of `calls` then a stop, with getTool
+        // backed by `getTool`; returns the parts sent back on the second call.
+        const runFork = async (
+          getTool: (name: string) => unknown,
+          calls: FunctionCall[],
+          tools: ToolConfig,
+          options: Parameters<typeof runAgent>[1] = {},
+        ) => {
+          const { config } = await createMockConfig({
+            getTool: vi.fn(getTool),
+          });
+          respond(calls, 'stop');
+          await runAgent(config, {
+            name: 'fork',
+            prompt: FORK_PROMPT,
+            tools,
+            ...options,
+          });
+          return sentParts(1);
         };
-      };
-      const frozenBoard = () =>
-        toolResult('#7 [in_progress] @peer-a — task', 'Listed tasks');
+        // A fork whose only tool is read_file, called once on README.md.
+        const runReadFileFork = async (executionAllowedTools: string[]) => {
+          const toolDef = decl(ToolNames.READ_FILE, 'Reads a file');
+          const tool = mockTool(toolDef);
+          const parts = await runFork(
+            () => tool,
+            [call(ToolNames.READ_FILE, { path: 'README.md' }, 'call_read')],
+            { tools: [toolDef], executionAllowedTools },
+          );
+          return { tool, response: parts[0]?.functionResponse };
+        };
+        /** `count` single-call rounds with ids `${prefix}_1`, `${prefix}_2`, ... */
+        const rounds = (
+          count: number,
+          name: string,
+          args: Record<string, unknown>,
+          prefix: string,
+        ) =>
+          Array.from({ length: count }, (_, index) => [
+            call(name, args, `${prefix}_${index + 1}`),
+          ]);
+        const setupTaskList = async (execute: Mock) => {
+          const args = {
+            status: 'in_progress',
+            owner: 'peer-a',
+            blockedBy: '',
+          };
+          const setup = await setupReadTool(
+            decl('task_list', 'Lists team tasks'),
+            invocation(args, 'List tasks', execute),
+            'Task List',
+            'List tasks in the team task list',
+            false,
+          );
+          return {
+            ...setup,
+            args,
+            polls: (count: number) => rounds(count, 'task_list', args, 'poll'),
+          };
+        };
+        const frozenBoard = () =>
+          toolResult('#7 [in_progress] @peer-a — task', 'Listed tasks');
 
-      it('should terminate with GOAL if no outputs are expected and model stops', async () => {
-        const { config } = await createMockConfig();
-        respond('stop');
-        const scope = await runAgent(config); // No ToolConfig, No OutputConfig
+        it('should terminate with GOAL if no outputs are expected and model stops', async () => {
+          const { config } = await createMockConfig();
+          respond('stop');
+          const scope = await runAgent(config); // No ToolConfig, No OutputConfig
 
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
-        expect(sentParts(0)).toEqual([{ text: 'Get Started!' }]);
-      });
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          expect(sentParts(0)).toEqual([{ text: 'Get Started!' }]);
+        });
 
-      it('should terminate with GOAL when model provides final text', async () => {
-        const { config } = await createMockConfig();
-        respond('stop');
-        const scope = await runAgent(config);
+        it('should terminate with GOAL when model provides final text', async () => {
+          const { config } = await createMockConfig();
+          respond('stop');
+          const scope = await runAgent(config);
 
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
-      });
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+        });
 
-      it('should wait for external notification after a no-tool response', async () => {
-        const { config } = await createMockConfig();
-        respond('stop', 'stop');
-        type Wake = Array<ReturnType<typeof notification>>;
-        let resolveWait: ((inputs: Wake) => void) | undefined;
-        const waitForExternalMessages = vi.fn(
-          (_signal: AbortSignal) =>
-            new Promise<Wake>((resolve) => {
-              resolveWait = resolve;
-            }),
-        );
-        let shouldWait = true;
-        const scope = await createAgent(config);
-        idleWaiter(waitForExternalMessages, () => shouldWait)(scope);
+        it('should wait for external notification after a no-tool response', async () => {
+          const { config } = await createMockConfig();
+          respond('stop', 'stop');
+          type Wake = Array<ReturnType<typeof notification>>;
+          let resolveWait: ((inputs: Wake) => void) | undefined;
+          const waitForExternalMessages = vi.fn(
+            (_signal: AbortSignal) =>
+              new Promise<Wake>((resolve) => {
+                resolveWait = resolve;
+              }),
+          );
+          let shouldWait = true;
+          const scope = await createAgent(config);
+          idleWaiter(waitForExternalMessages, () => shouldWait)(scope);
 
-        const executePromise = scope.execute(new ContextState());
-        await vi.waitFor(() =>
-          expect(waitForExternalMessages).toHaveBeenCalled(),
-        );
-        shouldWait = false;
-        resolveWait?.([notification('event')]);
-        await executePromise;
-
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
-        expect(sentParts(1)).toEqual([{ text: notification('event').text }]);
-      });
-
-      it('should finalize after an empty wake when no owner monitor remains running', async () => {
-        const { config } = await createMockConfig();
-        respond('stop');
-        let shouldWait = true;
-        const waitForExternalMessages = vi.fn(async () => {
+          const executePromise = scope.execute(new ContextState());
+          await vi.waitFor(() =>
+            expect(waitForExternalMessages).toHaveBeenCalled(),
+          );
           shouldWait = false;
-          return [];
-        });
-        const scope = await runAgent(config, {
-          setup: idleWaiter(waitForExternalMessages, () => shouldWait),
-        });
+          resolveWait?.([notification('event')]);
+          await executePromise;
 
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
-        expect(scope.getFinalText()).toBe('Done.');
-        expect(waitForExternalMessages).toHaveBeenCalledTimes(1);
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
-      });
-
-      it('should skip idle wait when the predicate flips false before wait registration', async () => {
-        const { config } = await createMockConfig();
-        respond('stop');
-        let predicateCalls = 0;
-        const waitForExternalMessages = vi.fn(async () => [
-          notification('late'),
-        ]);
-        const scope = await runAgent(config, {
-          setup: idleWaiter(
-            waitForExternalMessages,
-            () => ++predicateCalls === 1,
-          ),
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+          expect(sentParts(1)).toEqual([{ text: notification('event').text }]);
         });
 
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
-        expect(scope.getFinalText()).toBe('Done.');
-        expect(waitForExternalMessages).not.toHaveBeenCalled();
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
-      });
+        it('should finalize after an empty wake when no owner monitor remains running', async () => {
+          const { config } = await createMockConfig();
+          respond('stop');
+          let shouldWait = true;
+          const waitForExternalMessages = vi.fn(async () => {
+            shouldWait = false;
+            return [];
+          });
+          const scope = await runAgent(config, {
+            setup: idleWaiter(waitForExternalMessages, () => shouldWait),
+          });
 
-      it('should keep waiting after an empty wake while an owner monitor is still running', async () => {
-        const { config } = await createMockConfig();
-        respond('stop', 'stop');
-        let shouldWait = true;
-        let waitCalls = 0;
-        const waitForExternalMessages = vi.fn(async () => {
-          if (++waitCalls === 1) return [];
-          shouldWait = false;
-          return [notification('event')];
-        });
-        const scope = await runAgent(config, {
-          setup: idleWaiter(waitForExternalMessages, () => shouldWait),
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+          expect(scope.getFinalText()).toBe('Done.');
+          expect(waitForExternalMessages).toHaveBeenCalledTimes(1);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
         });
 
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
-        expect(waitForExternalMessages).toHaveBeenCalledTimes(2);
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
-        expect(sentParts(1)).toEqual([{ text: notification('event').text }]);
-      });
+        it('should skip idle wait when the predicate flips false before wait registration', async () => {
+          const { config } = await createMockConfig();
+          respond('stop');
+          let predicateCalls = 0;
+          const waitForExternalMessages = vi.fn(async () => [
+            notification('late'),
+          ]);
+          const scope = await runAgent(config, {
+            setup: idleWaiter(
+              waitForExternalMessages,
+              () => ++predicateCalls === 1,
+            ),
+          });
 
-      it('should drain queued external notification before finalizing', async () => {
-        const { config } = await createMockConfig();
-        respond('stop', 'stop');
-        const pendingInputs = [notification('terminal')];
-        const scope = await runAgent(config, {
-          setup: (s) =>
-            s.setExternalMessageProvider(() => pendingInputs.splice(0)),
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+          expect(scope.getFinalText()).toBe('Done.');
+          expect(waitForExternalMessages).not.toHaveBeenCalled();
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
         });
 
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
-        expect(sentParts(1)).toEqual([{ text: notification('terminal').text }]);
-      });
+        it('should keep waiting after an empty wake while an owner monitor is still running', async () => {
+          const { config } = await createMockConfig();
+          respond('stop', 'stop');
+          let shouldWait = true;
+          let waitCalls = 0;
+          const waitForExternalMessages = vi.fn(async () => {
+            if (++waitCalls === 1) return [];
+            shouldWait = false;
+            return [notification('event')];
+          });
+          const scope = await runAgent(config, {
+            setup: idleWaiter(waitForExternalMessages, () => shouldWait),
+          });
 
-      it('should not idle-wait when max turns prevents another round', async () => {
-        const { config } = await createMockConfig();
-        const waitForExternalMessages = vi.fn(async () => []);
-        respond('stop');
-        const scope = await runAgent(config, {
-          run: { ...defaultRunConfig, max_turns: 1 },
-          setup: idleWaiter(waitForExternalMessages, () => true),
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+          expect(waitForExternalMessages).toHaveBeenCalledTimes(2);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+          expect(sentParts(1)).toEqual([{ text: notification('event').text }]);
         });
 
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.MAX_TURNS);
-        expect(waitForExternalMessages).not.toHaveBeenCalled();
-      });
+        it('should drain queued external notification before finalizing', async () => {
+          const { config } = await createMockConfig();
+          respond('stop', 'stop');
+          const pendingInputs = [notification('terminal')];
+          const scope = await runAgent(config, {
+            setup: (s) =>
+              s.setExternalMessageProvider(() => pendingInputs.splice(0)),
+          });
 
-      it('should execute external tools and provide the response to the model', async () => {
-        const { config, inv, toolConfig } = await setupListFiles();
-        // Turn 1: the model calls the external tool. Turn 2: it stops.
-        respond([call('list_files', { path: '.' }, 'call_1')], 'stop');
-        const scope = await runAgent(config, { tools: toolConfig });
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+          expect(sentParts(1)).toEqual([
+            { text: notification('terminal').text },
+          ]);
+        });
 
-        // The tool output goes back to the model as a functionResponse part.
-        const parts = sentParts(1);
-        expect(Array.isArray(parts)).toBe(true);
-        expect(parts[0].functionResponse?.response?.['output']).toBe(
-          'file1.txt\nfile2.ts',
-        );
-        expect(inv.execute).toHaveBeenCalledTimes(1);
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
-      });
+        it('should not idle-wait when max turns prevents another round', async () => {
+          const { config } = await createMockConfig();
+          const waitForExternalMessages = vi.fn(async () => []);
+          respond('stop');
+          const scope = await runAgent(config, {
+            run: { ...defaultRunConfig, max_turns: 1 },
+            setup: idleWaiter(waitForExternalMessages, () => true),
+          });
 
-      it('keeps declarations unchanged while enforcing the execution allowlist', async () => {
-        const readFileToolDef = decl(ToolNames.READ_FILE, 'Reads a file');
-        const editFileToolDef = decl(ToolNames.EDIT, 'Edits a file');
-        const readFileInvocation = invocation(
-          { path: 'README.md' },
-          'Read README.md',
-          toolResult('file contents'),
-        );
-        const editFileInvocation = invocation(
-          { path: 'README.md' },
-          'Edit README.md',
-          vi.fn(),
-          'ask',
-        );
-        const readFileTool = mockTool(
-          readFileToolDef,
-          readFileInvocation,
-          builtin('Read File', 'Reads a file'),
-        );
-        const editFileTool = mockTool(
-          editFileToolDef,
-          editFileInvocation,
-          builtin('Edit File', 'Edits a file', 'EDIT'),
-        );
-        const [emitter, toolCallEvents, toolResultEvents, approvalEvents] =
-          eventLog(
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.MAX_TURNS);
+          expect(waitForExternalMessages).not.toHaveBeenCalled();
+        });
+
+        it('should execute external tools and provide the response to the model', async () => {
+          const { config, inv, toolConfig } = await setupListFiles();
+          // Turn 1: the model calls the external tool. Turn 2: it stops.
+          respond([call('list_files', { path: '.' }, 'call_1')], 'stop');
+          const scope = await runAgent(config, { tools: toolConfig });
+
+          // The tool output goes back to the model as a functionResponse part.
+          const parts = sentParts(1);
+          expect(Array.isArray(parts)).toBe(true);
+          expect(parts[0].functionResponse?.response?.['output']).toBe(
+            'file1.txt\nfile2.ts',
+          );
+          expect(inv.execute).toHaveBeenCalledTimes(1);
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        });
+
+        it('ends with TIMEOUT before running the calls of a round that outlived the time limit', async () => {
+          const { config, inv, toolConfig } = await setupListFiles();
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async () => {
+              // The model answers after the agent's time limit has passed.
+              await new Promise((resolve) => setTimeout(resolve, 2 * 60_000));
+              return streamOf(callsChunk([call('list_files', {}, 'call_1')]));
+            });
+            const scope = await createAgent(config, {
+              tools: toolConfig,
+              run: { max_turns: 5, max_time_minutes: 1 },
+            });
+            const run = scope.execute(new ContextState());
+            await vi.advanceTimersByTimeAsync(2 * 60_000);
+            await run;
+            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+            expect(inv.execute).not.toHaveBeenCalled();
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('keeps declarations unchanged while enforcing the execution allowlist', async () => {
+          const readFileToolDef = decl(ToolNames.READ_FILE, 'Reads a file');
+          const editFileToolDef = decl(ToolNames.EDIT, 'Edits a file');
+          const readFileInvocation = invocation(
+            { path: 'README.md' },
+            'Read README.md',
+            toolResult('file contents'),
+          );
+          const editFileInvocation = invocation(
+            { path: 'README.md' },
+            'Edit README.md',
+            vi.fn(),
+            'ask',
+          );
+          const readFileTool = mockTool(
+            readFileToolDef,
+            readFileInvocation,
+            builtin('Read File', 'Reads a file'),
+          );
+          const editFileTool = mockTool(
+            editFileToolDef,
+            editFileInvocation,
+            builtin('Edit File', 'Edits a file', 'EDIT'),
+          );
+          const [emitter, toolCallEvents, toolResultEvents, approvalEvents] =
+            eventLog(
+              AgentEventType.TOOL_CALL,
+              AgentEventType.TOOL_RESULT,
+              AgentEventType.TOOL_WAITING_APPROVAL,
+            );
+
+          const executionAllowedTools: string[] = [ToolNames.READ_FILE];
+          const secondRoundParts = await runFork(
+            byName(readFileTool, editFileTool),
+            [
+              call(ToolNames.READ_FILE, { path: 'README.md' }, 'call_read'),
+              call(
+                ToolNames.EDIT,
+                { path: 'README.md', old_string: 'a', new_string: 'b' },
+                'call_edit',
+              ),
+            ],
+            {
+              tools: [readFileToolDef, editFileToolDef],
+              executionAllowedTools,
+            },
+            {
+              emitter,
+              // Widening the caller's array after create must not take effect.
+              setup: () => executionAllowedTools.push(ToolNames.EDIT),
+            },
+          );
+
+          const sentDeclarations =
+            mockSendMessageStream.mock.calls[0][1].config.tools[0]
+              .functionDeclarations;
+          expect(sentDeclarations).toStrictEqual([
+            readFileToolDef,
+            editFileToolDef,
+          ]);
+          expect(JSON.stringify(sentDeclarations)).toBe(
+            JSON.stringify([readFileToolDef, editFileToolDef]),
+          );
+          expect(readFileTool.build).toHaveBeenCalled();
+          expect(readFileInvocation.execute).toHaveBeenCalledTimes(1);
+          expect(editFileTool.build).not.toHaveBeenCalled();
+          expect(editFileInvocation.execute).not.toHaveBeenCalled();
+          expect(approvalEvents).toHaveLength(0);
+
+          expect(
+            secondRoundParts.map((part) => part.functionResponse?.id),
+          ).toEqual(['call_read', 'call_edit']);
+          const deniedResponse = responseFor(secondRoundParts, 'call_edit');
+          expect(deniedResponse?.name).toBe(ToolNames.EDIT);
+          expect(deniedResponse?.response?.['error']).toContain(
+            'execution allowlist',
+          );
+          expect(deniedResponse?.response?.['error']).not.toContain(
+            'fork_tools',
+          );
+          expect(deniedResponse?.response?.['error']).not.toContain(
+            'not found',
+          );
+          expect(toolCallEvents.map((event) => event.callId).sort()).toEqual([
+            'call_edit',
+            'call_read',
+          ]);
+          expect(
+            toolResultEvents
+              .map(({ callId, success }) => ({ callId, success }))
+              .sort((left, right) => left.callId.localeCompare(right.callId)),
+          ).toEqual([
+            { callId: 'call_edit', success: false },
+            { callId: 'call_read', success: true },
+          ]);
+        });
+
+        it('treats an empty execution allowlist as deny-all', async () => {
+          const { tool, response } = await runReadFileFork([]);
+
+          expect(tool.build).not.toHaveBeenCalled();
+          expect(response?.id).toBe('call_read');
+          expect(response?.response?.['error']).toContain(
+            'No tools are allowed',
+          );
+        });
+
+        it('caps and decouples the execution allowlist denial message', async () => {
+          const { tool, response } = await runReadFileFork(
+            Array.from(
+              { length: 12 },
+              (_, index) => `tool_${index}_${'x'.repeat(50)}`,
+            ),
+          );
+
+          const error = response?.response?.['error'];
+          expect(error).toContain('execution allowlist');
+          expect(error).toContain('(+4 more)');
+          expect(error).not.toContain('fork_tools');
+          expect(String(error).length).toBeLessThan(400);
+          expect(tool.build).not.toHaveBeenCalled();
+        });
+
+        it('matches an exact MCP server allowlist entry without crossing server boundaries', async () => {
+          const githubName = normalizeToolNameForProvider(
+            'mcp__github__search',
+          );
+          const enterpriseName = normalizeToolNameForProvider(
+            'mcp__github-enterprise__search',
+          );
+          const githubDef = decl(githubName, 'Search GitHub');
+          const enterpriseDef = decl(
+            enterpriseName,
+            'Search GitHub Enterprise',
+          );
+          const githubInvocation = invocation(
+            {},
+            'Search GitHub',
+            toolResult('github result'),
+          );
+          const enterpriseTool = mockTool(
+            enterpriseDef,
+            undefined,
+            mcp('github-enterprise', 'search'),
+          );
+          const responses = await runFork(
+            byName(
+              mockTool(githubDef, githubInvocation, mcp('github', 'search')),
+              enterpriseTool,
+            ),
+            [
+              call(githubName, {}, 'call_github'),
+              call(enterpriseName, {}, 'call_enterprise'),
+            ],
+            {
+              tools: [githubDef, enterpriseDef],
+              executionAllowedTools: ['mcp__github'],
+            },
+          );
+
+          expect(githubInvocation.execute).toHaveBeenCalledTimes(1);
+          expect(enterpriseTool.build).not.toHaveBeenCalled();
+          expect(errorFor(responses, 'call_enterprise')).toContain(
+            'execution allowlist',
+          );
+        });
+
+        it('lets mcp__* match MCP tools without matching built-in tools', async () => {
+          const mcpName = normalizeToolNameForProvider('mcp__github__search');
+          const mcpDef = decl(mcpName, 'Search GitHub');
+          const builtinDef = decl(ToolNames.READ_FILE, 'Read a file');
+          const mcpInvocation = invocation(
+            {},
+            'Search GitHub',
+            toolResult('github result'),
+          );
+          const builtinTool = mockTool(builtinDef);
+          const responses = await runFork(
+            byName(
+              mockTool(mcpDef, mcpInvocation, mcp('github', 'search')),
+              builtinTool,
+            ),
+            [
+              call(mcpName, {}, 'call_mcp'),
+              call(ToolNames.READ_FILE, { path: 'README.md' }, 'call_builtin'),
+            ],
+            { tools: [mcpDef, builtinDef], executionAllowedTools: ['mcp__*'] },
+          );
+
+          expect(mcpInvocation.execute).toHaveBeenCalledTimes(1);
+          expect(builtinTool.build).not.toHaveBeenCalled();
+          expect(errorFor(responses, 'call_builtin')).toContain(
+            'execution allowlist',
+          );
+        });
+
+        it('matches long MCP wildcard patterns by raw server identity and boundary', async () => {
+          const serverSuffix = 'a'.repeat(80);
+          const allowedServer = `repo.${serverSuffix}`;
+          const deniedServer = `repo/${serverSuffix}`;
+          const boundaryDeniedServer = `${allowedServer}__evil`;
+          const readToolOf = (server: string) =>
+            normalizeToolNameForProvider(`mcp__${server}__read`);
+          const allowedName = readToolOf(allowedServer);
+          const deniedName = readToolOf(deniedServer);
+          const boundaryDeniedName = readToolOf(boundaryDeniedServer);
+          const allowedDef = decl(allowedName, 'Reads from repo.bad');
+          const deniedDef = decl(deniedName, 'Reads from repo/bad');
+          const boundaryDeniedDef = decl(
+            boundaryDeniedName,
+            'Reads from a server with a shared raw prefix',
+          );
+          const allowedInvocation = invocation(
+            {},
+            'Read from repo.bad',
+            toolResult('repo result'),
+          );
+          const deniedTool = mockTool(
+            deniedDef,
+            undefined,
+            mcp(deniedServer, 'read', false),
+          );
+          const boundaryDeniedTool = mockTool(
+            boundaryDeniedDef,
+            undefined,
+            mcp(boundaryDeniedServer, 'read', false),
+          );
+          const responses = await runFork(
+            byName(
+              mockTool(
+                allowedDef,
+                allowedInvocation,
+                mcp(allowedServer, 'read'),
+              ),
+              deniedTool,
+              boundaryDeniedTool,
+            ),
+            [
+              call(allowedName, {}, 'call_repo'),
+              call(deniedName, {}, 'call_repo2'),
+              call(boundaryDeniedName, {}, 'call_boundary'),
+            ],
+            {
+              tools: [allowedDef, deniedDef, boundaryDeniedDef],
+              executionAllowedTools: [`mcp__${allowedServer}__*`],
+            },
+          );
+
+          expect(allowedName).not.toBe(deniedName);
+          expect(allowedInvocation.execute).toHaveBeenCalledTimes(1);
+          expect(deniedTool.build).not.toHaveBeenCalled();
+          expect(boundaryDeniedTool.build).not.toHaveBeenCalled();
+          expect(errorFor(responses, 'call_repo2')).toContain(
+            'execution allowlist',
+          );
+          expect(errorFor(responses, 'call_boundary')).toContain(
+            'execution allowlist',
+          );
+        });
+
+        it('should ignore duplicate provider tool-call ids across rounds', async () => {
+          const { config, inv, toolConfig } = await setupListFiles();
+          respond(
+            [call('list_files', { path: '.' }, 'call_1')],
+            [collidingCall({ path: '.' })],
+            'stop',
+          );
+          const [emitter, toolCallEvents, toolResultEvents] = eventLog(
             AgentEventType.TOOL_CALL,
             AgentEventType.TOOL_RESULT,
-            AgentEventType.TOOL_WAITING_APPROVAL,
           );
+          const scope = await runAgent(config, { tools: toolConfig, emitter });
 
-        const executionAllowedTools: string[] = [ToolNames.READ_FILE];
-        const secondRoundParts = await runFork(
-          byName(readFileTool, editFileTool),
-          [
-            call(ToolNames.READ_FILE, { path: 'README.md' }, 'call_read'),
-            call(
-              ToolNames.EDIT,
-              { path: 'README.md', old_string: 'a', new_string: 'b' },
-              'call_edit',
-            ),
-          ],
-          { tools: [readFileToolDef, editFileToolDef], executionAllowedTools },
-          {
-            emitter,
-            // Widening the caller's array after create must not take effect.
-            setup: () => executionAllowedTools.push(ToolNames.EDIT),
-          },
-        );
-
-        const sentDeclarations =
-          mockSendMessageStream.mock.calls[0][1].config.tools[0]
-            .functionDeclarations;
-        expect(sentDeclarations).toStrictEqual([
-          readFileToolDef,
-          editFileToolDef,
-        ]);
-        expect(JSON.stringify(sentDeclarations)).toBe(
-          JSON.stringify([readFileToolDef, editFileToolDef]),
-        );
-        expect(readFileTool.build).toHaveBeenCalled();
-        expect(readFileInvocation.execute).toHaveBeenCalledTimes(1);
-        expect(editFileTool.build).not.toHaveBeenCalled();
-        expect(editFileInvocation.execute).not.toHaveBeenCalled();
-        expect(approvalEvents).toHaveLength(0);
-
-        expect(
-          secondRoundParts.map((part) => part.functionResponse?.id),
-        ).toEqual(['call_read', 'call_edit']);
-        const deniedResponse = responseFor(secondRoundParts, 'call_edit');
-        expect(deniedResponse?.name).toBe(ToolNames.EDIT);
-        expect(deniedResponse?.response?.['error']).toContain(
-          'execution allowlist',
-        );
-        expect(deniedResponse?.response?.['error']).not.toContain('fork_tools');
-        expect(deniedResponse?.response?.['error']).not.toContain('not found');
-        expect(toolCallEvents.map((event) => event.callId).sort()).toEqual([
-          'call_edit',
-          'call_read',
-        ]);
-        expect(
-          toolResultEvents
-            .map(({ callId, success }) => ({ callId, success }))
-            .sort((left, right) => left.callId.localeCompare(right.callId)),
-        ).toEqual([
-          { callId: 'call_edit', success: false },
-          { callId: 'call_read', success: true },
-        ]);
-      });
-
-      it('treats an empty execution allowlist as deny-all', async () => {
-        const { tool, response } = await runReadFileFork([]);
-
-        expect(tool.build).not.toHaveBeenCalled();
-        expect(response?.id).toBe('call_read');
-        expect(response?.response?.['error']).toContain('No tools are allowed');
-      });
-
-      it('caps and decouples the execution allowlist denial message', async () => {
-        const { tool, response } = await runReadFileFork(
-          Array.from(
-            { length: 12 },
-            (_, index) => `tool_${index}_${'x'.repeat(50)}`,
-          ),
-        );
-
-        const error = response?.response?.['error'];
-        expect(error).toContain('execution allowlist');
-        expect(error).toContain('(+4 more)');
-        expect(error).not.toContain('fork_tools');
-        expect(String(error).length).toBeLessThan(400);
-        expect(tool.build).not.toHaveBeenCalled();
-      });
-
-      it('matches an exact MCP server allowlist entry without crossing server boundaries', async () => {
-        const githubName = normalizeToolNameForProvider('mcp__github__search');
-        const enterpriseName = normalizeToolNameForProvider(
-          'mcp__github-enterprise__search',
-        );
-        const githubDef = decl(githubName, 'Search GitHub');
-        const enterpriseDef = decl(enterpriseName, 'Search GitHub Enterprise');
-        const githubInvocation = invocation(
-          {},
-          'Search GitHub',
-          toolResult('github result'),
-        );
-        const enterpriseTool = mockTool(
-          enterpriseDef,
-          undefined,
-          mcp('github-enterprise', 'search'),
-        );
-        const responses = await runFork(
-          byName(
-            mockTool(githubDef, githubInvocation, mcp('github', 'search')),
-            enterpriseTool,
-          ),
-          [
-            call(githubName, {}, 'call_github'),
-            call(enterpriseName, {}, 'call_enterprise'),
-          ],
-          {
-            tools: [githubDef, enterpriseDef],
-            executionAllowedTools: ['mcp__github'],
-          },
-        );
-
-        expect(githubInvocation.execute).toHaveBeenCalledTimes(1);
-        expect(enterpriseTool.build).not.toHaveBeenCalled();
-        expect(errorFor(responses, 'call_enterprise')).toContain(
-          'execution allowlist',
-        );
-      });
-
-      it('lets mcp__* match MCP tools without matching built-in tools', async () => {
-        const mcpName = normalizeToolNameForProvider('mcp__github__search');
-        const mcpDef = decl(mcpName, 'Search GitHub');
-        const builtinDef = decl(ToolNames.READ_FILE, 'Read a file');
-        const mcpInvocation = invocation(
-          {},
-          'Search GitHub',
-          toolResult('github result'),
-        );
-        const builtinTool = mockTool(builtinDef);
-        const responses = await runFork(
-          byName(
-            mockTool(mcpDef, mcpInvocation, mcp('github', 'search')),
-            builtinTool,
-          ),
-          [
-            call(mcpName, {}, 'call_mcp'),
-            call(ToolNames.READ_FILE, { path: 'README.md' }, 'call_builtin'),
-          ],
-          { tools: [mcpDef, builtinDef], executionAllowedTools: ['mcp__*'] },
-        );
-
-        expect(mcpInvocation.execute).toHaveBeenCalledTimes(1);
-        expect(builtinTool.build).not.toHaveBeenCalled();
-        expect(errorFor(responses, 'call_builtin')).toContain(
-          'execution allowlist',
-        );
-      });
-
-      it('matches long MCP wildcard patterns by raw server identity and boundary', async () => {
-        const serverSuffix = 'a'.repeat(80);
-        const allowedServer = `repo.${serverSuffix}`;
-        const deniedServer = `repo/${serverSuffix}`;
-        const boundaryDeniedServer = `${allowedServer}__evil`;
-        const readToolOf = (server: string) =>
-          normalizeToolNameForProvider(`mcp__${server}__read`);
-        const allowedName = readToolOf(allowedServer);
-        const deniedName = readToolOf(deniedServer);
-        const boundaryDeniedName = readToolOf(boundaryDeniedServer);
-        const allowedDef = decl(allowedName, 'Reads from repo.bad');
-        const deniedDef = decl(deniedName, 'Reads from repo/bad');
-        const boundaryDeniedDef = decl(
-          boundaryDeniedName,
-          'Reads from a server with a shared raw prefix',
-        );
-        const allowedInvocation = invocation(
-          {},
-          'Read from repo.bad',
-          toolResult('repo result'),
-        );
-        const deniedTool = mockTool(
-          deniedDef,
-          undefined,
-          mcp(deniedServer, 'read', false),
-        );
-        const boundaryDeniedTool = mockTool(
-          boundaryDeniedDef,
-          undefined,
-          mcp(boundaryDeniedServer, 'read', false),
-        );
-        const responses = await runFork(
-          byName(
-            mockTool(allowedDef, allowedInvocation, mcp(allowedServer, 'read')),
-            deniedTool,
-            boundaryDeniedTool,
-          ),
-          [
-            call(allowedName, {}, 'call_repo'),
-            call(deniedName, {}, 'call_repo2'),
-            call(boundaryDeniedName, {}, 'call_boundary'),
-          ],
-          {
-            tools: [allowedDef, deniedDef, boundaryDeniedDef],
-            executionAllowedTools: [`mcp__${allowedServer}__*`],
-          },
-        );
-
-        expect(allowedName).not.toBe(deniedName);
-        expect(allowedInvocation.execute).toHaveBeenCalledTimes(1);
-        expect(deniedTool.build).not.toHaveBeenCalled();
-        expect(boundaryDeniedTool.build).not.toHaveBeenCalled();
-        expect(errorFor(responses, 'call_repo2')).toContain(
-          'execution allowlist',
-        );
-        expect(errorFor(responses, 'call_boundary')).toContain(
-          'execution allowlist',
-        );
-      });
-
-      it('should ignore duplicate provider tool-call ids across rounds', async () => {
-        const { config, inv, toolConfig } = await setupListFiles();
-        respond(
-          [call('list_files', { path: '.' }, 'call_1')],
-          [collidingCall({ path: '.' })],
-          'stop',
-        );
-        const [emitter, toolCallEvents, toolResultEvents] = eventLog(
-          AgentEventType.TOOL_CALL,
-          AgentEventType.TOOL_RESULT,
-        );
-        const scope = await runAgent(config, { tools: toolConfig, emitter });
-
-        expect(inv.execute).toHaveBeenCalledTimes(1);
-        expect(toolCallEvents).toHaveLength(2);
-        expect(toolResultEvents).toHaveLength(2);
-        expect(toolCallEvents[0].callId).toBe('call_1');
-        expect(toolResultEvents[0].callId).toBe('call_1');
-        expect(toolCallEvents[1].callId).toMatch(
-          /^call_1__qwen_dup_2:duplicate:/,
-        );
-        expect(toolResultEvents[1].callId).toBe(toolCallEvents[1].callId);
-        expect(toolResultEvents[1].error).toContain(DUP_CALL_1);
-        expectDuplicateResponse(2, 'call_1__qwen_dup_2');
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
-      });
-
-      it('should stop repeated duplicate provider tool-call responses', async () => {
-        const { config, inv, toolConfig } = await setupListFiles();
-        const duplicate = collidingCall({ path: '.' });
-        respond(
-          [call('list_files', { path: '.' }, 'call_1')],
-          [duplicate],
-          [duplicate, call('list_files', { path: './fresh' }, 'call_2')],
-        );
-        const [emitter, toolResultEvents] = eventLog(
-          AgentEventType.TOOL_RESULT,
-        );
-        const scope = await runAgent(config, { tools: toolConfig, emitter });
-
-        expect(inv.execute).toHaveBeenCalledTimes(1);
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
-        expect(toolResultEvents).toHaveLength(2);
-        expect(toolResultEvents[1].error).toContain(DUP_CALL_1);
-        expectDuplicateResponse(2, 'call_1__qwen_dup_2');
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
-      });
-
-      it('should stop consecutive identical tool calls with fresh ids', async () => {
-        const missingPath = '/workspace/project/missing-directory';
-        const { config, inv, toolConfig } = await setupReadTool(
-          decl('list_directory', 'Lists a directory'),
-          invocation(
-            { path: missingPath },
-            'List directory',
-            toolResult(
-              'Error: ENOENT: no such file or directory, scandir ' +
-                missingPath,
-              'Directory not found',
-            ),
-          ),
-          'List Directory',
-          'List directory contents',
-        );
-        respond(
-          ...rounds(5, 'list_directory', { path: missingPath }, 'call'),
-          'stop',
-        );
-        const scope = await runAgent(config, { tools: toolConfig });
-
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
-        expect(inv.execute).toHaveBeenCalledTimes(4);
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
-      });
-
-      it('keeps polling task_list while the task board changes (issue #9450)', async () => {
-        // Identical task_list arguments do not imply an identical result:
-        // teammates mutate the shared board between calls. The agent must
-        // not be halted while the observed results keep changing.
-        let boardVersion = 0;
-        const { config, inv, toolConfig, polls } = await setupTaskList(
-          // A peer completes/claims a task between polls, so every result
-          // differs even though the arguments are identical.
-          vi.fn(async () => {
-            boardVersion += 1;
-            const status = boardVersion % 2 === 0 ? 'completed' : 'in_progress';
-            return {
-              llmContent: `#7 [${status}] @peer-a — task (v${boardVersion})`,
-              returnDisplay: 'Listed tasks',
-            };
-          }),
-        );
-        const pollCount = 8; // well past the consecutive-identical threshold
-        respond(...polls(pollCount), 'stop');
-        const scope = await runAgent(config, { tools: toolConfig });
-
-        expect(inv.execute).toHaveBeenCalledTimes(pollCount);
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(pollCount + 1);
-        expect(scope.getTerminateMode()).not.toBe(
-          AgentTerminateMode.LOOP_DETECTED,
-        );
-      });
-
-      it('still halts task_list polling when the board is frozen (issue #9450)', async () => {
-        // No teammate activity: every poll returns the identical board.
-        const { config, inv, toolConfig, polls } =
-          await setupTaskList(frozenBoard());
-        respond(...polls(5), 'stop');
-        const [emitter, finishEvents] = eventLog(AgentEventType.FINISH);
-        const scope = await runAgent(config, { tools: toolConfig, emitter });
-
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
-        expect(inv.execute).toHaveBeenCalledTimes(4);
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
-        // The exact detector is attributable in the finish event (#9450).
-        expect(finishEvents).toHaveLength(1);
-        expect(finishEvents[0].loopType).toBe(
-          'consecutive_identical_tool_calls',
-        );
-        // The telemetry completion record carries the same attribution; a
-        // SubagentExecutionEvent without loop_type would silently drop the
-        // spread and journal the stop as unattributable.
-        const completionEvents = vi
-          .mocked(logSubagentExecution)
-          .mock.calls.map((args) => args[1])
-          .filter(
-            (event): event is SubagentExecutionEvent =>
-              event.status !== 'started',
+          expect(inv.execute).toHaveBeenCalledTimes(1);
+          expect(toolCallEvents).toHaveLength(2);
+          expect(toolResultEvents).toHaveLength(2);
+          expect(toolCallEvents[0].callId).toBe('call_1');
+          expect(toolResultEvents[0].callId).toBe('call_1');
+          expect(toolCallEvents[1].callId).toMatch(
+            /^call_1__qwen_dup_2:duplicate:/,
           );
-        expect(completionEvents).toHaveLength(1);
-        expect(completionEvents[0]?.loop_type).toBe(
-          'consecutive_identical_tool_calls',
-        );
-      });
-
-      it('counts a provider-duplicate call id once so result evidence stays in sync (issue #9450)', async () => {
-        // A provider can stream the SAME call id twice in one response — the
-        // exact pathology dedupeToolCallsById exists for. Execution collapses
-        // the pair to one call (one recorded result), so the loop guard must
-        // also count one request; otherwise the request counter runs one
-        // ahead of the result evidence and the result-aware exemption
-        // fails safe, halting a fully productive poller.
-        let boardVersion = 0;
-        const { config, inv, toolConfig, args, polls } = await setupTaskList(
-          // Every executed poll returns a changed board.
-          vi.fn(async () => ({
-            llmContent: `#7 [in_progress] @peer-a — task (v${++boardVersion})`,
-            returnDisplay: 'Listed tasks',
-          })),
-        );
-        // Round 1 emits the same call id twice (the provider duplicate); the
-        // remaining rounds emit one call each, the board changing every time.
-        const duplicateId = 'dup_call_0';
-        respond(
-          [
-            call('task_list', args, duplicateId),
-            call('task_list', args, duplicateId),
-          ],
-          ...polls(5),
-          'stop',
-        );
-        const scope = await runAgent(config, {
-          tools: toolConfig,
-          run: { ...defaultRunConfig, max_turns: 20 },
+          expect(toolResultEvents[1].callId).toBe(toolCallEvents[1].callId);
+          expect(toolResultEvents[1].error).toContain(DUP_CALL_1);
+          expectDuplicateResponse(2, 'call_1__qwen_dup_2');
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
         });
 
-        // The duplicate id executes once (dedupeToolCallsById), so 6 executed
-        // polls across 7 model turns; the changed board must carry the agent
-        // to goal instead of a false loop halt.
-        expect(inv.execute).toHaveBeenCalledTimes(6);
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(7);
-        expect(scope.getTerminateMode()).not.toBe(
-          AgentTerminateMode.LOOP_DETECTED,
-        );
-      });
+        it('should stop repeated duplicate provider tool-call responses', async () => {
+          const { config, inv, toolConfig } = await setupListFiles();
+          const duplicate = collidingCall({ path: '.' });
+          respond(
+            [call('list_files', { path: '.' }, 'call_1')],
+            [duplicate],
+            [duplicate, call('list_files', { path: './fresh' }, 'call_2')],
+          );
+          const [emitter, toolResultEvents] = eventLog(
+            AgentEventType.TOOL_RESULT,
+          );
+          const scope = await runAgent(config, { tools: toolConfig, emitter });
 
-      it('does not carry a stale loop attribution into a re-executed run (issue #9450)', async () => {
-        const { config, toolConfig, polls } =
-          await setupTaskList(frozenBoard());
-        respond(...polls(5), 'stop');
-        const [emitter, finishEvents] = eventLog(AgentEventType.FINISH);
-        emitter.on(AgentEventType.ERROR, () => undefined);
+          expect(inv.execute).toHaveBeenCalledTimes(1);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+          expect(toolResultEvents).toHaveLength(2);
+          expect(toolResultEvents[1].error).toContain(DUP_CALL_1);
+          expectDuplicateResponse(2, 'call_1__qwen_dup_2');
+          expect(scope.getTerminateMode()).toBe(
+            AgentTerminateMode.LOOP_DETECTED,
+          );
+        });
 
-        // Run 1 halts on the frozen board with an attribution.
-        const scope = await runAgent(config, { tools: toolConfig, emitter });
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
+        it('should stop consecutive identical tool calls with fresh ids', async () => {
+          const missingPath = '/workspace/project/missing-directory';
+          const { config, inv, toolConfig } = await setupReadTool(
+            decl('list_directory', 'Lists a directory'),
+            invocation(
+              { path: missingPath },
+              'List directory',
+              toolResult(
+                'Error: ENOENT: no such file or directory, scandir ' +
+                  missingPath,
+                'Directory not found',
+              ),
+            ),
+            'List Directory',
+            'List directory contents',
+          );
+          respond(
+            ...rounds(5, 'list_directory', { path: missingPath }, 'call'),
+            'stop',
+          );
+          const scope = await runAgent(config, { tools: toolConfig });
 
-        // Run 2 on the same instance (stop-hook continuation / resident
-        // turns) errors before any loop fires: it must not carry run 1's
-        // loopType into its FINISH/telemetry.
-        mockSendMessageStream.mockRejectedValueOnce(
-          new Error('simulated model error'),
-        );
-        await expectExecuteError(scope, 'simulated model error');
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
+          expect(inv.execute).toHaveBeenCalledTimes(4);
+          expect(scope.getTerminateMode()).toBe(
+            AgentTerminateMode.LOOP_DETECTED,
+          );
+          // The 3rd identical call's results carry the loop-protection
+          // reminder, after the tool response (#14828).
+          expect(sentParts(3).at(-1)?.text).toContain(
+            '`list_directory` has been called 3 times in a row',
+          );
+          expect(sentParts(3)[0].functionResponse).toBeDefined();
+          expect(
+            [1, 2, 4].some((n) =>
+              sentParts(n).some((part) => part.text?.includes('in a row')),
+            ),
+          ).toBe(false);
+        });
 
-        expect(finishEvents).toHaveLength(2);
-        expect(finishEvents[0].loopType).toBe(
-          'consecutive_identical_tool_calls',
-        );
-        expect(finishEvents[1].loopType).toBeUndefined();
-      });
+        it('reminds without stopping consecutive identical tool calls under warn', async () => {
+          const missingPath = '/workspace/project/missing-directory';
+          const { config, inv, toolConfig } = await setupReadTool(
+            decl('list_directory', 'Lists a directory'),
+            invocation(
+              { path: missingPath },
+              'List directory',
+              toolResult('Error: ENOENT', 'Directory not found'),
+            ),
+            'List Directory',
+            'List directory contents',
+          );
+          vi.spyOn(config, 'getLoopProtection').mockReturnValue('warn');
+          respond(
+            ...rounds(6, 'list_directory', { path: missingPath }, 'call'),
+            'stop',
+          );
+          const scope = await runAgent(config, { tools: toolConfig });
 
-      it('should ignore duplicate provider tool-call ids already present in chat history', async () => {
-        const { config, inv, toolConfig } = await setupListFiles();
-        historyHasCall1();
-        respond([collidingCall({ path: '.' })], 'stop');
-        const [emitter, toolCallEvents, toolResultEvents] = eventLog(
-          AgentEventType.TOOL_CALL,
-          AgentEventType.TOOL_RESULT,
-        );
-        const scope = await runAgent(config, { tools: toolConfig, emitter });
+          expect(inv.execute).toHaveBeenCalledTimes(6);
+          expect(scope.getTerminateMode()).not.toBe(
+            AgentTerminateMode.LOOP_DETECTED,
+          );
+          const reminders = [0, 1, 2, 3, 4, 5, 6].filter((n) =>
+            sentParts(n).some((part) => part.text?.includes('in a row')),
+          );
+          expect(reminders).toEqual([3]);
+        });
 
-        expect(inv.execute).not.toHaveBeenCalled();
-        expect(toolCallEvents).toHaveLength(1);
-        expect(toolResultEvents).toHaveLength(1);
-        expect(toolCallEvents[0].callId).toMatch(
-          /^call_1__qwen_dup_2:duplicate:/,
-        );
-        expect(toolResultEvents[0].callId).toBe(toolCallEvents[0].callId);
-        expect(toolResultEvents[0].error).toContain(DUP_CALL_1);
-        expectDuplicateResponse(1, 'call_1__qwen_dup_2');
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
-      });
+        it('does not credit a prepared reminder when the run ends at maxTurns', async () => {
+          // Negative control: the reminder is taken at the end of round 3
+          // (three identical tool results), and the run exits at the maxTurns
+          // check before a fourth request is attempted. No round then crosses
+          // a model-acceptance boundary, so `reminded` telemetry never credits
+          // a warning the model never saw — the earlier take-time commit is
+          // what this pins against.
+          const missingPath = '/workspace/project/missing-directory';
+          const { config, toolConfig } = await setupReadTool(
+            decl('list_directory', 'Lists a directory'),
+            invocation(
+              { path: missingPath },
+              'List directory',
+              toolResult('Error: ENOENT', 'Directory not found'),
+            ),
+            'List Directory',
+            'List directory contents',
+          );
+          vi.spyOn(config, 'getLoopProtection').mockReturnValue('warn');
+          respond(
+            ...rounds(3, 'list_directory', { path: missingPath }, 'call'),
+          );
+          const takeSpy = vi.spyOn(
+            LoopDetectionService.prototype,
+            'takeLoopReminder',
+          );
+          const scope = await runAgent(config, {
+            tools: toolConfig,
+            run: { max_time_minutes: 5, max_turns: 3 },
+          });
 
-      it('should execute an id-colliding tool call whose args differ from the handled call', async () => {
-        const { config, inv, toolConfig } = await setupListFiles(
-          { path: 'src' },
-          'src/main.ts',
-          'Listed 1 file',
-        );
-        historyHasCall1();
-        respond([collidingCall({ path: 'src' })], 'stop');
-        const [emitter, toolResultEvents] = eventLog(
-          AgentEventType.TOOL_RESULT,
-        );
-        const scope = await runAgent(config, { tools: toolConfig, emitter });
+          // Three tool rounds, no fourth model request.
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.MAX_TURNS);
+          // The reminder really was queued and taken at the end of round 3.
+          const taken = takeSpy.mock.results
+            .map((result) => result.value)
+            .filter(Boolean);
+          expect(taken).toHaveLength(1);
+          expect(String(taken[0])).toContain('in a row');
+          // Prepared, not committed: the delivery accounting never credits
+          // `reminded` for the warning that stayed unsent.
+          const decisions = vi
+            .mocked(logLoopProtection)
+            .mock.calls.map(([, event]) => event.decision);
+          expect(decisions).not.toContain('reminded');
+        });
 
-        expect(inv.execute).toHaveBeenCalledTimes(1);
-        expect(toolResultEvents).toHaveLength(1);
-        expect(toolResultEvents[0].callId).toBe('call_1__qwen_dup_2');
-        expect(toolResultEvents[0].error).toBeUndefined();
-        const response = sentParts(1)[0].functionResponse;
-        expect(response?.id).toBe('call_1__qwen_dup_2');
-        expect(response?.response?.['error']).toBeUndefined();
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
-      });
+        it('commits the reminder once at the next round model acceptance (positive control)', async () => {
+          // With a genuine next round whose response streams model content,
+          // the reminder rides with that request and its delivery commits
+          // exactly once at the first chunk.
+          const missingPath = '/workspace/project/missing-directory';
+          const { config, toolConfig } = await setupReadTool(
+            decl('list_directory', 'Lists a directory'),
+            invocation(
+              { path: missingPath },
+              'List directory',
+              toolResult('Error: ENOENT', 'Directory not found'),
+            ),
+            'List Directory',
+            'List directory contents',
+          );
+          vi.spyOn(config, 'getLoopProtection').mockReturnValue('warn');
+          respond(
+            ...rounds(3, 'list_directory', { path: missingPath }, 'call'),
+            'stop',
+          );
+          const scope = await runAgent(config, { tools: toolConfig });
 
-      it('should keep suppressing replays of the original call after an id-colliding execution', async () => {
-        const { config, inv, toolConfig } = await setupListFiles(
-          { path: '.' },
-          'file1.txt',
-          'Listed 1 file',
-        );
-        // Rounds share one usedIds set so the collisions get _2 and _3
-        // suffixes, mirroring how normalization accumulates across rounds.
-        const usedIds = new Set(['call_1']);
-        const round2Call = collidingCall({ path: 'src' }, usedIds);
-        const round3Call = collidingCall({ path: '.' }, usedIds);
-        respond(
-          [call('list_files', { path: '.' }, 'call_1')],
-          [round2Call],
-          [round3Call],
-          'stop',
-        );
-        const scope = await runAgent(config, { tools: toolConfig });
+          expect(scope.getTerminateMode()).not.toBe(
+            AgentTerminateMode.LOOP_DETECTED,
+          );
+          expect(
+            sentParts(3).some((part) => part.text?.includes('in a row')),
+          ).toBe(true);
+          const decisions = vi
+            .mocked(logLoopProtection)
+            .mock.calls.map(([, event]) => event.decision);
+          expect(decisions.filter((d) => d === 'reminded')).toHaveLength(1);
+        });
 
-        // Round 1 (original) and round 2 (different-args collision) execute;
-        // round 3 replays the ORIGINAL call under the reused id and must be
-        // suppressed — first-occurrence recording keeps the id naming the
-        // round-1 call even after the collision executed.
-        expect(inv.execute).toHaveBeenCalledTimes(2);
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(4);
-        expectDuplicateResponse(3, 'call_1__qwen_dup_3');
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
-      });
+        it('abandons the prepared reminder when the reminder-carrying send fails before acceptance', async () => {
+          // Pre-send error control: the request that carries the reminder
+          // rejects before any chunk proves model acceptance. The prepared
+          // delivery is abandoned in the round finally, so `reminded` stays
+          // un-credited even though the text rode in the draft request.
+          const missingPath = '/workspace/project/missing-directory';
+          const { config, toolConfig } = await setupReadTool(
+            decl('list_directory', 'Lists a directory'),
+            invocation(
+              { path: missingPath },
+              'List directory',
+              toolResult('Error: ENOENT', 'Directory not found'),
+            ),
+            'List Directory',
+            'List directory contents',
+          );
+          vi.spyOn(config, 'getLoopProtection').mockReturnValue('warn');
+          const callRounds = rounds(
+            3,
+            'list_directory',
+            { path: missingPath },
+            'call',
+          );
+          let sendIndex = 0;
+          mockSendMessageStream.mockImplementation(async () => {
+            sendIndex += 1;
+            if (sendIndex > callRounds.length) {
+              throw new Error('provider connection reset');
+            }
+            return streamOf(callsChunk(callRounds[sendIndex - 1]!));
+          });
+          const takeSpy = vi.spyOn(
+            LoopDetectionService.prototype,
+            'takeLoopReminder',
+          );
+          const scope = await createAgent(config, { tools: toolConfig });
+          await expect(scope.execute(new ContextState())).rejects.toThrow(
+            'provider connection reset',
+          );
 
-      it('should execute only the first duplicate functionCall id in one model turn', async () => {
-        const { config, inv, toolConfig } = await setupListFiles(
-          { path: 'a' },
-          'file1.txt',
-          'Listed 1 file',
-        );
-        respond(
-          [
-            call('list_files', { path: 'a' }, 'dup_id_0001'),
-            call('list_files', { path: 'b' }, 'dup_id_0001'),
-          ],
-          'stop',
-        );
-        await runAgent(config, { tools: toolConfig });
+          // The fourth request carried the reminder text and failed pre-send.
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(4);
+          expect(
+            sentParts(3).some((part) => part.text?.includes('in a row')),
+          ).toBe(true);
+          const taken = takeSpy.mock.results
+            .map((result) => result.value)
+            .filter(Boolean);
+          expect(taken).toHaveLength(1);
+          const decisions = vi
+            .mocked(logLoopProtection)
+            .mock.calls.map(([, event]) => event.decision);
+          expect(decisions).not.toContain('reminded');
+        });
 
-        expect(inv.execute).toHaveBeenCalledOnce();
-        expect(
-          sentParts(1)
-            .map((part) => part.functionResponse?.id)
-            .filter((id): id is string => Boolean(id)),
-        ).toEqual(['dup_id_0001']);
-      });
+        it('abandons the prepared reminder when prepareTools rejects before the send', async () => {
+          // prepareTools rejection control: the reminder is taken at the end
+          // of round 1 (three parallel identical calls), and round 2 fails in
+          // prepareTools() before sendMessageStream is ever reached.
+          const missingPath = '/workspace/project/missing-directory';
+          const { config, toolConfig } = await setupReadTool(
+            decl('list_directory', 'Lists a directory'),
+            invocation(
+              { path: missingPath },
+              'List directory',
+              toolResult('Error: ENOENT', 'Directory not found'),
+            ),
+            'List Directory',
+            'List directory contents',
+          );
+          vi.spyOn(config, 'getLoopProtection').mockReturnValue('warn');
+          vi.spyOn(config, 'getExecutionEnvironment').mockReturnValue(
+            {} as ExecutionEnvironment,
+          );
+          respond([
+            call('list_directory', { path: missingPath }, 'call_1'),
+            call('list_directory', { path: missingPath }, 'call_2'),
+            call('list_directory', { path: missingPath }, 'call_3'),
+          ]);
+          const takeSpy = vi.spyOn(
+            LoopDetectionService.prototype,
+            'takeLoopReminder',
+          );
+          const scope = await createAgent(config, { tools: toolConfig });
+          const core = (scope as unknown as { core: AgentCore }).core;
+          // The loop and the tool-call processor each call prepareTools per
+          // round: rounds one and two succeed (the setup warm-up plus round
+          // one), round two's second call — before the reminder-carrying
+          // send — rejects.
+          let prepareCalls = 0;
+          vi.spyOn(core, 'prepareTools').mockImplementation(async () => {
+            prepareCalls += 1;
+            if (prepareCalls >= 3) {
+              throw new Error('tool preparation failed');
+            }
+            return [decl('list_directory', 'Lists a directory')];
+          });
 
-      it('should report unauthorized tool names before duplicate provider ids', async () => {
-        const { config, inv, toolConfig } = await setupListFiles();
-        respond(
-          [call('list_files', { path: '.' }, 'call_reused')],
-          [call('write_file', { path: 'x.txt', content: 'x' }, 'call_reused')],
-          'stop',
-        );
-        const scope = await runAgent(config, { tools: toolConfig });
+          await expect(scope.execute(new ContextState())).rejects.toThrow(
+            'tool preparation failed',
+          );
 
-        expect(inv.execute).toHaveBeenCalledTimes(1);
-        const response = sentParts(2)[0].functionResponse;
-        expect(response?.id).toBe('call_reused');
-        expect(response?.name).toBe('write_file');
-        expect(response?.response?.['error']).toContain(
-          'Tool "write_file" not found',
-        );
-        expect(response?.response?.['error']).not.toContain(
-          'Duplicate provider tool call id',
-        );
-        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
-      });
-    });
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          const taken = takeSpy.mock.results
+            .map((result) => result.value)
+            .filter(Boolean);
+          expect(taken).toHaveLength(1);
+          const decisions = vi
+            .mocked(logLoopProtection)
+            .mock.calls.map(([, event]) => event.decision);
+          expect(decisions).not.toContain('reminded');
+        });
+
+        it('keeps polling task_list while the task board changes (issue #9450)', async () => {
+          // Identical task_list arguments do not imply an identical result:
+          // teammates mutate the shared board between calls. The agent must
+          // not be halted while the observed results keep changing.
+          let boardVersion = 0;
+          const { config, inv, toolConfig, polls } = await setupTaskList(
+            // A peer completes/claims a task between polls, so every result
+            // differs even though the arguments are identical.
+            vi.fn(async () => {
+              boardVersion += 1;
+              const status =
+                boardVersion % 2 === 0 ? 'completed' : 'in_progress';
+              return {
+                llmContent: `#7 [${status}] @peer-a — task (v${boardVersion})`,
+                returnDisplay: 'Listed tasks',
+              };
+            }),
+          );
+          const pollCount = 8; // well past the consecutive-identical threshold
+          respond(...polls(pollCount), 'stop');
+          const scope = await runAgent(config, { tools: toolConfig });
+
+          expect(inv.execute).toHaveBeenCalledTimes(pollCount);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(pollCount + 1);
+          expect(scope.getTerminateMode()).not.toBe(
+            AgentTerminateMode.LOOP_DETECTED,
+          );
+        });
+
+        it('still halts task_list polling when the board is frozen (issue #9450)', async () => {
+          // No teammate activity: every poll returns the identical board.
+          const { config, inv, toolConfig, polls } =
+            await setupTaskList(frozenBoard());
+          respond(...polls(5), 'stop');
+          const [emitter, finishEvents] = eventLog(AgentEventType.FINISH);
+          const scope = await runAgent(config, { tools: toolConfig, emitter });
+
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
+          expect(inv.execute).toHaveBeenCalledTimes(4);
+          expect(scope.getTerminateMode()).toBe(
+            AgentTerminateMode.LOOP_DETECTED,
+          );
+          // The exact detector is attributable in the finish event (#9450).
+          expect(finishEvents).toHaveLength(1);
+          expect(finishEvents[0].loopType).toBe(
+            'consecutive_identical_tool_calls',
+          );
+          // The telemetry completion record carries the same attribution; a
+          // SubagentExecutionEvent without loop_type would silently drop the
+          // spread and journal the stop as unattributable.
+          const completionEvents = vi
+            .mocked(logSubagentExecution)
+            .mock.calls.map((args) => args[1])
+            .filter(
+              (event): event is SubagentExecutionEvent =>
+                event.status !== 'started',
+            );
+          expect(completionEvents).toHaveLength(1);
+          expect(completionEvents[0]?.loop_type).toBe(
+            'consecutive_identical_tool_calls',
+          );
+        });
+
+        it('counts a provider-duplicate call id once so result evidence stays in sync (issue #9450)', async () => {
+          // A provider can stream the SAME call id twice in one response — the
+          // exact pathology dedupeToolCallsById exists for. Execution collapses
+          // the pair to one call (one recorded result), so the loop guard must
+          // also count one request; otherwise the request counter runs one
+          // ahead of the result evidence and the result-aware exemption
+          // fails safe, halting a fully productive poller.
+          let boardVersion = 0;
+          const { config, inv, toolConfig, args, polls } = await setupTaskList(
+            // Every executed poll returns a changed board.
+            vi.fn(async () => ({
+              llmContent: `#7 [in_progress] @peer-a — task (v${++boardVersion})`,
+              returnDisplay: 'Listed tasks',
+            })),
+          );
+          // Round 1 emits the same call id twice (the provider duplicate); the
+          // remaining rounds emit one call each, the board changing every time.
+          const duplicateId = 'dup_call_0';
+          respond(
+            [
+              call('task_list', args, duplicateId),
+              call('task_list', args, duplicateId),
+            ],
+            ...polls(5),
+            'stop',
+          );
+          const scope = await runAgent(config, {
+            tools: toolConfig,
+            run: { ...defaultRunConfig, max_turns: 20 },
+          });
+
+          // The duplicate id executes once (dedupeToolCallsById), so 6 executed
+          // polls across 7 model turns; the changed board must carry the agent
+          // to goal instead of a false loop halt.
+          expect(inv.execute).toHaveBeenCalledTimes(6);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(7);
+          expect(scope.getTerminateMode()).not.toBe(
+            AgentTerminateMode.LOOP_DETECTED,
+          );
+        });
+
+        it('does not carry a stale loop attribution into a re-executed run (issue #9450)', async () => {
+          const { config, toolConfig, polls } =
+            await setupTaskList(frozenBoard());
+          respond(...polls(5), 'stop');
+          const [emitter, finishEvents] = eventLog(AgentEventType.FINISH);
+          emitter.on(AgentEventType.ERROR, () => undefined);
+
+          // Run 1 halts on the frozen board with an attribution.
+          const scope = await runAgent(config, { tools: toolConfig, emitter });
+          expect(scope.getTerminateMode()).toBe(
+            AgentTerminateMode.LOOP_DETECTED,
+          );
+
+          // Run 2 on the same instance (stop-hook continuation / resident
+          // turns) errors before any loop fires: it must not carry run 1's
+          // loopType into its FINISH/telemetry.
+          mockSendMessageStream.mockRejectedValueOnce(
+            new Error('simulated model error'),
+          );
+          await expectExecuteError(scope, 'simulated model error');
+
+          expect(finishEvents).toHaveLength(2);
+          expect(finishEvents[0].loopType).toBe(
+            'consecutive_identical_tool_calls',
+          );
+          expect(finishEvents[1].loopType).toBeUndefined();
+        });
+
+        it('should ignore duplicate provider tool-call ids already present in chat history', async () => {
+          const { config, inv, toolConfig } = await setupListFiles();
+          historyHasCall1();
+          respond([collidingCall({ path: '.' })], 'stop');
+          const [emitter, toolCallEvents, toolResultEvents] = eventLog(
+            AgentEventType.TOOL_CALL,
+            AgentEventType.TOOL_RESULT,
+          );
+          const scope = await runAgent(config, { tools: toolConfig, emitter });
+
+          expect(inv.execute).not.toHaveBeenCalled();
+          expect(toolCallEvents).toHaveLength(1);
+          expect(toolResultEvents).toHaveLength(1);
+          expect(toolCallEvents[0].callId).toMatch(
+            /^call_1__qwen_dup_2:duplicate:/,
+          );
+          expect(toolResultEvents[0].callId).toBe(toolCallEvents[0].callId);
+          expect(toolResultEvents[0].error).toContain(DUP_CALL_1);
+          expectDuplicateResponse(1, 'call_1__qwen_dup_2');
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        });
+
+        it('should execute an id-colliding tool call whose args differ from the handled call', async () => {
+          const { config, inv, toolConfig } = await setupListFiles(
+            { path: 'src' },
+            'src/main.ts',
+            'Listed 1 file',
+          );
+          historyHasCall1();
+          respond([collidingCall({ path: 'src' })], 'stop');
+          const [emitter, toolResultEvents] = eventLog(
+            AgentEventType.TOOL_RESULT,
+          );
+          const scope = await runAgent(config, { tools: toolConfig, emitter });
+
+          expect(inv.execute).toHaveBeenCalledTimes(1);
+          expect(toolResultEvents).toHaveLength(1);
+          expect(toolResultEvents[0].callId).toBe('call_1__qwen_dup_2');
+          expect(toolResultEvents[0].error).toBeUndefined();
+          const response = sentParts(1)[0].functionResponse;
+          expect(response?.id).toBe('call_1__qwen_dup_2');
+          expect(response?.response?.['error']).toBeUndefined();
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        });
+
+        it('should keep suppressing replays of the original call after an id-colliding execution', async () => {
+          const { config, inv, toolConfig } = await setupListFiles(
+            { path: '.' },
+            'file1.txt',
+            'Listed 1 file',
+          );
+          // Rounds share one usedIds set so the collisions get _2 and _3
+          // suffixes, mirroring how normalization accumulates across rounds.
+          const usedIds = new Set(['call_1']);
+          const round2Call = collidingCall({ path: 'src' }, usedIds);
+          const round3Call = collidingCall({ path: '.' }, usedIds);
+          respond(
+            [call('list_files', { path: '.' }, 'call_1')],
+            [round2Call],
+            [round3Call],
+            'stop',
+          );
+          const scope = await runAgent(config, { tools: toolConfig });
+
+          // Round 1 (original) and round 2 (different-args collision) execute;
+          // round 3 replays the ORIGINAL call under the reused id and must be
+          // suppressed — first-occurrence recording keeps the id naming the
+          // round-1 call even after the collision executed.
+          expect(inv.execute).toHaveBeenCalledTimes(2);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(4);
+          expectDuplicateResponse(3, 'call_1__qwen_dup_3');
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        });
+
+        it('should track refused and allowed replays independently when they reuse an id', async () => {
+          const { config, inv, toolConfig } = await setupListFiles();
+          const usedIds = new Set<string>();
+          const denied = () =>
+            normalizeModelToolCallIds(
+              [fnCall('write_file', { file_path: 'x.txt' }, 'call_1')],
+              usedIds,
+              new Set<string>(),
+            )[0]!.functionCall!;
+          respond(
+            [denied()],
+            [collidingCall({ path: '.' }, usedIds)],
+            [denied()],
+            [collidingCall({ path: '.' }, usedIds)],
+            'stop',
+          );
+          const scope = await runAgent(config, { tools: toolConfig });
+
+          expect(inv.execute).toHaveBeenCalledOnce();
+          expect(errorFor(sentParts(1), 'call_1')).toContain(
+            'Tool "write_file" not found',
+          );
+          if (loop.shared) {
+            expectDuplicateResponse(3, 'call_1__qwen_dup_3');
+          } else {
+            expect(errorFor(sentParts(3), 'call_1__qwen_dup_3')).toContain(
+              'Tool "write_file" not found',
+            );
+          }
+          expectDuplicateResponse(4, 'call_1__qwen_dup_4');
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        });
+
+        it('should refuse a missing tool name even when a tool is named unknown', async () => {
+          const toolDef = decl('unknown', 'A custom tool');
+          const tool = mockTool(toolDef);
+          const responses = await runFork(
+            () => tool,
+            [{ id: 'call_missing', args: {} }],
+            { tools: [toolDef], executionAllowedTools: ['unknown'] },
+          );
+
+          expect(tool.build).not.toHaveBeenCalled();
+          expect(errorFor(responses, 'call_missing')).toContain(
+            'Tool "undefined" not found',
+          );
+        });
+
+        it('should execute only the first duplicate functionCall id in one model turn', async () => {
+          const { config, inv, toolConfig } = await setupListFiles(
+            { path: 'a' },
+            'file1.txt',
+            'Listed 1 file',
+          );
+          respond(
+            [
+              call('list_files', { path: 'a' }, 'dup_id_0001'),
+              call('list_files', { path: 'b' }, 'dup_id_0001'),
+            ],
+            'stop',
+          );
+          await runAgent(config, { tools: toolConfig });
+
+          expect(inv.execute).toHaveBeenCalledOnce();
+          expect(
+            sentParts(1)
+              .map((part) => part.functionResponse?.id)
+              .filter((id): id is string => Boolean(id)),
+          ).toEqual(['dup_id_0001']);
+        });
+
+        it('should report unauthorized tool names before duplicate provider ids', async () => {
+          const { config, inv, toolConfig } = await setupListFiles();
+          respond(
+            [call('list_files', { path: '.' }, 'call_reused')],
+            [
+              call(
+                'write_file',
+                { path: 'x.txt', content: 'x' },
+                'call_reused',
+              ),
+            ],
+            'stop',
+          );
+          const scope = await runAgent(config, { tools: toolConfig });
+
+          expect(inv.execute).toHaveBeenCalledTimes(1);
+          const response = sentParts(2)[0].functionResponse;
+          expect(response?.id).toBe('call_reused');
+          expect(response?.name).toBe('write_file');
+          expect(response?.response?.['error']).toContain(
+            'Tool "write_file" not found',
+          );
+          expect(response?.response?.['error']).not.toContain(
+            'Duplicate provider tool call id',
+          );
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        });
+      },
+    );
 
     describe('execute - Termination and Recovery', () => {
       const promptConfig: PromptConfig = { systemPrompt: 'Execute task.' };
@@ -2470,6 +2883,50 @@ describe('subagent.ts', () => {
           return { result, attempts: () => attempts };
         };
 
+        it.each([false, true])(
+          'renews the stall window after preparing a follow-up stream (shared=%s)',
+          async (shared) => {
+            const { scope, emitter } = await createScope({ max_turns: 3 });
+            vi.stubEnv(
+              'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+              shared ? '1' : undefined,
+            );
+            const controller = new AbortController();
+            vi.useFakeTimers();
+            const watchdog = attachStallWatchdog(emitter, controller, 350);
+            try {
+              let startPreparation!: () => void;
+              const preparing = new Promise<void>((resolve) => {
+                startPreparation = resolve;
+              });
+              mockSendMessageStream
+                .mockResolvedValueOnce(
+                  streamOf(callsChunk([call('missing_tool', {}, 'call_1')])),
+                )
+                .mockImplementation(async () => {
+                  startPreparation();
+                  await new Promise((resolve) => setTimeout(resolve, 220));
+                  return (async function* () {
+                    await new Promise((resolve) => setTimeout(resolve, 220));
+                    yield doneChunk;
+                  })();
+                });
+              const run = scope.execute(new ContextState(), controller.signal);
+              await Promise.race([preparing, run]);
+              await vi.advanceTimersByTimeAsync(440);
+              await run;
+              expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+              expect(watchdog.stalled()).toBe(false);
+              expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+              expect(scope.getFinalText()).toBe('Done.');
+            } finally {
+              watchdog.dispose();
+              vi.useRealTimers();
+              vi.unstubAllEnvs();
+            }
+          },
+        );
+
         it('keeps a backoff longer than stallMs on one attempt', async () => {
           vi.useFakeTimers();
           try {
@@ -2569,226 +3026,237 @@ describe('subagent.ts', () => {
         });
       });
 
-      describe('agent time limit during a wait', () => {
-        // Each variant waits 2h after spending 30s of a 1-minute budget, so
-        // the limit passes 30s into the wait.
-        const variants = {
-          'the stream rejects': (params: unknown) =>
-            (async function* () {
-              await backoff(7_200_000, signalOf(params));
-              yield doneChunk;
-            })(),
-          'the stream yields after the abort': (params: unknown) =>
-            (async function* () {
-              await backoff(7_200_000, signalOf(params)).catch(() => {});
-              yield doneChunk;
-            })(),
-        };
+      describe.each(LOOPS)(
+        'agent time limit during a wait ($name loop)',
+        (loop) => {
+          let expectLoop: () => void;
+          beforeEach(() => {
+            expectLoop = useAgentLoop(loop);
+          });
+          afterEach(() => expectLoop());
 
-        it.each(Object.keys(variants))(
-          'ends with TIMEOUT when %s',
-          async (name) => {
+          // Each variant waits 2h after spending 30s of a 1-minute budget, so
+          // the limit passes 30s into the wait.
+          const variants = {
+            'the stream rejects': (params: unknown) =>
+              (async function* () {
+                await backoff(7_200_000, signalOf(params));
+                yield doneChunk;
+              })(),
+            'the stream yields after the abort': (params: unknown) =>
+              (async function* () {
+                await backoff(7_200_000, signalOf(params)).catch(() => {});
+                yield doneChunk;
+              })(),
+          };
+
+          it.each(Object.keys(variants))(
+            'ends with TIMEOUT when %s',
+            async (name) => {
+              vi.useFakeTimers();
+              try {
+                mockSendMessageStream.mockImplementation(async (_m, params) => {
+                  await new Promise((r) => setTimeout(r, 30_000));
+                  return variants[name as keyof typeof variants](params);
+                });
+                const { scope } = await createScope({
+                  max_turns: 5,
+                  max_time_minutes: 1,
+                });
+                let settled = false;
+                const run = scope
+                  .execute(new ContextState(), undefined, {
+                    enforceTimeLimitDuringRetryWait: true,
+                  })
+                  .finally(() => (settled = true));
+                await vi.advanceTimersByTimeAsync(59_999);
+                expect(settled).toBe(false);
+                await vi.advanceTimersByTimeAsync(1);
+                await run;
+                expect(scope.getTerminateMode()).toBe(
+                  AgentTerminateMode.TIMEOUT,
+                );
+                expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+                expect(vi.getTimerCount()).toBe(0);
+              } finally {
+                vi.useRealTimers();
+              }
+            },
+          );
+
+          it('ends with TIMEOUT when the send itself rejects during the wait', async () => {
             vi.useFakeTimers();
             try {
               mockSendMessageStream.mockImplementation(async (_m, params) => {
                 await new Promise((r) => setTimeout(r, 30_000));
-                return variants[name as keyof typeof variants](params);
+                await backoff(7_200_000, signalOf(params));
+                return (async function* () {
+                  yield doneChunk;
+                })();
               });
+              const { scope } = await createScope({
+                max_turns: 5,
+                max_time_minutes: 1,
+              });
+              const run = scope.execute(new ContextState(), undefined, {
+                enforceTimeLimitDuringRetryWait: true,
+              });
+              await vi.advanceTimersByTimeAsync(60_000);
+              await run;
+              expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+            } finally {
+              vi.useRealTimers();
+            }
+          });
+
+          it('times out at once when the limit already passed as the wait starts', async () => {
+            vi.useFakeTimers();
+            try {
+              mockSendMessageStream.mockImplementation(async (_m, params) =>
+                (async function* () {
+                  // Spent the whole budget inside the round before the retry.
+                  await new Promise((r) => setTimeout(r, 61_000));
+                  await backoff(7_200_000, signalOf(params));
+                  yield doneChunk;
+                })(),
+              );
+              const { scope } = await createScope({
+                max_turns: 5,
+                max_time_minutes: 1,
+              });
+              const run = scope.execute(new ContextState(), undefined, {
+                enforceTimeLimitDuringRetryWait: true,
+              });
+              await vi.advanceTimersByTimeAsync(61_000);
+              // The guard fires on the next tick, not after the 2h backoff.
+              await vi.advanceTimersByTimeAsync(1);
+              await run;
+              expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+            } finally {
+              vi.useRealTimers();
+            }
+          });
+
+          it('measures the limit from the original start and shares it across waits', async () => {
+            vi.useFakeTimers();
+            try {
+              mockSendMessageStream.mockImplementation(async (_m, params) =>
+                (async function* () {
+                  for (let i = 0; i < 10; i++) {
+                    await backoff(20_000, signalOf(params));
+                  }
+                  yield doneChunk;
+                })(),
+              );
+              const { scope, waits } = await createScope({
+                max_turns: 5,
+                max_time_minutes: 1,
+              });
+              const run = scope.execute(new ContextState(), undefined, {
+                enforceTimeLimitDuringRetryWait: true,
+              });
+              await vi.advanceTimersByTimeAsync(60_001);
+              await run;
+              expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+              // The third wait is cut as the minute passes: no wait renewed the
+              // limit, and no fourth request or wait followed.
+              expect(waits.filter((w) => w.phase === 'start')).toHaveLength(3);
+            } finally {
+              vi.useRealTimers();
+            }
+          });
+
+          it('clears the guard when the last wait ends early', async () => {
+            vi.useFakeTimers();
+            try {
+              let release!: () => void;
+              mockSendMessageStream.mockImplementation(async (_m, params) =>
+                (async function* () {
+                  await backoff(1_000, signalOf(params));
+                  await new Promise<void>((r) => (release = r));
+                  yield doneChunk;
+                })(),
+              );
+              const { scope } = await createScope({
+                max_turns: 5,
+                max_time_minutes: 1,
+              });
+              const run = scope.execute(new ContextState(), undefined, {
+                enforceTimeLimitDuringRetryWait: true,
+              });
+              await vi.advanceTimersByTimeAsync(1_000);
+              expect(vi.getTimerCount()).toBe(0);
+              // Past the limit with no active wait: only the loop's own
+              // cooperative checks apply, so the round is not aborted.
+              await vi.advanceTimersByTimeAsync(120_000);
+              release();
+              await run;
+              expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+              expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+            } finally {
+              vi.useRealTimers();
+            }
+          });
+
+          it('lets a parent cancel during the wait win as CANCELLED', async () => {
+            vi.useFakeTimers();
+            try {
+              mockSendMessageStream.mockImplementation(async (_m, params) =>
+                (async function* () {
+                  await backoff(7_200_000, signalOf(params));
+                  yield doneChunk;
+                })(),
+              );
+              const { scope } = await createScope({
+                max_turns: 5,
+                max_time_minutes: 1,
+              });
+              const parent = new AbortController();
+              const run = scope.execute(new ContextState(), parent.signal, {
+                enforceTimeLimitDuringRetryWait: true,
+              });
+              await vi.advanceTimersByTimeAsync(10_000);
+              parent.abort();
+              await run.catch(() => {});
+              expect(scope.getTerminateMode()).not.toBe(
+                AgentTerminateMode.TIMEOUT,
+              );
+              await vi.advanceTimersByTimeAsync(120_000);
+              expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+            } finally {
+              vi.useRealTimers();
+            }
+          });
+
+          it('leaves agents without the opt-in on their between-round checks', async () => {
+            vi.useFakeTimers();
+            try {
+              mockSendMessageStream.mockImplementation(async (_m, params) =>
+                (async function* () {
+                  await backoff(7_200_000, signalOf(params));
+                  yield doneChunk;
+                })(),
+              );
               const { scope } = await createScope({
                 max_turns: 5,
                 max_time_minutes: 1,
               });
               let settled = false;
               const run = scope
-                .execute(new ContextState(), undefined, {
-                  enforceTimeLimitDuringRetryWait: true,
-                })
+                .execute(new ContextState())
                 .finally(() => (settled = true));
-              await vi.advanceTimersByTimeAsync(59_999);
+              await vi.advanceTimersByTimeAsync(7_199_000);
               expect(settled).toBe(false);
-              await vi.advanceTimersByTimeAsync(1);
+              await vi.advanceTimersByTimeAsync(1_000);
               await run;
+              // Checked after the round, as before.
               expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
-              expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
-              expect(vi.getTimerCount()).toBe(0);
             } finally {
               vi.useRealTimers();
             }
-          },
-        );
-
-        it('ends with TIMEOUT when the send itself rejects during the wait', async () => {
-          vi.useFakeTimers();
-          try {
-            mockSendMessageStream.mockImplementation(async (_m, params) => {
-              await new Promise((r) => setTimeout(r, 30_000));
-              await backoff(7_200_000, signalOf(params));
-              return (async function* () {
-                yield doneChunk;
-              })();
-            });
-            const { scope } = await createScope({
-              max_turns: 5,
-              max_time_minutes: 1,
-            });
-            const run = scope.execute(new ContextState(), undefined, {
-              enforceTimeLimitDuringRetryWait: true,
-            });
-            await vi.advanceTimersByTimeAsync(60_000);
-            await run;
-            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
-          } finally {
-            vi.useRealTimers();
-          }
-        });
-
-        it('times out at once when the limit already passed as the wait starts', async () => {
-          vi.useFakeTimers();
-          try {
-            mockSendMessageStream.mockImplementation(async (_m, params) =>
-              (async function* () {
-                // Spent the whole budget inside the round before the retry.
-                await new Promise((r) => setTimeout(r, 61_000));
-                await backoff(7_200_000, signalOf(params));
-                yield doneChunk;
-              })(),
-            );
-            const { scope } = await createScope({
-              max_turns: 5,
-              max_time_minutes: 1,
-            });
-            const run = scope.execute(new ContextState(), undefined, {
-              enforceTimeLimitDuringRetryWait: true,
-            });
-            await vi.advanceTimersByTimeAsync(61_000);
-            // The guard fires on the next tick, not after the 2h backoff.
-            await vi.advanceTimersByTimeAsync(1);
-            await run;
-            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
-          } finally {
-            vi.useRealTimers();
-          }
-        });
-
-        it('measures the limit from the original start and shares it across waits', async () => {
-          vi.useFakeTimers();
-          try {
-            mockSendMessageStream.mockImplementation(async (_m, params) =>
-              (async function* () {
-                for (let i = 0; i < 10; i++) {
-                  await backoff(20_000, signalOf(params));
-                }
-                yield doneChunk;
-              })(),
-            );
-            const { scope, waits } = await createScope({
-              max_turns: 5,
-              max_time_minutes: 1,
-            });
-            const run = scope.execute(new ContextState(), undefined, {
-              enforceTimeLimitDuringRetryWait: true,
-            });
-            await vi.advanceTimersByTimeAsync(60_001);
-            await run;
-            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
-            // The third wait is cut as the minute passes: no wait renewed the
-            // limit, and no fourth request or wait followed.
-            expect(waits.filter((w) => w.phase === 'start')).toHaveLength(3);
-          } finally {
-            vi.useRealTimers();
-          }
-        });
-
-        it('clears the guard when the last wait ends early', async () => {
-          vi.useFakeTimers();
-          try {
-            let release!: () => void;
-            mockSendMessageStream.mockImplementation(async (_m, params) =>
-              (async function* () {
-                await backoff(1_000, signalOf(params));
-                await new Promise<void>((r) => (release = r));
-                yield doneChunk;
-              })(),
-            );
-            const { scope } = await createScope({
-              max_turns: 5,
-              max_time_minutes: 1,
-            });
-            const run = scope.execute(new ContextState(), undefined, {
-              enforceTimeLimitDuringRetryWait: true,
-            });
-            await vi.advanceTimersByTimeAsync(1_000);
-            expect(vi.getTimerCount()).toBe(0);
-            // Past the limit with no active wait: only the loop's own
-            // cooperative checks apply, so the round is not aborted.
-            await vi.advanceTimersByTimeAsync(120_000);
-            release();
-            await run;
-            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
-            expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
-          } finally {
-            vi.useRealTimers();
-          }
-        });
-
-        it('lets a parent cancel during the wait win as CANCELLED', async () => {
-          vi.useFakeTimers();
-          try {
-            mockSendMessageStream.mockImplementation(async (_m, params) =>
-              (async function* () {
-                await backoff(7_200_000, signalOf(params));
-                yield doneChunk;
-              })(),
-            );
-            const { scope } = await createScope({
-              max_turns: 5,
-              max_time_minutes: 1,
-            });
-            const parent = new AbortController();
-            const run = scope.execute(new ContextState(), parent.signal, {
-              enforceTimeLimitDuringRetryWait: true,
-            });
-            await vi.advanceTimersByTimeAsync(10_000);
-            parent.abort();
-            await run.catch(() => {});
-            expect(scope.getTerminateMode()).not.toBe(
-              AgentTerminateMode.TIMEOUT,
-            );
-            await vi.advanceTimersByTimeAsync(120_000);
-            expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
-          } finally {
-            vi.useRealTimers();
-          }
-        });
-
-        it('leaves agents without the opt-in on their between-round checks', async () => {
-          vi.useFakeTimers();
-          try {
-            mockSendMessageStream.mockImplementation(async (_m, params) =>
-              (async function* () {
-                await backoff(7_200_000, signalOf(params));
-                yield doneChunk;
-              })(),
-            );
-            const { scope } = await createScope({
-              max_turns: 5,
-              max_time_minutes: 1,
-            });
-            let settled = false;
-            const run = scope
-              .execute(new ContextState())
-              .finally(() => (settled = true));
-            await vi.advanceTimersByTimeAsync(7_199_000);
-            expect(settled).toBe(false);
-            await vi.advanceTimersByTimeAsync(1_000);
-            await run;
-            // Checked after the round, as before.
-            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
-          } finally {
-            vi.useRealTimers();
-          }
-        });
-      });
+          });
+        },
+      );
     });
 
     describe('execute - Streaming and Thought Handling', () => {
@@ -2992,102 +3460,116 @@ describe('subagent.ts', () => {
         expect(readResult!.success).toBe(true);
       });
 
-      it('should mark truncated subagent write_file calls as output-truncated errors', async () => {
-        const { config, toolConfig } = await setupWriteFile();
-        mockSendMessageStream.mockImplementation(async () =>
-          streamOf<object>(
-            writeCall('call_write', { file_path: '/tmp/truncated.txt' }),
-            partsChunk([], 'MAX_TOKENS'),
-            partsChunk([{ text: 'done' }]),
-          ),
-        );
-        const writeResult = await runWrite(config, toolConfig);
+      describe.each(LOOPS)('model rounds on the $name loop', (loop) => {
+        let expectLoop: () => void;
+        beforeEach(() => {
+          expectLoop = useAgentLoop(loop);
+        });
+        afterEach(() => expectLoop());
 
-        expect(writeResult.success).toBe(false);
-        expect(writeResult.error).toContain(
-          'truncated due to max_tokens limit',
-        );
-        expect(writeResult.error).toContain(
-          'rejected to prevent writing truncated content',
-        );
-        expect(writeResult.error).not.toContain(
-          "params must have required property 'content'",
-        );
-      });
-
-      it('should NOT reject write_file when truncated attempt is followed by successful retry', async () => {
-        const { config, toolConfig } = await setupWriteFile();
-        // First call: truncated (MAX_TOKENS). Retry resets state, second call:
-        // complete write_file. The scheduler should see wasOutputTruncated=false
-        // for the retried response and allow the tool to proceed. The second
-        // round's plain text ends the agent loop.
-        mockSendMessageStream
-          .mockImplementationOnce(async () =>
+        it('should mark truncated subagent write_file calls as output-truncated errors', async () => {
+          const { config, toolConfig } = await setupWriteFile();
+          mockSendMessageStream.mockImplementation(async () =>
             streamOf<object>(
-              // Truncated response with incomplete write_file args
-              writeCall('call_write_truncated', {
-                file_path: '/tmp/retry-test.txt',
-              }),
-              { type: 'retry' },
-              // After retry, complete response with all required args
-              writeCall('call_write_complete', {
-                file_path: '/tmp/retry-test.txt',
-                content: 'hello',
-              }),
-              partsChunk([], 'STOP'),
-            ),
-          )
-          .mockImplementation(async () =>
-            streamOf(partsChunk([{ text: 'done' }], 'STOP')),
-          );
-        const writeResult = await runWrite(config, toolConfig);
-
-        // After retry the wasOutputTruncated flag must have been cleared, so
-        // the call should NOT be rejected with a truncation error — even if
-        // execution fails for unrelated reasons (e.g. mock filesystem).
-        expect(writeResult.error).not.toContain(
-          'truncated due to max_tokens limit',
-        );
-        expect(writeResult.error).not.toContain(
-          'rejected to prevent writing truncated content',
-        );
-      });
-
-      it.each([
-        { retry: { type: 'retry' as const, isContinuation: true } },
-        { retry: { type: 'retry' as const } },
-      ])(
-        'forwards retry events to subagent loop detection',
-        async ({ retry }) => {
-          const loopSpy = vi
-            .spyOn(LoopDetectionService.prototype, 'addAndCheckHeuristicLoops')
-            .mockReturnValue(false);
-
-          const { config } = await createMockConfig();
-          mockSendMessageStream.mockResolvedValue(
-            streamOf<object>(
-              { ...retry },
-              partsChunk([{ text: 'done' }], 'STOP'),
+              writeCall('call_write', { file_path: '/tmp/truncated.txt' }),
+              partsChunk([], 'MAX_TOKENS'),
+              partsChunk([{ text: 'done' }]),
             ),
           );
-          await runAgent(config, {
-            tools: { tools: [] },
-            emitter: new AgentEventEmitter(),
-          });
+          const writeResult = await runWrite(config, toolConfig);
 
-          const retryArg = loopSpy.mock.calls.find(
-            ([event]) => event.type === LlmEventType.Retry,
-          )?.[0] as { type: LlmEventType; isContinuation?: boolean };
-          expect(retryArg).toEqual(
-            expect.objectContaining({ type: LlmEventType.Retry }),
+          expect(writeResult.success).toBe(false);
+          expect(writeResult.error).toContain(
+            'truncated due to max_tokens limit',
           );
-          if ('isContinuation' in retry) {
-            expect(retryArg.isContinuation).toBe(true);
-          } else {
-            expect(retryArg).not.toHaveProperty('isContinuation');
-          }
-        },
-      );
+          expect(writeResult.error).toContain(
+            'rejected to prevent writing truncated content',
+          );
+          expect(writeResult.error).not.toContain(
+            "params must have required property 'content'",
+          );
+        });
+
+        it('clears the truncation flag when a retry replaces the attempt', async () => {
+          const { config, toolConfig } = await setupWriteFile();
+          // First call: truncated (MAX_TOKENS). Retry resets state, second call:
+          // complete write_file. The scheduler should see wasOutputTruncated=false
+          // for the retried response and allow the tool to proceed. The second
+          // round's plain text ends the agent loop.
+          mockSendMessageStream
+            .mockImplementationOnce(async () =>
+              streamOf<object>(
+                // Truncated response with incomplete write_file args
+                writeCall('call_write_truncated', {
+                  file_path: '/tmp/retry-test.txt',
+                }),
+                partsChunk([], 'MAX_TOKENS'),
+                { type: 'retry' },
+                // After retry, complete response with all required args
+                writeCall('call_write_complete', {
+                  file_path: '/tmp/retry-test.txt',
+                  content: 'hello',
+                }),
+                partsChunk([], 'STOP'),
+              ),
+            )
+            .mockImplementation(async () =>
+              streamOf(partsChunk([{ text: 'done' }], 'STOP')),
+            );
+          const writeResult = await runWrite(config, toolConfig);
+
+          // After retry the wasOutputTruncated flag must have been cleared, so
+          // the call should NOT be rejected with a truncation error — even if
+          // execution fails for unrelated reasons (e.g. mock filesystem).
+          // The retry also dropped the truncated attempt's call.
+          expect(writeResult.callId).toBe('call_write_complete');
+          expect(writeResult.error).not.toContain(
+            'truncated due to max_tokens limit',
+          );
+          expect(writeResult.error).not.toContain(
+            'rejected to prevent writing truncated content',
+          );
+        });
+
+        it.each([
+          { retry: { type: 'retry' as const, isContinuation: true } },
+          { retry: { type: 'retry' as const } },
+        ])(
+          'forwards retry events to subagent loop detection',
+          async ({ retry }) => {
+            const loopSpy = vi
+              .spyOn(
+                LoopDetectionService.prototype,
+                'addAndCheckHeuristicLoops',
+              )
+              .mockReturnValue(false);
+
+            const { config } = await createMockConfig();
+            mockSendMessageStream.mockResolvedValue(
+              streamOf<object>(
+                { ...retry },
+                partsChunk([{ text: 'done' }], 'STOP'),
+              ),
+            );
+            await runAgent(config, {
+              tools: { tools: [] },
+              emitter: new AgentEventEmitter(),
+            });
+
+            const retryArg = loopSpy.mock.calls.find(
+              ([event]) => event.type === LlmEventType.Retry,
+            )?.[0] as { type: LlmEventType; isContinuation?: boolean };
+            expect(retryArg).toEqual(
+              expect.objectContaining({ type: LlmEventType.Retry }),
+            );
+            if ('isContinuation' in retry) {
+              expect(retryArg.isContinuation).toBe(true);
+            } else {
+              expect(retryArg).not.toHaveProperty('isContinuation');
+            }
+          },
+        );
+      });
 
       it('keeps automatic max token escalation warm for the next agent round', async () => {
         const { config, toolConfig } = await setupWriteFile();
@@ -3114,6 +3596,327 @@ describe('subagent.ts', () => {
         expect(
           mockSendMessageStream.mock.calls[1][1].config.maxOutputTokens,
         ).toBe(65_536);
+      });
+    });
+
+    describe('on the shared agent loop and its event-bus kernel', () => {
+      const EVENTS = [
+        AgentEventType.ROUND_START,
+        AgentEventType.STREAM_TEXT,
+        AgentEventType.ROUND_TEXT,
+        AgentEventType.ROUND_END,
+        AgentEventType.TOOL_CALL,
+        AgentEventType.TOOL_RESULT,
+        AgentEventType.USAGE_METADATA,
+        AgentEventType.FINISH,
+        AgentEventType.ERROR,
+      ] as const;
+      const VOLATILE = new Set([
+        'timestamp',
+        'runId',
+        'subagentId',
+        'durationMs',
+        'startTimeMs',
+        'totalDurationMs',
+        'startedAt',
+        'endedAt',
+        'executionDurationMs',
+        'executionId',
+      ]);
+      /** The agent's id, which each run draws anew, inside prompt ids. */
+      const AGENT_ID = /test-agent-[0-9a-f]+/g;
+      /**
+       * An event with a placeholder for each field that differs between any
+       * two runs, so the field must still be there.
+       */
+      const stable = (event: object) =>
+        JSON.parse(
+          JSON.stringify(event, (key, value) =>
+            VOLATILE.has(key) ? '<volatile>' : value,
+          ).replace(AGENT_ID, 'test-agent-<id>'),
+        );
+      type Outcome = {
+        requests: unknown[];
+        events: Array<[string, unknown]>;
+        terminateMode: AgentTerminateMode;
+        error?: string;
+        turns: number;
+      };
+      /**
+       * Runs `scenario` on each loop: what the model received, the agent's
+       * events and how the run ended.
+       */
+      const onEachLoop = async (
+        scenario: (run: AbortController) => void,
+      ): Promise<Outcome[]> => {
+        const outcomes: Outcome[] = [];
+        try {
+          for (const { shared, kernel } of LOOPS) {
+            vi.stubEnv(
+              'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+              shared ? '1' : undefined,
+            );
+            vi.stubEnv(
+              'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
+              kernel ? '1' : undefined,
+            );
+            mockSendMessageStream.mockReset();
+            const run = new AbortController();
+            scenario(run);
+            const { config } = await setupListFiles();
+            const emitter = new AgentEventEmitter();
+            const events: Array<[string, unknown]> = [];
+            for (const type of EVENTS) {
+              emitter.on(type, (event: object) =>
+                events.push([type, stable(event)]),
+              );
+            }
+            const turn = vi.spyOn(Turn.prototype, 'run');
+            const scope = await createAgent(config, {
+              tools: { tools: ['list_files'] },
+              emitter,
+            });
+            let error: string | undefined;
+            await scope
+              .execute(new ContextState(), run.signal)
+              .catch((e: unknown) => {
+                error = e instanceof Error ? e.message : String(e);
+              });
+            expect(turn).toHaveBeenCalledTimes(
+              shared ? mockSendMessageStream.mock.calls.length : 0,
+            );
+            turn.mockRestore();
+            outcomes.push({
+              requests: mockSendMessageStream.mock.calls.map(
+                ([model, params, promptId]) =>
+                  stable({
+                    model,
+                    message: params.message,
+                    tools: params.config.tools,
+                    maxOutputTokens: params.config.maxOutputTokens,
+                    promptId,
+                  }),
+              ),
+              events,
+              terminateMode: scope.getTerminateMode(),
+              ...(error !== undefined ? { error } : {}),
+              turns: mockSendMessageStream.mock.calls.length,
+            });
+          }
+        } finally {
+          vi.unstubAllEnvs();
+        }
+        return outcomes;
+      };
+      const listFiles = (id: string) => call('list_files', { path: '.' }, id);
+      const answer = partsChunk(
+        [{ text: 'Thinking.', thought: true }, { text: 'Done.' }],
+        'STOP',
+      );
+
+      it('sends each round on a Turn with the same requests and events', async () => {
+        const [current, shared, kernel] = await onEachLoop(() =>
+          mockSendMessageStream
+            .mockImplementationOnce(async () =>
+              streamOf<object>(
+                partsChunk([{ text: 'Let me look.' }]),
+                callsChunk([listFiles('call_1')], {
+                  usageMetadata: { totalTokenCount: 7 },
+                }),
+              ),
+            )
+            .mockImplementation(async () => streamOf(answer)),
+        );
+        expect(shared.turns).toBe(2);
+        expect(shared).toEqual(current);
+        expect(kernel).toEqual(shared);
+      });
+
+      it('keeps the escalated output limit and drops a retried attempt as before', async () => {
+        const [current, shared, kernel] = await onEachLoop(() =>
+          mockSendMessageStream
+            .mockImplementationOnce(async () =>
+              streamOf<object>(
+                callsChunk([listFiles('call_stale')]),
+                { type: 'retry', maxOutputTokensEscalated: 65_536 },
+                callsChunk([listFiles('call_1')]),
+              ),
+            )
+            .mockImplementation(async () => streamOf(answer)),
+        );
+        expect(shared.requests[1]).toMatchObject({ maxOutputTokens: 65_536 });
+        expect(JSON.stringify(shared.requests[1])).not.toContain('call_stale');
+        expect(shared).toEqual(current);
+        expect(kernel).toEqual(shared);
+      });
+
+      it.each([
+        {
+          description: 'a later chunk supplies the ID',
+          chunks: [
+            callsChunk([listFiles('call_1')]),
+            { type: 'chunk', value: { responseId: 'response-1' } },
+          ],
+          responseId: 'response-1',
+        },
+        {
+          description: 'the retried attempt has no ID',
+          chunks: [
+            { type: 'chunk', value: { responseId: 'discarded-response' } },
+            { type: 'retry' },
+            callsChunk([listFiles('call_1')]),
+          ],
+          responseId: undefined,
+        },
+      ])(
+        'correlates tool requests when $description',
+        async ({ chunks, responseId }) => {
+          const schedule = vi.spyOn(CoreToolScheduler.prototype, 'schedule');
+          await onEachLoop(() =>
+            mockSendMessageStream
+              .mockImplementationOnce(async () => streamOf<object>(...chunks))
+              .mockImplementation(async () => streamOf(answer)),
+          );
+          expect(schedule).toHaveBeenCalledTimes(LOOPS.length);
+          for (const [requests] of schedule.mock.calls) {
+            expect(requests).toMatchObject([
+              { callId: 'call_1', response_id: responseId },
+            ]);
+          }
+        },
+      );
+
+      it('ends the run with the failure the request threw', async () => {
+        const [current, shared, kernel] = await onEachLoop(() =>
+          mockSendMessageStream.mockImplementation(async () =>
+            (async function* () {
+              yield partsChunk([{ text: 'Partial' }]);
+              throw new Error('upstream exploded');
+            })(),
+          ),
+        );
+        expect(shared).toMatchObject({
+          terminateMode: AgentTerminateMode.ERROR,
+          error: 'upstream exploded',
+        });
+        expect(shared).toEqual(current);
+        expect(kernel).toEqual(shared);
+      });
+
+      it('stops the round at a loop the stream shows, and closes the stream', async () => {
+        const closed: boolean[] = [];
+        const [current, shared, kernel] = await onEachLoop(() => {
+          vi.spyOn(
+            LoopDetectionService.prototype,
+            'addAndCheckHeuristicLoops',
+          ).mockImplementation(
+            (event) =>
+              event.type === LlmEventType.Content && event.value === 'again',
+          );
+          mockSendMessageStream.mockImplementation(async () =>
+            (async function* () {
+              try {
+                yield partsChunk([{ text: 'again' }]);
+                yield callsChunk([listFiles('call_after_loop')]);
+              } finally {
+                closed.push(true);
+              }
+            })(),
+          );
+        });
+        expect(shared.terminateMode).toBe(AgentTerminateMode.LOOP_DETECTED);
+        expect(shared.turns).toBe(1);
+        expect(closed).toEqual(LOOPS.map(() => true));
+        expect(shared).toEqual(current);
+        expect(kernel).toEqual(shared);
+      });
+
+      it('streams the visible text already received when a thought trips the loop guard', async () => {
+        const thought = {
+          text: 'I need to check the workspace.',
+          thought: true,
+        };
+        const [current, shared, kernel] = await onEachLoop(() =>
+          mockSendMessageStream.mockImplementation(async () =>
+            streamOf(
+              partsChunk([thought]),
+              partsChunk([thought]),
+              partsChunk([thought, { text: 'Here is the answer.' }]),
+              partsChunk([{ text: 'Never seen.' }]),
+            ),
+          ),
+        );
+        expect(shared.terminateMode).toBe(AgentTerminateMode.LOOP_DETECTED);
+        expect(shared.events).toContainEqual([
+          AgentEventType.STREAM_TEXT,
+          expect.objectContaining({
+            text: 'Here is the answer.',
+            thought: false,
+          }),
+        ]);
+        expect(shared.events).not.toContainEqual([
+          AgentEventType.STREAM_TEXT,
+          expect.objectContaining({ text: 'Never seen.' }),
+        ]);
+        expect(shared).toEqual(current);
+        expect(kernel).toEqual(shared);
+      });
+
+      it('cancels the run when its signal aborts mid-stream', async () => {
+        const [current, shared, kernel] = await onEachLoop((run) =>
+          mockSendMessageStream.mockImplementation(async () =>
+            (async function* () {
+              yield partsChunk([{ text: 'Started.' }]);
+              // The parent cancels the run mid-stream.
+              run.abort();
+              yield partsChunk([{ text: 'Never seen.' }]);
+            })(),
+          ),
+        );
+        expect(shared.terminateMode).toBe(AgentTerminateMode.CANCELLED);
+        expect(shared).toEqual(current);
+        expect(kernel).toEqual(shared);
+      });
+
+      it('cancels the run when its signal aborts during a tool batch', async () => {
+        const schedule = CoreToolScheduler.prototype.schedule;
+        const [current, shared, kernel] = await onEachLoop((run) => {
+          mockSendMessageStream.mockImplementation(async () =>
+            streamOf(callsChunk([listFiles('call_1')])),
+          );
+          // The parent cancels the run as the batch is scheduled.
+          vi.spyOn(CoreToolScheduler.prototype, 'schedule').mockImplementation(
+            function (this: CoreToolScheduler, ...args) {
+              run.abort();
+              return schedule.apply(this, args);
+            },
+          );
+        });
+        expect(shared.terminateMode).toBe(AgentTerminateMode.CANCELLED);
+        expect(shared).toEqual(current);
+        expect(kernel).toEqual(shared);
+      });
+
+      it('drops the calls of a model the fallback replaced (intended difference)', async () => {
+        const [current, shared, kernel] = await onEachLoop(() =>
+          mockSendMessageStream
+            .mockImplementationOnce(async () =>
+              streamOf<object>(
+                callsChunk([listFiles('call_failed_model')]),
+                {
+                  type: 'model_fallback',
+                  info: { fromModel: 'a', toModel: 'b' },
+                },
+                callsChunk([listFiles('call_1')]),
+              ),
+            )
+            .mockImplementation(async () => streamOf(answer)),
+        );
+        const sentIds = (outcome: Outcome) =>
+          JSON.stringify(outcome.requests[1]).match(/call_\w+/g);
+        expect(sentIds(current)).toEqual(['call_failed_model', 'call_1']);
+        expect(sentIds(shared)).toEqual(['call_1']);
+        expect(kernel).toEqual(shared);
       });
     });
   });

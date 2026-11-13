@@ -505,6 +505,24 @@ describe('SendMessageTool — background-task mode', () => {
     expect(resumeBackgroundAgent).not.toHaveBeenCalled();
   });
 
+  it('refuses a running task that takes no messages, its own inputs aside', async () => {
+    register({
+      description: 'autofix-pr o/r#7 round',
+      messagesBlockedReason: 'A background fix is never continued.',
+    });
+
+    const result = await send('also delete the tests');
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
+    expect(result.llmContent).toContain('A background fix is never continued.');
+    // The registry still takes the task's own inputs (a Monitor's events).
+    expect(
+      registry.queueExternalInput('agent-1', {
+        text: 'monitor event',
+      } as never),
+    ).toBe(true);
+  });
+
   it('includes task description in success display', async () => {
     register({ description: 'Search for auth code' });
 
@@ -799,7 +817,10 @@ describe('SendMessageTool — peer mode', () => {
     expect(result.error).toBeDefined();
     expectLlm(
       result,
-      ['Teammate "zed" not found.', 'agents.crossSessionMessaging'],
+      [
+        'Teammate "zed" not found.',
+        'this session publishes no peer inbox address',
+      ],
       ['No reachable session has that name'],
     );
   });
@@ -807,7 +828,7 @@ describe('SendMessageTool — peer mode', () => {
   it('says messaging is off, rather than that a lookup found nothing', async () => {
     expectLlm(
       await peerSend({ kind: 'disabled' }, 'docs-cd'),
-      ['No active team', 'agents.crossSessionMessaging'],
+      ['No active team', 'this session publishes no peer inbox address'],
       ['no reachable session'],
     );
   });

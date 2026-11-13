@@ -16,16 +16,22 @@ import {
 import {
   affectedWorkspaces,
   buildSetFor,
+  chainsCommands,
+  dependencyClosure,
   hasUnmodeledWorkspaceGlob,
   readRootPackage,
   readWorkspaceGlobs,
   readWorkspacePackages,
   reverseDependencyClosure,
+  rootBuildFanOutScript,
   scriptFansOut,
+  workspaceDirFor,
   type WorkspacePackage,
 } from './workspaces.js';
 import { resolveTestScope, type TestScope } from './workspace-scope.js';
 import { DEFAULT_WHOLE_CALL_BUDGET_S } from './build-budget.js';
+import { killedFromOutside, ranOutOfHeap } from './heap.js';
+import { relatedTests, type RelatedSelection } from './related-tests.js';
 import type { ReviewToolchainAdapter, ToolchainRunArgs } from './toolchain.js';
 
 /**
@@ -62,6 +68,182 @@ function buildCommand(dir: string): string {
 /** The test command for a dir: the root package takes no `--workspace`. */
 function testCommand(dir: string): string {
   return dir === '.' ? 'npm test' : `npm test --workspace=${shellArg(dir)}`;
+}
+/**
+ * The command that runs only `dir`'s tests related to the diff. `npm exec`
+ * runs it in the workspace, with the root's `vitest` — selection admits a
+ * suite only where that is the one its `npm test` runs (`sameVitest`).
+ * `--yes=false` overrides the run env's `npm_config_yes`, so a missing
+ * `vitest` is an error rather than a silent install. The paths are
+ * `PATH_TOKEN_RE`-clean, so quoting them is enough.
+ */
+function relatedCommand(dir: string, selection: RelatedSelection): string {
+  const workspace = dir === '.' ? '' : ` --workspace=${shellArg(dir)}`;
+  const config = selection.config ? ` --config "${selection.config}"` : '';
+  return (
+    `npm exec${workspace} --yes=false -- vitest related --run${config} ` +
+    selection.paths.map((p) => `"${p}"`).join(' ')
+  );
+}
+/** `relatedCommand`'s grammar; the dir is its first group. */
+const RELATED_COMMAND_RE =
+  /^npm exec(?: --workspace="([\w@./-]+)")? --yes=false -- vitest related --run(?: --config "(?![-/])[\w@./-]+")?(?: "(?![-/])[\w@./-]+")+$/;
+
+/** The dir a related run ran in (`.` for the root), or undefined for a whole suite. */
+export function relatedTestDir(command: string): string | undefined {
+  const m = RELATED_COMMAND_RE.exec(command);
+  return m ? (m[1] ?? '.') : undefined;
+}
+
+/**
+ * Whether a run found no test to run: vitest prints this and exits 0, unlike
+ * a whole suite that collects nothing (exit 1), so the exit code cannot say
+ * it. Every reader of that fact shares this predicate — one reworded message
+ * is one edit.
+ */
+export function foundNoTests(output: string | undefined): boolean {
+  return /No test files found/.test(output ?? '');
+}
+
+/**
+ * The whole-suite command a related run stands in for (`npm test
+ * --workspace="<dir>"`), or undefined for a command that is not one.
+ */
+export function suiteCommandOf(command: string): string | undefined {
+  const dir = relatedTestDir(command);
+  return dir === undefined ? undefined : testCommand(dir);
+}
+
+/**
+ * Each suite's test command for one run: the related run where `relatedTests`
+ * selects one, the whole suite otherwise. The fresh run and `--resume` build
+ * it from the same tree and plan, so a continuation runs what the first call
+ * would have.
+ */
+function testCommands(
+  root: string,
+  args: Pick<ToolchainRunArgs, 'changedFiles' | 'renamedFrom'>,
+  scope: { globs: string[]; singleRoot: boolean; graph: WorkspacePackage[] },
+): {
+  commandFor: (dir: string) => string;
+  /** Why the suites in `dirs` that could have run related ran whole. */
+  wholeReason: (dirs: string[]) => string | undefined;
+  /** Why nothing in `dirs` was narrowed, when something could have been. */
+  bailReason: (dirs: string[]) => string | undefined;
+} {
+  const related = relatedTests({
+    root,
+    changed: args.changedFiles,
+    renamedFrom: args.renamedFrom ?? [],
+    ownerOf: (file) =>
+      scope.singleRoot ? null : workspaceDirFor(file, scope.globs),
+    reachOf: (dir) => dependencyClosure([dir], scope.graph),
+  });
+  return {
+    commandFor: (dir) => {
+      const selection = related.select(dir);
+      if (!selection) return testCommand(dir);
+      // Only a command the grammar reads back: a dir outside it would run
+      // narrowed with nothing in `relatedTests` to say so.
+      const command = relatedCommand(dir, selection);
+      return RELATED_COMMAND_RE.test(command) ? command : testCommand(dir);
+    },
+    // The diff-level reason publishes only where a suite that could have
+    // narrowed did so BECAUSE of it; a suite that could never narrow under
+    // any diff is not evidence for it.
+    wholeReason: (dirs) =>
+      related.reason !== undefined &&
+      dirs.some(
+        (d) =>
+          related.narrowable(d) && related.bailReason(d) === related.reason,
+      )
+        ? related.reason
+        : undefined,
+    bailReason: (dirs) => {
+      for (const dir of dirs) {
+        if (!related.narrowable(dir)) continue;
+        const bail = related.bailReason(dir);
+        // The diff-level reason has its own sentence.
+        if (bail !== undefined && bail !== related.reason) return bail;
+      }
+      return undefined;
+    },
+  };
+}
+
+/** A test command as prose names it: a related run by its dir. */
+const commandName = (command: string): string => {
+  const dir = relatedTestDir(command);
+  return dir === undefined ? command : `${dirName(dir)} (related tests)`;
+};
+
+/** An outstanding entry: a workspace dir, or a test command, as prose. */
+const outstandingName = (item: string): string =>
+  item === '.' ? dirName(item) : commandName(item);
+
+/** A dir as prose names it: the root is not a workspace. */
+export const dirName = (dir: string): string =>
+  dir === '.' ? 'the root package' : dir;
+
+/**
+ * Why every suite ran whole, for the note — when one could have run related.
+ * Structural too (`wholeSuiteReason`), since a continuation rewrites the note.
+ */
+function wholeSuiteSentence(reason: string | undefined): string {
+  return reason
+    ? ` Every suite ran whole, not only the tests related to the diff, because ${reason}.`
+    : '';
+}
+
+/** Why nothing was narrowed, for the note — actionable, unlike a bare timeout. */
+function narrowNoneSentence(bail: string | undefined): string {
+  return bail
+    ? ` No suite's tests were narrowed to the diff (vitest related): ${bail}.`
+    : '';
+}
+
+/** The dirs whose suite ran only its related tests, sorted. */
+function relatedDirs(test: CommandResult[]): string[] {
+  const dirs = test
+    .map((t) => relatedTestDir(t.command))
+    .filter((d): d is string => d !== undefined);
+  return [...new Set(dirs)].sort();
+}
+
+/**
+ * What the related runs leave out, for the note. A related run that found
+ * nothing to run passes (vitest's `passWithNoTests`), and "Everything
+ * passed" beside it must not read as a suite that ran.
+ */
+function relatedTestsSentence(test: CommandResult[]): string {
+  // A run killed at its deadline returned no verdict, one that failed
+  // without naming a failing test file crashed before any, and one that found
+  // nothing ran nothing: none is coverage. The timeout and the failure have
+  // their own sentences; the empty run gets the second one below.
+  const none = relatedDirs(
+    test.filter(
+      (t) => t.exitCode === 0 && /No test files found/.test(t.output),
+    ),
+  );
+  const ran = relatedDirs(
+    test.filter(
+      (t) =>
+        !t.timedOut && (t.exitCode === 0 || (t.failingFiles?.length ?? 0) > 0),
+    ),
+  ).filter((d) => !none.includes(d));
+  const names = (dirs: string[]): string => dirs.map(dirName).join(', ');
+  return (
+    (ran.length > 0
+      ? ` In ${names(ran)}, only the tests related to the diff ran ` +
+        '(`vitest related`: the tests that import a changed file, name one, ' +
+        'or import a module that names one) — not the whole suite. A test ' +
+        'that reads a changed file without naming it, lists a directory, or ' +
+        'builds the name at run time is not among them.'
+      : '') +
+    (none.length > 0
+      ? ` In ${names(none)}, no test is related to the diff, so none ran.`
+      : '')
+  );
 }
 /**
  * The installer a repo's lockfile calls for, or null when it commits neither.
@@ -112,8 +294,12 @@ export function npmInstallComplete(root: string): boolean {
  * The character class covers every workspace dir this repo shape produces;
  * a dir exotic enough to fall outside it costs that report its resume (a
  * named refusal, pointing at a fresh run), never a verbatim re-execution.
+ * The related run (`relatedCommand`) is the second form: its paths are
+ * quoted tokens of the same character class, none of them a flag.
  */
-export const TEST_COMMAND_RE = /^npm test(?: --workspace="[\w@./-]+")?$/;
+export const TEST_COMMAND_RE = new RegExp(
+  `${/^npm test(?: --workspace="[\w@./-]+")?$/.source}|${RELATED_COMMAND_RE.source}`,
+);
 
 /**
  * Workspace packages the compiler said it could not resolve.
@@ -167,6 +353,85 @@ function installFailureFraming(install: CommandResult | null): string {
     'The install failure is an environment/infrastructure result — report it as ' +
     'informational, never as a Critical, and never against this PR. '
   );
+}
+
+/**
+ * What a skipped root build left undone, for the note: `work` is the script
+ * it hands off to, or the root build's own text when it chains more than one
+ * command. Says what the skip was based on — the script was TAKEN for a
+ * whole-monorepo build, read off its text — and what that leaves unknown,
+ * rather than claiming what neither the text nor the manifests can show.
+ */
+function rootBuildSkipNote(work: string): string {
+  return (
+    ` The root \`build\` did not run: it runs \`${work}\`, taken for a build of ` +
+    'every workspace, and this run built only the ones in `buildSet`. Whatever ' +
+    `else \`${work}\` does did not run either — a failure over a file it writes ` +
+    'may come from that, not from the diff.'
+  );
+}
+
+/**
+ * How a failed command died, when it died of memory: of heap exhaustion, or
+ * SIGKILLed from outside. One precedence — heap first — so the build arm, the
+ * test arm and a continuation say the same thing about the same command.
+ */
+function memoryDeath(r: CommandResult): 'heap' | 'killed' | undefined {
+  if (r.timedOut) return undefined;
+  if (ranOutOfHeap(r)) return 'heap';
+  return killedFromOutside(r) ? 'killed' : undefined;
+}
+
+const MEMORY_DEATH = {
+  heap: 'ran out of JavaScript heap.',
+  killed:
+    "was killed (SIGKILL) — most often the kernel's OOM killer or a memory cap.",
+} as const;
+
+/**
+ * What to make of a memory death. `reached`: whether the diff can have
+ * changed what the command compiles or runs — a package it changes, one that
+ * depends on such a package, or the root when it changes a root-level file.
+ * Only a command outside that reach is called infrastructure outright: a type
+ * too big to compile surfaces in its consumers' compile, exactly as a
+ * breaking one does.
+ */
+function memoryDeathVerdict(reached: boolean): string {
+  return reached
+    ? "It is within the diff's reach: if what the diff adds can grow the compile or " +
+        'the run — a deeply recursive or very large type, a big generated file, a ' +
+        'suite that holds far more — that is a finding; otherwise it is an ' +
+        'infrastructure result — report it as informational.'
+    : 'That is an infrastructure result, not a defect in the diff — report it as ' +
+        'informational.';
+}
+
+/**
+ * The note's sentences for failed commands that did not time out, split by
+ * `memoryDeath`. Shared by the fresh run's test phase and by a continuation,
+ * whose note REPLACES the fresh one — a split only the fresh path made would
+ * be undone by the first `--resume`. Every suite ran because the diff reaches
+ * it (the test scope is the reverse-dependency closure of what it changes),
+ * and a continuation cannot recompute the reach of a carried build failure,
+ * so a memory death here gets the reached verdict: the one that cannot
+ * certify a death the diff caused away.
+ */
+function failureSentences(failures: CommandResult[]): string[] {
+  const heap = failures.filter((r) => memoryDeath(r) === 'heap').length;
+  const killed = failures.filter((r) => memoryDeath(r) === 'killed').length;
+  const defects = failures.length - heap - killed;
+  return [
+    defects > 0
+      ? `${defects} command(s) failed. Correlate each error with the diff: a failure ` +
+        'in a file the PR changed is a Critical; one in a file it did not touch is ' +
+        'pre-existing.'
+      : '',
+    heap > 0 ? `${heap} command(s) ${MEMORY_DEATH.heap}` : '',
+    killed > 0
+      ? `${killed} command(s) ${MEMORY_DEATH.killed.replace('was', 'were')}`
+      : '',
+    heap + killed > 0 ? memoryDeathVerdict(true) : '',
+  ].filter(Boolean);
 }
 
 /**
@@ -235,9 +500,13 @@ function resumeNpmToolchain(
     ...pendingDirs.filter((d) => affectedSet.has(d)),
     ...pendingDirs.filter((d) => !affectedSet.has(d)),
   ];
+  const commands = testCommands(root, args, scopeOf(root));
   const work: Array<{ command: string; dir: string | null }> = [
     ...retryCommands.map((command) => ({ command, dir: null })),
-    ...orderedPending.map((dir) => ({ command: testCommand(dir), dir })),
+    ...orderedPending.map((dir) => ({
+      command: commands.commandFor(dir),
+      dir,
+    })),
   ];
   if (work.length === 0) {
     // "Every suite ran" and "no suite ever ran" both reach here with nothing
@@ -375,7 +644,7 @@ function resumeNpmToolchain(
       liveSegments.push(
         `a --resume call ran ${ranDirs.length + replaced.size} more ` +
           `command(s), ${outstanding.length} still to run: ` +
-          outstanding.join(', '),
+          outstanding.map(outstandingName).join(', '),
       );
     }
     // NOT an else: a resume can leave BOTH unattempted work and suites
@@ -394,7 +663,7 @@ function resumeNpmToolchain(
       liveSegments.push(
         `a --resume call left ${provisionalOnly.length} command(s) ` +
           `provisional (killed on a budget-shortened deadline): ` +
-          `${provisionalOnly.join(', ')}`,
+          `${provisionalOnly.map(commandName).join(', ')}`,
       );
     }
     const caveat = liveSegments.join('; ');
@@ -413,6 +682,24 @@ function resumeNpmToolchain(
     ...previous.timedOut.filter((c) => !replaced.has(c)),
     ...fresh.filter((r) => r.timedOut).map((r) => r.command),
   ];
+  // Recomputed like `relatedTests`: the same diff gives the same reason, and
+  // only for a continuation that has suites in hand — a merged run with an
+  // empty `test[]` has nothing it can say ran whole.
+  const related = relatedDirs(mergedTest);
+  const whole =
+    mergedTest.length > 0
+      ? commands.wholeReason([
+          ...(prevScope?.workspaces ?? previous.affected),
+          ...pendingDirs,
+        ])
+      : undefined;
+  const notNarrowed =
+    mergedTest.length > 0 && related.length === 0
+      ? commands.bailReason([
+          ...(prevScope?.workspaces ?? previous.affected),
+          ...pendingDirs,
+        ])
+      : undefined;
   const merged: BuildTestReport = {
     ...previous,
     test: mergedTest,
@@ -442,10 +729,43 @@ function resumeNpmToolchain(
         timedOut,
         [...stillPending, ...unattemptedRetries],
         stillClamped,
-      ) + (testScope?.caveat ? ` Caveat: ${testScope.caveat}.` : ''),
+      ) +
+      relatedTestsSentence(mergedTest) +
+      wholeSuiteSentence(whole) +
+      narrowNoneSentence(notNarrowed) +
+      (testScope?.caveat ? ` Caveat: ${testScope.caveat}.` : ''),
     ...(testScope ? { testScope } : {}),
   };
+  // Read off the merged commands, not carried: a continuation's suites are
+  // related or whole by the same selection, and the field names both.
+  if (related.length > 0) merged.relatedTests = related;
+  else delete merged.relatedTests;
+  if (whole) merged.wholeSuiteReason = whole;
+  else delete merged.wholeSuiteReason;
   return merged;
+}
+
+/**
+ * The scope graph as the fresh run reads it, for a continuation: it runs no
+ * scope decision of its own, but its related runs need what each suite can
+ * import from.
+ */
+function scopeOf(root: string): {
+  globs: string[];
+  singleRoot: boolean;
+  graph: WorkspacePackage[];
+} {
+  const globs = readWorkspaceGlobs(root);
+  const rootPkg = readRootPackage(root);
+  const singleRoot = globs.length === 0 && rootPkg !== null;
+  const { packages } = readWorkspacePackages(root);
+  const graph =
+    singleRoot && rootPkg
+      ? [rootPkg]
+      : rootPkg
+        ? [rootPkg, ...packages]
+        : packages;
+  return { globs, singleRoot, graph };
 }
 
 /** The merged report's one-line story, rewritten for the continued run. */
@@ -469,15 +789,15 @@ function resumedNote(
     // a brief whose standing rule is to correlate failures with the diff.
     installFailureFraming(previous.install) +
       `Continued from a previous build-test call (install and build reused: ` +
-      `${previous.build.length} build command(s) already ran).`,
+      `${previous.build.length} build command(s) already ran).` +
+      // The reused build is the one that skipped it: say so again.
+      (previous.skippedRootBuild
+        ? rootBuildSkipNote(previous.skippedRootBuild)
+        : ''),
   ];
-  if (failures.length > 0) {
-    parts.push(
-      `${failures.length} command(s) failed. Correlate each error with the ` +
-        `diff: a failure in a file the PR changed is a Critical; one in a file ` +
-        `it did not touch is pre-existing.`,
-    );
-  }
+  // Split the way the fresh note is: the heap and outside-kill readings ride
+  // on the carried results, and this note replaces the one that said them.
+  parts.push(...failureSentences(failures));
   if (timedOut.length > 0) {
     parts.push(
       `${timedOut.length} command(s) ran out of time — infrastructure, not a ` +
@@ -494,7 +814,8 @@ function resumedNote(
   if (stillPending.length > 0) {
     parts.push(
       `The budget was spent with ${stillPending.length} command(s) still to ` +
-        `run — not run: ${stillPending.join(', ')}. Resume again to reach them.`,
+        `run — not run: ${stillPending.map(commandName).join(', ')}. Resume ` +
+        'again to reach them.',
     );
   }
   // An unattempted retry rides BOTH lists — its command is still-to-run, and
@@ -510,7 +831,8 @@ function resumedNote(
     parts.push(
       `${provisionalOnly.length} command(s) are still provisional — killed ` +
         `on a deadline the budget shortened, not on their own: ` +
-        `${provisionalOnly.join(', ')}. Resume again to give them a full one.`,
+        `${provisionalOnly.map(commandName).join(', ')}. Resume again to ` +
+        'give them a full one.',
     );
   }
   if (stillPending.length === 0 && stillClamped.length === 0) {
@@ -648,8 +970,7 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   // cannot drift apart — and it is the same graph for a build-only probe as
   // for the full run, or the merge-base probe measures a different tree than
   // the run it is the baseline for ("same set, same commands, same verdict").
-  // The root goes FIRST: on a name collision a member must win (this repo's
-  // root and packages/cli share the name `@qwen-code/qwen-code`).
+  // On a name collision a member wins over the root (`dependencyEdges`).
   const scopeGraph = !singleRoot && rootPkg ? [rootPkg, ...packages] : packages;
 
   // With no affected workspace there is nothing to run at all. Three diffs land
@@ -908,14 +1229,63 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   // it is exactly the whole-monorepo build this module exists to stop
   // running. Only a NON-fan-out root build — one that compiles the root's own
   // sources — is worth its deadline.
+  const rootBuildText = rootPkg?.scriptsText['build'];
+  const rootBuildFansOut = scriptFansOut(rootBuildText);
+  // A root build that hands off to a local script which fans out (`node
+  // scripts/build.js` running `pnpm -r … run build`) is the same whole-monorepo
+  // build, but the script can do work of its own as well — generate a file
+  // the root's suite reads — and its source cannot prove otherwise. It is
+  // skipped only when nothing in the repository reads what the ROOT package
+  // makes, as far as the manifests can say: no root suite of its own (a
+  // fan-out root `test` runs no root suite) and no member that depends on the
+  // root. Otherwise it runs as written, and costs what it costs. Either way
+  // the note says what a skip left undone (`skippedRootWork`).
+  //
+  // Read from the tree, not from this run's scope, so a build-only probe of
+  // the same tree decides the same way. The merge-base probe reads the BASE
+  // tree, though, and decides differently when the PR changes the root
+  // scripts, the script handed off to, or a member's dependency on the root.
+  const handOff =
+    rootPkg && !rootBuildFansOut
+      ? rootBuildFanOutScript(root, rootBuildText)
+      : undefined;
+  const rootOutputRead =
+    (!!rootPkg?.scripts.includes('test') &&
+      !scriptFansOut(rootPkg.scriptsText['test'])) ||
+    reverseDependencyClosure(['.'], scopeGraph).length > 1;
+  const skippedHandOff = handOff && !rootOutputRead ? handOff : undefined;
   const rootBuildRuns =
     !!rootPkg?.scripts.includes('build') &&
-    !scriptFansOut(rootPkg.scriptsText['build']);
+    !rootBuildFansOut &&
+    !skippedHandOff;
   // One predicate for both the loop skip and the reported set: a fan-out
   // root's build does not run — never in single-root mode, where the root is
   // the only package there is.
   const rootBuildSkipped = !singleRoot && !rootBuildRuns;
+  // What a skipped root build does besides building the members: the script
+  // it hands off to, or — when it chains more than one command (`pnpm -r run
+  // build && node copy-assets.js`, `node scripts/build.js | tee log`) — its
+  // whole text, so a sibling command is named too. Only a bare fan-out does
+  // nothing else. Disclosed on every report that carries the root in its set
+  // — see `rootBuildSkipNote`.
+  const skippedRootWork = !rootBuildSkipped
+    ? undefined
+    : typeof rootBuildText === 'string' && chainsCommands(rootBuildText)
+      ? rootBuildText
+      : skippedHandOff;
+  const discloseRootSkip = (): void => {
+    if (!skippedRootWork || !set.includes('.')) return;
+    results.skippedRootBuild = skippedRootWork;
+    results.note += rootBuildSkipNote(skippedRootWork);
+  };
   const notBuilt: string[] = [];
+  // What the diff can have changed the compile of: the packages it changes,
+  // everything that depends on them, and the root when it changes a file no
+  // workspace owns. A memory death outside this is the machine's.
+  const diffReach = new Set(reverseDependencyClosure(affected, scopeGraph));
+  if (!singleRoot && changed.some((f) => workspaceDirFor(f, globs) === null)) {
+    diffReach.add('.');
+  }
 
   // Build, and let the compiler correct the set. Three widenings is generous: each
   // one is a package the graph could not have known about, and a fourth would mean
@@ -924,6 +1294,7 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   // outer shell kill a report the budget exists to save.
   for (let attempt = 0; attempt <= 3; attempt++) {
     let failure: CommandResult | null = null;
+    let failedDir = '';
 
     for (const dir of set) {
       if (built.has(dir)) continue;
@@ -955,11 +1326,13 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
         buildCommand(dir),
         root,
         Math.min(perCommandMs, remainingMs()),
+        'build',
       );
       results.build.push(r);
       if (r.timedOut) results.timedOut.push(r.command);
       if (r.exitCode !== 0) {
         failure = r;
+        failedDir = dir;
         break;
       }
       built.add(dir);
@@ -982,24 +1355,35 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
     // would look like a too-small build set and trigger a retry — another full
     // deadline, and another, up to the attempt cap. A timeout is infrastructure, not
     // a graph gap: report it and stop, the same way the install path does.
-    const missing = failure.timedOut
+    // Nor must a heap death or an outside kill, for the same reason: their
+    // partial output can name a module too, and a retry would only die again.
+    const death = memoryDeath(failure);
+    const infraKill = failure.timedOut || death !== undefined;
+    const missing = infraKill
       ? []
       : unresolvedWorkspaceDeps(failure.output, packages).filter((name) => {
           const dir = packages.find((p) => p.name === name)?.dir;
           return dir && !built.has(dir);
         });
-    if (missing.length === 0 || failure.timedOut || attempt === 3) {
+    if (missing.length === 0 || infraKill || attempt === 3) {
       results.ok = false;
       results.note = failure.timedOut
         ? `\`${failure.command}\` ran out of time (${deadlineSecs(failure)}s). That is an ` +
           'infrastructure result, not a defect in the diff — report it as informational.'
-        : `\`${failure.command}\` failed. Correlate the errors below with the diff: a ` +
-          'compile error in a file the PR changed is a Critical; one in a file it did not ' +
-          'touch is a pre-existing failure, and belongs in the terminal, not on the PR.';
+        : death
+          ? // A package outside the diff's reach compiles as it did before:
+            // its memory death is the machine's. One inside it may have grown
+            // by what the diff added.
+            `\`${failure.command}\` ${MEMORY_DEATH[death]} ` +
+            memoryDeathVerdict(diffReach.has(failedDir))
+          : `\`${failure.command}\` failed. Correlate the errors below with the diff: a ` +
+            'compile error in a file the PR changed is a Critical; one in a file it did not ' +
+            'touch is a pre-existing failure, and belongs in the terminal, not on the PR.';
       results.buildSet = (
         rootBuildSkipped ? set.filter((d) => d !== '.') : set
       ).filter((d) => !notBuilt.includes(d));
       results.widenedWith = [...widened];
+      discloseRootSkip();
       frameInstallFailure();
       return results;
     }
@@ -1088,12 +1472,20 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       ? new Set(reverseDependencyClosure(notBuilt, scopeGraph))
       : new Set<string>();
   const notRun: string[] = [];
+  const commands = testCommands(root, args, {
+    globs,
+    singleRoot,
+    graph: scopeGraph,
+  });
   for (let i = 0; i < runnableDirs.length; i++) {
     const dir = runnableDirs[i];
     if (untestable.has(dir)) {
       notRun.push(dir);
       continue;
     }
+    // Selected before the clock is read: the name scan it may run is spent
+    // from the budget, and the deadline must be what is left after it.
+    const command = commands.commandFor(dir);
     const remaining = remainingMs();
     if (remaining < BUDGET_MIN_ATTEMPT_MS) {
       // Below the floor an "attempt" cannot even boot npm — it would
@@ -1113,12 +1505,25 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
     // 401s) was admitted with 286s of its 300s deadline and killed, and
     // nothing downstream could tell that from a suite that genuinely hangs.
     const deadline = Math.min(perCommandMs, remaining);
-    const r = exec(testCommand(dir), root, deadline);
+    const r = exec(command, root, deadline);
     const clamped = r.timedOut && deadline < perCommandMs;
     results.test.push(clamped ? { ...r, clamped: true } : r);
     if (r.timedOut) results.timedOut.push(r.command);
     if (r.exitCode !== 0) results.ok = false;
   }
+  const related = relatedDirs(results.test);
+  if (related.length > 0) results.relatedTests = related;
+  // Only a suite that RAN can say why it ran whole: a call whose budget
+  // stopped before the first suite scheduled them and ran none.
+  const whole =
+    results.test.length > 0 ? commands.wholeReason(runnableDirs) : undefined;
+  if (whole) results.wholeSuiteReason = whole;
+  // Nothing narrowed although a suite could have: name the gate that stopped
+  // it, or a deadline overrun reads as infrastructure with no actionable knob.
+  const notNarrowed =
+    results.test.length > 0 && related.length === 0
+      ? commands.bailReason(runnableDirs)
+      : undefined;
 
   // The test phase ran NOTHING and left work behind: stamp it. A single-root
   // run in this state writes no testScope and keeps ok: true (the build
@@ -1173,6 +1578,8 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   // above, carries the scope precisely because the empty scope IS the answer.
   if (testScope) results.testScope = testScope;
 
+  // Structural, not a content match: a PR-authored path can contain any text.
+  let caveatAppended = false;
   if (!results.note) {
     const failed = [...results.build, ...results.test].filter(
       (r) => r.exitCode !== 0,
@@ -1212,7 +1619,14 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
           'the changed workspaces and every workspace declared to depend on ' +
           'them that defines a test script. Everything passed.';
       }
-      if (testScope?.caveat) testsClause += ` Caveat: ${testScope.caveat}.`;
+      testsClause +=
+        relatedTestsSentence(results.test) +
+        wholeSuiteSentence(results.wholeSuiteReason) +
+        narrowNoneSentence(notNarrowed);
+      if (testScope?.caveat) {
+        testsClause += ` Caveat: ${testScope.caveat}.`;
+        caveatAppended = true;
+      }
       // The root is not a workspace: count it separately, or a 22-member repo
       // reports "of 23" — a number in a report whose thesis is honest numbers.
       // (A single-root repo's one package IS '.', and counts as the one.)
@@ -1235,19 +1649,32 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
         `${failed.length} command(s) ran out of time (${deadlineSecs(failed[0])}s). A timeout is an ` +
         'infrastructure result, not a defect in the diff — report it as informational.';
     } else {
-      results.note =
-        `${realFailures.length} command(s) failed. Correlate each error with the diff: a failure in a ` +
-        'file the PR changed is a Critical; one in a file it did not touch is pre-existing.' +
-        (failed.length > realFailures.length
-          ? ' (Commands that timed out are infrastructure, not findings.)'
-          : '');
+      // A memory death is not a timeout and not, by itself, a defect either:
+      // it gets its own sentence, as the build phase gives it one.
+      results.note = [
+        ...failureSentences(realFailures),
+        failed.length > realFailures.length
+          ? '(Commands that timed out are infrastructure, not findings.)'
+          : '',
+      ]
+        .filter(Boolean)
+        .join(' ');
+    }
+    // The ok branch says it inside its tests clause, ahead of the caveat.
+    if (!results.ok) {
+      results.note +=
+        relatedTestsSentence(results.test) +
+        wholeSuiteSentence(results.wholeSuiteReason) +
+        narrowNoneSentence(notNarrowed);
     }
   }
 
   // A failure note must carry the caveat too — the note is what the brief
   // renders first, and "a test failed AND the budget dropped suites" must not
-  // read as a plain failure. (The ok branch already appended it above.)
-  if (results.testScope?.caveat && !results.note.includes('Caveat:')) {
+  // read as a plain failure. (The ok branch already appended it above.) The
+  // decision is the boolean, not a search of prose: the whole-suite reason
+  // interpolates a PR-authored path, which may itself contain "Caveat:".
+  if (results.testScope?.caveat && !caveatAppended) {
     results.note += ` Caveat: ${results.testScope.caveat}.`;
   }
 
@@ -1258,6 +1685,8 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       ? `${results.note} ${partialNote}.`
       : partialNote;
   }
+
+  discloseRootSkip();
 
   // The build and test results below are real, and the install failure is
   // not a finding about this PR. (A `prepare` script that builds the whole

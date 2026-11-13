@@ -34,6 +34,7 @@ import {
   channelInputText,
   channelResendDeliveryId,
   channelRouteId,
+  CHANNEL_CAPACITY_NOTICE,
   CHANNEL_TRUNCATION_NOTICE,
   channelRouteOpenBody,
   channelRouteRolloverBody,
@@ -488,15 +489,15 @@ export class HostedChannelSession {
       .join('')
       .trim();
     if (text.length === 0) return undefined;
-    // Publish the planned segment text, not the raw turn output: the reply
-    // resource must satisfy the inline bound itself, or a long answer
-    // would fail the publish before the truncation plan could truncate it.
-    // And the envelope bound is measured on the serialized reply: JSON
+    // The representative reply is envelope-fitted while the segments carry
+    // the full answer. The reply resource must satisfy the inline bound
+    // itself, and that bound is measured on the serialized reply: JSON
     // escaping can push an escape-heavy answer past the inline limit even
-    // after the raw text truncated at the segment bound. Every further
-    // shrink re-runs a bounded cut — the truncation notice stays and the
-    // cut always lands on a code-point boundary.
-    let replyText = planChannelSegments(text).join('');
+    // when the raw text is well under it. The plan no longer truncates the
+    // answer, so this loop is what bounds the reply; every shrink re-runs a
+    // bounded code-point cut and (re)appends the truncation notice.
+    const pieces = planChannelSegments(text);
+    let replyText = pieces.join('');
     let budget = MANAGED_CHANNEL_LIMITS.maxSegmentBytes / 2;
     for (let attempt = 0; attempt < 4; attempt++) {
       const candidate = encodeChannelReply({
@@ -509,15 +510,19 @@ export class HostedChannelSession {
       ) {
         break;
       }
-      const endsWithNotice = replyText.endsWith(CHANNEL_TRUNCATION_NOTICE);
-      const core = endsWithNotice
-        ? replyText.slice(
-            0,
-            replyText.length - CHANNEL_TRUNCATION_NOTICE.length,
-          )
-        : replyText;
+      // Strip the notice the planned text carries before re-cutting, so it is
+      // never re-cut mid-wording, and re-append that same notice: an
+      // over-capacity answer keeps the capacity wording on the reply too,
+      // while an envelope-only shrink keeps the size wording.
+      const planNotice = replyText.endsWith(CHANNEL_CAPACITY_NOTICE)
+        ? CHANNEL_CAPACITY_NOTICE
+        : CHANNEL_TRUNCATION_NOTICE;
+      let core = replyText;
+      if (core.endsWith(planNotice)) {
+        core = core.slice(0, core.length - planNotice.length);
+      }
       if (core.length === 0) return undefined;
-      replyText = truncateChannelTextUtf8(core, budget);
+      replyText = truncateChannelTextUtf8(core, budget, planNotice);
       budget = Math.floor(budget / 2);
     }
     if (replyText.length === 0) return undefined;
@@ -529,16 +534,19 @@ export class HostedChannelSession {
       CHANNEL_RESOURCE_KINDS.reply,
       encodeChannelReply(reply),
     );
-    // The email plan is one segment, and it replies with the fitted text.
-    const segments = [
-      {
-        segmentId: `${deliveryId}:0`,
+    // One ledger segment per planned piece: the segments carry the full
+    // answer while the representative reply above stays envelope-fitted.
+    // Publish concurrently (each publish is a durability round trip) and
+    // await them all before the commit; Promise.all keeps the ordinal order.
+    const segments = await Promise.all(
+      pieces.map(async (piece, ordinal) => ({
+        segmentId: `${deliveryId}:${ordinal}`,
         contentRef: await this.store.resources.publish(
           CHANNEL_RESOURCE_KINDS.segment,
-          Buffer.from(replyText, 'utf8'),
+          Buffer.from(piece, 'utf8'),
         ),
-      },
-    ];
+      })),
+    );
     const record = channelDeliveryPlanBody({
       deliveryId,
       routeId: envelope.routeId,
@@ -621,15 +629,25 @@ export class HostedChannelSession {
       await this.store.resources.read(delivery.contentRef),
     );
     const segments = [];
+    let remaining = MANAGED_CHANNEL_LIMITS.maxClaimTextBytes;
     for (const segment of delivery.segments) {
       if (segment.receipt !== null) continue;
+      const text = (
+        await this.store.resources.read(segment.contentRef)
+      ).toString('utf8');
+      // The control plane reads this answer through a 1 MiB JSON response
+      // cap, so carry only the leading unreceipted segments that fit the
+      // claim text budget; the adapter re-claims the rest after each receipt
+      // (the partial/resume protocol). Always answer at least one segment so
+      // a claim can make progress, and stop reading once the budget is spent.
+      const cost = Buffer.byteLength(JSON.stringify(text), 'utf8');
+      if (segments.length > 0 && cost > remaining) break;
       segments.push({
         ordinal: segment.ordinal,
         segmentId: segment.segmentId,
-        text: (await this.store.resources.read(segment.contentRef)).toString(
-          'utf8',
-        ),
+        text,
       });
+      remaining -= cost;
     }
     return { delivery, reply, segments };
   }
@@ -680,6 +698,7 @@ export class HostedChannelSession {
   settle(
     deliveryId: string,
     outcome: 'unknown' | 'rejected',
+    reconciliationId?: string,
   ): Promise<ChannelDelivery> {
     return this.serial(async () => {
       const delivery = this.mustDelivery(deliveryId);
@@ -697,6 +716,7 @@ export class HostedChannelSession {
           ? channelDeliveryUnknownBody(delivery)
           : channelDeliveryRejectedBody(delivery),
         'acceptChannelReceipt',
+        reconciliationId,
       );
     });
   }
@@ -801,12 +821,18 @@ export class HostedChannelSession {
     previous: ChannelDelivery,
     next: ChannelDelivery,
     operation: string,
+    commandId?: string,
   ): Promise<ChannelDelivery> {
     const existing = this.store.authority.extensionRecord(
       'channel_delivery',
       previous.deliveryId,
     );
-    await this.commitDelivery(next, (existing?.revision ?? 0) + 1, operation);
+    await this.commitDelivery(
+      next,
+      (existing?.revision ?? 0) + 1,
+      operation,
+      commandId,
+    );
     return next;
   }
 
@@ -814,11 +840,12 @@ export class HostedChannelSession {
     record: ChannelDelivery,
     revision: number,
     operation: string,
+    commandId?: string,
   ): Promise<void> {
     await this.store.authority.commitExtensionRecord(
       {
         operation,
-        commandId: `${record.deliveryId}:${revision}`,
+        commandId: commandId ?? `${record.deliveryId}:${revision}`,
         sessionKey: this.key,
         contentDigest: digest(record),
       },

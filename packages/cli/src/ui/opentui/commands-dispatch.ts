@@ -27,6 +27,7 @@
  * applies, where ink returned `SlashCommandProcessorResult` to AppContainer.
  */
 
+import type { RestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import type { PartListUnion } from '@google/genai';
 import {
   createDebugLogger,
@@ -58,6 +59,10 @@ import {
 } from '../utils/commandUtils.js';
 import { recordAutoSkillCommandUsage } from '../../services/SkillCommandLoader.js';
 import {
+  sanitizeTerminalText,
+  stripUnsafeCharacters,
+} from '../utils/textUtils.js';
+import {
   ExtensionRefreshState,
   EXTENSION_RELOAD_FAILED_REASON,
 } from '../../config/extension-refresh-state.js';
@@ -65,6 +70,7 @@ import { AppEvent } from '../../utils/events.js';
 import { t } from '../../i18n/index.js';
 import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
 import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
+import { filterSubscriptionCommands } from '../commands/subscription-commands.js';
 import {
   appendUserPromptExpansionAdditionalContext,
   formatUserPromptExpansionBlockedMessage,
@@ -72,6 +78,21 @@ import {
 } from '../../utils/userPromptExpansionHook.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
+import { isExitInProgress } from './exit-lifecycle.js';
+import {
+  getInteractiveModSession,
+  isModRecoveryCommand,
+  MODS_FAILED_TO_INITIALIZE,
+} from '../../services/interactive-mod-session.js';
+import { ensureConfigInitialized, nextLivePromptId } from './live-session.js';
+import { MessageSenderType } from '@qwen-code/qwen-code-core/core/logger.js';
+import {
+  collapseRewrite,
+  REWRITE_CHANGED_PASTE,
+  expandPendingPastePlaceholders,
+  framePasteExpansion,
+} from '../utils/paste-placeholders.js';
+import { normalizeQuitSubmission } from './slash-gateway.js';
 import {
   createOpenTuiCommandContext,
   type OpenTuiCommandHost,
@@ -154,19 +175,41 @@ export type OpenTuiDispatchOutcome =
       kind: 'schedule_tool';
       toolName: string;
       toolArgs: Record<string, unknown>;
+      restoreResponseBinding?: RestoreToolResponseBinding;
     }
   | {
       kind: 'submit_prompt';
       content: PartListUnion;
+      promptId?: string;
       onComplete?: () => Promise<void>;
       modelOverride?: string;
       /** ink parity: refresh memory when the turn writes a context file. */
       refreshContextFilesOnWrite?: boolean;
+      /** What the Mods' prompt hooks attached to the `?`-form input. */
+      promptContext?: readonly string[];
     }
   | { kind: 'quit'; messages: HistoryItem[] }
-  | { kind: 'open_dialog'; request: OpenTuiDialogRequest };
+  | { kind: 'open_dialog'; request: OpenTuiDialogRequest }
+  /** Typed input the Mods' prompt hooks kept out; the composer gets it back. */
+  | { kind: 'refused' };
+
+/**
+ * What the composer showed for a submission whose text frames its pastes:
+ * the typed text with placeholders, and the pastes behind them.
+ */
+export interface TypedInput {
+  displayText?: string;
+  pasteExpansions?: ReadonlyMap<string, string>;
+}
+
+/** What the Mods' prompt hooks made of `?`-form input. */
+type HeardPrompt =
+  | { text: string; context?: readonly string[] }
+  | { refused: string };
 
 interface RunOptions {
+  recordRecall?: boolean;
+  typed?: TypedInput;
   oneTimeShellAllowlist?: Set<string>;
   overwriteConfirmed?: boolean;
   existingInvocationItemId?: number;
@@ -197,8 +240,15 @@ const STARTUP_REGISTRY_POLL_MS = 100;
 
 const replayedExtensionRefresh = new WeakSet<ExtensionRefreshState>();
 
+const REWRITE_CHANGED_COMMAND =
+  'A prompt.submit hook rewrote this ?-form input into another command, so it did not run.';
+
 export class OpenTuiSlashDispatcher {
-  private activeAbortController: AbortController | null = null;
+  private activeCommand: {
+    controller: AbortController;
+    canCancel: boolean;
+    committing: boolean;
+  } | null = null;
   private recentCommands = new Map<string, RecentSlashCommand>();
   private readonly extensionRefreshState: ExtensionRefreshState;
   private readonly extensionRefreshListeners: Array<() => void> = [];
@@ -348,6 +398,13 @@ export class OpenTuiSlashDispatcher {
     return this.commandList;
   }
 
+  private get availableCommands(): readonly SlashCommand[] {
+    return filterSubscriptionCommands(
+      this.commandList,
+      this.services.config?.getAuthType?.(),
+    );
+  }
+
   /** Parity of the processor's `reloadCommands` result swap. */
   setCommands(commands: readonly SlashCommand[]): void {
     this.commandList = commands;
@@ -355,11 +412,22 @@ export class OpenTuiSlashDispatcher {
 
   /** Rebuilds the registry through the original loader stack. */
   async loadCommands(signal?: AbortSignal): Promise<void> {
-    this.commandList = await loadInteractiveCommands(
-      this.services.config,
+    const config = this.services.config;
+    const session = config?.getSessionId();
+    const target = config?.getTargetDir();
+    const commands = await loadInteractiveCommands(
+      config,
       signal,
       this.services.settings,
     );
+    if (
+      config !== this.services.config ||
+      config?.getSessionId() !== session ||
+      config?.getTargetDir() !== target ||
+      signal?.aborted
+    )
+      return;
+    this.commandList = commands;
   }
 
   /**
@@ -415,7 +483,10 @@ export class OpenTuiSlashDispatcher {
     if (!this.takesAsSlashCommand(trimmed) || isBtwCommand(trimmed)) {
       return false;
     }
-    const { commandToExecute } = parseSlashCommand(trimmed, this.commandList);
+    const { commandToExecute } = parseSlashCommand(
+      trimmed,
+      this.availableCommands,
+    );
     // Matched on the resolved command, so `/exit` is covered as an altName.
     if (commandToExecute?.name === 'quit') return false;
     return commandToExecute?.canRunDuringStreaming !== true;
@@ -429,16 +500,20 @@ export class OpenTuiSlashDispatcher {
     return !(trimmed.startsWith('/') && hasSlashCommandPathSeparator(trimmed));
   }
 
+  isCommitInProgress(): boolean {
+    return this.activeCommand?.committing === true;
+  }
+
   /**
    * Parity of `cancelSlashCommand` in slashCommandProcessor.ts: ESC while a
    * slash command runs aborts it and reports the cancellation.
    */
   cancel(): void {
     this.host.cancelBtw();
-    if (!this.activeAbortController) {
+    if (!this.activeCommand?.canCancel || this.activeCommand.committing) {
       return;
     }
-    this.activeAbortController.abort();
+    this.activeCommand.controller.abort();
     this.host.addItem(
       { type: MessageType.INFO, text: 'Command cancelled.' },
       Date.now(),
@@ -451,12 +526,18 @@ export class OpenTuiSlashDispatcher {
    * Entry point — parity of the top of `handleSlashCommand`: returns `false`
    * when the input is not a slash command at all.
    */
-  async handle(rawQuery: string): Promise<OpenTuiDispatchOutcome | false> {
+  async handle(
+    rawQuery: string,
+    typed?: TypedInput,
+  ): Promise<OpenTuiDispatchOutcome | false> {
     const trimmed = rawQuery.trim();
     if (!this.takesAsSlashCommand(trimmed)) {
       return false;
     }
-    return this.run(trimmed, {});
+    // The gateway may have waited for the registry after the shell admitted input.
+    if (isExitInProgress()) return { kind: 'handled' };
+    this.services.onInputProcessed?.();
+    return this.run(trimmed, { recordRecall: true, typed });
   }
 
   private addMessage(message: Message): void {
@@ -466,10 +547,91 @@ export class OpenTuiSlashDispatcher {
     );
   }
 
+  /**
+   * `?`-form input is a prompt the person typed rather than slash-form text,
+   * so the Mods' `prompt.submit` hooks hear it before it is recorded or run,
+   * as they hear any typed prompt. Returns the text to run, or the line that
+   * refuses it; rejects when `signal` aborts.
+   */
+  private async hearPrompt(
+    text: string,
+    signal: AbortSignal,
+    typed?: TypedInput,
+  ): Promise<HeardPrompt> {
+    const mods = this.services.config
+      ? getInteractiveModSession(this.services.config)
+      : undefined;
+    if (!mods) return { text };
+    if (mods.starting || mods.failed) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => reject(signal.reason);
+          signal.addEventListener('abort', onAbort, { once: true });
+          mods.ready
+            .finally(() => signal.removeEventListener('abort', onAbort))
+            .then(resolve, reject);
+        });
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (mods.failed) return { refused: MODS_FAILED_TO_INITIALIZE };
+      }
+    }
+    if (!mods.hearsPrompts) return { text };
+    // The hooks hear what the person typed, with pastes expanded, not the
+    // text the composer framed them in.
+    const pastes = typed?.pasteExpansions;
+    const framed =
+      pastes?.size &&
+      typed?.displayText !== undefined &&
+      framePasteExpansion(typed.displayText, pastes) === text
+        ? pastes
+        : undefined;
+    const heard = framed
+      ? expandPendingPastePlaceholders(typed!.displayText!, framed)
+      : text;
+    const submitted = await mods.submitPrompt(heard, signal);
+    if ('drop' in submitted) return { refused: submitted.drop };
+    // The hooks' context rides the first send of a turn the command starts;
+    // a command that starts none, such as `?btw`, has no send to carry it.
+    const context = submitted.context?.length ? submitted.context : undefined;
+    const rewritten = submitted.text.trim();
+    if (rewritten === heard.trim()) return { text, context };
+    // A rewrite keeps the command the person typed, or it would run one they
+    // never asked for.
+    if (!this.sameCommand(text, rewritten))
+      return { refused: REWRITE_CHANGED_COMMAND };
+    // Each paste comes back whole to be framed again, or the rewrite is
+    // refused rather than run unframed.
+    const collapsed = collapseRewrite(
+      typed?.displayText ?? '',
+      rewritten,
+      framed,
+    );
+    if (!collapsed) return { refused: REWRITE_CHANGED_PASTE };
+    return {
+      text: collapsed.pasteExpansions
+        ? framePasteExpansion(collapsed.text, collapsed.pasteExpansions)
+        : rewritten,
+      context,
+    };
+  }
+
+  /** Whether two `?`-form texts run the same command. */
+  private sameCommand(typed: string, rewritten: string): boolean {
+    if (!rewritten.startsWith('?')) return false;
+    const before = parseSlashCommand(typed, this.commandList).canonicalPath;
+    const after = parseSlashCommand(rewritten, this.commandList).canonicalPath;
+    if (before.length > 0) return before.join(' ') === after.join(' ');
+    // Before the commands resolve, the command word itself must stay.
+    const word = (value: string) => value.slice(1).split(/\s+/, 1)[0];
+    return word(typed) === word(rewritten);
+  }
+
   private async run(
-    trimmed: string,
+    typed: string,
     options: RunOptions,
   ): Promise<OpenTuiDispatchOutcome> {
+    let trimmed = typed;
     const recordedItems: HistoryItemWithoutId[] = [];
     const addItemWithRecording = (
       item: HistoryItemWithoutId,
@@ -485,22 +647,104 @@ export class OpenTuiSlashDispatcher {
       options.wasIdleBeforeDispatch ?? this.host.isIdle();
     this.host.setIsProcessing(true);
     const abortController = new AbortController();
-    this.activeAbortController = abortController;
+    const activeCommand = {
+      controller: abortController,
+      canCancel: true,
+      committing: false,
+    };
+    this.activeCommand = activeCommand;
+    const releaseOwnership = () => {
+      if (this.activeCommand === activeCommand) {
+        this.activeCommand = null;
+        this.host.setIsProcessing(false);
+      }
+    };
+    let promptContext: readonly string[] | undefined;
+    if (options.recordRecall && trimmed.startsWith('?')) {
+      let heard: HeardPrompt;
+      try {
+        heard = await this.hearPrompt(
+          trimmed,
+          abortController.signal,
+          options.typed,
+        );
+      } catch (error) {
+        releaseOwnership();
+        if (abortController.signal.aborted) return { kind: 'refused' };
+        throw error;
+      }
+      if (
+        abortController.signal.aborted ||
+        this.activeCommand !== activeCommand
+      ) {
+        releaseOwnership();
+        return { kind: 'refused' };
+      }
+      if ('refused' in heard) {
+        // Neither recorded nor run, since it may hold what a hook kept out.
+        this.host.addItem(
+          { type: MessageType.ERROR, text: heard.refused },
+          Date.now(),
+        );
+        releaseOwnership();
+        return { kind: 'refused' };
+      }
+      trimmed = heard.text;
+      promptContext = heard.context;
+    }
+    if (
+      options.recordRecall &&
+      this.services.logger &&
+      normalizeQuitSubmission(trimmed) !== '/quit'
+    ) {
+      const sessionId = this.services.config?.getSessionId();
+      try {
+        await this.services.logger.logMessage(MessageSenderType.USER, trimmed);
+      } catch (error) {
+        releaseOwnership();
+        throw error;
+      }
+      if (
+        abortController.signal.aborted ||
+        this.activeCommand !== activeCommand ||
+        sessionId !== this.services.config?.getSessionId()
+      ) {
+        releaseOwnership();
+        return { kind: 'handled' };
+      }
+    }
 
     const userMessageTimestamp = Date.now();
     let invocationItemId = options.existingInvocationItemId;
     let invocationSentToModel = false;
+    let invocationPromptId: string | undefined;
     let {
       commandToExecute,
       args,
       canonicalPath: resolvedCommandPath,
-    } = parseSlashCommand(trimmed, this.commandList);
-    if (!commandToExecute && (await this.ensureCommandsLoaded())) {
-      ({
-        commandToExecute,
-        args,
-        canonicalPath: resolvedCommandPath,
-      } = parseSlashCommand(trimmed, this.commandList));
+    } = parseSlashCommand(trimmed, this.availableCommands);
+    if (!commandToExecute) {
+      const config = this.services.config;
+      const session = config?.getSessionId();
+      const target = config?.getTargetDir();
+      const loaded = await this.ensureCommandsLoaded();
+      if (
+        abortController.signal.aborted ||
+        this.activeCommand !== activeCommand ||
+        config !== this.services.config ||
+        config?.getSessionId() !== session ||
+        config?.getTargetDir() !== target
+      ) {
+        releaseOwnership();
+        return { kind: 'handled' };
+      }
+      if (loaded) {
+        ({
+          commandToExecute,
+          args,
+          canonicalPath: resolvedCommandPath,
+        } = parseSlashCommand(trimmed, this.availableCommands));
+      }
     }
     let hideInvocation =
       isBtwCommand(trimmed) ||
@@ -561,9 +805,17 @@ export class OpenTuiSlashDispatcher {
     };
 
     try {
+      const config = this.services.config;
+      if (
+        config &&
+        getInteractiveModSession(config) &&
+        !isModRecoveryCommand(commandToExecute)
+      ) {
+        await ensureConfigInitialized(config);
+      }
       const stackedResult = parseStackedSlashCommands(
         trimmed,
-        this.commandList,
+        this.availableCommands,
       );
       if (stackedResult.skills.length >= 2) {
         const combinedContent: PartListUnion[] = [];
@@ -632,18 +884,26 @@ export class OpenTuiSlashDispatcher {
         }
 
         invocationSentToModel = true;
+        invocationPromptId = this.services.config
+          ? nextLivePromptId(this.services.config)
+          : undefined;
         if (invocationItemId !== undefined) {
-          this.host.updateItem(invocationItemId, { sentToModel: true });
+          this.host.updateItem(invocationItemId, {
+            sentToModel: true,
+            promptId: invocationPromptId,
+          });
         }
 
         const mergedContent: PartListUnion = combinedContent.flat();
         return {
           kind: 'submit_prompt',
           content: mergedContent,
+          promptId: invocationPromptId,
           ...(firstModelOverride ? { modelOverride: firstModelOverride } : {}),
           ...(refreshContextFilesOnWrite
             ? { refreshContextFilesOnWrite: true }
             : {}),
+          ...(promptContext ? { promptContext } : {}),
           ...(onCompleteCallbacks.length
             ? {
                 onComplete: async () => {
@@ -674,6 +934,9 @@ export class OpenTuiSlashDispatcher {
             ...baseContext,
             ui: {
               ...baseContext.ui,
+              get history() {
+                return baseContext.ui.history;
+              },
               addItem: (item, timestamp) =>
                 addItemWithRecording(item, timestamp),
             },
@@ -681,9 +944,22 @@ export class OpenTuiSlashDispatcher {
               raw: trimmed,
               name: commandToExecute.name,
               args,
+              historyItemId: invocationItemId,
             },
             overwriteConfirmed: options.overwriteConfirmed,
             abortSignal: abortController.signal,
+            beginCommit: () => {
+              if (
+                this.activeCommand !== activeCommand ||
+                abortController.signal.aborted ||
+                isExitInProgress() ||
+                !fullCommandContext.ui.isIdleRef.current
+              ) {
+                return false;
+              }
+              activeCommand.committing = true;
+              return true;
+            },
           };
 
           // Parity: a "Proceed" confirmation temporarily augments the session
@@ -712,6 +988,7 @@ export class OpenTuiSlashDispatcher {
           // listener registered after the signal already aborted never
           // fires, so the race would otherwise await the action's side
           // effects (session rotation, telemetry reset) before discarding.
+          activeCommand.canCancel = commandToExecute.canCancel !== false;
           const result = abortController.signal.aborted
             ? undefined
             : await Promise.race([
@@ -730,17 +1007,11 @@ export class OpenTuiSlashDispatcher {
                   kind: 'schedule_tool',
                   toolName: result.toolName,
                   toolArgs: result.toolArgs,
+                  ...(result.restoreResponseBinding
+                    ? { restoreResponseBinding: result.restoreResponseBinding }
+                    : {}),
                 };
               case 'message': {
-                let messageContent = result.content;
-                // The OpenTUI renderer has no vim key mode; the toggle host
-                // reports the real (off) state, and the ink command would
-                // render that as "Exited Vim mode." — actively misleading.
-                // Replace it with the faithful notice (audit 01 G-11b).
-                if (commandToExecute.name === 'vim') {
-                  messageContent =
-                    'Vim mode is not yet available in the OpenTUI renderer.';
-                }
                 // Picker-shaped commands can still reject their arguments
                 // before opening a dialog. Keep those failures paired with
                 // the invocation in both live and reconstructed history, and
@@ -754,7 +1025,7 @@ export class OpenTuiSlashDispatcher {
                       ? MessageType.WARNING
                       : MessageType.ERROR;
                 addItemWithRecording(
-                  { type: messageType, text: messageContent },
+                  { type: messageType, text: result.content },
                   Date.now(),
                 );
                 return { kind: 'handled' };
@@ -785,14 +1056,16 @@ export class OpenTuiSlashDispatcher {
                 return { kind: 'handled' };
               }
               case 'dialog': {
-                if (result.dialog === 'resume') {
-                  if (result.sessionId) {
+                if (result.dialog === 'resume' && result.sessionId) {
+                  if (fullCommandContext.beginCommit?.() !== false) {
                     await this.host.handleResume(result.sessionId);
-                    return { kind: 'handled' };
                   }
+                  return { kind: 'handled' };
                 }
                 if (result.dialog === 'branch') {
-                  await this.host.handleBranch(result.name);
+                  if (fullCommandContext.beginCommit?.() !== false) {
+                    await this.host.handleBranch(result.name);
+                  }
                   return { kind: 'handled' };
                 }
                 return {
@@ -801,14 +1074,27 @@ export class OpenTuiSlashDispatcher {
                 };
               }
               case 'load_history': {
-                this.services.config
-                  ?.getGeminiClient()
+                const sessionId = this.services.config?.getSessionId();
+                const snapshot = [...this.host.getHistory()];
+                await this.services.config
+                  ?.getLlmClient()
                   ?.setHistory(result.clientHistory);
+                const current = this.host.getHistory();
+                if (
+                  abortController.signal.aborted ||
+                  sessionId !== this.services.config?.getSessionId() ||
+                  current.length !== snapshot.length ||
+                  current.some((item, index) => item !== snapshot[index])
+                )
+                  return { kind: 'handled' };
                 fullCommandContext.ui.clear();
                 const now = Date.now();
-                result.history.forEach((item, index) => {
-                  fullCommandContext.ui.addItem(item, now + index);
-                });
+                fullCommandContext.ui.loadHistory(
+                  result.history.map((item, index) => ({
+                    ...item,
+                    id: now + index,
+                  })),
+                );
                 return { kind: 'handled' };
               }
               case 'quit':
@@ -849,9 +1135,15 @@ export class OpenTuiSlashDispatcher {
                     output.getAdditionalContext(),
                   );
                 }
+                invocationPromptId = this.services.config
+                  ? nextLivePromptId(this.services.config)
+                  : undefined;
+                invocationSentToModel = true;
                 if (invocationItemId !== undefined) {
-                  invocationSentToModel = true;
-                  this.host.updateItem(invocationItemId, { sentToModel: true });
+                  this.host.updateItem(invocationItemId, {
+                    sentToModel: true,
+                    promptId: invocationPromptId,
+                  });
                 }
                 recordSkillCommandInvocation(true);
                 void recordAutoSkillCommandUsage(
@@ -861,6 +1153,7 @@ export class OpenTuiSlashDispatcher {
                 return {
                   kind: 'submit_prompt',
                   content,
+                  promptId: invocationPromptId,
                   ...(result.onComplete
                     ? { onComplete: result.onComplete }
                     : {}),
@@ -870,6 +1163,7 @@ export class OpenTuiSlashDispatcher {
                   ...(result.refreshContextFilesOnWrite
                     ? { refreshContextFilesOnWrite: true }
                     : {}),
+                  ...(promptContext ? { promptContext } : {}),
                 };
               }
               case 'confirm_shell_commands': {
@@ -971,7 +1265,9 @@ export class OpenTuiSlashDispatcher {
       addItemWithRecording(
         {
           type: MessageType.ERROR,
-          text: e instanceof Error ? e.message : String(e),
+          text: sanitizeTerminalText(
+            stripUnsafeCharacters(e instanceof Error ? e.message : String(e)),
+          ),
         },
         Date.now(),
       );
@@ -1029,7 +1325,7 @@ export class OpenTuiSlashDispatcher {
         });
         logSlashCommand(this.services.config, event);
       }
-      this.host.setIsProcessing(false);
+      releaseOwnership();
     }
   }
 }

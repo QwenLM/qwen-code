@@ -5,7 +5,12 @@
  */
 
 import { z } from 'zod';
-import { MOD_MAX_BYTES, type ModOptions } from './types.js';
+import {
+  MOD_MAX_BYTES,
+  type ModOptions,
+  type ModToolDialect,
+  type ModUnsupportedEvents,
+} from './types.js';
 
 const option = z.union([
   z.string(),
@@ -44,7 +49,71 @@ const field = z
     );
   });
 const schema = z.record(z.string().regex(/^[A-Za-z_]\w*$/), field);
-const storedOptions = z.record(option);
+const storedOptions = z.record(z.string(), option);
+
+function* pluginConfigurations(
+  scopes: readonly unknown[],
+  name: string,
+  marketplace?: string,
+): Generator<Record<string, unknown>> {
+  const keys = marketplace
+    ? [`${name}@${marketplace}`]
+    : [name, `${name}@inline`];
+  for (const scope of scopes) {
+    if (scope === undefined) continue;
+    if (!scope || typeof scope !== 'object' || Array.isArray(scope)) {
+      throw new Error('Invalid Mod pluginConfigs settings.');
+    }
+    for (const key of keys) {
+      if (!Object.hasOwn(scope, key)) continue;
+      const config = (scope as Record<string, unknown>)[key];
+      if (!config || typeof config !== 'object' || Array.isArray(config)) {
+        throw new Error('Invalid Mod pluginConfigs entry.');
+      }
+      yield config as Record<string, unknown>;
+    }
+  }
+}
+
+function resolveModChoice<T extends string>(
+  scopes: readonly unknown[],
+  name: string,
+  marketplace: string | undefined,
+  key: string,
+  choices: readonly [T, ...T[]],
+): T {
+  let choice = choices[0];
+  for (const config of pluginConfigurations(scopes, name, marketplace)) {
+    const value = config[key];
+    if (value === undefined) continue;
+    if (!choices.includes(value as T))
+      throw new Error(`Invalid Mod ${key}: expected ${choices.join(' or ')}.`);
+    choice = value as T;
+  }
+  return choice;
+}
+
+export function resolveModToolDialect(
+  scopes: readonly unknown[],
+  name: string,
+  marketplace?: string,
+): ModToolDialect {
+  return resolveModChoice(scopes, name, marketplace, 'toolDialect', [
+    'native',
+    'claude',
+  ]);
+}
+
+export function resolveModUnsupportedEvents(
+  scopes: readonly unknown[],
+  name: string,
+  marketplace?: string,
+): ModUnsupportedEvents {
+  return resolveModChoice(scopes, name, marketplace, 'unsupportedEvents', [
+    'skip',
+    'reject',
+  ]);
+}
 
 export function resolveModOptions(
   declaration: unknown,
@@ -60,29 +129,15 @@ export function resolveModOptions(
     throw new Error('Sensitive Mod userConfig is not supported yet.');
   }
   let stored: ModOptions = {};
-  const keys = marketplace
-    ? [`${name}@${marketplace}`]
-    : [name, `${name}@inline`];
-  for (const scope of scopes) {
-    if (scope === undefined) continue;
-    if (!scope || typeof scope !== 'object' || Array.isArray(scope)) {
-      throw new Error('Invalid Mod pluginConfigs settings.');
-    }
-    for (const key of keys) {
-      if (!Object.hasOwn(scope, key)) continue;
-      const config = (scope as Record<string, unknown>)[key];
-      if (!config || typeof config !== 'object' || Array.isArray(config)) {
-        throw new Error('Invalid Mod pluginConfigs entry.');
-      }
-      const options = (config as Record<string, unknown>)['options'];
-      if (options === undefined) continue;
-      const values = storedOptions.safeParse(options);
-      if (!values.success)
-        throw new Error(
-          `Invalid Mod configured option: ${String(values.error.issues[0]?.path[0] ?? '').slice(0, 64)}.`,
-        );
-      stored = { ...stored, ...values.data };
-    }
+  for (const config of pluginConfigurations(scopes, name, marketplace)) {
+    const options = config['options'];
+    if (options === undefined) continue;
+    const values = storedOptions.safeParse(options);
+    if (!values.success)
+      throw new Error(
+        `Invalid Mod configured option: ${String(values.error.issues[0]?.path[0] ?? '').slice(0, 64)}.`,
+      );
+    stored = { ...stored, ...values.data };
   }
   const result: ModOptions = Object.fromEntries(
     fields

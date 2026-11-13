@@ -264,3 +264,51 @@ describe('sized bodies window from the region budget', () => {
     expect(scrollboxOf(container)).toMatchObject({ height: 9, marginTop: 1 });
   });
 });
+
+describe('read-only sized bodies on very short terminals', () => {
+  for (const [name, Dialog] of [
+    ['diff', OpenTuiDiffDialog],
+    ['subagents', OpenTuiSubagentListDialog],
+  ] as const) {
+    it.each([1, 2, 3, 4, 5, 6])(
+      `keeps ${name} scrollable in a %i-row region`,
+      (height) => {
+        const { container } = render(
+          <Dialog
+            settings={settingsWith({})}
+            onClose={() => {}}
+            availableTerminalHeight={height}
+          />,
+        );
+        expect(scrollboxOf(container)).toMatchObject({
+          height: height - (height >= 3 ? 2 : 0),
+          marginTop: 0,
+          flexShrink: 1,
+        });
+        expect(container.textContent).not.toContain(
+          name === 'diff' ? 'Diff' : 'Subagents',
+        );
+      },
+    );
+
+    it(`remounts the ${name} sized body when its region changes`, () => {
+      const dialog = (height: number) => (
+        <Dialog
+          settings={settingsWith({})}
+          onClose={() => {}}
+          availableTerminalHeight={height}
+        />
+      );
+      const { container, rerender } = render(dialog(15));
+      const before = container.querySelector('[data-scrollbox]');
+      rerender(dialog(12));
+      expect(container.querySelector('[data-scrollbox]')).not.toBe(before);
+      expect(scrollboxOf(container)).toMatchObject({
+        height: 6,
+        flexShrink: 1,
+      });
+      rerender(dialog(3));
+      expect(scrollboxOf(container)).toMatchObject({ height: 1, marginTop: 0 });
+    });
+  }
+});

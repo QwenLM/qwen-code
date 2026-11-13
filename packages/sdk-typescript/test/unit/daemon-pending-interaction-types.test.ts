@@ -5,10 +5,17 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { pendingInteractionWireTypesInSync } from '../../src/daemon/types-sync.js';
+import {
+  pendingInteractionWireTypesInSync,
+  skillsSnapshotWireTypesInSync,
+} from '../../src/daemon/types-sync.js';
 
 describe('daemon pending interaction wire types', () => {
   it('keeps bridge and SDK mirrors mutually assignable', () => {
     expect(pendingInteractionWireTypesInSync).toEqual([true, true, true, true]);
+  });
+
+  it('keeps the skills snapshot mirror key- and optionality-complete', () => {
+    expect(skillsSnapshotWireTypesInSync).toEqual([true, true, true]);
   });
 });

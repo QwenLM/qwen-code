@@ -2,7 +2,7 @@
 
 [English](2026-10-02-runtime-broker-hardening.md) | [简体中文](2026-10-02-runtime-broker-hardening.zh-CN.md)
 
-Status: implemented in `packages/sdk-java/runtime-broker` (PR #13214, issue #13183).
+Status: implemented in `packages/managed-agent-server` (PR #13214, issue #13183).
 
 ## Problem
 
@@ -28,4 +28,4 @@ Credential key rotation (#13202), terminal-row retention (#13203), and InMemory/
 
 ## Validation
 
-`Issue13183RegressionTest` and `Issue13183AdversarialTest` encode the issue's scenarios with the fixed expectations: the race interleaving, the stalled renewal, the observation cooldown, the loopback refusal, the wedged-worker escalation, and the whole-generation drain, plus a 600-round cross-process stress (300 of them a tight race, 300 with the admission committed first) and a forked-JVM exit-hook proof. `RuntimeRecoveryContract.verifyBeginSessionRelease` covers the new repository primitive on both backends: the READY and ACQUIRING transitions, null on a stale snapshot, the passthrough for an already RELEASING or RELEASED session, `runtime_session_busy`, and `runtime_session_not_ready`. `mvn clean test` in `packages/sdk-java/runtime-broker` and the managed-agent-server fix-adjacent suites pass; `mvn checkstyle:check` is clean.
+`Issue13183RegressionTest` and `Issue13183AdversarialTest` encode the issue's scenarios with the fixed expectations: the race interleaving, the stalled renewal, the observation cooldown, the loopback refusal, the wedged-worker escalation, and the whole-generation drain, plus a 600-round cross-process stress (300 of them a tight race, 300 with the admission committed first) and a forked-JVM exit-hook proof. `RuntimeRecoveryContract.verifyBeginSessionRelease` covers the new repository primitive on both backends: the READY and ACQUIRING transitions, null on a stale snapshot, the passthrough for an already RELEASING or RELEASED session, `runtime_session_busy`, and `runtime_session_not_ready`. `mvn clean test` in `packages/managed-agent-server` and the managed-agent-server fix-adjacent suites pass; `mvn checkstyle:check` is clean.

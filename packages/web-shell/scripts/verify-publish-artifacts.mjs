@@ -1,9 +1,10 @@
 // Runs from `prepublishOnly`: a published version cannot be replaced, so refuse
 // to pack artifacts that consumers could not resolve.
-import { execSync } from 'node:child_process';
+import { execSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { isBuiltin } from 'node:module';
 import pkg from '../package.json' with { type: 'json' };
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -141,19 +142,56 @@ for (const [key, entry] of entryPoints) {
   }
 }
 
-// Declarations ship verbatim, so they must not import through the alias that
-// only this repository resolves.
+for (const key of ['.', './transcript']) {
+  const exported = pkg.exports[key];
+  const entry = typeof exported === 'string' ? exported : exported?.import;
+  if (!entry?.startsWith('./') || entry.includes('*')) continue;
+  const target = join(root, entry);
+  if (!existsSync(target) || (packed && !packed.has(packPath(target))))
+    continue;
+  const imported = spawnSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '--eval',
+      `await import(${JSON.stringify(pathToFileURL(target).href)})`,
+    ],
+    { cwd: root, encoding: 'utf8', timeout: 30_000 },
+  );
+  if (imported.status !== 0) {
+    const detail = imported.stderr.trim().split('\n').at(-1);
+    problems.push(
+      `${key} cannot be imported by Node without DOM globals${detail ? `: ${detail}` : ''}`,
+    );
+  }
+}
+
+// Published declarations must resolve without this repository's dev dependencies.
+const typeDependencies = new Set([
+  pkg.name,
+  ...Object.keys(pkg.dependencies ?? {}),
+  ...Object.keys(pkg.peerDependencies ?? {}),
+]);
 const typesDir = join(root, 'dist/types');
 if (existsSync(typesDir)) {
   for (const name of readdirSync(typesDir, { recursive: true })) {
     if (!name.endsWith('.d.ts')) continue;
+    if (packed && !packed.has(packPath(join(typesDir, name)))) continue;
     const source = readFileSync(join(typesDir, name), 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/\/\/.*$/gm, '');
     for (const [, specifier] of source.matchAll(
       /(?:from|import)\s*\(?\s*['"]([^'"]+)['"]/g,
     )) {
-      if (specifier.startsWith('@/')) {
+      if (specifier.startsWith('.') || isBuiltin(specifier)) continue;
+      const dependency = specifier.startsWith('@')
+        ? specifier.split('/').slice(0, 2).join('/')
+        : specifier.split('/')[0];
+      const typesPackage = `@types/${dependency.replace(/^@/, '').replace('/', '__')}`;
+      if (
+        !typeDependencies.has(dependency) &&
+        !typeDependencies.has(typesPackage)
+      ) {
         problems.push(`dist/types/${name} imports the repo-only ${specifier}`);
       }
     }

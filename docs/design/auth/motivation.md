@@ -14,7 +14,8 @@ architectures.
 ## Goals
 
 - Keep `/auth` user-facing flows easy to understand:
-  - Alibaba ModelStudio for first-party Qwen setup.
+  - QwenCloud for 千问AI平台 / QwenCloud Token Plan and Standard API Key setup.
+  - Alibaba ModelStudio for Coding Plan, Token Plan, and Standard API Key setup.
   - Third-party providers for common built-in integrations such as DeepSeek,
     MiniMax, and Z.AI.
   - OAuth providers such as OpenRouter.
@@ -66,12 +67,18 @@ collected the inputs.
 `/auth` can still present different entry points, but they should all converge on
 the same provider install path:
 
-1. **Alibaba ModelStudio**
+1. **QwenCloud**
+   - Token Plan
+   - Standard API key
+   - An explicit platform step (China — 千问AI平台 / International — QwenCloud)
+     decides the endpoint; the UI language must not.
+
+2. **Alibaba ModelStudio**
    - Coding Plan
    - Token Plan
    - Standard API key
 
-2. **Third-party Providers**
+3. **Third-party Providers**
    - Common providers with built-in defaults.
    - Each provider should own its base URL, env key, default models, and model
      metadata.
@@ -79,12 +86,12 @@ the same provider install path:
      - Coding Plan: `https://api.z.ai/api/coding/paas/v4`
      - Standard API key: `https://api.z.ai/api/paas/v4`
 
-3. **OAuth**
+4. **OAuth**
    - Browser-based authorization for routing platforms such as OpenRouter.
    - OAuth-specific mechanics can live in the provider implementation, but the
      final result should still be a provider install plan.
 
-4. **Custom Provider**
+5. **Custom Provider**
    - Manual setup for local servers, proxies, or unsupported providers.
    - The wizard collects protocol, base URL, API key, model IDs, and advanced
      model options such as thinking, multimodal input, context window, and max

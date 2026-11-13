@@ -33,6 +33,7 @@ import {
   channelRouteId,
   channelRouteOpenBody,
   channelRouteRolloverBody,
+  CHANNEL_CAPACITY_NOTICE,
   CHANNEL_TRUNCATION_NOTICE,
   channelSessionCreationKey,
   decodeChannelInputEnvelope,
@@ -46,6 +47,8 @@ import {
   type ChannelInputEnvelope,
 } from './managed-channel-operations.js';
 import { ManagedSessionRecordError } from './managed-session-records.js';
+
+const REPLACEMENT_CHARACTER = '\uFFFD';
 
 function ref(resourceId: string, bytes: string | Buffer, kind = 'k') {
   const buffer = Buffer.from(bytes);
@@ -300,17 +303,191 @@ describe('channel policy and envelopes', () => {
     ).not.toThrow();
   });
 
-  it('round-trips a reply and plans one bounded segment for email', () => {
+  it('round-trips a reply and plans ordered segments for a long answer', () => {
     const reply = { text: 'Done.', replyContext: { parent: '<a@b>' } };
     expect(decodeChannelReply(encodeChannelReply(reply))).toEqual(reply);
     expect(planChannelSegments('short')).toEqual(['short']);
+    expect(planChannelSegments('')).toEqual(['']);
+    // 3-byte code points: three full segments, no notice, no lost tail.
     const long = '€'.repeat(MANAGED_CHANNEL_LIMITS.maxSegmentBytes);
-    const [segment, ...rest] = planChannelSegments(long);
-    expect(rest).toEqual([]);
-    expect(Buffer.byteLength(segment!, 'utf8')).toBeLessThanOrEqual(
-      MANAGED_CHANNEL_LIMITS.maxSegmentBytes,
+    const pieces = planChannelSegments(long);
+    expect(pieces).toHaveLength(3);
+    expect(pieces.join('')).toBe(long);
+    for (const piece of pieces) {
+      expect(Buffer.byteLength(piece, 'utf8')).toBeLessThanOrEqual(
+        MANAGED_CHANNEL_LIMITS.maxSegmentBytes,
+      );
+      expect(piece).not.toContain(CHANNEL_TRUNCATION_NOTICE);
+      expect(piece).not.toContain(REPLACEMENT_CHARACTER);
+    }
+  });
+
+  it('splits a mixed reply on code-point boundaries and concatenates back', () => {
+    const text = 'answer 答案 🙂\n'.repeat(8_000);
+    const pieces = planChannelSegments(text);
+    expect(pieces.length).toBeGreaterThan(1);
+    expect(pieces.length).toBeLessThanOrEqual(
+      MANAGED_CHANNEL_LIMITS.maxSegments,
     );
-    expect(segment).toMatch(/€\n\n\[Reply truncated/);
+    expect(pieces.join('')).toBe(text);
+    for (const piece of pieces) {
+      expect(Buffer.byteLength(piece, 'utf8')).toBeLessThanOrEqual(
+        MANAGED_CHANNEL_LIMITS.maxSegmentBytes,
+      );
+      expect(piece).not.toContain(REPLACEMENT_CHARACTER);
+      expect(
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+          piece,
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it('prefers a line end within the byte budget for segment boundaries', () => {
+    const text =
+      'x'.repeat(40_000) +
+      '\n' +
+      'y'.repeat(40_000) +
+      '\n' +
+      'z'.repeat(20_000);
+    const pieces = planChannelSegments(text);
+    expect(pieces).toHaveLength(3);
+    expect(pieces[0]).toBe('x'.repeat(40_000) + '\n');
+    expect(pieces[1]).toBe('y'.repeat(40_000) + '\n');
+    expect(pieces[2]).toBe('z'.repeat(20_000));
+    expect(pieces.join('')).toBe(text);
+  });
+
+  it('keeps the nominal byte capacity when lines are longer than half a segment', () => {
+    const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
+    const capacity = maxBytes * MANAGED_CHANNEL_LIMITS.maxSegments;
+    // Long lines put each window's last newline far below the byte bound
+    // (a 24 KiB line halves every piece). An unconditional line-end cut
+    // would exhaust the 64-segment budget at a fraction of the capacity
+    // and drop a tail that fits; the cut must fall back to the byte bound
+    // whenever the remainder would no longer fit the remaining segments.
+    for (const lineBytes of [4_096, 8_192, 16_384, 24_576, 32_768]) {
+      const line = 'x'.repeat(lineBytes) + '\n';
+      const text = line
+        .repeat(Math.ceil(capacity / line.length))
+        .slice(0, capacity);
+      const pieces = planChannelSegments(text);
+      expect(pieces.join('')).toBe(text);
+      expect(pieces.length).toBeLessThanOrEqual(
+        MANAGED_CHANNEL_LIMITS.maxSegments,
+      );
+      expect(pieces[pieces.length - 1]!).not.toContain(
+        CHANNEL_TRUNCATION_NOTICE,
+      );
+    }
+  });
+
+  it('takes the line-end cut when the remainder fits the remaining segments exactly', () => {
+    const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
+    // A 40,001-byte first line then exactly 63 full segments: the bytes after
+    // the line-end cut equal the remaining segment budget to the byte, so the
+    // <= boundary must admit the cut. A one-byte-stricter guard would fall
+    // back to full width and lose the line end.
+    const firstLine = 'x'.repeat(40_000) + '\n';
+    const text = firstLine + 'y'.repeat(63 * maxBytes);
+    const pieces = planChannelSegments(text);
+    expect(pieces[0]).toBe(firstLine);
+    expect(pieces).toHaveLength(64);
+    expect(pieces.join('')).toBe(text);
+    expect(pieces[pieces.length - 1]!).not.toContain(CHANNEL_TRUNCATION_NOTICE);
+  });
+
+  it('does not cut a lone newline into its own segment at the window start', () => {
+    const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
+    // A full segment of y, a newline, then just over a segment of b: the
+    // newline lands at the start of the second window. Without the fill
+    // floor it is cut alone (a 1-byte segment = its own publish / claim /
+    // provider message); the floor absorbs it into a full-width piece.
+    const text = 'y'.repeat(maxBytes) + '\n' + 'b'.repeat(maxBytes + 1);
+    const pieces = planChannelSegments(text);
+    expect(pieces.join('')).toBe(text);
+    expect(pieces).toHaveLength(3);
+    for (const piece of pieces) {
+      expect(piece).not.toBe('\n');
+    }
+  });
+
+  it('takes a paragraph break a KiB into the window instead of cutting mid-word', () => {
+    // A 10 KiB paragraph then a 50 KiB line then the paragraph again: the
+    // first window's last newline is 10,001 bytes in. A half-segment fill
+    // floor would refuse that clean break and cut the long line mid-word;
+    // the low floor accepts it while still rejecting a window-start newline.
+    const paragraph = 'p'.repeat(10_000) + '\n';
+    const longLine = 'q'.repeat(50_000) + '\n';
+    const text = paragraph + longLine + paragraph;
+    const pieces = planChannelSegments(text);
+    expect(pieces[0]).toBe(paragraph);
+    expect(pieces[0]!.endsWith('\n')).toBe(true);
+    expect(pieces.join('')).toBe(text);
+  });
+
+  it('bounds the visible loss when mixed widths sit exactly at the capacity', () => {
+    const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
+    const capacity = maxBytes * MANAGED_CHANNEL_LIMITS.maxSegments;
+    // A 4-byte emoji aligned so every full-width cut backs off 3 bytes: at
+    // exactly the nominal capacity the only loss is the alignment slack plus
+    // the notice room, and it stays visible, a strict prefix, never
+    // mid-code-point. Uniform-width text never drifts (49152 divides 1..4).
+    const unit = '\u{1F642}' + 'x'.repeat(49_145);
+    const text =
+      unit.repeat(MANAGED_CHANNEL_LIMITS.maxSegments) +
+      'x'.repeat(capacity - MANAGED_CHANNEL_LIMITS.maxSegments * 49_149);
+    const pieces = planChannelSegments(text);
+    expect(pieces).toHaveLength(MANAGED_CHANNEL_LIMITS.maxSegments);
+    for (const piece of pieces) {
+      expect(Buffer.byteLength(piece, 'utf8')).toBeLessThanOrEqual(maxBytes);
+      expect(piece).not.toContain(REPLACEMENT_CHARACTER);
+    }
+    const join = pieces.join('');
+    expect(join.endsWith(CHANNEL_CAPACITY_NOTICE)).toBe(true);
+    const kept = join.slice(0, join.length - CHANNEL_CAPACITY_NOTICE.length);
+    expect(text.startsWith(kept)).toBe(true);
+    const lost =
+      Buffer.byteLength(text, 'utf8') - Buffer.byteLength(kept, 'utf8');
+    expect(lost).toBeGreaterThan(0);
+    expect(lost).toBeLessThanOrEqual(
+      3 * MANAGED_CHANNEL_LIMITS.maxSegments +
+        Buffer.byteLength(CHANNEL_CAPACITY_NOTICE, 'utf8'),
+    );
+  });
+
+  it('keeps 64 segments past the count bound and marks the truncation', () => {
+    const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
+    const text = 'x'.repeat(
+      maxBytes * MANAGED_CHANNEL_LIMITS.maxSegments + 1_000,
+    );
+    const pieces = planChannelSegments(text);
+    expect(pieces).toHaveLength(MANAGED_CHANNEL_LIMITS.maxSegments);
+    for (const piece of pieces) {
+      expect(Buffer.byteLength(piece, 'utf8')).toBeLessThanOrEqual(maxBytes);
+    }
+    expect(
+      pieces
+        .slice(0, -1)
+        .every((piece) => !piece.includes(CHANNEL_CAPACITY_NOTICE)),
+    ).toBe(true);
+    const last = pieces[pieces.length - 1]!;
+    expect(last.endsWith(CHANNEL_CAPACITY_NOTICE)).toBe(true);
+    // The join is the kept prefix plus the notice — a strict prefix of the
+    // input, never a silent loss and never a mid-code-point cut.
+    const join = pieces.join('');
+    const kept = join.slice(0, join.length - CHANNEL_CAPACITY_NOTICE.length);
+    expect(text.startsWith(kept)).toBe(true);
+    expect(kept.length).toBeLessThan(text.length);
+    expect(join).not.toContain(REPLACEMENT_CHARACTER);
+  });
+
+  it('drops an emoji at the cut point whole, never as a replacement character', () => {
+    // The leading byte shifts every 48 KiB cut into the middle of a 4-byte
+    // code point, so the boundary back-off must drop the emoji whole.
+    const text = 'x' + '🙂'.repeat(40_000);
+    const segment = planChannelSegments(text).join('');
+    expect(segment).toBe(text);
     expect(segment).not.toContain('�');
   });
 

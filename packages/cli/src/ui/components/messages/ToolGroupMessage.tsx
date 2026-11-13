@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import { isSubagentToolEntry } from '../../utils/tool-group-summary.js';
 import { Box, Text } from 'ink';
 import type { DOMElement } from 'ink';
 import { useMemo, useRef } from 'react';
@@ -53,20 +54,6 @@ function isRunningAgent(
 
 function hasInlineImageOutput(tool: IndividualToolCallDisplay): boolean {
   return Boolean(tool.images?.length || tool.omittedImageCount);
-}
-
-/**
- * Predicate: tool entry whose `resultDisplay` is an `AgentResultDisplay`
- * (i.e. a `task_execution` subagent invocation), regardless of status.
- */
-function isSubagentToolEntry(tool: IndividualToolCallDisplay): boolean {
-  const rd = tool.resultDisplay;
-  return (
-    typeof rd === 'object' &&
-    rd !== null &&
-    'type' in rd &&
-    (rd as AgentResultDisplay).type === 'task_execution'
-  );
 }
 
 /**

@@ -20,6 +20,10 @@ import {
   resolveModelManagement,
   type WebShellModelManagementOptions,
 } from '../../modelManagement';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from '../../unavailableModels';
 import { ChatPane } from '../ChatPane';
 import { Button } from '../ui/button';
 import { Spinner } from '../ui/spinner';
@@ -52,6 +56,8 @@ interface SideTaskPanelProps {
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
   modelManagement?: WebShellModelManagementOptions;
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /** Policy refused the stored initial prompt; the parent drops it from the tab. */
   onInitialPromptRefused?: (tabId: string) => void;
@@ -75,6 +81,8 @@ export function SideTaskPanel({
   onError,
   sessionWorkflowEnabled,
   modelManagement,
+  unavailableModels,
+  mountUnavailableModelTooltip,
   onImageIngestionNotice,
   onInitialPromptRefused,
 }: SideTaskPanelProps) {
@@ -115,6 +123,8 @@ export function SideTaskPanel({
         onError={onError}
         sessionWorkflowEnabled={sessionWorkflowEnabled}
         modelManagement={modelManagement}
+        unavailableModels={unavailableModels}
+        mountUnavailableModelTooltip={mountUnavailableModelTooltip}
         onImageIngestionNotice={onImageIngestionNotice}
         onInitialPromptRefused={onInitialPromptRefused}
       />
@@ -221,6 +231,8 @@ function SideTaskSession({
   onError,
   sessionWorkflowEnabled,
   modelManagement,
+  unavailableModels,
+  mountUnavailableModelTooltip,
   onImageIngestionNotice,
   onInitialPromptRefused,
 }: Omit<
@@ -249,18 +261,32 @@ function SideTaskSession({
         ? block.text.trim().length > 0
         : !block.images?.length),
   );
-  const restoredEmptySession =
+  // Media-only prompts (image, file, or resource link) arrive with empty text
+  // (see userBlockBoundaryKey in DaemonSessionProvider). They leave the
+  // session unnamed, but they are still user interaction: a retained
+  // auto-prompt must not fire on top.
+  const hasUserInteraction = blocks.some((block) => {
+    if (block.kind !== 'user') return false;
+    if (
+      block.images?.length ||
+      block.files?.length ||
+      block.resourceLinks?.length
+    )
+      return true;
+    return typeof block.text !== 'string' || block.text.trim().length > 0;
+  });
+  const transcriptSettled =
     connection.status === 'connected' &&
     !connection.loadingTranscript &&
     !connection.catchingUp &&
     !transcriptHistory.loading &&
     !transcriptHistory.hasMore &&
     !transcriptHistory.capacityReached &&
-    !transcriptHistory.paginationError &&
-    !hasTextualUserPrompt;
+    !transcriptHistory.paginationError;
+  const restoredEmptySession = transcriptSettled && !hasUserInteraction;
   const canNameFromFirstPrompt =
     !hasTextualUserPrompt &&
-    (shouldNameFromFirstPrompt || restoredEmptySession);
+    (shouldNameFromFirstPrompt || (transcriptSettled && !hasTextualUserPrompt));
   useEffect(() => {
     const displayName = connection.displayName?.trim();
     if (displayName) onTitleChange(tabId, displayName);
@@ -404,6 +430,8 @@ function SideTaskSession({
       onPaneArtifactsChange={onArtifactsChange}
       sessionWorkflowEnabled={sessionWorkflowEnabled}
       modelManagement={modelManagement}
+      unavailableModels={unavailableModels}
+      mountUnavailableModelTooltip={mountUnavailableModelTooltip}
     />
   );
 }

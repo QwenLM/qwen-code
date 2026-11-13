@@ -43,6 +43,10 @@ import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 // error code rather than an ad-hoc bare `{ message }` object.
 import { ToolErrorType } from '../tool-error.js';
 import type { Config } from '../../config/config.js';
+import {
+  getChannelWorkflowOrigin,
+  isBackgroundWorkflowBlocked,
+} from '../../utils/invocation-context.js';
 import type { WorkflowAgentDispatch } from '../../agents/runtime/workflow-orchestrator.js';
 import {
   DEFAULT_MAX_AGENTS_PER_RUN,
@@ -59,6 +63,7 @@ import {
   type WorkflowBudgetSource,
 } from '../../agents/runtime/workflow-budget.js';
 import {
+  hostSupportsBackgroundWorkflows,
   WorkflowRunner,
   WorkflowScriptNotLaunchedError,
   WorkflowStartCancelledError,
@@ -201,11 +206,12 @@ const WORKFLOW_PARAM_SCHEMA = {
       type: 'string',
       description:
         'Optional. Absolute path to a workflow `.js` file to load and run ' +
-        'instead of inline `script`. Primarily set by the `/<name>` ' +
-        'saved-workflow slash command; a tool that generated a script for ' +
-        'this run hands you its path the same way. The file must resolve ' +
+        'instead of inline `script`. Set by saved-workflow slash commands ' +
+        'or script generators. The file must resolve ' +
         'inside a saved-workflow directory (`.qwen/workflows`, ' +
-        '`~/.qwen/workflows`), be a workflow file an active extension ' +
+        '`~/.qwen/workflows`), be a direct legal `<name>.js` file in a trusted ' +
+        'ancestor `.qwen/workflows` up to the nearest Git root when the local ' +
+        'host enables ancestor discovery, be a workflow file an active extension ' +
         'ships, or sit under the generated-scripts root ' +
         '(`$QWEN_CODE_PROJECT_DIR/workflows/generated` — the per-project ' +
         'runtime dir, not the project tree) — any other path is refused. ' +
@@ -221,7 +227,8 @@ const WORKFLOW_PARAM_SCHEMA = {
       description:
         'Optional. Name of a saved workflow to run instead of inline ' +
         '`script`: `<name>` for one in `.qwen/workflows` or ' +
-        '`~/.qwen/workflows`, or `<extension>:<name>` for one an active ' +
+        '`~/.qwen/workflows` (local hosts may also enable trusted ancestor ' +
+        '`.qwen/workflows` up to the nearest Git root), or `<extension>:<name>` for one an active ' +
         'extension ships. Provide exactly ONE of `script`, `scriptPath` or ' +
         '`name`.',
     },
@@ -250,7 +257,7 @@ const WORKFLOW_PARAM_SCHEMA = {
       type: 'boolean',
       default: false,
       description:
-        'Optional. When true, start the workflow under the interactive session and return a run handle immediately. The Background Tasks view can observe, cooperatively pause/resume, or stop it, and completion is delivered to the conversation when the run settles. Interactive TUI only. Defaults to false.',
+        'Optional. When true, start the workflow under the session and return a run handle immediately. The Background Tasks view can observe, cooperatively pause/resume, or stop it, and completion is delivered to the conversation when the run settles. Interactive TUI and ACP clients (such as Web Shell) only; headless runs reject it. Defaults to false.',
     },
   },
   // Exactly one of `script`, `scriptPath` and `name`; that can't be expressed
@@ -540,6 +547,16 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     const runInBackground = this.params.run_in_background === true;
     if (runInBackground && signal.aborted) {
       return startCancelledResult();
+    }
+    if (runInBackground && !this.sessionOwned) {
+      const error = getBackgroundWorkflowError(this.config);
+      if (error) {
+        return {
+          llmContent: error,
+          returnDisplay: error,
+          error: { message: error, type: ToolErrorType.EXECUTION_DENIED },
+        };
+      }
     }
     const load = this.loadReferencedScript();
     let handle: WorkflowRunHandle;
@@ -961,10 +978,34 @@ function buildBackgroundStartText(
   return lines.join('\n');
 }
 
+function getBackgroundWorkflowError(config: Config): string | null {
+  if (!hostSupportsBackgroundWorkflows(config)) {
+    if (config.isSessionAgentSession?.() === true) {
+      return 'WorkflowTool: Qwen Session Agents must run workflows in the foreground to return the result to the calling session. Omit `run_in_background`.';
+    }
+    if (getChannelWorkflowOrigin()?.backgroundWorkflowBlocked === true) {
+      return 'WorkflowTool: this channel target cannot receive background results. Omit `run_in_background` to run the workflow in the foreground.';
+    }
+    if (isBackgroundWorkflowBlocked()) {
+      return 'WorkflowTool: this turn has no channel chat to report a background result to. Omit `run_in_background` to run the workflow in the foreground.';
+    }
+    return config.getExperimentalZedIntegration?.() === true
+      ? 'WorkflowTool: `run_in_background` is not available in this session: its workflow controls are off (workflows disabled, bare mode, or an untrusted workspace), so a background run could not be watched or stopped.'
+      : 'WorkflowTool: `run_in_background` is available only in the interactive TUI and ACP clients such as Web Shell.';
+  }
+  if (!config.getWorkflowRunRegistry().hasCompletionCallback()) {
+    return 'WorkflowTool: `run_in_background` requires an active workflow completion channel.';
+  }
+  return null;
+}
+
 function startCancelledResult(): WorkflowToolResult {
   return {
     llmContent: 'Workflow was cancelled before it could start.',
     returnDisplay: 'Workflow cancelled.',
+    // Same returned-interruption shape as the monitor: nothing ran, so the
+    // scheduler must not tell the model the call completed.
+    interruptedBeforeCompletion: true,
   };
 }
 
@@ -1496,7 +1537,7 @@ Reach for one to be comprehensive (cover every part of the work in parallel), to
  */
 const WORKFLOW_TOOL_RUNTIME = `**Runtime**
 
-\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope), plus active extensions' \`<extension>:<name>\`; \`scriptPath\` additionally accepts an active extension's workflow file or a path inside the generated-scripts root (\`$QWEN_CODE_PROJECT_DIR/workflows/generated\` — the per-project runtime dir, not the project tree); any other path is refused. Default \`max(2, min(16, availableParallelism()-2))\` agents in flight per run, which follows CPU affinity and container CPU limits (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. Each subagent attempt is separately capped at ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS} turns (\`${WORKFLOW_SUBAGENT_MAX_TURNS_ENV}\`) and ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES} minutes (\`${WORKFLOW_SUBAGENT_MAX_MINUTES_ENV}\`). \`agent()\` resolves to \`null\` when that admitted agent fails on its own — turn/time caps, model or setup errors, missing structured output, exhausted stall retries — for a bare \`await agent()\` exactly as inside \`parallel()\`/\`pipeline()\`, so check for \`null\` wherever you read a result; run-level rejections no later call could survive (the token budget, the ${DEFAULT_MAX_AGENTS_PER_RUN}-agent cap, cancellation) throw instead. \`budget.total\` is the turn's output-token target when the user's message sets one with a \`+500k\`-style directive, and \`budget.spent()\` then counts every output token this turn, the main loop included. Every run hands back its runId, the script's path on disk (an inline script is persisted, so a resume edits that file rather than re-sending the source) and its journal path; read it before diagnosing an empty or surprising result. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.`;
+\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope). Local hosts may enable trusted ancestor \`.qwen/workflows\` up to the nearest Git root (project scope); lookup prefers target, nearest ancestors, then user. Project saves stay in the current target. Extensions use \`<extension>:<name>\`; \`scriptPath\` additionally accepts an active extension's workflow file or a path inside the generated-scripts root (\`$QWEN_CODE_PROJECT_DIR/workflows/generated\` — the per-project runtime dir, not the project tree); any other path is refused. Default \`max(2, min(16, availableParallelism()-2))\` agents in flight per run, which follows CPU affinity and container CPU limits (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. Each subagent attempt is separately capped at ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS} turns (\`${WORKFLOW_SUBAGENT_MAX_TURNS_ENV}\`) and ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES} minutes (\`${WORKFLOW_SUBAGENT_MAX_MINUTES_ENV}\`). \`agent()\` resolves to \`null\` when that admitted agent fails on its own — turn/time caps, model or setup errors, missing structured output, exhausted stall retries — for a bare \`await agent()\` exactly as inside \`parallel()\`/\`pipeline()\`, so check for \`null\` wherever you read a result; run-level rejections no later call could survive (the token budget, the ${DEFAULT_MAX_AGENTS_PER_RUN}-agent cap, cancellation) throw instead. \`budget.total\` is the turn's output-token target when the user's message sets one with a \`+500k\`-style directive, and \`budget.spent()\` then counts every output token this turn, the main loop included. Every run hands back its runId, the script's path on disk (an inline script is persisted, so a resume edits that file rather than re-sending the source) and its journal path; read it before diagnosing an empty or surprising result. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and ACP clients and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.`;
 
 /**
  * Replaces the authoring reference when the model can load it on its own.
@@ -1659,7 +1700,8 @@ function buildWorkflowParamSchema(
           type: 'string',
           description:
             'Name of the workflow to run: `<name>` for one in ' +
-            '`.qwen/workflows` or `~/.qwen/workflows`, or ' +
+            '`.qwen/workflows` or `~/.qwen/workflows` (local hosts may also ' +
+            'enable trusted ancestor `.qwen/workflows` up to the nearest Git root), or ' +
             '`<extension>:<name>` for one an active extension ships. This ' +
             'session runs named workflows only, so every call passes `name`.',
         },
@@ -1803,6 +1845,7 @@ export class WorkflowTool extends BaseDeclarativeTool<
       buildWorkflowParamSchema(surface, nameOnly),
       /* isOutputMarkdown */ true,
       /* canUpdateOutput */ true,
+      /* shouldDefer */ true,
     );
     this.authoringSurface = surface;
   }
@@ -1887,18 +1930,9 @@ export class WorkflowTool extends BaseDeclarativeTool<
     ) {
       return 'WorkflowTool: `resumeFromRunId` must match the generated id format `wf_<hex>`.';
     }
-    if (params.run_in_background === true) {
-      if (
-        !this.config.isInteractive() ||
-        this.config.getExperimentalZedIntegration?.() === true
-      ) {
-        return 'WorkflowTool: `run_in_background` is available only in the interactive TUI.';
-      }
-      if (!this.config.getWorkflowRunRegistry().hasCompletionCallback()) {
-        return 'WorkflowTool: `run_in_background` requires an active workflow completion channel.';
-      }
-    }
-    return null;
+    return params.run_in_background === true
+      ? getBackgroundWorkflowError(this.config)
+      : null;
   }
 
   protected createInvocation(

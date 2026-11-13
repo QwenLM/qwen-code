@@ -34,6 +34,8 @@ import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { ResponsesApiRequest } from './types.js';
 import { preloadRuntimeFetchModule } from '../../utils/runtimeFetchOptions.js';
 import { classifyRetryError } from '../../utils/retryErrorClassification.js';
+import { retryContext } from '../../utils/retryContext.js';
+import { appendAutoMemoryContext } from '../../memory/request-context.js';
 import {
   collect,
   content,
@@ -443,6 +445,77 @@ describe('ResponsesPipeline', () => {
     expect(keys[1]).toBe(keys[0]);
   });
 
+  it('caches the stable user text before the request-only memory catalog', async () => {
+    const contents = [userText('Keep all permission checks.')];
+    const body = await sendBody(pipe({ model: 'gpt-6.1-sol' }), {
+      model: 'gpt-6.1-sol',
+      contents: appendAutoMemoryContext(contents, 'Current memory catalog'),
+    });
+
+    expect(body.input).toEqual([
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: 'Keep all permission checks.',
+            prompt_cache_breakpoint: { mode: 'explicit' },
+          },
+          { type: 'input_text', text: 'Current memory catalog' },
+        ],
+      },
+    ]);
+    expect(body.prompt_cache_options).toEqual({ mode: 'implicit' });
+    expect(contents).toEqual([userText('Keep all permission checks.')]);
+  });
+
+  it.each([
+    [{ baseUrl: 'https://proxy.example/v1' }, undefined],
+    [
+      { baseUrl: 'https://proxy.example/v1', enableCacheControl: true },
+      { mode: 'implicit' },
+    ],
+    [
+      {
+        baseUrl: 'https://proxy.example/v1',
+        extra_body: { prompt_cache_options: { mode: 'implicit', ttl: '12h' } },
+      },
+      { mode: 'implicit', ttl: '12h' },
+    ],
+    [
+      { extra_body: { prompt_cache_options: { mode: 'explicit' } } },
+      { mode: 'explicit' },
+    ],
+    [{ enableCacheControl: false }, undefined],
+  ] satisfies Array<
+    [
+      Partial<ContentGeneratorConfig>,
+      ResponsesApiRequest['prompt_cache_options'],
+    ]
+  >)(
+    'honors caller cache policy after extra_body merges: %j',
+    async (overrides, expected) => {
+      const body = await sendBody(
+        pipe({ model: 'gpt-6.1-sol', ...overrides }),
+        {
+          model: 'gpt-6.1-sol',
+          contents: appendAutoMemoryContext(
+            [userText('stable question')],
+            'catalog',
+          ),
+        },
+      );
+      expect(body.prompt_cache_options).toEqual(expected);
+      const serialized = JSON.stringify(body);
+      expect(serialized.includes('prompt_cache_breakpoint')).toBe(
+        expected?.mode === 'implicit',
+      );
+      expect(serialized).not.toContain('cacheBoundary');
+      expect(serialized).toContain('catalog');
+    },
+  );
+
   it('falls back to userPromptId as prompt_cache_key when the session id is empty', async () => {
     const body = await sendBody(pipe(), undefined, 'short-id');
     expect(body.prompt_cache_key).toBe('short-id');
@@ -618,6 +691,49 @@ describe('ResponsesPipeline', () => {
       { ...textRequest('hi'), config: { maxOutputTokens: 8000 } },
     ],
   ])('%s', expectBody);
+
+  it('keeps isolated Mod requests free of configured tools and server-side history', async () => {
+    const body = await retryContext.run(
+      {
+        attempt: 1,
+        retryTotalDelayMs: 0,
+        requestSetupMs: 0,
+        singleAttempt: true,
+      },
+      () =>
+        sendBody(
+          pipe({
+            extra_body: {
+              instructions: 'configured prompt',
+              prompt: { id: 'pmpt_fixture', variables: { note: 'configured' } },
+              previous_response_id: 'old-response',
+              conversation: 'old-conversation',
+              tools: [{ type: 'web_search' }],
+              tool_choice: 'required',
+              max_tokens: 111,
+              max_output_tokens: 222,
+              service_tier: 'priority',
+            },
+          }),
+          { ...textRequest('hi'), config: { maxOutputTokens: 32 } },
+        ),
+    );
+    expect(body).toMatchObject({
+      max_output_tokens: 32,
+      service_tier: 'priority',
+    });
+    for (const key of [
+      'instructions',
+      'prompt',
+      'previous_response_id',
+      'conversation',
+      'tools',
+      'tool_choice',
+      'max_tokens',
+    ]) {
+      expect(body).not.toHaveProperty(key);
+    }
+  });
 
   describe('tool_choice from toolConfig.functionCallingConfig.mode', () => {
     function requestWithTool(
@@ -1139,6 +1255,36 @@ describe('ResponsesPipeline', () => {
       expect(sentHeaders().get('user-agent')).toBe(
         `QwenCode/9.9.9-test (${process.platform}; ${process.arch})`,
       );
+    });
+
+    it.each([
+      [undefined, 'qwen-code-cli'],
+      ['CLI', 'qwen-code-cli'],
+      ['desktop', 'qwen-code-desktop'],
+    ])('attributes channel %s on the Token Plan wire', async (channel, t1) => {
+      await executeDone(
+        pipe(
+          {
+            baseUrl: 'https://token-plan.maas.qianwenaiapi.com/compatible-mode',
+            customHeaders: { 'X-DashScope-Source-Config': 'user' },
+          },
+          { ...makeCliConfig(), getChannel: () => channel } as Config,
+        ),
+      );
+
+      expect(sentHeaders().get('x-dashscope-source-config')).toBe(
+        JSON.stringify({
+          channel: 'qianwenai-inner-agents',
+          source: 'model',
+          tags: { t1 },
+        }),
+      );
+    });
+
+    it('sends no source attribution to other endpoints', async () => {
+      await executeDone();
+
+      expect(sentHeaders().get('x-dashscope-source-config')).toBeNull();
     });
 
     it('expands ${session_id} per request when the consent gate is on', async () => {

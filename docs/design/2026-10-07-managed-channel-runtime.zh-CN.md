@@ -36,7 +36,7 @@ H5a 钉住了*可以提交什么*：以 `routeId` 为链身份、各修订携带
 5. **一次 Harness 操作完成入站准入；它在任何副作用前完成，且可安全重放。** `POST /session/:id/channels/operations` 的 `kind: submit_input` 先发布附件资源与 input 信封，再在一个 authority 事务里提交路由修订 + input + wake（或仅 input）。控制面只在操作应答后把 V47 行标记为 `admitted` 并记录返回的 `inputId`；在此之前任何位置崩溃都让该行停留在 `staged`，适配器重试会重新驱动同一操作，而它回答原始准入。暂存字节保留在它们本就持久的地方：适配器记录准入前的不可变平台副本（IMAP），以及一经发布的 Session 资源库；V47 行以附件内容摘要（`sha256:<hex>`）作为其暂存引用。
 6. **附件以 Session 资源暂存，受内联上限约束。** 每个 ≤ 64 KiB（hosted store 的内联资源上限）的附件在准入前发布为 `managed-channel-attachment` 资源，并以名称、MIME 类型、大小与摘要在信封中引用；超限者在信封中列为 `omitted` 并附摘要与大小——对模型和记录可见，绝不静默丢弃（参考设计第 6 节："unsupported 可见"）。更大字节提升到 O2/O3 Artifact 作为后续工作记录在"待决问题"。
 7. **channel 轮走 H3 的 wake 路径。** input 的 `source` 为 `channel`；内嵌 wake 调度器在 `monitor` 与 `child_agent` 之外也放行它，于是它在 Session 空闲时作为普通文本轮运行，有轮次运行时在 journal 中排队，Session 被阻塞时准确地保持待处理。轮次文本是渲染为 `<channel-message>` 块的信封：发送者、平台身份、不可信的主题元数据、附件列表与消息正文。channel input 像 monitor input 一样排除在停泊轮次计算之外，关闭路径以无模型方式结算待处理的 channel input 且不产生回复。
-8. **回复在结束时幂等地规划，并在打开时对账。** channel wake 轮以 `completed` 结束且助手文本非空后，漏斗发布回复资源（`managed-channel-reply`：文本与 input 携带的适配器不透明回复上下文）和每段一个 `managed-channel-segment` 资源，然后提交 `channel_delivery` 修订 1（`planned`），`deliveryId = <inputId>:reply`，`sourceTurnId = turnId`，并带上信封中的路由钉。email 的计划是一个分段：回复文本截断到 48 KiB 并附截断提示。以 `error` 或 `cancelled` 结束、或在关闭时无模型结算的轮次不规划任何内容。`reconcileReplies()` 在 Session 打开时运行，为任何尚无交付的已结束 channel 轮规划交付，于是结束与规划之间的崩溃既不丢失也不重复。
+8. **回复在结束时幂等地规划，并在打开时对账。** channel wake 轮以 `completed` 结束且助手文本非空后，漏斗发布回复资源（`managed-channel-reply`：文本与 input 携带的适配器不透明回复上下文）和每段一个 `managed-channel-segment` 资源，然后提交 `channel_delivery` 修订 1（`planned`），`deliveryId = <inputId>:reply`，`sourceTurnId = turnId`，并带上信封中的路由钉。email 的计划把回复拆成有序分段（每段 ≤ 48 KiB，至多 64 段），在名义字节容量内完整保留答案，溢出以截断提示标记（多分段生产者设计，2026-11-12）。以 `error` 或 `cancelled` 结束、或在关闭时无模型结算的轮次不规划任何内容。`reconcileReplies()` 在 Session 打开时运行，为任何尚无交付的已结束 channel 轮规划交付，于是结束与规划之间的崩溃既不丢失也不重复。
 9. **outbox 由适配器经控制面拉取，每一步都是记录修订。** 适配器调用 `deliveries:claim`；控制面找出该 channel 各 Session 的 `planned` 交付（通过绑定索引与扩展记录投影），插入 V47 台账行（`planned`），请求 Harness 提交 `sending`（`kind: claim_delivery`）并把台账推进到 `sending`，然后返回各分段内容与回复上下文。逐段 `receipt` 提交该分段的回执（仍有分段未完成时为 `partial`，最后一段为 `delivered`），台账带 provider 回执随之推进。`unknown`（适配器无法证明 provider 未持有该消息）提交 `waiting`/`unknown`；`rejected`（provider 明确拒绝）提交 `failed`/`rejected`；两者对自动工作都是终态。Harness 的应答是权威：台账只在记录提交后推进，发现记录已在该状态的台账步骤即幂等重放。
 10. **unknown 由租约对账，绝不由重发对账。** 超出认领租约（默认 10 分钟）的 claim 由控制面的定时对账器结算为 `unknown`（Harness `settle_delivery`，`outcome: unknown`）：适配器可能在发送后死亡。结算之前，每个过期 claim 的台账先与其已提交记录实际到达的状态收敛——应答丢失的回执落成带 provider id 的 `delivered`，应答丢失的 `claim_delivery` 把台账推进到 `sending`——于是任何恢复入口都不会对一次已提交的步骤保持盲目。该路径上不重发任何内容（参考设计第 14 节第 5 项）。Session 不再 `ACTIVE` 的 `planned` 交付已没有 writer 可以修订它：claim 跳过非活动 Session，记录保持可见的 `planned`。租约过期而其台账从未离开 `planned`——`claim_delivery` 提交从未落库的 claim，同样结算为 `unknown`：留下它会让这一行永远据守对账页首、饿死后来的 claim。
 11. **重发是新链、显式且带警告。** `deliveries/{deliveryId}:resend` 只对 `unknown`、`rejected` 或 `partial` 后 `unknown` 的交付准入；Harness 开启 `<deliveryId>:r<n>`（`planned`），使用相同的路由钉、`sourceTurnId` 与 `contentRef`，只携带没有回执的分段（序号从 0 重新致密编号，分段身份保留）。原记录不动。应答携带 `possibleDuplicate: true`。v1 只在可信适配器面暴露它；公开 mutation 需要自己的契约工作。
@@ -68,7 +68,7 @@ H5a 钉住了*可以提交什么*：以 `routeId` 为链身份、各修订携带
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | 入站文本            | ≤ 32,000 字符（线路 `maxTextChars` 与 Jakarta `@Size`；email 适配器的 `maxTextLength` 先按其设置截断），信封 ≤ 64 KiB               | 文本超出线路上限：400 `invalid_request`（bean validation）；信封超限：400 `invalid_channel_operation`（operations 路由） |
 | 附件                | 每事件 ≤ 16 个；适配器上传上限 1,500,000 解码字节（线路的 2,000,000 字符 base64 上限）；每个内联暂存 ≤ 64 KiB，更大者列为 `omitted` | 超出上传上限：由适配器过滤（线路上不可准入）；其余：无（可见的省略）                                                     |
-| 回复分段            | ≤ 48 KiB，email 为一个分段                                                                                                          | 截断并附提示                                                                                                             |
+| 回复分段            | ≤ 48 KiB 每段；email 至多 64 个有序分段                                                                                             | 超出交付容量截断并附提示                                                                                                 |
 | 每交付分段数        | 1–64（契约）                                                                                                                        | 规划拒绝                                                                                                                 |
 | 认领租约            | 10 分钟（`qwen.managed-agent.channels.claim-lease`）                                                                                | 对账器结算为 `unknown`                                                                                                   |
 | 认领批量            | 每次调用 ≤ 16 个交付                                                                                                                | —                                                                                                                        |
@@ -77,7 +77,7 @@ H5a 钉住了*可以提交什么*：以 `routeId` 为链身份、各修订携带
 ## 非目标
 
 - managed 路径上的**主动发送、控制命令、配对、memory 与 loop**；v1 中回复是唯一的交付来源（自动化设计 3.2，`source: reply`）。
-- **多分段计划与卡片界面**：契约支持它们；email 计划为一个分段，V47 台账按 `deliveryId` 只记一个分段。
+- **卡片界面**：契约支持多分段计划，email 生产者如今把长回复拆成有序分段（多分段生产者设计，2026-11-12）；分段台账按每段一行记录。卡片式界面仍是后续工作。
 - **超出内联上限的附件字节**、从工具读取已暂存附件、O3 公开 Artifact 提升。
 - **公开重发 mutation、WebShell 镜像路由，以及除把三个已冻结路由及其 schema 翻为 `partial` 之外的任何 OpenAPI 变更。**
 - **任何 Legacy 变更**：`EmailChannel`、`ChannelBase`、daemon channel 工作者与路由保持原行为。
@@ -88,7 +88,7 @@ H5a 钉住了*可以提交什么*：以 `routeId` 为链身份、各修订携带
 - `packages/cli/src/serve/`：`hosted-channel-session.ts`（新漏斗）、`hosted-harness-session.ts`（漏斗接线、操作路由、`channel` input 的 wake 放行、结束与打开时的回复规划、关闭时结算），`hosted-wake-intake.ts` 不变。
 - `packages/cli/src/commands/channel/`：`managed-email.ts`（新子命令）、`managed-channel-client.ts`（可信面的 HTTP 客户端）、在 `channel.ts` 注册。
 - `packages/channels/email/src/`：`managed-email-adapter.ts` 与 `managed-state.ts`（新增），从 `index.ts` 导出；基于既有 fake 的测试。
-- `packages/sdk-java/managed-agent-server`：`V55__managed_channel_instance_binding.sql`、`ChannelInstanceStore`、`ManagedChannelService`、`ManagedChannelAdapterController`（内部）、`ManagedChannelController`（公开）、`HarnessConnector.runChannelOperation` 及其客户端/连接器实现、`ManagedExtensionRecordStore` 中的跨记录检查、租户过滤器前缀、OpenAPI 翻为 `partial`、`ApiModels` 记录与测试（store、service、controller、contract）。
+- `packages/managed-agent-server`：`V55__managed_channel_instance_binding.sql`、`ChannelInstanceStore`、`ManagedChannelService`、`ManagedChannelAdapterController`（内部）、`ManagedChannelController`（公开）、`HarnessConnector.runChannelOperation` 及其客户端/连接器实现、`ManagedExtensionRecordStore` 中的跨记录检查、租户过滤器前缀、OpenAPI 翻为 `partial`、`ApiModels` 记录与测试（store、service、controller、contract）。
 - `packages/sdk-java/qwencode`：`HostedHarnessClient.runChannelOperation`。
 - 本设计双语版本；H5 设计中切片表的状态（双语）。
 

@@ -15,6 +15,11 @@ import { isNodeError } from '../utils/errors.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
+  isZombie,
+  readPidNamespaceId,
+  readProcStartToken,
+} from '../utils/process-liveness.js';
+import {
   readWorktreeSessionMarker,
   writeWorktreeSessionMarker,
 } from './gitWorktreeService.js';
@@ -655,16 +660,55 @@ async function getRuntimeStatusPathState(
     return 'unknown';
   }
 
+  // A PID number and its proc_start token only identify a process within the
+  // namespace that assigned them. A record written in a different PID
+  // namespace (host + devcontainer with a mounted home, sibling CI containers)
+  // names a PID that resolves to nothing — or to a different process — here,
+  // so comparing proc_start would judge a live foreign session 'dead' and let
+  // its worktree be taken over or deleted. 'unknown' is the safe direction:
+  // isSessionRuntimeActive treats it as active. Records without pid_ns (older
+  // writers, non-Linux) fall through to the proc_start comparison below.
+  if (status.pidNs !== null && status.pidNs !== readPidNamespaceId()) {
+    return 'unknown';
+  }
+
+  const procStartMatches = (): boolean => {
+    if (status.procStart === null) return true;
+    const current = readProcStartToken(status.pid);
+    // An unreadable token degrades to plain liveness rather than declaring a
+    // live session dead; within the same PID namespace (guaranteed by the
+    // pid_ns guard above), only a readable mismatch proves the PID was reused.
+    return current === null || current === status.procStart;
+  };
+
   try {
     process.kill(status.pid, 0);
-    return 'active';
+    if (!procStartMatches()) {
+      // The PID was recycled by an unrelated process after this record was
+      // written. Liveness alone cannot distinguish that from the original
+      // session (#14288).
+      return 'dead';
+    }
+    // A zombie answers `kill(pid, 0)` — the pid still occupies a process-table
+    // slot — but the process has exited and will never act again. Reporting
+    // it as 'active' keeps a dead session listed as live for as long as its
+    // parent stays around unreaped, which is how a 48-day-old `[node]
+    // <defunct>` was read back as an active session (#14288).
+    return isZombie(status.pid) ? 'dead' : 'active';
   } catch (error) {
     if (isNodeError(error) && error.code === 'ESRCH') {
       return 'dead';
     }
     if (isNodeError(error) && error.code === 'EPERM') {
-      return 'active';
+      // Owned by another user. The kernel permission-checks signal 0
+      // regardless of the target's state, so a cross-user zombie lands here
+      // too and needs the same exclusion.
+      return !procStartMatches() || isZombie(status.pid) ? 'dead' : 'active';
     }
+    // Any other errno establishes nothing about the pid, and folding it into
+    // 'dead' would be the destructive direction: it feeds
+    // `sawDeadRuntimeStatus` and can flip the aggregate to 'inactive' for a
+    // session that is in fact alive.
     return 'unknown';
   }
 }

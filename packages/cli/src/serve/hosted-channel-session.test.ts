@@ -4,17 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import {
+  CHANNEL_CAPACITY_NOTICE,
   CHANNEL_TRUNCATION_NOTICE,
+  MANAGED_CHANNEL_LIMITS,
   channelInputId,
   channelRouteId,
   encodeChannelReply,
@@ -100,7 +103,10 @@ async function withSession<T>(
             createdBy: 'daemon',
           };
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',
@@ -591,7 +597,38 @@ describe('HostedChannelSession outbound', () => {
     });
   });
 
-  it('plans a reply the publish bound can take, truncated on plan', async () => {
+  it('plans a long reply as ordered segments the ledger can carry', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (channels, authority) => {
+      const inputId = (await channels.submitInput(inbound())).inputId;
+      const text = 'x'.repeat(100_000);
+      settleTurn(harness, inputId, text);
+      await settleInJournal(harness, authority, inputId);
+      const planned = (await channels.planReply(inputId))!;
+      const claimed = await channels.claim(planned.deliveryId);
+      // The segments carry the full answer in order; the representative
+      // reply stays envelope-fitted, so publishing it stays inside the
+      // inline bound even though the turn is 100 KB.
+      expect(claimed.segments).toHaveLength(3);
+      expect(claimed.segments.map((segment) => segment.segmentId)).toEqual([
+        `${planned.deliveryId}:0`,
+        `${planned.deliveryId}:1`,
+        `${planned.deliveryId}:2`,
+      ]);
+      expect(claimed.segments.map((segment) => segment.ordinal)).toEqual([
+        0, 1, 2,
+      ]);
+      expect(claimed.segments.map((segment) => segment.text).join('')).toBe(
+        text,
+      );
+      expect(encodeChannelReply(claimed.reply).byteLength).toBeLessThanOrEqual(
+        64 * 1024,
+      );
+      expect(claimed.reply.text).toContain('Reply truncated');
+    });
+  });
+
+  it('receipts a multi-segment delivery partial until the last segment', async () => {
     const harness = await createHarness();
     await withSession(harness, async (channels, authority) => {
       const inputId = (await channels.submitInput(inbound())).inputId;
@@ -599,12 +636,20 @@ describe('HostedChannelSession outbound', () => {
       await settleInJournal(harness, authority, inputId);
       const planned = (await channels.planReply(inputId))!;
       const claimed = await channels.claim(planned.deliveryId);
-      // The reply resource carries the planned segment, not the raw 100 KB
-      // turn, so publishing it stays inside the inline bound.
-      expect(claimed.reply.text).toContain('Reply truncated');
-      expect(claimed.reply.text.length).toBeLessThanOrEqual(48 * 1024);
-      expect(claimed.segments).toHaveLength(1);
-      expect(claimed.segments[0]!.text).toBe(claimed.reply.text);
+      expect(claimed.segments).toHaveLength(3);
+      const first = await channels.receipt(planned.deliveryId, 0, RECEIPT);
+      expect(first.run.delivery?.state).toBe('partial');
+      // A claim of the partial delivery answers only the proven-unsent
+      // segments — the receipted one is never offered again.
+      const resumed = await channels.claim(planned.deliveryId);
+      expect(resumed.segments.map((segment) => segment.ordinal)).toEqual([
+        1, 2,
+      ]);
+      const second = await channels.receipt(planned.deliveryId, 1, RECEIPT);
+      expect(second.run.delivery?.state).toBe('partial');
+      const delivered = await channels.receipt(planned.deliveryId, 2, RECEIPT);
+      expect(delivered.run.delivery?.state).toBe('delivered');
+      expect(channels.pendingDeliveries()).toEqual([]);
     });
   });
 
@@ -612,27 +657,120 @@ describe('HostedChannelSession outbound', () => {
     const harness = await createHarness();
     await withSession(harness, async (channels, authority) => {
       const inputId = (await channels.submitInput(inbound())).inputId;
-      // Newlines and quotes double in the reply's JSON: a 48 KiB raw plan
-      // serializes to about 96 KiB — past the inline envelope bound.
-      settleTurn(harness, inputId, '\n"'.repeat(50_000) + '🙂'.repeat(40_000));
+      // Newlines and quotes double in the reply's JSON: the raw plan
+      // serializes far past the inline envelope bound, so the
+      // representative reply must shrink while the segments keep the
+      // full answer.
+      const text = '\n"'.repeat(50_000) + '🙂'.repeat(40_000);
+      settleTurn(harness, inputId, text);
       await settleInJournal(harness, authority, inputId);
       const planned = (await channels.planReply(inputId))!;
       const claimed = await channels.claim(planned.deliveryId);
       expect(encodeChannelReply(claimed.reply).byteLength).toBeLessThanOrEqual(
         64 * 1024,
       );
-      expect(claimed.segments).toHaveLength(1);
-      expect(claimed.segments[0]!.text).toBe(claimed.reply.text);
+      expect(claimed.segments.length).toBeGreaterThan(1);
+      // The turn projection trims the answer before planning, so the
+      // segments concatenate back to the trimmed text, losslessly.
+      expect(claimed.segments.map((segment) => segment.text).join('')).toBe(
+        text.trim(),
+      );
       expect(claimed.reply.text.length).toBeLessThan(48 * 1024);
       // A further shrink still carries the truncation notice, and an emoji
       // at the cut point is dropped whole — never split into U+D83D that
       // the SMTP text would render as U+FFFD.
       expect(claimed.reply.text.endsWith(CHANNEL_TRUNCATION_NOTICE)).toBe(true);
-      expect(
-        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
-          claimed.reply.text,
+      for (const piece of [
+        claimed.reply.text,
+        ...claimed.segments.map((segment) => segment.text),
+      ]) {
+        expect(
+          /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+            piece,
+          ),
+        ).toBe(false);
+      }
+    });
+  });
+
+  it('plans at most 64 segments and marks an overflowing reply', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (channels, authority) => {
+      const inputId = (await channels.submitInput(inbound())).inputId;
+      const text = 'x'.repeat(64 * 48 * 1024 + 1_000);
+      settleTurn(harness, inputId, text);
+      await settleInJournal(harness, authority, inputId);
+      const planned = (await channels.planReply(inputId))!;
+      expect(planned.segments).toHaveLength(64);
+      // The claim is bounded by the transport budget, so it carries only the
+      // leading segments; read the plan's resources for the full picture.
+      const claimed = await channels.claim(planned.deliveryId);
+      expect(claimed.segments.length).toBeGreaterThan(0);
+      expect(claimed.segments.length).toBeLessThan(64);
+      // The representative reply keeps the capacity wording too — the shrink
+      // must not swap it for the per-segment size notice.
+      expect(claimed.reply.text.endsWith(CHANNEL_CAPACITY_NOTICE)).toBe(true);
+      const texts = await Promise.all(
+        planned.segments.map(async (segment) =>
+          (await harness.store.read(segment.contentRef)).toString('utf8'),
         ),
-      ).toBe(false);
+      );
+      expect(texts[63]!.endsWith(CHANNEL_CAPACITY_NOTICE)).toBe(true);
+      // The overflow is visible, never silent: the join is a strict prefix
+      // of the answer plus the notice.
+      const join = texts.join('');
+      const kept = join.slice(0, join.length - CHANNEL_CAPACITY_NOTICE.length);
+      expect(text.startsWith(kept)).toBe(true);
+      expect(kept.length).toBeLessThan(text.length);
+    });
+  });
+
+  it('bounds a claim to the transport budget and resumes the rest by re-claim', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (channels, authority) => {
+      const inputId = (await channels.submitInput(inbound())).inputId;
+      // Escape-heavy so raw bytes and serialized bytes diverge ~2x: a raw-byte
+      // cost model would over-pack a claim past the transport bound, while the
+      // escaped-cost model keeps each answer under it.
+      const text = '\n"'.repeat(250_000);
+      settleTurn(harness, inputId, text);
+      await settleInJournal(harness, authority, inputId);
+      const planned = (await channels.planReply(inputId))!;
+      expect(planned.segments.length).toBeGreaterThan(1);
+      const collected: string[] = [];
+      let delivery = planned;
+      let claims = 0;
+      while (claims++ < 64) {
+        const claimed = await channels.claim(delivery.deliveryId);
+        expect(claimed.segments.length).toBeGreaterThan(0);
+        const claimBytes = claimed.segments.reduce(
+          (sum, segment) =>
+            sum + Buffer.byteLength(JSON.stringify(segment.text), 'utf8'),
+          0,
+        );
+        expect(claimBytes).toBeLessThanOrEqual(
+          MANAGED_CHANNEL_LIMITS.maxClaimTextBytes,
+        );
+        // The answer the control plane actually reads must stay under its
+        // 1 MiB JSON cap (HttpSupport.MAXIMUM_JSON_BYTES) — measured on the
+        // whole serialized claim, independent of the implementation's cost
+        // formula.
+        expect(
+          Buffer.byteLength(JSON.stringify(claimed), 'utf8'),
+        ).toBeLessThanOrEqual(1024 * 1024);
+        for (const segment of claimed.segments) {
+          collected[segment.ordinal] = segment.text;
+          delivery = await channels.receipt(
+            delivery.deliveryId,
+            segment.ordinal,
+            RECEIPT,
+          );
+        }
+        if (delivery.run.delivery?.state === 'delivered') break;
+      }
+      expect(delivery.run.delivery?.state).toBe('delivered');
+      expect(claims).toBeGreaterThan(1);
+      expect(collected.join('')).toBe(text.trim());
     });
   });
 
@@ -841,7 +979,7 @@ describe('HostedChannelSession outbound', () => {
     });
   });
 
-  it('records unknown after a send, never resends by itself, and resends only on request', async () => {
+  it('records a claim-fenced unknown after a send, never resends by itself, and resends only on request', async () => {
     const harness = await createHarness();
     await withSession(harness, async (channels, authority) => {
       const inputId = (await channels.submitInput(inbound())).inputId;
@@ -849,7 +987,17 @@ describe('HostedChannelSession outbound', () => {
       await settleInJournal(harness, authority, inputId);
       const planned = (await channels.planReply(inputId))!;
       await channels.claim(planned.deliveryId);
-      const unknown = await channels.settle(planned.deliveryId, 'unknown');
+      const operationId = `channel-reconcile:${'a'.repeat(64)}`;
+      const commit = vi.spyOn(authority, 'commitExtensionRecord');
+      const unknown = await channels.settle(
+        planned.deliveryId,
+        'unknown',
+        operationId,
+      );
+      expect(commit.mock.calls.at(-1)?.[0]).toMatchObject({
+        commandId: operationId,
+        operation: 'acceptChannelReceipt',
+      });
       expect(unknown.run).toMatchObject({
         state: 'waiting',
         reason: null,

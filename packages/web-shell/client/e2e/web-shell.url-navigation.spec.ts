@@ -205,7 +205,7 @@ test('Home then new task leaves a directly opened page without creating a sessio
   await page.locator('[data-web-shell-home-trigger]').click();
   await page
     .locator('[data-sidebar-shell]')
-    .getByRole('button', { name: 'New task', exact: true })
+    .getByRole('button', { name: 'New session', exact: true })
     .click();
   await expect(page).toHaveURL(/\/\?instanceId=kept$/);
   await expect(page.getByTestId('inline-panel')).toHaveCount(0);
@@ -302,6 +302,10 @@ test('host defaults keep existing page URLs while explicit lists still restrict 
   page,
   baseURL,
 }) => {
+  // Thirteen full app boots against the dev server (one per mode/path pair,
+  // plus the sidebar rewrites) need more than the default 60s on a loaded CI
+  // host even when every assertion passes.
+  test.setTimeout(120_000);
   await install(page, baseURL!);
   await page.route('**/agentic-code**', async (route) => {
     if (!route.request().isNavigationRequest()) return route.fallback();

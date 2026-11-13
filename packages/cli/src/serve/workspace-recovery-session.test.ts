@@ -18,6 +18,11 @@ import { createInitialHarnessCheckpoint } from '@qwen-code/qwen-code-core/manage
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import {
+  enableManagedSessionDiagnostics,
+  getManagedSessionDiagnostics,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
+import { MANAGED_MODEL_STATISTICS_KINDS } from '@qwen-code/qwen-code-core/managed-runtime/managed-model-statistics.js';
+import {
   openManagedSession,
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
@@ -287,6 +292,9 @@ function fixture(
 async function hostedModelFixture(
   settled = true,
   turn?: (session: ManagedSession) => Promise<void>,
+  options: {
+    diagnostics?: boolean;
+  } = {},
 ) {
   const f = fixture();
   f.transactions.length = 0;
@@ -326,11 +334,13 @@ async function hostedModelFixture(
           records.push(...batch);
         },
         seal: async () => {},
+        writerSealed: false,
         abort: async () => {},
       }),
     },
   });
   try {
+    if (options.diagnostics) await enableManagedSessionDiagnostics(session);
     await session.authority.submitInput(
       {
         operation: 'submitInput',
@@ -373,6 +383,8 @@ async function hostedModelFixture(
   } finally {
     await session.close();
   }
+  if (options.diagnostics)
+    f.source.head = { ...f.source.head, storageVersion: 3 };
   const attempts = session.authority
     .eventsInSequenceRange(1, session.authority.committedSequence)
     .filter((event) => event.kind === 'model.attempt');
@@ -388,6 +400,50 @@ async function hostedModelFixture(
       'usageRef',
     ),
   };
+}
+
+async function diagnosticResourceFixture(kind: string) {
+  if (kind === MANAGED_MODEL_STATISTICS_KINDS.main) {
+    const f = await hostedModelFixture(true, undefined, {
+      diagnostics: true,
+    });
+    return { ...f, diagnosticRef: f.usageRef };
+  }
+  let diagnosticRef: ManagedSessionDurableRef | undefined;
+  const f = await hostedModelFixture(true, async (session) => {
+    await enableManagedSessionDiagnostics(session);
+    diagnosticRef = await getManagedSessionDiagnostics(
+      session.authority,
+    )!.publish(
+      kind,
+      kind === MANAGED_MODEL_STATISTICS_KINDS.hook
+        ? {
+            operationId: 'hook-operation',
+            occurrenceId: 'hook-occurrence',
+            originTurnId: 'prompt',
+            eventName: 'AfterModel',
+            model: 'hook-model',
+          }
+        : {},
+    );
+    await session.sink.write({
+      uuid: 'diagnostic-reference',
+      parentUuid: null,
+      sessionId: SESSION,
+      timestamp: '2026-10-02T00:00:00.000Z',
+      cwd: '/original/cwd',
+      version: 'hosted-harness/1',
+      type: 'system',
+      subtype: 'slash_command',
+      systemPayload: {
+        phase: 'result',
+        rawCommand: '/diagnostics',
+        outputHistoryItems: [{ diagnosticRef }],
+      },
+    });
+  });
+  f.source.head = { ...f.source.head, storageVersion: 3 };
+  return { ...f, diagnosticRef: diagnosticRef! };
 }
 
 async function shellFixture(
@@ -655,9 +711,12 @@ async function shellFixture(
   return { ...f, localSegmentId, emptySealId, manifestRef, seals, binary };
 }
 
-async function detachedShellFixture(options: { partial?: boolean } = {}) {
+async function detachedShellFixture(
+  options: { partial?: boolean; recoveredCancellation?: boolean } = {},
+) {
   const f = fixture();
   const partial = options.partial === true;
+  const recoveredCancellation = options.recoveredCancellation === true;
   const manifestRef = partial
     ? f.resource('managed-tool-result-manifest', {
         toolResult: 'managed-tool-result/1',
@@ -694,7 +753,11 @@ async function detachedShellFixture(options: { partial?: boolean } = {}) {
       })
     : null;
   const envelope = {
-    executionStatus: partial ? ('error' as const) : ('success' as const),
+    executionStatus: recoveredCancellation
+      ? ('cancelled' as const)
+      : partial
+        ? ('error' as const)
+        : ('success' as const),
     responseParts: [
       { text: 'Background shell started under unit qwen-bg-call.' },
     ],
@@ -707,8 +770,12 @@ async function detachedShellFixture(options: { partial?: boolean } = {}) {
           deliveryStatus: 'pending' as const,
         }
       : {
-          captureStatus: 'detached' as const,
-          captureReason: null,
+          captureStatus: recoveredCancellation
+            ? ('unavailable' as const)
+            : ('detached' as const),
+          captureReason: recoveredCancellation
+            ? ('producer_lost' as const)
+            : null,
           manifest: null,
           previewTruncated: false,
           deliveryStatus: 'pending' as const,
@@ -753,11 +820,24 @@ async function detachedShellFixture(options: { partial?: boolean } = {}) {
     }),
   ]);
   const outcomeRef = f.resource('managed-tool-outcome', {
-    schemaVersion: 1,
+    ...(recoveredCancellation
+      ? {
+          version: 1,
+          identity: {
+            tenantId: 'tenant',
+            sessionId: SESSION,
+            turnId: 'prompt',
+            executionCallId: 'execution',
+            callId: 'call',
+            invocationDigest: 'sha256:' + 'a'.repeat(64),
+            bindingGeneration: '1',
+            captureId: 'capture',
+            revision: 1,
+          },
+        }
+      : { schemaVersion: 1, manifestRef, history }),
     decision: 'blocked',
     envelope,
-    manifestRef,
-    history,
   });
   f.append([
     f.event('tool.receipt', {
@@ -928,7 +1008,6 @@ describe('migration profile evidence', () => {
     {},
     { toolProfile: 'hosted-workspace-files/2' },
     { toolProfile: 'hosted-workspace-shell/1' },
-    { toolProfile: 'hosted-workspace-shell/2' },
     { toolProfile: 'hosted-workspace-team-lead/1' },
     { toolProfile: 'hosted-workspace-files/1', hookCatalog: {} },
     { toolProfile: 'hosted-workspace-files/1', captureBytes: 1024 },
@@ -941,6 +1020,95 @@ describe('migration profile evidence', () => {
 });
 
 describe('verifyRecoverySession', () => {
+  it.each([
+    [
+      'published catalog',
+      Buffer.from(
+        '[{"name":"review","description":"Review","body":"Check the diff."}]',
+      ),
+      undefined,
+      undefined,
+    ],
+    [
+      'corrupt bytes',
+      Buffer.from('[]'),
+      Buffer.from('{}'),
+      'resource bytes conflict',
+    ],
+    ['missing bytes', Buffer.from('[]'), null, 'missing_resource'],
+    [
+      'catalog above the previous 48 KiB limit',
+      Buffer.from(
+        JSON.stringify([
+          {
+            name: 'review',
+            description: 'Review',
+            body: 'x'.repeat(48 * 1024),
+          },
+        ]),
+      ),
+      undefined,
+      undefined,
+    ],
+    [
+      'catalog at the 2 MiB resource limit',
+      Buffer.from('[]'.padEnd(2 * 1024 * 1024)),
+      undefined,
+      undefined,
+    ],
+    [
+      'oversized catalog',
+      Buffer.from('[]'.padEnd(2 * 1024 * 1024 + 1)),
+      undefined,
+      'Invalid agent skills reference',
+    ],
+    [
+      'invalid UTF-8',
+      Buffer.from([0xff]),
+      undefined,
+      'The encoded data was not valid for encoding utf-8',
+    ],
+    [
+      'invalid catalog',
+      Buffer.from('[{"name":"review"}]'),
+      undefined,
+      'Invalid Hosted skill catalog',
+    ],
+  ] as const)(
+    'verifies pinned Skills through the recovery closure: %s',
+    async (_name, bytes, stored, error) => {
+      const skillsRef: ManagedSessionDurableRef = {
+        resourceId: 'agent-skills',
+        kind: 'managed-agent-skills',
+        schemaVersion: 1,
+        byteLength: bytes.length,
+        digest: hash(bytes),
+      };
+      const f = fixture({
+        toolProfile: 'hosted-workspace-files/1',
+        agentDefinition: {
+          agentId: `agent_${'a'.repeat(32)}`,
+          revision: '1',
+          digest: 'b'.repeat(64),
+          skillsRef,
+        },
+      });
+      if (stored !== null)
+        f.resources.set(skillsRef.resourceId, stored ?? bytes);
+      if (error) {
+        await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+          error,
+        );
+        expect(f.complete.has(skillsRef.resourceId)).toBe(false);
+      } else {
+        await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+          fileHistory: 'not_captured',
+        });
+        expect(f.complete.has(skillsRef.resourceId)).toBe(true);
+      }
+    },
+  );
+
   it('captures raw pinned agent instructions and refuses changed bytes', async () => {
     const bytes = Buffer.from('Keep the agent instructions. 保留指令。');
     const instructionsRef: ManagedSessionDurableRef = {
@@ -1090,6 +1258,63 @@ describe('verifyRecoverySession', () => {
     expect(f.complete.size).toBe(f.refs.size);
   });
 
+  it('roundtrips fully collected retirement counters without replay or activation', async () => {
+    const f = retiredFixture();
+    const source: RecoverySessionSource = {
+      ...f.source,
+      head: null,
+      retiredHead: {
+        ...f.source.head,
+        compactedThroughRevision: f.source.head.journalRevision,
+      },
+    };
+    const roundtrip = JSON.parse(
+      JSON.stringify(source),
+    ) as RecoverySessionSource;
+    const io = {
+      ...f.io,
+      async *transactions() {},
+      nextReference: vi.fn(async () => null),
+      enqueue: vi.fn(async () => {}),
+    };
+    await expect(
+      verifyRecoverySession(roundtrip, io, 'migration'),
+    ).resolves.toEqual({ fileHistory: 'not_captured' });
+    expect(roundtrip.retiredHead).toEqual(source.retiredHead);
+    expect(io.read).not.toHaveBeenCalled();
+    expect(io.enqueue).not.toHaveBeenCalled();
+    expect(roundtrip.publicSession.status).toBe('DELETED');
+  });
+
+  it.each([
+    { state: 'ACTIVE' },
+    { compactedThroughRevision: 0 },
+    { tenantId: 'other' },
+    { sessionId: 'other' },
+    { writerId: 'late-writer' },
+    { lastCommitDigest: 'bad' },
+    { writerGeneration: Number.MAX_SAFE_INTEGER + 1 },
+    { committedSequence: -1 },
+    { activationEpoch: 0.5 },
+  ])('rejects damaged collected retirement authority (%j)', async (damage) => {
+    const f = retiredFixture();
+    const source: RecoverySessionSource = {
+      ...f.source,
+      head: null,
+      retiredHead: {
+        ...f.source.head,
+        compactedThroughRevision: f.source.head.journalRevision,
+        ...damage,
+      },
+    };
+    await expect(
+      verifyRecoverySession(source, {
+        ...f.io,
+        async *transactions() {},
+      }),
+    ).rejects.toThrow('invalid collected retirement head');
+  });
+
   it('requires retirement evidence before accepting a cleared checkpoint pointer', async () => {
     const f = retiredFixture();
     Object.assign(f.source, { retirement: null });
@@ -1164,6 +1389,40 @@ describe('verifyRecoverySession', () => {
       expect(f.complete.has(ref.resourceId)).toBe(true);
     }
   });
+
+  it.each(Object.values(MANAGED_MODEL_STATISTICS_KINDS))(
+    'verifies committed diagnostic resource %s at storage version 3',
+    async (kind) => {
+      const f = await diagnosticResourceFixture(kind);
+      expect(f.source.head.storageVersion).toBe(3);
+      expect(f.diagnosticRef.kind).toBe(kind);
+      await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+        fileHistory: 'not_captured',
+      });
+      expect(f.io.read).toHaveBeenCalledWith(f.diagnosticRef);
+      expect(f.complete.has(f.diagnosticRef.resourceId)).toBe(true);
+    },
+  );
+
+  it.each(Object.values(MANAGED_MODEL_STATISTICS_KINDS))(
+    'refuses missing and corrupted diagnostic resource bytes for %s',
+    async (kind) => {
+      const missing = await diagnosticResourceFixture(kind);
+      missing.resources.delete(missing.diagnosticRef.resourceId);
+      await expect(
+        verifyRecoverySession(missing.source, missing.io),
+      ).rejects.toThrow('missing_resource');
+      const corrupt = await diagnosticResourceFixture(kind);
+      const bytes = Buffer.from(
+        corrupt.resources.get(corrupt.diagnosticRef.resourceId)!,
+      );
+      bytes[0] ^= 1;
+      corrupt.resources.set(corrupt.diagnosticRef.resourceId, bytes);
+      await expect(
+        verifyRecoverySession(corrupt.source, corrupt.io),
+      ).rejects.toThrow('resource bytes conflict');
+    },
+  );
 
   it.each(['routeRef', 'usageRef'] as const)(
     'refuses a missing or corrupted Hosted model %s',
@@ -1641,6 +1900,16 @@ describe('verifyRecoverySession', () => {
       verifyRecoverySession(committedFree.source, committedFree.io),
     ).rejects.toThrow();
   });
+
+  it('replays a recovered cancellation without capture as not captured', async () => {
+    const f = await detachedShellFixture({ recoveredCancellation: true });
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+    expect(f.io.publicationReceipt).not.toHaveBeenCalled();
+    expect(f.io.publicationObject).not.toHaveBeenCalled();
+    expect(f.complete.size).toBe(f.refs.size);
+  });
   it('uses the actual private workspace key and verifies an initial journal', async () => {
     const f = fixture();
     expect(await verifyRecoverySession(f.source, f.io)).toEqual({
@@ -1653,9 +1922,11 @@ describe('verifyRecoverySession', () => {
   it.each([
     { toolProfile: 'hosted-workspace-files/1' },
     { toolProfile: 'hosted-workspace-files/2' },
+    { toolProfile: 'hosted-workspace-files/3' },
     { toolProfile: 'hosted-workspace-shell/1', captureBytes: 1024 },
-    { toolProfile: 'hosted-workspace-shell/2', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-shell/3', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-team-lead/1', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-read/1' },
   ])('recovers every saved Workspace profile (%j)', async (definition) => {
     // One refused profile would abort recovery for the whole Workspace,
     // so recovery reads the same profile vocabulary creation persists.
@@ -1666,8 +1937,10 @@ describe('verifyRecoverySession', () => {
   });
 
   it.each([
-    { toolProfile: 'hosted-workspace-files/3' },
+    { toolProfile: 'hosted-workspace-files/4' },
+    { toolProfile: 'hosted-workspace-shell/2', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-files/2', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-read/1', captureBytes: 1024 },
   ])('still refuses an unknown Hosted definition (%j)', async (definition) => {
     const f = fixture(definition);
     await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
@@ -1935,4 +2208,33 @@ describe('migration profile eligibility', () => {
       verifyRecoverySession({ ...f.source, head: null }, f.io, 'migration'),
     ).rejects.toThrow('uninitialized migration member');
   });
+});
+
+it('restores committed execution diagnostic source resources', async () => {
+  const { enableManagedExecutionDiagnostics } = await import(
+    '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js'
+  );
+  const f = await hostedModelFixture(true, async (session) => {
+    await enableManagedExecutionDiagnostics(session);
+    await session.sink.write({
+      uuid: 'diag-assistant',
+      parentUuid: null,
+      sessionId: SESSION,
+      timestamp: '2026-11-07T00:00:00.000Z',
+      type: 'assistant',
+      cwd: '/original/cwd',
+      version: 'hosted-harness/1',
+      daemonPromptId: 'prompt',
+      message: { role: 'model', parts: [{ text: 'done' }] },
+    });
+  });
+  const source = {
+    ...f.source,
+    head: { ...f.source.head!, storageVersion: 4 },
+  };
+  await expect(verifyRecoverySession(source, f.io)).resolves.toBeDefined();
+  const diagnostics = [...f.resources.keys()].filter(
+    (id) => f.refs.get(id)?.kind === 'managed-execution-diagnostics',
+  );
+  expect(diagnostics).toHaveLength(1);
 });

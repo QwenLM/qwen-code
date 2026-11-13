@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
-import type { Stats } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { constants, type Stats } from 'node:fs';
 import {
   chmod,
   copyFile,
@@ -18,6 +18,7 @@ import {
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { diffLines, structuredPatch, type Hunk } from 'diff';
 import { Storage } from '../config/storage.js';
+import { renameWithRetry } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { MAX_DIFF_SIZE_BYTES } from '../utils/gitDiff.js';
 import {
@@ -25,6 +26,9 @@ import {
   readFileHandleBytes,
   type DescriptorFileReadSource,
 } from '../utils/file-read-source.js';
+import { MAX_SNAPSHOTS } from './file-history-limits.js';
+
+export { MAX_SNAPSHOTS } from './file-history-limits.js';
 
 const debugLogger = createDebugLogger('FILE_HISTORY');
 
@@ -70,6 +74,8 @@ async function readRetainedText(
 export interface FileHistorySnapshot {
   promptId: string;
   trackedFileBackups: Record<string, FileHistoryBackup>;
+  /** Original turn endpoint when the following turn has been deleted. */
+  diffAfterBackups?: Record<string, FileHistoryBackup>;
   timestamp: Date;
 }
 
@@ -129,7 +135,6 @@ export interface TurnDiff {
   };
 }
 
-export const MAX_SNAPSHOTS = 100;
 export const FILE_HISTORY_DIR = 'file-history';
 
 // ---------------------------------------------------------------------------
@@ -139,6 +144,7 @@ export const FILE_HISTORY_DIR = 'file-history';
 export interface SerializedFileHistorySnapshot {
   promptId: string;
   trackedFileBackups: Record<string, SerializedFileHistoryBackup>;
+  diffAfterBackups?: Record<string, SerializedFileHistoryBackup>;
   timestamp: string;
 }
 
@@ -149,23 +155,30 @@ export interface SerializedFileHistoryBackup {
   failed?: boolean;
 }
 
+function serializeBackups(backups: Record<string, FileHistoryBackup>) {
+  return Object.fromEntries(
+    Object.entries(backups).map(([path, backup]) => [
+      path,
+      {
+        backupFileName: backup.backupFileName,
+        version: backup.version,
+        backupTime: backup.backupTime.toISOString(),
+        failed: backup.failed || undefined,
+      },
+    ]),
+  );
+}
+
 export function serializeSnapshot(
   s: FileHistorySnapshot,
 ): SerializedFileHistorySnapshot {
   return {
     promptId: s.promptId,
     timestamp: s.timestamp.toISOString(),
-    trackedFileBackups: Object.fromEntries(
-      Object.entries(s.trackedFileBackups).map(([path, backup]) => [
-        path,
-        {
-          backupFileName: backup.backupFileName,
-          version: backup.version,
-          backupTime: backup.backupTime.toISOString(),
-          failed: backup.failed || undefined,
-        },
-      ]),
-    ),
+    trackedFileBackups: serializeBackups(s.trackedFileBackups),
+    ...(s.diffAfterBackups
+      ? { diffAfterBackups: serializeBackups(s.diffAfterBackups) }
+      : {}),
   };
 }
 
@@ -174,23 +187,32 @@ function safeParseDate(iso: string): Date {
   return Number.isNaN(d.getTime()) ? new Date(0) : d;
 }
 
+function deserializeBackups(
+  backups: Record<string, SerializedFileHistoryBackup>,
+) {
+  return Object.fromEntries(
+    Object.entries(backups).map(([path, backup]) => [
+      path,
+      {
+        backupFileName: backup.backupFileName,
+        version: backup.version,
+        backupTime: safeParseDate(backup.backupTime),
+        failed: backup.failed,
+      },
+    ]),
+  );
+}
+
 export function deserializeSnapshots(
   arr: SerializedFileHistorySnapshot[],
 ): FileHistorySnapshot[] {
   return arr.map((s) => ({
     promptId: s.promptId,
     timestamp: safeParseDate(s.timestamp),
-    trackedFileBackups: Object.fromEntries(
-      Object.entries(s.trackedFileBackups).map(([path, backup]) => [
-        path,
-        {
-          backupFileName: backup.backupFileName,
-          version: backup.version,
-          backupTime: safeParseDate(backup.backupTime),
-          failed: backup.failed,
-        },
-      ]),
-    ),
+    trackedFileBackups: deserializeBackups(s.trackedFileBackups),
+    ...(s.diffAfterBackups
+      ? { diffAfterBackups: deserializeBackups(s.diffAfterBackups) }
+      : {}),
   }));
 }
 /** Per-turn read-fanout cap. Each candidate file may read up to two backups,
@@ -256,15 +278,16 @@ function resolveBackupPath(backupFileName: string, sessionId: string): string {
 async function safeCopyFile(
   src: string,
   dst: string,
+  mode = 0,
 ): Promise<'ok' | 'src-missing'> {
   try {
-    await copyFile(src, dst);
+    await copyFile(src, dst, mode);
     return 'ok';
   } catch (e: unknown) {
     if (!isENOENT(e)) throw e;
     if (!(await pathExists(src))) return 'src-missing';
     await mkdir(dirname(dst), { recursive: true });
-    await copyFile(src, dst);
+    await copyFile(src, dst, mode);
     return 'ok';
   }
 }
@@ -287,12 +310,55 @@ async function createBackup(
     throw e;
   }
 
-  const result = await safeCopyFile(filePath, backupPath);
-  if (result === 'src-missing') {
-    return { backupFileName: null, version, backupTime: new Date() };
+  // Publish only complete backups: a crash mid-copy must never leave a
+  // truncated blob at the final path, which later reads would treat as a
+  // valid checkpoint. The temporary suffix is unique per call because
+  // concurrent captures share the deterministic final path (see trackEdit);
+  // a shared name would collide on COPYFILE_EXCL and let one call's failure
+  // cleanup delete another's in-progress copy.
+  const temporaryPath = `${backupPath}.${randomUUID()}.tmp`;
+  try {
+    const result = await safeCopyFile(
+      filePath,
+      temporaryPath,
+      constants.COPYFILE_EXCL,
+    );
+    if (result === 'src-missing') {
+      // The copy may have created the temporary file before the source
+      // vanished (Windows can interrupt an open-file copy); leave nothing
+      // behind. Best-effort: a failed unlink is swept with the session.
+      await unlink(temporaryPath).catch(() => undefined);
+      return { backupFileName: null, version, backupTime: new Date() };
+    }
+    // copyFile carries the source's mode onto the temporary, which may be
+    // read-only; make it writable for the flush, then re-apply the exact
+    // source mode before publication (checkOriginFileChanged compares it).
+    await chmod(temporaryPath, (srcStats.mode & 0o7777) | 0o600);
+    // Flush the copied bytes before publication: rename is atomic in the
+    // metadata sense, but without fsync a host crash could still expose a
+    // zero-filled backup (atomicWriteFile's flush contract, issue #16896
+    // triage note 1). A sync failure routes through the cleanup below.
+    const handle = await open(temporaryPath, 'r+');
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await chmod(temporaryPath, srcStats.mode);
+    // Same publication step as atomicWriteFile / mods store: transient
+    // EPERM/EACCES (Windows concurrent access, AV scans) retry with backoff;
+    // any other error rethrows into the caller's failed-entry semantics.
+    await renameWithRetry(temporaryPath, backupPath, 3, 50);
+  } catch (e: unknown) {
+    await unlink(temporaryPath).catch((cleanupError: unknown) => {
+      if (!isENOENT(cleanupError)) {
+        debugLogger.warn(
+          `FileHistory: failed to remove incomplete backup ${temporaryPath}: ${cleanupError}`,
+        );
+      }
+    });
+    throw e;
   }
-
-  await chmod(backupPath, srcStats.mode);
 
   return { backupFileName, version, backupTime: new Date() };
 }
@@ -670,7 +736,21 @@ export class FileHistoryService {
         trackedFiles.add(trackingPath);
         trackedFileBackups[trackingPath] = backup;
       }
-      migrated.push({ ...snapshot, trackedFileBackups });
+      migrated.push({
+        ...snapshot,
+        trackedFileBackups,
+        ...(snapshot.diffAfterBackups
+          ? {
+              diffAfterBackups: Object.fromEntries(
+                Object.entries(snapshot.diffAfterBackups).map(([p, backup]) => {
+                  const trackingPath = this.maybeShortenFilePath(p);
+                  trackedFiles.add(trackingPath);
+                  return [trackingPath, backup];
+                }),
+              ),
+            }
+          : {}),
+      });
     }
     this.state = {
       snapshots: migrated,
@@ -683,7 +763,10 @@ export class FileHistoryService {
     // the same backup file via the inheritance optimization in makeSnapshot).
     const uniqueNames = new Set<string>();
     for (const snapshot of this.state.snapshots) {
-      for (const backup of Object.values(snapshot.trackedFileBackups)) {
+      for (const backup of [
+        ...Object.values(snapshot.trackedFileBackups),
+        ...Object.values(snapshot.diffAfterBackups ?? {}),
+      ]) {
         if (this.retainedStorage && backup.failed)
           throw new Error('Retained backup is unavailable.');
         if (backup.backupFileName !== null && !backup.failed) {
@@ -734,7 +817,10 @@ export class FileHistoryService {
     // window so concurrent makeSnapshot/trackEdit see a consistent state.
     const affectedSnapshots = new Set<FileHistorySnapshot>();
     for (const snapshot of this.state.snapshots) {
-      for (const backup of Object.values(snapshot.trackedFileBackups)) {
+      for (const backup of [
+        ...Object.values(snapshot.trackedFileBackups),
+        ...Object.values(snapshot.diffAfterBackups ?? {}),
+      ]) {
         if (backup.backupFileName && missing.has(backup.backupFileName)) {
           backup.failed = true;
           affectedSnapshots.add(snapshot);
@@ -984,9 +1070,10 @@ export class FileHistoryService {
         const removed = this.state.snapshots.slice(targetIdx + 1);
         this.state.snapshots = this.state.snapshots.slice(0, targetIdx + 1);
         this.state.trackedFiles = new Set(
-          this.state.snapshots.flatMap((s) =>
-            Object.keys(s.trackedFileBackups),
-          ),
+          this.state.snapshots.flatMap((s) => [
+            ...Object.keys(s.trackedFileBackups),
+            ...Object.keys(s.diffAfterBackups ?? {}),
+          ]),
         );
         await this.cleanupOrphanedBackups(removed);
       }
@@ -1092,8 +1179,9 @@ export class FileHistoryService {
     if (targetIdx < 0) return undefined;
 
     const target = this.state.snapshots[targetIdx]!;
-    const nextSnapshot =
-      targetIdx + 1 < this.state.snapshots.length
+    const nextSnapshot = target.diffAfterBackups
+      ? { ...target, trackedFileBackups: target.diffAfterBackups }
+      : targetIdx + 1 < this.state.snapshots.length
         ? this.state.snapshots[targetIdx + 1]
         : undefined;
 
@@ -1474,9 +1562,12 @@ export class FileHistoryService {
     trackingPath: string,
   ): BackupFileName | undefined {
     for (const snapshot of this.state.snapshots) {
-      const backup = snapshot.trackedFileBackups[trackingPath];
-      if (backup !== undefined && backup.version === 1) {
-        return backup.backupFileName;
+      for (const backup of [
+        snapshot.trackedFileBackups[trackingPath],
+        snapshot.diffAfterBackups?.[trackingPath],
+      ]) {
+        if (backup !== undefined && backup.version === 1)
+          return backup.backupFileName;
       }
     }
     return undefined;
@@ -1485,9 +1576,12 @@ export class FileHistoryService {
   private getMaxVersion(trackingPath: string): number {
     let maxVersion = 0;
     for (const snapshot of this.state.snapshots) {
-      const existing = snapshot.trackedFileBackups[trackingPath];
-      if (existing && existing.version > maxVersion) {
-        maxVersion = existing.version;
+      for (const existing of [
+        snapshot.trackedFileBackups[trackingPath],
+        snapshot.diffAfterBackups?.[trackingPath],
+      ]) {
+        if (existing && existing.version > maxVersion)
+          maxVersion = existing.version;
       }
     }
     return maxVersion;
@@ -1504,14 +1598,20 @@ export class FileHistoryService {
       throw new Error('Retained history cannot delete backups.');
     const liveBackups = new Set<string>();
     for (const s of this.state.snapshots) {
-      for (const b of Object.values(s.trackedFileBackups)) {
+      for (const b of [
+        ...Object.values(s.trackedFileBackups),
+        ...Object.values(s.diffAfterBackups ?? {}),
+      ]) {
         if (b.backupFileName !== null) liveBackups.add(b.backupFileName);
       }
     }
 
     const toDelete = new Set<string>();
     for (const s of removedSnapshots) {
-      for (const b of Object.values(s.trackedFileBackups)) {
+      for (const b of [
+        ...Object.values(s.trackedFileBackups),
+        ...Object.values(s.diffAfterBackups ?? {}),
+      ]) {
         if (b.backupFileName !== null && !liveBackups.has(b.backupFileName)) {
           toDelete.add(b.backupFileName);
         }
