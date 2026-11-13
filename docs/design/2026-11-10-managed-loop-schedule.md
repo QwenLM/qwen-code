@@ -387,7 +387,7 @@ separate change:
    window is still reached; the cached deferred proof expires at the
    earliest deferred fire time, and a settlement drops the input from
    the deferred latch. The exemption needs a clock reference in the
-   store and a `WakeRecoveryTest` pair (future-only loop input →
+   store and a `WakeRecoveryStoreTest` pair (future-only loop input →
    `isEmpty()`, no attach; due loop input → `contains(true)`, attach).
 2. **Fire-time sentinel Java fixture replay parity.** The journal-replay
    proof in `JdbcWakeRecoveryStore` must recognize the loop sentinel

@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicAutomationRun;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcAutomationLedgerStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore;
@@ -88,6 +89,9 @@ class AutomationScannerTest {
 
     @Autowired
     private JdbcAutomationLedgerStore ledger;
+
+    @Autowired
+    private JdbcManagedSessionStore sessionStore;
 
     @Autowired
     private ManagedAgentStore agentStore;
@@ -279,6 +283,34 @@ class AutomationScannerTest {
         assertThat(created.sessionId()).isEqualTo(sessionId);
         assertThat(ledger.findSchedule(tenant, created.id()).orElseThrow()
                 .sessionId()).isEqualTo(sessionId);
+    }
+
+    @Test
+    void creatorActorReadsTheSessionRowFromTheSchema() {
+        // The internal routes' creator derivation against the real schema: the
+        // actor id is decoded from ma_session.creator_actor_key, and a missing
+        // Session yields empty rather than throwing. A wrong column or decoder
+        // would silently 403 every create/retire, so pin the read itself.
+        assertThat(sessionStore.creatorActor(tenant, sessionId)).isEqualTo(ACTOR);
+        assertThat(sessionStore.creatorActor(tenant, "missing-session")).isEmpty();
+    }
+
+    @Test
+    void anEmptyCreatorActorRefusesTheInternalMutation() {
+        ManagedSessionStore emptyCreatorStore = mock(ManagedSessionStore.class);
+        when(emptyCreatorStore.creatorActor(tenant, sessionId)).thenReturn("");
+        ManagedAutomationSessionService sessionService =
+                new ManagedAutomationSessionService(emptyCreatorStore, service);
+        AutomationSessionModels.Create request = new AutomationSessionModels.Create(
+                WORKSPACE, "writer", 1,
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true));
+        assertThatThrownBy(() -> sessionService.create(tenant, sessionId,
+                "writer-token", "iso-empty-creator-" + UUID.randomUUID(), request))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(403);
+                    assertThat(error.getCode()).isEqualTo("session_operation_forbidden");
+                });
     }
 
     private PublicAutomation defineGated(String gate) {

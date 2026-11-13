@@ -264,10 +264,9 @@ public class JdbcWakeRecoveryStore
             }
         }
         // A complete proof attaches even beside a deferred wakeup: its pending
-        // input needs recovery now, regardless of the wakeup's fire time.
-        if (proof.deferred && proof.complete) {
-            return Optional.of(true);
-        }
+        // input needs recovery now, regardless of the wakeup's fire time. It
+        // falls through to the put below so the proven prefix is memoized —
+        // returning here would re-prove from revision zero on every scan.
         // The complete Candidate fences every continuation to the same immutable
         // prefix. Losing it restarts proof at zero; it never clears a durable hint.
         if (pendingProofs.size() == 128) {

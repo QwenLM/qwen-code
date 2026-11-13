@@ -918,6 +918,50 @@ export const HOSTED_CRON_DELETE_TOOL: FunctionDeclaration = {
     additionalProperties: false,
   },
 };
+// The cron union surface ships on profiles that lack one of the two creators:
+// files/4 and team-lead/2 carry the trio without loop_wakeup, shell/3 keeps the
+// wakeup slice's list/delete without cron_create. The declarations must never
+// name a tool the Session does not declare — naming one steers the model into
+// emitting it, which the admission chain refuses and fails the whole turn.
+// Assemble each description from the creators the profile actually has.
+function cronListDescription(
+  hasCronCreate: boolean,
+  hasLoopWakeup: boolean,
+): string {
+  if (hasCronCreate && hasLoopWakeup) {
+    return 'List this Session’s live recurring cron schedules (created via cron_create) and any pending loop wakeup scheduled via loop_wakeup. Shows each schedule’s id, cron, timezone, state and a short goal label, and each wakeup’s id, fire time and a short prompt preview.';
+  }
+  if (hasCronCreate) {
+    return 'List this Session’s live recurring cron schedules (created via cron_create). Shows each schedule’s id, cron, timezone, state and a short goal label.';
+  }
+  return 'List this Session’s pending loop wakeup scheduled via loop_wakeup. Shows each wakeup’s id, fire time and a short prompt preview.';
+}
+
+function cronDeleteDescription(
+  hasCronCreate: boolean,
+  hasLoopWakeup: boolean,
+): string {
+  if (hasCronCreate && hasLoopWakeup) {
+    return 'Cancel a recurring cron schedule or a pending loop wakeup by its id (as returned by cron_list). A wakeup whose turn already started cannot be cancelled.';
+  }
+  if (hasCronCreate) {
+    return 'Cancel a recurring cron schedule by its id (as returned by cron_list).';
+  }
+  return 'Cancel a pending loop wakeup by its id (as returned by cron_list). A wakeup whose turn already started cannot be cancelled.';
+}
+
+function cronDeleteIdDescription(
+  hasCronCreate: boolean,
+  hasLoopWakeup: boolean,
+): string {
+  if (hasCronCreate && hasLoopWakeup) {
+    return 'A schedule id from cron_create, or a wakeup id (loop:<wakeupId>) from loop_wakeup.';
+  }
+  if (hasCronCreate) {
+    return 'A schedule id from cron_create.';
+  }
+  return 'A wakeup id (loop:<wakeupId>) from loop_wakeup.';
+}
 // #13753 I3: the read profile of a snapshot child, which reads a frozen copy
 // of its parent's Workspace. Nothing here writes, and the turn refuses any
 // call it does not declare.
@@ -2690,6 +2734,28 @@ export class HostedWorkspaceToolTurn {
           if (tool.name === 'cron_create' && !loopTool) {
             // The profile has no loop_wakeup to fall back to; do not name it.
             tool = { ...tool, description: CRON_CREATE_DESCRIPTION };
+          }
+          if (tool.name === 'cron_list' && (!loopTool || !cronCreate)) {
+            tool = {
+              ...tool,
+              description: cronListDescription(cronCreate, loopTool),
+            };
+          }
+          if (tool.name === 'cron_delete' && (!loopTool || !cronCreate)) {
+            const schema = structuredClone(tool.parametersJsonSchema) as {
+              properties?: Record<string, { description?: string }>;
+            };
+            if (schema.properties?.['id']) {
+              schema.properties['id'].description = cronDeleteIdDescription(
+                cronCreate,
+                loopTool,
+              );
+            }
+            tool = {
+              ...tool,
+              description: cronDeleteDescription(cronCreate, loopTool),
+              parametersJsonSchema: schema,
+            };
           }
           return extensionToolDeclaration(
             hostedWorkspaceDeclarations([tool], !this.fileBackupsEnabled)[0],
