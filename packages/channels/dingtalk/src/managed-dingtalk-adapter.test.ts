@@ -48,6 +48,8 @@ function fakeControlPlane() {
   const admitted = new Map<string, string>();
   let queue: ManagedClaimedDelivery[] = [];
   let submitError: (Error & { status?: number; code?: string }) | undefined;
+  let refuseSubmit: { status: number; code?: string } | undefined;
+  let submitAttempts = 0;
   let receiptError:
     | ((
         deliveryId: string,
@@ -59,6 +61,13 @@ function fakeControlPlane() {
     },
     disconnect: async () => {},
     submitInbound: async (event) => {
+      submitAttempts += 1;
+      if (refuseSubmit) {
+        throw Object.assign(new Error(`HTTP ${refuseSubmit.status}`), {
+          status: refuseSubmit.status,
+          code: refuseSubmit.code,
+        });
+      }
       if (submitError) {
         const error = submitError;
         submitError = undefined;
@@ -89,6 +98,10 @@ function fakeControlPlane() {
     },
     failNextSubmit: (error: Error & { status?: number; code?: string }) => {
       submitError = error;
+    },
+    submitAttempts: () => submitAttempts,
+    setRefuseSubmit: (value: { status: number; code?: string } | undefined) => {
+      refuseSubmit = value;
     },
     setReceiptError: (
       fn:
@@ -258,6 +271,145 @@ describe('managed DingTalk adapter inbound', () => {
     ).toBe('conv-1');
     await second.adapter.disconnect();
   });
+
+  it('truncates an over-long inbound text to the wire bound instead of dropping it', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    fake.push(
+      'msg-long',
+      messageData({ msgId: 'msg-long', text: { content: 'x'.repeat(32_001) } }),
+    );
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(1);
+    expect(plane.submit[0]!.text).toHaveLength(32_000);
+    await adapter.disconnect();
+  });
+
+  it('clamps a CJK text to the byte envelope even under the character bound', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    // 25,000 CJK characters are under the 32,000-character line but ~75 KB in
+    // UTF-8, over the 64 KiB envelope: the byte cut must land on a code point.
+    fake.push(
+      'msg-cjk',
+      messageData({ msgId: 'msg-cjk', text: { content: '中'.repeat(25_000) } }),
+    );
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(1);
+    const text = plane.submit[0]!.text;
+    expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(
+      64 * 1024 - 4096,
+    );
+    expect(text.length).toBeLessThan(25_000);
+    expect(text).toBe('中'.repeat(text.length));
+    await adapter.disconnect();
+  });
+
+  it('drops a deterministically refused admission visibly, never re-driving it', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    plane.setRefuseSubmit({ status: 400 });
+    fake.push('msg-poison', messageData({ msgId: 'msg-poison' }));
+    await adapter.tick();
+    expect(plane.submitAttempts()).toBe(1);
+    expect(plane.submit).toHaveLength(0);
+    // The claim is gone, so a later tick never re-drives it.
+    await adapter.tick();
+    expect(plane.submitAttempts()).toBe(1);
+    // The rest of the inbound still flows once the refusal clears.
+    plane.setRefuseSubmit(undefined);
+    fake.push('msg-fine', messageData({ msgId: 'msg-fine' }));
+    await adapter.tick();
+    expect(plane.submitAttempts()).toBe(2);
+    expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+      'dingtalk:msg-fine',
+    ]);
+    await adapter.disconnect();
+  });
+
+  it('re-registers after an admission is refused as not registered, keeping the event', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    plane.failNextSubmit(
+      Object.assign(new Error('not registered'), {
+        status: 404,
+        code: 'channel_not_found',
+      }),
+    );
+    fake.push('msg-reg', messageData({ msgId: 'msg-reg' }));
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(0);
+    const registersBefore = plane.register.length;
+    // The claim is kept and the generation reset; the next tick re-registers
+    // first, then re-drives the identical event.
+    await adapter.tick();
+    expect(plane.register.length).toBeGreaterThan(registersBefore);
+    expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+      'dingtalk:msg-reg',
+    ]);
+    await adapter.disconnect();
+  });
+
+  it('stalls admission on consecutive workspace_not_found refusals instead of dropping every message', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('m1', messageData({ msgId: 'm1', text: { content: 'first' } }));
+    fake.push('m2', messageData({ msgId: 'm2', text: { content: 'second' } }));
+    fake.push('m3', messageData({ msgId: 'm3', text: { content: 'third' } }));
+    await adapter.tick();
+    // The first refusal drops as the sacrifice; the second holds and stalls,
+    // so the third message is never attempted.
+    expect(plane.submitAttempts()).toBe(2);
+    expect(plane.submit).toHaveLength(0);
+    fake.push('m4', messageData({ msgId: 'm4', text: { content: 'fourth' } }));
+    await adapter.tick();
+    // One held-claim probe per tick; the mail behind the stall stays unattempted.
+    expect(plane.submitAttempts()).toBe(3);
+    expect(plane.submit).toHaveLength(0);
+    // The binding answers again: the held claim and the backlog flow.
+    plane.setRefuseSubmit(undefined);
+    await adapter.tick();
+    expect(plane.submit.map((event) => event.text)).toEqual([
+      'second',
+      'third',
+      'fourth',
+    ]);
+    await adapter.disconnect();
+  });
+
+  it('restores the workspace stall from the persisted held claim across a restart', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    first.plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    first.fake.push(
+      'm1',
+      messageData({ msgId: 'm1', text: { content: 'first' } }),
+    );
+    first.fake.push(
+      'm2',
+      messageData({ msgId: 'm2', text: { content: 'held' } }),
+    );
+    await first.adapter.tick();
+    expect(first.plane.submitAttempts()).toBe(2);
+    await first.adapter.disconnect();
+
+    // The restart re-arms the stall from the persisted held marker. The held
+    // re-drive meets a transient 503 (no verdict) while new mail arrives behind
+    // the stall — that mail must not be admitted to the still-broken binding.
+    const second = await connectedAdapter(cwd);
+    second.plane.setRefuseSubmit({ status: 503 });
+    second.fake.push(
+      'm3',
+      messageData({ msgId: 'm3', text: { content: 'behind' } }),
+    );
+    await second.adapter.tick();
+    expect(second.plane.submitAttempts()).toBe(1);
+    expect(second.plane.submit).toHaveLength(0);
+    // The binding answers again: the held claim and the mail behind it flow.
+    second.plane.setRefuseSubmit(undefined);
+    await second.adapter.tick();
+    expect(second.plane.submit.map((event) => event.text)).toEqual([
+      'held',
+      'behind',
+    ]);
+    await second.adapter.disconnect();
+  });
 });
 
 describe('managed DingTalk adapter outbox', () => {
@@ -401,6 +553,83 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.tick();
     expect(plane.register.length).toBeGreaterThan(registersBefore);
     expect(plane.receipts.map((entry) => entry.deliveryId)).toEqual(['d-R']);
+    await adapter.disconnect();
+  });
+
+  it('replays the persisted provider receipt on restart instead of settling unknown', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    // The webhook accepted the segment and the receipt was persisted — only
+    // the control plane's answer was lost.
+    first.plane.setReceiptError(() =>
+      Object.assign(new Error('answer lost'), { status: 503 }),
+    );
+    first.plane.enqueue([delivery('d-receipted', 1)]);
+    await first.adapter.tick();
+    expect(first.fake.sent).toHaveLength(1);
+    expect(first.plane.receipts).toHaveLength(0);
+    await first.adapter.disconnect();
+
+    // The restart replays the committed accepted receipt verbatim, never a
+    // blanket unknown, and never re-sends the segment.
+    const second = await connectedAdapter(cwd);
+    await second.adapter.tick();
+    expect(second.plane.receipts).toHaveLength(1);
+    expect(second.plane.receipts[0]!.deliveryId).toBe('d-receipted');
+    expect(
+      (second.plane.receipts[0]!.receipt as { outcome: string }).outcome,
+    ).toBe('accepted');
+    expect(second.fake.sent).toHaveLength(0);
+    await second.adapter.disconnect();
+  });
+
+  it('rejects a delivery whose conversation has no webhook without sending', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    const noWebhook = delivery('d-nowebhook', 1);
+    noWebhook.replyContext = {
+      conversationId: 'conv-unknown',
+      sessionWebhook: '',
+      senderId: 'staff-1',
+      robotCode: 'robot-app',
+    };
+    plane.enqueue([noWebhook]);
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(0);
+    expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
+      'rejected',
+    );
+    await adapter.disconnect();
+  });
+
+  it('refuses a reply whose sender the policy does not allow without sending', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    const foreign = delivery('d-foreign', 1);
+    foreign.replyContext = {
+      conversationId: 'conv-1',
+      sessionWebhook:
+        'https://oapi.dingtalk.com/robot/sendBySession?session=abc',
+      senderId: 'mallory',
+      robotCode: 'robot-app',
+    };
+    plane.enqueue([foreign]);
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(0);
+    expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
+      'rejected',
+    );
+    await adapter.disconnect();
+  });
+
+  it('stops the rest of a multi-segment delivery after a non-accepted segment', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    fake.setBehavior('definitive');
+    plane.enqueue([delivery('d-multi', 3)]);
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(1);
+    expect(plane.receipts).toHaveLength(1);
+    expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
+      'rejected',
+    );
     await adapter.disconnect();
   });
 });

@@ -12,35 +12,9 @@ import type {
   ManagedDingtalkStreamClient,
   DingtalkWebhookFailure,
 } from './managed-dingtalk-adapter.js';
+import { withConnectLoggingSuppressed } from './connect-logging.js';
 
 const WEBHOOK_TIMEOUT_MS = 30_000;
-
-/**
- * The SDK's getEndpoint() console.log()s the resolved config (clientSecret)
- * and the gateway response, ungated by its own debug flag. Silence rather
- * than redact: a key allowlist stays open to future SDK logs. A depth counter
- * keeps nested suppressions from restoring the no-op early.
- */
-let connectLogDepth = 0;
-let unsuppressedConsoleLog: typeof console.log | undefined;
-/* eslint-disable no-console */
-async function withConnectLoggingSuppressed<T>(
-  connect: () => Promise<T>,
-): Promise<T> {
-  if (connectLogDepth++ === 0) {
-    unsuppressedConsoleLog = console.log;
-    console.log = () => {};
-  }
-  try {
-    return await connect();
-  } finally {
-    if (--connectLogDepth === 0 && unsuppressedConsoleLog) {
-      console.log = unsuppressedConsoleLog;
-      unsuppressedConsoleLog = undefined;
-    }
-  }
-}
-/* eslint-enable no-console */
 
 function createStreamClient(
   settings: DingtalkSettings,

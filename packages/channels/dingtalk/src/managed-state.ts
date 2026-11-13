@@ -148,7 +148,9 @@ export class ManagedDingtalkStateStore {
 
   constructor(name: string, cwd: string, clientId: string) {
     // One directory per robot app per workspace, beside the other channel
-    // state; its lock keeps a single owner, managed or Legacy.
+    // state. Its lock serializes concurrent managed instances of this robot
+    // app; the Legacy DingTalk channel keeps no on-disk state and takes no
+    // lock, so the lock does not arbitrate managed-versus-Legacy.
     const key = createHash('sha256')
       .update(`${name}\u0000${clientId}`)
       .digest('hex')
@@ -196,6 +198,3 @@ export class ManagedDingtalkStateStore {
     }
   }
 }
-
-export const digest = (value: string): string =>
-  createHash('sha256').update(value).digest('hex');

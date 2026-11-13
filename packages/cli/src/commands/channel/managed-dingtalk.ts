@@ -75,10 +75,9 @@ export const managedDingtalkCommand: CommandModule<
         type: 'string',
         default: process.cwd(),
         description:
-          'Local workspace for channel config resolution; must be the' +
-          ' directory the Legacy path (daemon worker) resolves for the' +
-          ' same channel, so one state directory and one lock serve the' +
-          ' robot app',
+          'Local workspace for channel config resolution; it also scopes' +
+          ' the managed state directory, so one state directory and one' +
+          ' lock serialize the managed instances of this robot app',
       }),
   handler: async (argv) => {
     const [channel] = await parseConfiguredChannels(

@@ -88,6 +88,13 @@ const INSTANCE_SCOPED_REFUSALS = new Set([
 const INSTANCE_REFUSAL_DROP_LIMIT = 1;
 const INBOX_LIMIT = 256;
 const CHANNEL_NOT_FOUND = 'channel_not_found';
+// The wire's text bound (the control plane's Jakarta @Size) and the Harness
+// envelope's byte line, mirrored locally to keep this package free of core
+// imports; the overhead allowance covers the event's JSON metadata around the
+// text. Both match the email reference adapter's clamp.
+const MAX_WIRE_TEXT_CHARS = 32_000;
+const ENVELOPE_BYTE_LIMIT = 64 * 1024;
+const TEXT_ENVELOPE_OVERHEAD_BYTES = 4096;
 
 interface InboxItem {
   messageId: string;
@@ -307,7 +314,8 @@ export class ManagedDingtalkAdapter {
     const senderId =
       str(parsed['senderStaffId']) ?? str(parsed['senderId']) ?? '';
     const msgId = str(parsed['msgId']) ?? item.messageId;
-    const text = extractText(parsed);
+    const rawText = extractText(parsed);
+    const text = rawText ? fitInboundText(rawText) : rawText;
     // Remember the newest webhook for the conversation before anything else:
     // the reply may arrive after this webhook's own message is long gone.
     if (conversationId && sessionWebhook) {
@@ -643,4 +651,22 @@ function extractText(parsed: Record<string, unknown>): string | undefined {
     if (typeof content === 'string' && content.trim()) return content.trim();
   }
   return undefined;
+}
+
+/**
+ * The wire admits at most MAX_WIRE_TEXT_CHARS characters and the Harness
+ * envelope at most ENVELOPE_BYTE_LIMIT bytes of event JSON. Clamp to both so
+ * an over-long message is admitted truncated instead of meeting a
+ * deterministic 400 and being dropped whole — the same choice the email
+ * reference makes. A CJK message can sit under the character line yet
+ * overflow the byte envelope, so the byte cut lands on a code-point boundary.
+ */
+function fitInboundText(text: string): string {
+  const bounded = text.slice(0, MAX_WIRE_TEXT_CHARS);
+  const byteLimit = ENVELOPE_BYTE_LIMIT - TEXT_ENVELOPE_OVERHEAD_BYTES;
+  if (Buffer.byteLength(bounded, 'utf8') <= byteLimit) return bounded;
+  const bytes = Buffer.from(bounded, 'utf8');
+  let end = byteLimit;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString('utf8');
 }

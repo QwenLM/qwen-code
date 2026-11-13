@@ -85,6 +85,18 @@ it, and there is no mailbox to re-fetch from — so the pending claim persists t
 full inbound event. A restart re-drives that exact persisted event; it must not
 drop an admission it can no longer rebuild.
 
+Inbound text is clamped to what the wire admits before it is submitted — at most
+32,000 characters and the Harness's 64 KiB byte envelope, with the byte cut on a
+code-point boundary — the same clamp the email reference applies. An over-long
+message is therefore admitted truncated instead of meeting a deterministic
+refusal and being dropped whole. A CJK message can sit under the character line
+yet overflow the byte envelope, so both bounds are enforced.
+
+The reply context's `sessionWebhook` is a bearer capability. Restart durability
+requires persisting it with the state (a `0600` file inside a `0700` directory),
+where the Legacy channel held it only in an in-memory map. That on-disk exposure
+is new relative to Legacy and is the price of the ack-once re-drive.
+
 ## Files affected
 
 - `packages/channels/base/src/managed-channel.ts` (new) — the shared adapter
@@ -113,8 +125,10 @@ drop an admission it can no longer rebuild.
   implementation is called out before it is added.
 - No DingTalk interactive/card surfaces (H5e), no attachment kinds beyond inline
   staging (Media), no proactive sends or automation (H6).
-- The Legacy `DingtalkChannel` is untouched; the managed adapter is a separate
-  implementation that reuses the provider mechanics, not the Legacy class.
+- The Legacy `DingtalkChannel`'s behavior is unchanged; the only Legacy edit is
+  extracting the connect-logging credential guard into a shared module so it has
+  a single copy. The managed adapter is a separate implementation that reuses the
+  provider mechanics, not the Legacy class.
 
 ## Validation plan
 
@@ -122,10 +136,16 @@ drop an admission it can no longer rebuild.
   `email`; enablement admits `dingtalk` and still refuses an unknown adapter;
   email's existing suites stay green unchanged after the contract move.
 - Adapter witnesses (deps-injected, no live provider): an inbound message is
-  admitted once and a redelivery replays; a multi-segment claim sends each
-  segment in order and receipts each by ordinal; a send interrupted between
-  receipts resumes only the unsent segments; a failed send reports `unknown`,
-  never a second send. Each rule disabled in turn reds its case.
+  admitted once and a redelivery replays; over-long inbound text is truncated to
+  the wire bound rather than dropped; a multi-segment claim sends each segment in
+  order and receipts each by ordinal; a non-accepted segment stops the rest of
+  its delivery; a failed send reports `unknown`, never a second send; a persisted
+  receipt replays on restart rather than settling `unknown`; the deterministic
+  admission refusal, the instance-scoped stall (including across a restart) and
+  the registration-refusal re-register each red their case. Resuming the
+  still-unsent segments after an interruption is the control plane's
+  partial/resume re-claim (#17002), unchanged here. Each rule disabled in turn
+  reds its case.
 - The real-provider leg (stream inbound + sessionWebhook outbound) is exercised
   against a fake DingTalk endpoint in the deps, mirroring the email adapter's
   fake-transport tests; a live-tenant smoke is a follow-up, not a merge gate.
