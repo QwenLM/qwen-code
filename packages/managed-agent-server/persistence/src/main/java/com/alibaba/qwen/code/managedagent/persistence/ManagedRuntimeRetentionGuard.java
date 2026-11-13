@@ -6,8 +6,8 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeRetention;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 
 import java.nio.charset.StandardCharsets;
@@ -73,15 +73,15 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
         if (request.getIsolationKey() != null) {
             return exists(connection, "SELECT 1 FROM ma_session_head h WHERE h.tenant_key = ?"
                             + " AND h.harness_key = ? AND h.tenant_id = ? AND h.session_id = ?"
-                            + stale + " LIMIT 1", JdbcRuntimeBindingRepository.harnessDrainKey(
+                            + stale + " LIMIT 1", RuntimeAdmissionFences.harnessDrainKey(
                                     request.getScope().getTenantId()),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(request.getIsolationKey()),
+                    RuntimeAdmissionFences.harnessDrainKey(request.getIsolationKey()),
                     identity(request.getScope().getTenantId()), identity(request.getIsolationKey()));
         }
         return exists(connection, "SELECT 1 FROM ma_runtime_session s JOIN ma_session_head h"
                         + " ON h.tenant_key = ? AND h.tenant_id = s.tenant_id AND h.session_id = s.harness_session_id"
                         + " WHERE s.binding_id = ? AND s.runtime_generation = ?" + stale + " LIMIT 1",
-                JdbcRuntimeBindingRepository.harnessDrainKey(request.getScope().getTenantId()),
+                RuntimeAdmissionFences.harnessDrainKey(request.getScope().getTenantId()),
                 identity(binding.getBindingId()), binding.getGeneration());
     }
 

@@ -70,6 +70,7 @@ import {
 import {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V3,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
   HOSTED_WORKSPACE_FILE_PROFILE_V3,
   HOSTED_WORKSPACE_READ_PROFILE,
@@ -80,6 +81,10 @@ import {
   isHostedWorkspaceReadProfile,
   type HostedWorkspaceToolProfile,
 } from './hosted-workspace-profiles.js';
+import {
+  LoopWakeupError,
+  type HostedLoopSession,
+} from './hosted-loop-session.js';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import {
   HOSTED_PUBLIC_PLAN_TOOL,
@@ -167,6 +172,7 @@ import {
 } from './hosted-shell-input.js';
 import { MANAGED_WORKSPACE_CONTEXT_FILES } from './managed-runtime-provider-protocol.js';
 import type { HostedMcpSession } from './hosted-mcp-session.js';
+import type { HostedClientFilesSession } from './hosted-client-files-session.js';
 import type {
   HostedHookSession,
   HostedPromptHookRunner,
@@ -789,6 +795,66 @@ export const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
     additionalProperties: false,
   },
 };
+// Self-paced /loop: schedule the next wakeup of a self-paced loop. The
+// continuation is future model input, so the arm is vetted by the turn's
+// permission classifier and gated by qwen.managed-agent.loop.enabled.
+export const HOSTED_LOOP_WAKEUP_TOOL: FunctionDeclaration = {
+  name: 'loop_wakeup',
+  description:
+    'Schedule when to resume work in a self-paced loop iteration (always pass the `prompt` arg). Call this before ending the turn to keep the loop alive; omit the call to end the loop. One-shot and durable — it survives a Harness restart. A self-paced wakeup chain may run for at most 24h. When a background task you started will wake you on its own, keep this wakeup as a long fallback heartbeat rather than a poll.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      delaySeconds: {
+        type: 'number',
+        description:
+          'Seconds from now to wake up. Clamped to [60, 3600]. Use 60-270s only when actively polling external state that nothing else reports; when a background task will wake you via a notification, use 1200-1800s as a fallback. With no specific signal to watch, default to 1200s+.',
+      },
+      prompt: {
+        type: 'string',
+        maxLength: 10000,
+        description:
+          'Continuation prompt to enqueue when the wakeup fires. Prefix with `/loop` so the next firing re-invokes the loop skill.',
+      },
+      reason: {
+        type: 'string',
+        description:
+          'One short sentence explaining the chosen delay. Shown to the user. Be specific.',
+      },
+    },
+    required: ['delaySeconds', 'prompt'],
+    additionalProperties: false,
+  },
+};
+// The union cron list/cancel surface (decision 8), shared with the
+// fixed-interval sibling: this slice lists and cancels the pending loop
+// wakeup; the sibling's cron jobs join the same two tools when it lands.
+export const HOSTED_CRON_LIST_TOOL: FunctionDeclaration = {
+  name: 'cron_list',
+  description:
+    'List the pending loop wakeups scheduled via loop_wakeup (and, once available, cron jobs). Shows each wakeup’s id, fire time, and continuation prompt.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {},
+    additionalProperties: false,
+  },
+};
+export const HOSTED_CRON_DELETE_TOOL: FunctionDeclaration = {
+  name: 'cron_delete',
+  description:
+    'Cancel a pending loop wakeup scheduled via loop_wakeup (or, once available, a cron job) by its id. A wakeup whose turn already started cannot be cancelled.',
+  parametersJsonSchema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'string',
+        description: 'The id returned by loop_wakeup (loop:<wakeupId>).',
+      },
+    },
+    required: ['id'],
+    additionalProperties: false,
+  },
+};
 // #13753 I3: the read profile of a snapshot child, which reads a frozen copy
 // of its parent's Workspace. Nothing here writes, and the turn refuses any
 // call it does not declare.
@@ -815,6 +881,9 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'edit',
   'run_shell_command',
   'todo_write',
+  'loop_wakeup',
+  'cron_list',
+  'cron_delete',
   ...HOSTED_MEMORY_TOOLS,
   'agent',
   'send_message',
@@ -1837,6 +1906,7 @@ interface HostedPreparedRequest {
   isShell: boolean;
   inputDigest?: string;
   mcp: boolean;
+  clientFiles?: boolean;
   payloadJson: string;
   inputBytes: Buffer;
   digest: string;
@@ -1857,6 +1927,9 @@ interface HostedPreparedRequest {
   planExit?: boolean;
   question?: boolean;
   todo?: boolean;
+  loop?: boolean;
+  cronList?: boolean;
+  cronDelete?: boolean;
   memory?: boolean;
 }
 
@@ -1870,8 +1943,12 @@ function skipsRuntimeBroker(request: HostedPreparedRequest): boolean {
       request.question ||
       request.skill ||
       request.todo ||
+      request.loop ||
+      request.cronList ||
+      request.cronDelete ||
       request.memory ||
-      request.workflow,
+      request.workflow ||
+      request.clientFiles,
   );
 }
 
@@ -1881,6 +1958,35 @@ function convertToFunctionResponse(
 ): ReturnType<typeof baseFunctionResponse> {
   const parts = baseFunctionResponse(...args);
   for (const part of parts) diagnosticResults.set(part, 'success');
+  return parts;
+}
+
+/** Converts an MCP tool result's content array into model response parts. */
+function clientFilesResultParts(result: { content?: unknown[] }): Part[] {
+  const parts: Part[] = [];
+  for (const item of result.content ?? []) {
+    if (!item || typeof item !== 'object') continue;
+    const entry = item as {
+      type?: string;
+      text?: string;
+      data?: string;
+      mimeType?: string;
+    };
+    if (entry.type === 'text' && typeof entry.text === 'string') {
+      parts.push({ text: entry.text });
+    } else if (
+      entry.type === 'image' &&
+      typeof entry.data === 'string' &&
+      typeof entry.mimeType === 'string'
+    ) {
+      parts.push({
+        inlineData: { mimeType: entry.mimeType, data: entry.data },
+      });
+    } else {
+      parts.push({ text: JSON.stringify(item) });
+    }
+  }
+  if (parts.length === 0) parts.push({ text: '' });
   return parts;
 }
 
@@ -1969,12 +2075,19 @@ export class HostedWorkspaceToolTurn {
   // Calls a PermissionRequest Hook allowed, which the mode then never asks.
   private readonly hookAllowed = new Set<string>();
   private readonly mcp?: HostedMcpSession;
+  private readonly clientFiles?: HostedClientFilesSession;
+  // Client-files tool names captured when declarations were built, so a call
+  // to a since-revoked registration is refused even though resolve() now
+  // returns nothing (the declarations snapshot still advertises the name).
+  private clientFilesDeclaredNames: ReadonlySet<string> = new Set();
   private readonly hooks?: HostedHookSession;
   private readonly profile?: string;
   private readonly context?: HostedWorkspaceContextSlot;
   private readonly foregroundOnly: boolean;
   private readonly childRuns?: HostedChildRunSession;
   private readonly monitors?: HostedMonitorSession;
+  private readonly loops?: HostedLoopSession;
+  private readonly wakeKick?: () => void;
   private readonly backgroundLane?: HostedShellTurnOptions;
   private readonly childAgents?: HostedChildAgentSession;
   private childModelRoute?: { modelId: string; route: PublicChildModelRoute };
@@ -2055,6 +2168,7 @@ export class HostedWorkspaceToolTurn {
       memory?: HostedMemorySession;
       memoryOnly?: boolean;
       mcp?: HostedMcpSession;
+      clientFiles?: HostedClientFilesSession;
       hooks?: HostedHookSession;
       profile?: string;
       context?: HostedWorkspaceContextSlot;
@@ -2062,6 +2176,8 @@ export class HostedWorkspaceToolTurn {
       childDepth?: number;
       childRuns?: HostedChildRunSession;
       monitors?: HostedMonitorSession;
+      loops?: HostedLoopSession;
+      wakeKick?: () => void;
       backgroundLane?: HostedShellTurnOptions;
       childAgents?: {
         readonly funnel: HostedChildAgentSession;
@@ -2110,11 +2226,14 @@ export class HostedWorkspaceToolTurn {
     this.extensionConfig = extras?.extensionConfig;
     this.foregroundOnly = extras?.foregroundOnly === true;
     this.mcp = this.foregroundOnly ? undefined : extras?.mcp;
+    this.clientFiles = this.foregroundOnly ? undefined : extras?.clientFiles;
     this.hooks = this.foregroundOnly ? undefined : extras?.hooks;
     this.profile = extras?.profile;
     this.context = extras?.context;
     this.childRuns = this.foregroundOnly ? undefined : extras?.childRuns;
     this.monitors = this.foregroundOnly ? undefined : extras?.monitors;
+    this.loops = this.foregroundOnly ? undefined : extras?.loops;
+    this.wakeKick = this.foregroundOnly ? undefined : extras?.wakeKick;
     this.backgroundLane = this.foregroundOnly
       ? undefined
       : extras?.backgroundLane;
@@ -2149,9 +2268,11 @@ export class HostedWorkspaceToolTurn {
         this.mcp ||
         this.memberPlanMode ||
         this.childDepth !== 0 ||
-        !['hosted-workspace-files/1', 'hosted-workspace-shell/1'].includes(
-          this.profile ?? '',
-        ))
+        ![
+          'hosted-workspace-files/1',
+          'hosted-workspace-shell/1',
+          'hosted-workspace-shell/3',
+        ].includes(this.profile ?? ''))
     )
       throw new Error('Public Plan mode is unavailable for this Session.');
     this.publication =
@@ -2198,14 +2319,27 @@ export class HostedWorkspaceToolTurn {
   }
 
   private get fileBackupsEnabled(): boolean {
-    return !this.mcp || this.profile === 'hosted-workspace-shell/1';
+    return (
+      !this.mcp ||
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3
+    );
   }
 
   private declaresTodoTool(): boolean {
     return (
       this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
-      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3
     );
+  }
+
+  private declaresLoopTool(): boolean {
+    return this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3;
+  }
+
+  private declaresCronTools(): boolean {
+    return this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3;
   }
 
   private questionsAdmitted(): boolean {
@@ -2225,6 +2359,7 @@ export class HostedWorkspaceToolTurn {
         HOSTED_WORKSPACE_FILE_PROFILE_V2,
         HOSTED_WORKSPACE_FILE_PROFILE_V3,
         HOSTED_WORKSPACE_SHELL_PROFILE,
+        HOSTED_WORKSPACE_SHELL_PROFILE_V3,
       ].includes(this.profile ?? HOSTED_WORKSPACE_FILE_PROFILE)
     );
   }
@@ -2252,7 +2387,7 @@ export class HostedWorkspaceToolTurn {
 
   diagnosticMcpToolNames(): ReadonlySet<string> {
     return new Set(
-      (this.mcp?.tools() ?? [])
+      [...(this.mcp?.tools() ?? []), ...(this.clientFiles?.tools() ?? [])]
         .map((tool) => tool.name)
         .filter((name): name is string => Boolean(name)),
     );
@@ -2305,6 +2440,19 @@ export class HostedWorkspaceToolTurn {
     );
   }
 
+  // The client-files declarations plus the revoked-name bookkeeping, decided in
+  // one place so every profile branch that advertises tools stays consistent
+  // with a registration the harness already admitted.
+  private clientFilesDeclarations(): FunctionDeclaration[] {
+    const tools = this.clientFiles?.tools() ?? [];
+    this.clientFilesDeclaredNames = new Set(
+      tools
+        .map((tool) => tool.name)
+        .filter((name): name is string => Boolean(name)),
+    );
+    return tools;
+  }
+
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
     await this.memory?.ready();
@@ -2354,6 +2502,9 @@ export class HostedWorkspaceToolTurn {
       );
       if (this.memory) this.advertised.push(...hostedMemoryDeclarations());
       if (this.publicPlanMode) this.advertised.push(HOSTED_PUBLIC_PLAN_TOOL);
+      // A registration the harness admitted must reach the model on this
+      // profile too, or the panel reports connected for tools never handed out.
+      this.advertised.push(...this.clientFilesDeclarations());
       return this.planning
         ? this.advertised.filter(
             (tool) =>
@@ -2368,6 +2519,7 @@ export class HostedWorkspaceToolTurn {
     // Session has; the refusal of every other call rests on this alone.
     if (isHostedWorkspaceReadProfile(this.profile)) {
       this.advertised = [...HOSTED_WORKSPACE_READ_TOOLS];
+      this.advertised.push(...this.clientFilesDeclarations());
       return this.advertised;
     }
     if (this.mcp) await waitForTurn(this.mcp.refresh(signal), signal);
@@ -2377,6 +2529,9 @@ export class HostedWorkspaceToolTurn {
     const memberCommands = await this.memberCommandsDeclared();
     const skill = this.skills?.declaration();
     const todoTool = this.declaresTodoTool();
+    const clientFilesTools = this.clientFilesDeclarations();
+    const loopTool = this.declaresLoopTool();
+    const cronTools = this.declaresCronTools();
     this.advertised = [
       ...[
         ...(this.publication || this.shell
@@ -2384,6 +2539,8 @@ export class HostedWorkspaceToolTurn {
           : [...HOSTED_WORKSPACE_FILE_TOOLS, HOSTED_WEB_FETCH_TOOL]),
         ...(search ? [HOSTED_GLOB_TOOL] : []),
         ...(todoTool ? [HOSTED_TODO_WRITE_TOOL] : []),
+        ...(loopTool ? [HOSTED_LOOP_WAKEUP_TOOL] : []),
+        ...(cronTools ? [HOSTED_CRON_LIST_TOOL, HOSTED_CRON_DELETE_TOOL] : []),
       ]
         .filter((tool) => tool.name !== 'monitor' || this.monitorsAdmitted())
         .map((declaration) => {
@@ -2413,6 +2570,7 @@ export class HostedWorkspaceToolTurn {
         }),
       ...(this.memory ? hostedMemoryDeclarations() : []),
       ...(this.mcp?.tools() ?? []),
+      ...clientFilesTools,
       ...(skill ? [skill] : []),
       // H4b: the Agent tool joins the declaration set only on a
       // Shell-laned Session whose own child orchestrator exists (never in
@@ -3331,10 +3489,22 @@ export class HostedWorkspaceToolTurn {
             callId: call.callId,
           })) ||
         intents.some((entry) => entry.payload['ordinal'] === ordinal) ||
+        // A client-files call commits its own durable tool_result on the
+        // harness-local accept path (no broker dispatch). The accept path
+        // stamps executionStatus on that result, so its presence — not the
+        // declared name alone — is the dispatch evidence: a call denied at
+        // approval never reaches the accept path and carries no
+        // executionStatus, so it must not fire an outcome hook. Not gated on
+        // success, so an executed-but-failed call fires PostToolUseFailure.
+        (this.clientFilesDeclaredNames.has(call.name) &&
+          response?.['executionStatus'] !== undefined) ||
         // A team tool commits only to the journal and answers a refusal as
         // its error, so its committed answer is its own dispatch evidence.
         (((call.name === 'skill' && this.skills !== undefined) ||
           (call.name === 'todo_write' && this.declaresTodoTool()) ||
+          (call.name === 'loop_wakeup' && this.declaresLoopTool()) ||
+          (call.name === 'cron_list' && this.declaresCronTools()) ||
+          (call.name === 'cron_delete' && this.declaresCronTools()) ||
           (this.memory !== undefined && isHostedMemoryTool(call.name)) ||
           HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
           (call.name === 'exit_plan_mode' &&
@@ -4252,6 +4422,10 @@ export class HostedWorkspaceToolTurn {
           call.args,
           runtimeCallId,
         );
+        const clientFilesTool =
+          mcpInput === undefined
+            ? this.clientFiles?.resolve(call.name)
+            : undefined;
         const isShell = call.name === 'run_shell_command';
         const skill =
           mcpInput === undefined &&
@@ -4358,6 +4532,18 @@ export class HostedWorkspaceToolTurn {
           input = { ...call.args };
         } else if (mcpInput) {
           input = { ...mcpInput.input };
+        } else if (clientFilesTool) {
+          input = { ...call.args };
+        } else if (this.clientFilesDeclaredNames.has(call.name)) {
+          // The declarations snapshot still advertises this client-files tool,
+          // but the registration was revoked before the call ran. Refuse it
+          // here instead of letting it fall through to the Workspace file-tool
+          // arm (which would tell the model to retry with file_path and then
+          // dispatch it through the broker).
+          validationError = denied(
+            'The client filesystem registration is no longer active.',
+          );
+          input = { ...call.args };
         } else if (skill) {
           validationError = source.some((other) => other.name !== 'skill')
             ? HOSTED_SKILL_BATCH_REFUSAL
@@ -4526,6 +4712,35 @@ export class HostedWorkspaceToolTurn {
           const check = checkHostedTodoWriteInput(call.args);
           input = check.input;
           if (check.error) validationError = check.error;
+        } else if (call.name === 'loop_wakeup') {
+          const args = call.args;
+          const delaySeconds = args['delaySeconds'];
+          const prompt = args['prompt'];
+          const reason = args['reason'];
+          if (typeof delaySeconds !== 'number') {
+            validationError = 'loop_wakeup requires a numeric delaySeconds.';
+          } else if (typeof prompt !== 'string' || !prompt.trim()) {
+            validationError = 'loop_wakeup requires a nonempty prompt.';
+          } else if (reason !== undefined && typeof reason !== 'string') {
+            validationError = 'loop_wakeup reason must be a string.';
+          }
+          // canonicalJson refuses undefined values, so an absent reason must
+          // be omitted, not carried as `reason: undefined`.
+          input = {
+            delaySeconds,
+            prompt,
+            ...(reason === undefined ? {} : { reason }),
+          };
+        } else if (call.name === 'cron_list') {
+          input = {};
+        } else if (call.name === 'cron_delete') {
+          const id = call.args['id'];
+          if (typeof id !== 'string' || !id.trim()) {
+            validationError = 'cron_delete requires a nonempty id.';
+          }
+          // The funnel cancels by exact id, so dispatch the trimmed id the
+          // nonempty check validated — a padded id must not silently no-op.
+          input = { id: typeof id === 'string' ? id.trim() : id };
         } else if (call.name === 'monitor') {
           const args = call.args;
           const unsupportedKey = Object.keys(args).find(
@@ -5032,6 +5247,7 @@ export class HostedWorkspaceToolTurn {
           isShell,
           inputDigest,
           mcp: mcpInput !== undefined,
+          clientFiles: clientFilesTool !== undefined,
           ...encoded,
           argsDigest,
           publicationId:
@@ -5053,6 +5269,9 @@ export class HostedWorkspaceToolTurn {
           planExit,
           question: call.name === 'ask_user_question',
           todo: call.name === 'todo_write',
+          loop: mcpInput === undefined && call.name === 'loop_wakeup',
+          cronList: mcpInput === undefined && call.name === 'cron_list',
+          cronDelete: mcpInput === undefined && call.name === 'cron_delete',
           memory: this.memory !== undefined && isHostedMemoryTool(call.name),
         };
       });
@@ -5078,7 +5297,8 @@ export class HostedWorkspaceToolTurn {
             (tool) => tool.name === call.name,
           ) &&
           !(this.memory && isHostedMemoryTool(call.name)) &&
-          !(this.publicPlanMode && call.name === 'exit_plan_mode'),
+          !(this.publicPlanMode && call.name === 'exit_plan_mode') &&
+          !this.clientFiles?.resolve(call.name),
       )
     ) {
       return this.refuseBatch(
@@ -5086,9 +5306,12 @@ export class HostedWorkspaceToolTurn {
         calls.map((call) =>
           HOSTED_WORKSPACE_FILE_TOOLS.some((tool) => tool.name === call.name) ||
           (this.memory && isHostedMemoryTool(call.name)) ||
-          (this.publicPlanMode && call.name === 'exit_plan_mode')
+          (this.publicPlanMode && call.name === 'exit_plan_mode') ||
+          this.clientFiles?.resolve(call.name)
             ? undefined
-            : 'Resident Workspace supports only read_file, write_file and edit.',
+            : this.clientFilesDeclaredNames.has(call.name)
+              ? 'The client filesystem registration is no longer active.'
+              : 'Resident Workspace supports only read_file, write_file and edit.',
         ),
         calls.map(() => 'denied'),
         parts,
@@ -5154,7 +5377,14 @@ export class HostedWorkspaceToolTurn {
       this.hooks ||
       this.mcp ||
       requests.some(
-        (request) => !request.skill && !request.todo && !request.memory,
+        (request) =>
+          !request.skill &&
+          !request.todo &&
+          !request.memory &&
+          !request.clientFiles &&
+          !request.loop &&
+          !request.cronList &&
+          !request.cronDelete,
       )
     )
       await waitForTurn(this.warmed, signal);
@@ -5178,7 +5408,11 @@ export class HostedWorkspaceToolTurn {
           request.command !== true &&
           !request.skill &&
           !request.todo &&
-          !request.memory,
+          !request.memory &&
+          request.clientFiles !== true &&
+          !request.loop &&
+          !request.cronList &&
+          !request.cronDelete,
       )
     ) {
       // Acquisition may have taken effect even when its reply is lost.
@@ -6144,6 +6378,115 @@ export class HostedWorkspaceToolTurn {
           responses.push(...converted);
           continue;
         }
+        if (request.loop) {
+          let converted: Part[];
+          try {
+            const arm = await this.loops!.arm({
+              delaySeconds: request.input['delaySeconds'] as number,
+              prompt: request.input['prompt'] as string,
+              reason: request.input['reason'] as string | undefined,
+            });
+            this.wakeKick?.();
+            converted = convertToFunctionResponse(
+              request.call.name,
+              request.call.callId,
+              [
+                {
+                  text: `Loop wakeup ${arm.id} scheduled for ${new Date(arm.fireAt).toISOString()} (in ${arm.clampedDelaySeconds}s).`,
+                },
+              ],
+            );
+            const response = converted[0]?.functionResponse;
+            if (!response)
+              throw new Error('Hosted loop wakeup result is missing.');
+            response.response = {
+              ...response.response,
+              ...arm,
+              executionStatus: 'success',
+            };
+          } catch (cause) {
+            if (!(cause instanceof LoopWakeupError)) throw cause;
+            converted = convertToFunctionErrorResponse(
+              request.call.name,
+              request.call.callId,
+              [],
+              cause.message,
+            );
+          }
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted loop wakeup result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
+          responses.push(...converted);
+          continue;
+        }
+        if (request.cronList) {
+          const wakeups = await this.loops!.list();
+          const text =
+            wakeups.length === 0
+              ? 'No active cron jobs or loop wakeups.'
+              : wakeups
+                  .map(
+                    (wakeup) =>
+                      `${wakeup.id} — wakeup at ${
+                        wakeup.fireAt === null
+                          ? 'now'
+                          : new Date(wakeup.fireAt).toISOString()
+                      } (one-shot) [durable]: ${wakeup.prompt}`,
+                  )
+                  .join('\n');
+          const converted = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [{ text }],
+          );
+          const response = converted[0]?.functionResponse;
+          if (!response) throw new Error('Hosted cron_list result is missing.');
+          response.response = {
+            ...response.response,
+            wakeups,
+            executionStatus: 'success',
+          };
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted cron_list result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
+          responses.push(...converted);
+          continue;
+        }
+        if (request.cronDelete) {
+          const id = request.input['id'] as string;
+          const cancelled = await this.loops!.cancel(id);
+          this.wakeKick?.();
+          const converted = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            [
+              {
+                text: cancelled
+                  ? `Cancelled ${id}.`
+                  : `No pending wakeup ${id} to cancel.`,
+              },
+            ],
+          );
+          const response = converted[0]?.functionResponse;
+          if (!response)
+            throw new Error('Hosted cron_delete result is missing.');
+          response.response = {
+            ...response.response,
+            cancelled,
+            executionStatus: 'success',
+          };
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted cron_delete result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
+          responses.push(...converted);
+          continue;
+        }
         if (request.skill) {
           const converted = skillBatch![index].responseParts;
           await this.commit('tool_result', converted, model);
@@ -6164,6 +6507,12 @@ export class HostedWorkspaceToolTurn {
               signal,
               messageId,
             )),
+          );
+          continue;
+        }
+        if (request.clientFiles) {
+          responses.push(
+            ...(await this.acceptClientFiles(request, model, signal)),
           );
           continue;
         }
@@ -7427,6 +7776,12 @@ export class HostedWorkspaceToolTurn {
       : this.childModelRoute;
     if (extensionAgent?.model && !childModel)
       throw new Error('Extension agent model is unavailable.');
+    // Client-files tool names are generation-scoped and vanish with the
+    // registration (a reconnect, an unregister or a harness restart), so they
+    // are deliberately not admitted into the durable launch pin: they are
+    // re-derived from the live catalog on every drive, and the strict snapshot
+    // comparison must fingerprint only the stable tool set or an ephemeral
+    // name would trigger a false recovery.
     const allowed = (this.advertised ?? [])
       .map((tool) => tool.name!)
       .filter(
@@ -7440,7 +7795,10 @@ export class HostedWorkspaceToolTurn {
           !extensionAgent?.disallowedTools?.includes(name),
       );
     const descriptor = extensionAgent
-      ? { ...extensionAgent.descriptor, toolNames: allowed }
+      ? {
+          ...extensionAgent.descriptor,
+          toolNames: allowed,
+        }
       : undefined;
     const publicLaunch = this.publicChildren
       ? ((await children.publicLaunchSnapshot(childRunId)) ??
@@ -9221,6 +9579,10 @@ export class HostedWorkspaceToolTurn {
           (request.call.name === 'skill' && this.skills !== undefined) ||
           (request.memory && HOSTED_MEMORY_READS.has(request.call.name)) ||
           this.hookAllowed.has(request.call.callId) ||
+          // The arm's funnel admission review is the single classification
+          // (decision 9 replaces the interactive dialog); classifying here too
+          // would double-gate every tick and lose the durable admission record.
+          request.loop ||
           !hostedApprovalAsks(settings, request.call.name, globProfile)
         )
           continue;
@@ -9791,6 +10153,90 @@ export class HostedWorkspaceToolTurn {
     return APPROVAL_REFUSALS.expired;
   }
 
+  /**
+   * Executes one client filesystem tool in the harness (the relay MCP client
+   * is harness-local, never the worker) and commits its result through the
+   * normal durable tool-result path. A dropped registration or a failed call
+   * becomes the call's error response, never a Turn failure.
+   */
+  private async acceptClientFiles(
+    request: HostedPreparedRequest,
+    model: string,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    const tool = this.clientFiles?.resolve(request.call.name);
+    let parts: Part[];
+    let executionStatus: 'success' | 'error' = 'error';
+    if (!tool) {
+      parts = convertToFunctionErrorResponse(
+        request.call.name,
+        request.call.callId,
+        [],
+        'The client filesystem registration is no longer active.',
+      );
+    } else {
+      try {
+        signal.throwIfAborted();
+        const result = (await this.clientFiles!.invoke(
+          tool,
+          request.input,
+          signal,
+        )) as {
+          content?: unknown[];
+          isError?: boolean;
+        };
+        // A cancellation that landed while the browser round trip was in flight
+        // must not be journalled as a tool result: re-check after the await and
+        // let the abort propagate instead of committing a bogus failure.
+        signal.throwIfAborted();
+        const converted = clientFilesResultParts(result);
+        if (result.isError) {
+          parts = convertToFunctionErrorResponse(
+            request.call.name,
+            request.call.callId,
+            converted,
+            'The client files tool reported an error.',
+          );
+        } else {
+          parts = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            converted,
+          );
+          executionStatus = 'success';
+        }
+      } catch (cause) {
+        if (signal.aborted) throw cause;
+        parts = convertToFunctionErrorResponse(
+          request.call.name,
+          request.call.callId,
+          [],
+          cause instanceof Error
+            ? cause.message
+            : 'The client files tool failed.',
+        );
+      }
+    }
+    // Stamp the accept-path outcome like the memory/todo/shell accept paths do.
+    // It is the durable dispatch evidence completeHookResults reads: a call
+    // denied at approval never reaches this accept path, so its refusal
+    // response carries no executionStatus and must not fire an outcome hook.
+    for (const part of parts) {
+      if (part.functionResponse) {
+        part.functionResponse.response = {
+          ...part.functionResponse.response,
+          executionStatus,
+        };
+      }
+    }
+    if (!this.messageFitsInline('tool_result', parts, model))
+      throw new Error(
+        'Hosted client files result exceeds the inline Session Store limit.',
+      );
+    await this.commit('tool_result', parts, model);
+    return parts;
+  }
+
   private async permissionDecision(
     request: HostedPreparedRequest,
     settings?: HostedApprovalSettings,
@@ -9800,17 +10246,32 @@ export class HostedWorkspaceToolTurn {
     const input = request.mcp
       ? (request.input as unknown as import('@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js').ManagedMcpInvoke)
       : undefined;
+    const clientFilesTool = request.clientFiles
+      ? this.clientFiles?.resolve(request.call.name)
+      : undefined;
     const identity =
       input?.request.kind === 'tool_call'
         ? { serverName: input.serverId, serverToolName: input.request.name }
-        : undefined;
-    const identities =
-      this.mcp?.getCatalogs().flatMap((catalog) =>
+        : clientFilesTool
+          ? {
+              serverName: this.clientFiles!.catalogs()[0].serverId,
+              serverToolName: clientFilesTool.name,
+            }
+          : undefined;
+    const identities = [
+      ...(this.mcp?.getCatalogs().flatMap((catalog) =>
         catalog.tools.map((tool) => ({
           serverName: catalog.serverId,
           serverToolName: tool.name,
         })),
-      ) ?? [];
+      ) ?? []),
+      ...(this.clientFiles?.catalogs().flatMap((catalog) =>
+        catalog.tools.map((tool) => ({
+          serverName: catalog.serverId,
+          serverToolName: tool.name,
+        })),
+      ) ?? []),
+    ];
     return evaluateHostedPermissionRules(
       selected.permissionRules,
       {

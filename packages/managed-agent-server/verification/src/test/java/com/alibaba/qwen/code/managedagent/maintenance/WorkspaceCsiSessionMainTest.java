@@ -423,7 +423,7 @@ class WorkspaceCsiSessionMainTest {
                 "recordAdmission", "recordRecoveryAdmission", "retractContinuationOutput", "retractHarnessTurnOutput",
                 "recordHarnessEvents", "cancelBeforeAdmission", "failTurn", "appendPublicEventIfAbsent",
                 "appendLiveSessionEventIfAbsent", "beginTaskCancelOperation", "deferMaterializationTarget",
-                "beginSessionRename", "completeSessionRename", "abandonSessionRename");
+                "settleRenameSync");
         assertThat(Arrays.stream(ManagedAgentStore.class.getMethods()).map(Method::getName).distinct()
                 .filter(names::contains).sorted().toList())
                 .containsExactlyElementsOf(names.stream().sorted().toList());
@@ -581,10 +581,6 @@ class WorkspaceCsiSessionMainTest {
             if (type == Map.class) {
                 return Map.of();
             }
-            if (type == StoreModels.RenameDelivery.class) {
-                return new StoreModels.RenameDelivery(
-                                                "tenant", sessionId, "unused", "title", 1, 0);
-            }
             throw new IllegalStateException("Unsupported mutation parameter " + type);
         }).toArray();
         if (method.getParameterTypes()[0] == String.class) {
@@ -592,8 +588,7 @@ class WorkspaceCsiSessionMainTest {
         }
         int sessionIndex = switch (method.getName()) {
             case "insertTurnCommand", "insertCancelCommand", "beginSessionMutation" -> 4;
-            case "completeSessionMutation", "abandonSessionMutation", "beginSessionRename" -> 3;
-            case "completeSessionRename", "abandonSessionRename" -> 2;
+            case "completeSessionMutation", "abandonSessionMutation", "settleRenameSync" -> 3;
             default -> 1;
         };
         if (method.getParameterTypes()[0] == String.class) {
@@ -648,7 +643,7 @@ class WorkspaceCsiSessionMainTest {
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, json.valueToTree(rows));
         }
-        assertThat(result).hasSize(42);
+        assertThat(result).hasSize(47);
         return result;
     }
 

@@ -21,13 +21,21 @@ final class JournalResourceWrites {
     private final JournalFencing fencing;
     private final JournalStoreRows storeRows;
     private final JdbcTemplate jdbc;
+    private final com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings settings;
 
     JournalResourceWrites(JournalFencing fencing,
             JournalStoreRows storeRows,
-            JdbcTemplate jdbc) {
+            JdbcTemplate jdbc,
+            com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings settings) {
         this.fencing = fencing;
         this.storeRows = storeRows;
         this.jdbc = jdbc;
+        this.settings = settings;
+    }
+
+    private boolean ossEnabled() {
+        var resources = settings == null ? null : settings.getSessionResources();
+        return resources != null && resources.isEnabled();
     }
 
     ToolResultResourceRef publishAgentInstructions(String tenantId,
@@ -236,6 +244,18 @@ final class JournalResourceWrites {
             writeFence.run();
             if (existing == null) {
                 if (input.bytes() == null) {
+                    // An over-cap body can only land through the OSS allocation path;
+                    // with that path disabled a missing external reference fails closed
+                    // with 501 rather than the generic missing-resource 409. A captured
+                    // publication resource already exists above and never reaches here.
+                    if (resource.byteLength()
+                            > ManagedSessionStoreModels.inlineResourceBytes(resource.kind())
+                            && !ossEnabled()) {
+                        throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(
+                                501, ManagedSessionStoreModels.ERROR_OSS_DISABLED,
+                                "Resources larger than the inline limit require the disabled"
+                                        + " OSS storage path.");
+                    }
                     throw JournalStoreRows.conflict(
                             ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
                             "A referenced Managed Session resource is"

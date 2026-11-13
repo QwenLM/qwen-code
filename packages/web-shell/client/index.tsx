@@ -389,6 +389,12 @@ export type {
 
 export type { WebShellModelManagementOptions } from './modelManagement';
 export type {
+  WebShellModelPickerContext,
+  WebShellModelPickerItemContext,
+  WebShellModelPickerMount,
+  WebShellModelPickerOptions,
+} from './model-picker';
+export type {
   WebShellUnavailableModel,
   WebShellUnavailableModelTooltipHandle,
   WebShellUnavailableModelTooltipInfo,

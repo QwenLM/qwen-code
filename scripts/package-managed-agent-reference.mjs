@@ -484,7 +484,6 @@ export async function createReferenceDistribution({
   }
 
   const serverJar = `qwen-managed-agent-server-${serverVersion}.jar`;
-  const recoveryJar = `qwen-managed-agent-server-${serverVersion}-operator-recovery.jar`;
   const componentSources = [
     {
       name: 'qwen-managed-agent-server',
@@ -492,13 +491,6 @@ export async function createReferenceDistribution({
       source: `packages/managed-agent-server/server/target/qwen-managed-agent-server-${serverVersion}-exec.jar`,
       destination: `lib/${serverJar}`,
       role: 'control-plane',
-    },
-    {
-      name: 'qwen-managed-agent-operator-recovery',
-      version: serverVersion,
-      source: `packages/managed-agent-server/server/target/${recoveryJar}`,
-      destination: `lib/${recoveryJar}`,
-      role: 'operator-recovery',
     },
   ];
 
@@ -557,23 +549,14 @@ export async function createReferenceDistribution({
   }
 
   const serverLauncher = path.join(stage, 'bin/qwen-managed-agent-server');
-  const recoveryLauncher = path.join(
-    stage,
-    'bin/qwen-managed-agent-operator-recovery',
-  );
   const adminCommand = path.join(stage, 'bin/qwen-managed-agent-admin');
   await verifyAdminCommands(root);
   await mkdir(path.dirname(serverLauncher), { recursive: true });
   await Promise.all([
     writeFile(serverLauncher, launcher(serverJar)),
-    writeFile(recoveryLauncher, launcher(recoveryJar)),
     writeFile(adminCommand, adminLauncher(serverJar)),
   ]);
-  await Promise.all([
-    chmod(serverLauncher, 0o755),
-    chmod(recoveryLauncher, 0o755),
-    chmod(adminCommand, 0o755),
-  ]);
+  await Promise.all([chmod(serverLauncher, 0o755), chmod(adminCommand, 0o755)]);
 
   const components = [];
   for (const component of componentSources) {
@@ -660,7 +643,6 @@ export async function createReferenceDistribution({
     `${rootName}/manifest.json`,
     `${rootName}/SHA256SUMS`,
     `${rootName}/bin/qwen-managed-agent-server`,
-    `${rootName}/bin/qwen-managed-agent-operator-recovery`,
     `${rootName}/bin/qwen-managed-agent-admin`,
     // The two launchers exec these modules.
     `${rootName}/bin/qwen-managed-agent-bootstrap`,
