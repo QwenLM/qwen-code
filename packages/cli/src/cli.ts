@@ -21,6 +21,7 @@ import {
   DEFAULT_COMMAND_DESC,
   QUERY_POSITIONAL,
   TOP_LEVEL_DEPRECATED_OPTIONS,
+  TOP_LEVEL_GLOBAL_OPTIONS,
   TOP_LEVEL_HELP_OPTIONS,
   TOP_LEVEL_USAGE,
 } from './config/top-level-options.js';
@@ -404,20 +405,7 @@ export function resolveBootstrapRoute(
   // every exact version token before `--`, and post-`--` tokens are
   // positional data the fast path persists verbatim.
   if (firstArg === 'memory') return 'memory';
-  if (firstArg === 'mcp') {
-    const nextArg = argv[1];
-    // Global options belong to the full parser. The MCP-only parser neither
-    // registers them nor recognizes a subcommand after an intervening flag.
-    if (
-      nextArg?.startsWith('-') &&
-      nextArg !== '--' &&
-      nextArg !== '--help' &&
-      nextArg !== '-h'
-    ) {
-      return 'default';
-    }
-    return 'mcp';
-  }
+  if (firstArg === 'mcp') return 'mcp';
   if (firstArg === 'managed-runtime-worker') {
     return 'managed-runtime-worker';
   }
@@ -472,9 +460,37 @@ async function printBootstrapVersion(): Promise<void> {
 }
 
 async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
-  const argv: readonly string[] = normalizeMcpFastPathArgv(
+  let argv: readonly string[] = normalizeMcpFastPathArgv(
     normalizeServeFastPathArgv(rawArgv),
   );
+  if (argv[1]?.startsWith('-') && argv[1] !== '--help' && argv[1] !== '-h') {
+    const { default: yargsInstance } = await import('yargs');
+    let invalidPrefix = false;
+    // Parse only the prefix: root options must not consume MCP server args.
+    const prefix = await yargsInstance([])
+      .options(TOP_LEVEL_GLOBAL_OPTIONS)
+      .parserConfiguration({
+        'halt-at-non-option': true,
+        'parse-positional-numbers': false,
+      })
+      .help(false)
+      .version(false)
+      .option('help', { alias: 'h', type: 'boolean' })
+      .strictOptions()
+      .exitProcess(false)
+      .fail((message, error) => {
+        invalidPrefix = true;
+        writeStderrLine(message || error?.message || 'Unknown argument error');
+        process.exitCode = 1;
+      })
+      .parseAsync(argv.slice(1));
+    if (invalidPrefix) return;
+    if (prefix.help) {
+      printMcpHelp();
+      return;
+    }
+    argv = ['mcp', ...prefix._.map(String)];
+  }
   const hasSubcommand = argv.length > 1 && !argv[1]!.startsWith('-');
   if (!hasSubcommand) {
     printMcpHelp();

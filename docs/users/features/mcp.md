@@ -541,7 +541,7 @@ instead of adjusting its limits.
 
 You can always configure MCP servers by manually editing `settings.json`, but the CLI is usually faster.
 
-Global options can appear before the MCP subcommand; for example, `qwen mcp --debug list` runs the list command with debug mode enabled.
+Registered global options such as `--debug` can appear between `mcp` and its subcommand: `qwen mcp --debug list` runs the list command. Management commands accept this prefix for compatibility without initializing the interactive CLI's debugging options. Adding a global prefix does not change how server arguments are parsed; for example, `qwen mcp --debug add srv docker run -d alpine` preserves `-d` in the saved command.
 
 #### Adding a server (`qwen mcp add`)
 
