@@ -1054,6 +1054,9 @@ describe('no-AK integration CI wiring', () => {
     expect(diagnosticJob).toContain('issue17040-diagnostic/run.mjs');
     expect(diagnosticJob).toContain('codex/issue17040-windows-diagnostic');
     expect(diagnosticJob).toContain('prompt_delay_ms: [0, 12000]');
+    expect(diagnosticJob).toContain("probe: ['on']");
+    expect(diagnosticJob).toContain("probe: 'off'");
+    expect(diagnosticJob).toContain('QWEN17040_DISABLE_PRELOAD:');
     expect(diagnosticJob).toContain('QWEN17040_FIRST_PROMPT_DELAY_MS');
     // The gate's run steps inherit ci.yml's workflow-level bash default, so
     // the smoke must execute these commands under the same shell; a

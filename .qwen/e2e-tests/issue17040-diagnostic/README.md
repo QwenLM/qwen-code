@@ -10,6 +10,8 @@ Use Node 22.23.4 (`node --version`). Install the release into a temporary direct
 
 Set `QWEN17040_FIRST_PROMPT_DELAY_MS=12000` for the phase comparison; the default sends the first prompt immediately. This changes only the test's wait before sending a prompt, not channel liveness or shell timeouts. The outer harness waits up to 150 seconds after admission so cold startup plus the slow download is not cut off by the fixture.
 
+Set `QWEN17040_DISABLE_PRELOAD=1` for the control with no diagnostic hooks loaded into either product process. The Windows matrix includes this control at the 12000ms delay to check for observer-induced stalls.
+
 ```powershell
 $release = Join-Path $env:TEMP 'qwen17040-release'
 npm install --prefix $release --no-audit --no-fund '@qwen-code/qwen-code@0.27.2'
@@ -51,6 +53,8 @@ The ACP child's metadata also records PTY loading and spawn outcomes. A `pty_spa
 
 `write_call` and `write_return` include queue size, drain state, and the return boolean. `drain`, `error`, and `close` events are observed through the existing emitter; the preload neither adds event listeners nor supplies extra write callbacks. A `write_callback` is recorded only if the caller already supplied one. Calling `write()` or returning `true` does not prove delivery to the other process or completion at the OS layer.
 
-Capture keeps at most 64 KiB of a frame in memory and writes at most 2 MiB of JSONL per process. It persists only method names, hashed IDs, byte counts, process identifiers, timing, and stream state. It does not persist request parameters, results, prompts, tool arguments, credentials, or full skill bodies. Oversized-frame metadata is extracted only from the leading JSON-RPC envelope, when possible. Worker threads return immediately from the preload; node-pty workers are not patched. The daemon's target ACP launch gets an explicit `--require` so the child-side observations do not depend on inherited preload behavior.
+The ACP-only CPU profiler samples every 10ms and stops after the first event-loop delay over five seconds, or after 60 seconds. It persists only the top 25 aggregate stacks with function names, allowed code-file basenames, line/column numbers, and sample durations. It never saves the full profile or script sources. Slow synchronous filesystem calls over 500ms record duration and the same restricted stack metadata, without paths or arguments. Diagnostic logging frames remain identifiable in the aggregate so its own I/O cannot be mistaken for product work. PTY module-load start/end events separate loading from actual native spawn.
+
+Capture keeps at most 64 KiB of a frame in memory and writes at most 2 MiB of JSONL per process. It persists only method names, hashed IDs, byte counts, process identifiers, timing, stream state, and the restricted call-site metadata described above. It does not persist request parameters, results, prompts, tool arguments, credentials, or full skill bodies. Oversized-frame metadata is extracted only from the leading JSON-RPC envelope, when possible. Worker threads return immediately from the preload; node-pty workers are not patched. The daemon's target ACP launch gets an explicit `--require` so the child-side observations do not depend on inherited preload behavior.
 
 `PASS` means this controlled run was healthy. `FAIL` requires inspecting `summary.json` and the wire metadata; it does not automatically prove the reporter's original root cause. Windows, its bundled ConPTY backend, the reporter's proxy, and real-model behavior remain unverified until this diagnostic is run in those environments. Instrumentation itself can change timing.

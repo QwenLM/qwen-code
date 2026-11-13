@@ -23,7 +23,8 @@ const generated = spawnSync(openssl, ['req', '-x509', '-newkey', 'rsa:2048', '-n
 if (generated.status !== 0) throw new Error('Cannot generate test certificate; set QWEN17040_OPENSSL to an OpenSSL executable.');
 
 const promptDelayMs = Number(process.env.QWEN17040_FIRST_PROMPT_DELAY_MS ?? 0);
-const summary = { node: process.version, platform: process.platform, arch: process.arch, osRelease: os.release(), firstPromptDelayMs: promptDelayMs, out, started: new Date().toISOString(), downloadComplete: false, shellExitCode: null, shellSucceeded: false, turnComplete: false, sessionDied: false, statsFailures: 0, permissionFallbacks: 0, shellProgress: [], signals: [] };
+const instrumented = process.env.QWEN17040_DISABLE_PRELOAD !== '1';
+const summary = { node: process.version, platform: process.platform, arch: process.arch, osRelease: os.release(), firstPromptDelayMs: promptDelayMs, instrumented, out, started: new Date().toISOString(), downloadComplete: false, shellExitCode: null, shellSucceeded: false, turnComplete: false, sessionDied: false, statsFailures: 0, permissionFallbacks: 0, shellProgress: [], signals: [] };
 const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 const tlsServer = https.createServer({ key: fs.readFileSync(key), cert: fs.readFileSync(cert) }, (_req, res) => {
   res.writeHead(200, { 'content-length': 831741, 'content-type': 'application/json' });
@@ -63,7 +64,7 @@ const proxyPort = await listen(proxy);
 const quoted = value => '"' + value.replaceAll('"', '') + '"';
 command = `${process.platform === 'win32' ? 'curl.exe' : 'curl'} -sS --cacert ${quoted(cert)} --proxy http://127.0.0.1:${proxyPort} --connect-timeout 25 --max-time 60 -o ${quoted(download)} -w "catalog http=%{http_code} size=%{size_download}\\n" https://raw.githubusercontent.com/Pal-AI-Lab/cortico-extensions/main/catalog.json`;
 const preload = fileURLToPath(new URL('./wire-preload.cjs', import.meta.url)).replaceAll('\\', '/');
-const env = { ...process.env, QWEN_HOME: home, QWEN_RUNTIME_DIR: path.join(out, 'runtime'), QWEN17040_TRACE_DIR: trace, OPENAI_API_KEY: 'sk-mock', OPENAI_BASE_URL: `http://127.0.0.1:${proxyPort}/v1`, OPENAI_MODEL: 'mock-model', NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require ${JSON.stringify(preload)}` };
+const env = { ...process.env, QWEN_HOME: home, QWEN_RUNTIME_DIR: path.join(out, 'runtime'), QWEN17040_TRACE_DIR: trace, OPENAI_API_KEY: 'sk-mock', OPENAI_BASE_URL: `http://127.0.0.1:${proxyPort}/v1`, OPENAI_MODEL: 'mock-model', NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''}${instrumented ? ` --require ${JSON.stringify(preload)}` : ''}` };
 const daemon = spawn(process.execPath, [cli, 'serve', '--port', '0', '--workspace', workspace, '--no-web'], { cwd: workspace, env, stdio: ['ignore', 'pipe', 'pipe'] });
 summary.daemonPid = daemon.pid;
 let interval, abort, eventTask;

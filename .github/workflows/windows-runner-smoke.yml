@@ -128,7 +128,7 @@ jobs:
 
   diagnose:
     if: "${{ github.ref_name == 'codex/issue17040-windows-diagnostic' }}"
-    name: 'Issue 17040 (${{ matrix.os }}, delay ${{ matrix.prompt_delay_ms }})'
+    name: 'Issue 17040 (${{ matrix.os }}, delay ${{ matrix.prompt_delay_ms }}, probe ${{ matrix.probe }})'
     runs-on: '${{ matrix.os }}'
     timeout-minutes: 15
     strategy:
@@ -136,8 +136,14 @@ jobs:
       matrix:
         os: ['windows-2025']
         prompt_delay_ms: [0, 12000]
+        probe: ['on']
+        include:
+          - os: 'windows-2025'
+            prompt_delay_ms: 12000
+            probe: 'off'
     env:
       QWEN17040_FIRST_PROMPT_DELAY_MS: '${{ matrix.prompt_delay_ms }}'
+      QWEN17040_DISABLE_PRELOAD: "${{ matrix.probe == 'off' && '1' || '0' }}"
     defaults:
       run:
         shell: 'pwsh'
@@ -166,7 +172,7 @@ jobs:
         if: '${{ always() }}'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
         with:
-          name: 'issue17040-${{ matrix.os }}-delay${{ matrix.prompt_delay_ms }}'
+          name: 'issue17040-${{ matrix.os }}-delay${{ matrix.prompt_delay_ms }}-probe${{ matrix.probe }}'
           path: |
             ${{ runner.temp }}/qwen17040-run/summary.json
             ${{ runner.temp }}/qwen17040-run/trace/*.jsonl
