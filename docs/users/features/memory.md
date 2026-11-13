@@ -241,6 +241,8 @@ Opens the Memory panel. From here you can:
 - Open the project QWEN.md
 - Browse the auto-memory folder
 
+In Web Shell, `/memory refresh` also reloads the selected file's content. If a temporary read failure made the file read-only, refresh after resolving the problem to retry the read and restore editing.
+
 ### `/memory migrate-team`
 
 Migrates the **team memory** tier (`.qwen/team-memory/`) to the structured metadata format: each file gains the frontmatter (name, description, category, keywords, usage scenarios) that memory recall needs. Personal and project memory are migrated automatically in the background once [structured recall](#structured-recall-opt-in) is enabled; team memory is shared through git, so the rewrite runs only on explicit request and shows up as a reviewable commit. Run it once per repository in a trusted workspace with team memory enabled.

@@ -64,6 +64,7 @@ export function MemoryMessage({
   const [editable, setEditable] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const handledAddSignalRef = useRef(0);
+  const handledRefreshSignalRef = useRef(0);
 
   const entries = useMemo<MemoryEntry[]>(() => {
     const globalFile = fileForScope(files, 'global');
@@ -106,6 +107,7 @@ export function MemoryMessage({
       setDraft('');
       setEditable(true);
       if (!entry?.file) {
+        setContentLoading(false);
         if (nextMode === 'edit') {
           requestAnimationFrame(() => editorRef.current?.focus());
         }
@@ -158,9 +160,22 @@ export function MemoryMessage({
   }, [error]);
 
   useEffect(() => {
-    if (refreshSignal <= 0) return;
+    if (refreshSignal <= 0 || !selectedEntry) return;
+    if (handledRefreshSignalRef.current === refreshSignal) return;
+    handledRefreshSignalRef.current = refreshSignal;
+    const loadSeq = loadSeqRef.current;
     reload()
-      .then(() => setMessage(t('memory.refreshed')))
+      .then((nextStatus) => {
+        if (!nextStatus || loadSeq !== loadSeqRef.current) return;
+        loadContent(
+          {
+            ...selectedEntry,
+            file: fileForScope(nextStatus.files, selectedEntry.scope),
+          },
+          mode,
+        );
+        setMessage(t('memory.refreshed'));
+      })
       .catch((refreshError: unknown) => {
         const text =
           refreshError instanceof Error
@@ -169,7 +184,7 @@ export function MemoryMessage({
         setMessage(text);
         onMessage?.(text, 'error');
       });
-  }, [onMessage, refreshSignal, reload, t]);
+  }, [loadContent, mode, onMessage, refreshSignal, reload, selectedEntry, t]);
 
   useEffect(() => {
     if (addSignal <= 0) return;

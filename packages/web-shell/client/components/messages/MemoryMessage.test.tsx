@@ -80,6 +80,17 @@ function button(label: string): HTMLButtonElement {
   return match;
 }
 
+async function refreshMemory(signal = 1) {
+  act(() => {
+    root.render(
+      <I18nProvider language="en">
+        <MemoryMessage refreshSignal={signal} />
+      </I18nProvider>,
+    );
+  });
+  await flush();
+}
+
 function type(textarea: HTMLTextAreaElement, text: string) {
   act(() => {
     const setter = Object.getOwnPropertyDescriptor(
@@ -120,6 +131,86 @@ afterEach(() => {
 });
 
 describe('MemoryMessage', () => {
+  it('retries a failed content read when the unchanged file is refreshed', async () => {
+    memory.readMemoryFile.mockRejectedValue(
+      new Error('temporary read failure'),
+    );
+    await mountOnUserTab();
+    expect(button('Edit').disabled).toBe(true);
+
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'recovered memory\n',
+      truncated: false,
+    });
+    memory.reload.mockResolvedValue(memory.status);
+    const readsBeforeRefresh = memory.readMemoryFile.mock.calls.length;
+
+    await refreshMemory();
+
+    expect(memory.reload).toHaveBeenCalledTimes(1);
+    expect(memory.readMemoryFile).toHaveBeenCalledTimes(readsBeforeRefresh + 1);
+    expect(container.textContent).toContain('recovered memory');
+    expect(button('Edit').disabled).toBe(false);
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+  });
+
+  it('keeps failed content read-only when refreshing the list fails', async () => {
+    memory.readMemoryFile.mockRejectedValue(
+      new Error('temporary read failure'),
+    );
+    await mountOnUserTab();
+    const readsBeforeRefresh = memory.readMemoryFile.mock.calls.length;
+    // useDaemonResource returns undefined for failed or superseded reloads.
+    memory.reload.mockResolvedValue(undefined);
+
+    await refreshMemory();
+
+    expect(memory.readMemoryFile).toHaveBeenCalledTimes(readsBeforeRefresh);
+    expect(button('Edit').disabled).toBe(true);
+    expect(container.textContent).not.toContain('Memory refreshed');
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+  });
+
+  it('clears a pending content load if refresh finds the file was removed', async () => {
+    memory.readMemoryFile.mockReturnValue(new Promise(() => {}));
+    await mountOnUserTab();
+    memory.reload.mockImplementation(async () => {
+      memory.files = [];
+      memory.status = { ...memory.status!, files: [], fileCount: 0 };
+      return memory.status;
+    });
+
+    await refreshMemory();
+
+    expect(container.textContent).not.toContain('Loading file');
+    expect(button('Edit').disabled).toBe(false);
+    act(() => button('Edit').click());
+    await flush();
+    expect(container.querySelector('textarea')?.disabled).toBe(false);
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+  });
+
+  it('does not restore the previous tab when a pending refresh completes', async () => {
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'user memory\n',
+      truncated: false,
+    });
+    await mountOnUserTab();
+    let finishRefresh!: (status: DaemonWorkspaceMemoryStatus) => void;
+    memory.reload.mockImplementation(
+      () => new Promise((resolve) => (finishRefresh = resolve)),
+    );
+    await refreshMemory();
+    act(() => button('Workspace').click());
+    await flush();
+
+    await act(async () => finishRefresh(memory.status!));
+
+    expect(container.textContent).not.toContain('user memory');
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+    expect(memory.reload).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps the User tab read-only when its file cannot be read', async () => {
     memory.readMemoryFile.mockRejectedValue(
       new Error(`GET /file: path escapes workspace: ${GLOBAL_PATH}`),
