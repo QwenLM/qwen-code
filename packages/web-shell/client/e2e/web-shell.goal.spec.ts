@@ -262,7 +262,23 @@ for (const width of [1280, 390]) {
       condition,
     );
     await expect(details).toContainText(lastReason);
+    const expandedLayout = await details.evaluate((element) => ({
+      height: element.getBoundingClientRect().height,
+      lineHeight: parseFloat(getComputedStyle(element).lineHeight),
+      overflowing: element.scrollHeight > element.clientHeight,
+    }));
+    expect(expandedLayout.height).toBeLessThanOrEqual(
+      expandedLayout.lineHeight * 6 + 1,
+    );
+    expect(expandedLayout.overflowing).toBe(true);
     await capture(page, testInfo, 'goal-expanded.png');
+    const beforeScroll = await collapse.boundingBox();
+    await details.hover();
+    await page.mouse.wheel(0, 800);
+    await expect
+      .poll(() => details.evaluate((element) => element.scrollTop))
+      .toBeGreaterThan(0);
+    expect(await collapse.boundingBox()).toEqual(beforeScroll);
     await collapse.press('Space');
     await expect(toggle).toHaveAttribute('aria-expanded', 'false');
     await expect(page.getByText(lastReason, { exact: false })).toHaveCount(0);

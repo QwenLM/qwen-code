@@ -80,7 +80,9 @@
 }
 
 .details {
-  padding-top: 6px;
+  margin-top: 6px;
+  max-height: calc(6 * 1.5em);
+  overflow-y: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
