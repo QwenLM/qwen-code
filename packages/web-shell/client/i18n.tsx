@@ -4674,15 +4674,18 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.platform.available': 'Available',
   'channels.platform.configure': 'Configure',
   'channels.platform.add': 'Add connection',
-  'channels.method.title': 'Choose a DingTalk connection',
-  'channels.method.description':
-    'Choose how this Channel connects to DingTalk.',
+  'channels.platform.name.dingtalk': 'DingTalk',
+  'channels.platform.name.feishu': 'Feishu',
+  'channels.method.title': (v) =>
+    `Choose a ${v?.platform ?? 'Channel'} connection`,
+  'channels.method.description': (v) =>
+    `Choose how this Channel connects to ${v?.platform ?? 'the platform'}.`,
   'channels.method.applicationBot': 'Application bot',
   'channels.method.applicationBot.description':
     'Receive messages and reply using an application bot.',
   'channels.method.webhook': 'Webhook (send only)',
   'channels.method.webhook.description':
-    'Send notifications to the group configured by a custom robot webhook.',
+    'Send notifications to the group configured by a custom bot webhook.',
   'channels.status.readyToSend': 'Ready to send',
   'channels.statusDescription.readyToSend':
     'Ready locally. Remote credentials are checked when sending.',
@@ -4791,12 +4794,12 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.qrLogin.error': 'Could not complete the QR binding.',
   'channels.editor.field.dingtalk.clientId': 'Client ID (AppKey)',
   'channels.editor.field.dingtalk.clientSecret': 'Client Secret (AppSecret)',
-  'channels.editor.field.dingtalkWebhook.webhookUrl': 'Webhook URL',
-  'channels.editor.field.dingtalkWebhook.webhookUrl.description':
-    'The secret webhook address of your DingTalk custom robot.',
-  'channels.editor.field.dingtalkWebhook.signingSecret': 'Signing secret',
-  'channels.editor.field.dingtalkWebhook.signingSecret.description':
-    'Required if signature verification is enabled for the custom robot.',
+  'channels.editor.field.webhook.webhookUrl': 'Webhook URL',
+  'channels.editor.field.webhook.webhookUrl.description':
+    'The secret webhook address of your custom bot.',
+  'channels.editor.field.webhook.signingSecret': 'Signing secret',
+  'channels.editor.field.webhook.signingSecret.description':
+    'Required if signature verification is enabled for the custom bot.',
   'channels.editor.field.weixin.groupPolicy': 'Group policy',
   'channels.editor.field.weixin.groupPolicy.description':
     'WeChat iLink Bot only supports direct messages, so groups stay disabled.',
@@ -9612,8 +9615,11 @@ const ZH: Messages = {
   'channels.platform.available': '已开放',
   'channels.platform.configure': '配置',
   'channels.platform.add': '添加连接',
-  'channels.method.title': '选择钉钉连接方式',
-  'channels.method.description': '选择此频道连接钉钉的方式。',
+  'channels.platform.name.dingtalk': '钉钉',
+  'channels.platform.name.feishu': '飞书',
+  'channels.method.title': (v) => `选择${v?.platform ?? '此频道'}的连接方式`,
+  'channels.method.description': (v) =>
+    `选择此频道连接${v?.platform ?? '平台'}的方式。`,
   'channels.method.applicationBot': '应用机器人',
   'channels.method.applicationBot.description':
     '通过应用机器人接收消息并回复。',
@@ -9715,11 +9721,11 @@ const ZH: Messages = {
   'channels.qrLogin.cancelled': '已取消绑定。',
   'channels.qrLogin.error': '无法完成扫码绑定。',
   'channels.editor.field.dingtalk.clientId': 'Client ID（原 AppKey）',
-  'channels.editor.field.dingtalkWebhook.webhookUrl': 'Webhook 地址',
-  'channels.editor.field.dingtalkWebhook.webhookUrl.description':
-    '钉钉自定义机器人的私密 Webhook 地址。',
-  'channels.editor.field.dingtalkWebhook.signingSecret': '加签密钥',
-  'channels.editor.field.dingtalkWebhook.signingSecret.description':
+  'channels.editor.field.webhook.webhookUrl': 'Webhook 地址',
+  'channels.editor.field.webhook.webhookUrl.description':
+    '自定义机器人的私密 Webhook 地址。',
+  'channels.editor.field.webhook.signingSecret': '加签密钥',
+  'channels.editor.field.webhook.signingSecret.description':
     '自定义机器人启用加签验证时需填写。',
   'channels.editor.field.dingtalk.clientSecret':
     'Client Secret（原 AppSecret）',
