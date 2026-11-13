@@ -3429,6 +3429,8 @@ export const ChatEditor = memo(
                   <button
                     className={`${styles.toolBtn} ${styles.modeToolBtn} ${
                       showModeLabel ? '' : styles.toolBtnCompact
+                    } ${
+                      currentMode === 'yolo' ? styles.modeToolBtnDanger : ''
                     }`}
                     data-web-shell-mode-button
                     disabled={
