@@ -591,6 +591,8 @@ const GOAL_HELD_RECOVERY_COMMANDS =
   'Run:\n/goal pause\nThen, when ready:\n/goal resume';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
+/** Carries an output-limit truncation from the turn to the ACP boundary. */
+const OUTPUT_TRUNCATED_META_KEY = 'qwen.outputTruncated';
 const MAX_DAEMON_ATTACHMENT_REFERENCES = 256;
 function readDaemonAttachmentReferences(
   value: unknown,
@@ -5992,7 +5994,15 @@ export class Session implements SessionContext {
         turnRecording,
         result,
       );
-      return result;
+      // The ACP boundary. Inside this package a truncated answer keeps its
+      // `end_turn` outcome so the completion gates that decide Goal pauses,
+      // channel delivery and rewind points still see a finished turn; only
+      // the client is told, via the closed `StopReason` union, that the
+      // answer is incomplete.
+      return result.stopReason === 'end_turn' &&
+        result._meta?.[OUTPUT_TRUNCATED_META_KEY] === true
+        ? { ...result, stopReason: 'max_tokens' }
+        : result;
     } catch (error) {
       recordAdmissionCancellation();
       const pendingSend = turnRecording?.abortController;
@@ -8087,9 +8097,9 @@ export class Session implements SessionContext {
             let memoryTasksRanInClient = false;
             // Whether the turn's last model response ended truncated at the
             // output limit. A bounded MAX_TOKENS recovery that ran out its
-            // attempts leaves the response truncated with no other trace, so
-            // the turn's stop reason is the only place an ACP client can see
-            // that the answer is incomplete.
+            // attempts leaves the response truncated; carrying it on the
+            // response lets the ACP boundary tell the client the answer is
+            // incomplete without changing the internal `end_turn` outcome.
             let truncatedAtOutputLimit = false;
             let restorePostAnswerNoticesAttached = false;
             // conversation_finished must fire on every terminal path of the
@@ -8797,21 +8807,24 @@ export class Session implements SessionContext {
                     channelTurn,
                   );
               // Recovery is bounded: exhausting its attempts leaves the answer
-              // cut off, and reporting a normal stop would let the client
-              // treat it as complete.
-              const stopReason =
-                truncatedAtOutputLimit &&
-                result.stopReason === 'end_turn' &&
-                !pendingSend.signal.aborted
-                  ? 'max_tokens'
-                  : result.stopReason;
+              // cut off. The internal outcome stays `end_turn` — every
+              // completion gate inside this package reads it, and a Goal turn
+              // would otherwise pause on a session-token limit that was never
+              // hit — so the truncation rides as its own field and is
+              // rewritten to `max_tokens` only where it crosses the ACP
+              // boundary in `prompt()`.
               this.#recordPromptCompletionEffects(
                 result,
                 responseCapture,
                 isFreshUserTurn,
                 { channelTurn, sharedModelRound, memoryTasksRanInClient },
               );
-              return { stopReason };
+              return truncatedAtOutputLimit && result.stopReason === 'end_turn'
+                ? {
+                    stopReason: result.stopReason,
+                    _meta: { [OUTPUT_TRUNCATED_META_KEY]: true },
+                  }
+                : { stopReason: result.stopReason };
             } finally {
               logConversationFinishedEvent(
                 this.config,
@@ -9248,9 +9261,9 @@ export class Session implements SessionContext {
       requestRouteKey,
       channelDeliveryResponseBlock,
       // A bounded output recovery that exhausted its attempts ends
-      // here with the response still truncated. Reporting the
-      // turn's stop as `max_tokens` is what lets an ACP client
-      // tell an unresolved output limit from a completed answer.
+      // here with the response still truncated. Carrying that out of
+      // the round is what lets the ACP boundary tell an unresolved
+      // output limit from a completed answer.
       maxTokensTruncated: lastFinishReason === FinishReason.MAX_TOKENS,
       // The client runs the turn's memory tasks when a response
       // stops on its own.
