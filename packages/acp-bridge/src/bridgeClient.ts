@@ -2714,11 +2714,16 @@ export class BridgeClient implements Client {
     }
     if (method === '_qwencode/end_turn') {
       const sessionId = params['sessionId'];
+      if (typeof sessionId !== 'string' || sessionId.length === 0) return;
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
       const reason = params['reason'];
       const source = params['source'];
+      // A malformed Goal terminal must not pin future loads to live replay.
+      if (source === 'goal') {
+        entry.goalTurnActive = false;
+      }
       if (
-        typeof sessionId !== 'string' ||
-        sessionId.length === 0 ||
         typeof reason !== 'string' ||
         reason.length === 0 ||
         reason.length > 128 ||
@@ -2726,10 +2731,7 @@ export class BridgeClient implements Client {
       ) {
         return;
       }
-      const entry = this.resolveEntry(sessionId);
-      if (!entry || !this.ownsSession(sessionId)) return;
       if (source === 'goal') {
-        entry.goalTurnActive = false;
         // Before the promptId validation below: a malformed id costs the
         // session its `turn_complete`, but the queue must still be settled.
         this.onAutomaticTurnEnded?.(sessionId);

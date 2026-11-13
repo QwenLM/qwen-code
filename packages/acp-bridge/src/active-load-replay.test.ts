@@ -17,6 +17,75 @@ function deferred<T>() {
 }
 
 describe('active session paged replay', () => {
+  it('refreshes persisted replay after a malformed Goal terminal', async () => {
+    let transcriptReads = 0;
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) return {};
+        transcriptReads++;
+        return {
+          v: 1,
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'persisted history page' },
+              },
+            },
+          ],
+          hasMore: true,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await handle.agentConnection.extNotification('_qwencode/start_turn', {
+        sessionId: session.sessionId,
+        source: 'goal',
+      });
+      await handle.agentConnection.sessionUpdate({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'active live response' },
+        },
+      });
+      const request = {
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        clientId: session.clientId,
+        historyReplay: 'response' as const,
+        liveReplayMode: 'summary' as const,
+        historyPageSize: 100,
+      };
+      const active = await bridge.loadSession(request);
+      expect(transcriptReads).toBe(0);
+      expect(JSON.stringify(active.liveJournal)).toContain(
+        'active live response',
+      );
+
+      await handle.agentConnection.extNotification('_qwencode/end_turn', {
+        sessionId: session.sessionId,
+        source: 'goal',
+        reason: '',
+        promptId: `${session.sessionId}########1`,
+      });
+      const refreshed = await bridge.loadSession(request);
+
+      expect(transcriptReads).toBe(1);
+      expect(JSON.stringify(refreshed.compactedReplay)).toContain(
+        'persisted history page',
+      );
+      expect(refreshed.liveJournal).toEqual([]);
+      expect(refreshed.historyHasMore).toBe(true);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it.each(['foreground', 'background', 'goal'] as const)(
     'serves concurrent loads from memory without transcript reads during a %s turn',
     async (kind) => {
