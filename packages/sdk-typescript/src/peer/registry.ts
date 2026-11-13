@@ -74,11 +74,17 @@ export function isValidSessionKind(kind: string): boolean {
   return KIND_RE.test(kind);
 }
 
+// Written into the XDG directory while it is the default global dir in use;
+// see Storage.getGlobalQwenDir() in packages/core.
+const GLOBAL_DIR_MARKER = '.qwen-global-dir';
+
 /**
  * The Qwen home this process should use: `explicit`, else `QWEN_HOME`, else
- * `~/.qwen`. A leading `~` is expanded and a relative path is resolved
- * against the working directory, the way Qwen Code itself reads the
- * variable — two programs that disagree on this never see each other.
+ * `~/.qwen` (on Linux, the XDG config directory for a new install, while an
+ * existing `~/.qwen` keeps being used). A leading `~` is expanded and a
+ * relative path is resolved against the working directory, the way Qwen Code
+ * itself reads the variable — two programs that disagree on this never see
+ * each other.
  */
 export function resolveQwenHome(explicit?: string): string {
   const configured = explicit || process.env['QWEN_HOME'];
@@ -100,7 +106,22 @@ export function resolveQwenHome(explicit?: string): string {
     return path.resolve(resolved);
   }
   const home = os.homedir();
-  return home ? path.join(home, '.qwen') : path.join(os.tmpdir(), '.qwen');
+  if (!home) return path.join(os.tmpdir(), '.qwen');
+  const legacyDir = path.join(home, '.qwen');
+  if (process.platform === 'win32' || process.platform === 'darwin') {
+    return legacyDir;
+  }
+  const xdgConfigHome = process.env['XDG_CONFIG_HOME'];
+  const xdgDir = path.join(
+    xdgConfigHome && path.isAbsolute(xdgConfigHome)
+      ? xdgConfigHome
+      : path.join(home, '.config'),
+    'qwen',
+  );
+  return !fsSync.existsSync(legacyDir) ||
+    fsSync.existsSync(path.join(xdgDir, GLOBAL_DIR_MARKER))
+    ? xdgDir
+    : legacyDir;
 }
 
 export function sessionRegistryDir(qwenHome: string): string {

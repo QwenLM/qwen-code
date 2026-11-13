@@ -93,7 +93,10 @@ export interface PeerEndpointOptions {
   sessionId?: string;
   /** Free text recorded as the writer's version. */
   version?: string;
-  /** The Qwen home to join. Default `QWEN_HOME`, else `~/.qwen`. */
+  /**
+   * The Qwen home to join. Default `QWEN_HOME`, else `~/.qwen` (on Linux, the
+   * XDG config directory for a new install). See `resolveQwenHome()`.
+   */
   qwenHome?: string;
   /**
    * Bind the inbox here instead of choosing a path. If something live

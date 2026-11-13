@@ -73,9 +73,8 @@ const { createHash } = await import('node:crypto');
 const { homedir, tmpdir } = await import('node:os');
 const { parseEnv } = await import('node:util');
 const { fileURLToPath, pathToFileURL } = await import('node:url');
-const { delimiter, dirname, join, parse, resolve, sep } = await import(
-  'node:path'
-);
+const { delimiter, dirname, isAbsolute, join, parse, resolve, sep } =
+  await import('node:path');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const currentEntryPath = realpathSync(fileURLToPath(import.meta.url));
@@ -88,9 +87,33 @@ function getHomeDir() {
   }
 }
 
+// Mirrors Storage.getGlobalQwenDir() in packages/core when QWEN_HOME is unset.
+function getDefaultQwenHome() {
+  let home = '';
+  try {
+    home = homedir();
+  } catch {
+    // Same as an empty home directory, as in getHomeDir().
+  }
+  const legacy = join(home || tmpdir(), '.qwen');
+  if (!home || process.platform === 'win32' || process.platform === 'darwin') {
+    return legacy;
+  }
+  const xdgConfigHome = process.env['XDG_CONFIG_HOME'];
+  const xdg = join(
+    xdgConfigHome && isAbsolute(xdgConfigHome)
+      ? xdgConfigHome
+      : join(home, '.config'),
+    'qwen',
+  );
+  return !existsSync(legacy) || existsSync(join(xdg, '.qwen-global-dir'))
+    ? xdg
+    : legacy;
+}
+
 function resolveQwenHome() {
   const configured = process.env['QWEN_HOME'];
-  if (!configured) return join(getHomeDir(), '.qwen');
+  if (!configured) return getDefaultQwenHome();
   if (configured === '~') return getHomeDir();
   if (configured.startsWith('~/') || configured.startsWith('~\\')) {
     return join(
@@ -107,7 +130,10 @@ function resolveQwenHome() {
 function preResolveQwenHome() {
   if (Object.hasOwn(process.env, 'QWEN_HOME')) return;
   const home = getHomeDir();
-  for (const candidate of [join(home, '.qwen', '.env'), join(home, '.env')]) {
+  for (const candidate of [
+    join(getDefaultQwenHome(), '.env'),
+    join(home, '.env'),
+  ]) {
     try {
       const source = readFileSync(candidate, 'utf8')
         .replace(/^\uFEFF/, '')

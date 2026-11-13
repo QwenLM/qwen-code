@@ -12,6 +12,7 @@ import {
   createTranscriptExecutionLifecycleUpdate,
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
+import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import {
@@ -2350,9 +2351,11 @@ export function resolveHomeLoopResolverRoots({
 } = {}): { homeConfineRoot: string; homeQwenDir: string } {
   // qwenHome truthy → QWEN_HOME is itself the global dir, so confine within
   // homeQwenDir; the homeDir param is only consulted when qwenHome is unset.
+  // An XDG_CONFIG_HOME outside the home directory moves the global dir too.
+  const relocated = qwenHome || (homeDir && !isSubpath(homeDir, homeQwenDir));
   return {
     homeConfineRoot:
-      (qwenHome ? homeQwenDir : homeDir) || path.dirname(homeQwenDir),
+      (relocated ? homeQwenDir : homeDir) || path.dirname(homeQwenDir),
     homeQwenDir,
   };
 }

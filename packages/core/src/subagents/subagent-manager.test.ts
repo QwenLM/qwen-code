@@ -112,6 +112,9 @@ describe('SubagentManager', () => {
     // constructor calls Storage.getGlobalQwenDir(), which needs it.
     vi.mocked(os.homedir).mockReturnValue('/home/user');
     vi.mocked(os.tmpdir).mockReturnValue('/tmp');
+    // On Linux the default global dir depends on which config directories
+    // exist; pin it to the fake home's ~/.qwen these fixtures use.
+    vi.stubEnv('QWEN_HOME', path.join('/home/user', '.qwen'));
 
     mockToolRegistry = {
       warmAll: vi.fn().mockResolvedValue(undefined),
@@ -311,6 +314,7 @@ describe('SubagentManager', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   const validConfig: SubagentConfig = {

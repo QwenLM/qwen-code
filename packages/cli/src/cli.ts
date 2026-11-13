@@ -460,6 +460,17 @@ async function printBootstrapVersion(): Promise<void> {
   writeStdoutLine(await getCliVersion());
 }
 
+// main() does this before parsing, as a subcommand can write to the global
+// dir; these fast paths never reach it.
+async function markDefaultGlobalDir(): Promise<void> {
+  const [{ preResolveHomeEnvOverrides }, { Storage }] = await Promise.all([
+    import('./config/environment.js'),
+    import('@qwen-code/qwen-code-core/config/storage.js'),
+  ]);
+  preResolveHomeEnvOverrides();
+  Storage.markDefaultGlobalQwenDir();
+}
+
 async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
   const argv: readonly string[] = normalizeMcpFastPathArgv(
     normalizeServeFastPathArgv(rawArgv),
@@ -496,6 +507,7 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
     return;
   }
 
+  await markDefaultGlobalDir();
   await parseYargsCommand(parser, argv);
 }
 
@@ -533,6 +545,7 @@ async function runMemoryFastPath(rawArgv: readonly string[]): Promise<void> {
     return;
   }
 
+  await markDefaultGlobalDir();
   await parseYargsCommand(parser, argv);
 }
 

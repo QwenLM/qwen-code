@@ -12,14 +12,14 @@
  * 2. Signal toggle: SIGUSR1 — first signal starts, second stops and writes
  * 3. Command: /doctor cpu-profile [--duration N] — records for N seconds
  *
- * Output: ~/.qwen/cpu-profiles/qwen-code-cpu-<pid>-<timestamp>.cpuprofile
+ * Output: <global Qwen dir>/cpu-profiles/qwen-code-cpu-<pid>-<timestamp>.cpuprofile
  * Zero overhead when disabled (single env var check at init).
  */
 
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { registerCleanup } from './cleanup.js';
 
 // ---------------------------------------------------------------------------
@@ -158,7 +158,7 @@ export async function stopCpuProfile(options?: {
     };
   }
 
-  const outputDir = options?.outputDir ?? defaultOutputDir();
+  const outputDir = options?.outputDir ?? getCpuProfileOutputDir();
   const now = options?.now ?? new Date();
   const rateLimitMs = options?.rateLimitMs ?? RATE_LIMIT_MS;
   const maxProfiles = options?.maxProfiles ?? MAX_PROFILES;
@@ -278,8 +278,8 @@ export function clearCpuProfileRateLimit(): void {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-function defaultOutputDir(): string {
-  return path.join(os.homedir(), '.qwen', 'cpu-profiles');
+export function getCpuProfileOutputDir(): string {
+  return path.join(Storage.getGlobalQwenDir(), 'cpu-profiles');
 }
 
 function formatTimestamp(now: Date): string {

@@ -36074,6 +36074,34 @@ describe('Session', () => {
         expect(roots.homeQwenDir).toBe(homeQwenDir);
       });
 
+      it('confines the home loop resolver within a global dir outside the home directory', () => {
+        // XDG_CONFIG_HOME can do this without QWEN_HOME; confining to the home
+        // directory would refuse the global dir's own loop.md.
+        const homeQwenDir = path.join(os.tmpdir(), 'xdg', 'qwen');
+
+        const roots = resolveHomeLoopResolverRoots({
+          homeDir: path.join(os.tmpdir(), 'real-home'),
+          homeQwenDir,
+          qwenHome: '',
+        });
+
+        expect(roots.homeConfineRoot).toBe(homeQwenDir);
+      });
+
+      it('confines the home loop resolver within the home directory by default', () => {
+        const homeDir = path.join(os.tmpdir(), 'real-home');
+
+        for (const homeQwenDir of [
+          path.join(homeDir, '.qwen'),
+          path.join(homeDir, '.config', 'qwen'),
+        ]) {
+          expect(
+            resolveHomeLoopResolverRoots({ homeDir, homeQwenDir, qwenHome: '' })
+              .homeConfineRoot,
+          ).toBe(homeDir);
+        }
+      });
+
       it('confines the home loop resolver within QWEN_HOME when set', () => {
         const homeQwenDir = path.join(os.tmpdir(), '.qwen-home');
 
