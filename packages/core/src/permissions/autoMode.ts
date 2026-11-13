@@ -381,7 +381,8 @@ function hasRawProtectedWriteCommand(command: string, cwd: string): boolean {
         '',
       );
       for (const candidate of rawProtectedWriteTargets(target, line)) {
-        if (/\$[{(A-Za-z_]/.test(candidate)) return true;
+        // URLs can encode write targets. Review them without probing UNC paths.
+        if (/\$[{(A-Za-z_]|\bhttps?:\/\//i.test(candidate)) return true;
         if (containsProtectedPathFragment(candidate, cwd)) return true;
       }
     }
