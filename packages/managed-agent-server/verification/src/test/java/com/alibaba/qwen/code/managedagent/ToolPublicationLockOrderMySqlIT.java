@@ -69,9 +69,9 @@ import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMI
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
+import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 
 class ToolPublicationLockOrderMySqlIT {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -218,6 +218,16 @@ class ToolPublicationLockOrderMySqlIT {
             boolean prepareInSameTransaction = "admission-and-receipt".equals(operation);
             var jdbc = journal.jdbc;
             ToolPublicationObjectStore objects = new ToolPublicationObjectStore() {
+                @Override
+                public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                    guard.run();
+                    try (InputStream full = open(key)) {
+                        byte[] bytes = full.readAllBytes();
+                        return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                    } catch (java.io.IOException error) {
+                        throw new IllegalStateException(error);
+                    }
+                }
                 @Override
                 public void putIfAbsent(String key, byte[] bytes) {
                     throw new AssertionError("Inline fixture expected");

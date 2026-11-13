@@ -64,7 +64,6 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
-import com.alibaba.qwen.code.managedagent.session.SessionRenameCoordinator;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -84,7 +83,6 @@ import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockHttpServletResponse;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -109,6 +107,7 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
 import static java.util.Map.entry;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -134,6 +133,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "qwen.managed-agent.harness.enabled=false",
         "qwen.managed-agent.automation.enabled=true",
         "qwen.managed-agent.session-store.enabled=true",
+        "qwen.managed-agent.client-files.enabled=true",
         "qwen.managed-agent.dispatch.scan-delay=50ms",
         "qwen.managed-agent.events.poll-interval=10ms",
         "qwen.managed-agent.events.materialize-interval=10ms"
@@ -141,8 +141,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 // SSE responses are still being written when MockMvc runs its result printer.
 @AutoConfigureMockMvc(print = MockMvcPrint.NONE)
 @Import(ManagedAgentServerIntegrationTest.FixtureConfiguration.class)
-// Keep background recovery from claiming the synchronous schema-check rename.
-@MockitoBean(types = SessionRenameCoordinator.class)
 class ManagedAgentApiContractTest {
     private static final String KNOWN_GAPS = "openapi/contract-known-gaps.txt";
     private static final List<String> GAP_CATEGORIES = List.of("route",
@@ -478,6 +476,29 @@ class ManagedAgentApiContractTest {
         run.put("state", "bogus");
         assertThat(CONTRACT.validate("/components/schemas/PublicAutomationRun", run))
                 .isNotEmpty();
+    }
+
+    @Test
+    void managedMcpSnapshotCountsOnlyLiveServersAgainstCapacity() {
+        ObjectNode withRetainedRemoval = mcpManagementSnapshot(32, 1);
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                withRetainedRemoval)).isEmpty();
+
+        // 16 enabled + 17 disabled = 33 live: exercises the disabled arm of
+        // the live-only predicate, which a narrow "enabled"-only `contains`
+        // enum would let through while the implementation rejects it.
+        ObjectNode tooManyLive = mcpManagementSnapshot(33, 0);
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                tooManyLive)).isNotEmpty();
+
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                mcpManagementSnapshot(32, 64))).isEmpty();
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                mcpManagementSnapshot(32, 65))).isNotEmpty();
     }
 
     @Test
@@ -1775,6 +1796,21 @@ class ManagedAgentApiContractTest {
             exchange(drift, sideAction + "WebShellSessionSideQuery", 404,
                     post(WEB_SHELL + "/session-side-queries/" + sideAction).header(TENANT, tenant).principal(actor(tenant)), sideBody);
         }
+        exchange(drift, "registerWebShellClientFiles", 404,
+                post(WEB_SHELL + "/client-files/register").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"sessionId\":\"" + sideSession + "\",\"connectionId\":\"conn-contract\"}");
+        exchange(drift, "unregisterWebShellClientFiles", 404,
+                post(WEB_SHELL + "/client-files/unregister").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"sessionId\":\"" + sideSession + "\"}");
+        exchange(drift, "queryWebShellClientFilesStatus", 404,
+                post(WEB_SHELL + "/client-files/status").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"sessionId\":\"" + sideSession + "\"}");
+        exchange(drift, "streamWebShellClientFilesRequests", 404,
+                post(WEB_SHELL + "/client-files/requests/stream").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"sessionId\":\"" + sideSession + "\",\"generation\":1}");
+        exchange(drift, "respondWebShellClientFiles", 404,
+                post(WEB_SHELL + "/client-files/responses").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"sessionId\":\"" + sideSession + "\",\"generation\":1,\"rpcRequestId\":\"probe\",\"responseJson\":\"{}\"}");
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
@@ -2839,13 +2875,22 @@ class ManagedAgentApiContractTest {
                 List.of("sha256:" + "b".repeat(64)), 1000, 1000));
         var deliveryRepository = new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelDeliveryRepository(jdbc);
         deliveryRepository.findOrCreate(new com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository.ChannelDelivery(
-                channelTenant, "mail-1", "delivery-1", "delivery-1:0", 0, "planned", null, 1000, 1000));
+                channelTenant, "mail-1", "delivery-1", "delivery-1:0", 0, "planned", null, 1000, 1000, 1));
         deliveryRepository.transition(channelTenant, "mail-1", "delivery-1", "planned", "sending", null);
         deliveryRepository.transition(channelTenant, "mail-1", "delivery-1", "sending", "delivered", "<m1@example.com>");
         var segmentRepository = new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelSegmentRepository(jdbc);
         segmentRepository.plan(channelTenant, "mail-1", "delivery-1",
                 List.of(new com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository.SegmentLedger("delivery-1:0", 0, null)));
         segmentRepository.receipt(channelTenant, "mail-1", "delivery-1", 0, "<m1@example.com>");
+        // A second delivery still in flight: segment 0 receipted, segment 1
+        // not — its wire shape must omit provider_receipt for the latter.
+        deliveryRepository.findOrCreate(new com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository.ChannelDelivery(
+                channelTenant, "mail-1", "delivery-2", "delivery-2:0", 0, "planned", null, 1000, 1000, 2));
+        deliveryRepository.transition(channelTenant, "mail-1", "delivery-2", "planned", "sending", null);
+        segmentRepository.plan(channelTenant, "mail-1", "delivery-2",
+                List.of(new com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository.SegmentLedger("delivery-2:0", 0, null),
+                        new com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository.SegmentLedger("delivery-2:1", 1, null)));
+        segmentRepository.receipt(channelTenant, "mail-1", "delivery-2", 0, "<m0@example.com>");
         JsonNode channels = json(exchange(drift, "listAgentChannels", 200,
                 get("/v1/agent-channels").header(TENANT, channelTenant)
                         .principal(reader).param("limit", "10"), null));
@@ -2867,9 +2912,23 @@ class ManagedAgentApiContractTest {
                 get("/v1/agent-channels/{id}/deliveries", "mail-1")
                         .header(TENANT, channelTenant).principal(reader),
                 null));
-        assertThat(deliveries.path("data")).hasSize(1);
-        assertThat(deliveries.path("data").get(0).path("state").asText())
-                .isEqualTo("delivered");
+        assertThat(deliveries.path("data")).hasSize(2);
+        // Anchor the wire state by id, not position: both fixture rows share
+        // gmt_create and the route orders by delivery_id DESC, so data[0] is
+        // delivery-2. A list projection serving a wrong-but-valid state must
+        // red here, not pass on row count alone.
+        JsonNode listed = StreamSupport.stream(
+                deliveries.path("data").spliterator(), false)
+                .filter(row -> "delivery-1".equals(row.path("id").asText()))
+                .findFirst().orElseThrow();
+        assertThat(listed.path("state").asText()).isEqualTo("delivered");
+        // The in-flight row's state must be pinned too: a projection serving a
+        // constant "delivered" would otherwise survive on the terminal row alone.
+        JsonNode inflightRow = StreamSupport.stream(
+                deliveries.path("data").spliterator(), false)
+                .filter(row -> "delivery-2".equals(row.path("id").asText()))
+                .findFirst().orElseThrow();
+        assertThat(inflightRow.path("state").asText()).isEqualTo("sending");
         exchange(drift, "listAgentChannelDeliveries", 404,
                 get("/v1/agent-channels/{id}/deliveries", "missing")
                         .header(TENANT, channelTenant).principal(reader),
@@ -2893,6 +2952,20 @@ class ManagedAgentApiContractTest {
                 .isEqualTo("delivery-1:0");
         assertThat(delivery.path("segments").get(0).path("provider_receipt").asText())
                 .isEqualTo("<m1@example.com>");
+        // The in-flight delivery serves a non-empty segments array, and the
+        // unreceipted segment omits provider_receipt entirely (NON_NULL).
+        JsonNode inflight = json(exchange(drift, "getAgentChannelDelivery",
+                200, get("/v1/agent-channels/{id}/deliveries/{d}", "mail-1",
+                        "delivery-2").header(TENANT, channelTenant)
+                        .principal(reader), null));
+        assertThat(inflight.path("state").asText()).isEqualTo("sending");
+        assertThat(inflight.path("segments").isArray()).isTrue();
+        assertThat(inflight.path("segments")).hasSize(2);
+        assertThat(inflight.path("segments").get(0).path("provider_receipt").asText())
+                .isEqualTo("<m0@example.com>");
+        assertThat(inflight.path("segments").get(1).path("segment_id").asText())
+                .isEqualTo("delivery-2:1");
+        assertThat(inflight.path("segments").get(1).has("provider_receipt")).isFalse();
         exchange(drift, "getAgentChannelDelivery", 404,
                 get("/v1/agent-channels/{id}/deliveries/{d}", "mail-1",
                         "missing").header(TENANT, channelTenant)
@@ -3094,7 +3167,7 @@ class ManagedAgentApiContractTest {
                         .isEqualTo(session.get("last_event_id").asLong());
                 JsonNode webCapabilities = json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false,"diagnostics":true,"btw":false,"recap":false}
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false,"diagnostics":true,"btw":false,"recap":false,"clientFiles":false}
                                 """);
                 assertThat(other.get("capabilities")).isEqualTo(webCapabilities);
             }
@@ -3490,6 +3563,13 @@ class ManagedAgentApiContractTest {
                 + "\"name\":\"fixture\",\"version\":\"1\",\"target\":{\"platform\":\"linux\",\"arch\":\"x64\"},\"components\":[\"skills\"]}")
                 .getBytes(StandardCharsets.UTF_8));
         exchange(drift, "listWorkspaceExtensionPackages", 200, get(base).header(TENANT, tenant).principal(actor), null);
+        exchange(drift, "importWorkspaceExtensionSource", 401, post(base + "/source-imports").header(TENANT, tenant)
+                .header(IDEMPOTENCY_KEY, "source-import"),
+                "{\"reference\":{\"providerId\":\"dataworks\",\"kind\":\"skill\",\"resourceId\":\"skill_1\",\"revision\":\"1\"},\"target\":{\"platform\":\"linux\",\"arch\":\"any\"}}");
+        exchange(drift, "getWorkspaceExtensionSourceImport", 404,
+                get(base + "/source-imports/missing").header(TENANT, tenant).principal(actor), null);
+        exchange(drift, "lookupWorkspaceExtensionSourceImport", 404,
+                get(base + "/source-imports").header(TENANT, tenant).principal(actor).header(IDEMPOTENCY_KEY, "missing"), null);
         exchange(drift, "createWorkspaceExtensionPackage", 401, post(base).header(TENANT, tenant)
                 .header(IDEMPOTENCY_KEY, "extension-publish").param("manifest", encodedManifest).param("packageDigest", digest)
                 .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
@@ -3852,6 +3932,25 @@ class ManagedAgentApiContractTest {
 
     private JsonNode json(String content) throws IOException {
         return objectMapper.readTree(content);
+    }
+
+    private ObjectNode mcpManagementSnapshot(int live, int removed) {
+        ObjectNode snapshot = objectMapper.createObjectNode()
+                .put("sessionId", "mcp-contract-session")
+                .put("revision", 1)
+                .put("supported", true);
+        snapshot.putArray("availableServers");
+        var servers = snapshot.putArray("servers");
+        for (int index = 0; index < live + removed; index++) {
+            servers.addObject()
+                    .put("serverId", "server-" + index)
+                    .put("serverRevision", 1)
+                    .put("definitionDigest", "a".repeat(64))
+                    .put("state", index < live
+                            ? (index < 16 ? "enabled" : "disabled")
+                            : "removed");
+        }
+        return snapshot;
     }
 
     private String errorCode(String content) {

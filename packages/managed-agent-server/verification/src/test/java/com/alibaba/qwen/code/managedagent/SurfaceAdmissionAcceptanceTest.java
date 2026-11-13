@@ -103,6 +103,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
             "qwen.managed-agent.events.materialize-interval=10ms",
             "qwen.managed-agent.session-store.enabled=true",
             "qwen.managed-agent.session-store.binding-key=" + "0123456789abcdef0123456789abcdef",
+            "qwen.managed-agent.client-files.enabled=true",
             "qwen.managed-agent.runtime-broker.ssh.enabled=false",
             "qwen.managed-agent.tool-publication.entry-concurrency=4",
             "qwen.managed-agent.artifacts.enabled=true",
@@ -341,7 +342,11 @@ public class SurfaceAdmissionAcceptanceTest {
     }
 
     public static Stream<SurfaceRegistry> everyRoute() {
-        return Stream.of(SurfaceRegistry.values());
+        // The client-files MCP leg carries no tenant context by design: the
+        // relay credential is its only admission (probed in the rule-class
+        // matrix), so a cross-tenant principal is not a meaningful probe.
+        return Stream.of(SurfaceRegistry.values())
+                .filter(entry -> entry != SurfaceRegistry.INTERNAL_CLIENT_FILES_MCP);
     }
 
     public static Stream<SurfaceRegistry> refusalProbedRoutes() {
@@ -385,6 +390,21 @@ public class SurfaceAdmissionAcceptanceTest {
                 }
             }
             case INTERNAL_SIDE_QUERY -> expect(entry, null, 404, "side_query_not_found");
+            case CLIENT_FILES_OPERATOR -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "session_not_found");
+                expect(entry, READER, 403, "client_files_execution_forbidden");
+            }
+            case CLIENT_FILES_ACTOR -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "session_not_found");
+                if (entry.capabilities().contains(Capability.CLIENT_FILES_STATUS)) {
+                    expect(entry, READER, 200, null);
+                } else {
+                    expect(entry, READER, 404, "client_files_not_found");
+                }
+            }
+            case INTERNAL_CLIENT_FILES -> expect(entry, null, 403, "client_files_credential_invalid");
             case PERSONAL_MEMORY -> {
                 expect(entry, null, 401, "actor_required");
                 expect(entry, STRANGER, 503, "memory_disabled");
@@ -1547,7 +1567,8 @@ public class SurfaceAdmissionAcceptanceTest {
             query.add("expectedScopeRevision=" + digest());
             query.add("uploadId=11111111-1111-4111-8111-111111111111");
         }
-        if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)) {
+        if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
+                && entry != SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_IMPORT) {
             if (entry.template().contains("/imports")) {
                 String metadata = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
                         ("{\"sourceKind\":\"skill\",\"sourceDigest\":\"" + digest() + "\",\"compilerVersion\":1,"
@@ -1596,10 +1617,14 @@ public class SurfaceAdmissionAcceptanceTest {
             default -> post(path);
         };
         request.header(TenantContextFilter.HEADER, headerTenant);
+        if (entry == SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_LOOKUP) {
+            request.header("Idempotency-Key", nextKey());
+        }
         if ("POST".equals(entry.method()) || "PATCH".equals(entry.method()) || "PUT".equals(entry.method())) {
             boolean octets = entry.capabilities().contains(
                     Capability.PUB_SEGMENT) || entry.capabilities().contains(
-                    Capability.PUB_RESOURCE) || entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
+                    Capability.PUB_RESOURCE) || (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
+                    && entry != SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_IMPORT)
                     || entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD);
             request.contentType(octets ? MediaType.APPLICATION_OCTET_STREAM
                     : MediaType.APPLICATION_JSON);
@@ -1633,6 +1658,10 @@ public class SurfaceAdmissionAcceptanceTest {
 
     private String bodyFor(SurfaceRegistry entry, String tenant,
             String session) {
+        if (entry == SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_IMPORT) {
+            return "{\"reference\":{\"providerId\":\"test\",\"kind\":\"skill\",\"resourceId\":\"source\",\"revision\":\"1\"},"
+                    + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"}}";
+        }
         if (entry == SurfaceRegistry.INTERNAL_WRITER_QUIESCE_OWNERSHIP
                 || entry == SurfaceRegistry.INTERNAL_WRITER_RELEASE_OWNERSHIP) {
             String scope = "\"workspaceId\":\"ws\",\"writerId\":\"boot-probe\",\"writerGeneration\":1,"
@@ -1647,6 +1676,15 @@ public class SurfaceAdmissionAcceptanceTest {
             case SIDE_QUERY_CREATE -> publicSurface ? "{\"kind\":\"btw\",\"question\":\"probe\"}"
                     : "{\"sessionId\":\"" + session + "\",\"kind\":\"btw\",\"question\":\"probe\",\"idempotencyKey\":\"" + nextKey() + "\"}";
             case SIDE_QUERY_LIST, SIDE_QUERY_CONTEXT -> "{\"sessionId\":\"" + session + "\"}";
+            case CLIENT_FILES_REGISTER ->
+                    "{\"sessionId\":\"" + session + "\",\"connectionId\":\"conn-probe\"}";
+            case CLIENT_FILES_UNREGISTER, CLIENT_FILES_STATUS ->
+                    "{\"sessionId\":\"" + session + "\"}";
+            case CLIENT_FILES_STREAM ->
+                    "{\"sessionId\":\"" + session + "\",\"generation\":1,\"connectionId\":\"conn-probe\"}";
+            case CLIENT_FILES_RESPOND -> "{\"sessionId\":\"" + session
+                    + "\",\"generation\":1,\"rpcRequestId\":\"probe\",\"responseJson\":\"{}\"}";
+            case INTERNAL_CLIENT_FILES_MCP -> "{\"jsonrpc\":\"2.0\",\"id\":\"probe\",\"method\":\"tools/list\"}";
             case SIDE_QUERY_GET, SIDE_QUERY_STREAM, SIDE_QUERY_CANCEL -> "{\"sessionId\":\"" + session
                     + "\",\"queryId\":\"11111111-1111-4111-8111-111111111111\"}";
             case STORE_SIDE_QUERY -> {

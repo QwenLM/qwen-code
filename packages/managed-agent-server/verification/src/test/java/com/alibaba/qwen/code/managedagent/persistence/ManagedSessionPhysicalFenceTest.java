@@ -5,7 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationComma
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -74,9 +74,9 @@ class ManagedSessionPhysicalFenceTest {
                         + " physical_key, storage_kind, registration_state, registration_revision,"
                         + " registration_json) VALUES (?, ?, ?, ?, ?, ?, 'LOCAL', 'REGISTERED', 1,"
                         + " '{}')",
-                JdbcRuntimeBindingRepository.storageAliasKey(TENANT, STORAGE),
-                JdbcRuntimeBindingRepository.storageFenceKey(TENANT),
-                JdbcRuntimeBindingRepository.storageFenceKey(STORAGE),
+                RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE),
+                RuntimeAdmissionFences.storageFenceKey(TENANT),
+                RuntimeAdmissionFences.storageFenceKey(STORAGE),
                 TENANT,
                 STORAGE,
                 physical);
@@ -203,7 +203,7 @@ class ManagedSessionPhysicalFenceTest {
         jdbc.update(
                 "UPDATE ma_storage SET registration_state = 'RETIRING', fence_operation_id ="
                         + " 'retirement' WHERE alias_key = ?",
-                JdbcRuntimeBindingRepository.storageAliasKey(TENANT, STORAGE));
+                RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE));
         assertThatThrownBy(
                         () ->
                                 transactions.execute(

@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.109.0",
-    "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided."
+    "version": "1.117.0",
+    "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided. Retained removed MCP-management entries stay in the response snapshot: only non-removed entries count toward the 32-server selection capacity, so the servers array may exceed 32 while preserving tombstones."
   },
   "servers": [
     {
@@ -1157,7 +1157,7 @@
         "tags": ["WebShell"],
         "operationId": "webShellRenameSession",
         "x-qwen-implementation-status": "implemented",
-        "description": "Synchronously rename a Session through the same durable, fenced title service as public PATCH. HTTP 200 confirms persistence; an unavailable or unknown Harness outcome remains an error and is never a pending success. Workspace-bound fresh renames require current OPERATOR access and the original binding's execution facts; unbound Sessions use the existing tenant-scoped rename authorization. An active Turn does not itself block rename. Reuse the same idempotency key only for the same Session and title; completed replay returns the Session's current persisted title without another Harness rename, including the existing last-visible result after deletion. Fresh-rename capability changes do not preclude authorized replay. The result title is authoritative and can differ from the requested title when a later rename already completed.",
+        "description": "Synchronously rename a Session in one local SQL transaction under the same authorization as public PATCH. The public SQL row is the display authority: HTTP 200 confirms the SQL title is persisted, while the Harness journal copy is updated by a best-effort notification after commit and may lag or be skipped when the Harness is unavailable or does not support fenced titles. Workspace-bound fresh renames require current OPERATOR access and the original binding's execution facts; unbound Sessions use the existing tenant-scoped rename authorization. An active Turn does not itself block rename. Reuse the same idempotency key only for the same Session and title; completed replay returns the Session's current persisted title without another notification, including the existing last-visible result after deletion. Fresh-rename capability changes do not preclude authorized replay. The result title is authoritative and can differ from the requested title when a later rename already completed.",
         "requestBody": {
           "required": true,
           "content": {
@@ -3878,7 +3878,7 @@
         "tags": ["WebShell"],
         "operationId": "changeWebShellSessionModel",
         "x-qwen-implementation-status": "implemented",
-        "description": "Change the model of an idle Workspace Session for later Turns. The actor-scoped idempotency key replays an earlier completed change before current admission checks; expectedRevision prevents overwriting a concurrent selection.",
+        "description": "Change the model selection of a Workspace Session for later Turns, including while a Turn or approval is active. Already admitted Turns keep their immutable model snapshot. Lifecycle, recovery and unsettled context changes remain guarded. The actor-scoped idempotency key replays an earlier completed change before current admission checks; expectedRevision prevents overwriting a concurrent selection.",
         "requestBody": {
           "required": true,
           "content": {
@@ -3974,7 +3974,7 @@
         "tags": ["WebShell"],
         "operationId": "changeWebShellSessionApproval",
         "x-qwen-implementation-status": "implemented",
-        "description": "Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1, hosted-workspace-files/3 or hosted-workspace-shell/1. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. Classifier auto requires auto-approval/1. Optional permissionRules requires permission-rules/1 and an idle Session. Omitted rules preserve the current selection; three empty arrays clear it. Mode, Plan and rules share one approval revision and receipt. Persisted rules are also snapshotted at Turn admission; replay preserves the original policy. Empty rules are omitted from responses and Harness payloads.",
+        "description": "Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1, hosted-workspace-files/3, hosted-workspace-shell/1 or hosted-workspace-shell/3. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. Classifier auto requires auto-approval/1. Optional permissionRules requires permission-rules/1 and an idle Session. Omitted rules preserve the current selection; three empty arrays clear it. Mode, Plan and rules share one approval revision and receipt. Persisted rules are also snapshotted at Turn admission; replay preserves the original policy. Empty rules are omitted from responses and Harness payloads.",
         "requestBody": {
           "required": true,
           "content": {
@@ -8255,6 +8255,176 @@
         }
       }
     },
+    "/v1/agents/workspaces/{workspaceId}/extensions/source-imports": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "importWorkspaceExtensionSource",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Trusted business services select an exact Skill or Extension revision. Authorizes the source outside SQL transactions, compiles through managed-package-preparation/1, and publishes without installing. The request contains no storage location or credentials. Same key and request replay the original completed receipt without resolving the business source.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedExtensionSourceImport"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The original source import receipt, including its immutable Managed Pin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionSourceImportResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "lookupWorkspaceExtensionSourceImport",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Lookup by the original Idempotency-Key, including intents admitted before a source read failed. A pending result has no Pin until compilation and publication finish.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Original import intent or publication receipt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionSourceImportResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/agents/workspaces/{workspaceId}/extensions/source-imports/{operationId}": {
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "getWorkspaceExtensionSourceImport",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Returns the actor-scoped durable import receipt under current Workspace access, including pending publication. Does not resolve or download the business source.",
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "operationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The original source import receipt, including its immutable Managed Pin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedExtensionSourceImportResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
     "/v1/agents/workspaces/{workspaceId}/extensions/imports": {
       "post": {
         "tags": ["Public Resources"],
@@ -9619,6 +9789,237 @@
             }
           }
         ]
+      }
+    },
+    "/api/agent/web-shell/v1/client-files/register": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "registerWebShellClientFiles",
+        "description": "Registers the calling actor's client directory grant into the Session and dispatches the one-time relay credential to the Harness server-side for the Runtime MCP leg; the credential is never part of the browser response. Requires the deployment opt-in and current execution authority on the bound ACTIVE Workspace. Registration is ephemeral session state: the bounded TTL queue holds the size-bounded JSON-RPC bodies (which may include file content) only until they settle or expire, no credential or directory path is persisted, and no file content enters the journal or public events beyond the normal durable tool-result policy.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "The registration ack (generation, toolCount, connectionId); the relay credential stays on the server-to-harness path.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellClientFilesRegistration"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellClientFilesRegisterRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/client-files/unregister": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "unregisterWebShellClientFiles",
+        "description": "Closes the calling actor's registration (or an operator's teardown of it) and fails every queued request with the structured offline error.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "The closed binding summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellClientFilesStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellClientFilesUnregisterRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/client-files/status": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "queryWebShellClientFilesStatus",
+        "description": "Reads the Session's binding summary without the credential; an absent binding answers an empty 200.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "The binding summary, or an empty body when nothing is registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellClientFilesStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellClientFilesStatusRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/client-files/requests/stream": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "streamWebShellClientFilesRequests",
+        "description": "The browser downlink: SSE events named request carrying opaque JSON-RPC payloads for the registering actor's own active binding generation. Each poll revalidates the read grant.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "Queued JSON-RPC requests as SSE events.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellClientFilesStreamRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/web-shell/v1/client-files/responses": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "respondWebShellClientFiles",
+        "description": "The browser uplink: settles one queued JSON-RPC request with either a response payload or a structured error code, never both.",
+        "x-qwen-implementation-status": "implemented",
+        "responses": {
+          "200": {
+            "description": "The request was settled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellClientFilesRespondReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellClientFilesRespondRequest"
+              }
+            }
+          }
+        }
       }
     },
     "/api/agent/web-shell/v1/session-side-queries/create": {
@@ -11928,11 +12329,11 @@
           },
           "modelChange": {
             "type": "boolean",
-            "description": "The caller may request an idle Session model change using the server model catalog. Missing means unsupported; authorization and revision admission still apply."
+            "description": "The caller may change the Session model selection for later Turns using the server model catalog, including while a Turn or approval is active. Missing means unsupported; authorization, recovery and revision admission still apply."
           },
           "approvalModeChange": {
             "type": "boolean",
-            "description": "The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1, hosted-workspace-files/3 or hosted-workspace-shell/1 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false."
+            "description": "The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1, hosted-workspace-files/3, hosted-workspace-shell/1 or hosted-workspace-shell/3 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false."
           },
           "inputAttachments": {
             "type": "boolean",
@@ -11967,6 +12368,12 @@
           "recap": {
             "type": "boolean",
             "default": false
+          },
+          "clientFiles": {
+            "type": "boolean",
+            "default": false,
+            "description": "Browser local-files registration is available for this Session: the Session is bound to a Workspace, the caller holds current execution authority, the deployment enables the client-files relay and the Harness supports it. A Workspace-less Session never advertises this capability. Registration admission still checks the actor grant and idle state separately.",
+            "x-qwen-implementation-status": "implemented"
           }
         }
       },
@@ -15936,12 +16343,12 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "description": "Stable identity of the card or reply segment this delivery carries; only segments proven unsent are sent again, and an explicit resend keeps this identity under a new deliveryId."
+            "description": "Stable identity of the delivery's first segment, the first entry of segments; only segments proven unsent are sent again, and an explicit resend keeps each carried identity under a new deliveryId. The authoritative per-segment view is segments."
           },
           "ordinal": {
             "type": "integer",
             "minimum": 0,
-            "description": "Position of the segment inside its segmentId sequence."
+            "description": "Position of the first segment (the singular segment_id) within the delivery, contiguous from 0."
           },
           "state": {
             "$ref": "#/components/schemas/ChannelDeliveryState"
@@ -18066,7 +18473,19 @@
           },
           "servers": {
             "type": "array",
-            "maxItems": 32,
+            "description": "The selected MCP server snapshot, including retained removed entries. Only non-removed entries count toward the 32-server live capacity, and the retained snapshot is capped at 96 total entries.",
+            "maxItems": 96,
+            "contains": {
+              "type": "object",
+              "required": ["state"],
+              "properties": {
+                "state": {
+                  "enum": ["enabled", "disabled"]
+                }
+              }
+            },
+            "minContains": 0,
+            "maxContains": 32,
             "items": {
               "$ref": "#/components/schemas/ManagedMcpManagementServer"
             }
@@ -18706,6 +19125,96 @@
           "components"
         ]
       },
+      "ManagedExtensionSourceReference": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "providerId": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,63}$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["skill", "extension"]
+          },
+          "resourceId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "revision": {
+            "type": "string",
+            "pattern": "^(?![Ll][Aa][Tt][Ee][Ss][Tt]$)[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+            "description": "Exact immutable business revision. Dynamic selectors must be resolved by the business entry point."
+          }
+        },
+        "required": ["providerId", "kind", "resourceId", "revision"]
+      },
+      "ManagedExtensionSourceOrigin": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "reference": {
+            "$ref": "#/components/schemas/ManagedExtensionSourceReference"
+          },
+          "sourceDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "SHA-256 of the actual raw archive bytes, distinct from packageDigest."
+          },
+          "requestDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": ["reference", "sourceDigest", "requestDigest"]
+      },
+      "ManagedExtensionSourceImport": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "reference": {
+            "$ref": "#/components/schemas/ManagedExtensionSourceReference"
+          },
+          "target": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "platform": {
+                "type": "string",
+                "enum": ["linux", "darwin"]
+              },
+              "arch": {
+                "type": "string",
+                "enum": ["x64", "arm64", "any"]
+              }
+            },
+            "required": ["platform", "arch"]
+          }
+        },
+        "required": ["reference", "target"]
+      },
+      "ManagedExtensionSourceImportResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "operationId": { "type": "string", "maxLength": 128 },
+          "state": { "type": "string", "enum": ["pending", "settled"] },
+          "reference": {
+            "$ref": "#/components/schemas/ManagedExtensionSourceReference"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/ManagedExtensionPackageOperation"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ManagedExtensionSourceOrigin"
+          },
+          "pin": {
+            "$ref": "#/components/schemas/ManagedExtensionPackagePin"
+          }
+        },
+        "required": ["operationId", "state", "reference"]
+      },
       "ManagedExtensionPackage": {
         "type": "object",
         "additionalProperties": false,
@@ -18721,6 +19230,9 @@
             "format": "int64",
             "minimum": 1,
             "maximum": 104857600
+          },
+          "source": {
+            "$ref": "#/components/schemas/ManagedExtensionSourceOrigin"
           }
         },
         "required": ["pin", "manifest", "byteLength"]
@@ -22107,7 +22619,7 @@
         "properties": {
           "kind": {
             "type": "string",
-            "enum": ["publish", "settings"]
+            "enum": ["publish", "settings", "source-import"]
           },
           "idempotencyKey": {
             "type": "string",
@@ -22945,6 +23457,177 @@
           },
           "requestId": {
             "type": "string"
+          }
+        }
+      },
+      "WebShellClientFilesRegisterRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId", "connectionId"],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "connectionId": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "Browser-generated identity correlating this registration's downlink and teardown with its own binding."
+          }
+        }
+      },
+      "WebShellClientFilesUnregisterRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId"],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "connectionId": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "The unregistering bridge's owned registration identity; a stale teardown of a replaced binding is a no-op."
+          }
+        }
+      },
+      "WebShellClientFilesStatusRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId"],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "connectionId": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "The caller's own registration identity. The response echoes the live generation and identity only when this matches the binding; a merely readable session learns that a binding exists, not how to attach to it."
+          }
+        }
+      },
+      "WebShellClientFilesStreamRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId", "generation", "connectionId"],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "connectionId": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "The downlink's owned registration identity; a stream omitting it or naming another tab's binding is refused."
+          }
+        }
+      },
+      "WebShellClientFilesRespondRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId", "generation", "connectionId", "rpcRequestId"],
+        "properties": {
+          "sessionId": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "connectionId": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "The settling client's owned registration identity; a response omitting it or naming another tab's binding is refused, so a second client of the same actor cannot answer this registration's queued requests."
+          },
+          "rpcRequestId": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "The JSON-RPC request identity being settled; distinct from the HTTP request id echo field."
+          },
+          "responseJson": {
+            "type": "string"
+          },
+          "errorCode": {
+            "type": "string",
+            "maxLength": 128
+          }
+        }
+      },
+      "WebShellClientFilesRegistration": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The browser-facing registration ack. The relay credential is dispatched server-to-harness and is never part of this response; the bridge correlates on generation, toolCount and connectionId.",
+        "required": [
+          "serverId",
+          "generation",
+          "expiresAt",
+          "toolCount",
+          "connectionId"
+        ],
+        "properties": {
+          "serverId": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "expiresAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Binding deadline in Unix epoch milliseconds."
+          },
+          "toolCount": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of browser tools the Harness discovered during registration."
+          },
+          "connectionId": {
+            "type": "string",
+            "description": "Echo of the registration identity the caller supplied, for downlink correlation."
+          }
+        }
+      },
+      "WebShellClientFilesStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The binding summary. Every field is optional because an absent binding answers 200 with an empty body, which a client reads as an empty object. The generation and connectionId are the fence for the downlink and settlement, so they are echoed only when the request's connectionId proves the caller owns the binding (owned=true); otherwise they are 0 / absent and only the non-secret summary is returned.",
+        "properties": {
+          "serverId": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The binding generation, echoed only when owned; 0 otherwise."
+          },
+          "state": {
+            "enum": ["active", "closed"]
+          },
+          "expiresAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Binding deadline in Unix epoch milliseconds."
+          },
+          "connectionId": {
+            "type": "string",
+            "description": "The binding's registration identity, echoed only when the request proved it (owned=true); absent otherwise."
+          },
+          "owned": {
+            "type": "boolean",
+            "description": "Whether the request's connectionId matched the live binding, gating the generation/connectionId echo."
+          }
+        }
+      },
+      "WebShellClientFilesRespondReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["settled"],
+        "properties": {
+          "settled": {
+            "type": "boolean"
           }
         }
       },
