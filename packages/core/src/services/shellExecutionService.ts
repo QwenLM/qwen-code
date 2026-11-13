@@ -40,14 +40,12 @@ const DEFAULT_MAX_BUFFERED_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_BUFFERED_OUTPUT_BYTES_CEILING = 256 * 1024 * 1024;
 const SIGKILL_TIMEOUT_MS = 200;
 /**
- * streamStdout settle fence: after the child exits, trailing stdio keeps
- * flowing until 'close' — but 'close' also waits on *inherited* fds, so a
- * shell that exits while a grandchild holds the pipe (`sleep 10 &`,
- * `nohup … &`) would defer 'close' indefinitely and wedge the result
- * promise (background shells and the ACP channel both stream this way;
- * PR #12067 review). Settle on 'close' or this bound after exit,
- * whichever comes first. 1s covers trailing writes that land shortly
- * after exit while bounding the grandchild case.
+ * Post-exit settle fence: trailing stdio flows until 'close', but inherited
+ * pipes held by descendants can defer 'close' indefinitely (PR #12067).
+ * Settle on 'close' or the applicable bound after exit, whichever comes first:
+ * POST_EXIT_STREAM_DRAIN_MS gives streamStdout/rawCapture callers 1000ms for
+ * trailing writes; POST_EXIT_BUFFERED_DRAIN_MS limits buffered callers to
+ * 200ms so a foreground `cmd &` does not add a long delay.
  */
 const POST_EXIT_STREAM_DRAIN_MS = 1000;
 // Foreground commands need the same pipe drain without a long delay for `cmd &`.
@@ -1049,7 +1047,8 @@ export class ShellExecutionService {
         let settled = false;
         // Drain fence state: the recorded 'exit' info and the
         // bound timer. Settlement happens on 'close' or timer expiry,
-        // whichever comes first (see POST_EXIT_STREAM_DRAIN_MS).
+        // whichever comes first: POST_EXIT_STREAM_DRAIN_MS for streamStdout/
+        // rawCapture, POST_EXIT_BUFFERED_DRAIN_MS for buffered callers.
         let recordedExit: {
           code: number | null;
           signal: NodeJS.Signals | null;

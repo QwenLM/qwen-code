@@ -2566,6 +2566,43 @@ describe('ShellExecutionService child_process fallback', () => {
       },
     );
 
+    it.each(['streamStdout', 'rawCapture'] as const)(
+      'bounds %s post-exit drain to 1000ms',
+      async (mode) => {
+        vi.useFakeTimers();
+        const capture = {
+          write: vi.fn(async () => {}),
+          finish: vi.fn(async () => {}),
+          setStarted: vi.fn(),
+          setProcessResult: vi.fn(),
+        };
+        const handle = await exec('inherited-pipe', {
+          usePty: false,
+          options:
+            mode === 'streamStdout'
+              ? { streamStdout: true }
+              : { rawCapture: capture },
+        });
+        const settled = vi.fn();
+        void handle.result.then(settled);
+        try {
+          mockChildProcess.emit('exit', 7, null);
+          await vi.advanceTimersByTimeAsync(999);
+          expect(settled).not.toHaveBeenCalled();
+          await vi.advanceTimersByTimeAsync(1);
+          expect(settled).toHaveBeenCalledOnce();
+          expect(await handle.result).toMatchObject({
+            exitCode: 7,
+            aborted: false,
+            stdoutHeldAfterExit: true,
+          });
+        } finally {
+          mockChildProcess.emit('close', 7, null);
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it('keeps streaming both pipes after exit until stdio closes', async () => {
       await simulateExecution(
         'monitor',
@@ -3143,11 +3180,10 @@ describe('ShellExecutionService child_process fallback', () => {
       const binaryChunk1 = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
       const binaryChunk2 = Buffer.from([0x0d, 0x0a, 0x1a, 0x0a]);
 
-      const { result } = await simulateExecution('cat image.png', (cp) => {
+      const { result } = await simulateExecution('cat image.png', () => {
         emitOut(binaryChunk1);
         emitOut(binaryChunk2);
-        cp.emit('exit', 0, null);
-        cp.emit('close', 0, null);
+        finish();
       });
 
       expect(result.rawOutput).toEqual(
@@ -3183,10 +3219,7 @@ describe('ShellExecutionService child_process fallback', () => {
       useShell(BASH_SHELL);
     });
 
-    const exitAndClose: Simulation = (cp) => {
-      cp.emit('exit', 0, null);
-      cp.emit('close', 0, null);
-    };
+    const exitAndClose: Simulation = () => finish();
 
     const windowsSpawn = (windowsVerbatimArguments: boolean) =>
       expect.objectContaining({
