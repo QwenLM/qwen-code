@@ -562,7 +562,7 @@ describe('ChannelEditorDialog', () => {
       nameLabel: 'Instance name',
       urlLabel: 'Webhook URL',
       secretLabel: 'Signing secret',
-      description: 'The secret webhook address of your custom robot.',
+      description: 'The secret webhook address of your custom bot.',
       saveLabel: 'Save',
       hidden: ['Access control', 'Conversation management', 'Pairing'],
     },

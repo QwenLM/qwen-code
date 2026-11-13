@@ -290,7 +290,9 @@ describe('ChannelsManagerPage', () => {
         )
         ?.click();
     });
-    expect(document.body.textContent).toContain('Choose a connection method');
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'Choose a DingTalk connection',
+    );
     expect(document.body.textContent).toContain('Application bot');
     const webhookMethod = Array.from(document.querySelectorAll('button')).find(
       (button) => button.textContent?.includes('Webhook (send only)'),
@@ -365,6 +367,7 @@ describe('ChannelsManagerPage', () => {
       const feishu = channelState.current.catalog.find(
         (entry) => entry.type === 'feishu',
       )!;
+      feishu.displayName = 'Feishu application bot';
       feishu.fields = [
         { key: 'clientId', label: 'App ID', kind: 'string', required: true },
         {
@@ -407,7 +410,13 @@ describe('ChannelsManagerPage', () => {
       expect(platform.getAttribute('aria-label')).toBe('Configure Feishu');
       await act(async () => platform.click());
       const dialog = document.querySelector('[role="dialog"]')!;
-      expect(dialog.textContent).toContain('Choose a connection method');
+      expect(
+        document.getElementById(dialog.getAttribute('aria-labelledby')!)
+          ?.textContent,
+      ).toBe('Choose a Feishu connection');
+      expect(dialog.textContent).toContain(
+        'Choose how this Channel connects to Feishu.',
+      );
       expect(dialog.textContent).not.toContain('DingTalk');
       const appMethod = Array.from(dialog.querySelectorAll('button')).find(
         (button) => button.textContent?.includes('Application bot'),

@@ -1363,8 +1363,11 @@ async function configureWebhook(
     })
     .click();
   const methodDialog = page.getByRole('dialog');
-  await expect(methodDialog.getByRole('heading')).toHaveText(
-    'Choose a connection method',
+  const methodTitle = `Choose a ${platform.displayName} connection`;
+  await expect(methodDialog).toHaveAccessibleName(methodTitle);
+  await expect(methodDialog.getByRole('heading')).toHaveText(methodTitle);
+  await expect(methodDialog).toHaveAccessibleDescription(
+    `Choose how this Channel connects to ${platform.displayName}.`,
   );
   await expect(
     methodDialog.getByRole('button', { name: /^Application bot/ }),

@@ -4672,15 +4672,16 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.platform.available': 'Available',
   'channels.platform.configure': 'Configure',
   'channels.platform.add': 'Add connection',
-  'channels.method.title': 'Choose a connection method',
-  'channels.method.description':
-    'Choose how this Channel connects to the platform.',
+  'channels.method.title': (v) =>
+    `Choose a ${v?.platform ?? 'Channel'} connection`,
+  'channels.method.description': (v) =>
+    `Choose how this Channel connects to ${v?.platform ?? 'the platform'}.`,
   'channels.method.applicationBot': 'Application bot',
   'channels.method.applicationBot.description':
     'Receive messages and reply using an application bot.',
   'channels.method.webhook': 'Webhook (send only)',
   'channels.method.webhook.description':
-    'Send notifications to the group configured by a custom robot webhook.',
+    'Send notifications to the group configured by a custom bot webhook.',
   'channels.status.readyToSend': 'Ready to send',
   'channels.statusDescription.readyToSend':
     'Ready locally. Remote credentials are checked when sending.',
@@ -4791,10 +4792,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.editor.field.dingtalk.clientSecret': 'Client Secret (AppSecret)',
   'channels.editor.field.webhook.webhookUrl': 'Webhook URL',
   'channels.editor.field.webhook.webhookUrl.description':
-    'The secret webhook address of your custom robot.',
+    'The secret webhook address of your custom bot.',
   'channels.editor.field.webhook.signingSecret': 'Signing secret',
   'channels.editor.field.webhook.signingSecret.description':
-    'Required if signature verification is enabled for the custom robot.',
+    'Required if signature verification is enabled for the custom bot.',
   'channels.editor.field.weixin.groupPolicy': 'Group policy',
   'channels.editor.field.weixin.groupPolicy.description':
     'WeChat iLink Bot only supports direct messages, so groups stay disabled.',
@@ -9608,8 +9609,9 @@ const ZH: Messages = {
   'channels.platform.available': '已开放',
   'channels.platform.configure': '配置',
   'channels.platform.add': '添加连接',
-  'channels.method.title': '选择连接方式',
-  'channels.method.description': '选择此频道连接平台的方式。',
+  'channels.method.title': (v) => `选择 ${v?.platform ?? '此频道'} 的连接方式`,
+  'channels.method.description': (v) =>
+    `选择此频道连接 ${v?.platform ?? '平台'} 的方式。`,
   'channels.method.applicationBot': '应用机器人',
   'channels.method.applicationBot.description':
     '通过应用机器人接收消息并回复。',

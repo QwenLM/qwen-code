@@ -6,6 +6,19 @@
 
 import type { DaemonChannelTypeDescriptor } from '@qwen-code/sdk/daemon';
 
+const DINGTALK_PLATFORM = { type: 'dingtalk', displayName: 'DingTalk' };
+const FEISHU_PLATFORM = { type: 'feishu', displayName: 'Feishu' };
+
+export const CHANNEL_METHOD_PLATFORMS: Record<
+  string,
+  { type: string; displayName: string } | undefined
+> = {
+  dingtalk: DINGTALK_PLATFORM,
+  'dingtalk-webhook': DINGTALK_PLATFORM,
+  feishu: FEISHU_PLATFORM,
+  'feishu-webhook': FEISHU_PLATFORM,
+};
+
 export const PLATFORM_MARKS: Record<string, string> = {
   dingtalk: 'D',
   'dingtalk-webhook': 'D',

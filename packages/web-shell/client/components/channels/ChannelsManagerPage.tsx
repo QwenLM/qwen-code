@@ -101,6 +101,7 @@ import {
 } from './weixin-auth-api';
 import styles from './ChannelsManagerPage.module.css';
 import {
+  CHANNEL_METHOD_PLATFORMS,
   isChannelPlatformAvailable,
   isSupportedChannelType,
   PLATFORM_MARKS,
@@ -220,8 +221,10 @@ export function ChannelsManagerPage({
     descriptor: DaemonChannelTypeDescriptor;
     instance?: DaemonChannelInstanceSnapshot;
   }>();
-  const [methodChoices, setMethodChoices] =
-    useState<DaemonChannelTypeDescriptor[]>();
+  const [methodChoices, setMethodChoices] = useState<{
+    displayName: string;
+    methods: DaemonChannelTypeDescriptor[];
+  }>();
   const editorRef = useRef(editor);
   useEffect(() => {
     editorRef.current = editor;
@@ -324,24 +327,15 @@ export function ChannelsManagerPage({
       }
     >();
     for (const descriptor of availablePlatforms) {
-      const type =
-        descriptor.type === 'dingtalk-webhook'
-          ? 'dingtalk'
-          : descriptor.type === 'feishu-webhook'
-            ? 'feishu'
-            : descriptor.type;
+      const { type, displayName } =
+        CHANNEL_METHOD_PLATFORMS[descriptor.type] ?? descriptor;
       const group = groups.get(type);
       if (group) {
         group.methods.push(descriptor);
       } else {
         groups.set(type, {
           type,
-          displayName:
-            type === 'dingtalk'
-              ? 'DingTalk'
-              : type === 'feishu'
-                ? 'Feishu'
-                : descriptor.displayName,
+          displayName,
           methods: [descriptor],
         });
       }
@@ -879,7 +873,7 @@ export function ChannelsManagerPage({
                   })}
                   onClick={() => {
                     if (platform.methods.length > 1) {
-                      setMethodChoices(platform.methods);
+                      setMethodChoices(platform);
                     } else {
                       setEditor({
                         workspaceCwd: activeWorkspaceCwd!,
@@ -919,13 +913,21 @@ export function ChannelsManagerPage({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t('channels.method.title')}</DialogTitle>
+            <DialogTitle>
+              {t(
+                'channels.method.title',
+                methodChoices && { platform: methodChoices.displayName },
+              )}
+            </DialogTitle>
             <DialogDescription>
-              {t('channels.method.description')}
+              {t(
+                'channels.method.description',
+                methodChoices && { platform: methodChoices.displayName },
+              )}
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-3">
-            {methodChoices?.map((descriptor) => (
+            {methodChoices?.methods.map((descriptor) => (
               <Button
                 key={descriptor.type}
                 variant="outline"

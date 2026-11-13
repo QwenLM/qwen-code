@@ -185,13 +185,20 @@ describe('web-shell i18n catalog', () => {
       for (const key of [
         'channels.method.title',
         'channels.method.description',
+        'channels.method.webhook.description',
         'channels.editor.field.webhook.webhookUrl.description',
+        'channels.editor.field.webhook.signingSecret.description',
       ]) {
         expect(t(key)).not.toBe(key);
         expect(t(key)).not.toMatch(/DingTalk|钉钉|Feishu|飞书/i);
       }
-      if (language === 'ru') {
-        expect(t('channels.method.title')).toBe('Choose a connection method');
+      for (const key of [
+        'channels.method.title',
+        'channels.method.description',
+      ]) {
+        expect(t(key, { platform: 'Example platform' })).toContain(
+          'Example platform',
+        );
       }
     },
   );
