@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.RestoreHead;
@@ -33,11 +34,13 @@ import java.util.regex.Pattern;
 final class JournalStoreRows {
     private final com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion;
     private final JdbcTemplate jdbc;
+    private final ToolPublicationObjectStore objects;
 
     JournalStoreRows(com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion,
-            JdbcTemplate jdbc) {
+            JdbcTemplate jdbc, ToolPublicationObjectStore objects) {
         this.readerVersion = readerVersion;
         this.jdbc = jdbc;
+        this.objects = objects;
         this.headMapper = (result, row) ->
                 new HeadRow(result.getString("tenant_id"),
                         result.getString("workspace_id"),
@@ -139,13 +142,22 @@ final class JournalStoreRows {
         // resident Session. Renewals update the activation row in place, so
         // without idx_ma_session_journal_tx_activation the lookup walked back
         // over every transaction the activation had committed.
-        var rows = jdbc.query("SELECT journal_revision, record_bytes, record_digest, activation_lease_until,"
+        var rows = jdbc.query("SELECT journal_revision, record_bytes, record_digest, byte_length, activation_lease_until,"
                         + " activation_renewal_seq FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
                         + " AND activation_epoch = ? AND is_activation_record = TRUE"
                         + " ORDER BY journal_revision DESC LIMIT 1", (result, index) -> {
                             try {
                                 byte[] raw = result.getBytes("record_bytes");
-                                if (raw == null || !sha256(raw).equals(result.getString("record_digest"))) {
+                                if (raw == null) {
+                                    if (objects == null) {
+                                        throw journalCorrupt();
+                                    }
+                                    raw = new JdbcJournalPacks(jdbc, objects, null).resolveBytes(head.tenantId(),
+                                            head.sessionId(), result.getLong("journal_revision"),
+                                            result.getString("record_digest"), result.getLong("byte_length"));
+                                }
+                                if (raw == null || raw.length != result.getLong("byte_length")
+                                        || !sha256(raw).equals(result.getString("record_digest"))) {
                                     throw journalCorrupt();
                                 }
                                 String first = new String(raw, StandardCharsets.UTF_8).split("\n", 2)[0];

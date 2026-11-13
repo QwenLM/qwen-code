@@ -503,6 +503,7 @@ test('shadow portal details keep focus in the overview after hover replacement @
   page,
 }) => {
   await page.goto('/e2e/session-overview-shadow-dom.html');
+  // A footer-only shell renders footer actions inline; there is no More menu.
   await page
     .getByRole('button', { name: 'Session Overview', exact: true })
     .click();

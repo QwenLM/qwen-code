@@ -149,12 +149,13 @@ describe('Feishu webhook workspace proxy', () => {
   );
 
   it.each([
-    { code: 0, bypass: false },
-    { code: 19024, bypass: false },
-    { code: 0, bypass: true },
+    { code: 0, bypass: false, cancel: false },
+    { code: 19024, bypass: false, cancel: false },
+    { code: 0, bypass: true, cancel: false },
+    { code: 0, bypass: false, cancel: true },
   ])(
-    'routes and releases the request dispatcher (code=$code, bypass=$bypass)',
-    async ({ code, bypass }) => {
+    'routes and releases the request dispatcher (code=$code, bypass=$bypass, cancel=$cancel)',
+    async ({ code, bypass, cancel }) => {
       vi.stubEnv('NO_PROXY', bypass ? '127.0.0.1' : '');
       vi.stubEnv('no_proxy', undefined);
       const unproxiedFetch = vi
@@ -167,10 +168,16 @@ describe('Feishu webhook workspace proxy', () => {
       const sockets = new Set<Socket>();
       const connects: string[] = [];
       const received: Array<{ path: string; body: unknown }> = [];
+      let receiveRequest!: () => void;
+      const requestReceived = new Promise<void>((resolve) => {
+        receiveRequest = resolve;
+      });
       const origin = createServer(async (request, response) => {
         let body = '';
         for await (const chunk of request) body += chunk;
         received.push({ path: request.url!, body: JSON.parse(body) });
+        receiveRequest();
+        if (cancel) return;
         response.writeHead(200, { 'content-type': 'application/json' });
         response.end(JSON.stringify({ code }));
       });
@@ -245,7 +252,19 @@ describe('Feishu webhook workspace proxy', () => {
         );
         await channel.connect();
         const result = channel.sendMessage('default', '# Proxy message\nBody');
-        if (code === 0) {
+        if (cancel) {
+          const deliveryError = result.catch((error: unknown) => error);
+          await Promise.race([requestReceived, result]);
+          expect(sockets.size).toBeGreaterThan(0);
+          channel.disconnect();
+          await channel.waitForDisconnect();
+          expect(dispatcher).toHaveProperty('destroyed', true);
+          expect(await deliveryError).toMatchObject({
+            disposition: 'transient',
+            message:
+              'Feishu webhook request cancelled; delivery may have been accepted.',
+          });
+        } else if (code === 0) {
           await result;
         } else {
           await expect(result).rejects.toMatchObject({
