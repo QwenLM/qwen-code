@@ -86,9 +86,11 @@ describe('InteractiveSession.start source pins (#13552)', () => {
     // The nightly loop legs export the two switches; deleting the forwarding
     // block (or narrowing it to one switch) leaves the inheritEnv:false
     // suites on the default loop on every arm, and only a nightly run would
-    // notice. Both keys must be present inside the inheritEnv:false guard.
+    // notice. Both keys and the forwarding assignment must be present inside
+    // the inheritEnv:false guard; keeping the keys while dropping the
+    // assignment is the no-op this pin exists to redden.
     expect(source).toMatch(
-      /if \(options\?\.inheritEnv === false\) \{[\s\S]*?'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'[\s\S]*?'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'/,
+      /if \(options\?\.inheritEnv === false\) \{[\s\S]*?'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'[\s\S]*?'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'[\s\S]*?baseEnv\[key\]\s*=\s*process\.env\[key\];/,
     );
   });
 
