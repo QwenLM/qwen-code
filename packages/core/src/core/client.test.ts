@@ -53,6 +53,7 @@ import {
 } from './contentGenerator.js';
 import { BaseLlmClient } from './baseLlmClient.js';
 import { MemoryManager } from '../memory/manager.js';
+import { buildLegacyRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { getAutoMemorySnapshot } from '../memory/request-context.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { LlmChat, userContentPushSnapshotKey } from './llm-chat.js';
@@ -7502,6 +7503,59 @@ Other open files:
       expect(toolText).not.toContain('- overlapping');
     });
 
+    it('preserves the legacy reminder when rebuilding after fast delivery overlap', async () => {
+      vi.useFakeTimers();
+      vi.mocked(mockConfig.getMemoryRecallMode).mockReturnValue('legacy');
+      const overlapping = fastDoc('/m/overlap.md', '- Use supplied URLs only.');
+      const remaining = fastDoc('/m/new.md', '- Verify links before use.');
+      const fastPrompt = buildLegacyRelevantAutoMemoryPrompt([overlapping]);
+      const settle = fastThenPending({
+        focusedPrompt: fastPrompt,
+        prompt: fastPrompt,
+        selectedDocs: [overlapping],
+        strategy: 'heuristic',
+      });
+
+      await toolCallUserTurn('prompt-id-legacy-fast');
+
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        ...requestWith(expect.stringMatching(/^<system-reminder>\n/)),
+      );
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        ...requestWith(expect.stringContaining('- Use supplied URLs only.')),
+      );
+
+      const refinedPrompt = buildLegacyRelevantAutoMemoryPrompt([
+        overlapping,
+        remaining,
+      ]);
+      await refinedToolTurn(
+        settle,
+        {
+          focusedPrompt: refinedPrompt,
+          prompt: refinedPrompt,
+          selectedDocs: [overlapping, remaining],
+          strategy: 'model',
+        },
+        'prompt-id-legacy-refined',
+      );
+
+      const request = mockTurnRunFn.mock.lastCall![1] as unknown[];
+      const memory = request.find(
+        (part) =>
+          typeof part === 'string' && part.includes('## Relevant memory'),
+      );
+      expect(request[0]).toHaveProperty('functionResponse');
+      expect(request.indexOf(memory)).toBeGreaterThan(0);
+      expect(memory).toMatch(/^<system-reminder>\n/);
+      expect(memory).toMatch(/\n<\/system-reminder>$/);
+      expect(memory).toContain('Automatically recalled saved context');
+      expect(memory).toContain('Do not acknowledge these memories separately.');
+      expect(memory).toContain('- Verify links before use.');
+      expect(memory).not.toContain('overlap.md');
+      expect(memory).not.toContain('- Use supplied URLs only.');
+    });
+
     it('deduplicates focused refs without shrinking the complete tree snapshot', async () => {
       const overlapping = fastDoc('/m/overlap.md', '- overlapping');
       const newDoc = fastDoc('/m/new.md', '- brand new');
@@ -7839,7 +7893,7 @@ Other open files:
       );
     });
 
-    it('excludes body-bearing memories after legacy delivery', async () => {
+    it('excludes marked legacy memories until compression resets delivery', async () => {
       vi.mocked(mockConfig.getMemoryRecallMode).mockReturnValue('legacy');
       const memoryPath = '/test/project/root/.qwen/memory/user.md';
       const selectedDoc = {
@@ -7856,16 +7910,21 @@ Other open files:
         body: '- User prefers terse responses.',
         mtimeMs: 1,
       };
+      const recalled = {
+        prompt: buildLegacyRelevantAutoMemoryPrompt([selectedDoc]),
+        selectedDocs: [selectedDoc],
+        strategy: 'model',
+      };
       mockMemoryManager.recall
-        .mockResolvedValueOnce({
-          prompt: `## Relevant memory\n\n${selectedDoc.body}`,
-          selectedDocs: [selectedDoc],
-          strategy: 'semantic',
-        })
+        .mockResolvedValueOnce(recalled)
         .mockResolvedValueOnce({
           prompt: '',
           selectedDocs: [],
           strategy: 'none',
+        })
+        .mockImplementationOnce((_root, _query, options) => {
+          expect(options.excludedFilePaths.has(memoryPath)).toBe(false);
+          return Promise.resolve(recalled);
         });
       mockTurnRunFn.mockReturnValue(
         (async function* () {
@@ -7884,6 +7943,9 @@ Other open files:
       )) {
         // consume stream
       }
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        ...requestWith(expect.stringMatching(/^<system-reminder>\n/)),
+      );
       for await (const _ of client.sendMessageStream(
         [{ text: 'Second question' }],
         new AbortController().signal,
@@ -7904,6 +7966,22 @@ Other open files:
       );
       const options = mockMemoryManager.recall.mock.calls[1]?.[2];
       expect(options?.excludedFilePaths?.has(memoryPath)).toBe(true);
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        ...requestWithout(expect.stringContaining('## Relevant memory')),
+      );
+
+      client.resetManagedAutoMemoryAfterCompression();
+      mockTurnRunFn.mockReturnValue(textTurn('Hello again'));
+      await run([{ text: 'After compression' }], 'prompt-id-legacy-memory-3');
+
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        ...requestWith(expect.stringMatching(/^<system-reminder>\n/)),
+      );
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        ...requestWith(
+          expect.stringContaining('- User prefers terse responses.'),
+        ),
+      );
     });
 
     it('should hold the main request for exactly the initial recall budget when recall never settles', async () => {
@@ -8056,7 +8134,8 @@ Other open files:
       expect(deliveryEvent.discard_reason).toBe('no_relevant_results');
     });
 
-    it('should inject auto-memory on first ToolResult when recall settles after UserQuery', async () => {
+    it('injects marked legacy memory after the first ToolResult when recall settles late', async () => {
+      vi.mocked(mockConfig.getMemoryRecallMode).mockReturnValue('legacy');
       // Recall stays pending across the UserQuery turn and settles only
       // before the ToolResult turn runs.
       let resolveRecall: RecallResolver | undefined;
@@ -8085,11 +8164,18 @@ Other open files:
       });
 
       expect(mockTurnRunFn).toHaveBeenLastCalledWith(
-        ...requestWithout(expect.stringContaining('Deferred memory result')),
+        ...requestWithout(expect.stringContaining('## Relevant memory')),
       );
       expect(recallSignal?.aborted).toBe(false);
 
-      resolveRecall!(modelResult('Deferred memory result.', [userMemoryDoc()]));
+      const selectedDoc = userMemoryDoc();
+      const prompt = buildLegacyRelevantAutoMemoryPrompt([selectedDoc]);
+      resolveRecall!({
+        focusedPrompt: prompt,
+        prompt,
+        selectedDocs: [selectedDoc],
+        strategy: 'model',
+      });
       // Drain microtasks so the settledAt finally() callback runs
       await Promise.resolve();
       await Promise.resolve();
@@ -8107,10 +8193,18 @@ Other open files:
         (p) => typeof p === 'object' && p !== null && 'functionResponse' in p,
       );
       const memoryIdx = requestArr.findIndex(
-        (p) => p === '## Relevant memory\n\nDeferred memory result.',
+        (p) => typeof p === 'string' && p.includes('## Relevant memory'),
       );
       expect(functionResponseIdx).toBeGreaterThanOrEqual(0);
       expect(memoryIdx).toBeGreaterThan(functionResponseIdx);
+      expect(requestArr[memoryIdx]).toMatch(/^<system-reminder>\n/);
+      expect(requestArr[memoryIdx]).toMatch(/\n<\/system-reminder>$/);
+      expect(requestArr[memoryIdx]).toContain(
+        'Automatically recalled saved context',
+      );
+      expect(requestArr[memoryIdx]).toContain(
+        'Do not acknowledge these memories separately.',
+      );
       expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
         mockConfig,
         expect.objectContaining({
