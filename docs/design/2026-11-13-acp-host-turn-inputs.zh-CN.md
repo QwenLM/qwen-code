@@ -4,7 +4,7 @@
 
 - **状态**：为 #17045 的 ACP 第二行准备了实现和测试更新。更新后的测试在本地通过。
 - **日期**：2026-11-13。
-- **关联**：#17045，以及 [统一 Agent loop 设计](2026-10-23-unified-agent-loop.md)。
+- **关联**：#17045，以及 [统一 Agent loop 设计](2026-10-23-unified-agent-loop.zh-CN.md)。
 
 ## 问题
 
@@ -23,11 +23,9 @@
 ```ts
 type UserTurnInput = {
   promptId: string;
-  todoWorkChain?: { promptId: string; continuedFrom?: string };
-  fileHistory?: {
-    promptId: string;
-    outcome: 'attempted' | 'restore-omitted';
-  };
+  todoWorkChain?: { promptId: string };
+  // 宿主已完成该回合的快照阶段时存在。
+  fileHistory?: { promptId: string };
 };
 ```
 
@@ -43,11 +41,13 @@ type UserTurnInput = {
 
 `interactionSpan` 由调用方所有。Core 加入或触碰已有 trace，并把它传递给 continuation，但绝不关闭它。这样明确了所有权，同时保留 ACP 的 span 生命周期。
 
+宿主提供 span 时，宿主也是该 span 唯一的属性写入方：core 不再写入 input-message 或 resolved-request 属性，因此宿主记录的显示文本不会被原始提交 prompt 覆盖。
+
 ## 保留的行为
 
 - slash 命令处理前的原始 user 记录继续保留显示文本、附件、资源引用和 `daemonPromptId`；`/clear` 仍会替换 recorder，同时保留已解析的 `/advisor` 例外。
 - 文件历史快照仍在发送前尝试，即使该回合已取消。
-- Retry、continue 和 restore 不再新增记录：它们的消息已在历史中，或在发送前已记录，因此该回合只带 `promptId`。Goal permit 行为保持不变。
+- Retry、continue 和 restore 不再新增记录：它们的消息已在历史中，或在发送前已记录，因此记录阶段只带 `promptId`；该回合仍携带宿主已经执行的 todo 链和快照输入。Goal permit 行为保持不变。
 - 延迟 cron 记录仍只在内容进入模型后执行，并且仍仅在保留历史时执行，包括保留未发送输入的情况。
 - Notification 记录继续保留任务元数据和此前的持久化行为；已经持久化的后台通知不会被重复记录。
 

@@ -3132,10 +3132,7 @@ describe('Gemini Client (client.ts)', () => {
         {
           userTurn: {
             promptId: 'prompt-host-retry',
-            todoWorkChain: {
-              promptId: 'prompt-host-retry',
-              continuedFrom: 'prompt-host',
-            },
+            todoWorkChain: { promptId: 'prompt-host-retry' },
           },
         },
       );
@@ -8171,6 +8168,9 @@ Other open files:
     it('leaves the interaction span to a host that keeps one open', async () => {
       const promptId = 'prompt-host-span';
       const interactionSpan = ownerFor(promptId);
+      vi.mocked(
+        mockConfig.getTelemetryIncludeSensitiveSpanAttributes,
+      ).mockReturnValue(true);
       mockTurnRunFn.mockReturnValueOnce(
         turnStream(toolCallRequest('call-1', 'read_file', {}, promptId)),
       );
@@ -8178,6 +8178,7 @@ Other open files:
       await run([{ text: 'use a tool' }], promptId, {
         type: SendMessageType.UserQuery,
         interactionSpan,
+        submittedPrompt: 'raw prompt',
       });
       mockTurnRunFn.mockReturnValueOnce(textTurn('done'));
       await run([fnResponse('read_file', { ok: true })], promptId, {
@@ -8187,10 +8188,17 @@ Other open files:
 
       expect(tel.startInteractionSpan).not.toHaveBeenCalled();
       expect(tel.endInteractionSpan).not.toHaveBeenCalled();
-      expect(tel.recordInteractionActivity).toHaveBeenCalledWith(
-        promptId,
-        interactionSpan,
-      );
+      // One heartbeat per round: the UserQuery and its tool continuation.
+      expect(tel.recordInteractionActivity.mock.calls).toEqual([
+        [promptId, interactionSpan],
+        [promptId, interactionSpan],
+      ]);
+      // The host writes the span's attributes; core must not overwrite them.
+      expect(tel.addAgentInputMessageAttributes).not.toHaveBeenCalled();
+      expect(tel.addUserPromptAttributes).not.toHaveBeenCalled();
+      vi.mocked(
+        mockConfig.getTelemetryIncludeSensitiveSpanAttributes,
+      ).mockReturnValue(false);
     });
 
     it('keeps one interaction open across multiple tool-result continuations', async () => {
@@ -15591,7 +15599,7 @@ Other open files:
           type: SendMessageType.UserQuery,
           userTurn: {
             promptId: 'prompt-host',
-            fileHistory: { promptId: 'prompt-host', outcome: 'attempted' },
+            fileHistory: { promptId: 'prompt-host' },
           },
         });
 
@@ -15611,7 +15619,7 @@ Other open files:
             userTurn: {
               promptId,
               todoWorkChain: { promptId: 'other-turn' },
-              fileHistory: { promptId: 'other-turn', outcome: 'attempted' },
+              fileHistory: { promptId: 'other-turn' },
             },
           });
 

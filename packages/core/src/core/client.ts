@@ -329,15 +329,12 @@ export type UserTurnRecord =
       kind: 'cron';
       message: PartListUnion;
       displayText?: string;
-      goalPermit?: GoalTurnPermit;
     }
   | {
       kind: 'notification';
       message: PartListUnion;
       displayText?: string;
       backgroundTask?: NotificationRecordPayload['backgroundTask'];
-      goalPermit?: GoalTurnPermit;
-      deliveredTurn?: boolean;
     };
 
 /**
@@ -348,11 +345,12 @@ export type UserTurnRecord =
  */
 export interface UserTurnInput {
   promptId: string;
-  todoWorkChain?: { promptId: string; continuedFrom?: string };
-  fileHistory?: {
-    promptId: string;
-    outcome: 'attempted' | 'restore-omitted';
-  };
+  todoWorkChain?: { promptId: string };
+  /**
+   * Present when the host completed the snapshot phase for this turn, whether
+   * it took the snapshot or skipped it for a restore.
+   */
+  fileHistory?: { promptId: string };
 }
 
 /** Writes the host's record at its existing timing. */
@@ -372,33 +370,10 @@ export function recordUserTurn(config: Config, record: UserTurnRecord): void {
       recorder?.recordGoalRuntimeMessage(record.message, record.goalPermit);
       break;
     case 'cron':
-      if (record.goalPermit === undefined) {
-        recorder?.recordCronPrompt(record.message, record.displayText);
-      } else {
-        recorder?.recordCronPrompt(
-          record.message,
-          record.displayText,
-          record.goalPermit,
-        );
-      }
+      recorder?.recordCronPrompt(record.message, record.displayText);
       break;
     case 'notification':
-      if (record.deliveredTurn !== undefined) {
-        recorder?.recordNotification(
-          record.message,
-          record.displayText,
-          record.backgroundTask,
-          record.goalPermit,
-          record.deliveredTurn,
-        );
-      } else if (record.goalPermit !== undefined) {
-        recorder?.recordNotification(
-          record.message,
-          record.displayText,
-          record.backgroundTask,
-          record.goalPermit,
-        );
-      } else if (record.backgroundTask !== undefined) {
+      if (record.backgroundTask !== undefined) {
         recorder?.recordNotification(
           record.message,
           record.displayText,
@@ -4045,9 +4020,7 @@ export class LlmClient {
       options?.userTurn?.promptId === prompt_id ? options.userTurn : undefined;
     const hasUserTurnRecord = userTurn !== undefined;
     const hasTodoWorkChain = userTurn?.todoWorkChain?.promptId === prompt_id;
-    const hasFileHistory =
-      userTurn?.fileHistory?.promptId === prompt_id &&
-      userTurn.fileHistory.outcome === 'attempted';
+    const hasFileHistory = userTurn?.fileHistory?.promptId === prompt_id;
     const hostInteractionSpan = options?.interactionSpan;
     let interactionOwner =
       hostInteractionSpan ??
@@ -4409,6 +4382,7 @@ export class LlmClient {
       this.interactionStartTypes.set(prompt_id, messageType);
       if (
         interactionOwner &&
+        !hostInteractionSpan &&
         messageType === SendMessageType.UserQuery &&
         typeof options?.submittedPrompt === 'string'
       ) {
@@ -4802,7 +4776,7 @@ export class LlmClient {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
     }
-    if (startsInteraction) {
+    if (startsInteraction && !hostInteractionSpan) {
       const interactionSpan = interactionOwner;
       if (
         interactionSpan &&

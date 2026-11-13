@@ -7734,16 +7734,11 @@ export class Session implements SessionContext {
                 this.config.getActiveTodoWorkChainOwner(
                   this.activeTodoWorkChainPromptId,
                 ) === this.config.getActiveTodoPlanWriterOwner());
-            userTurn.todoWorkChain = {
-              promptId,
-              continuedFrom: continuesTodoWorkChain
-                ? this.activeTodoWorkChainPromptId
-                : undefined,
-            };
-            this.config.startActiveTodoWorkChain(
-              promptId,
-              userTurn.todoWorkChain.continuedFrom,
-            );
+            const continuedFrom = continuesTodoWorkChain
+              ? this.activeTodoWorkChainPromptId
+              : undefined;
+            userTurn.todoWorkChain = { promptId };
+            this.config.startActiveTodoWorkChain(promptId, continuedFrom);
             this.activeTodoWorkChainPromptId = promptId;
             if (responseCapture.channelTask) {
               responseCapture.channelTask.sourceTurnId =
@@ -7781,12 +7776,7 @@ export class Session implements SessionContext {
               }
             }
 
-            userTurn.fileHistory = {
-              promptId,
-              outcome: isRestoreAskUserQuestion
-                ? 'restore-omitted'
-                : 'attempted',
-            };
+            userTurn.fileHistory = { promptId };
 
             if (
               isFreshUserTurn &&

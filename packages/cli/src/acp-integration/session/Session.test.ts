@@ -5007,10 +5007,7 @@ describe('Session', () => {
         userTurn: {
           promptId: send.mock.calls[0][2],
           todoWorkChain: { promptId: send.mock.calls[0][2] },
-          fileHistory: {
-            promptId: send.mock.calls[0][2],
-            outcome: 'attempted',
-          },
+          fileHistory: { promptId: send.mock.calls[0][2] },
         },
         workflowModeEligible: true,
         interactionSpan: agentTelemetry.span,
@@ -10712,7 +10709,7 @@ describe('Session', () => {
         type: core.SendMessageType.Retry,
         userTurn: {
           promptId,
-          fileHistory: { outcome: 'restore-omitted' },
+          fileHistory: { promptId },
         },
       });
       expect(options).not.toHaveProperty('promptAdmission');

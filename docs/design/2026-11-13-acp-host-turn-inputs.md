@@ -23,11 +23,9 @@ Out of scope: other ACP tool batches, a full per-round `runAgentLoop` migration,
 ```ts
 type UserTurnInput = {
   promptId: string;
-  todoWorkChain?: { promptId: string; continuedFrom?: string };
-  fileHistory?: {
-    promptId: string;
-    outcome: 'attempted' | 'restore-omitted';
-  };
+  todoWorkChain?: { promptId: string };
+  // Present when the host completed the snapshot phase for this turn.
+  fileHistory?: { promptId: string };
 };
 ```
 
@@ -43,11 +41,13 @@ Removing `userTurnRecordedByHost` means two things: the host writes its record t
 
 `interactionSpan` is caller-owned. Core joins or touches the existing trace and propagates it through continuations, but never closes it. This makes ownership explicit while preserving the ACP span lifecycle.
 
+When the host supplies the span, the host is also its single attribute writer: core does not add the input-message or resolved-request attributes, so the host's recorded display text is not replaced by the raw submitted prompt.
+
 ## Preserved behavior
 
 - Early raw-user recording keeps display text, attachments, resource references, and `daemonPromptId` before slash-command handling; `/clear` still replaces the recorder, with the resolved `/advisor` exception.
 - The file-history snapshot is attempted before sending, even when the turn is cancelled.
-- Retry, continue, and restore record nothing new: their message is already in history or recorded before the send, so the turn carries only `promptId`. Goal permit behavior remains intact.
+- Retry, continue, and restore record nothing new: their message is already in history or recorded before the send, so the record phase carries only `promptId`; the turn still carries the todo-chain and snapshot inputs the host already applied. Goal permit behavior remains intact.
 - Deferred cron recording still happens only once the block reached the model, and remains conditional on keeping history, including retained unsent input.
 - Notification records retain task metadata and prior persistence behavior; a background notification that was already persisted is not recorded twice.
 
