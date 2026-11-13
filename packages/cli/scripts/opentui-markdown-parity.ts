@@ -45,6 +45,32 @@ const CASES: Array<readonly [name: string, text: string]> = [
 ];
 
 const syntaxStyle = SyntaxStyle.create();
+const MIN_CASES = 20;
+// Independent oracle: a token that must survive both renders. This catches a
+// mask that silently drops the content the case exists to protect.
+const ORACLE: Record<string, string> = {
+  heading: '同步結果',
+  'bare url': 'x.dev',
+  'partial url': 'www.bb',
+  'long url': 'bbc.com',
+  'list long url': 'bbc.com',
+  'www/email': 'example.com',
+  'cpp template': 'any_cast',
+  'shortcut defined': 'expr.add',
+  'task markers': 'rotate',
+  'html tags': 'bold',
+  'indented code': 'curl',
+  'three blank lines': 'p1',
+  'table cell url': 'x.dev',
+  'emphasis url': 'x.dev',
+  'ftp url': 'gnu.org',
+  'tilde approximations': '3,000',
+  'tilde near dollars': '$92',
+  strikethrough: 'strike',
+  'list definition': 'expr.add',
+  'reference link': 'ref',
+  'non-ascii label': '图1',
+};
 
 async function frame(content: string, streaming: boolean): Promise<string[]> {
   const setup = await createTestRenderer({ width: 72, height: 30 });
@@ -89,10 +115,31 @@ async function frame(content: string, streaming: boolean): Promise<string[]> {
 }
 
 async function main() {
+  if (CASES.length < MIN_CASES) {
+    console.error(
+      `MARKDOWN PARITY FAIL: evidence floor not met (${CASES.length} < ${MIN_CASES})`,
+    );
+    process.exit(1);
+  }
   let failures = 0;
   for (const [name, text] of CASES) {
+    const oracle = ORACLE[name];
+    if (!oracle) {
+      failures += 1;
+      console.log(`FAIL ${name} missing independent oracle`);
+      continue;
+    }
     const live = await frame(streamingMarkdownForRender(text, true), true);
     const settled = await frame(streamingMarkdownForRender(text, false), false);
+    const liveText = live.join('\n');
+    const settledText = settled.join('\n');
+    if (!liveText.includes(oracle) || !settledText.includes(oracle)) {
+      failures += 1;
+      console.log(
+        `FAIL ${name} oracle ${JSON.stringify(oracle)} missing (live=${liveText.includes(oracle)}, settled=${settledText.includes(oracle)})`,
+      );
+      continue;
+    }
     const mismatch: number[] = [];
     for (
       let index = 0;

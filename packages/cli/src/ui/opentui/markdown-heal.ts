@@ -11,8 +11,10 @@
  * `**` arrives) flips the tail between literal-marker text and rendered
  * styles frame to frame — the "left-right flicker" on dense Chinese
  * documents. Healing closes the unterminated markers before rendering so the
- * tail always renders as markdown; when streaming settles the raw text is
- * rendered as-is (the message on disk is the truth).
+ * tail always renders as markdown. When streaming settles the message on disk
+ * remains the source of truth, but both states apply width-preserving render
+ * masks: lone `~` becomes U+223C, unpaired backticks become U+02CB, and
+ * thinking-only literal asterisks become U+2217.
  */
 import remend from 'remend';
 import remarkGfm from 'remark-gfm';
@@ -499,9 +501,21 @@ function codeSpanRanges(line: string): Array<[number, number]> {
 function linkDestinationRanges(line: string): Array<[number, number]> {
   const codeSpans = codeSpanRanges(line);
   const ranges: Array<[number, number]> = [];
-  let from = 0;
-  const inCodeSpan = (index: number) =>
+  const closeParen = new Map<number, number>();
+  const openParens: number[] = [];
+  const isCodeChar = (index: number) =>
     codeSpans.some(([start, end]) => index >= start && index < end);
+  for (let index = 0; index < line.length; index += 1) {
+    if (isCodeChar(index)) continue;
+    if (line[index] === '(' && !isEscaped(line, index)) {
+      openParens.push(index);
+    } else if (line[index] === ')' && !isEscaped(line, index)) {
+      const open = openParens.pop();
+      if (open !== undefined) closeParen.set(open, index);
+    }
+  }
+  let from = 0;
+  const inCodeSpan = isCodeChar;
   for (;;) {
     const open = line.indexOf('](', from);
     if (open === -1) break;
@@ -516,23 +530,9 @@ function linkDestinationRanges(line: string): Array<[number, number]> {
       if (angleEnd !== -1 && line[angleEnd + 1] === ')') end = angleEnd + 1;
     }
     if (end === -1) {
-      let depth = 0;
-      for (let i = start; i < line.length; i++) {
-        if (line[i] === '(') {
-          depth += 1;
-        } else if (line[i] === ')') {
-          if (depth === 0) {
-            end = i;
-            break;
-          }
-          depth -= 1;
-        }
-      }
+      end = closeParen.get(open + 1) ?? -1;
     }
     if (end === -1) {
-      // No `)` remains on this line: no later `](` can close either, so stop
-      // instead of rescanning the tail for every unmatched pair.
-      if (line.indexOf(')', start) === -1) break;
       from = open + 2;
       continue;
     }
@@ -585,6 +585,12 @@ function maskAutolinksInProse(
   carriedCodeSpan: number | null = null,
 ): MaskResult {
   const destinations = linkDestinationRanges(line);
+  const nextCloseBracket = new Array<number>(line.length + 1).fill(-1);
+  let nextClose = -1;
+  for (let index = line.length - 1; index >= 0; index -= 1) {
+    if (line[index] === ']') nextClose = index;
+    nextCloseBracket[index] = nextClose;
+  }
   let destinationIndex = 0;
   let out = '';
   let i = 0;
@@ -684,7 +690,7 @@ function maskAutolinksInProse(
     // (`[expr.add]:`) and GFM task marker (`- [ ]`) keep theirs. The label is
     // re-scanned so `[https://x.dev]` masks the URL inside in the same pass.
     if (char === '[' && !isEscaped(line, i)) {
-      const close = line.indexOf(']', i + 1);
+      const close = nextCloseBracket[i + 1] ?? -1;
       if (close !== -1) {
         const after = line[close + 1] ?? '';
         const label = line.slice(i + 1, close);
@@ -692,7 +698,7 @@ function maskAutolinksInProse(
         // `arr[i][j]`) is concealed to its visible label by the settled
         // renderer, so streaming drops both bracket pairs too.
         if (after === '[') {
-          const secondClose = line.indexOf(']', close + 2);
+          const secondClose = nextCloseBracket[close + 2] ?? -1;
           if (secondClose !== -1 && !label.startsWith('^')) {
             // The settled renderer conceals both bracket pairs of a
             // reference link (and C-style `arr[i][j]`); keep only the
@@ -1165,6 +1171,13 @@ function stripFalseEmphasisClose(source: string, healed: string): string {
     if (source.endsWith(marker)) continue;
     const last = source.lastIndexOf(marker);
     if (last === -1) continue;
+    if (last === 0) {
+      const rest = source.slice(1);
+      if (/^[A-Za-z_][A-Za-z0-9_]*\s*(?:=|;|->|\[|\))/.test(rest)) {
+        return healed.slice(0, -1);
+      }
+      continue;
+    }
     if (!/[A-Za-z0-9_>)\]:`]/.test(source[last - 1] ?? '')) continue;
     return healed.slice(0, -1);
   }

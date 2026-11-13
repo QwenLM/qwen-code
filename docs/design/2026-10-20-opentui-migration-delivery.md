@@ -173,7 +173,10 @@ href. Keep the shortcut-label strip (`[expr.add]` → `expr.add`): the settled
 renderer conceals those brackets and 0.8.4 does not change that. Keep
 stripping ATX heading markers from the streaming text until a coalesced-mode
 streaming preview is verified to conceal them without flipping (0.8.4 still
-flips them).
+flips them). Also revisit the width-preserving substitutions when the new
+streaming Markdown engine is wired in: lone `~` → U+223C, unpaired backticks
+→ U+02CB, and thinking-only literal asterisks → U+2217 should be removed
+only after the preview and settled passes agree on those literal markers.
 
 ## Completion and rollout gates
 

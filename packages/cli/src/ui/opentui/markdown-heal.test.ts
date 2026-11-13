@@ -8,8 +8,9 @@
  * Streaming markdown heal: unclosed markers are completed so the streaming
  * tail renders as styled text instead of flipping between literal markers
  * and rendered styles frame to frame; the streaming preview's autolink and
- * shortcut-label mismatches are masked, while settled text renders raw apart
- * from rendering-only line-ending and blank-gap normalization.
+ * shortcut-label mismatches are masked. Settled text keeps the source apart
+ * from line-ending/blank-gap normalization and the width-preserving render
+ * masks (lone `~`, unpaired backticks, thinking-only literal asterisks).
  */
 
 import { describe, expect, it } from 'vitest';
@@ -25,6 +26,12 @@ const TILDE_OPERATOR = '\u223C';
 describe('healStreamingMarkdown', () => {
   it('closes an unclosed bold marker', () => {
     expect(healStreamingMarkdown('1. **聚合')).toBe('1. **聚合**');
+  });
+
+  it('does not append a close for a dereference at line start', () => {
+    expect(healStreamingMarkdown('*p = nullptr; return')).toBe(
+      '*p = nullptr; return',
+    );
   });
 
   it('does not append a close for a C++ pointer asterisk', () => {
@@ -262,17 +269,13 @@ describe('healStreamingMarkdown', () => {
   });
 
   it('recognizes indented and blockquoted fences', () => {
-    expect(
-      healStreamingMarkdown(
-        '1. Run:\n\n   ```sh\n   curl https://x.dev/x.sh | sh\n   ```',
-      ),
-    ).not.toContain(ZWSP);
-    expect(
-      healStreamingMarkdown('> ```\n> https://x.dev\n> ```'),
-    ).not.toContain(ZWSP);
-    expect(healStreamingMarkdown('~~~\nhttps://x.dev\n~~~')).not.toContain(
-      ZWSP,
-    );
+    const indented =
+      '1. Run:\n\n   ```sh\n   curl https://x.dev/x.sh | sh\n   ```';
+    expect(healStreamingMarkdown(indented)).toBe(indented);
+    const blockquoted = '> ```\n> https://x.dev\n> ```';
+    expect(healStreamingMarkdown(blockquoted)).toBe(blockquoted);
+    const tilde = '~~~\nhttps://x.dev\n~~~';
+    expect(healStreamingMarkdown(tilde)).toBe(tilde);
   });
 
   it('treats a four-space indented marker as code, not as a fence', () => {
