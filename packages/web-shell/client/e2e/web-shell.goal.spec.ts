@@ -197,6 +197,94 @@ async function capture(
   await page.screenshot({ path: testInfo.outputPath(name), fullPage: true });
 }
 
+for (const width of [1280, 390]) {
+  test(`goal status has a one-line preview and trailing details at ${width}px`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    const scenario = createWebShellDaemonScenario();
+    const daemon = await installScenario(page, scenario, testInfo);
+    await gotoSession(page, scenario, daemon);
+    const condition = `Generate current work ideas.\n${'Read current tasks and preserve the complete objective. '.repeat(240)}`;
+    const lastReason = 'Verified the output by reading it back.';
+    await daemon.sendEvent({
+      id: 10,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            goalStatus: {
+              kind: 'achieved',
+              condition,
+              iterations: 4,
+              durationMs: 60_000,
+              lastReason,
+            },
+          },
+        },
+      },
+    });
+    const toggle = page.getByRole('button', { name: 'Expand details' });
+    await expect(toggle).toBeVisible();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    const row = toggle.locator('..');
+    const preview = row.locator('span').last();
+    const layout = await preview.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        height: element.getBoundingClientRect().height,
+        lineHeight: parseFloat(style.lineHeight),
+        overflow: element.scrollWidth > element.clientWidth,
+        ellipsis: style.textOverflow,
+      };
+    });
+    expect(layout.height).toBeLessThanOrEqual(layout.lineHeight + 1);
+    expect(layout.overflow).toBe(true);
+    expect(layout.ellipsis).toBe('ellipsis');
+    const buttonBox = (await toggle.boundingBox())!;
+    const previewBox = (await preview.boundingBox())!;
+    expect(buttonBox.x).toBeGreaterThanOrEqual(previewBox.x + previewBox.width);
+    expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(width);
+    await expect(page.getByText(lastReason, { exact: false })).toHaveCount(0);
+    await capture(page, testInfo, 'goal-collapsed.png');
+
+    await toggle.focus();
+    await page.keyboard.press('Enter');
+    const collapse = page.getByRole('button', { name: 'Collapse details' });
+    await expect(collapse).toHaveAttribute('aria-expanded', 'true');
+    const details = page.locator(
+      `[id="${await collapse.getAttribute('aria-controls')}"]`,
+    );
+    expect(await details.locator(':scope > div').first().textContent()).toBe(
+      condition,
+    );
+    await expect(details).toContainText(lastReason);
+    const expandedLayout = await details.evaluate((element) => ({
+      height: element.getBoundingClientRect().height,
+      lineHeight: parseFloat(getComputedStyle(element).lineHeight),
+      overflowing: element.scrollHeight > element.clientHeight,
+    }));
+    expect(expandedLayout.height).toBeLessThanOrEqual(
+      expandedLayout.lineHeight * 6 + 1,
+    );
+    expect(expandedLayout.overflowing).toBe(true);
+    await capture(page, testInfo, 'goal-expanded.png');
+    const beforeScroll = await collapse.boundingBox();
+    await details.hover();
+    await page.mouse.wheel(0, 800);
+    await expect
+      .poll(() => details.evaluate((element) => element.scrollTop))
+      .toBeGreaterThan(0);
+    expect(await collapse.boundingBox()).toEqual(beforeScroll);
+    await collapse.press('Space');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.getByText(lastReason, { exact: false })).toHaveCount(0);
+  });
+}
+
 for (const viewport of [
   { width: 1280, height: 720 },
   { width: 320, height: 568 },
