@@ -31603,7 +31603,21 @@ describe('Session', () => {
           ]);
         });
 
-        describe('on the shared agent loop round', () => {
+        describe.each([false, true])('shared round (kernel=%s)', (kernel) => {
+          beforeEach(() => {
+            mockConfig.isEventBusAgentLoopEnabled = vi
+              .fn()
+              .mockReturnValue(kernel);
+            vi.mocked(runAgentLoop).mockClear();
+          });
+
+          afterEach(() => {
+            // Each round ran on the kernel when it is on.
+            for (const [options] of vi.mocked(runAgentLoop).mock.calls) {
+              expect(options).toMatchObject({ useEventBus: kernel });
+            }
+          });
+
           /** Streams `plan A`, then holds the response until it is cut. */
           function openSharedResponse(endsWithError = false) {
             let markStreaming!: () => void;
@@ -39510,7 +39524,21 @@ describe('Session', () => {
         expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
       });
 
-      describe('on the shared agent loop round', () => {
+      describe.each([false, true])('shared round (kernel=%s)', (kernel) => {
+        beforeEach(() => {
+          mockConfig.isEventBusAgentLoopEnabled = vi
+            .fn()
+            .mockReturnValue(kernel);
+          vi.mocked(runAgentLoop).mockClear();
+        });
+
+        afterEach(() => {
+          // Each round ran on the kernel when it is on.
+          for (const [options] of vi.mocked(runAgentLoop).mock.calls) {
+            expect(options).toMatchObject({ useEventBus: kernel });
+          }
+        });
+
         const activeGoalSnapshot = (activity: 'idle' | 'running') => ({
           v: 2,
           activity,
