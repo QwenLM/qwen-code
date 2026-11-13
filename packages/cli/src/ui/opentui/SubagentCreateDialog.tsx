@@ -77,6 +77,7 @@ export function OpenTuiSubagentCreateDialog({
   owner.current = config;
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useLayoutEffect(() => {
+    const currentGeneration = generation;
     alive.current = true;
     if (draftRef.current.isGenerating)
       setDraft(
@@ -87,7 +88,7 @@ export function OpenTuiSubagentCreateDialog({
       );
     return () => {
       alive.current = false;
-      generation.current++;
+      currentGeneration.current++;
       pendingController.current?.abort();
       pendingController.current = null;
       if (closeTimer.current) clearTimeout(closeTimer.current);

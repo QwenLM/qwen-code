@@ -142,10 +142,25 @@ async function scrollAndResizeDialogs() {
       const setup = await render(<Responsive />, { width, height: 15 });
       try {
         setup.renderer.start();
-        await setup.waitFor(() => body(setup).scrollHeight >= 40, {
-          maxPasses: 100,
-        });
+        const selectionList = Dialog === OpenTuiSubagentListDialog;
+        await setup.waitFor(
+          () =>
+            selectionList
+              ? setup.captureCharFrame().includes('row-0')
+              : body(setup).scrollHeight >= 40,
+          { maxPasses: 100 },
+        );
         setup.renderer.pause();
+        if (selectionList) {
+          for (let index = 1; index < fixtureRows.length; index++) {
+            await act(async () => setup.mockInput.pressKey('ARROW_DOWN'));
+            await setup.renderOnce();
+          }
+          assert(
+            setup.captureCharFrame().includes(endMarker),
+            'agent list: last choice is unreachable by keyboard',
+          );
+        }
         for (const height of [7, 20, 4, 12]) {
           const before = body(setup);
           await act(async () => setup.resize(width, height));
@@ -166,7 +181,7 @@ async function scrollAndResizeDialogs() {
               height,
             `${Dialog.name}: resize frame overflow`,
           );
-          after.scrollTo(after.scrollHeight);
+          if (!selectionList) after.scrollTo(after.scrollHeight);
           await setup.renderOnce();
           assert(
             setup.captureCharFrame().includes(endMarker),
