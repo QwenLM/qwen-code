@@ -10,9 +10,14 @@
  * Interactive sessions disclose usage statistics through the privacy notice
  * linked from the auth dialog, but a headless `qwen -p` run renders no
  * dialog. This notice names the collection host and the opt-out once per
- * install, and only for users who are relying on the default: anyone who has
- * set the setting or the environment variable, either way, has already made
- * a choice and is not shown it.
+ * install, and only for users who are relying on the default: an operator
+ * who has set the setting or the environment variable, either way, has
+ * already made a choice and is not shown it.
+ *
+ * The decision is made on the headless entry path before `config.initialize()`
+ * sends the first event (see `prepareUsageStatisticsNotice`), so the
+ * disclosure cannot be skipped by a run that exits early, for example at the
+ * auth check.
  */
 
 import * as fs from 'node:fs';
@@ -20,6 +25,10 @@ import * as path from 'node:path';
 import { Storage } from '@qwen-code/qwen-code-core/storage';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/atomicFileWrite';
 import { USAGE_STATS_HOSTNAME } from '@qwen-code/qwen-code-core/telemetryConstants';
+import { OutputFormat } from '@qwen-code/qwen-code-core/output/types.js';
+import { isFileSourcedEnvKey } from '../config/environment.js';
+import type { Settings } from '../config/settings.js';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 export const USAGE_STATISTICS_NOTICE_SUBTYPE = 'usage_statistics_notice';
 
@@ -39,41 +48,93 @@ export const USAGE_STATISTICS_NOTICE =
 export interface UsageStatisticsNoticeInput {
   /** Resolved usage-statistics state for this session. */
   usageStatisticsEnabled: boolean;
-  /** `privacy.usageStatisticsEnabled` from merged settings, before defaults. */
-  settingsValue: boolean | undefined;
+  /**
+   * `privacy.usageStatisticsEnabled` from operator scopes only (see
+   * `operatorUsageStatisticsSetting`). A repository's workspace settings
+   * must not be able to suppress the disclosure.
+   */
+  operatorSettingsValue: boolean | undefined;
   env?: Record<string, string | undefined>;
+  /**
+   * Whether an environment value was written by a `.env` file or a settings
+   * `env` block rather than the launch environment. A file-sourced value may
+   * come from the repository, so it does not count as the operator's choice.
+   */
+  isEnvFileSourced?: (key: string) => boolean;
   /** Overrides the marker location; defaults to the global Qwen directory. */
   markerPath?: string;
 }
 
-let shownThisProcess = false;
+interface SettingsScope {
+  settings: Pick<Settings, 'privacy'>;
+}
+
+/**
+ * The operator's explicit `privacy.usageStatisticsEnabled`, ignoring the
+ * workspace scope. Scopes resolve like a normal load: system over user over
+ * system defaults. Bare mode keeps operator settings in the system scope.
+ */
+export function operatorUsageStatisticsSetting(scopes: {
+  systemDefaults?: SettingsScope;
+  user?: SettingsScope;
+  system?: SettingsScope;
+}): boolean | undefined {
+  let selected: boolean | undefined;
+  for (const scope of [scopes.systemDefaults, scopes.user, scopes.system]) {
+    const value = scope?.settings?.privacy?.usageStatisticsEnabled;
+    if (typeof value === 'boolean') selected = value;
+  }
+  return selected;
+}
+
+let decided = false;
+let pendingMarkerPath: string | undefined;
 
 function defaultMarkerPath(): string {
   return path.join(Storage.getGlobalQwenDir(), NOTICE_MARKER_FILE);
 }
 
 /**
- * Returns the notice text when it should be shown, recording that it was so
- * later runs stay quiet. A marker that cannot be read or written never
- * suppresses the notice: showing it again beats never showing it.
+ * Decides once per process whether the notice is due, and holds it until
+ * `takeUsageStatisticsNotice` delivers it. Returns true when a notice is
+ * pending. Nothing is recorded here, so a run that never delivers the notice
+ * shows it again next time.
  */
-export function consumeUsageStatisticsNotice(
+export function prepareUsageStatisticsNotice(
   input: UsageStatisticsNoticeInput,
-): string | null {
+): boolean {
+  if (decided) return pendingMarkerPath !== undefined;
+  decided = true;
+
   const env = input.env ?? process.env;
-  if (shownThisProcess) return null;
-  if (!input.usageStatisticsEnabled) return null;
-  if (env[USAGE_STATISTICS_ENV] !== undefined) return null;
-  if (input.settingsValue !== undefined) return null;
+  const isEnvFileSourced = input.isEnvFileSourced ?? isFileSourcedEnvKey;
+  if (!input.usageStatisticsEnabled) return false;
+  if (
+    env[USAGE_STATISTICS_ENV] !== undefined &&
+    !isEnvFileSourced(USAGE_STATISTICS_ENV)
+  ) {
+    return false;
+  }
+  if (input.operatorSettingsValue !== undefined) return false;
 
   const markerPath = input.markerPath ?? defaultMarkerPath();
-  try {
-    if (fs.existsSync(markerPath)) return null;
-  } catch {
-    // Unreadable marker: fall through and show the notice.
-  }
+  // existsSync returns false rather than throwing, so an unreadable marker
+  // already falls through to showing the notice.
+  if (fs.existsSync(markerPath)) return false;
 
-  shownThisProcess = true;
+  pendingMarkerPath = markerPath;
+  return true;
+}
+
+/**
+ * Returns the pending notice once and records that it was shown, so later
+ * runs stay quiet. A marker that cannot be written never suppresses the
+ * notice: showing it again beats never showing it.
+ */
+export function takeUsageStatisticsNotice(): string | null {
+  const markerPath = pendingMarkerPath;
+  if (markerPath === undefined) return null;
+  pendingMarkerPath = undefined;
   try {
     fs.mkdirSync(path.dirname(markerPath), { recursive: true });
     atomicWriteFileSync(markerPath, `${new Date().toISOString()}\n`, {
@@ -85,7 +146,47 @@ export function consumeUsageStatisticsNotice(
   return USAGE_STATISTICS_NOTICE;
 }
 
-/** Test-only: forget that the notice was shown in this process. */
+function writePendingNoticeToStderr(): void {
+  const notice = takeUsageStatisticsNotice();
+  if (notice) writeStderrLine(notice);
+}
+
+export interface HeadlessNoticeConfig {
+  getUsageStatisticsEnabled(): boolean;
+  getOutputFormat(): OutputFormat | string;
+}
+
+/**
+ * Called on the headless entry path before `config.initialize()`, which
+ * sends the first usage-statistics event. Text mode prints the notice to
+ * stderr right away. JSON and stream-JSON modes keep it pending so it is
+ * emitted as a system message after `init` (or before an early error
+ * result); if the process exits before that happens, it goes to stderr.
+ */
+export function discloseUsageStatisticsForHeadlessRun(
+  config: HeadlessNoticeConfig,
+  settings: Parameters<typeof operatorUsageStatisticsSetting>[0],
+  options: Pick<
+    UsageStatisticsNoticeInput,
+    'env' | 'isEnvFileSourced' | 'markerPath'
+  > = {},
+): void {
+  const pending = prepareUsageStatisticsNotice({
+    usageStatisticsEnabled: config.getUsageStatisticsEnabled(),
+    operatorSettingsValue: operatorUsageStatisticsSetting(settings),
+    ...options,
+  });
+  if (!pending) return;
+  if (config.getOutputFormat() === OutputFormat.TEXT) {
+    writePendingNoticeToStderr();
+  } else {
+    process.once('exit', writePendingNoticeToStderr);
+  }
+}
+
+/** Test-only: forget the decision and any pending notice. */
 export function resetUsageStatisticsNoticeForTesting(): void {
-  shownThisProcess = false;
+  decided = false;
+  pendingMarkerPath = undefined;
+  process.removeListener('exit', writePendingNoticeToStderr);
 }

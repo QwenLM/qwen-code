@@ -10,6 +10,10 @@ import { validateAuthMethod } from './config/auth.js';
 import { type LoadedSettings } from './config/settings.js';
 import { JsonOutputAdapter } from './nonInteractive/io/JsonOutputAdapter.js';
 import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAdapter.js';
+import {
+  USAGE_STATISTICS_NOTICE_SUBTYPE,
+  takeUsageStatisticsNotice,
+} from './nonInteractive/usage-statistics-notice.js';
 import { runExitCleanup } from './utils/cleanup.js';
 import { writeStderrLine } from './utils/stdioHelpers.js';
 
@@ -61,6 +65,14 @@ export async function validateNonInteractiveAuth(
           nonInteractiveConfig,
           nonInteractiveConfig.getIncludePartialMessages(),
         );
+      }
+      // The run ends before `init`, so a pending usage-statistics notice
+      // would otherwise only reach stderr at exit; keep it in the output.
+      const usageStatisticsNotice = takeUsageStatisticsNotice();
+      if (usageStatisticsNotice) {
+        adapter.emitSystemMessage(USAGE_STATISTICS_NOTICE_SUBTYPE, {
+          notice: usageStatisticsNotice,
+        });
       }
       const errorMessage =
         error instanceof Error ? error.message : String(error);

@@ -22,6 +22,19 @@ vi.mock('./utils/stdioHelpers.js', () => ({
   clearScreen: vi.fn(),
 }));
 
+const mockTakeUsageStatisticsNotice = vi.hoisted(() =>
+  vi.fn().mockReturnValue(null),
+);
+vi.mock(
+  './nonInteractive/usage-statistics-notice.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('./nonInteractive/usage-statistics-notice.js')
+    >()),
+    takeUsageStatisticsNotice: mockTakeUsageStatisticsNotice,
+  }),
+);
+
 type ModelsConfig = ReturnType<Config['getModelsConfig']>;
 
 // Helper to create a mock Config with modelsConfig
@@ -312,19 +325,58 @@ describe('validateNonInterActiveAuth', () => {
 
   describe('JSON output mode', () => {
     let emitResultMock: ReturnType<typeof vi.fn>;
+    let emitSystemMessageMock: ReturnType<typeof vi.fn>;
     let runExitCleanupMock: ReturnType<typeof vi.fn>;
 
     beforeEach(() => {
       emitResultMock = vi.fn();
+      emitSystemMessageMock = vi.fn();
       runExitCleanupMock = vi.fn().mockResolvedValue(undefined);
       vi.spyOn(JsonOutputAdapterModule, 'JsonOutputAdapter').mockImplementation(
         () =>
           ({
             emitResult: emitResultMock,
+            emitSystemMessage: emitSystemMessageMock,
           }) as unknown as JsonOutputAdapterModule.JsonOutputAdapter,
       );
       vi.spyOn(cleanupModule, 'runExitCleanup').mockImplementation(
         runExitCleanupMock,
+      );
+    });
+
+    it('emits a pending usage statistics notice before the error result', async () => {
+      // The run that #17052 captured: no auth type, so the process exits
+      // here, after `config.initialize()` has already sent the first event.
+      mockTakeUsageStatisticsNotice.mockReturnValueOnce('notice text');
+      const nonInteractiveConfig = createMockConfig({
+        refreshAuth: refreshAuthMock,
+        getOutputFormat: vi.fn().mockReturnValue(OutputFormat.JSON),
+        getModelsConfig: vi.fn().mockReturnValue({
+          getModel: vi.fn().mockReturnValue('default-model'),
+          getCurrentAuthType: vi.fn().mockReturnValue(undefined),
+        }),
+      });
+
+      await expect(
+        validateNonInteractiveAuth(
+          undefined,
+          nonInteractiveConfig,
+          mockSettings,
+        ),
+      ).rejects.toThrow('process.exit(1) called');
+
+      expect(emitSystemMessageMock).toHaveBeenCalledWith(
+        'usage_statistics_notice',
+        { notice: 'notice text' },
+      );
+      expect(emitResultMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isError: true,
+          errorMessage: expect.stringContaining('No auth type is selected'),
+        }),
+      );
+      expect(emitSystemMessageMock.mock.invocationCallOrder[0]).toBeLessThan(
+        emitResultMock.mock.invocationCallOrder[0],
       );
     });
 

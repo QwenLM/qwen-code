@@ -143,7 +143,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
-const mockConsumeUsageStatisticsNotice = vi.hoisted(() =>
+const mockTakeUsageStatisticsNotice = vi.hoisted(() =>
   vi.fn().mockReturnValue(null),
 );
 vi.mock(
@@ -152,7 +152,7 @@ vi.mock(
     ...(await importOriginal<
       typeof import('./nonInteractive/usage-statistics-notice.js')
     >()),
-    consumeUsageStatisticsNotice: mockConsumeUsageStatisticsNotice,
+    takeUsageStatisticsNotice: mockTakeUsageStatisticsNotice,
   }),
 );
 
@@ -418,7 +418,6 @@ describe('runNonInteractive', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getDebugMode: vi.fn().mockReturnValue(false),
       getOutputFormat: vi.fn().mockReturnValue('text'),
-      getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
       getJsonSchema: vi.fn().mockReturnValue(undefined),
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       getFolderTrust: vi.fn().mockReturnValue(false),
@@ -1255,17 +1254,16 @@ describe('runNonInteractive', () => {
       );
     });
 
-    it('passes the resolved state and the unresolved setting', async () => {
-      vi.mocked(mockConfig.getUsageStatisticsEnabled).mockReturnValue(false);
-      await runNonInteractive(mockConfig, mockSettings, 'test', 'notice-args');
-      expect(mockConsumeUsageStatisticsNotice).toHaveBeenCalledWith({
-        usageStatisticsEnabled: false,
-        settingsValue: mockSettings.merged.privacy?.usageStatisticsEnabled,
-      });
+    it('emits nothing when no notice is pending', async () => {
+      await runNonInteractive(mockConfig, mockSettings, 'test', 'notice-none');
+      expect(mockTakeUsageStatisticsNotice).toHaveBeenCalled();
+      expect(processStderrSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('usage statistics'),
+      );
     });
 
     it('writes the notice to stderr in text mode', async () => {
-      mockConsumeUsageStatisticsNotice.mockReturnValueOnce(notice);
+      mockTakeUsageStatisticsNotice.mockReturnValueOnce(notice);
       await runNonInteractive(mockConfig, mockSettings, 'test', 'notice-text');
       expect(processStderrSpy).toHaveBeenCalledWith(`${notice}\n`);
       const stdout = processStdoutSpy.mock.calls
@@ -1278,7 +1276,7 @@ describe('runNonInteractive', () => {
       'emits the notice as a system message after init in %s mode',
       async (format) => {
         vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
-        mockConsumeUsageStatisticsNotice.mockReturnValueOnce(notice);
+        mockTakeUsageStatisticsNotice.mockReturnValueOnce(notice);
         await runNonInteractive(
           mockConfig,
           mockSettings,

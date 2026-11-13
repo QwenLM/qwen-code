@@ -1111,4 +1111,4 @@ repository cannot override should use `model.catalogRefresh`.
 >
 > When usage statistics are enabled, events are sent to an Alibaba Cloud RUM collection endpoint.
 
-Headless (`qwen -p`) runs show no setup dialog, so the first headless run that relies on the default prints a one-time notice naming the collection host and the opt-out. Setting either value above, to `true` or `false`, suppresses it. See [Usage Statistics Notice](../features/headless.md#usage-statistics-notice).
+Headless (`qwen -p`) runs show no setup dialog, so the first headless run that relies on the default prints a one-time notice naming the collection host and the opt-out. Setting either value above, to `true` or `false`, suppresses it, as long as the environment variable is set in the shell environment and the setting in user or system settings; values from `.env` files or a project's workspace settings do not suppress it. See [Usage Statistics Notice](../features/headless.md#usage-statistics-notice).
