@@ -1040,13 +1040,19 @@ describe('no-AK integration CI wiring', () => {
       smokeWorkflow.indexOf("uses: './.github/actions/verify-checkout-head'"),
     ).toBeGreaterThan(smokeCheckoutIndex);
     expect(smokeWorkflow).toContain("expected_sha: '${{ github.sha }}'");
-    // The smoke is self-hosted-only, so it must take the same Node path as
+    // The validation job is self-hosted-only, so it takes the same Node path as
     // the gate's self-hosted side: the pre-installed Node, never a nodejs.org
     // download the ECS egress proxy cannot reach.
     expect(smokeWorkflow).toContain(
       "uses: './.github/actions/self-hosted-node'",
     );
-    expect(smokeWorkflow).not.toContain('actions/setup-node');
+    expect(getWorkflowJob(smokeWorkflow, 'validate')).not.toContain(
+      'actions/setup-node',
+    );
+    const diagnosticJob = getWorkflowJob(smokeWorkflow, 'diagnose');
+    expect(diagnosticJob).toContain("node-version: '22.23.4'");
+    expect(diagnosticJob).toContain('issue17040-diagnostic/run.mjs');
+    expect(diagnosticJob).toContain('codex/issue17040-windows-diagnostic');
     // The gate's run steps inherit ci.yml's workflow-level bash default, so
     // the smoke must execute these commands under the same shell; a
     // powershell pin there would validate a shell the gate never runs.
