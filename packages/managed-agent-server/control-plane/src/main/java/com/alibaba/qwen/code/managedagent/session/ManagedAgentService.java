@@ -151,6 +151,23 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 && sideQueriesEnabled.getAsBoolean();
     }
 
+    private BooleanSupplier clientFilesEnabled = () -> false;
+
+    @Autowired
+    void configureClientFiles(ManagedAgentSettings properties) {
+        clientFilesEnabled = () -> properties.getClientFiles().isEnabled()
+                && harness.supportsClientFiles();
+    }
+
+    private boolean supportsClientFiles(SessionRecord session) {
+        return session.deletedAt() == null && "ACTIVE".equals(session.status())
+                && clientFilesEnabled.getAsBoolean()
+                // Ask the same question the register route answers: a
+                // foregroundOnly or profile-less Session is always refused, so
+                // the capability must not advertise it there.
+                && harness.supportsClientFiles(session);
+    }
+
     @Autowired(required = false)
     void setRuntimeWarmer(RuntimeWarmer runtimeWarmer) {
         this.runtimeWarmer = runtimeWarmer;
@@ -1579,7 +1596,11 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         terminalEnabled.getAsBoolean()
                                 ? maySubmit && Boolean.TRUE.equals(foregroundShell(session, worktree))
                                         && terminalPlacementCapable.test(session)
-                                : null),
+                                : null,
+                        // Registration refuses a Workspace-less Session (mayExecute
+                        // requires a bound Workspace), so the capability must not
+                        // advertise it there.
+                        session.workspace() != null && maySubmit && supportsClientFiles(session)),
                 session.workspace() != null || session.agentDefinitionDigest() != null
                         ? approvalSelection == null ? session.approvalMode() : approvalSelection.mode() : null,
                 modelContext, modelSelection, approvalSelection == null ? null : approvalSelection.revision(),

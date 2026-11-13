@@ -107,6 +107,7 @@ import type {
   ManagedAgentWorkspace,
   ManagedInputBlock,
 } from './managed-agent-provider';
+import { ManagedLocalFilesControl } from '../ManagedLocalFilesControl';
 import type { PromptImage, PromptFile } from '../../adapters/promptTypes';
 import {
   encodeManagedInput,
@@ -1486,6 +1487,14 @@ function ManagedSessionsContent({
         {t('terminal.title')}
       </Button>
     ) : null;
+  const localFilesButton =
+    provider.clientFiles && currentSummary?.capabilities.clientFiles ? (
+      <ManagedLocalFilesControl
+        provider={provider}
+        sessionId={currentSummary.sessionId}
+        triggerClassName="inline-flex h-8 w-8 items-center justify-center rounded-md border border-input bg-background text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+      />
+    ) : null;
   function prepareHandoff() {
     if (
       !currentSummary ||
@@ -2055,6 +2064,7 @@ function ManagedSessionsContent({
                     {diagnosticsButton}
                     {terminalButton}
                     {sideQueryButtons}
+                    {localFilesButton}
                   </span>
                 }
                 hideWorkspaceIcon={!showManagedSessionHeader}
@@ -2110,6 +2120,7 @@ function ManagedSessionsContent({
               {diagnosticsButton}
               {terminalButton}
               {sideQueryButtons}
+              {localFilesButton}
               {provider.tasks &&
                 (summary.capabilities.tasks === true ||
                   taskCancel.pendingTaskIds.length > 0) && (

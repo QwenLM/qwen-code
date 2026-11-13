@@ -161,6 +161,28 @@ describe('createJavaManagedAgentProvider', () => {
     expect(summary.capabilities.canSend).toBe(false);
   });
 
+  it('projects the client files capability only when the server advertises it', async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: fetchImpl,
+    });
+    for (const advertised of [true, false]) {
+      fetchImpl.mockResolvedValueOnce(
+        jsonResponse({
+          sessionId: 's1',
+          status: 'closed',
+          createdAt: 1,
+          updatedAt: 2,
+          capabilities: { clientFiles: advertised },
+        }),
+      );
+      const summary = await provider.getSession('s1', { clientId: 'c' });
+      expect(summary.capabilities.clientFiles === true).toBe(advertised);
+    }
+  });
+
   it('submits and reads a compression operation through the product routes', async () => {
     const operation = {
       operationId: 'compression-1',

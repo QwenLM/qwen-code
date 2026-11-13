@@ -311,6 +311,9 @@ export function createJavaManagedAgentProvider(
       list: (sessionId, request) =>
         client.getSessionMcp(sessionId, request.signal),
     },
+    clientFiles: {
+      transport: () => client.clientFilesTransport(),
+    },
     extensions: {
       storageScope: options.productScope?.trim()
         ? storageKey(options)
@@ -1203,6 +1206,9 @@ function toSessionSummary(
       ...(session.capabilities?.recap === true ? { recap: true } : {}),
       ...(session.capabilities?.terminal !== undefined
         ? { terminal: session.capabilities.terminal }
+        : {}),
+      ...(session.capabilities?.clientFiles === true
+        ? { clientFiles: true }
         : {}),
       canSend:
         sessionActive &&

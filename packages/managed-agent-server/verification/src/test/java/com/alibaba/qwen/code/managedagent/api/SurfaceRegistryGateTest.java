@@ -44,6 +44,7 @@ import static org.mockito.Mockito.mock;
         "spring.datasource.password=",
         "qwen.managed-agent.harness.enabled=false",
         "qwen.managed-agent.session-store.enabled=true",
+        "qwen.managed-agent.client-files.enabled=true",
         "qwen.managed-agent.tool-publication.entry-concurrency=4"
 })
 @Import(SurfaceRegistryGateTest.ExtraControllers.class)

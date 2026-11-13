@@ -30,6 +30,8 @@ public class TenantContextFilter extends OncePerRequestFilter {
             "/internal/managed-channels/v1/";
     private static final String MANAGED_WORKSPACES_PREFIX =
             "/internal/managed-workspaces/v1/";
+    private static final String MANAGED_CLIENT_FILES_PREFIX =
+            "/internal/managed-client-files/v1/";
     private static final Pattern TENANT_PATTERN = Pattern.compile(
             "^[A-Za-z0-9._:-]{1,128}$");
     private final ObjectMapper objectMapper;
@@ -44,6 +46,11 @@ public class TenantContextFilter extends OncePerRequestFilter {
         // The terminal upgrade carries its identity in the single-use ticket,
         // not the tenant header a browser WebSocket cannot set.
         if (PublicSurface.terminalUpgrade(request)) {
+            return true;
+        }
+        // The client-files MCP leg carries no tenant context: the binding is
+        // resolved by Session and the relay credential is the only admission.
+        if (path.startsWith(MANAGED_CLIENT_FILES_PREFIX)) {
             return true;
         }
         return !PublicSurface.covers(path)
