@@ -235,7 +235,9 @@ import {
 } from '../telemetry/index.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 import {
+  getCurrentAgentChat,
   getRuntimeContentGenerator,
+  isTopLevelSession,
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
 } from '../agents/runtime/agent-context.js';
@@ -1855,6 +1857,18 @@ function producerContentEqual(
         )
       : output,
   );
+}
+
+/**
+ * The pending call's ID when the classifier history can hold that call, else
+ * `undefined`. The history is read from the session chat, and call IDs are
+ * unique only within one chat: a sub-agent's call lives in its own chat, so
+ * its ID could only match an unrelated, finished call of the session.
+ */
+function callIdInSessionHistory(callId: string): string | undefined {
+  const issuedBySessionChat =
+    isTopLevelSession() && getCurrentAgentChat() === undefined;
+  return issuedBySessionChat ? callId : undefined;
 }
 
 export class CoreToolScheduler {
@@ -4176,7 +4190,7 @@ export class CoreToolScheduler {
                 ctx: pmCtx,
                 pmForcedAsk,
                 toolParams,
-                callId: reqInfo.callId,
+                callId: callIdInSessionHistory(reqInfo.callId),
                 messages,
                 trustedUserAnswers,
                 config: this.config,
@@ -8412,7 +8426,7 @@ export class CoreToolScheduler {
                 ctx: pmCtx,
                 pmForcedAsk,
                 toolParams,
-                callId: pendingTool.request.callId,
+                callId: callIdInSessionHistory(pendingTool.request.callId),
                 messages,
                 trustedUserAnswers,
                 config: this.config,

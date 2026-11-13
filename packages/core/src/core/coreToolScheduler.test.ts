@@ -101,6 +101,7 @@ import type { ShellToolParams } from '../tools/shell.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import {
   getRuntimeContentGenerator,
+  runWithAgentChat,
   runWithAgentContext,
   type RuntimeContentGeneratorView,
 } from '../agents/runtime/agent-context.js';
@@ -5909,6 +5910,40 @@ describe('CoreToolScheduler', () => {
     expect(sent).not.toContain('Prior action');
   });
 
+  it.each<[string, (run: () => Promise<void>) => Promise<void>]>([
+    ['an agent frame', (run) => runWithAgentContext('agent-1', run)],
+    ['an agent chat frame', (run) => runWithAgentChat({} as LlmChat, run)],
+  ])(
+    'keeps a finished session call whose ID a call in %s repeats',
+    async (_frame, inSubAgent) => {
+      runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
+      const request = shellRequest('call_0', 'git branch -D tmp/spike');
+      // The classifier reads the session chat, and call IDs are unique only
+      // within one chat: this finished call is not the sub-agent's pending one.
+      const history = [
+        userText('check the repo, then have an agent clean up'),
+        content(
+          'model',
+          fnCall(request.name, { command: 'git status' }, 'call_0'),
+        ),
+      ];
+
+      await inSubAgent(async () => {
+        await scheduleAndSettle(
+          autoScheduler(askingTool(), {
+            getLlmClient: () => ({ getHistoryTail: () => history }),
+          }),
+          request,
+        );
+      });
+
+      const sent = JSON.stringify(
+        runSideQueryMock.mock.calls.at(-1)![1].contents,
+      );
+      expect(sent).toContain(`Prior action: ${request.name}`);
+    },
+  );
+
   it.each(Object.entries(ToolNamesMigration))(
     'sends canonical hook tool names for legacy %s calls',
     async (legacyName, canonicalName) => {
@@ -8767,6 +8802,32 @@ describe('CoreToolScheduler request queueing', () => {
     );
     expect(sent).toContain('Pending tool call to classify');
     expect(sent).not.toContain('Prior action');
+  });
+
+  it('keeps a finished session call whose ID a sub-agent pending L4 allow repeats', async () => {
+    runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
+
+    await runWithAgentContext('agent-1', () =>
+      autoApprovePendingProtectedWrite({
+        history: [
+          userText('check the repo, then have an agent reset my settings'),
+          content(
+            'model',
+            fnCall(
+              ToolNames.SHELL,
+              { command: 'git status' },
+              'pending-protected-write',
+            ),
+          ),
+        ],
+      }),
+    );
+
+    const sent = JSON.stringify(
+      runSideQueryMock.mock.calls.at(-1)![1].contents,
+    );
+    expect(sent).toContain('Prior action');
+    expect(sent).toContain('git status');
   });
 
   it('fires PermissionDenied hooks for pending AUTO classifier blocks', async () => {
