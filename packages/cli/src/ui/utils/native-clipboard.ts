@@ -231,9 +231,9 @@ export interface NativeClipboardBridge {
 }
 
 /**
- * Strategy for native clipboard I/O. Writes always run in a Node child so the
- * addon's stdout cannot reach the renderer; reads use the addon in process
- * when it loads and fall back to the child. Tests inject fakes so no real
+ * Strategy for native clipboard I/O. Writes and reads run in a Node child so
+ * the addon's stdout cannot reach the renderer; reads fall back to the addon
+ * in process only when no child can run. Tests inject fakes so no real
  * clipboard is touched.
  */
 export function createNativeClipboardBridge(
@@ -257,34 +257,34 @@ export function createNativeClipboardBridge(
     },
 
     async readText(): Promise<string | null> {
-      const module = await deps.loadModule();
-      if (module?.getClipboardText) {
-        try {
-          const text = module.getClipboardText();
-          if (text.trim() !== CLIPBOARD_BUSY_MESSAGE) {
-            return normalizeClipboardText(text);
-          }
-        } catch (error) {
-          debugLogger.debug('Native clipboard read failed in-process:', error);
-        }
-      }
-
+      // Read from a child for the same reason as writes: clipboard-rs can
+      // print ownership diagnostics to stdout, which in-process is the TUI.
       const result = await deps.runHelper(READ_HELPER_SCRIPT, null);
-      if (result?.code !== 0) {
-        if (result) {
+      if (result) {
+        if (result.code !== 0) {
           debugLogger.debug(
             `Native clipboard helper exited ${result.code}: ${result.stderr}`,
           );
+          return null;
         }
+        if (result.overflow) {
+          debugLogger.warn(
+            'Native clipboard read exceeded the helper output cap; dropping it',
+          );
+          return null;
+        }
+        return normalizeClipboardText(extractReadPayload(result.stdout));
+      }
+
+      // No Node child could run; the in-process addon is the only route left.
+      const module = await deps.loadModule();
+      if (!module?.getClipboardText) return null;
+      try {
+        return normalizeClipboardText(module.getClipboardText());
+      } catch (error) {
+        debugLogger.debug('Native clipboard read failed in-process:', error);
         return null;
       }
-      if (result?.overflow) {
-        debugLogger.warn(
-          'Native clipboard read exceeded the helper output cap; dropping it',
-        );
-        return null;
-      }
-      return normalizeClipboardText(extractReadPayload(result.stdout));
     },
   };
 }
@@ -307,9 +307,9 @@ export function copyTextViaNativeClipboard(text: string): Promise<boolean> {
 }
 
 /**
- * Read text through the native clipboard addon, in process when it loads and
- * through the Node child otherwise. Returns null when the addon is unavailable
- * or the clipboard holds no text.
+ * Read text through the native clipboard addon, in a Node child when one can
+ * run and in process otherwise. Returns null when the addon is unavailable or
+ * the clipboard holds no text.
  */
 export function readTextViaNativeClipboard(): Promise<string | null> {
   return defaultBridge.readText();

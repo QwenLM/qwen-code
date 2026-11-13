@@ -45,16 +45,16 @@ Ink 已有自己的選取與右鍵選單；本次定義 OpenTUI 的行為，而�
 
 ### 模組結構
 
-| 檔案                                       | 職責                                                                                                         |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
-| `renderable-tree.ts`                       | `isRenderableWithin()`：把右鍵策略的選取範圍限定在對話區。                                                   |
-| `selection-auto-copy.ts`                   | `useSelectionAutoCopy()`：複製任何非空的 OpenTUI 選取並回報成功。                                            |
-| `copy-notice.tsx`                          | 右下角短暫顯示的 `Copied N chars` 確認訊息，兩秒後消失。                                                     |
-| `transcript-mouse.ts`                      | `handleTranscriptRightClick()`：純右鍵策略（取消選取或貼上）。                                               |
-| `scrollbar-visibility.ts`                  | `openTuiScrollbarOptions()`：把設定映射成 `{ visible: false }` 或 `undefined`（交給 OpenTUI 自動隱藏）。     |
-| `native-clipboard.ts`                      | 原生剪貼簿橋接：寫入一律 Node 子程序；讀取先用 in-process addon，失敗才走 child。含 Windows/macOS 文字讀取。 |
-| `jump-to-bottom-hint.tsx`                  | 既有的尾部判斷與浮動提示。                                                                                   |
-| `input-submission.ts` / `input-prompt.tsx` | Composer handle 新增 `pasteClipboard()`，執行既有 Ctrl+V 路徑。                                              |
+| 檔案                                       | 職責                                                                                                                      |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `renderable-tree.ts`                       | `isRenderableWithin()`：把右鍵策略的選取範圍限定在對話區。                                                                |
+| `selection-auto-copy.ts`                   | `useSelectionAutoCopy()`：複製任何非空的 OpenTUI 選取並回報成功。                                                         |
+| `copy-notice.tsx`                          | 右下角短暫顯示的 `Copied N chars` 確認訊息，兩秒後消失。                                                                  |
+| `transcript-mouse.ts`                      | `handleTranscriptRightClick()`：純右鍵策略（取消選取或貼上）。                                                            |
+| `scrollbar-visibility.ts`                  | `openTuiScrollbarOptions()`：把設定映射成 `{ visible: false }` 或 `undefined`（交給 OpenTUI 自動隱藏）。                  |
+| `native-clipboard.ts`                      | 原生剪貼簿橋接：寫入與讀取都走 Node 子程序；只有子程序無法執行時，讀取才在目前程序使用 addon。含 Windows/macOS 文字讀取。 |
+| `jump-to-bottom-hint.tsx`                  | 既有的尾部判斷與浮動提示。                                                                                                |
+| `input-submission.ts` / `input-prompt.tsx` | Composer handle 新增 `pasteClipboard()`，執行既有 Ctrl+V 路徑。                                                           |
 
 ### 行為
 
@@ -90,7 +90,7 @@ Ink 已有自己的選取與右鍵選單；本次定義 OpenTUI 的行為，而�
    的 stdout 就是 alternate screen，訊息會直接蓋在 composer 那一列。子程序的
    stdout 是 pipe，不會碰到畫面。子程序在 `setClipboardText()` 後多存活
    150ms，讓作業系統剪貼簿管理員完成接手；立即結束會讓下一次讀取拿到空字串。
-   讀取優先在目前程序使用 addon，失敗才退回子程序。Node 路徑優先取
+   讀取基於同樣理由也走子程序，只有無法啟動 Node 子程序時才在目前程序使用 addon。Node 路徑優先取
    `QWEN_NODE_BINARY`（npm Bun handoff 設定）或 `NVM_BIN`，因為 snap Bun
    的 PATH 可能沒有 nvm。右鍵貼上的讀取在沒有 `wl-paste`/`xclip` 時也走同一
    addon fallback。讀取會重試 addon 暫時性的

@@ -53,16 +53,16 @@ defines the OpenTUI behavior rather than copying Ink's menu model.
 
 ### Module layout
 
-| File                                       | Responsibility                                                                                                                                |
-| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `renderable-tree.ts`                       | `isRenderableWithin()`: scope a renderer selection to the transcript.                                                                         |
-| `selection-auto-copy.ts`                   | `useSelectionAutoCopy()`: copy any non-empty OpenTUI selection and report success.                                                            |
-| `copy-notice.tsx`                          | Transient bottom-right `Copied N chars` confirmation; expires after two seconds.                                                              |
-| `transcript-mouse.ts`                      | `handleTranscriptRightClick()`: pure right-click policy (clear selection vs paste).                                                           |
-| `scrollbar-visibility.ts`                  | `openTuiScrollbarOptions()`: map the setting to `{ visible: false }` or `undefined` (OpenTUI auto-hide).                                      |
-| `native-clipboard.ts`                      | Native clipboard bridge: writes always run in a Node child; reads use the in-process addon then the child. Includes Windows/macOS text reads. |
-| `jump-to-bottom-hint.tsx`                  | Existing tail predicate and floating hint.                                                                                                    |
-| `input-submission.ts` / `input-prompt.tsx` | Composer handle gains `pasteClipboard()`, which runs the existing Ctrl+V path.                                                                |
+| File                                       | Responsibility                                                                                                                                               |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `renderable-tree.ts`                       | `isRenderableWithin()`: scope a renderer selection to the transcript.                                                                                        |
+| `selection-auto-copy.ts`                   | `useSelectionAutoCopy()`: copy any non-empty OpenTUI selection and report success.                                                                           |
+| `copy-notice.tsx`                          | Transient bottom-right `Copied N chars` confirmation; expires after two seconds.                                                                             |
+| `transcript-mouse.ts`                      | `handleTranscriptRightClick()`: pure right-click policy (clear selection vs paste).                                                                          |
+| `scrollbar-visibility.ts`                  | `openTuiScrollbarOptions()`: map the setting to `{ visible: false }` or `undefined` (OpenTUI auto-hide).                                                     |
+| `native-clipboard.ts`                      | Native clipboard bridge: writes and reads run in a Node child; reads use the in-process addon only when no child can run. Includes Windows/macOS text reads. |
+| `jump-to-bottom-hint.tsx`                  | Existing tail predicate and floating hint.                                                                                                                   |
+| `input-submission.ts` / `input-prompt.tsx` | Composer handle gains `pasteClipboard()`, which runs the existing Ctrl+V path.                                                                               |
 
 ### Behavior
 
@@ -104,8 +104,8 @@ defines the OpenTUI behavior rather than copying Ink's menu model.
    message would land on the composer row. The child's stdout is a pipe. It
    stays alive for 150 ms after `setClipboardText()` so the OS clipboard
    manager can take ownership; exiting immediately leaves the next read with
-   an empty clipboard. Reads use the addon in process when it loads and fall
-   back to the child. The Node path comes from `QWEN_NODE_BINARY` (set by the
+   an empty clipboard. Reads also run in the child for the same reason, and use
+   the addon in process only when no Node child can run. The Node path comes from `QWEN_NODE_BINARY` (set by the
    npm Bun handoff) or `NVM_BIN`, since Bun's snap PATH may omit nvm.
    Right-click paste uses the same addon fallback for reads when no
    `wl-paste`/`xclip` is installed. Reads retry the addon's transient

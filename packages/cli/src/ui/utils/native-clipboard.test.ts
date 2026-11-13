@@ -51,7 +51,29 @@ describe('native clipboard bridge', () => {
     await expect(value.copyText('hello')).resolves.toBe(false);
   });
 
-  it('reads and normalizes text from the in-process addon', async () => {
+  it('reads through the Node helper even when the addon loads in process', async () => {
+    const getClipboardText = vi.fn(() => 'in-process');
+    const { value, runHelper } = bridge(
+      { getClipboardText },
+      { code: 0, stdout: `${CLIPBOARD_READ_MARKER}from child`, stderr: '' },
+    );
+    await expect(value.readText()).resolves.toBe('from child');
+    // In-process the addon's stdout diagnostics would land on the TUI.
+    expect(getClipboardText).not.toHaveBeenCalled();
+    expect(runHelper).toHaveBeenCalledWith(expect.any(String), null);
+  });
+
+  it('does not fall back in process when the helper ran and failed', async () => {
+    const getClipboardText = vi.fn(() => 'in-process');
+    const { value } = bridge(
+      { getClipboardText },
+      { code: 1, stdout: '', stderr: 'nope' },
+    );
+    await expect(value.readText()).resolves.toBeNull();
+    expect(getClipboardText).not.toHaveBeenCalled();
+  });
+
+  it('reads and normalizes text in process when no helper can run', async () => {
     const { value } = bridge({
       getClipboardText: () => 'one\r\ntwo\rthree',
     });
