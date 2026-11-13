@@ -23,8 +23,8 @@ encoding, query parameters or fragment.
 
 ## Configure a Channel
 
-Configure this integration in [Web Shell](#use-web-shell) or with the CLI and
-`settings.json` as shown below.
+Configure this integration in [Web Shell](#use-web-shell) or `settings.json` as
+shown below.
 
 Add a named instance to the workspace's Channel settings:
 
