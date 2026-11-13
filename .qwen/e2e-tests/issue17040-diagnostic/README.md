@@ -1,6 +1,6 @@
 # Issue 17040 portable diagnostic
 
-Run `run.mjs` with Node 22.23.4 and the released Qwen Code 0.27.2 `cli.js`. It creates a fresh daemon/session, uses a local mock model in `auto` approval mode, and downloads 831741 bytes over about 45 seconds through an HTTPS CONNECT proxy. All network endpoints are local; the HTTPS hostname is handled by the local proxy and a temporary test certificate. The model credential is the synthetic string `sk-mock`.
+Run `run.mjs` with Node 22.23.4 and the released Qwen Code 0.27.2 `cli.js`. It creates a fresh daemon/session, uses a local mock model in `auto` approval mode, and downloads 831741 bytes over about 45 seconds through an HTTPS CONNECT proxy. The model endpoint, CONNECT proxy, and HTTPS server are local; the HTTPS hostname is handled by that proxy and a temporary test certificate. The unfixed Windows permission scan can nevertheless attempt a native network-filesystem lookup of the URL host, outside the HTTP proxy: that unintended UNC lookup is the fault being diagnosed. The model credential is the synthetic string `sk-mock`.
 
 The output includes isolated configuration/runtime files, a test certificate/key, `summary.json`, and bounded protocol metadata in `trace/<pid>.jsonl`. Use a new output directory for every run. The runner removes a previous `workspace/catalog.json` before starting and requires a new completed download, successful shell result with exit code 0 and expected curl output, exact file size, normal `end_turn`, and responsive stats. A generic tool result or `turn_complete` alone cannot pass.
 
