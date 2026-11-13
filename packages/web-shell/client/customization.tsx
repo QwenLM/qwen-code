@@ -27,8 +27,15 @@ import type {
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
 import type { WebShellTheme } from './themeContext';
+import type { ComposerPlaceholderState } from './utils/composerInputState';
+import type { WebShellModelPickerOptions } from './model-picker';
 
 export type MarkdownContentSource = 'assistant' | 'thinking';
+
+/** Select an existing directory on the connected daemon, or cancel with undefined. */
+export type WebShellWorkspaceDirectoryPicker = (opts?: {
+  signal?: AbortSignal;
+}) => Promise<string | undefined>;
 
 export interface MarkdownRenderContext {
   source: MarkdownContentSource;
@@ -710,6 +717,7 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  modelPicker?: WebShellModelPickerOptions;
   onRefreshModels?: Parameters<DaemonSessionActions['refreshModels']>[0];
   allowedApprovalModes?: readonly WebShellApprovalMode[];
   filterArtifact?: ArtifactFilter;
@@ -717,11 +725,36 @@ export interface WebShellCustomization {
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
+  /**
+   * 与普通会话对齐 Managed 对话区文案与能力提示口径。默认 false 保持独立版行为。
+   *
+   * 宿主已有自己的外壳与能力表达：控件不可用即灰掉，不额外解释。
+   * 置 true 后 Managed 会：
+   * - placeholder 改用与普通会话相同的解析口径
+   *   （`composerPlaceholders?.[state] ?? t(getComposerPlaceholderKey(state))`，
+   *   进行中的会话同样按 processing 态对齐，而不是停在 managed 队列提示）
+   * - 不再渲染「模型已固定 / 审批模式已固定 / 请新建任务后发送」这类解释文案
+   *   （能力仍由后端 capabilities 决定并静默禁用，不放宽任何限制）
+   */
+  alignManagedChatWithHost?: boolean;
+  /**
+   * Show the managed session header (title / workspace / phase badge). Defaults to true.
+   * 宿主外壳已展示会话身份（如宿主侧栏）时置 false，避免对话区重复一遍。
+   */
+  showManagedSessionHeader?: boolean;
+  /**
+   * Host welcome slots. Managed surfaces (the managed session empty state and
+   * the workspace-binding creation screen) invoke the same renderers but can
+   * only supply a workspace-relative `cwd`, no daemon `version`, and no
+   * `hideTips` flag — renderers that branch on those fields must tolerate the
+   * managed shape (see `WelcomeHeaderProps`).
+   */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   renderWelcomeFooter?: WelcomeFooterRenderer;
   parseUserMessageContent?: UserMessageContentParser;
   renderUserMessageContent?: UserMessageContentRenderer;
   composerTagIcons?: WebShellComposerTagIconMap;
+  composerVariant?: 'default' | 'simple';
   /**
    * Built-in / host @ mention providers. Split-view panes share this context
    * so they match the main composer without ChatPane prop drilling.
@@ -733,6 +766,14 @@ export interface WebShellCustomization {
   onComposerTagClick?: ComposerTagClickHandler;
   renderAssistantTurnFooter?: AssistantTurnFooterRenderer;
   /**
+   * Main-composer copy by semantic state, mirrored for the managed composer
+   * when `alignManagedChatWithHost` is on. Omitted or blank entries retain the
+   * localized default for that state.
+   */
+  composerPlaceholders?: Readonly<
+    Partial<Record<ComposerPlaceholderState, string>>
+  >;
+  /**
    * Satisfied / not-satisfied marks on each completed assistant turn. Omit the
    * object to leave Web Shell's answer footer unchanged.
    */
@@ -742,11 +783,44 @@ export interface WebShellCustomization {
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;
+  /**
+   * The host already renders its own add ("+") entry in
+   * `renderComposerToolbarStart`. Hides the built-in composer AddMenu in the
+   * main, split-pane, and managed composers, and the touch composer's
+   * commands trigger (slash icon, "All commands" label), so the two entries
+   * do not sit side by side.
+   *
+   * Workflow loses its menu entry with the menu, so the default-variant
+   * toolbar carries a switch for it instead. That switch drives both
+   * directions and is disabled only while the host reports no usable state
+   * (unbound, syncing, unknown, a pending write, no change handler, or
+   * unavailable with nothing requested); when Workflow is requested but
+   * currently unavailable, the switch stays enabled so the preference can
+   * still be turned off.
+   *
+   * `composerVariant: 'simple'` does not render the composer toolbar leading
+   * area where this switch lives — the host's own
+   * `renderComposerToolbarStart` is skipped there as well — so that variant
+   * has no Workflow fallback, and setting this flag only takes its built-in
+   * menu away. The flag is meant for the default variant.
+   *
+   * Unlike leaving `addMenu` out of `composerToolbarActions`, which only
+   * reaches the main composer, this flag applies to every composer's
+   * built-in menu.
+   */
+  hostOwnsAddMenu?: boolean;
   renderComposerHeader?: ComposerHeaderRenderer;
   renderComposerFooter?: ComposerFooterRenderer;
   renderFooter?: FooterRenderer;
   compactThinking?: boolean;
   hostOwnsEditDiffPreview?: boolean;
+  /**
+   * The embedding host claims right-panel open requests and may render artifact
+   * previews itself. Managed-storage artifacts have no content in the default
+   * panel (metadata only), so the card only promises Preview for them when this
+   * is set; otherwise it keeps the generic Open.
+   */
+  hostOwnsArtifactPreview?: boolean;
   /**
    * Auto-collapse each completed turn's intermediate steps (thinking, tool
    * calls, mid-turn assistant text) behind a toggle on the prompt row, leaving

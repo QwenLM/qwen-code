@@ -214,6 +214,8 @@ class FakeBridge {
   honorRequestedSessionId = true;
   spawnAttached = false;
   spawnClientId: string | undefined = 'client-1';
+  suspendClientWorkflowApprovals =
+    vi.fn<HttpAcpBridge['suspendClientWorkflowApprovals']>();
   loadRequests: Array<{
     sessionId: string;
     historyReplay?: string;
@@ -389,6 +391,18 @@ class FakeBridge {
     this.lastSetModel = req;
     this.lastSetModelContext = context;
     return { modelServiceId: 'qwen-max' };
+  }
+
+  lastWorkflowMode:
+    | { sessionId: string; value: string; context?: { clientId?: string } }
+    | undefined;
+  async setSessionConfigOption(
+    sessionId: string,
+    request: { value: string },
+    context?: { clientId?: string },
+  ) {
+    this.lastWorkflowMode = { sessionId, value: request.value, context };
+    return { configOptions: [] };
   }
 
   lastApprovalMode: string | undefined;
@@ -2642,6 +2656,252 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }
   });
 
+  it('suspends the designated workflow voter after remote grace while its prompt runs', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const conn = acpHandle!.registry.get(connId)!;
+    conn.preserveRunningPromptsOnDisconnect = true;
+    const originalStream = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length === 1);
+    const binding = conn.sessions.get('sess-1')!;
+    const resume = vi.fn();
+    bridge.suspendClientWorkflowApprovals.mockReturnValue(resume);
+    let finishPrompt!: () => void;
+    const promptFinished = new Promise<void>((resolve) => {
+      finishPrompt = resolve;
+    });
+    bridge.promptBehavior = async () => {
+      await promptFinished;
+      return { stopReason: 'end_turn' };
+    };
+    try {
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'Follow-up' }],
+        },
+      });
+      await waitUntil(() => binding.promptAbort !== undefined);
+      conn.detachSessionStream('sess-1', binding.stream!, 1);
+      await originalStream.body?.cancel().catch(() => {});
+      await waitUntil(
+        () => bridge.suspendClientWorkflowApprovals.mock.calls.length > 0,
+      );
+      expect(
+        bridge.suspendClientWorkflowApprovals,
+      ).toHaveBeenCalledExactlyOnceWith('sess-1', 'client-1');
+      expect(binding.promptAbort?.signal.aborted).toBe(false);
+      expect(conn.ownsSession('sess-1')).toBe(true);
+      expect(conn.pending.size).toBe(0);
+      const resumed = await openStream(connId, 'sess-1');
+      expect(resume).toHaveBeenCalledTimes(1);
+      await resumed.body?.cancel().catch(() => {});
+    } finally {
+      finishPrompt();
+      await originalStream.body?.cancel().catch(() => {});
+    }
+  });
+
+  it.each([
+    'disconnect',
+    'observer RPC error',
+    'forbidden vote',
+    'cross-connection vote',
+    'originator RPC error',
+  ] as const)(
+    'handles workflow approval copies independently through %s',
+    async (failure) => {
+      const vote = vi
+        .spyOn(bridge, 'respondToSessionPermission')
+        .mockReturnValue(true);
+      const ownerId = await initialize();
+      await newSession(ownerId);
+      const owner = acpHandle!.registry.get(ownerId)!;
+      const ownerReader = frameReader(await openStream(ownerId, 'sess-1'));
+      await waitUntil(() => bridge.queues.has('sess-1'));
+      const ownerQueue = bridge.queues.get('sess-1')!;
+      const originatorClientId = owner.sessions.get('sess-1')!.clientId;
+      expect(originatorClientId).toBe('client-1');
+      const observerId = await initialize();
+      bridge.spawnClientId = 'observer-client';
+      await newSession(observerId);
+      const observer = acpHandle!.registry.get(observerId)!;
+      const observerReader = frameReader(
+        await openStream(observerId, 'sess-1'),
+      );
+      try {
+        await waitUntil(() => bridge.queues.get('sess-1') !== ownerQueue);
+        const observerQueue = bridge.queues.get('sess-1')!;
+        const permission = {
+          type: 'permission_request',
+          originatorClientId,
+          data: {
+            requestId: 'workflow-approval',
+            sessionId: 'sess-1',
+            toolCall: {
+              toolCallId: 'workflow-tool',
+              title: 'Edit fixture',
+              _meta: {
+                workflowApproval: true,
+                backgroundWorkflowApproval: true,
+              },
+            },
+            options: [{ optionId: 'allow', name: 'Allow' }],
+          },
+        } as const;
+        ownerQueue.push(permission);
+        observerQueue.push(permission);
+        const ownerFrame = (await ownerReader.next()) as { id: string };
+        // Outbound request ids are minted per connection: each copy has
+        // its own.
+        const observerFrame = (await observerReader.next()) as { id: string };
+        expect(observerFrame.id).not.toBe(ownerFrame.id);
+        expect(owner.pending.size).toBe(1);
+        expect(observer.pending.size).toBe(1);
+        const selected = {
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        };
+        if (failure === 'disconnect') {
+          await fetch(`${base}/acp`, {
+            method: 'DELETE',
+            headers: { 'acp-connection-id': observerId },
+          });
+          await waitUntil(() => observer.pending.size === 0);
+        } else {
+          if (failure === 'forbidden vote') {
+            vote.mockImplementationOnce(() => {
+              throw new PermissionForbiddenError(
+                'workflow-approval',
+                'sess-1',
+                'designated_mismatch',
+              );
+            });
+          }
+          const votes =
+            failure === 'forbidden vote' || failure === 'cross-connection vote';
+          await post(
+            failure === 'originator RPC error' ? ownerId : observerId,
+            {
+              jsonrpc: '2.0',
+              // A real observer answers its own copy; a co-owner may also
+              // answer the owner's copy by its id.
+              id:
+                failure === 'observer RPC error'
+                  ? observerFrame.id
+                  : ownerFrame.id,
+              ...(votes
+                ? { result: selected }
+                : { error: { code: -32603, message: 'Client failure' } }),
+            },
+          );
+          if (votes) {
+            await waitUntil(() => vote.mock.calls.length > 0);
+          }
+        }
+        if (failure === 'cross-connection vote') {
+          // The vote resolves the approval and drops only the voter's own
+          // copy; the owner's copy stays until the bridge reports it
+          // resolved.
+          expect(vote).toHaveBeenCalledExactlyOnceWith(
+            'sess-1',
+            'workflow-approval',
+            selected,
+            expect.any(Object),
+          );
+          expect(observer.pending.size).toBe(0);
+          expect(owner.pending.has(ownerFrame.id)).toBe(true);
+          ownerQueue.push({
+            type: 'permission_resolved',
+            data: { requestId: 'workflow-approval', sessionId: 'sess-1' },
+          });
+          await waitUntil(() => owner.pending.size === 0);
+          return;
+        }
+        if (failure !== 'originator RPC error') {
+          expect(owner.pending.has(ownerFrame.id)).toBe(true);
+          expect(vote).toHaveBeenCalledTimes(
+            failure === 'forbidden vote' ? 1 : 0,
+          );
+          await post(ownerId, {
+            jsonrpc: '2.0',
+            id: ownerFrame.id,
+            result: selected,
+          });
+        }
+        await waitUntil(() => owner.pending.size === 0);
+        expect(vote).toHaveBeenCalledTimes(
+          failure === 'forbidden vote' ? 2 : 1,
+        );
+        expect(vote.mock.calls.at(-1)).toEqual([
+          'sess-1',
+          'workflow-approval',
+          failure === 'originator RPC error'
+            ? { outcome: { outcome: 'cancelled' } }
+            : selected,
+          expect.any(Object),
+        ]);
+        if (failure !== 'disconnect') {
+          expect(observer.pending.size).toBe(1);
+          observerQueue.push({
+            type: 'permission_resolved',
+            data: { requestId: 'workflow-approval', sessionId: 'sess-1' },
+          });
+          await waitUntil(() => observer.pending.size === 0);
+        }
+      } finally {
+        ownerReader.close();
+        observerReader.close();
+      }
+    },
+  );
+
+  it('ends an origin-less background workflow approval on the holding connection RPC error', async () => {
+    // A cron or runtime-goal turn has no originator, so its run's approval
+    // carries none: the holder's error must still settle it.
+    const vote = vi
+      .spyOn(bridge, 'respondToSessionPermission')
+      .mockReturnValue(true);
+    const ownerId = await initialize();
+    await newSession(ownerId);
+    const owner = acpHandle!.registry.get(ownerId)!;
+    const ownerReader = frameReader(await openStream(ownerId, 'sess-1'));
+    try {
+      await waitUntil(() => bridge.queues.has('sess-1'));
+      bridge.queues.get('sess-1')!.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'workflow-approval',
+          sessionId: 'sess-1',
+          toolCall: {
+            toolCallId: 'workflow-tool',
+            title: 'Edit fixture',
+            _meta: { workflowApproval: true, backgroundWorkflowApproval: true },
+          },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      const frame = (await ownerReader.next()) as { id: string };
+      expect(owner.pending.size).toBe(1);
+      await post(ownerId, {
+        jsonrpc: '2.0',
+        id: frame.id,
+        error: { code: -32603, message: 'Client failure' },
+      });
+      await waitUntil(() => owner.pending.size === 0);
+      expect(vote).toHaveBeenCalledExactlyOnceWith(
+        'sess-1',
+        'workflow-approval',
+        { outcome: { outcome: 'cancelled' } },
+        expect.any(Object),
+      );
+    } finally {
+      ownerReader.close();
+    }
+  });
+
   it('cross-connection permission response resolves for a co-owned session', async () => {
     let resolvedWith: unknown;
     let voteCount = 0;
@@ -3828,6 +4088,254 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.id).toBe(9);
     expect(bridge.lastSetModel).toMatchObject({ modelId: 'qwen-max' });
   });
+
+  it('session/set_config_option (workflow_mode) reaches the same session owner with its lease', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 91,
+      method: 'session/set_config_option',
+      params: { sessionId: 'sess-1', configId: 'workflow_mode', value: 'on' },
+    });
+    const [frame] = (await got) as Array<{ id: number; result?: unknown }>;
+    expect(frame).toMatchObject({ id: 91, result: {} });
+    expect(bridge.lastWorkflowMode).toMatchObject({
+      sessionId: 'sess-1',
+      value: 'on',
+      context: { clientId: expect.any(String) },
+    });
+  });
+
+  it.each(['on', 'off'])(
+    'rejects Workflow mode %s on an untrusted primary but keeps other setters available',
+    async (value) => {
+      await restartServer({ primaryTrusted: false });
+      const connId = await initialize();
+      await newSession(connId);
+      const reader = frameReader(await openStream(connId, 'sess-1'));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 91,
+        method: 'session/set_config_option',
+        params: { sessionId: 'sess-1', configId: 'workflow_mode', value },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 91,
+        error: {
+          code: -32003,
+          data: { errorKind: 'untrusted_workspace', httpStatus: 403 },
+        },
+      });
+      expect(bridge.lastWorkflowMode).toBeUndefined();
+
+      for (const [id, configId, configValue] of [
+        [92, 'model', 'qwen-max'],
+        [93, 'mode', 'default'],
+      ] as const) {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id,
+          method: 'session/set_config_option',
+          params: { sessionId: 'sess-1', configId, value: configValue },
+        });
+        expect(await reader.next()).toMatchObject({ id, result: {} });
+      }
+      expect(bridge.lastSetModel).toMatchObject({ modelId: 'qwen-max' });
+      expect(bridge.lastApprovalMode).toBe('default');
+      reader.close();
+    },
+  );
+
+  it.each([false, true])(
+    'shapes Workflow mode across HTTP ACP surfaces for workspace trust %s',
+    async (trusted) => {
+      await restartServer({ primaryTrusted: trusted });
+      const context = await bridge.getSessionContextStatus('sess-1');
+      const workflow = {
+        id: 'workflow_mode',
+        name: 'Workflow mode',
+        category: 'other',
+        type: 'select',
+        currentValue: 'off',
+        options: [],
+        _meta: { 'qwen.workflowMode': { available: false, effective: false } },
+      };
+      const configOptions = [...context.state.configOptions, workflow];
+      const contextSpy = vi
+        .spyOn(bridge, 'getSessionContextStatus')
+        .mockImplementation(async (sessionId) => ({
+          ...context,
+          sessionId,
+          state: { configOptions },
+        }));
+      bridge.loadState = { configOptions, _meta: { marker: 'preserved' } };
+      const expectedRoutable = configOptions.filter(
+        (option) =>
+          option.id !== 'reasoning_effort' &&
+          (trusted || option.id !== 'workflow_mode'),
+      );
+      const expectedRaw = configOptions.filter(
+        (option) => trusted || option.id !== 'workflow_mode',
+      );
+      const connId = await initialize();
+      const connection = frameReader(await openStream(connId));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 90,
+        method: 'session/new',
+        params: {},
+      });
+      expect(await connection.next()).toMatchObject({
+        id: 90,
+        result: { configOptions: expectedRoutable },
+      });
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 91,
+        method: '_qwen/session/context',
+        params: { sessionId: 'sess-1' },
+      });
+      expect(await connection.next()).toMatchObject({
+        id: 91,
+        result: { state: { configOptions: expectedRaw } },
+      });
+
+      for (const [id, method] of [
+        [92, 'session/load'],
+        [93, 'session/resume'],
+        [94, 'session/fork'],
+      ] as const) {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id,
+          method,
+          params: { sessionId: 'sess-1' },
+        });
+        expect(await connection.next()).toMatchObject({
+          id,
+          result: { configOptions: expectedRoutable },
+        });
+      }
+
+      contextSpy.mockRejectedValueOnce(new Error('context unavailable'));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 95,
+        method: 'session/load',
+        params: { sessionId: 'sess-1' },
+      });
+      expect(await connection.next()).toMatchObject({
+        id: 95,
+        result: { configOptions: expectedRaw, _meta: { marker: 'preserved' } },
+      });
+
+      const session = frameReader(await openStream(connId, 'sess-1'));
+      const update = { sessionUpdate: 'config_option_update', configOptions };
+      bridge.queues.get('sess-1')?.push({
+        type: 'session_update',
+        data: { sessionId: 'sess-1', update },
+      });
+      expect(await session.next()).toMatchObject({
+        method: 'session/update',
+        params: { update: { configOptions: expectedRoutable } },
+      });
+      if (trusted) {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 96,
+          method: 'session/set_config_option',
+          params: {
+            sessionId: 'sess-1',
+            configId: 'workflow_mode',
+            value: 'off',
+          },
+        });
+        expect(await session.next()).toMatchObject({
+          id: 96,
+          result: { configOptions: expectedRoutable },
+        });
+        expect(bridge.lastWorkflowMode).toMatchObject({
+          value: 'off',
+          context: { clientId: expect.any(String) },
+        });
+      }
+      expect(configOptions).toHaveLength(4);
+      expect(update.configOptions).toBe(configOptions);
+      session.close();
+      connection.close();
+    },
+  );
+
+  it.each(['_qwen/session/context', 'session/load', 'session/resume'])(
+    'omits Workflow mode from trusted SSH raw state for %s',
+    async (method) => {
+      await restartServer({
+        fsFactory: {
+          sshWorkspace: { host: 'host', directory: '/srv/project' },
+        } as WorkspaceFileSystemFactory,
+      });
+      const context = await bridge.getSessionContextStatus('sess-1');
+      const workflow = {
+        id: 'workflow_mode',
+        name: 'Workflow mode',
+        category: 'other',
+        type: 'select',
+        currentValue: 'on',
+        options: [],
+      };
+      const configOptions = [...context.state.configOptions, workflow];
+      const contextSpy = vi
+        .spyOn(bridge, 'getSessionContextStatus')
+        .mockImplementation(async (sessionId) => ({
+          ...context,
+          sessionId,
+          state: { configOptions },
+        }));
+      bridge.loadState = { configOptions, _meta: { marker: 'preserved' } };
+      const resume = bridge.resumeSession.bind(bridge);
+      vi.spyOn(bridge, 'resumeSession').mockImplementation(async (request) => {
+        const session = await resume(request);
+        return { ...session, state: { ...session.state, ...bridge.loadState } };
+      });
+      const connId = await initialize();
+      const connection = frameReader(await openStream(connId));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 90,
+        method: 'session/new',
+        params: {},
+      });
+      expect(await connection.next()).toMatchObject({ id: 90, result: {} });
+
+      if (method !== '_qwen/session/context') {
+        contextSpy.mockRejectedValueOnce(new Error('context unavailable'));
+      }
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 91,
+        method,
+        params: { sessionId: 'sess-1' },
+      });
+      expect(await connection.next()).toMatchObject({
+        id: 91,
+        result:
+          method === '_qwen/session/context'
+            ? { state: { configOptions: context.state.configOptions } }
+            : {
+                configOptions: context.state.configOptions,
+                _meta: { marker: 'preserved' },
+              },
+      });
+      expect(configOptions.at(-1)).toBe(workflow);
+      expect(bridge.loadState['configOptions']).toBe(configOptions);
+      connection.close();
+    },
+  );
 
   it('session/set_config_option (mode) routes to setSessionApprovalMode', async () => {
     const connId = await initialize();
@@ -7086,7 +7594,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.error.message).toContain(
       'ConfigId not supported by this transport: reasoning_effort',
     );
-    expect(frame.error.message).toContain('(supported: model, mode)');
+    expect(frame.error.message).toContain(
+      '(supported: model, mode, workflow_mode)',
+    );
     expect(bridge.lastSetModel).toBeUndefined();
     expect(bridge.lastApprovalMode).toBeUndefined();
   });
@@ -8662,6 +9172,45 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect.arrayContaining(['stream_error', 'client_evicted']),
     );
     // (takeFrames already locked + aborted `sess`; afterEach force-closes.)
+  });
+
+  it('filters config_option_update through the same routable option allowlist', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const stream = await openStream(connId, 'sess-1');
+    const got = takeFrames(stream, 1);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const workflow = {
+      id: 'workflow_mode',
+      currentValue: 'on',
+      _meta: { 'qwen.workflowMode': { available: true, effective: true } },
+    };
+    bridge.queues.get('sess-1')?.push({
+      type: 'session_update',
+      data: {
+        sessionId: 'sess-1',
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions: [
+            { id: 'model' },
+            { id: 'mode' },
+            workflow,
+            { id: 'reasoning_effort' },
+          ],
+        },
+      },
+    });
+    const [frame] = await got;
+    expect(frame).toMatchObject({
+      method: 'session/update',
+      params: {
+        sessionId: 'sess-1',
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions: [{ id: 'model' }, { id: 'mode' }, workflow],
+        },
+      },
+    });
   });
 
   it('keeps availableSkillDetails verbatim on pumped session_update frames (#9234)', async () => {
@@ -11521,42 +12070,49 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       }
     });
 
-    it('_qwen/workspace/memory/forget queues and polls hidden tasks', async () => {
-      const connId = await initialize();
-      const streamRes = openStream(connId);
-      const reader = frameReader(await streamRes);
-      try {
-        await post(connId, {
-          jsonrpc: '2.0',
-          id: 82,
-          method: '_qwen/workspace/memory/forget',
-          params: { query: 'old preference' },
-        });
-        const queued = (await reader.next()) as {
-          result: { taskId: string; status: string };
-        };
-        expect(queued.result).toMatchObject({
-          status: 'queued',
-        });
+    it.each([false, true])(
+      '_qwen/workspace/memory/forget queues and polls hidden tasks with availability %s',
+      async (available) => {
+        vi.spyOn(
+          bridge,
+          'isWorkspaceMemoryRememberAvailable',
+        ).mockResolvedValue(available);
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        const reader = frameReader(await streamRes);
+        try {
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 82,
+            method: '_qwen/workspace/memory/forget',
+            params: { query: 'old preference' },
+          });
+          const queued = (await reader.next()) as {
+            result: { taskId: string; status: string };
+          };
+          expect(queued.result).toMatchObject({
+            status: 'queued',
+          });
 
-        await new Promise((resolve) => setTimeout(resolve, 30));
-        await post(connId, {
-          jsonrpc: '2.0',
-          id: 83,
-          method: '_qwen/workspace/memory/forget/get',
-          params: { taskId: queued.result.taskId },
-        });
-        const completed = (await reader.next()) as {
-          result: { status: string; result: { summary: string } };
-        };
-        expect(completed.result).toMatchObject({
-          status: 'completed',
-          result: { summary: 'forgot' },
-        });
-      } finally {
-        reader.close();
-      }
-    });
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 83,
+            method: '_qwen/workspace/memory/forget/get',
+            params: { taskId: queued.result.taskId },
+          });
+          const completed = (await reader.next()) as {
+            result: { status: string; result: { summary: string } };
+          };
+          expect(completed.result).toMatchObject({
+            status: 'completed',
+            result: { summary: 'forgot' },
+          });
+        } finally {
+          reader.close();
+        }
+      },
+    );
 
     it('_qwen/workspace/memory/forget carries a scope through, and omits it when unscoped', async () => {
       const connId = await initialize();
@@ -13104,6 +13660,44 @@ describe('ACP WebSocket transport security', () => {
         })
       ).code,
     ).toBe(403);
+  });
+
+  it('uses remote listener origins and credentials without changing primary access', async () => {
+    await startServer({ token: 'operator', localControlToken: 'pairing' });
+    credentialStore!.setRemoteToken('remote-token');
+    const origin = `http://127.0.0.1:${lanPort}`;
+    tagListener(lanServer!, {
+      kind: 'remote-access',
+      authority: `127.0.0.1:${lanPort}`,
+      origin,
+      allowedOrigins: {
+        allows: (candidate) => candidate === 'http://localhost:5273',
+      },
+    });
+    const accepted = await wsConnectLocalControl('remote-token', {
+      Origin: 'http://localhost:5273',
+    });
+    expect(accepted.code).toBe(101);
+    const closed = new Promise<void>((resolve) =>
+      accepted.socket!.once('close', () => resolve()),
+    );
+    expect(
+      (
+        await wsConnectLocalControl('operator', {
+          Origin: 'http://localhost:5273',
+        })
+      ).code,
+    ).toBe(401);
+    expect(
+      (await wsConnectLocalControl('remote-token', { Origin: origin })).code,
+    ).toBe(403);
+    const primary = await wsConnect({
+      headers: { Authorization: 'Bearer operator' },
+    });
+    acpHandle!.detachServer(lanServer!);
+    await closed;
+    expect(primary.readyState).toBe(WebSocket.OPEN);
+    primary.terminate();
   });
 
   it('terminates LAN WebSockets when their listener is detached', async () => {

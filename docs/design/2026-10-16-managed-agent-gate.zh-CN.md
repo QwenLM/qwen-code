@@ -21,7 +21,8 @@
 - 每个改到 Managed Agent 路径的 PR，在最终 head 上通过全量套件后才能合入。
 - push 时的反馈保持快速（约 25 分钟）。
 - 没改到这些路径的 PR，除几秒钟的路径匹配外不付出额外成本。
-- 仍然漏进 main 的回归，经现有 `main-ci-failure-issue.yml` 路线自动开 issue。
+- 仍然漏进 main 的回归，经现有 `main-ci-failure-issue.yml` 路线自动开 issue；
+  例外是 main 已越过失败 head、且更新的运行拥有该结果的情形。
 
 ## 非目标
 
@@ -143,11 +144,28 @@ fork 代码留在托管 runner 上，在那里跑全量也不需要任何 secret
 
 ### 失败上报
 
-`main-ci-failure-issue.yml` 也监听 `Managed Agent gate`，合入后快闸变红会记录到每个
-workflow 共用的一个 open issue；找到匹配的已关闭 issue 时会重新打开。新汇总单使用
+`main-ci-failure-issue.yml` 也监听 `Managed Agent gate`，合入后快闸变红会经该路线记录：
+能识别失败用例的 run 按测试 marker 复用或新开按签名去重的 issue；识别不了的则在每个
+workflow 共用的汇总 issue 上追加评论，找到匹配的已关闭 issue 时会重新打开。新汇总单使用
 `scope/ci-cd` 和 `status/needs-triage` 标签供人工分诊，不自动指派 autofix。
 `qwen-triage-finalize.yml` 用 `Managed Agent gate` 替换了 `SDK Java`——后者自 #14205
 起已没有 `pull_request` 触发。
+
+当合入后 push 失败的 head 已不再是 main 的 tip 时，如果新 tip 上存在同一 workflow
+的更新 push 运行、且它**已经定论**，这次失败只记录在 analyze 运行的步骤摘要里，不会
+记录到 workflow issue 上：`success` 表示该处代码是绿的，`failure` 会通过自己的完成
+事件上报。以 `timed_out`、`skipped`、`startup_failure` 结束的后继永远不会被分析，
+因此此时仍然上报原始失败。`cancelled` 后继只有在共享判别脚本给出的结论属于会上报的
+那一类时才拥有该结果：`timeout`，或 fail-open 的 `unknown`。`concurrency` 与
+`nothing-executed` 的后继自己保持沉默，因此仍然上报原始失败；`unreadable` 的后继同样
+不接手，因为读取失败无法证明那个 run 的结论是什么，此时本次运行保留自己的 fail-open
+上报（#16272、#16280）。
+
+尚未 `completed` 的后继什么都证明不了，而本 job 也等不起它——报告所在
+的 runner 池把它排了 20-100 分钟，准备好报告时 tip 上的运行通常刚开始不久。此时仍然
+上报，并在正文顶部标注为临时性（provisional）。之所以负担得起，是因为按签名路由的新
+issue 交给人工分诊而不是 autofix：一条过期的临时报告只需关掉，丢掉一条则丢掉整个回归
+（#15470）。
 
 ## 成本
 
@@ -170,6 +188,46 @@ workflow 共用的一个 open issue；找到匹配的已关闭 issue 时会重�
   `HostedMonitorRunFaultGatesIT` 的 fg8f 时序断言也会间歇失败。如果现在就设为必需，
   门禁会因噪声卡住大量 Java PR。在 #14361 解决前保持为非必需；期间
   **Re-run failed jobs** 是逃生口。
+
+  2026-11-12 重新实测。这里有两个不同的分母，不能直接相互比较：41% 是
+  `HostedShellLifecycleRecoveryIT` 这一个类的失败率，而下面的数字统计的是「两条
+  Hosted 泳道中至少一条失败」的运行数。
+
+  在 2026-10-27T14:57Z 至 2026-11-11T21:48:10Z 之间创建的 97 次 `sdk-java.yml`
+  运行中，70 次已完成且未被取消，这 70 次都真正执行了两条 Hosted
+  泳道。其中 54 次至少有一条泳道失败（77%），只有 6 次整个运行的所有 job 全绿。
+  在这 70 次里最新的 22 次中，20 次至少有一条失败（91%）。
+
+  **失败几乎集中在一条泳道，而不是两条。** process-fault 失败 54 次、failover 失败
+  8 次，而这 8 次 failover 失败全部发生在 process-fault 也失败的运行里 ——
+  failover 从未单独失败。这个「从未」只是关于该窗口，不是关于这条泳道本身：以同一
+  口径放宽到 2026-10-16 至 2026-11-11T13:44Z，有 163 次运行执行了两条泳道，其中 3 次
+  是 failover 失败而 process-fault 通过（2026-10-18 的 run 39091025824 与
+  39097018288、2026-10-19 的 39201677644），即更早的窗口里 failover 确实单独失败过。
+  更宽窗口下的分布是 process-fault 失败 110 次对 failover 11 次，所以不对称性在换窗口
+  后依然成立，不成立的只是「从未」这个绝对说法。钉住的窗口内分布是：46 次只有
+  process-fault 失败、8 次两条都失败、16 次两条都通过，合计正是那 70 次。
+  本文档早前的版本写的是「process-fault 26 次、failover 26 次」，
+  并据此认为两条泳道各自独立失败；那个计数复现不出来，结论也是反的。接 #14361 的
+  人应当从 process-fault 这条泳道入手。
+
+  这个序列是 nightly 加手工 dispatch，不是门禁自己的运行：那 97 次里有 16 次
+  `schedule` 和 81 次 `workflow_dispatch`，而 `sdk-java.yml` 根本没有
+  `pull_request` 触发器。nightly 一侧更差 —— 16 次 nightly 里有 15 次 Hosted 泳道
+  失败、没有一次全绿；6 次全绿全部来自 54 次已完成的 dispatch 运行。应当把它读作
+  测试脚手架的背景失败率（正是它让门禁无法设为必需），而不是门禁自身的通过率。
+
+  门禁自己的全量档还太新，给不出比率，而且它是另一份运行列表。
+  `managed-agent-gate.yml` 通过可复用工作流调用这两条泳道，job 名带
+  `SDK Java (full) /` 前缀。该 workflow 在 2026-11-11 全天以 success 或 failure
+  结束的 133 次 `pull_request_review` 运行里，有 38 次执行了两条 Hosted 泳道，
+  这 38 次全部是 process-fault 失败、failover 通过 —— 与上面同一形态，而且当天
+  没有一次全量档运行是两条泳道都通过的。
+
+  拒绝原因本身也换了形态：现在是 Runtime Broker 回
+  `409 managed_runtime_identity_conflict`，而最初报告里是 Store 回
+  `400 invalid_request`，但以同样方式冻结 turn。
+
 - **approve 时机。** 全量在首个 approve 时启动，合入最多要在其后等约两小时。reviewer
   可以更早 approve；approve 后的 push 会作废它并重新开始。
 - **分类漂移。** push 运行和 approve 运行各自对自己的 merge commit 分类；两次之间 base
@@ -183,6 +241,36 @@ workflow 共用的一个 open issue；找到匹配的已关闭 issue 时会重�
 2. 观察全量运行，直到 #14361 修复、通过率稳定。
 3. 维护者把 `Managed Agent gate` 加入 main 的必需检查（若重新启用 merge queue，也加到
    那里）。
+
+第 2 步有一个值得记下来的度量陷阱，因为有两个看起来很令人安心的序列其实完全没有度量
+Hosted 泳道：
+
+- 本 workflow 自己的 `pull_request_review` 运行大多选出 tier `none`。它最近 13 次成功
+  **全部**跑的是 `SDK Java (none)` —— 一行 Java 都没跑，因为那些 head 没有碰到范围内
+  的路径。这里的连续全绿对全量 tier 毫无说明力。
+- 本 workflow 在 main 上的失败可能来自无关步骤。它最近 7 次 main 失败**全部**是
+  `Run Managed Agent Server Checkstyle` —— 一条未使用 import，已由 `da270e434` 修掉
+  —— 此后本 workflow 在 main 上转绿，而 Hosted 泳道仍以上述比率失败。
+
+只有真正执行了 `Hosted process fault gates` 与 `Hosted failover E2E` 的运行才度量第 2
+步。筛选时要求这两个 job 既存在、又不是 `skipped`，然后在读通过率之前排除 cancelled
+运行。一次运行不构成度量的两种情形并不相同：不在范围内的 PR 选出 tier `none`，根本
+不产出任何 Hosted job；而 `fast` 档的运行会产出这两个名字但跳过它们，所以只按「是否
+存在」筛选会把 fast 运行也算成度量。
+
+引用比率时要写明是哪个运行列表并钉住时间窗，因为两个列表并不相同，而不钉窗口的计数会随
+新运行漂移。`sdk-java.yml` 是 nightly 加 dispatch，没有 `pull_request` 触发器；门禁
+自己的运行记在 `managed-agent-gate.yml` 下，其可复用工作流的 job 名带
+`SDK Java (full) /` 前缀（例如 run `43019171265`）。「风险」一节的数字钉在
+2026-10-27T14:57Z 至 2026-11-11T21:48:10Z 之间创建的 `sdk-java.yml` 运行；后来的人用同一
+个查询会得到不同的分母。main 的必需检查位于 ruleset `main`，而不是旧的 branch
+protection；在那里添加名字时不得扰动它「两个 approve」与「push 后作废」这两条规则。
+
+第 3 步只需要那一个名字。计算出来的名字是刻意设计，不是需要先修的缺陷：碰了这些路径的
+PR 会显示 `Managed Agent gate` 为 expected，直到它首个 approve 的全量运行报出该名字，
+而 ruleset 本来就要求两个 approve，所以「等这个 approve」正是强制手段而不是死锁。若把
+`Managed Agent fast tier` 也加进去，反过来会卡住每一个不碰这些路径、因而从不报告该名字
+的 PR。
 
 ## 验证
 

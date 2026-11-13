@@ -16,6 +16,7 @@ import {
   type LlmPreparedRequestCallback,
 } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { createHash } from 'node:crypto';
+import * as classifier from '@qwen-code/qwen-code-core/permissions/classifier.js';
 import { getRuntimeContentGenerator } from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { TurnBudget } from '@qwen-code/qwen-code-core/core/turn-budget.js';
@@ -29,13 +30,15 @@ import type { ManagedHookDispatcher } from '@qwen-code/qwen-code-core/hooks/hook
 import type { HostedHookSession } from './hosted-hook-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
+import * as stdioHelpers from '../utils/stdioHelpers.js';
 import {
   HostedModelRoundLimitError,
   applyHostedPublicChildModelPin,
   HostedImageInputUnsupportedError,
   runHostedHarnessTextTurn,
+  createHostedLoopFireClassifier,
 } from './hosted-harness-model.js';
 import { HostedModelUnavailableError } from './hosted-agent-definition.js';
 import { HostedSkillCatalog } from './hosted-skill-catalog.js';
@@ -43,6 +46,7 @@ import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordin
 import type { HostedModelRequest } from './hosted-model-recovery.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import type { PublicChildModelRoute } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 
 const state = vi.hoisted(() => ({
   config: undefined as unknown as {
@@ -55,7 +59,12 @@ const state = vi.hoisted(() => ({
   },
 }));
 vi.mock('../config/settings.js', () => ({
-  loadSettings: () => ({ merged: {} }),
+  loadSettings: () => ({
+    merged: {},
+    getSystemHooks: () => undefined,
+    getUserHooks: () => undefined,
+    getProjectHooks: () => undefined,
+  }),
 }));
 vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(async () => state.config),
@@ -183,6 +192,521 @@ function nativeInput(event: HookEventName): HookInput {
 describe('Hosted Harness model boundary', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it('recalls personal memory from original user input and injects it as request data', async () => {
+    const model = config([{ type: LlmEventType.Finished }]);
+    const hooks = hostedHooks([HookEventName.UserPromptSubmit]);
+    hooks.fire.mockImplementation(async (event) =>
+      event === HookEventName.UserPromptSubmit
+        ? {
+            hookSpecificOutput: {
+              hookEventName: event,
+              updatedPrompt: 'rewritten prompt',
+            },
+          }
+        : undefined,
+    );
+    const recall = vi
+      .fn()
+      .mockResolvedValue(
+        '<untrusted_external_context>known preference</untrusted_external_context>',
+      );
+    await runHostedHarnessTextTurn({
+      ...input,
+      memory: { recall },
+      recallUserInput: true,
+      hooks: hooks.session,
+      workspaceContext: { read: () => 'workspace instructions' },
+    });
+    expect(recall).toHaveBeenCalledExactlyOnceWith(
+      input.promptId,
+      'hello',
+      input.signal,
+    );
+    expect(model.requests[0][0].text).toContain('rewritten prompt');
+    expect(model.requests[0][0].text).toContain('<untrusted_external_context>');
+    expect(model.setUserMemory).toHaveBeenCalledWith('workspace instructions');
+    expect(model.setUserMemory.mock.calls.flat().join(' ')).not.toContain(
+      'known preference',
+    );
+  });
+
+  it('does not recall personal memory without a new accepted user input', async () => {
+    config([{ type: LlmEventType.Finished }]);
+    const recall = vi.fn();
+    await runHostedHarnessTextTurn({
+      ...input,
+      memory: { recall },
+      recallUserInput: false,
+    });
+    expect(recall).not.toHaveBeenCalled();
+  });
+
+  it.each(['tool-results', 'model'] as const)(
+    'does not recall accepted input again when resuming %s',
+    async (kind) => {
+      const model = config([{ type: LlmEventType.Finished }]);
+      const recall = vi.fn().mockResolvedValue('unexpected recall');
+      const responses: Part[] = [
+        {
+          functionResponse: {
+            id: 'saved-call',
+            name: 'context_search',
+            response: { status: 'ok', items: [] },
+          },
+        },
+      ];
+      const prepared = {
+        request: { model: 'saved-model', config: {}, contents: [] },
+      } as unknown as LlmPreparedRequest;
+      const replay =
+        kind === 'model'
+          ? vi
+              .spyOn(Turn.prototype, 'run')
+              .mockImplementation(async function* () {
+                yield {
+                  type: LlmEventType.Finished,
+                  value: { reason: undefined, usageMetadata: undefined },
+                };
+              })
+          : undefined;
+      try {
+        await runHostedHarnessTextTurn({
+          ...input,
+          memory: { recall },
+          recallUserInput: true,
+          ...(kind === 'model'
+            ? { resumeModel: { round: 0, prepared } as HostedModelRequest }
+            : { resumeFromToolResults: responses }),
+        });
+        expect(recall).not.toHaveBeenCalled();
+        if (replay) expect(replay).toHaveBeenCalled();
+        else expect(model.requests[0]).toEqual(responses);
+      } finally {
+        replay?.mockRestore();
+      }
+    },
+  );
+
+  it('recalls personal memory for each queued input using its accepted identity and original text', async () => {
+    config([{ type: LlmEventType.Finished }]);
+    const recall = vi.fn(
+      async (_id: string, text: string) => `memory for ${text}`,
+    );
+    const claim = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          id: 'umsg_next:2',
+          text: 'new preference',
+          parts: [{ text: 'new preference' }],
+        },
+      ])
+      .mockResolvedValue([]);
+    const commit = vi.fn();
+    await runHostedHarnessTextTurn({
+      ...input,
+      memory: { recall },
+      recallUserInput: true,
+      userMessages: { claim, commit, commitAssistant: vi.fn() },
+    });
+    expect(recall.mock.calls.map(([id, text]) => [id, text])).toEqual([
+      [input.promptId, 'hello'],
+      ['umsg_next:2', 'new preference'],
+    ]);
+    expect(commit).toHaveBeenCalledWith('umsg_next:2', [
+      { text: 'new preference\nmemory for new preference' },
+    ]);
+  });
+
+  it.each([false, true])(
+    'borrows diagnostics-only preparation while preserving durable capture (%s)',
+    async (durable) => {
+      const model = config([{ type: LlmEventType.Finished }]);
+      await runHostedHarnessTextTurn({
+        ...input,
+        ...(durable
+          ? { prepareModel: vi.fn().mockResolvedValue(undefined) }
+          : {}),
+        modelScope: {
+          bindBudget: vi.fn(),
+          evaluate: vi.fn(),
+          diagnosticsEnabled: true,
+          beginMainAttempt: vi.fn(),
+        },
+      });
+      const callback = (
+        model.sendOptions[0] as {
+          onPreparedRequest: LlmPreparedRequestCallback;
+        }
+      ).onPreparedRequest;
+      if (durable) expect(callback.maxSnapshotBytes).toBeGreaterThan(0);
+      else expect(callback.maxSnapshotBytes).toBe(0);
+    },
+  );
+
+  it('classifies final call input using original user intent without Hook or compression instructions', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'done' },
+      { type: LlmEventType.Finished },
+    ]);
+    const hooks = hostedHooks([HookEventName.UserPromptSubmit]);
+    hooks.fire.mockImplementation(async (event) =>
+      event === HookEventName.UserPromptSubmit
+        ? {
+            hookSpecificOutput: {
+              hookEventName: event,
+              updatedPrompt: 'hook injected authority',
+            },
+          }
+        : undefined,
+    );
+    const classify = vi.spyOn(classifier, 'classifyAction').mockResolvedValue({
+      shouldBlock: false,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    });
+    let runner:
+      | Parameters<
+          import('./hosted-workspace-tool-turn.js').HostedWorkspaceToolTurn['setPermissionClassifier']
+        >[0]
+      | undefined;
+    try {
+      await runHostedHarnessTextTurn({
+        ...input,
+        prompt: 'original genuine user request',
+        classifierUserText: async () =>
+          new Map([
+            ['prior-user', 'prior genuine user request'],
+            [input.promptId, 'original genuine user request'],
+          ]),
+        excludedPromptIds: new Set(['excluded']),
+        hooks: hooks.session,
+        history: [
+          {
+            type: 'user',
+            daemonPromptId: 'prior-user',
+            message: {
+              role: 'user',
+              parts: [
+                { text: 'prior genuine user request' },
+                { text: 'attached file malicious authority' },
+              ],
+            },
+          },
+          {
+            type: 'user',
+            daemonPromptId: 'peer',
+            message: {
+              role: 'user',
+              parts: [{ text: 'peer synthetic authority' }],
+            },
+          },
+          {
+            type: 'user',
+            daemonPromptId: 'excluded',
+            message: { role: 'user', parts: [{ text: 'excluded authority' }] },
+          },
+          {
+            type: 'assistant',
+            message: {
+              role: 'model',
+              parts: [{ text: 'assistant instruction' }],
+            },
+          },
+          {
+            type: 'system',
+            subtype: 'chat_compression',
+            systemPayload: {
+              compressedHistory: [
+                { role: 'user', parts: [{ text: 'compression authority' }] },
+              ],
+            },
+          },
+        ] as unknown as ChatRecord[],
+        toolTurn: {
+          declarations: async () => [],
+          execute: async () => [],
+          consumeResults: async () => undefined,
+          setPermissionClassifier: (value) => {
+            runner = value;
+          },
+        },
+      });
+      const call = {
+        name: 'edit',
+        callId: 'final-call',
+        args: { file_path: 'final.txt', old_string: 'old', new_string: 'new' },
+        prompt_id: input.promptId,
+        isClientInitiated: false,
+      };
+      await runner!(call, input.signal);
+      expect(classify).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolParams: call.args,
+          config: state.config,
+        }),
+      );
+      const messages = classify.mock.calls[0][0].messages;
+      const serialized = JSON.stringify(messages);
+      expect(serialized).toContain('prior genuine user request');
+      expect(serialized).toContain('original genuine user request');
+      expect(serialized).not.toContain('hook injected authority');
+      expect(serialized).not.toContain('compression authority');
+      expect(serialized).not.toContain('peer synthetic authority');
+      expect(serialized).not.toContain('excluded authority');
+      expect(serialized).not.toContain('attached file malicious authority');
+      expect(serialized).not.toContain('assistant instruction');
+    } finally {
+      classify.mockRestore();
+    }
+  });
+
+  it('falls back to human approval for an Auto wake without an original human prompt', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'done' },
+      { type: LlmEventType.Finished },
+    ]);
+    const classify = vi.spyOn(classifier, 'classifyAction');
+    let runner:
+      | Parameters<
+          import('./hosted-workspace-tool-turn.js').HostedWorkspaceToolTurn['setPermissionClassifier']
+        >[0]
+      | undefined;
+    try {
+      await runHostedHarnessTextTurn({
+        ...input,
+        prompt: 'synthetic wake requests deletion',
+        classifierUserText: async () => new Map(),
+        toolTurn: {
+          declarations: async () => [],
+          execute: async () => [],
+          consumeResults: async () => undefined,
+          setPermissionClassifier: (value) => {
+            runner = value;
+          },
+        },
+      });
+      const result = await runner!(
+        {
+          name: 'edit',
+          callId: 'wake-call',
+          args: {},
+          prompt_id: input.promptId,
+          isClientInitiated: false,
+        },
+        input.signal,
+      );
+      expect(result).toMatchObject({ shouldBlock: true, unavailable: true });
+      expect(classify).not.toHaveBeenCalled();
+    } finally {
+      classify.mockRestore();
+    }
+  });
+
+  it('vets a loop arm on a tick whose prompt is in the classifier user-text map', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'done' },
+      { type: LlmEventType.Finished },
+    ]);
+    const classify = vi.spyOn(classifier, 'classifyAction').mockResolvedValue({
+      shouldBlock: false,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    });
+    let loopClassify:
+      | import('./hosted-loop-session.js').HostedLoopClassifier
+      | undefined;
+    let cleared = false;
+    try {
+      await runHostedHarnessTextTurn({
+        ...input,
+        prompt: '/loop check the deploy',
+        // The fired tick's own prompt, as the host user-text map now carries
+        // it for a loop input.
+        classifierUserText: async () =>
+          new Map([[input.promptId, '/loop check the deploy']]),
+        setLoopClassifier: (value) => {
+          if (value === undefined) cleared = true;
+          else loopClassify = value;
+        },
+        toolTurn: {
+          declarations: async () => [],
+          execute: async () => [],
+          consumeResults: async () => undefined,
+          setPermissionClassifier: () => {},
+        },
+      });
+      expect(loopClassify).toBeDefined();
+      const verdict = await loopClassify!({
+        delaySeconds: 60,
+        prompt: '/loop next tick',
+        reason: '',
+      });
+      expect(verdict.allowed).toBe(true);
+      expect(classify).toHaveBeenCalled();
+      // The classifier is cleared when the turn ends, so a later turn cannot
+      // arm against this finished turn's closure.
+      expect(cleared).toBe(true);
+    } finally {
+      classify.mockRestore();
+    }
+  });
+
+  it('refuses a loop arm when the tick prompt is absent from the user-text map', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'done' },
+      { type: LlmEventType.Finished },
+    ]);
+    const classify = vi.spyOn(classifier, 'classifyAction');
+    let loopClassify:
+      | import('./hosted-loop-session.js').HostedLoopClassifier
+      | undefined;
+    try {
+      await runHostedHarnessTextTurn({
+        ...input,
+        prompt: '/loop check the deploy',
+        classifierUserText: async () => new Map(),
+        setLoopClassifier: (value) => {
+          if (value !== undefined) loopClassify = value;
+        },
+        toolTurn: {
+          declarations: async () => [],
+          execute: async () => [],
+          consumeResults: async () => undefined,
+          setPermissionClassifier: () => {},
+        },
+      });
+      expect(loopClassify).toBeDefined();
+      const verdict = await loopClassify!({
+        delaySeconds: 60,
+        prompt: '/loop next tick',
+        reason: '',
+      });
+      expect(verdict.allowed).toBe(false);
+      expect(classify).not.toHaveBeenCalled();
+    } finally {
+      classify.mockRestore();
+    }
+  });
+
+  it('commits queued guidance in FIFO order before requesting the model', async () => {
+    const model = config([{ type: LlmEventType.Finished, value: {} }]);
+    const commit = vi.fn().mockResolvedValue(undefined);
+    const claim = vi
+      .fn()
+      .mockResolvedValueOnce([
+        { id: 'umsg_first:1', text: 'first', parts: [{ text: 'first' }] },
+        { id: 'umsg_second:1', text: 'second', parts: [{ text: 'second' }] },
+      ])
+      .mockResolvedValue([]);
+    await runHostedHarnessTextTurn({
+      ...input,
+      userMessages: {
+        claim,
+        commit,
+        commitAssistant: vi.fn(),
+      },
+    });
+    expect(commit.mock.calls.map(([id]) => id)).toEqual([
+      'umsg_first:1',
+      'umsg_second:1',
+    ]);
+    expect(model.requests).toEqual([[{ text: 'second' }]]);
+    expect(model.setHistory).toHaveBeenLastCalledWith(
+      expect.arrayContaining([
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'user', parts: [{ text: 'first' }] },
+      ]),
+    );
+    expect(commit.mock.invocationCallOrder[1]).toBeLessThan(
+      model.sendMessageStream.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('continues after final output when guidance arrived during generation', async () => {
+    const model = config([{ type: LlmEventType.Finished, value: {} }]);
+    const commitAssistant = vi.fn().mockResolvedValue(undefined);
+    const commit = vi.fn().mockResolvedValue(undefined);
+    const claim = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: 'umsg_late:1',
+          text: 'follow up',
+          parts: [{ text: 'follow up' }],
+        },
+      ])
+      .mockResolvedValue([]);
+    await runHostedHarnessTextTurn({
+      ...input,
+      userMessages: { claim, commit, commitAssistant },
+    });
+    expect(model.requests).toEqual([
+      [{ text: 'hello' }],
+      [{ text: 'follow up' }],
+    ]);
+    expect(commitAssistant).toHaveBeenCalledOnce();
+    expect(commit).toHaveBeenCalledWith('umsg_late:1', [{ text: 'follow up' }]);
+    expect(commitAssistant.mock.invocationCallOrder[0]).toBeLessThan(
+      commit.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('keeps suppressed output private when late guidance continues the Turn', async () => {
+    config([{ type: LlmEventType.Finished }]);
+    const hooks = hostedHooks([HookEventName.MessageDisplay]);
+    hooks.fire.mockImplementation(async (event) =>
+      event === HookEventName.MessageDisplay
+        ? { suppressOutput: true }
+        : undefined,
+    );
+    const commitAssistant = vi.fn().mockResolvedValue(undefined);
+    const claim = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: 'umsg_late:1',
+          text: 'follow up',
+          parts: [{ text: 'follow up' }],
+        },
+      ])
+      .mockResolvedValue([]);
+    await runHostedHarnessTextTurn({
+      ...input,
+      hooks: hooks.session,
+      userMessages: { claim, commit: vi.fn(), commitAssistant },
+    });
+    expect(commitAssistant).toHaveBeenCalledWith([], expect.any(String));
+  });
+
+  it('does not dispatch a model request after uncertain guidance persistence', async () => {
+    const model = config([{ type: LlmEventType.Finished, value: {} }]);
+    const failed = new ManagedSessionRecordError('receipt unavailable');
+    await expect(
+      runHostedHarnessTextTurn({
+        ...input,
+        userMessages: {
+          claim: vi.fn().mockResolvedValue([
+            {
+              id: 'umsg_unknown:1',
+              text: 'hello',
+              parts: [{ text: 'hello' }],
+            },
+          ]),
+          commit: vi.fn().mockRejectedValue(failed),
+          commitAssistant: vi.fn(),
+        },
+      }),
+    ).rejects.toThrow('receipt unavailable');
+    expect(model.sendMessageStream).not.toHaveBeenCalled();
+  });
+
   it('keeps the immutable default runtime model and fails closed on route drift', async () => {
     const model = config([
       { type: LlmEventType.Content, value: 'done' },
@@ -225,6 +749,148 @@ describe('Hosted Harness model boundary', () => {
     ).rejects.toBeInstanceOf(HostedModelUnavailableError);
     expect(model.sendMessageStream).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    'same',
+    'explicit-inherit',
+    'explicit-same',
+    'legacy-explicit-same',
+    'endpoint-drift',
+    'provider-pin-drift',
+    'model-id-drift',
+  ])(
+    'inherits a configured child route with an empty host registry (%s)',
+    async (scenario) => {
+      const model = config([]);
+      const generation = {
+        model: 'tenant-model',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://tenant.test/v1',
+        apiKey: 'synthetic-tenant-key',
+        samplingParams: { temperature: 0.25 },
+      };
+      const modelConfig = vi.fn().mockResolvedValue(generation);
+      const getAllConfiguredModels = vi.fn().mockReturnValue([]);
+      const switchModel = vi.fn();
+      state.config['getModel'] = () => generation.model;
+      state.config['getModelsConfig'] = () => ({
+        getCurrentAuthType: () => generation.authType,
+        getGenerationConfig: () => generation,
+      });
+      state.config['getContentGeneratorConfig'] = () => generation;
+      state.config['getAllConfiguredModels'] = getAllConfiguredModels;
+      state.config['switchModel'] = switchModel;
+      const resolveForModel = vi.fn().mockResolvedValue({
+        model: generation.model,
+        contentGeneratorConfig: generation,
+      });
+      state.config['getBaseLlmClient'] = () => ({ resolveForModel });
+      let explicitRoute: PublicChildModelRoute | undefined;
+      model.sendMessageStream.mockImplementation(
+        async function* (_request, _signal, _promptId, options) {
+          await (
+            options as { onPreparedRequest: LlmPreparedRequestCallback }
+          ).onPreparedRequest({
+            request: { model: generation.model, contents: [], config: {} },
+            history: [],
+            completedToolCallIds: [],
+            routeSelector: `openai:${generation.model}`,
+            providerPin: llmPreparedProviderPin(generation),
+            promptTokensForClamp: 0,
+          });
+          if (scenario.includes('explicit-') && !explicitRoute) {
+            expect(model.shutdown).not.toHaveBeenCalled();
+            const selector =
+              scenario === 'explicit-inherit' ? 'inherit' : generation.model;
+            const resolved =
+              await setChildModelResolver.mock.calls[0]![0](selector);
+            expect(resolveForModel).toHaveBeenCalledExactlyOnceWith(selector, {
+              failClosed: true,
+            });
+            expect(resolved.modelId).toBe(generation.model);
+            explicitRoute = resolved.route;
+          }
+          yield { type: LlmEventType.Content, value: 'done' };
+          yield { type: LlmEventType.Finished };
+        },
+      );
+      const setChildModelRoute =
+        vi.fn<(modelId: string, route: PublicChildModelRoute) => void>();
+      const setChildModelResolver = vi.fn<
+        (
+          resolve: (selector: string) => Promise<{
+            modelId: string;
+            route: PublicChildModelRoute;
+          }>,
+        ) => void
+      >();
+      await expect(
+        runHostedHarnessTextTurn({
+          ...input,
+          ...(scenario === 'legacy-explicit-same' ? {} : { modelConfig }),
+          toolTurn: {
+            declarations: async () => [{ name: 'agent' }],
+            consumeResults: async () => undefined,
+            execute: vi.fn(),
+            capturesChildModelRoute: () => true,
+            setChildModelRoute,
+            setChildModelResolver,
+          },
+        }),
+      ).resolves.toMatchObject({ text: 'done' });
+      expect(setChildModelRoute).toHaveBeenCalledExactlyOnceWith(
+        generation.model,
+        {
+          authType: generation.authType,
+          endpointDigest: createHash('sha256')
+            .update(generation.baseUrl)
+            .digest('hex'),
+          providerPin: llmPreparedProviderPin(generation),
+        },
+      );
+      let route = { ...setChildModelRoute.mock.calls[0]![1] };
+      if (scenario === 'legacy-explicit-same') {
+        expect(explicitRoute).toEqual({
+          ...route,
+          origin: { modelId: generation.model, ...route },
+        });
+        expect(modelConfig).not.toHaveBeenCalled();
+        expect(
+          vi.mocked(loadCliConfig).mock.calls.at(-1)?.[9],
+        ).not.toHaveProperty('modelConfiguration');
+        return;
+      }
+      if (scenario.startsWith('explicit-')) {
+        expect(explicitRoute).toBeDefined();
+        route = explicitRoute!;
+      }
+      if (scenario === 'endpoint-drift') route.endpointDigest = 'f'.repeat(64);
+      if (scenario === 'provider-pin-drift') route.providerPin = 'f'.repeat(64);
+      const child = runHostedHarnessTextTurn({
+        ...input,
+        modelConfig,
+        modelSelection: {
+          modelId:
+            scenario === 'model-id-drift' ? 'other-model' : generation.model,
+          revision: 1,
+        },
+        publicChildModelRoute: route,
+      });
+      if (scenario === 'same' || scenario.startsWith('explicit-')) {
+        await expect(child).resolves.toMatchObject({ text: 'done' });
+        expect(model.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(getAllConfiguredModels).not.toHaveBeenCalled();
+      } else {
+        await expect(child).rejects.toBeInstanceOf(HostedModelUnavailableError);
+        expect(model.sendMessageStream).toHaveBeenCalledOnce();
+      }
+      expect(modelConfig).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[9]).toMatchObject({
+        modelConfiguration: generation,
+      });
+      expect(switchModel).not.toHaveBeenCalled();
+    },
+  );
 
   it('restores a configured endpoint by exact route and uses its registry key', async () => {
     config([]);
@@ -447,6 +1113,47 @@ describe('Hosted Harness model boundary', () => {
     },
   );
 
+  it('keeps queued file content when a prompt Hook replaces guidance text', async () => {
+    const model = config([{ type: LlmEventType.Finished }]);
+    const hook = hostedHooks([HookEventName.UserPromptSubmit]);
+    hook.fire.mockImplementation(async (event) =>
+      event === HookEventName.UserPromptSubmit
+        ? {
+            hookSpecificOutput: {
+              hookEventName: HookEventName.UserPromptSubmit,
+              updatedPrompt: 'updated guidance',
+            },
+          }
+        : undefined,
+    );
+    const attachments = [{ text: 'Pinned file notes.md: contents' }];
+    const claim = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          id: 'umsg_file:1',
+          text: 'guidance',
+          parts: [{ text: 'guidance' }, ...attachments],
+          attachments,
+        },
+      ])
+      .mockResolvedValue([]);
+    const commit = vi.fn().mockResolvedValue(undefined);
+    await runHostedHarnessTextTurn({
+      ...input,
+      hooks: hook.session,
+      userMessages: { claim, commit, commitAssistant: vi.fn() },
+    });
+    expect(model.requests[0]).toEqual([
+      { text: 'updated guidance' },
+      ...attachments,
+    ]);
+    expect(commit).toHaveBeenCalledWith('umsg_file:1', [
+      { text: 'updated guidance' },
+      ...attachments,
+    ]);
+  });
+
   it('passes attachments as real model parts while a prompt Hook only replaces the text', async () => {
     const model = config([
       { type: LlmEventType.Content, value: 'done' },
@@ -624,6 +1331,7 @@ describe('Hosted Harness model boundary', () => {
         modelScope: {
           bindBudget: vi.fn(),
           evaluate: vi.fn(),
+          diagnosticsEnabled: false,
           beginMainAttempt: vi
             .fn()
             .mockResolvedValueOnce(first)
@@ -763,10 +1471,16 @@ describe('Hosted Harness model boundary', () => {
     expect(hooks.setHistory).toHaveBeenCalledWith([]);
     expect(hooks.shutdown).toHaveBeenCalledOnce();
     const args = vi.mocked(loadCliConfig).mock.calls[0];
-    expect(args?.[1]).toMatchObject({ safeMode: true, chatRecording: false });
+    expect(args?.[1]).toMatchObject({
+      safeMode: true,
+      chatRecording: false,
+      sessionId: input.sessionId,
+      sessionIdGenerated: true,
+    });
     expect(args?.[9]?.toolInvocationGuard?.({} as never)).toMatchObject({
       allowed: false,
     });
+    expect(args?.[9]?.lspDisabled).toBe(true);
   });
 
   it('returns complete no-tool model Parts without aliasing provider history', async () => {
@@ -824,7 +1538,7 @@ describe('Hosted Harness model boundary', () => {
     );
     await runHostedHarnessTextTurn({ ...input, history });
     expect(model.setHistory).toHaveBeenCalledWith([
-      { role: 'user', parts: answered },
+      expect.objectContaining({ role: 'user', parts: answered }),
       { role: 'model', parts: visible },
     ]);
     expect(history[1]!.message!.parts).toEqual(thoughtOnly);
@@ -1454,6 +2168,7 @@ describe('Hosted Harness model boundary', () => {
       modelScope: {
         bindBudget,
         evaluate: vi.fn(),
+        diagnosticsEnabled: false,
         beginMainAttempt: vi.fn().mockResolvedValue(complete),
       },
     });
@@ -1540,6 +2255,7 @@ describe('Hosted Harness model boundary', () => {
       modelScope: {
         bindBudget: vi.fn(),
         evaluate: vi.fn(),
+        diagnosticsEnabled: false,
         beginMainAttempt: vi.fn().mockResolvedValue(complete),
       },
     });
@@ -1586,6 +2302,7 @@ describe('Hosted Harness model boundary', () => {
         modelScope: {
           bindBudget: vi.fn(),
           evaluate: vi.fn(),
+          diagnosticsEnabled: false,
           beginMainAttempt,
         },
       });
@@ -1625,6 +2342,7 @@ describe('Hosted Harness model boundary', () => {
       modelScope: {
         bindBudget: vi.fn(),
         evaluate: vi.fn(),
+        diagnosticsEnabled: false,
         beginMainAttempt,
       },
     });
@@ -1654,6 +2372,7 @@ describe('Hosted Harness model boundary', () => {
         modelScope: {
           bindBudget: vi.fn(),
           evaluate: vi.fn(),
+          diagnosticsEnabled: false,
           beginMainAttempt: vi.fn().mockResolvedValue(complete),
         },
       });
@@ -1832,6 +2551,7 @@ describe('Hosted Harness model boundary', () => {
       modelScope: {
         evaluate: vi.fn(),
         bindBudget: vi.fn(),
+        diagnosticsEnabled: false,
         beginMainAttempt: vi.fn(),
       },
       toolTurn,
@@ -1903,6 +2623,7 @@ describe('Hosted Harness model boundary', () => {
       const modelScope = {
         evaluate: vi.fn(),
         bindBudget: vi.fn(),
+        diagnosticsEnabled: false,
         beginMainAttempt: vi
           .fn()
           .mockResolvedValueOnce(complete('turn:model-1'))
@@ -2646,6 +3367,83 @@ it('keeps agent instructions ahead of refreshed project context', async () => {
   );
 });
 
+it('preserves pinned instruction sources when Todo changes after a tool batch', async () => {
+  const mocks = config([]);
+  const observed: string[] = [];
+  const skills = new HostedSkillCatalog([
+    { name: 'published', description: 'SKILL_SECTION', body: 'body' },
+  ]);
+  let todo = 'TODO_FIRST';
+  let round = 0;
+  const call = {
+    callId: 'context-call',
+    name: 'read_file',
+    args: {},
+    isClientInitiated: false,
+    prompt_id: input.promptId,
+  };
+  mocks.getHistory.mockImplementation(() => [
+    {
+      role: 'model',
+      parts:
+        round === 1
+          ? [{ functionCall: { name: call.name } }]
+          : [{ text: 'done' }],
+    },
+  ]);
+  mocks.sendMessageStream.mockImplementation(async function* () {
+    observed.push(mocks.setUserMemory.mock.calls.at(-1)?.[0] ?? '');
+    round++;
+    if (round === 1) yield { type: LlmEventType.ToolCallRequest, value: call };
+    else yield { type: LlmEventType.Content, value: 'done' };
+    yield { type: LlmEventType.Finished };
+  });
+  const execute = vi.fn(async () => {
+    todo = 'TODO_UPDATED';
+    return [
+      {
+        functionResponse: {
+          id: call.callId,
+          name: call.name,
+          response: { output: 'contents' },
+        },
+      },
+    ];
+  });
+  await runHostedHarnessTextTurn({
+    ...input,
+    agentInstructions: 'AGENT_SECTION',
+    extensionInstructions: 'EXTENSION_SECTION',
+    skills,
+    workspaceContext: { read: () => 'WORKSPACE_SECTION' },
+    toolTurn: {
+      declarations: async () => [{ name: call.name }],
+      consumeResults: async () => undefined,
+      execute,
+      planModeInstructions: () => 'PLAN_SECTION',
+      todoInstructions: async () => todo,
+    },
+  });
+  expect(execute).toHaveBeenCalledOnce();
+  expect(observed).toHaveLength(2);
+  for (const [index, prompt] of observed.entries()) {
+    let position = -1;
+    for (const marker of [
+      'AGENT_SECTION',
+      'EXTENSION_SECTION',
+      'SKILL_SECTION',
+      'PLAN_SECTION',
+      index === 0 ? 'TODO_FIRST' : 'TODO_UPDATED',
+      'WORKSPACE_SECTION',
+    ]) {
+      const next = prompt.indexOf(marker);
+      expect(next).toBeGreaterThan(position);
+      position = next;
+    }
+  }
+  expect(observed[1]).not.toContain('TODO_FIRST');
+});
+
 it('advertises only the published Skill catalog while keeping host Skill discovery disabled', async () => {
   const mocks = config([{ type: LlmEventType.Finished }]);
   await runHostedHarnessTextTurn({
@@ -2749,4 +3547,140 @@ it('uses saved Skill results on continuation without loading the selection again
   });
   expect(toolTurn.execute).not.toHaveBeenCalled();
   expect(mocks.requests[0]).toEqual(result);
+});
+
+describe('createHostedLoopFireClassifier', () => {
+  const initialize = vi.fn(async () => undefined);
+  const refreshAuth = vi.fn(async () => undefined);
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.config = {
+      initialize,
+      getModelsConfig: () => ({ getCurrentAuthType: () => 'test-auth' }),
+      refreshAuth,
+      shutdown: vi.fn(async () => undefined),
+    } as unknown as typeof state.config;
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  const fireInput = {
+    delaySeconds: 0,
+    prompt: '# Autonomous loop check\nthe guidance',
+    reason: 'loop fire-time sentinel re-review',
+  };
+
+  it('classifies on the Session model (M6)', async () => {
+    const classify = vi.spyOn(classifier, 'classifyAction').mockResolvedValue({
+      shouldBlock: false,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    });
+    const sessionModelConfig = { model: 'session-model' };
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+      modelConfig: async () => sessionModelConfig as never,
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.allowed).toBe(true);
+    expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[9]).toMatchObject({
+      modelConfiguration: sessionModelConfig,
+    });
+    expect(classify).toHaveBeenCalledOnce();
+  });
+
+  it('initializes and refreshes auth so the side query has a live model (D1)', async () => {
+    vi.spyOn(classifier, 'classifyAction').mockResolvedValue({
+      shouldBlock: false,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    });
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.allowed).toBe(true);
+    // loadCliConfig alone leaves no content generator; without initialize +
+    // refreshAuth the side query always reports unavailable (the dead gate).
+    expect(initialize).toHaveBeenCalledOnce();
+    expect(refreshAuth).toHaveBeenCalledWith('test-auth', true);
+  });
+
+  it('pins the definition model when there is no modelConfig digest (R9-1)', async () => {
+    const switchModel = vi.fn(async () => undefined);
+    state.config['getAllConfiguredModels'] = () => [
+      { id: 'definition-model', authType: 'test-auth', isRuntimeModel: false },
+    ];
+    state.config['switchModel'] = switchModel;
+    vi.spyOn(classifier, 'classifyAction').mockResolvedValue({
+      shouldBlock: false,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    });
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+      model: { id: 'definition-model' },
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.allowed).toBe(true);
+    // With no digest the fire must pin the definition model exactly like the
+    // turn does; reverting the pin to undefined leaves switchModel uncalled.
+    expect(switchModel).toHaveBeenCalledWith(
+      'test-auth',
+      'definition-model',
+      expect.objectContaining({ requireCachedCredentials: true }),
+    );
+  });
+
+  it('a classifier that cannot be built reports unavailable, not a denial (M12)', async () => {
+    vi.mocked(loadCliConfig).mockRejectedValueOnce(new Error('config boom'));
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.unavailable).toBe(true);
+  });
+
+  it('logs the cause when the fire classifier cannot be built (N-3)', async () => {
+    const log = vi
+      .spyOn(stdioHelpers, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    vi.mocked(loadCliConfig).mockRejectedValueOnce(new Error('config boom'));
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.unavailable).toBe(true);
+    // A persistent build/auth failure must be diagnosable, not silent (N-3).
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('config boom'));
+  });
+
+  it('forwards the classifier unavailable flag on the success path (M13)', async () => {
+    vi.spyOn(classifier, 'classifyAction').mockResolvedValue({
+      shouldBlock: false,
+      unavailable: true,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    });
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.unavailable).toBe(true);
+  });
 });

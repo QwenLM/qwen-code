@@ -5,7 +5,11 @@
  */
 
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
-import { restorePasteDraft } from '../utils/paste-placeholders.js';
+import {
+  CLIPBOARD_PASTE_FRAMING,
+  framePasteExpansion,
+  restorePasteDraft,
+} from '../utils/paste-placeholders.js';
 
 export interface OpenTuiRestoredDraft {
   readonly modelText: string;
@@ -65,6 +69,22 @@ export function restoreInputSubmissions(
   const submittedPrompt = drafts
     .map((draft) => draft.submittedPrompt)
     .join(separator);
+  let hasFramedPaste = false;
+  const framingSuffix = `\n${CLIPBOARD_PASTE_FRAMING}`;
+  const modelText = drafts
+    .map((draft) => {
+      const text = draft.modelText;
+      if (
+        draft.pasteExpansions?.size &&
+        text.endsWith(framingSuffix) &&
+        framePasteExpansion(draft.displayText, draft.pasteExpansions) === text
+      ) {
+        hasFramedPaste = true;
+        return text.slice(0, -framingSuffix.length);
+      }
+      return text;
+    })
+    .join(separator);
   return {
     text: displayText,
     imagePaths: entries.flatMap((entry) => entry.imagePaths ?? []),
@@ -72,7 +92,7 @@ export function restoreInputSubmissions(
     deferUntilIdle: entries.every((entry) => entry.deferUntilIdle),
     restoredDraft: {
       displayText,
-      modelText: drafts.map((draft) => draft.modelText).join(separator),
+      modelText: hasFramedPaste ? modelText + framingSuffix : modelText,
       submittedPrompt,
       hasUnknownInput: drafts.some((draft) => draft.hasUnknownInput),
       ...(humanTexts.length
@@ -91,12 +111,45 @@ export type OpenTuiCancelSettled = (
         prompt: OpenTuiInputSubmission | null;
       }
     | { kind: 'reset' },
-) => void;
+) => boolean | void;
 
 export interface OpenTuiComposerHandle {
   getText(): string;
   setText(text: string): void;
   cancelTurn?(): void;
   submitDraft?(text: string): Promise<void>;
+  /** Puts a prompt back ahead of whatever the composer holds. */
+  restoreSubmission?(submission: OpenTuiInputSubmission): void;
   invalidateImportedInput?(): void;
+}
+
+/**
+ * The entry's hold on the composer. A dialog unmounts the composer, so a
+ * prompt handed back meanwhile waits in `returned` for the next one to mount.
+ */
+export interface OpenTuiComposerSlot {
+  current: OpenTuiComposerHandle | null;
+  returned?: OpenTuiInputSubmission;
+}
+
+/** Puts a prompt back in the composer, or keeps it until one mounts. */
+export function returnToComposer(
+  slot: OpenTuiComposerSlot,
+  submission: OpenTuiInputSubmission,
+  options?: { unmounting?: boolean },
+): void {
+  // A composer about to unmount would lose what it was handed, so the text
+  // waits for the next mount instead.
+  const restore = options?.unmounting
+    ? undefined
+    : slot.current?.restoreSubmission;
+  if (restore) {
+    restore(submission);
+    return;
+  }
+  // Each prompt goes back ahead of what came back before it, as it does in a
+  // mounted composer.
+  slot.returned = slot.returned
+    ? restoreInputSubmissions([submission, slot.returned], '\n')
+    : submission;
 }

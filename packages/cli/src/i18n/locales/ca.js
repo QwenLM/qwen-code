@@ -441,6 +441,8 @@ export default {
   'disabled (bare mode)': 'desactivada (mode mínim)',
   'disabled (safe mode)': 'desactivada (mode segur)',
   'disabled (disableAllHooks)': 'desactivada (disableAllHooks)',
+  'disabled (not approved)': 'desactivada (no aprovada)',
+  'disabled (rejected)': 'desactivada (rebutjada)',
   'disabled (folder not trusted)': 'desactivada (carpeta no fiable)',
   'disabled (turned off for this session)':
     'desactivada (apagada en aquesta sessió)',
@@ -1033,6 +1035,26 @@ export default {
     'Ús: /forget <text de memòria a eliminar>',
   'No managed auto-memory entries matched: {{query}}':
     'Cap entrada de memòria automàtica gestionada coincideix: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'Vincula una pull request de GitHub a aquesta sessió',
+  'Usage: /pr <number | url>': 'Ús: /pr <número | url>',
+  'No PRs bound to this session.': 'Cap PR vinculat a aquesta sessió.',
+  'Bound PRs: {{list}}': 'PR vinculats: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Referència de PR no vàlida. Ús: /pr <número | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'No s’ha pogut resoldre el PR #{{number}} mitjançant gh. Indiqueu l’URL complet del PR.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} vinculat a aquesta sessió: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'El PR #{{number}} ja està vinculat a aquesta sessió: {{url}}',
+  'Failed to bind PR #{{number}}.': 'No s’ha pogut vincular el PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'No s’ha pogut vincular el PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'No s’han pogut llegir els vincles de PR d’aquesta sessió.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) no està disponible o ha excedit el temps d’espera. Indiqueu l’URL complet del PR per vincular sense ell.',
   'Consolidate managed auto-memory topic files.':
     'Consolida els fitxers de temes de memòria automàtica gestionada.',
   'Open MCP management dialog': 'Obre el diàleg de gestió MCP',
@@ -1555,6 +1577,7 @@ export default {
   Reqs: 'Sol·licituds',
   'Input Tokens': "Tokens d'entrada",
   'Output Tokens': 'Tokens de sortida',
+  'Output (incl. Reasoning)': 'Sortida (amb raonament)',
   'Savings Highlight:': 'Estalvis destacats:',
   'of input tokens were served from the cache, reducing costs.':
     "dels tokens d'entrada s'han servit des de la memòria cau, reduint els costos.",
@@ -1918,6 +1941,8 @@ export default {
   'System prompt': 'Missatge del sistema',
   'Built-in tools': 'Eines integrades',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Fitxers d’instruccions',
+  'Auto memory': 'Memòria automàtica',
   'Memory files': 'Fitxers de memòria',
   Skills: 'Habilitats',
   Messages: 'Missatges',
@@ -2042,6 +2067,8 @@ export default {
     "La revisió de l'assessor ha fallat: {{error}}",
   'No conversation context available for /advisor':
     'No hi ha context de conversa disponible per a /advisor',
+  'No conversation context available for /btw':
+    'No hi ha context de conversa disponible per a /btw',
   'Focus too long (max {{max}} chars)':
     'El focus és massa llarg (màx. {{max}} caràcters)',
   'Another operation is in progress, wait for it to complete before running /advisor':
@@ -2170,6 +2197,8 @@ export default {
   'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
     'Història reduïda: {{n}} missatges ocults. Utilitzeu /history expand-now per mostrar.',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'Les actualitzacions a una versió concreta requereixen una instal·lació independent. Instal·leu manualment la versió {{version}} amb el vostre mètode d’instal·lació.',
   'Check for Qwen Code updates and install if available':
     'Comprova les actualitzacions de Qwen Code i instal·la si estan disponibles',
   'Qwen Code update available! {{current}} → {{latest}}':
@@ -2463,6 +2492,7 @@ export default {
   'toolDisplayName.CronCreate': 'Crea tasca programada',
   'toolDisplayName.CronList': 'Llista tasques programades',
   'toolDisplayName.CronDelete': 'Suprimeix tasca programada',
+  'toolDisplayName.AutofixPr': 'Autocorrecció de PR',
   'toolDisplayName.LoopWakeup': 'Desperta el bucle',
   'toolDisplayName.CreateSubSession': 'Crea subsessió',
   'toolDisplayName.ListAgents': "Llista d'agents",

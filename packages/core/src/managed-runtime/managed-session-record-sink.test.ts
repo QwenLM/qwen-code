@@ -201,6 +201,102 @@ async function transcriptSubtypes(
 }
 
 describe('managed session record sink', () => {
+  it('admits compaction beneath a not-yet-due loop wakeup, but a due one still blocks', async () => {
+    const admission = async (notBefore: number | null) => {
+      const harness = await createHarness();
+      await harness.sink.write(
+        record({
+          uuid: 'u',
+          message: { role: 'user', parts: [{ text: 'q' }] },
+        }),
+      );
+      await harness.sink.write(
+        record({
+          uuid: 'a',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'r' }] },
+        }),
+      );
+      const cut = harness.authority.committedSequence;
+      const requestRef = await harness.store.publish(
+        'managed-compaction-request',
+        Buffer.from('{}'),
+      );
+      const inputRef = await harness.store.publish(
+        'managed-input',
+        Buffer.from('{"text":"tick"}'),
+      );
+      const actor = {
+        class: 'harness' as const,
+        activation: { activationId: 'act-1', epoch: 1 },
+      };
+      await harness.authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: 'arm-loop',
+          sessionKey,
+          contentDigest: requestRef.digest,
+        },
+        {
+          inputId: 'loop:1',
+          turnId: 'loop:1',
+          source: 'loop',
+          contentRef: inputRef,
+          deadline: null,
+          admissionRef: inputRef,
+          wakeReason: 'input',
+          notBefore,
+        },
+      );
+      return harness.authority.commitHistoryMaintenance(
+        {
+          operation: 'historyMaintenance',
+          commandId: 'admit',
+          sessionKey,
+          contentDigest: requestRef.digest,
+        },
+        {
+          record: {
+            schemaVersion: 1,
+            kind: 'context_compression',
+            operationId: 'op',
+            expectedCompactionRevision: 0,
+            historyCutSequence: cut,
+            requestRef,
+            phase: 'admitted',
+            attempt: 0,
+            candidateRef: null,
+            outcome: null,
+            failureCode: null,
+            compactionRevision: null,
+            run: {
+              state: 'admitted',
+              reason: null,
+              definition: null,
+              executionCallId: null,
+              effectId: null,
+              dispatchId: null,
+              deliveryId: null,
+              execution: null,
+              runtime: null,
+              delivery: null,
+            },
+          },
+        },
+        actor,
+      );
+    };
+    // A deferred wakeup must not hold compaction for its whole delay window.
+    await expect(admission(Date.now() + 3_600_000)).resolves.toBeDefined();
+    // A due (or immediate) loop input is about to run and still blocks.
+    await expect(admission(Date.now() - 1_000)).rejects.toThrow(
+      'history changed or has pending input',
+    );
+    await expect(admission(null)).rejects.toThrow(
+      'history changed or has pending input',
+    );
+  });
+
   it('atomically applies a chunked compression and its outcome while preserving queued wake inputs', async () => {
     const harness = await createHarness();
     const user = record({
@@ -307,6 +403,18 @@ describe('managed session record sink', () => {
       deadline: null,
       admissionRef: inputRef,
       wakeReason: 'input',
+    });
+    // A self-paced loop wakeup is a wake source like automation: it arms
+    // during active maintenance too (its notBefore defers the fire).
+    await harness.authority.submitInput(command('wake-loop'), {
+      inputId: 'wake-loop',
+      turnId: 'wake-loop',
+      source: 'loop',
+      contentRef: inputRef,
+      deadline: null,
+      admissionRef: inputRef,
+      wakeReason: 'input',
+      notBefore: Date.now() + 60_000,
     });
     maintenance = {
       ...maintenance,
@@ -440,10 +548,10 @@ describe('managed session record sink', () => {
       message: { role: 'user', parts: [{ text: 'Continue' }] },
     });
     await harness.sink.write(later);
-    expect((await harness.sink.projectModelHistory()).apiHistory).toEqual([
-      ...compressedHistory,
-      later.message,
-    ]);
+    // toMatchObject: restored records also carry their record-derived rewind id.
+    expect((await harness.sink.projectModelHistory()).apiHistory).toMatchObject(
+      [...compressedHistory, later.message],
+    );
     expect(await harness.sink.project()).toEqual([original, later]);
     const cold = await readManagedSessionRecords({
       transcriptPath: harness.transcriptPath,
@@ -463,6 +571,26 @@ describe('managed session record sink', () => {
     });
     await harness.sink.write(attempt);
     expect(await harness.sink.project()).toEqual([attempt]);
+    await harness.close();
+  });
+
+  it('round-trips marked memory snapshots through the managed projection', async () => {
+    const harness = await createHarness();
+    const snapshot = record({
+      type: 'system',
+      subtype: 'memory_catalog_snapshot',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            text: 'full catalog',
+            partMetadata: { 'qwen-code:memory-catalog-snapshot': true },
+          },
+        ],
+      },
+    });
+    await harness.sink.write(snapshot);
+    expect(await harness.sink.project()).toEqual([snapshot]);
     await harness.close();
   });
 

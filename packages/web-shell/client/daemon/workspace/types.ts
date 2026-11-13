@@ -12,11 +12,18 @@ import type {
   DaemonAuthProviderInstallRequest,
   DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
+  DaemonSubscriptionActivation,
   DaemonCapabilities,
+  DaemonChannelDelivery,
+  DaemonChannelEvent,
+  DaemonChannelEventsQuery,
+  DaemonChannelEventsSnapshot,
   DaemonChannelMutationResult,
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelQrLoginStartResult,
+  DaemonChannelQrLoginView,
   DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
   DaemonChannelsSnapshot,
@@ -25,6 +32,7 @@ import type {
   DaemonChannelUpsertRequest,
   DaemonClient,
   DaemonCreateAgentRequest,
+  DaemonGitCloneJob,
   DaemonWorkspaceGenerationEvent,
   DaemonGeneratedAgentContent,
   DaemonDeviceFlowStartResult,
@@ -65,6 +73,8 @@ import type {
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceDirectories,
+  DaemonWorkspaceDirectoriesMutation,
   DaemonWorkspaceMcpConfigStatus,
   DaemonMcpConfigMutationResult,
   DaemonMcpConfigScope,
@@ -108,6 +118,7 @@ import type {
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
   DaemonRevisionRequest,
+  SetUserLanguageResult,
 } from '@qwen-code/sdk/daemon';
 
 // ── Resource Hook Types (shared by workspace hooks) ────────────────
@@ -244,6 +255,46 @@ export interface DaemonChannelsResource {
   snapshot: DaemonChannelsSnapshot;
 }
 
+export interface DaemonChannelObservedContacts {
+  users: Array<{
+    channelName: string;
+    id: string;
+    label: string;
+    lastObservedAt: string;
+  }>;
+  groups: Array<{
+    channelName: string;
+    id: string;
+    label: string;
+    lastObservedAt: string;
+  }>;
+}
+
+export interface DaemonChannelQrLoginActions {
+  /**
+   * `clientId` attributes the login to this browser tab. Without it the daemon
+   * treats every id-less caller as the same client, so it reattaches a peer's
+   * login and lets any of them cancel it.
+   */
+  start(
+    name: string,
+    clientId?: string,
+  ): Promise<DaemonChannelQrLoginStartResult>;
+  state(loginId: string, clientId?: string): Promise<DaemonChannelQrLoginView>;
+  cancel(loginId: string, clientId?: string): Promise<DaemonChannelQrLoginView>;
+  /**
+   * Release a login while the page is going away. Sent with `keepalive` so the
+   * request outlives the document: a reload or tab close runs no React cleanup,
+   * so `cancel` alone never fires for the abandonment path operators use most.
+   * Best-effort — the session still expires if the request is lost.
+   */
+  release(
+    loginId: string,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<void>;
+}
+
 export interface DaemonChannelPairingActions {
   list(name: string): Promise<DaemonChannelPairingRequestsSnapshot>;
   approve(
@@ -310,6 +361,7 @@ export interface DaemonScheduledTask {
    * the capability says whether POST and PATCH accept it. */
   gate?: string | null;
   gateStatus?: DaemonScheduledTaskGateStatus | null;
+  delivery?: DaemonChannelDelivery;
   createdAt: number;
   lastFiredAt: number | null;
   /** Next scheduled fire (epoch ms), or null for a disabled task. A GET-time
@@ -357,6 +409,7 @@ export interface DaemonCreateScheduledTaskRequest {
   /** Gate command; only to a daemon advertising `scheduled_task_gate`, and
    * only on a recurring task. */
   gate?: string;
+  delivery?: DaemonChannelDelivery;
 }
 
 /** Partial update. `name: null` (or '') clears the name. Omitted fields are
@@ -374,6 +427,8 @@ export interface DaemonUpdateScheduledTaskRequest {
   groupId?: string | null;
   /** Null (or '') removes the gate. */
   gate?: string | null;
+  /** Null explicitly removes delivery; omission preserves it. */
+  delivery?: DaemonChannelDelivery | null;
 }
 
 export interface DaemonAddWorkspaceResult {
@@ -420,6 +475,71 @@ export interface DaemonGoalList {
   droppedCount: number;
 }
 
+/**
+ * One `/autofix-pr` watch of a workspace's clone, as `qwen autofix-pr status`
+ * lists it (`GET /autofix-pr/watches`, advertised as `autofix_pr_watches`).
+ */
+export interface DaemonAutofixPrWatch {
+  pr: number;
+  /** `<owner>/<repo>`. */
+  repo: string;
+  host: string;
+  url: string;
+  headRefName: string;
+  /** The PR head the watch knows of. */
+  headSha: string;
+  pushes: number;
+  maxPushes: number;
+  /** The session that owns the watch: maybe no session of this daemon. */
+  session: string;
+  preparedAt: string | null;
+  /** The last run of the watch's own gate. */
+  lastCheck: string | null;
+  /** Whether `lastCheck` is within two of the watch's intervals. */
+  checkedRecently: boolean;
+  /** The last round's snapshot. */
+  lastRound: string | null;
+  /** The gate saw the PR end, and the watch was not cleaned up. */
+  stopped: 'merged' | 'closed' | null;
+  /** The task `schedule` recorded, or null for a `--once` round. */
+  watch: {
+    every: number;
+    reply: boolean;
+    instructions: string;
+    task?: string;
+  } | null;
+  /** A `cleanup` that kept the worktree ended the watch. */
+  ended: { at: string; reason: string } | null;
+  /** Items the watch left for a person, newest last. */
+  needsHuman: Array<{ sha: string; at: string; text: string }>;
+  worktreeExists: boolean;
+  /** A background fix's attempt: `fresh` while it has not ended. */
+  fix: {
+    attempt: string | null;
+    startedAt: string | null;
+    fresh: boolean;
+  } | null;
+}
+
+/** The `GET /autofix-pr/watches` payload. */
+export interface DaemonAutofixPrWatchList {
+  /** False when no git repository is found for the workspace. */
+  available: boolean;
+  /** The clone's main worktree: two workspaces of one clone list the same
+   * watches. */
+  root?: string;
+  /** When the daemon read the files, for comparing `lastCheck` with. */
+  now?: string;
+  watches: DaemonAutofixPrWatch[];
+  /** State files that could not be read, with the reason. */
+  unreadable?: Array<{ pr: number; error: string }>;
+}
+
+/** One entry of a Channel's event journal (`GET .../channels/events`). */
+export type DaemonChannelEventEntry = DaemonChannelEvent;
+
+export type DaemonChannelEventList = DaemonChannelEventsSnapshot;
+
 export interface DaemonWorkspacePathSuggestion {
   name: string;
   path: string;
@@ -446,7 +566,27 @@ export type DaemonWorkspaceDirectoryPickerResult =
       selected: false;
     };
 
-export interface DaemonWorkspaceActions {
+export interface DaemonWorkspaceActions
+  extends Pick<
+    DaemonClient,
+    | 'getSubscriptionConfig'
+    | 'startSubscriptionLogin'
+    | 'getSubscriptionLogin'
+    | 'cancelSubscriptionLogin'
+    | 'getSubscriptionUserInfo'
+    | 'getSubscriptionDefaultModel'
+    | 'signOutSubscription'
+  > {
+  activateSubscription(options?: {
+    workspaceCwd?: string;
+    signal?: AbortSignal;
+    settingsScope?: 'provider' | 'user';
+  }): Promise<DaemonSubscriptionActivation>;
+  setUiLanguage(
+    language: string,
+    scope: 'user' | 'workspace',
+    workspaceCwd?: string,
+  ): Promise<SetUserLanguageResult>;
   // Sessions
   listSessions(
     options?: DaemonSessionListPageOptions,
@@ -489,6 +629,9 @@ export interface DaemonWorkspaceActions {
 
   // Channels
   loadChannels(): Promise<DaemonChannelsResource>;
+  listChannelObservedContacts(
+    workspaceId?: string,
+  ): Promise<DaemonChannelObservedContacts>;
   upsertChannel(
     name: string,
     request: DaemonChannelUpsertRequest,
@@ -505,6 +648,7 @@ export interface DaemonWorkspaceActions {
   stopChannel(name: string): Promise<DaemonChannelMutationResult>;
   restartChannel(name: string): Promise<DaemonChannelMutationResult>;
   channelPairing: DaemonChannelPairingActions;
+  channelQrLogin: DaemonChannelQrLoginActions;
 
   // MCP
   ensureRuntime(): Promise<DaemonWorkspaceRuntimeStatus>;
@@ -660,6 +804,16 @@ export interface DaemonWorkspaceActions {
   ): Promise<DaemonScheduledTask>;
   deleteScheduledTask(id: string, workspaceId?: string): Promise<void>;
 
+  /** The `/autofix-pr` watches of a workspace's clone; `workspaceId` as for
+   * `listScheduledTasks`. Only to a daemon advertising `autofix_pr_watches`. */
+  listAutofixPrWatches(workspaceId?: string): Promise<DaemonAutofixPrWatchList>;
+
+  /** The provider workspace's Channel event journal, newest last. A scoped
+   * workspace reads its own through its client. */
+  listChannelEvents(
+    query?: DaemonChannelEventsQuery,
+  ): Promise<DaemonChannelEventList>;
+
   // Goals (session-scoped runtimes, listed workspace-wide)
   listGoals(): Promise<DaemonGoalList>;
   controlGoal(
@@ -750,6 +904,12 @@ export interface DaemonWorkspaceActions {
     options?: { persist?: boolean; displayName?: string },
   ): Promise<DaemonAddWorkspaceResult>;
   addScratchWorkspace(): Promise<DaemonAddWorkspaceResult>;
+  startGitWorkspaceClone(input: {
+    url: string;
+    target: string;
+  }): Promise<{ jobId: string }>;
+  getGitWorkspaceCloneJob(jobId: string): Promise<DaemonGitCloneJob>;
+  cancelGitWorkspaceClone(jobId: string): Promise<DaemonGitCloneJob>;
   suggestWorkspacePaths(
     prefix: string,
   ): Promise<DaemonWorkspacePathSuggestions>;
@@ -758,8 +918,24 @@ export interface DaemonWorkspaceActions {
     workspaceSelector: string,
     update: DaemonWorkspaceUpdate,
   ): Promise<DaemonWorkspaceCapability>;
+  listWorkspaceDirectories(
+    workspaceSelector: string,
+  ): Promise<DaemonWorkspaceDirectories>;
+  addWorkspaceDirectory(
+    workspaceSelector: string,
+    path: string,
+  ): Promise<DaemonWorkspaceDirectoriesMutation>;
+  removeWorkspaceDirectory(
+    workspaceSelector: string,
+    path: string,
+  ): Promise<DaemonWorkspaceDirectoriesMutation>;
   removeWorkspace(
     workspaceId: string,
     options?: { force?: boolean; timeoutMs?: number },
   ): Promise<DaemonWorkspaceRemovalResult>;
 }
+
+export type {
+  DaemonChannelQrLoginStartResult,
+  DaemonChannelQrLoginView,
+} from '@qwen-code/sdk/daemon';

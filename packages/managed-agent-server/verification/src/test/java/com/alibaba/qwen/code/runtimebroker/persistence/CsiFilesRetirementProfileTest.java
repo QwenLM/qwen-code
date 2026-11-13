@@ -1,0 +1,96 @@
+package com.alibaba.qwen.code.runtimebroker.persistence;
+
+import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import org.junit.jupiter.api.Test;
+
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class CsiFilesRetirementProfileTest {
+    private final ContextBinding workspace = new ContextBinding("tenant", "workspace", 3,
+            "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1);
+
+    @Test
+    void pinsTheReservedWorkerCapabilityDigest() {
+        assertEquals("sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+                CsiFilesRetirementProfile.CAPABILITY_DIGEST);
+        assertEquals("sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+                CsiFilesRetirementProfile.CONTEXT_CONFIG_REF);
+    }
+
+    @Test
+    void diagnosticsAreAnIndependentProfileWithAnExactStorageFloor() {
+        String session = UUID.randomUUID().toString();
+        var legacy = CsiFilesRetirementProfile.request(workspace, "/workspace", session);
+        var diagnostics = CsiFilesRetirementProfile.request(workspace, "/workspace", session,
+                CsiFilesRetirementProfile.DIAGNOSTICS_PROFILE);
+        assertEquals("sha256:e973d9401c00a917e8b3de2d8fd63a0d1b09e3c4407aecf64826cdfff6c1c321",
+                diagnostics.getScope().getCapabilityDigest());
+        assertNotEquals(legacy.requestKey(), diagnostics.requestKey());
+        assertTrue(CsiFilesRetirementProfile.supportsStorage(legacy.getScope(), 1));
+        assertFalse(CsiFilesRetirementProfile.supportsStorage(legacy.getScope(), 3));
+        assertTrue(CsiFilesRetirementProfile.supportsStorage(diagnostics.getScope(), 1));
+        assertTrue(CsiFilesRetirementProfile.supportsStorage(diagnostics.getScope(), 3));
+        assertFalse(CsiFilesRetirementProfile.supportsStorage(diagnostics.getScope(), 2));
+        assertFalse(CsiFilesRetirementProfile.matches(CsiFilesRetirementProfile.PROFILE,
+                diagnostics.getScope().getCapabilityDigest()));
+    }
+
+    @Test
+    void activityProfileAddsEvidenceWithoutChangingExecutionCapabilities() {
+        String session = UUID.randomUUID().toString();
+        var previous = CsiFilesRetirementProfile.request(workspace, "/workspace", session, CsiFilesRetirementProfile.DIAGNOSTICS_PROFILE);
+        var activity = CsiFilesRetirementProfile.request(workspace, "/workspace", session, CsiFilesRetirementProfile.ACTIVITY_PROFILE);
+        assertTrue(CsiFilesRetirementProfile.hasActivityDiagnostics(activity.getScope()));
+        assertTrue(CsiFilesRetirementProfile.hasDiagnostics(activity.getScope()));
+        assertTrue(CsiFilesRetirementProfile.supportsStorage(activity.getScope(), 4));
+        assertFalse(CsiFilesRetirementProfile.supportsStorage(previous.getScope(), 4));
+        assertFalse(CsiFilesRetirementProfile.hasActivityDiagnostics(previous.getScope()));
+        assertEquals("csi-files-retirement/3", CsiFilesRetirementProfile.profile(activity.getScope()));
+        assertNotEquals(previous.requestKey(), activity.requestKey());
+    }
+
+    @Test
+    void pinsExactSessionAndUsesTheExistingManagedRequestEncoding() {
+        String id = UUID.randomUUID().toString();
+        var request = CsiFilesRetirementProfile.request(workspace, "/workspace", id);
+        assertEquals("session", request.getScope().getIsolationClass());
+        assertEquals(id, request.getIsolationKey());
+        assertEquals("3", request.getScope().getWorkspaceGeneration());
+        assertEquals("storage", request.getStorageId());
+        assertEquals("kubernetes-workspace", request.getProvisionerKind());
+        assertEquals(CsiFilesRetirementProfile.CAPABILITY_DIGEST, request.getScope().getCapabilityDigest());
+        assertNotEquals(WorkspaceExecutionProfile.CAPABILITY_DIGEST, request.getScope().getCapabilityDigest());
+        assertNotEquals(JdbcRepositorySupport.requestKey(request), JdbcRepositorySupport.requestKey(CsiFilesRetirementProfile.request(workspace,
+                "/workspace", UUID.randomUUID().toString())));
+        assertNotEquals(JdbcRepositorySupport.requestKey(request), JdbcRepositorySupport.requestKey(CsiFilesRetirementProfile.request(workspace,
+                "/another", id)));
+    }
+
+    @Test
+    void rejectsNoncanonicalOriginalIdentity() {
+        String id = UUID.randomUUID().toString();
+        var subdirectory = new ContextBinding("tenant", "workspace", 3,
+                "storage", "subdir", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1);
+        assertThrows(IllegalArgumentException.class,
+                () -> CsiFilesRetirementProfile.request(subdirectory, "/workspace", id));
+        var foreign = new ContextBinding("tenant", "workspace", 3,
+                "storage", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        assertThrows(IllegalArgumentException.class,
+                () -> CsiFilesRetirementProfile.request(foreign, "/workspace", id));
+        for (String path : new String[] {"/", "workspace", "/workspace/", "/a/../b", "/a//b", "/a/./b", "/a\\b"}) {
+            assertThrows(IllegalArgumentException.class, () -> CsiFilesRetirementProfile.request(workspace, path, id));
+        }
+        for (String other : new String[] {"prompt", "1-1-1-1-1", id.toUpperCase(java.util.Locale.ROOT)}) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> CsiFilesRetirementProfile.request(workspace, "/workspace", other));
+        }
+    }
+}

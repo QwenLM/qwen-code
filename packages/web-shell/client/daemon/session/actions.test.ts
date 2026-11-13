@@ -7,6 +7,7 @@ import {
   DaemonStandaloneCreationOutcomeUnknownError,
   DaemonTransportClosedError,
   type DaemonCapabilities,
+  type DaemonSessionBtwStreamEvent,
   type DaemonContinueSessionResult,
   DaemonSessionClient,
   type DaemonSessionContextStatus,
@@ -20,7 +21,12 @@ import {
   resolveCreateWatchdogTimeoutMs,
   resolveSessionRestoreTimeouts,
 } from './actions';
-import { updateConnectionFromDaemonEvent } from './mappers';
+import { applyConfigOptions, updateConnectionFromDaemonEvent } from './mappers';
+import {
+  observeSessionConfig,
+  resetSessionConfigSync,
+  type SessionConfigSyncMap,
+} from './session-config-sync';
 import { createAndAttachSessionForPrompt } from '../../utils/sessionPreparation';
 import type {
   ActivePrompt,
@@ -30,6 +36,84 @@ import type {
   PendingSessionLoad,
   SettledPrompt,
 } from './types';
+
+describe('Generated UI action invalidation', () => {
+  it('revokes the cleared session before waiting for detach', async () => {
+    const session = createMockSession('original');
+    const detach = createDeferred<void>();
+    session.detach.mockReturnValue(detach.promise);
+    const onGeneratedUiInvalidated = vi.fn();
+    const h = createActionsHarness({ session, onGeneratedUiInvalidated });
+    const clearing = h.actions.clearSession();
+    expect(onGeneratedUiInvalidated).toHaveBeenCalledWith(session, 'cleared');
+    detach.resolve();
+    await clearing;
+  });
+
+  it.each(['release', 'rewind'] as const)(
+    'invalidates the original owner after successful %s, even after navigation',
+    async (operation) => {
+      const session = createMockSession('original');
+      const finished = createDeferred<unknown>();
+      session.client.closeSession.mockReturnValue(finished.promise);
+      session.rewind.mockReturnValue(finished.promise);
+      const onGeneratedUiInvalidated = vi.fn();
+      const h = createActionsHarness({ session, onGeneratedUiInvalidated });
+      const pending =
+        operation === 'release'
+          ? h.actions.releaseSession('background')
+          : h.actions.rewindSession('prompt');
+      expect(onGeneratedUiInvalidated).not.toHaveBeenCalled();
+      h.sessionRef.current = createMockSession(
+        'replacement',
+      ) as unknown as DaemonSessionClient;
+      finished.resolve({});
+      await pending;
+      if (operation === 'release')
+        expect(onGeneratedUiInvalidated).toHaveBeenCalledWith(
+          session,
+          'deleted',
+          'background',
+        );
+      else
+        expect(onGeneratedUiInvalidated).toHaveBeenCalledWith(
+          session,
+          'rewound',
+        );
+    },
+  );
+
+  it.each(['release', 'rewind'] as const)(
+    'does not report an unsuccessful %s as a deletion',
+    async (operation) => {
+      const session = createMockSession('original');
+      session.client.closeSession.mockRejectedValue(new Error('refused'));
+      session.rewind.mockRejectedValue(new Error('refused'));
+      const onGeneratedUiInvalidated = vi.fn();
+      const h = createActionsHarness({ session, onGeneratedUiInvalidated });
+      await expect(
+        operation === 'release'
+          ? h.actions.releaseSession('background')
+          : h.actions.rewindSession('prompt'),
+      ).rejects.toThrow('refused');
+      expect(onGeneratedUiInvalidated).not.toHaveBeenCalled();
+    },
+  );
+
+  it('releases through the workspace client when no session is connected', async () => {
+    const closeSession = vi.fn().mockResolvedValue(undefined);
+    const onGeneratedUiInvalidated = vi.fn();
+    const h = createActionsHarness({
+      getClient: () => ({ closeSession }) as unknown as DaemonClient,
+      onGeneratedUiInvalidated,
+    });
+
+    await h.actions.releaseSession('background');
+
+    expect(closeSession).toHaveBeenCalledWith('background');
+    expect(onGeneratedUiInvalidated).not.toHaveBeenCalled();
+  });
+});
 
 describe('context usage counter reconciliation', () => {
   function snapshot() {
@@ -177,6 +261,64 @@ describe('context usage counter reconciliation', () => {
       expect(h.getConnection().tokenCount).toBe(change === 'usage' ? 70 : 60);
       expect(h.getConnection().contextWindow).toBe(
         change === 'context-window' ? 32_000 : 100,
+      );
+    },
+  );
+});
+
+describe('local prompt timing before the authoritative echo', () => {
+  it.each(['completed', 'cancelled'] as const)(
+    'clears its local clock after an admitted turn is %s',
+    async (outcome) => {
+      const session = createMockSession('session-a');
+      const h = createActionsHarness({ session });
+      const result = h.actions.sendPrompt('new question', {
+        optimisticUserMessage: false,
+      });
+      await vi.waitFor(() =>
+        expect(h.activePromptsRef.current.get('session-a')?.resolve).toBeTypeOf(
+          'function',
+        ),
+      );
+      expect(h.getConnection().localPrompt?.sessionId).toBe('session-a');
+      const active = h.activePromptsRef.current.get('session-a')!;
+      if (outcome === 'completed') active.resolve?.({ stopReason: 'end_turn' });
+      else active.controller.abort();
+      await result;
+      expect(h.getConnection().localPrompt).toBeUndefined();
+      expect(h.store.appendLocalUserMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'clears only its own clock after rejection (newer owner: %s)',
+    async (newerOwner) => {
+      const session = createMockSession('session-a');
+      const admission = createDeferred<{ promptId: string }>();
+      session.submitPrompt.mockReturnValueOnce(admission.promise);
+      const h = createActionsHarness({ session });
+      const before = Date.now();
+      const result = h.actions.sendPrompt('new question', {
+        optimisticUserMessage: false,
+      });
+      const rejected = result.catch((error: unknown) => error);
+      await vi.waitFor(() =>
+        expect(session.submitPrompt).toHaveBeenCalledOnce(),
+      );
+      const local = h.getConnection().localPrompt;
+      expect(local?.sessionId).toBe('session-a');
+      expect(local?.startedAt).toBeGreaterThanOrEqual(before);
+      expect(h.store.appendLocalUserMessage).not.toHaveBeenCalled();
+      const replacement = {
+        sessionId: 'session-b',
+        startedAt: Date.now() + 1000,
+      };
+      if (newerOwner)
+        h.replaceConnection({ ...h.getConnection(), localPrompt: replacement });
+      admission.reject(new DaemonHttpError(413, {}, 'Rejected'));
+      await rejected;
+      expect(h.getConnection().localPrompt).toEqual(
+        newerOwner ? replacement : undefined,
       );
     },
   );
@@ -685,6 +827,21 @@ describe('getConnectionAfterSessionClear', () => {
       await pending;
     },
   );
+
+  it('does not promote reviewed Generated UI data to declared human input', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({ session });
+    const text =
+      'Captured parameters: {"kind":"qwen.generated-ui.parameters","title":"Workflow: deploy","inputs":{"task":{"value":"/workflow deploy","checked":false}}}';
+    const pending = actions.sendPrompt(text, { source: 'mcp-app' });
+    await vi.waitFor(() => expect(session.submitPrompt).toHaveBeenCalled());
+    const request = session.submitPrompt.mock.calls[0][0];
+    expect(request).toMatchObject({ prompt: [{ type: 'text', text }] });
+    expect(request).not.toHaveProperty('_meta');
+    expect(request).not.toHaveProperty('humanInput');
+    await actions.cancel();
+    await pending;
+  });
 
   it.each(['sendPrompt', 'submitPrompt'] as const)(
     'uses the current provider detail mode through %s',
@@ -1282,18 +1439,90 @@ describe('createDaemonSessionActions', () => {
       expect(setPromptStatus).toHaveBeenCalledWith('idle');
     });
 
-    it('settles when the authority itself goes unknown', () => {
-      // A dead daemon: the live-state channel stops answering, its retained
-      // snapshot is dropped, and the bridge publishes `undefined`. Nothing
-      // vouches for the turn any more, so the pane must be released instead of
-      // holding a running turn for the life of the tab.
-      const { actions, setPromptStatus } = createActionsHarness({
-        session: createMockSession('session-1'),
-      });
+    it('bounds activity recovery with the existing load watchdog', async () => {
+      vi.useFakeTimers();
+      try {
+        const harness = createActionsHarness({
+          session: createMockSession('session-1'),
+          connection: {
+            status: 'connected',
+            workspaceCwd: '/workspace',
+            sessionId: 'session-1',
+          },
+          getPromptStatus: () => 'streaming',
+        });
+        harness.actions.setDaemonActivePrompt(true);
+        harness.actions.setDaemonActivePrompt(undefined);
+        expect(harness.pendingSessionLoadRef.current).toMatchObject({
+          sessionId: 'session-1',
+          mode: 'load',
+          reconcilePromptActivity: true,
+        });
+        expect(harness.setPromptStatus).not.toHaveBeenCalled();
 
-      actions.setDaemonActivePrompt(true);
-      actions.setDaemonActivePrompt(undefined);
-      expect(setPromptStatus).toHaveBeenCalledWith('idle');
+        await vi.advanceTimersByTimeAsync(75_000);
+        expect(harness.setPromptStatus).toHaveBeenCalledWith('idle');
+        expect(harness.getConnection().error).toContain('timed out');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not apply an old recovery failure after switching sessions', async () => {
+      vi.useFakeTimers();
+      try {
+        const harness = createActionsHarness({
+          session: createMockSession('session-a'),
+          connection: {
+            status: 'connected',
+            workspaceCwd: '/workspace',
+            sessionId: 'session-a',
+          },
+          getPromptStatus: () => 'streaming',
+        });
+        harness.actions.setDaemonActivePrompt(true);
+        harness.actions.setDaemonActivePrompt(undefined);
+        const switched = harness.actions.loadSession('session-b');
+        harness.setPromptStatus.mockClear();
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(harness.getConnection().sessionId).toBe('session-b');
+        expect(harness.getConnection().error).toBeUndefined();
+        expect(harness.setPromptStatus).not.toHaveBeenCalled();
+        const pending = harness.pendingSessionLoadRef.current!;
+        clearTimeout(pending.timeout);
+        pending.resolve();
+        await switched;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not settle a local prompt submitted during failed recovery', async () => {
+      const harness = createActionsHarness({
+        session: createMockSession('session-1'),
+        connection: {
+          status: 'connected',
+          workspaceCwd: '/workspace',
+          sessionId: 'session-1',
+        },
+        getPromptStatus: () => 'streaming',
+      });
+      harness.actions.setDaemonActivePrompt(true);
+      harness.actions.setDaemonActivePrompt(undefined);
+      harness.activePromptsRef.current.set('session-1', {
+        controller: new AbortController(),
+      });
+      const pending = harness.pendingSessionLoadRef.current!;
+      clearTimeout(pending.timeout);
+      harness.pendingSessionLoadRef.current = undefined;
+      pending.reject(new Error('Activity recovery unavailable'));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(harness.setPromptStatus).not.toHaveBeenCalled();
+      expect(harness.getConnection().error).toBe(
+        'Activity recovery unavailable',
+      );
     });
 
     it('never revives a settled turn', () => {
@@ -1438,6 +1667,30 @@ describe('createDaemonSessionActions', () => {
     expect(onPromptRemoved).toHaveBeenCalledWith(session, 'prompt-1');
   });
 
+  it('binds admission to a caller-supplied block when no optimistic message is appended', async () => {
+    const session = createMockSession('session-a');
+    const onPromptAdmitted = vi.fn();
+    const { actions, store } = createActionsHarness({
+      session,
+      onPromptAdmitted,
+    });
+
+    const prompt = actions.sendPrompt('retried text', {
+      optimisticUserMessage: false,
+      bindBlockId: 'block-failed',
+    });
+
+    await vi.waitFor(() => expect(onPromptAdmitted).toHaveBeenCalledOnce());
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(onPromptAdmitted).toHaveBeenCalledWith(session, {
+      promptId: 'prompt-1',
+      label: 'retried text',
+      blockId: 'block-failed',
+    });
+    await actions.cancel();
+    await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+  });
+
   it('notifies prompt removal on the stale-session branch with the foreign session id', async () => {
     const session = createMockSession('session-current');
     const clientRemovePendingPrompt = vi.fn(async () => ({ removed: true }));
@@ -1563,6 +1816,53 @@ describe('createDaemonSessionActions', () => {
       expect(addNotice).toHaveBeenCalledTimes(notices);
     },
   );
+
+  it('only reports a missing context session for non-silent callers', async () => {
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({ addNotice });
+
+    await expect(actions.getContext({ silent: true })).rejects.toThrow(
+      'Daemon session is not connected',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+
+    await expect(actions.getContext()).rejects.toThrow(
+      'Daemon session is not connected',
+    );
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: 'Load context failed: Daemon session is not connected',
+      }),
+    );
+  });
+
+  it('only reports an in-flight context disconnect for non-silent callers', async () => {
+    const addNotice = vi.fn();
+    const session = createMockSession('session-a');
+    session.context.mockRejectedValue(new DaemonTransportClosedError());
+    const { actions, getConnection } = createActionsHarness({
+      addNotice,
+      session,
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        workflowModeStatus: 'ready',
+      },
+    });
+
+    await expect(actions.getContext({ silent: true })).rejects.toThrow(
+      'Transport connection closed',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+    expect(getConnection().workflowModeStatus).toBe('unknown');
+
+    await expect(actions.getContext()).rejects.toThrow(
+      'Transport connection closed',
+    );
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: 'load_context' }),
+    );
+  });
 
   it('does not report a context usage error while the session is disconnected', async () => {
     const addNotice = vi.fn();
@@ -2109,6 +2409,43 @@ describe('createDaemonSessionActions', () => {
       },
       errorStatus: 503,
     });
+  });
+
+  it('marks a workspace session-limit create failure with its daemon code', async () => {
+    const addNotice = vi.fn();
+    const createDetachedSession = vi.fn(async () => {
+      throw new DaemonHttpError(
+        503,
+        {
+          error: 'Session limit reached (64)',
+          code: 'session_limit_exceeded',
+          limit: 64,
+          scope: 'workspace',
+        },
+        'Session limit reached (64)',
+      );
+    });
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        workspaceCwd: '/workspace',
+      },
+      addNotice,
+      createDetachedSession,
+    });
+
+    await expect(actions.createSession()).rejects.toBeInstanceOf(
+      DaemonHttpError,
+    );
+
+    expect(createDetachedSession).toHaveBeenCalledOnce();
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: 'create_session',
+        code: 'session_limit_exceeded',
+      }),
+    );
   });
 
   it('publishes standalone recovery after a workspace predecessor is cleared', async () => {
@@ -2703,7 +3040,10 @@ describe('createDaemonSessionActions', () => {
       expect(submitPrompt).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(4_999);
       await pending;
-      expect(onSessionCreated).toHaveBeenCalledExactlyOnceWith('session-b');
+      expect(onSessionCreated).toHaveBeenCalledExactlyOnceWith(
+        'session-b',
+        undefined,
+      );
       expect(attachSession).toHaveBeenCalledOnce();
       expect(submitPrompt).toHaveBeenCalledOnce();
       expect(vi.getTimerCount()).toBe(0);
@@ -2947,13 +3287,14 @@ describe('createDaemonSessionActions', () => {
     },
   );
 
-  it('stops first-prompt preparation before callbacks after workspace navigation', async () => {
+  it('continues first-prompt preparation detached after workspace navigation', async () => {
     const nextSession = createMockSession('session-b');
     const deferred = createDeferred<DaemonSessionClient>();
     let selectedWorkspaceCwd = '/workspace';
-    const { actions, getConnection, replaceConnection } = createActionsHarness({
-      createDetachedSession: vi.fn(() => deferred.promise),
-    });
+    const { actions, sessionRef, getConnection, replaceConnection } =
+      createActionsHarness({
+        createDetachedSession: vi.fn(() => deferred.promise),
+      });
     const attachSession = vi.spyOn(actions, 'attachSession');
     const clearSession = vi.spyOn(actions, 'clearSession');
     const onSessionCreated = vi.fn();
@@ -2975,13 +3316,258 @@ describe('createDaemonSessionActions', () => {
     replaceConnection(navigatedConnection);
     deferred.resolve(nextSession as unknown as DaemonSessionClient);
 
-    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
-    expect(nextSession.detach).toHaveBeenCalledOnce();
-    expect(onSessionCreated).not.toHaveBeenCalled();
-    expect(onSessionAllocated).not.toHaveBeenCalled();
+    // The submitted prompt keeps its session: preparation resolves with the
+    // unbound client for admission-only dispatch instead of aborting, and
+    // the navigation target is never replaced.
+    await expect(pending).resolves.toMatchObject({
+      detachedSession: nextSession,
+    });
+    expect(nextSession.detach).not.toHaveBeenCalled();
+    expect(onSessionAllocated).toHaveBeenCalledWith('session-b');
+    expect(onSessionCreated).toHaveBeenCalledWith('session-b', nextSession);
     expect(attachSession).not.toHaveBeenCalled();
     expect(clearSession).not.toHaveBeenCalled();
+    expect(sessionRef.current).toBeUndefined();
     expect(getConnection()).toBe(navigatedConnection);
+  });
+
+  it('returns the created client unbound when a prompt create survives navigation', async () => {
+    const nextSession = createMockSession('session-b');
+    const deferred = createDeferred<DaemonSessionClient>();
+    const { actions, sessionRef, getConnection, replaceConnection } =
+      createActionsHarness({
+        connection: { status: 'connected' },
+        createDetachedSession: vi.fn(() => deferred.promise),
+      });
+    const navigationOutcome = { bound: true };
+    const outcome = actions.createSession({
+      keepOnNavigation: true,
+      navigationOutcome,
+    });
+    const navigatedConnection: DaemonConnectionState = {
+      status: 'connected',
+      sessionId: 'session-c',
+      sessionContext: { kind: 'workspace', cwd: '/other-workspace' },
+    };
+    replaceConnection(navigatedConnection);
+    deferred.resolve(nextSession as unknown as DaemonSessionClient);
+
+    await expect(outcome).resolves.toBe(nextSession);
+    expect(navigationOutcome.bound).toBe(false);
+    expect(nextSession.detach).not.toHaveBeenCalled();
+    expect(sessionRef.current).toBeUndefined();
+    expect(getConnection()).toBe(navigatedConnection);
+  });
+
+  it.each([
+    'superseded create resolves last',
+    'superseded create resolves first',
+  ])(
+    'keeps concurrent draft creates bound to their own draft (%s)',
+    async (order) => {
+      const sessionA = createMockSession('session-a');
+      const sessionB = createMockSession('session-b');
+      const deferredA = createDeferred<DaemonSessionClient>();
+      const deferredB = createDeferred<DaemonSessionClient>();
+      const manualSessionClearRef = { current: false };
+      const { actions, getConnection } = createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionContext: { kind: 'workspace', cwd: '/workspace' },
+        },
+        createDetachedSession: vi
+          .fn()
+          .mockReturnValueOnce(deferredA.promise)
+          .mockReturnValueOnce(deferredB.promise),
+        manualSessionClearRef,
+      });
+      let currentVersion = 1;
+      const outcomeA = { bound: true };
+      const pendingA = actions.createSession({
+        workspaceCwd: '/workspace',
+        getCurrentWorkspaceCwd: () => '/workspace',
+        keepOnNavigation: true,
+        navigationOutcome: outcomeA,
+        sourceVersion: 1,
+        getCurrentSourceVersion: () => currentVersion,
+      });
+      // The user opens a new draft in the same workspace and submits: the
+      // view is session-less again, and the second create resets the shared
+      // navigation marker.
+      currentVersion = 2;
+      manualSessionClearRef.current = true;
+      const outcomeB = { bound: true };
+      const pendingB = actions.createSession({
+        workspaceCwd: '/workspace',
+        getCurrentWorkspaceCwd: () => '/workspace',
+        keepOnNavigation: true,
+        navigationOutcome: outcomeB,
+        sourceVersion: 2,
+        getCurrentSourceVersion: () => currentVersion,
+      });
+      expect(manualSessionClearRef.current).toBe(false);
+
+      if (order === 'superseded create resolves last') {
+        // B binds the current draft first; A must not hijack it afterwards.
+        deferredB.resolve(sessionB as unknown as DaemonSessionClient);
+        await pendingB;
+        expect(outcomeB.bound).toBe(true);
+        expect(getConnection().sessionId).toBe('session-b');
+        deferredA.resolve(sessionA as unknown as DaemonSessionClient);
+        await pendingA;
+      } else {
+        // A resolves while B is still pending: without the generation
+        // check, A sees the same session-less view and binds over draft B.
+        deferredA.resolve(sessionA as unknown as DaemonSessionClient);
+        await pendingA;
+        expect(getConnection().sessionId).toBeUndefined();
+        deferredB.resolve(sessionB as unknown as DaemonSessionClient);
+        await pendingB;
+      }
+      expect(outcomeA.bound).toBe(false);
+      expect(sessionA.detach).not.toHaveBeenCalled();
+      expect(outcomeB.bound).toBe(true);
+      expect(getConnection().sessionId).toBe('session-b');
+    },
+  );
+
+  it('dispatches a detached prompt admission-only and detaches the client', async () => {
+    const session = createMockSession('session-b');
+    const { actions, store, setPromptStatus, getConnection } =
+      createActionsHarness({
+        connection: { status: 'connected', sessionId: 'session-c' },
+      });
+    const onAdmitted = vi.fn();
+
+    const result = await actions.sendDetachedPrompt(
+      session as unknown as DaemonSessionClient,
+      'background prompt',
+      { submittedPrompt: 'background prompt', onAdmitted },
+    );
+
+    expect(result).toEqual({ promptId: 'prompt-1' });
+    expect(session.submitPrompt).toHaveBeenCalledOnce();
+    const request = session.submitPrompt.mock.calls[0]?.[0] as {
+      prompt: Array<{ type: string; text: string }>;
+      _meta?: Record<string, unknown>;
+    };
+    expect(request.prompt[0]).toMatchObject({
+      type: 'text',
+      text: 'background prompt',
+    });
+    expect(request._meta).toEqual({
+      'qwen.submittedPrompt': 'background prompt',
+    });
+    expect(onAdmitted).toHaveBeenCalledWith({ promptId: 'prompt-1' });
+    expect(session.detach).toHaveBeenCalledOnce();
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(setPromptStatus).not.toHaveBeenCalled();
+    expect(getConnection().sessionId).toBe('session-c');
+  });
+
+  it('detaches the client when detached admission fails', async () => {
+    const session = createMockSession('session-b');
+    session.submitPrompt.mockRejectedValue(new Error('admission failed'));
+    const { actions, store } = createActionsHarness();
+
+    await expect(
+      actions.sendDetachedPrompt(
+        session as unknown as DaemonSessionClient,
+        'background prompt',
+      ),
+    ).rejects.toThrow('admission failed');
+
+    expect(session.detach).toHaveBeenCalledOnce();
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('admits concurrent detached dispatches sharing one client', async () => {
+    // Two draft submissions dedupe onto one creation; both prompts own the
+    // same detached client. The daemon FIFO-queues the second admission.
+    const session = createMockSession('session-b');
+    const { actions, store } = createActionsHarness();
+
+    const [first, second] = await Promise.all([
+      actions.sendDetachedPrompt(
+        session as unknown as DaemonSessionClient,
+        'prompt one',
+      ),
+      actions.sendDetachedPrompt(
+        session as unknown as DaemonSessionClient,
+        'prompt two',
+      ),
+    ]);
+
+    expect(first).toEqual({ promptId: 'prompt-1' });
+    expect(second).toEqual({ promptId: 'prompt-1' });
+    expect(session.submitPrompt).toHaveBeenCalledTimes(2);
+    expect(session.detach).toHaveBeenCalledTimes(2);
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('classifies slash attachments through the detached client when commands are unloaded', async () => {
+    const session = createMockSession('session-b');
+    session.supportedCommands.mockResolvedValue(
+      supportedCommandsStatus('session-b', 'custom'),
+    );
+    const { actions, store, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          features: ['session_attachments'],
+        } as DaemonCapabilities,
+      },
+    });
+
+    const result = await actions.sendDetachedPrompt(
+      session as unknown as DaemonSessionClient,
+      '/custom',
+      { images: [{ data: 'aGVsbG8=', mimeType: 'image/png' }] },
+    );
+
+    expect(result).toEqual({ promptId: 'prompt-1' });
+    expect(session.supportedCommands).toHaveBeenCalledOnce();
+    expect(session.uploadAttachment).toHaveBeenCalledOnce();
+    expect(session.submitPrompt).toHaveBeenCalledOnce();
+    // The detached client's command snapshot never publishes to the
+    // connection the user navigated to.
+    expect(getConnection().commands).toBeUndefined();
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+  });
+
+  it('classifies detached slash attachments against the created session catalog, not the current connection', async () => {
+    const session = createMockSession('session-b');
+    session.supportedCommands.mockResolvedValue(
+      supportedCommandsStatus('session-b', 'deploy'),
+    );
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-c',
+        workspaceCwd: '/workspace',
+        // The session the user navigated to has a built-in namesake; the
+        // created session's own 'deploy' is a custom command that keeps
+        // attachments.
+        commands: [commandInfo('deploy', 'builtin-command')],
+        capabilities: {
+          features: ['session_attachments'],
+        } as DaemonCapabilities,
+      },
+    });
+
+    const result = await actions.sendDetachedPrompt(
+      session as unknown as DaemonSessionClient,
+      '/deploy now',
+      { images: [{ data: 'aGVsbG8=', mimeType: 'image/png' }] },
+    );
+
+    expect(result).toEqual({ promptId: 'prompt-1' });
+    expect(session.supportedCommands).toHaveBeenCalledOnce();
+    expect(session.uploadAttachment).toHaveBeenCalledOnce();
+    expect(getConnection().commands).toEqual([
+      commandInfo('deploy', 'builtin-command'),
+    ]);
   });
 
   it('does not restore a detached session after the session was cleared', async () => {
@@ -3445,6 +4031,98 @@ describe('createDaemonSessionActions', () => {
       kind: 'workspace',
       cwd: '/workspace/secondary',
     });
+  });
+
+  it('reloads a standalone session with the standalone context when the connection context is missing', () => {
+    const standalone = createMockSession('standalone-a');
+    Object.assign(standalone, {
+      session: {
+        sessionId: 'standalone-a',
+        workspaceCwd: '/private/standalone-a',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        projectlessOutputDirectory: '/output/standalone-a',
+        workingDirectory: { state: 'ready' },
+      },
+    });
+    const controller = new AbortController();
+    const { actions, pendingSessionLoadRef, sessionRef, store } =
+      createActionsHarness({
+        connection: { status: 'connected', sessionId: 'standalone-a' },
+        session: standalone,
+      });
+
+    void actions.reloadSession(controller.signal).catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current?.sessionContext).toEqual({
+      kind: 'standalone',
+    });
+    expect(store.reset).not.toHaveBeenCalled();
+    expect(sessionRef.current).toBe(standalone);
+    expect(standalone.detach).not.toHaveBeenCalled();
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
+    pendingSessionLoadRef.current?.reject(
+      new DOMException('Test cleanup', 'AbortError'),
+    );
+    pendingSessionLoadRef.current = undefined;
+  });
+
+  it('keeps the workspace reload context for a workspace session', () => {
+    const workspace = createMockSession('session-a');
+    workspace.workspaceCwd = '/work/a';
+    Object.assign(workspace, {
+      session: {
+        sessionId: 'session-a',
+        workspaceCwd: '/work/a',
+        sourceType: 'default',
+      },
+    });
+    const controller = new AbortController();
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session: workspace,
+    });
+
+    void actions.reloadSession(controller.signal).catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current?.sessionContext).toEqual({
+      kind: 'workspace',
+      cwd: '/work/a',
+    });
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
+    pendingSessionLoadRef.current?.reject(
+      new DOMException('Test cleanup', 'AbortError'),
+    );
+    pendingSessionLoadRef.current = undefined;
+  });
+
+  it('falls back to the standalone context for a contextless load of the current standalone session', () => {
+    const standalone = createMockSession('standalone-a');
+    Object.assign(standalone, {
+      session: {
+        sessionId: 'standalone-a',
+        workspaceCwd: '/private/standalone-a',
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+        projectlessOutputDirectory: '/output/standalone-a',
+        workingDirectory: { state: 'ready' },
+      },
+    });
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'standalone-a' },
+      session: standalone,
+    });
+
+    void actions.loadSession('standalone-a').catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current?.sessionContext).toEqual({
+      kind: 'standalone',
+    });
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
+    pendingSessionLoadRef.current?.reject(
+      new DOMException('Test cleanup', 'AbortError'),
+    );
+    pendingSessionLoadRef.current = undefined;
   });
 
   it('uses the default standalone context after a failed connection', () => {
@@ -3977,6 +4655,55 @@ describe('createDaemonSessionActions', () => {
       }),
     );
     expect(pendingSessionLoadRef.current).toBeUndefined();
+  });
+
+  describe('bindSessionPr', () => {
+    const pr = {
+      number: 16865,
+      url: 'https://github.com/QwenLM/qwen-code/pull/16865',
+      state: 'open' as const,
+    };
+
+    it('binds through the session metadata update and returns the result', async () => {
+      const result = { prs: [pr] };
+      const session = {
+        ...createMockSession('session-a'),
+        updateMetadata: vi.fn(async () => result),
+      };
+      const { actions } = createActionsHarness({ session });
+      await expect(actions.bindSessionPr(pr)).resolves.toBe(result);
+      expect(session.updateMetadata).toHaveBeenCalledWith({ pr });
+    });
+
+    it('dispatches a bind_session_pr notice and rethrows on failure', async () => {
+      const addNotice = vi.fn();
+      const session = {
+        ...createMockSession('session-a'),
+        updateMetadata: vi.fn(async () => {
+          throw new Error('locked');
+        }),
+      };
+      const { actions } = createActionsHarness({ session, addNotice });
+      await expect(actions.bindSessionPr(pr)).rejects.toThrow('locked');
+      expect(addNotice).toHaveBeenCalledWith(
+        expect.objectContaining({
+          severity: 'error',
+          operation: 'bind_session_pr',
+          code: 'daemon.bind_session_pr.failed',
+        }),
+      );
+    });
+
+    it('fails with a notice when no session is connected', async () => {
+      const addNotice = vi.fn();
+      const { actions } = createActionsHarness({ addNotice });
+      await expect(actions.bindSessionPr(pr)).rejects.toThrow(
+        'Daemon session is not connected',
+      );
+      expect(addNotice).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'daemon.bind_session_pr.failed' }),
+      );
+    });
   });
 
   describe('continueSession', () => {
@@ -6572,6 +7299,56 @@ describe('createDaemonSessionActions', () => {
     },
   );
 
+  it.each([
+    ['ready', false],
+    ['ready', true],
+    ['unsupported', false],
+    ['unsupported', true],
+  ] as const)(
+    'applies confirmed reasoning before its own %s config reconciliation (deferred=%s)',
+    async (workflowModeStatus, deferConnectionUpdates) => {
+      const session = createMockSession('session-a');
+      const readback = createDeferred<DaemonSessionContextStatus>();
+      session.context.mockReturnValueOnce(readback.promise);
+      session.setConfigOption.mockResolvedValueOnce({
+        configOptions: reasoningConfigOptions('medium'),
+        persisted: true,
+      });
+      const { actions, getConnection, flushConnectionUpdates } =
+        createActionsHarness({
+          deferConnectionUpdates,
+          connection: {
+            status: 'connected',
+            sessionId: 'session-a',
+            currentModel: 'qwen3.8-max',
+            providers: workspaceProvidersStatus('low'),
+            workflowModeStatus,
+          },
+          session,
+        });
+
+      await actions.setReasoningEffort('medium', { persist: true });
+
+      expect(session.context).toHaveBeenCalledTimes(1);
+      flushConnectionUpdates();
+      expect(getConnection().reasoning).toMatchObject({
+        enabled: true,
+        effort: 'medium',
+      });
+      readback.reject(new Error('readback offline'));
+      await vi.waitFor(() => {
+        flushConnectionUpdates();
+        expect(getConnection().workflowModeStatus).toBe('unknown');
+      });
+      await actions.clearSession();
+      flushConnectionUpdates();
+      expect(getConnection().models?.[0]?.reasoningPreview).toMatchObject({
+        enabled: true,
+        effort: 'medium',
+      });
+    },
+  );
+
   it('drops the connection session context through the real clearSession action', async () => {
     const session = createMockSession('session-a');
     const { actions, getConnection } = createActionsHarness({
@@ -6940,6 +7717,7 @@ function createActionsHarness(
     addNotice?: ReturnType<typeof vi.fn>;
     clearLiveJournalRepair?: ReturnType<typeof vi.fn>;
     connection?: DaemonConnectionState;
+    deferConnectionUpdates?: boolean;
     onConnectionChange?: (connection: DaemonConnectionState) => void;
     createDetachedSession?: ReturnType<typeof vi.fn>;
     createDetachedStandaloneSession?: ReturnType<typeof vi.fn>;
@@ -6953,6 +7731,7 @@ function createActionsHarness(
     onPromptAdmitted?: ReturnType<typeof vi.fn>;
     onContinuationAdmitted?: ReturnType<typeof vi.fn>;
     onPromptRemoved?: ReturnType<typeof vi.fn>;
+    onGeneratedUiInvalidated?: ReturnType<typeof vi.fn>;
     passiveAssistantDoneTimerRef?: {
       current: ReturnType<typeof setTimeout> | undefined;
     };
@@ -6966,12 +7745,14 @@ function createActionsHarness(
     getDefaultSessionContext?: () => DaemonProductSessionContext | undefined;
     getClient?: () => DaemonClient | undefined;
     getEventDetailMode?: () => 'full' | 'summary';
+    getPromptStatus?: () => 'idle' | 'waiting' | 'streaming';
   } = {},
 ) {
   let connection: DaemonConnectionState = opts.connection ?? {
     status: 'connected',
     workspaceCwd: '/workspace',
   };
+  const connectionUpdates: Array<() => void> = [];
   const replaceConnection = (next: DaemonConnectionState) => {
     connection = next;
   };
@@ -7004,6 +7785,7 @@ function createActionsHarness(
         (() => ({ blocks: [], activeAssistantBlockId: undefined })),
     ),
   };
+  const sessionConfigGeneration: SessionConfigSyncMap = new WeakMap();
   const actions = createDaemonSessionActions({
     store: store as never,
     sessionRef,
@@ -7011,7 +7793,7 @@ function createActionsHarness(
     settledPromptsRef,
     pendingSessionLoadRef,
     pendingSessionLoadIdRef: { current: 0 },
-    sessionConfigGeneration: new WeakMap(),
+    sessionConfigGeneration,
     sessionRecoveryGeneration: new WeakMap(),
     heartbeatSupportedRef: { current: false },
     manualSessionClearRef: opts.manualSessionClearRef ?? { current: false },
@@ -7039,6 +7821,7 @@ function createActionsHarness(
       opts.getDefaultSessionContext ?? (() => undefined),
     getClient: opts.getClient,
     getConnection: () => connection,
+    getPromptStatus: opts.getPromptStatus ?? (() => 'idle'),
     getEventDetailMode: opts.getEventDetailMode ?? (() => 'full'),
     hasSessionActivePrompt: opts.hasSessionActivePrompt ?? (() => false),
     resetCurrentSessionActivePrompt: vi.fn(),
@@ -7048,9 +7831,14 @@ function createActionsHarness(
     onPromptAdmitted: opts.onPromptAdmitted,
     onContinuationAdmitted: opts.onContinuationAdmitted,
     onPromptRemoved: opts.onPromptRemoved,
+    onGeneratedUiInvalidated: opts.onGeneratedUiInvalidated,
     setConnection: (update) => {
-      connection = typeof update === 'function' ? update(connection) : update;
-      opts.onConnectionChange?.(connection);
+      const apply = () => {
+        connection = typeof update === 'function' ? update(connection) : update;
+        opts.onConnectionChange?.(connection);
+      };
+      if (opts.deferConnectionUpdates) connectionUpdates.push(apply);
+      else apply();
     },
     setPromptStatus,
     setRestoreSessionId: opts.setRestoreSessionId ?? vi.fn(),
@@ -7062,6 +7850,10 @@ function createActionsHarness(
   });
   return {
     actions,
+    flushConnectionUpdates: () => {
+      for (const apply of connectionUpdates.splice(0)) apply();
+    },
+    sessionConfigGeneration,
     activePromptsRef,
     settledPromptsRef,
     getConnection: () => connection,
@@ -7136,6 +7928,17 @@ function createMockSession(
     },
     savedWorkflow: vi.fn(),
     cancel: vi.fn(async () => undefined),
+    btw: vi.fn(async () => ({ sessionId, answer: 'Legacy answer' })),
+    btwStream: vi.fn(
+      async function* (): AsyncGenerator<DaemonSessionBtwStreamEvent> {
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'Side answer',
+        } as const;
+      },
+    ),
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
     setModel: vi.fn(async () => ({})),
@@ -7539,6 +8342,131 @@ function createTimedCreateClient({
 }
 
 describe('model catalog refresh', () => {
+  it.each([false, true])(
+    'preserves an unlisted subscription selection after logout (live: %s)',
+    async (live) => {
+      const session = createMockSession('hidden-subscription');
+      const workspace = session.client.workspaceByCwd();
+      session.client.workspaceByCwd.mockReturnValue(workspace);
+      const modelId = 'qwen3.8-max(qwen-subscription)';
+      workspace.workspaceProviders.mockResolvedValue({
+        v: 1,
+        initialized: true,
+        workspaceCwd: '/workspace',
+        current: { authType: 'qwen-subscription', modelId },
+        providers: [],
+      });
+      const context = contextStatus('hidden-subscription');
+      context.state.models = { currentModelId: modelId, availableModels: [] };
+      session.context.mockResolvedValue(context);
+      const h = createActionsHarness({
+        ...(live ? { session } : {}),
+        getClient: () => session.client as unknown as DaemonClient,
+        connection: {
+          status: 'connected',
+          ...(live ? { sessionId: 'hidden-subscription' } : {}),
+          workspaceCwd: '/workspace',
+          currentModel: modelId,
+          contextWindow: 128000,
+          models: [{ id: modelId, authType: 'qwen-subscription' }],
+        },
+      });
+      await expect(
+        h.actions.refreshModels(undefined, { reloadProviders: false }),
+      ).resolves.toBeUndefined();
+      expect(h.getConnection().currentModel).toBe(modelId);
+      expect(h.getConnection().contextWindow).toBe(128000);
+      expect(h.getConnection().models).toEqual([]);
+      expect(session.setModel).not.toHaveBeenCalled();
+      expect(workspace.reloadModelProviders).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reads a recovered live model without reloading providers', async () => {
+    const h = setup();
+    h.replaceConnection({
+      ...h.getConnection(),
+      context: {
+        ...h.context,
+        state: { _meta: { authType: 'qwen-subscription' } },
+      },
+    });
+    h.context.state._meta = { authType: 'openai' };
+    h.context.state.models = {
+      currentModelId: 'bailian',
+      availableModels: [
+        { modelId: 'bailian', name: 'Bailian', _meta: { contextLimit: 8192 } },
+      ],
+    };
+    await h.actions.refreshModels(undefined, { reloadProviders: false });
+    expect(h.workspace.reloadModelProviders).not.toHaveBeenCalled();
+    expect(h.getConnection().currentModel).toBe('bailian');
+    expect(h.getConnection().contextWindow).toBe(8192);
+    expect(h.getConnection().context?.state._meta?.['authType']).toBe('openai');
+  });
+
+  it('does not overwrite a model notification received during readback', async () => {
+    const h = setup();
+    const gate = createDeferred<DaemonSessionContextStatus>();
+    h.session.context.mockImplementation(() => gate.promise);
+    const refresh = h.actions.refreshModels(undefined, {
+      reloadProviders: false,
+    });
+    await vi.waitFor(() => expect(h.session.context).toHaveBeenCalled());
+    h.replaceConnection({
+      ...h.getConnection(),
+      currentModel: 'newer-model',
+      models: [{ id: 'newer-model' }],
+    });
+    gate.resolve(h.context);
+    await refresh;
+    expect(h.getConnection().currentModel).toBe('newer-model');
+    expect(h.getConnection().models).toEqual([{ id: 'newer-model' }]);
+    expect(h.workspace.reloadModelProviders).not.toHaveBeenCalled();
+  });
+
+  it('preserves a non-subscription live model when the workspace signs out', async () => {
+    const session = createMockSession('other-provider');
+    const workspace = session.client.workspaceByCwd();
+    session.client.workspaceByCwd.mockReturnValue(workspace);
+    workspace.workspaceProviders.mockResolvedValue({
+      v: 1,
+      initialized: true,
+      workspaceCwd: '/workspace',
+      providers: [],
+      current: { modelId: 'coder-model' },
+    });
+    const context = contextStatus('other-provider');
+    context.state.models = {
+      currentModelId: 'manual-bailian',
+      availableModels: [
+        {
+          modelId: 'manual-bailian',
+          name: 'Bailian',
+          _meta: { authType: 'openai' },
+        },
+      ],
+    };
+    session.context.mockResolvedValue(context);
+    const h = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        sessionId: 'other-provider',
+        workspaceCwd: '/workspace',
+        currentModel: 'manual-bailian',
+        providers: {
+          current: { authType: 'qwen-subscription', modelId: 'qwen3.8-max' },
+        },
+        models: [{ id: 'manual-bailian', authType: 'openai', isRuntime: true }],
+      },
+    });
+    await h.actions.refreshModels();
+    expect(h.getConnection().currentModel).toBe('manual-bailian');
+    await h.actions.refreshModels(undefined, { reloadProviders: false });
+    expect(h.getConnection().currentModel).toBe('manual-bailian');
+  });
+
   function setup() {
     const session = createMockSession('session-a');
     const workspace = session.client.workspaceByCwd();
@@ -7564,6 +8492,76 @@ describe('model catalog refresh', () => {
     });
     return { ...h, session, workspace, context };
   }
+
+  it.each([false, true])(
+    'clears a signed-out subscription selection without another provider (live session: %s)',
+    async (live) => {
+      const session = createMockSession('unused');
+      const workspace = session.client.workspaceByCwd();
+      workspace.reloadModelProviders.mockResolvedValue({
+        status: live ? 'applied' : 'deferred',
+      });
+      workspace.workspaceProviders.mockResolvedValue({
+        v: 1,
+        initialized: true,
+        workspaceCwd: '/workspace',
+        providers: [],
+        current: { modelId: 'coder-model' },
+      });
+      session.client.workspaceByCwd.mockReturnValue(workspace);
+      const context = contextStatus('unused');
+      delete context.state.models;
+      session.context.mockResolvedValue(context);
+      const h = createActionsHarness({
+        ...(live ? { session } : {}),
+        getClient: () => session.client as unknown as DaemonClient,
+        connection: {
+          status: 'connected',
+          ...(live ? { sessionId: 'unused' } : {}),
+          workspaceCwd: '/workspace',
+          currentModel: 'old',
+          providers: {
+            current: { authType: 'qwen-subscription', modelId: 'old' },
+          },
+          models: [{ id: 'old', label: 'Qwen', authType: 'qwen-subscription' }],
+        },
+      });
+      await expect(
+        h.actions.refreshModels(undefined, { reloadProviders: false }),
+      ).resolves.toBeUndefined();
+      expect(h.getConnection().currentModel).toBeUndefined();
+      expect(h.getConnection().models).toEqual([]);
+      expect(h.getConnection().sessionId).toBe(live ? 'unused' : undefined);
+      expect(workspace.reloadModelProviders).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['openai', 'qwen-subscription'] as const)(
+    'keeps a removed subscription selection and publishes the new catalog for reselection (workspace: %s)',
+    async (authType) => {
+      const h = setup();
+      const providers = workspaceProvidersStatus('high');
+      providers.current = { authType, modelId: 'old-model' };
+      h.workspace.workspaceProviders.mockResolvedValue(providers);
+      h.replaceConnection({
+        ...h.getConnection(),
+        models: [
+          { id: 'old-model', label: 'Old', authType: 'qwen-subscription' },
+        ],
+      });
+      h.context.state.models!.availableModels = [
+        { modelId: 'new-model', name: 'New' },
+      ];
+      await expect(h.actions.refreshModels()).rejects.toThrow(
+        'Run /model to choose another model',
+      );
+      expect(h.getConnection().currentModel).toBe('old-model');
+      expect(h.getConnection().models?.map((model) => model.id)).toEqual([
+        'new-model',
+      ]);
+      expect(h.session.setModel).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([false, true])(
     'refreshes with an absent or void callback (callback=%s)',
@@ -7858,6 +8856,584 @@ describe('model catalog refresh', () => {
         'connected workspace',
       );
       expect(h.workspace.reloadModelProviders).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe('streaming side questions', () => {
+  const connection: DaemonConnectionState = {
+    status: 'connected',
+    workspaceCwd: '/workspace',
+    capabilities: { features: ['session_btw_stream'] } as DaemonCapabilities,
+  };
+
+  it.each([undefined, [], ['session_btw']])(
+    'uses legacy JSON when streaming is not advertised: %j',
+    async (features) => {
+      const session = createMockSession('session-a');
+      const legacyConnection: DaemonConnectionState = {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        ...(features === undefined
+          ? {}
+          : { capabilities: { features } as DaemonCapabilities }),
+      };
+      const { actions } = createActionsHarness({
+        session,
+        connection: legacyConnection,
+      });
+      const signal = new AbortController().signal;
+      const events = [];
+      for await (const event of actions.btwSessionStream('Question', {
+        signal,
+      }))
+        events.push(event);
+      expect(events).toEqual([{ type: 'done', answer: 'Legacy answer' }]);
+      expect(session.btw).toHaveBeenCalledWith('Question', { signal });
+      expect(session.btwStream).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not retry JSON after an advertised stream fails', async () => {
+    const session = createMockSession('session-a');
+    session.btwStream.mockImplementationOnce(async function* () {
+      yield await Promise.reject(new Error('Stream not found'));
+    });
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({
+      session,
+      connection,
+      addNotice,
+    });
+    await expect(
+      actions.btwSessionStream('Question').next(),
+    ).rejects.toMatchObject({ message: 'Stream not found' });
+    expect(session.btwStream).toHaveBeenCalledOnce();
+    expect(session.btw).not.toHaveBeenCalled();
+    expect(addNotice).toHaveBeenCalledOnce();
+  });
+
+  it('keeps streaming beyond the ordinary 30-second action deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createMockSession('session-a');
+      const finish = createDeferred<void>();
+      session.btwStream.mockImplementationOnce(async function* () {
+        await finish.promise;
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'Slow answer',
+        } as const;
+      });
+      const addNotice = vi.fn();
+      const { actions } = createActionsHarness({
+        session,
+        addNotice,
+        connection,
+      });
+      const stream = actions.btwSessionStream('Question');
+      const answer = stream.next();
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(addNotice).not.toHaveBeenCalled();
+      finish.resolve();
+      expect((await answer).value).toMatchObject({
+        type: 'done',
+        answer: 'Slow answer',
+      });
+      await stream.next();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['btw_timeout', 'btw_cancelled', 'btw_failed'])(
+    'preserves terminal error code %s in the notice',
+    async (code) => {
+      const session = createMockSession('session-a');
+      const addNotice = vi.fn();
+      session.btwStream.mockImplementationOnce(async function* () {
+        yield {
+          v: 1,
+          type: 'error',
+          requestId: 'btw-request',
+          code,
+          message: 'Stream failed',
+        } as const;
+      });
+      const { actions } = createActionsHarness({
+        session,
+        addNotice,
+        connection,
+      });
+      await expect(
+        actions.btwSessionStream('Question').next(),
+      ).rejects.toMatchObject({ message: 'Stream failed' });
+      expect(addNotice).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operation: 'btw_session',
+          code,
+          message: 'Side question failed: Stream failed',
+        }),
+      );
+    },
+  );
+  it.each([
+    [410, 'btw_expired'],
+    [409, 'btw_request_conflict'],
+    [429, 'btw_limit'],
+    [501, 'btw_stream_not_supported'],
+  ] as const)(
+    'preserves HTTP %i error code %s in the notice',
+    async (status, code) => {
+      const session = createMockSession('session-a');
+      const error = new DaemonHttpError(status, { code }, 'Server explanation');
+      session.btwStream.mockImplementationOnce(async function* () {
+        yield await Promise.reject(error);
+      });
+      const addNotice = vi.fn();
+      const { actions } = createActionsHarness({
+        session,
+        connection,
+        addNotice,
+      });
+      await expect(actions.btwSessionStream('Question').next()).rejects.toBe(
+        error,
+      );
+      expect(addNotice).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operation: 'btw_session',
+          code,
+          message: 'Side question failed: Server explanation',
+        }),
+      );
+      expect(session.btw).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['legacy action', 'stream fallback'] as const)(
+    'keeps the 30-second deadline for %s',
+    async (path) => {
+      vi.useFakeTimers();
+      try {
+        const session = createMockSession('session-a');
+        session.btw.mockImplementationOnce(() => new Promise(() => {}));
+        const addNotice = vi.fn();
+        const { actions } = createActionsHarness({
+          session,
+          addNotice,
+          connection: {
+            ...connection,
+            capabilities: { features: [] } as DaemonCapabilities,
+          },
+        });
+        const result =
+          path === 'legacy action'
+            ? actions.btwSession('Question')
+            : actions.btwSessionStream('Question').next();
+        const failed = result.catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(29_999);
+        expect(addNotice).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await failed).toMatchObject({
+          message: 'Side question timed out after 30000ms',
+        });
+        expect(addNotice).toHaveBeenCalledOnce();
+        expect(session.btwStream).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('reports a stream that ends without a terminal snapshot', async () => {
+    const session = createMockSession('session-a');
+    session.btwStream.mockImplementationOnce(async function* () {
+      yield {
+        v: 1,
+        type: 'answer',
+        requestId: 'request',
+        answer: 'Partial',
+      } as const;
+    });
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({
+      session,
+      connection,
+      addNotice,
+    });
+    const stream = actions.btwSessionStream('Question');
+    expect((await stream.next()).value).toEqual({
+      type: 'answer',
+      answer: 'Partial',
+    });
+    await expect(stream.next()).rejects.toThrow('ended before completion');
+    expect(addNotice).toHaveBeenCalledOnce();
+    expect(session.btw).not.toHaveBeenCalled();
+  });
+});
+
+describe('Workflow mode actions', () => {
+  function configOptions(requested: boolean): unknown[] {
+    return [
+      {
+        id: 'workflow_mode',
+        type: 'select',
+        currentValue: requested ? 'on' : 'off',
+        options: [{ value: 'off' }, { value: 'on' }],
+        _meta: {
+          'qwen.workflowMode': { available: true, effective: requested },
+        },
+      },
+    ];
+  }
+
+  function fixture() {
+    const session = createMockSession('workflow-session');
+    const snapshot = (requested: boolean) => ({
+      ...contextStatus(session.sessionId),
+      state: { configOptions: configOptions(requested) },
+    });
+    session.context.mockResolvedValue(snapshot(false));
+    const addNotice = vi.fn();
+    const harness = createActionsHarness({
+      session,
+      addNotice,
+      connection: {
+        status: 'connected',
+        sessionId: session.sessionId,
+        clientId: session.clientId,
+        workflowModeStatus: 'ready',
+        workflowMode: { requested: false, available: true, effective: false },
+        context: snapshot(false),
+      },
+    });
+    const push = (requested: boolean) => {
+      observeSessionConfig(
+        harness.sessionConfigGeneration,
+        session as unknown as DaemonSessionClient,
+      );
+      harness.replaceConnection(
+        applyConfigOptions(harness.getConnection(), configOptions(requested)),
+      );
+    };
+    return { ...harness, session, snapshot, push, addNotice };
+  }
+
+  it.each(['missing array', 'newer opposite value'] as const)(
+    'reconciles a successful ACK with %s without resending the write',
+    async (shape) => {
+      const h = fixture();
+      const readback = createDeferred<DaemonSessionContextStatus>();
+      h.session.context.mockReturnValue(readback.promise);
+      h.session.setConfigOption.mockResolvedValue({
+        ...(shape === 'missing array'
+          ? {}
+          : { configOptions: configOptions(false) }),
+        persisted: true,
+      } as Awaited<ReturnType<typeof h.session.setConfigOption>>);
+      await h.actions.setWorkflowMode(true);
+      expect(h.getConnection()).toMatchObject({
+        workflowModeStatus: 'syncing',
+        workflowMode: { requested: false },
+        workflowModePending: false,
+      });
+      expect(h.session.setConfigOption).toHaveBeenCalledExactlyOnceWith(
+        'workflow_mode',
+        'on',
+      );
+      expect(h.session.context).toHaveBeenCalledTimes(1);
+      readback.resolve(h.snapshot(true));
+      await vi.waitFor(() =>
+        expect(h.getConnection()).toMatchObject({
+          workflowModeStatus: 'ready',
+          workflowMode: { requested: true },
+        }),
+      );
+      expect(h.addNotice).not.toHaveBeenCalled();
+      expect(h.session.submitPrompt).not.toHaveBeenCalled();
+      expect(h.session.cancel).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['resolve', 'reject'] as const)(
+    'keeps a newer push when a mode ACK later %s',
+    async (outcome) => {
+      const h = fixture();
+      const ack =
+        createDeferred<Awaited<ReturnType<typeof h.session.setConfigOption>>>();
+      h.session.setConfigOption.mockReturnValue(ack.promise);
+      const pending = h.actions.setWorkflowMode(true);
+      const observed = pending.catch(() => undefined);
+      await expect(h.actions.setWorkflowMode(true)).rejects.toThrow(
+        'not available',
+      );
+      h.push(true);
+      h.push(false);
+      if (outcome === 'resolve')
+        ack.resolve({ configOptions: configOptions(true), persisted: true });
+      else ack.reject(new Error('late transport error'));
+      await observed;
+      await vi.waitFor(() =>
+        expect(h.getConnection().workflowModeStatus).toBe('ready'),
+      );
+      expect(h.getConnection().workflowMode?.requested).toBe(false);
+      expect(h.getConnection().context?.state.configOptions).toEqual(
+        configOptions(false),
+      );
+      expect(h.session.setConfigOption).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('rejects a pre-push context and a GET completed after a newer GET', async () => {
+    const h = fixture();
+    const old = createDeferred<DaemonSessionContextStatus>();
+    h.session.context.mockReturnValueOnce(old.promise);
+    const pending = h.actions.getContext();
+    h.push(true);
+    old.resolve(h.snapshot(false));
+    await pending;
+    expect(h.getConnection().workflowMode?.requested).toBe(true);
+    const first = createDeferred<DaemonSessionContextStatus>();
+    const second = createDeferred<DaemonSessionContextStatus>();
+    h.session.context
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    const a = h.actions.getContext();
+    const b = h.actions.getContext();
+    second.resolve(h.snapshot(false));
+    await b;
+    first.resolve(h.snapshot(true));
+    await a;
+    expect(h.getConnection().workflowMode?.requested).toBe(false);
+  });
+
+  it('does not read overlapping unfinished writes as idle and reads once after settlement', async () => {
+    const h = fixture();
+    const mode =
+      createDeferred<Awaited<ReturnType<typeof h.session.setConfigOption>>>();
+    const approval =
+      createDeferred<
+        Awaited<ReturnType<typeof h.session.client.setSessionApprovalMode>>
+      >();
+    h.session.setConfigOption.mockReturnValue(mode.promise);
+    h.session.client.setSessionApprovalMode.mockReturnValue(approval.promise);
+    h.session.context.mockResolvedValue(h.snapshot(true));
+    const a = h.actions.setWorkflowMode(true);
+    const b = h.actions.setApprovalMode('auto-edit');
+    await h.actions.getContext();
+    expect(h.getConnection().workflowMode?.requested).toBe(false);
+    mode.resolve({ configOptions: configOptions(true), persisted: true });
+    await a;
+    expect(h.session.context).toHaveBeenCalledTimes(1);
+    approval.resolve({
+      sessionId: h.session.sessionId,
+      mode: 'auto-edit',
+      previous: 'default',
+      persisted: false,
+    });
+    await b;
+    await vi.waitFor(() =>
+      expect(h.getConnection().workflowMode?.requested).toBe(true),
+    );
+    expect(h.session.context).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a newer mode while reasoning returns an obsolete whole config array', async () => {
+    const h = fixture();
+    const ack =
+      createDeferred<Awaited<ReturnType<typeof h.session.setConfigOption>>>();
+    h.session.setConfigOption.mockReturnValue(ack.promise);
+    const options = [
+      ...configOptions(true),
+      ...reasoningConfigOptions('medium'),
+    ];
+    h.session.context.mockResolvedValue({
+      ...h.snapshot(true),
+      state: { configOptions: options },
+    });
+    const pending = h.actions.setReasoningEffort('medium');
+    h.push(true);
+    ack.resolve({
+      configOptions: [
+        ...configOptions(false),
+        ...reasoningConfigOptions('medium'),
+      ],
+      persisted: false,
+    });
+    await pending;
+    await vi.waitFor(() =>
+      expect(h.getConnection().reasoning?.effort).toBe('medium'),
+    );
+    expect(h.getConnection().workflowMode?.requested).toBe(true);
+    expect(h.getConnection().context?.state.configOptions).toEqual(options);
+  });
+
+  it('releases a timed-out write, reconciles once, and ignores its late ACK', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = fixture();
+      const ack =
+        createDeferred<Awaited<ReturnType<typeof h.session.setConfigOption>>>();
+      h.session.setConfigOption.mockReturnValue(ack.promise);
+      h.session.context.mockRejectedValue(new Error('read offline'));
+      const pending = h.actions.setWorkflowMode(true);
+      const result = pending.catch((error: Error) => error);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await result).toBeInstanceOf(Error);
+      expect(h.getConnection()).toMatchObject({
+        workflowModePending: false,
+        workflowModeStatus: 'unknown',
+        workflowMode: { requested: false },
+      });
+      expect(
+        h.sessionConfigGeneration.get(
+          h.session as unknown as DaemonSessionClient,
+        )?.pendingWrites,
+      ).toBe(0);
+      expect(h.session.context).toHaveBeenCalledTimes(1);
+      await expect(h.actions.setWorkflowMode(true)).rejects.toThrow(
+        'not available',
+      );
+      ack.resolve({ configOptions: configOptions(true), persisted: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.getConnection().workflowMode?.requested).toBe(false);
+      expect(h.session.setConfigOption).toHaveBeenCalledTimes(1);
+      expect(h.session.context).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds an unanswered reconciliation and keeps the last confirmed mode', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = fixture();
+      const read = createDeferred<DaemonSessionContextStatus>();
+      h.session.context.mockReturnValue(read.promise);
+      h.session.setConfigOption.mockResolvedValue({
+        configOptions: configOptions(true),
+        persisted: true,
+      });
+      await h.actions.setWorkflowMode(true);
+      expect(h.getConnection().workflowModeStatus).toBe('syncing');
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(h.getConnection()).toMatchObject({
+        workflowModeStatus: 'unknown',
+        workflowModePending: false,
+        workflowMode: { requested: false },
+      });
+      expect(h.session.context).toHaveBeenCalledTimes(1);
+      read.resolve(h.snapshot(true));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.getConnection().workflowMode?.requested).toBe(false);
+      expect(h.session.context).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('finishes mode reconciliation when cancellation also refreshes recovery', async () => {
+    const h = fixture();
+    const recovery = { kind: 'clean' as const, canContinue: false };
+    h.replaceConnection({
+      ...h.getConnection(),
+      context: { ...h.snapshot(false), recovery },
+    });
+    const read = createDeferred<DaemonSessionContextStatus>();
+    h.session.context
+      .mockReturnValueOnce(read.promise)
+      .mockResolvedValue({ ...h.snapshot(true), recovery });
+    h.session.setConfigOption.mockResolvedValue({ persisted: true } as Awaited<
+      ReturnType<typeof h.session.setConfigOption>
+    >);
+    await h.actions.setWorkflowMode(true);
+    expect(h.getConnection().workflowModeStatus).toBe('syncing');
+    h.activePromptsRef.current.set(h.session.sessionId, {
+      controller: new AbortController(),
+    });
+    await h.actions.cancel();
+    expect(h.session.context).toHaveBeenCalledTimes(2);
+    read.resolve(h.snapshot(true));
+    await vi.waitFor(() =>
+      expect(h.getConnection()).toMatchObject({
+        workflowModeStatus: 'ready',
+        workflowMode: { requested: true },
+        workflowModePending: false,
+        context: { recovery },
+      }),
+    );
+  });
+
+  it.each(['model write', 'model read', 'explicit read'] as const)(
+    'settles mode synchronization when a newer %s fails',
+    async (failure) => {
+      const h = fixture();
+      const old = createDeferred<DaemonSessionContextStatus>();
+      h.session.context.mockReturnValueOnce(old.promise);
+      h.session.setConfigOption.mockResolvedValue({
+        persisted: true,
+      } as Awaited<ReturnType<typeof h.session.setConfigOption>>);
+      await h.actions.setWorkflowMode(true);
+      expect(h.getConnection().workflowModeStatus).toBe('syncing');
+      if (failure === 'model write') {
+        h.session.setModel.mockRejectedValue(new Error('model rejected'));
+        h.session.context.mockResolvedValue(h.snapshot(true));
+        await expect(h.actions.setModel('new-model')).rejects.toThrow(
+          'model rejected',
+        );
+      } else {
+        h.session.context.mockRejectedValue(new Error('read offline'));
+        if (failure === 'model read') await h.actions.setModel('new-model');
+        else
+          await expect(h.actions.getContext()).rejects.toThrow('read offline');
+      }
+      old.resolve(h.snapshot(false));
+      await vi.waitFor(() =>
+        expect(h.getConnection().workflowModeStatus).toBe(
+          failure === 'model write' ? 'ready' : 'unknown',
+        ),
+      );
+      expect(h.getConnection().workflowModePending).toBe(false);
+      expect(h.session.context).toHaveBeenCalledTimes(2);
+      expect(h.session.setConfigOption).toHaveBeenCalledTimes(1);
+      if (failure === 'model write')
+        expect(h.getConnection().workflowMode?.requested).toBe(true);
+    },
+  );
+
+  it.each(['new client', 'new stream'] as const)(
+    'keeps same-id replacement state and notices after %s',
+    async (replacement) => {
+      const h = fixture();
+      const ack =
+        createDeferred<Awaited<ReturnType<typeof h.session.setConfigOption>>>();
+      h.session.setConfigOption.mockReturnValue(ack.promise);
+      const pending = h.actions.setWorkflowMode(true).catch(() => undefined);
+      if (replacement === 'new client') {
+        h.sessionRef.current = createMockSession(
+          h.session.sessionId,
+          'replacement',
+        ) as unknown as DaemonSessionClient;
+      } else
+        resetSessionConfigSync(
+          h.sessionConfigGeneration,
+          h.session as unknown as DaemonSessionClient,
+        );
+      const next = {
+        ...h.getConnection(),
+        workflowModePending: true,
+        workflowModeStatus: 'ready' as const,
+        workflowMode: { requested: true, available: true, effective: true },
+      };
+      h.replaceConnection(next);
+      ack.reject(new Error('old owner failure'));
+      await pending;
+      expect(h.getConnection()).toBe(next);
+      expect(h.addNotice).not.toHaveBeenCalled();
+      expect(h.session.context).not.toHaveBeenCalled();
     },
   );
 });

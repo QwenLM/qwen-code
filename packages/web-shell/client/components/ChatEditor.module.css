@@ -60,6 +60,151 @@
   padding: 10px;
 }
 
+.inputRow {
+  display: contents;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .container {
+  border-radius: 28px;
+  --chat-editor-min-height: 54px;
+  --chat-editor-input-min-height: 28px;
+  --chat-editor-input-max-height: 200px;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .content {
+  padding: 4px 8px;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .inputRow {
+  display: grid;
+  flex: 1 1 auto;
+  min-height: 44px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
+  align-items: end;
+  column-gap: 6px;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .inputRow > button {
+  grid-column: 1;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .editorArea {
+  grid-column: 2;
+  align-self: stretch;
+  min-width: 0;
+  min-height: 0;
+  padding: 9px 0;
+}
+
+.editorShell[data-web-shell-composer-variant='simple']
+  .editorArea
+  > :last-child {
+  min-height: 0;
+  max-height: min(100%, var(--chat-editor-input-max-height, 300px));
+}
+
+.editorShell[data-web-shell-composer-variant='simple']
+  :global(.cm-placeholder) {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.editorShell[data-web-shell-composer-variant='simple']
+  .mobileTextarea::placeholder {
+  white-space: nowrap;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .toolbar {
+  display: contents;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .toolbarRight {
+  grid-column: 3;
+  flex: 0 0 auto;
+  gap: 4px;
+  margin: 0;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .inputRow > button,
+.editorShell[data-web-shell-composer-variant='simple'] .toolbarRight > button,
+.editorShell[data-web-shell-composer-variant='simple']
+  [data-web-shell-simple-voice]
+  button:has(> svg) {
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  border-radius: 50%;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .inputRow > button svg {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  color: color-mix(in srgb, var(--foreground) 50%, var(--background));
+}
+
+.editorShell [data-web-shell-simple-voice]:not([hidden]) {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+}
+
+.editorShell
+  [data-web-shell-simple-idle]:has([data-web-shell-simple-voice] button)
+  [data-web-shell-composer-submit] {
+  display: none;
+}
+
+.editorShell[data-web-shell-simple-voice-active] .inputRow {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.editorShell[data-web-shell-simple-voice-active] .editorArea,
+.editorShell[data-web-shell-simple-voice-active] .inputRow > button,
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-composer-submit],
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-composer-stop] {
+  display: none;
+}
+
+.editorShell[data-web-shell-simple-voice-active] .toolbarRight {
+  grid-column: 1 / -1;
+  width: 100%;
+}
+
+.editorShell[data-web-shell-simple-voice-active] [data-web-shell-simple-voice],
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-simple-voice]
+  > span,
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-simple-voice]
+  > span
+  > :first-child {
+  width: 100%;
+  min-width: 0;
+}
+
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-simple-voice]
+  > span
+  > :first-child {
+  height: 44px;
+  border-radius: 22px;
+  justify-content: center;
+}
+
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-voice-waveform] {
+  flex: 1;
+  justify-content: center;
+}
+
 .container:focus-within .content,
 .container[data-at-panel-open] .content {
   border-color: var(--chat-editor-accent-color);
@@ -282,6 +427,75 @@
   -webkit-line-clamp: 2;
 }
 
+:global(
+  [data-web-shell-toolbar-popover][data-web-shell-mode-popover]:not(
+      [data-web-shell-compact-overlay]
+    )
+) {
+  box-sizing: border-box;
+  width: min(400px, var(--radix-popover-content-available-width));
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover]) {
+  padding: 6px;
+  font-size: 13px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownList {
+  gap: 1px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownRich
+  .dropdownItem {
+  grid-template-columns: 20px minmax(0, 1fr) 18px;
+  gap: 8px;
+  padding: 5px 7px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItem {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemContent {
+  gap: 1px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemLabel {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemDesc {
+  font-size: 13px;
+  line-height: 16px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemIcon
+  svg {
+  width: 16px;
+  height: 16px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemDanger
+  .dropdownItemIcon,
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemDanger
+  .dropdownItemLabel,
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemDanger
+  .dropdownItemDesc {
+  color: var(--destructive);
+}
+
 :global([data-web-shell-reasoning-popover]) {
   overflow-x: hidden;
   overflow-y: auto;
@@ -372,7 +586,7 @@
   width: 100%;
   min-width: 0;
   grid-template-columns:
-    minmax(0, 220px)
+    minmax(0, max-content)
     minmax(0, 1fr);
   column-gap: 8px;
   align-items: baseline;
@@ -456,7 +670,7 @@
   font-size: 14px;
   font-weight: 400;
   line-height: 22px;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .slashDetailText {
@@ -492,7 +706,7 @@
   font-size: 12px;
   font-weight: 400;
   line-height: 20px;
-  text-align: right;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1399,6 +1613,58 @@
   height: 16px;
 }
 
+.editorShell .toolbarRight [data-web-shell-simple-voice] button > svg {
+  width: 28px;
+  height: 28px;
+}
+
+.editorShell
+  .toolbarRight
+  button:is(
+    [data-web-shell-composer-expand],
+    [data-web-shell-composer-collapse]
+  ) {
+  justify-content: center;
+}
+
+.editorShell
+  .toolbarRight
+  button:is(
+    [data-web-shell-composer-expand],
+    [data-web-shell-composer-collapse]
+  )
+  > svg {
+  width: 14px;
+  height: 14px;
+  color: color-mix(in srgb, var(--muted-foreground) 85%, var(--background));
+  transform: translateX(4px);
+}
+
+.editorShell
+  .toolbarRight
+  button:is(
+    [data-web-shell-composer-expand],
+    [data-web-shell-composer-collapse]
+  ):not(:disabled):hover {
+  background: radial-gradient(closest-side, var(--muted) 99%, transparent)
+    calc(50% + 4px) center / 24px 24px no-repeat;
+}
+
+.editorShell[data-web-shell-composer-variant='simple']
+  .inputRow
+  > button:not(:disabled):hover {
+  background: radial-gradient(closest-side, var(--muted) 99%, transparent)
+    center / 32px 32px no-repeat;
+}
+
+.editorShell
+  .toolbarRight
+  [data-web-shell-simple-voice]
+  button:has(> svg):not(:disabled):hover {
+  background: radial-gradient(closest-side, var(--secondary) 99%, transparent)
+    center / 32px 32px no-repeat;
+}
+
 .toolbarRightCustom {
   display: inline-flex;
   min-width: 0;
@@ -1549,6 +1815,19 @@
   gap: 2px;
 }
 
+.dropdownItem.modelPickerRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  gap: 10px;
+  align-items: center;
+}
+
+.modelPickerContent {
+  min-width: 0;
+  width: 100%;
+  white-space: normal;
+}
+
 .dropdownItemLabel {
   overflow: hidden;
   color: var(--foreground);
@@ -1675,6 +1954,20 @@
   color: var(--chat-editor-text-primary);
 }
 
+/* The trigger names the active mode, so Full Access stays dangerous after it
+   is selected, not only inside the picker. Hover tiles the generic rule above
+   on specificity and would otherwise drop the warning color. */
+.toolBtn.modeToolBtnDanger,
+.toolBtn.modeToolBtnDanger .toolBtnText {
+  color: var(--destructive);
+}
+
+.toolBtn.modeToolBtnDanger:not(:disabled):not([data-disabled]):hover,
+.toolBtn.modeToolBtnDanger:not(:disabled):not([data-disabled]):hover
+  .toolBtnText {
+  color: var(--destructive);
+}
+
 .planControl {
   flex: 0 0 auto;
 }
@@ -1706,6 +1999,11 @@
 
 .planChip .toolBtnText {
   color: inherit;
+}
+
+/* Workflow mode saved on but not currently able to take effect. */
+.workflowChip[data-unavailable] {
+  color: var(--warning-color);
 }
 
 /* No dimming: like every other .toolBtn, including the permission button
@@ -1786,16 +2084,6 @@
     forced-color-adjust: none;
     background: ButtonText;
   }
-}
-
-.addMenuPlanIcon {
-  display: inline-flex;
-  width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  color: var(--muted-foreground);
 }
 
 .workspaceSelectTrigger {
@@ -2819,8 +3107,21 @@
 }
 
 .editorShell[data-web-shell-mobile-composer] .toolbarRight {
+  gap: 0;
   margin-left: auto;
   margin-right: 0;
+}
+
+.editorShell[data-web-shell-mobile-composer] .toolbarLeft {
+  gap: 0;
+}
+
+.editorShell[data-web-shell-mobile-composer] .toolBtn {
+  justify-content: center;
+}
+
+.editorShell[data-web-shell-mobile-composer] .contextUsageBtn {
+  padding: 0;
 }
 
 .mobileEditingActions,
@@ -2832,6 +3133,9 @@
 }
 
 .mobileContextRow {
+  min-width: 44px;
+  min-height: 44px;
+  flex: 1;
   flex-wrap: wrap;
 }
 
@@ -2850,12 +3154,12 @@
   margin-top: -8px;
 }
 
-/* Pulled up under the context row it would cover the row's touch targets. */
-.mobileContextRow + .mobileEditingActions {
+.mobileEditingActions:has(.mobileContextRow) {
+  align-items: flex-start;
   margin-top: 0;
 }
 
-.mobileEditingActions svg {
+.mobileEditingActions > button > svg {
   width: 18px;
   height: 18px;
 }

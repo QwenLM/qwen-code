@@ -1287,6 +1287,53 @@ function scriptedGate(results: HostedAutomationGateResult[]) {
 const gated = { ...definition, gate: './probe.sh --gate' };
 
 describe('hosted automation gates', () => {
+  it('retains unknown release debt after the release-key cache overflows', async () => {
+    const harness = await createHarness();
+    let failing = true;
+    const releaseGate = vi.fn(async () => {});
+    const occurrences = Array.from(
+      { length: 1025 },
+      (_, index) =>
+        `schedule:${new Date(Date.UTC(2026, 2, 8 + index, 7))
+          .toISOString()
+          .replace('.000Z', 'Z')}`,
+    );
+    await withSession(
+      harness,
+      async (automations) => {
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        expect(automations.hasPendingGateReleases).toBe(false);
+        for (const occurrence of occurrences) {
+          await expect(
+            automations.fire(fireParams(1, occurrence)),
+          ).rejects.toThrow('unreleased Runtime');
+        }
+        failing = false;
+        for (const occurrence of occurrences.slice(1)) {
+          expect(
+            (await automations.fire(fireParams(1, occurrence))).gate,
+          ).toEqual({
+            outcome: 'quiet',
+            durationMs: 0,
+          });
+        }
+        expect(releaseGate).toHaveBeenCalledTimes(1024);
+        expect(automations.hasPendingGateReleases).toBe(true);
+      },
+      {
+        gate: async () => {
+          if (failing) throw new Error('unreleased Runtime');
+          return { kind: 'quiet', durationMs: 0 };
+        },
+        releaseGate,
+      },
+    );
+  });
+
   it('withholds a quiet fire with no claim, input or wake', async () => {
     const harness = await createHarness();
     const gate = scriptedGate([{ kind: 'quiet', durationMs: 12 }]);

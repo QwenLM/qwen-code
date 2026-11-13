@@ -4,9 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { LlmChat } from '../core/llm-chat.js';
+import {
+  appendAutoMemorySnapshot,
+  getAutoMemorySnapshot,
+} from '../memory/request-context.js';
 import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
 import {
   SYSTEM_REMINDER_CLOSE,
@@ -15,6 +23,7 @@ import {
 import {
   normalizeForEchoCompare,
   sanitizeTitle,
+  modPromptTitleKey,
   tryGenerateSessionTitle,
 } from './sessionTitle.js';
 import { content, modelText, userText } from '../test-utils/model-fixtures.js';
@@ -22,6 +31,8 @@ import { content, modelText, userText } from '../test-utils/model-fixtures.js';
 interface MockOptions {
   fastModel?: string | undefined;
   history?: Content[];
+  chat?: LlmChat;
+  outputLanguageFilePath?: string;
   generateJsonResult?:
     | Record<string, unknown>
     | ((...args: unknown[]) => Promise<Record<string, unknown>>);
@@ -41,12 +52,14 @@ function makeConfig(opts: MockOptions): {
     getFastModel: vi.fn(() => opts.fastModel ?? undefined),
     getModel: vi.fn(() => 'qwen-plus'),
     getLlmClient: vi.fn(() => ({
-      getHistoryShallow: () => opts.history ?? [],
+      getHistoryShallow: (curated?: boolean) =>
+        opts.chat?.getHistoryShallow(curated) ?? opts.history ?? [],
       getChat: () => ({
         getHistory: () => opts.history ?? [],
       }),
     })),
     getBaseLlmClient: vi.fn(() => ({ generateJson })),
+    getOutputLanguageFilePath: vi.fn(() => opts.outputLanguageFilePath),
   } as unknown as Config;
 
   return { config, generateJson };
@@ -61,6 +74,160 @@ const reminder = (body: string) =>
   `${SYSTEM_REMINDER_OPEN}\n${body}\n${SYSTEM_REMINDER_CLOSE}`;
 
 describe('tryGenerateSessionTitle', () => {
+  it.each(['CATALOG_SENTINEL', ''])(
+    'excludes durable catalog and ACP hook context from fallback title input, catalog=%j',
+    async (catalog) => {
+      const history: Content[] = [
+        content(
+          'user',
+          { text: 'Diagnose parser failure' },
+          { text: wrapUserPromptSubmitContext('HOOK_SENTINEL') },
+        ),
+      ];
+      appendAutoMemorySnapshot(
+        history,
+        getAutoMemorySnapshot([], 'CATALOG_SENTINEL')!,
+      );
+      history.push(modelText('The parser needs a fix.'));
+      const original = structuredClone(history);
+      const chat = new LlmChat(
+        { getAutoMemoryContext: () => catalog } as Config,
+        {},
+        history,
+      );
+      const { config, generateJson } = makeConfig({
+        chat,
+        fastModel: 'qwen-turbo',
+        generateJsonResult: { title: 'Repair parser regression' },
+      });
+      // Plain ACP recording has no display payload; its hook is appended later.
+      const outcome = await tryGenerateSessionTitle(
+        config,
+        new AbortController().signal,
+        [undefined],
+      );
+      expect(outcome.ok).toBe(true);
+      expect(generateJson).toHaveBeenCalledTimes(1);
+      const prompt = JSON.stringify(generateJson.mock.calls[0][0]);
+      expect(prompt).toContain('Diagnose parser failure');
+      expect(prompt).toContain('The parser needs a fix.');
+      expect(prompt).not.toContain('HOOK_SENTINEL');
+      expect(prompt).not.toContain('CATALOG_SENTINEL');
+      expect(prompt).not.toContain('Current memory catalog');
+      expect(chat.getHistoryShallow()).toEqual(original);
+    },
+  );
+
+  it('keeps ACP hook boundaries across a failed historical response under suppression', async () => {
+    const history: Content[] = [];
+    for (const [prompt, answer] of [
+      ['First parser request', ''],
+      ['Second parser request', 'Fixed parser'],
+    ]) {
+      history.push(
+        content(
+          'user',
+          { text: prompt },
+          { text: wrapUserPromptSubmitContext('HISTORICAL_HOOK') },
+        ),
+      );
+      const snapshot = getAutoMemorySnapshot(history, 'OLD_CATALOG');
+      if (snapshot) appendAutoMemorySnapshot(history, snapshot);
+      history.push(modelText(answer));
+    }
+    const chat = new LlmChat(
+      { getAutoMemoryContext: () => '' } as Config,
+      {},
+      history,
+    );
+    const { config, generateJson } = makeConfig({
+      chat,
+      fastModel: 'qwen-turbo',
+      generateJsonResult: { title: 'Repair parser regression' },
+    });
+    expect(
+      (
+        await tryGenerateSessionTitle(config, new AbortController().signal, [
+          undefined,
+          undefined,
+        ])
+      ).ok,
+    ).toBe(true);
+    const prompt = JSON.stringify(generateJson.mock.calls[0][0]);
+    expect(prompt).toContain('First parser request');
+    expect(prompt).toContain('Second parser request');
+    expect(prompt).not.toContain('HISTORICAL_HOOK');
+    expect(prompt).not.toContain('OLD_CATALOG');
+  });
+
+  it('keeps the recorded display projection authoritative with a durable snapshot', async () => {
+    const history = [
+      content(
+        'user',
+        { text: 'RAW_INPUT' },
+        { text: wrapUserPromptSubmitContext('RAW_HOOK') },
+        getAutoMemorySnapshot([], 'RAW_CATALOG')!,
+      ),
+      modelText('RAW_ANSWER'),
+    ];
+    const chat = new LlmChat(
+      { getAutoMemoryContext: () => 'RAW_CATALOG' } as Config,
+      {},
+      history,
+    );
+    const { config, generateJson } = makeConfig({
+      chat,
+      fastModel: 'qwen-turbo',
+      generateJsonResult: { title: 'Repair parser regression' },
+    });
+    expect(
+      (
+        await tryGenerateSessionTitle(config, new AbortController().signal, [
+          'Visible parser request',
+        ])
+      ).ok,
+    ).toBe(true);
+    const prompt = JSON.stringify(generateJson.mock.calls[0][0]);
+    expect(prompt).toContain('Visible parser request');
+    expect(prompt).not.toContain('RAW_');
+  });
+
+  it.each([false, true])(
+    'preserves user-authored tagged text before snapshot removal, multipart=%s',
+    async (multipart) => {
+      const parts = [
+        { text: wrapUserPromptSubmitContext('USER_AUTHORED_TAG') },
+      ];
+      if (multipart) parts.push({ text: 'Explain that literal tag' });
+      const history: Content[] = [
+        content(
+          'user',
+          ...parts,
+          getAutoMemorySnapshot([], 'CATALOG_SENTINEL')!,
+        ),
+        modelText('This is a literal tag.'),
+      ];
+      const chat = new LlmChat(
+        { getAutoMemoryContext: () => 'CATALOG_SENTINEL' } as Config,
+        {},
+        history,
+      );
+      const { config, generateJson } = makeConfig({
+        chat,
+        fastModel: 'qwen-turbo',
+        generateJsonResult: { title: 'Explain literal context tags' },
+      });
+      expect(
+        (await tryGenerateSessionTitle(config, new AbortController().signal))
+          .ok,
+      ).toBe(true);
+      const prompt = JSON.stringify(generateJson.mock.calls[0][0]);
+      expect(prompt).toContain('USER_AUTHORED_TAG');
+      if (multipart) expect(prompt).toContain('Explain that literal tag');
+      expect(prompt).not.toContain('CATALOG_SENTINEL');
+    },
+  );
+
   it('returns {ok:false, reason:"no_fast_model"} when fast model is absent', async () => {
     const { config } = makeConfig({
       fastModel: undefined,
@@ -349,6 +516,73 @@ describe('tryGenerateSessionTitle', () => {
     expect(generateJson).not.toHaveBeenCalled();
   });
 
+  it("draws on the conversation when only a Mod's turn is in the projection", async () => {
+    const framed =
+      '<qwen:mod-prompt mod="lint">\nRun the linter\n</qwen:mod-prompt>';
+    // As recorded, and as history holds it: a reminder part ahead, IDE context
+    // prepended to the text, the hooks' context after.
+    const modParts = [
+      { text: framed },
+      { text: wrapUserPromptSubmitContext('MOD_CONTEXT') },
+    ];
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'Fix the flaky login test' }] },
+        { role: 'model', parts: [{ text: 'Fixed it.' }] },
+        {
+          role: 'user',
+          parts: [
+            { text: 'REMINDER' },
+            { text: `IDE_CONTEXT\n\n${framed}` },
+            modParts[1]!,
+          ],
+        },
+        { role: 'model', parts: [{ text: 'Lint is clean.' }] },
+      ],
+      generateJsonResult: { title: 'Fix flaky login test' },
+    });
+
+    // The person's prompt recorded no display text; the Mod's turn offers
+    // nothing and must not switch the title to an empty projection, nor reach
+    // it through the conversation.
+    const outcome = await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+      [undefined, null],
+      new Set([modPromptTitleKey(modParts)!]),
+    );
+
+    expect(outcome).toMatchObject({ ok: true });
+    const call = generateJson.mock.calls[0][0] as { contents: Content[] };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('Fix the flaky login test');
+    expect(prompt).not.toContain('Run the linter');
+    expect(prompt).not.toContain('REMINDER');
+    expect(prompt).toContain('Lint is clean.');
+  });
+
+  it("leaves a Mod's turn out of a display projection", async () => {
+    const { config, generateJson } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: [
+        { role: 'user', parts: [{ text: 'hidden instructions' }] },
+        { role: 'model', parts: [{ text: 'Hello!' }] },
+      ],
+      generateJsonResult: { title: 'Answer greeting' },
+    });
+
+    await tryGenerateSessionTitle(config, new AbortController().signal, [
+      '你好',
+      null,
+    ]);
+
+    const call = generateJson.mock.calls[0][0] as { contents: Content[] };
+    const prompt = call.contents[0]?.parts?.[0]?.text;
+    expect(prompt).toContain('你好');
+    expect(prompt).not.toContain('hidden instructions');
+  });
+
   it('does not align a display projection onto an intervening system turn', async () => {
     const { config, generateJson } = makeConfig({
       fastModel: 'qwen-turbo',
@@ -601,10 +835,12 @@ describe('tryGenerateSessionTitle', () => {
     // A session that pivots mid-conversation — the final topic is what the
     // title should reflect. Feeding the head risks titling the session by
     // what the user opened with rather than what they ended up doing.
-    const longUserText = 'BEGIN_HEAD ' + 'x'.repeat(3000) + ' END_TAIL_MARKER';
+    const longUserText = 'BEGIN_HEAD ' + 'x'.repeat(3000);
     const history: Content[] = [
-      { role: 'user', parts: [{ text: longUserText }] },
-      { role: 'model', parts: [{ text: 'END_MODEL_MARKER' }] },
+      userText(longUserText),
+      modelText('Old topic'),
+      userText('RECENT_USER_MARKER'),
+      modelText('END_MODEL_MARKER'),
     ];
 
     let captured: string | null = null;
@@ -627,8 +863,193 @@ describe('tryGenerateSessionTitle', () => {
     await tryGenerateSessionTitle(config, new AbortController().signal);
 
     expect(captured).not.toBeNull();
+    expect(captured).toContain('User: RECENT_USER_MARKER');
     expect(captured).toContain('END_MODEL_MARKER');
     expect(captured).not.toContain('BEGIN_HEAD');
+  });
+});
+
+describe('tryGenerateSessionTitle output language (#16793)', () => {
+  const CONVERSATION_LANGUAGE_RULE =
+    "Write the title in the main language of the user's messages";
+  const PLAIN_RULES =
+    '- 3-7 words.\n- Sentence case: capitalize only the first word and proper nouns. NOT Title Case.\n- No trailing punctuation.';
+
+  async function titleRequestFor(
+    outputLanguage: string | undefined | null,
+    history = [
+      userText('请解释工作流依赖检查的原理'),
+      modelText('依赖检查会先解析工作流的依赖图。'),
+    ],
+    userDisplayTexts: readonly string[] = [],
+  ) {
+    const dir = await mkdtemp(path.join(tmpdir(), 'session-title-lang-'));
+    try {
+      let outputLanguageFilePath: string | undefined;
+      if (outputLanguage !== undefined) {
+        outputLanguageFilePath = path.join(dir, 'output-language.md');
+        if (outputLanguage !== null) {
+          await writeFile(outputLanguageFilePath, outputLanguage);
+        }
+      }
+      const { config, generateJson } = makeConfig({
+        history,
+        fastModel: 'qwen-turbo',
+        outputLanguageFilePath,
+        generateJsonResult: { title: '解释工作流依赖检查原理' },
+      });
+      const outcome = await tryGenerateSessionTitle(
+        config,
+        new AbortController().signal,
+        userDisplayTexts,
+      );
+      expect(outcome.ok).toBe(true);
+      const request = generateJson.mock.calls[0][0] as {
+        systemInstruction: string;
+        schema: { properties: { title: { description: string } } };
+        contents: Content[];
+      };
+      const transcript = request.contents[0]?.parts?.[0]?.text?.match(
+        /^Conversation so far:\n([\s\S]*)\n\nGenerate the session title now\./,
+      )?.[1];
+      return {
+        ...request,
+        transcript,
+        preferencePathReads: vi.mocked(config.getOutputLanguageFilePath).mock
+          .calls.length,
+      };
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  const AUTO_FILE = `# Output language preference: auto
+<!-- qwen-code:llm-output-language: auto -->
+
+## Rule
+Respond in the same language as the user's input.
+
+## Exception
+If the user explicitly requests a response in a specific language, switch to that language.`;
+  const FIXED_FILE = `# Output language preference: English
+<!-- qwen-code:llm-output-language: English -->
+
+## Rule
+You MUST always respond in **English** regardless of the user's input language.`;
+
+  it('asks for the conversation language under the auto preference', async () => {
+    const { systemInstruction: instruction, schema } =
+      await titleRequestFor(AUTO_FILE);
+    expect(instruction).toContain(CONVERSATION_LANGUAGE_RULE);
+    expect(instruction).toContain(
+      '- 3-7 words, or about 8-20 characters for Chinese, Japanese or Korean.',
+    );
+    expect(instruction).toContain('Do not translate or transliterate them');
+    expect(instruction).not.toContain(PLAIN_RULES);
+    expect(instruction).toMatch(/^Generate a concise title that captures/);
+    expect(schema.properties.title.description).toContain('8-20 characters');
+    expect(instruction).toContain(
+      "This preference overrides any earlier language-selection rule in this system instruction.\n\nFor this title, the user's input means the human user's messages in the conversation transcript. Apply any language exception to those same messages.",
+    );
+    expect(instruction).toContain(AUTO_FILE);
+  });
+
+  it('uses one preference snapshot to choose the prompt and append the rule', async () => {
+    const request = await titleRequestFor(AUTO_FILE);
+    expect(request.preferencePathReads).toBe(1);
+  });
+
+  it('keeps the question and latest log details in a long projected user turn', async () => {
+    const question = '请排查工作流失败的原因。';
+    const logs = 'Dependency check did not complete.\n'.repeat(50);
+    const { transcript } = await titleRequestFor(AUTO_FILE, DIALOG_HISTORY, [
+      `${question}\n${logs}LATEST_LOG_ENTRY`,
+    ]);
+
+    expect(transcript).toContain(question);
+    expect(transcript).toContain('LATEST_LOG_ENTRY');
+    expect(transcript).toHaveLength(1000);
+  });
+
+  it('keeps the human prompt when an assistant reply fills the transcript budget', async () => {
+    const question = '¿Por qué falló el flujo de trabajo?';
+    const answer = 'The dependency checker stopped. '.repeat(50);
+    const { transcript } = await titleRequestFor(undefined, [
+      userText(question),
+      modelText(answer + 'LATEST_REPLY_DETAIL'),
+    ]);
+
+    expect(transcript).toContain(question);
+    expect(transcript).toContain('LATEST_REPLY_DETAIL');
+    expect(transcript).toHaveLength(1000);
+  });
+
+  it('finds a complete marker after an unterminated marker', async () => {
+    const malformed = '<!-- qwen-code:llm-output-language:' + ' '.repeat(4000);
+    const { systemInstruction } = await titleRequestFor(
+      `${malformed}x <!-- qwen-code:llm-output-language: auto -->`,
+    );
+    expect(systemInstruction).toContain(CONVERSATION_LANGUAGE_RULE);
+  });
+
+  it('keeps the selected fast model when the setting changes during setup', async () => {
+    const { config, generateJson } = makeConfig({
+      history: DIALOG_HISTORY,
+      fastModel: 'qwen-turbo',
+      generateJsonResult: { title: 'Fix mobile login' },
+    });
+    const outcome = tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+    );
+    vi.mocked(config.getFastModel).mockReturnValue(undefined);
+
+    await expect(outcome).resolves.toMatchObject({
+      ok: true,
+      modelUsed: 'qwen-turbo',
+    });
+    expect(generateJson).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'qwen-turbo' }),
+    );
+  });
+
+  it.each([
+    ['no preference file is configured', undefined],
+    ['the configured file is missing', null],
+    ['the file is blank', '  \n'],
+  ])(
+    'asks for the conversation language when %s',
+    async (_label, outputLanguage) => {
+      const { systemInstruction: instruction, schema } =
+        await titleRequestFor(outputLanguage);
+      expect(instruction).toContain(CONVERSATION_LANGUAGE_RULE);
+      expect(instruction).not.toContain(PLAIN_RULES);
+      expect(schema.properties.title.description).toContain('8-20 characters');
+    },
+  );
+
+  it.each([
+    ['a fixed language', FIXED_FILE],
+    ['a hand-written rule without the marker', '请始终用中文回答。'],
+  ])('keeps the plain title rules for %s', async (_label, outputLanguage) => {
+    const answer =
+      'The dependency checker stopped. '.repeat(50) + 'Latest detail';
+    const {
+      systemInstruction: instruction,
+      schema,
+      transcript,
+    } = await titleRequestFor(outputLanguage, [
+      userText('请排查工作流失败的原因。'),
+      modelText(answer),
+    ]);
+    expect(instruction).toContain(PLAIN_RULES);
+    expect(instruction).not.toContain(CONVERSATION_LANGUAGE_RULE);
+    expect(instruction).not.toContain('Chinese, Japanese or Korean');
+    expect(instruction).toContain(outputLanguage.trim());
+    expect(schema.properties.title.description).toBe(
+      'A concise sentence-case session title, 3-7 words, no trailing punctuation.',
+    );
+    expect(transcript).toBe(answer.slice(-1000));
   });
 });
 

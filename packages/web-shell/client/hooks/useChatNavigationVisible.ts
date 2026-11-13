@@ -12,24 +12,49 @@ export function useChatNavigationVisible(
       return;
     }
     const container = element.closest('[data-history-viewport]') ?? element;
+    let observedContent: HTMLElement | null = null;
+    let resize: ResizeObserver | null = null;
     const update = () => {
-      const minWidth =
-        Number.parseFloat(
-          getComputedStyle(element).getPropertyValue(
-            '--chat-regular-content-width',
-          ),
-        ) || 1000;
-      setVisible(container.getBoundingClientRect().width >= minWidth);
+      const style = getComputedStyle(element);
+      const content = element.querySelector<HTMLElement>(
+        '[data-web-shell-message-row]',
+      );
+      if (content !== observedContent) {
+        if (observedContent) resize?.unobserve(observedContent);
+        observedContent = content;
+        if (content) resize?.observe(content);
+      }
+      const containerRect = container.getBoundingClientRect();
+      const contentRect = content?.getBoundingClientRect();
+      // Reserve rail space and keep at least 440px for transcript text.
+      setVisible(
+        style.getPropertyValue('--chat-content-width').trim() !== '100%' &&
+          contentRect !== undefined &&
+          contentRect.width >= 440 &&
+          contentRect.left - containerRect.left >= 56 &&
+          containerRect.right - contentRect.right >= 56,
+      );
     };
-    update();
-    const resize =
+    resize =
       typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update);
     resize?.observe(container);
+    update();
+    let frame: number | null = null;
+    // Coalesce streaming DOM mutations into one layout read per frame.
+    const schedule = () => {
+      if (frame !== null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        update();
+      });
+    };
     const shell = element.closest('[data-web-shell-root]');
-    const mutation = new MutationObserver(update);
+    const mutation = new MutationObserver(schedule);
+    mutation.observe(element, { childList: true, subtree: true });
     if (shell)
       mutation.observe(shell, { attributes: true, attributeFilter: ['style'] });
     return () => {
+      if (frame !== null) cancelAnimationFrame(frame);
       resize?.disconnect();
       mutation.disconnect();
     };

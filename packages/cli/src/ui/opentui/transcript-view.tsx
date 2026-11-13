@@ -63,6 +63,9 @@ import {
   type TranscriptWindow,
 } from './transcript-window.js';
 import { assistantMarkdownForRender } from './markdown-heal.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { ModAssistantMessageInput } from '@qwen-code/qwen-code-core/mods/render-tree.js';
+import { useModRow } from '../hooks/use-mod-row.js';
 import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { formatInlineToolArgsJson } from '../components/messages/ToolMessage.js';
 import {
@@ -73,7 +76,14 @@ import { getCompressionStatusText } from '../utils/compression-text.js';
 import { ICON } from '../constants.js';
 import { formatClockTime, formatDuration } from '../utils/formatters.js';
 import { getArenaStatusLabel } from '../utils/displayUtils.js';
-import type { ArenaAgentCardData } from '../types.js';
+import { ToolCallStatus, type ArenaAgentCardData } from '../types.js';
+import { isHistoryItemVisibleAfterRestore } from '../types.js';
+import { t } from '../../i18n/index.js';
+import {
+  buildToolSummary,
+  isCollapsibleTool,
+  isSubagentToolEntry,
+} from '../utils/tool-group-summary.js';
 
 /** ink HistoryItemDisplay picks between two hints by whether the card is
  *  clickable; `ui.mouseTracking: false` hands the pointer back to the
@@ -121,6 +131,8 @@ export interface TranscriptViewProps {
    * *behind* another waiting call, while its card goes back to pending in place,
    * so transcript order and queue order disagree. */
   awaitingCallId?: string;
+  activeShellCallId?: string;
+  focusedShellCallId?: string;
   /**
    * Which end of the transcript is on screen before the first frame reports a
    * real scroll position. The app shell pins its scroll region to the bottom,
@@ -128,6 +140,12 @@ export interface TranscriptViewProps {
    * that reads from the first turn down.
    */
   initialAnchor?: 'top' | 'bottom';
+  /**
+   * The main transcript's Mod rows: the config whose Mods may rewrite a
+   * complete reply block, and the session the items belong to. Left out by
+   * the session preview and the quit screen.
+   */
+  modRows?: { config: Config; sessionId: string };
 }
 
 /** ink HistoryItemDisplay getHistoryItemMarginTop: conversation turns and the
@@ -210,7 +228,7 @@ function sameWindow(a: TranscriptWindow, b: TranscriptWindow): boolean {
  *  call mints a tool card and a task card from one call id, so `id` alone is
  *  not unique among live items and two of them would share one height slot. */
 function itemKey(item: LiveHistoryItem): string {
-  return `${item.kind}:${item.id}`;
+  return `${item.kind}:${item.id}${item.kind === 'tool' && item.renderId ? `:${item.renderId}` : ''}`;
 }
 
 interface MountedNode {
@@ -453,6 +471,85 @@ function useTranscriptWindow(
   return { rootRef, nodesRef, win };
 }
 
+type ToolPresentationRow = Extract<LiveHistoryItem, { kind: 'tool' }>;
+
+type CompactToolPresentation = ToolPresentationRow & {
+  compactToolSummary?: string;
+};
+
+function projectCompactToolGroups(
+  items: readonly LiveHistoryItem[],
+  fullDetail: boolean,
+  showToolCallArgs: boolean,
+  showToolCallDetails: boolean,
+): readonly LiveHistoryItem[] {
+  if (fullDetail || !showToolCallDetails) return items;
+  const projected: LiveHistoryItem[] = [];
+  for (let index = 0; index < items.length; ) {
+    const first = items[index];
+    const group = first.canonicalHistoryItem;
+    if (first.kind !== 'tool' || group?.type !== 'tool_group') {
+      projected.push(first);
+      index++;
+      continue;
+    }
+    const rows: ToolPresentationRow[] = [];
+    let end = index;
+    while (end < items.length) {
+      const row = items[end];
+      if (row.kind !== 'tool' || row.canonicalHistoryItem?.id !== group.id)
+        break;
+      rows.push(row);
+      end++;
+    }
+    const completeGroup =
+      rows.length === group.tools.length &&
+      rows.every((row, position) => row.id === group.tools[position].callId);
+    const forceIndividual =
+      group.isUserInitiated ||
+      group.tools.some(
+        (tool) => isSubagentToolEntry(tool) || tool.ptyId !== undefined,
+      ) ||
+      (group.memoryReadCount ?? 0) > 0 ||
+      (group.memoryWriteCount ?? 0) > 0 ||
+      rows.some(
+        (row) => !row.done || row.confirm === 'pending' || row.canonicalPending,
+      ) ||
+      group.tools.some(
+        (tool) =>
+          tool.status !== ToolCallStatus.Success &&
+          tool.status !== ToolCallStatus.Canceled,
+      ) ||
+      (showToolCallArgs &&
+        group.tools.some(
+          (tool) => tool.args != null && Object.keys(tool.args).length > 0,
+        ));
+    const compact = group.tools.filter(
+      (tool) =>
+        tool.status === ToolCallStatus.Success &&
+        isCollapsibleTool(tool.name) &&
+        !tool.images?.length &&
+        !tool.omittedImageCount,
+    );
+    if (!completeGroup || forceIndividual || compact.length === 0) {
+      projected.push(...rows);
+      index = end;
+      continue;
+    }
+    const compactIds = new Set(compact.map((tool) => tool.callId));
+    const summaryRow = rows.find((row) => compactIds.has(row.id))!;
+    const presentation: CompactToolPresentation = {
+      ...summaryRow,
+      renderId: `${summaryRow.renderId ?? summaryRow.id}:compact-${group.id}`,
+      compactToolSummary: buildToolSummary(compact, false),
+    };
+    projected.push(presentation);
+    projected.push(...rows.filter((row) => !compactIds.has(row.id)));
+    index = end;
+  }
+  return projected;
+}
+
 export function OpenTuiTranscriptView({
   items,
   availableWidth = 80,
@@ -463,18 +560,34 @@ export function OpenTuiTranscriptView({
   showToolCallDetails = true,
   mouseTracking = true,
   awaitingCallId,
+  activeShellCallId,
+  focusedShellCallId,
   initialAnchor = 'bottom',
+  modRows,
 }: TranscriptViewProps) {
+  const visibleItems = useMemo(
+    () =>
+      projectCompactToolGroups(
+        items.filter(
+          (item) =>
+            !item.canonicalOnly && isHistoryItemVisibleAfterRestore(item),
+        ),
+        thoughtsExpanded,
+        showToolCallArgs,
+        showToolCallDetails,
+      ),
+    [items, thoughtsExpanded, showToolCallArgs, showToolCallDetails],
+  );
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
-  const awaitingId = items.find(
+  const awaitingItem = visibleItems.findLast(
     (item) =>
       item.kind === 'tool' &&
       item.confirm === 'pending' &&
       !item.done &&
       item.id === awaitingCallId,
-  )?.id;
+  );
   const { rootRef, nodesRef, win } = useTranscriptWindow(
-    items,
+    visibleItems,
     availableTerminalHeight,
     initialAnchor,
   );
@@ -488,7 +601,7 @@ export function OpenTuiTranscriptView({
       }}
     >
       <box height={win.topPad} flexShrink={0} />
-      {items.slice(win.start, win.end).map((item) => {
+      {visibleItems.slice(win.start, win.end).map((item) => {
         const key = itemKey(item);
         return (
           <box
@@ -517,7 +630,17 @@ export function OpenTuiTranscriptView({
                 showTimestamps={showTimestamps}
                 showToolCallDetails={showToolCallDetails}
                 mouseTracking={mouseTracking}
-                awaitingApproval={item.id === awaitingId}
+                awaitingApproval={item === awaitingItem}
+                modRows={modRows}
+                shellFocus={
+                  item.kind === 'tool' &&
+                  !item.done &&
+                  item.id === activeShellCallId
+                    ? item.id === focusedShellCallId
+                      ? 'focused'
+                      : 'available'
+                    : undefined
+                }
               />
             </OpenTuiErrorBoundary>
           </box>
@@ -539,6 +662,8 @@ function TranscriptItem({
   showToolCallDetails,
   mouseTracking,
   awaitingApproval,
+  shellFocus,
+  modRows,
 }: {
   item: LiveHistoryItem;
   maxRows: number;
@@ -550,6 +675,8 @@ function TranscriptItem({
   showToolCallDetails: boolean;
   mouseTracking: boolean;
   awaitingApproval: boolean;
+  shellFocus?: 'available' | 'focused';
+  modRows?: TranscriptViewProps['modRows'];
 }) {
   switch (item.kind) {
     case 'user':
@@ -557,9 +684,12 @@ function TranscriptItem({
     case 'assistant':
       return (
         <AssistantRow
+          id={item.id}
           text={item.text}
           streaming={item.streaming}
           timestamp={showTimestamps ? item.timestamp : undefined}
+          isFirstOfReply={item.canonicalHistoryItem?.type !== 'gemini_content'}
+          modRows={modRows}
         />
       );
     case 'thinking':
@@ -582,6 +712,7 @@ function TranscriptItem({
           showToolCallDetails={showToolCallDetails}
           mouseTracking={mouseTracking}
           awaitingApproval={awaitingApproval}
+          shellFocus={shellFocus}
         />
       );
     case 'task':
@@ -595,6 +726,30 @@ function TranscriptItem({
     case 'compaction':
       return <CompactionRow compression={item.compression} />;
     case 'info':
+      if (item.presentation === 'subscription-success') {
+        return (
+          <box flexDirection="column">
+            {item.text.split('\n').map((line, index) =>
+              index < 2 ? (
+                <box key={index} flexDirection="row">
+                  <text fg={C.green} flexShrink={0}>
+                    {'✓ '}
+                  </text>
+                  <text fg={C.text} {...selectionProps()}>
+                    {sanitizeTerminalText(line.slice(2))}
+                  </text>
+                </box>
+              ) : (
+                <box key={index} paddingLeft={2}>
+                  <text fg={C.dim} {...selectionProps()}>
+                    {sanitizeTerminalText(line.trimStart())}
+                  </text>
+                </box>
+              ),
+            )}
+          </box>
+        );
+      }
       return (
         <box flexDirection="row">
           {/* A wrapped message would otherwise shrink the prefix and drop its
@@ -606,7 +761,17 @@ function TranscriptItem({
         </box>
       );
     case 'error':
-      return <ErrorRow text={item.text} hint={item.hint} />;
+      return (
+        <ErrorRow
+          text={
+            item.text ===
+            'Your login credentials are no longer valid. Run /auth to sign in again.'
+              ? t(item.text)
+              : item.text
+          }
+          hint={item.hint}
+        />
+      );
     case 'warning':
       return (
         <box flexDirection="row">
@@ -664,17 +829,38 @@ function UserRow({ text }: { text: string }) {
 }
 
 function AssistantRow({
+  id,
   text,
   streaming,
   timestamp,
+  isFirstOfReply,
+  modRows,
 }: {
+  id: string;
   text: string;
   streaming: boolean;
   timestamp?: number;
+  isFirstOfReply: boolean;
+  modRows?: TranscriptViewProps['modRows'];
 }) {
   const meta = assistantMessageMeta();
+  // The Mods can rewrite how a complete, nonblank block is drawn. The item
+  // keeps its original text.
+  const modInput = useMemo<ModAssistantMessageInput | undefined>(
+    () =>
+      modRows && !streaming && text.trim().length > 0
+        ? {
+            surface: 'terminal',
+            component: 'AssistantMessage',
+            requestId: id,
+            props: { text, isFirstOfReply },
+          }
+        : undefined,
+    [modRows, streaming, id, text, isFirstOfReply],
+  );
+  const modProps = useModRow(modRows?.config, modRows?.sessionId, modInput);
   const content = sanitizeTerminalText(
-    assistantMarkdownForRender(text, streaming),
+    assistantMarkdownForRender(modProps?.text ?? text, streaming),
   );
   // The two shapes differ, and `output.showTimestamps` is a setting the dialog
   // can flip mid-session: without keys the stamped branch's second child would
@@ -762,8 +948,9 @@ function ToolCard({
   showToolCallDetails,
   mouseTracking,
   awaitingApproval,
+  shellFocus,
 }: {
-  item: LiveToolItem;
+  item: CompactToolPresentation;
   maxRows: number;
   terminalHeight: number;
   width: number;
@@ -772,9 +959,22 @@ function ToolCard({
   showToolCallDetails: boolean;
   mouseTracking: boolean;
   awaitingApproval: boolean;
+  shellFocus?: 'available' | 'focused';
 }) {
   const [clickedOpen, setClickedOpen] = useState(false);
   const status = toolStatusMeta(item);
+  if (item.compactToolSummary !== undefined) {
+    return (
+      <box flexDirection="row">
+        <box width={STATUS_INDICATOR_WIDTH}>
+          <text fg={status.color}>{status.glyph}</text>
+        </box>
+        <text fg={C.text} attributes={1} flexGrow={1} {...selectionProps()}>
+          {item.compactToolSummary}
+        </text>
+      </box>
+    );
+  }
   const name = toolCardName(item.tool);
   // ink's CollapsibleToolGroupMessage keeps a call open while it needs an
   // answer: the card is the only surface carrying the payload being approved.
@@ -874,6 +1074,11 @@ function ToolCard({
             ) : null}
           </text>
         )}
+        {shellFocus ? (
+          <text fg={C.accent} flexShrink={0}>
+            {shellFocus === 'focused' ? ' (Focused)' : ' (ctrl+f to focus)'}
+          </text>
+        ) : null}
       </box>
       {collapsed ? null : (
         <>
@@ -887,7 +1092,22 @@ function ToolCard({
               </text>
             </box>
           ) : null}
-          <ToolCardBody item={item} maxRows={maxRows} width={width} />
+          <ToolCardBody
+            item={
+              fullDetail && item.detailedDisplay
+                ? {
+                    ...item,
+                    output: sanitizeTerminalText(item.detailedDisplay),
+                    diff: undefined,
+                    todos: undefined,
+                    ansi: undefined,
+                    subagentSummary: undefined,
+                  }
+                : item
+            }
+            maxRows={maxRows}
+            width={width}
+          />
         </>
       )}
     </box>
@@ -1081,11 +1301,18 @@ function RetryRows({
     <box flexDirection="column">
       <text fg={C.red} {...selectionProps()}>
         {sanitizeTerminalText(
-          message ?? `Attempt ${attempt} of ${maxRetries} failed`,
+          message ?? t('Rate limit exceeded. Please wait and try again.'),
         )}
       </text>
       <text fg={C.yellow}>
-        {`↻ Retrying in ${remainingSec}s… (attempt ${attempt} of ${maxRetries})`}
+        {`↻ ${t(
+          'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})',
+          {
+            seconds: String(remainingSec),
+            attempt: String(attempt),
+            maxRetries: String(maxRetries),
+          },
+        )}`}
       </text>
     </box>
   );

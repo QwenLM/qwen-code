@@ -496,6 +496,8 @@ describe('SessionService', () => {
     vi.mocked(readRuntimeStatus).mockResolvedValue({
       schemaVersion: 1,
       pid: 123,
+      procStart: null,
+      pidNs: null,
       sessionId,
       workDir,
       hostname: 'host',
@@ -1040,7 +1042,12 @@ describe('SessionService', () => {
       expect(result.items[0].sessionId).toBe(sessionIdC); // newest
       expect(result.items[1].sessionId).toBe(sessionIdB);
       expect(result.hasMore).toBe(true);
-      expect(result.nextCursor).toBeDefined();
+      // The boundary mtime is unique here, so this pins the published format:
+      // a bare numeric mtime satisfies every shape-agnostic cursor assertion
+      // in this suite while breaking the documented cursor.
+      expect(result.nextCursor).toMatch(
+        /^\d+(\.\d+)?\|[0-9a-f-]{32,36}\.jsonl$/,
+      );
     });
 
     it('should paginate with cursor parameter', async () => {
@@ -1056,6 +1063,40 @@ describe('SessionService', () => {
       expect(result.items).toHaveLength(1);
       expect(result.items[0].sessionId).toBe(sessionIdA);
       expect(result.hasMore).toBe(false);
+    });
+
+    it('should return every session once when all files share an mtime', async () => {
+      // A tie group larger than one page must not be dropped at the page
+      // boundary: the cursor has to carry the ordering tie-break, not just
+      // the timestamp (bulk copies, restores and coarse-timestamp
+      // filesystems all produce equal mtimes).
+      const ids = Array.from({ length: 25 }, (_, index) =>
+        (index + 1).toString(16).padStart(32, '0'),
+      );
+      // readdir order is not name order (ext4 returns hash order), so hand the
+      // files over reversed: only the sort's tie-break can restore the order
+      // the cursor filter assumes.
+      listIds(...ids.slice().reverse());
+      byMtime({}, Date.now());
+      vi.mocked(jsonl.readLines).mockImplementation(async (filePath) => [
+        {
+          ...recordA1,
+          sessionId: filePath.toString().match(/([0-9a-f]{32})\.jsonl/)![1],
+        },
+      ]);
+
+      const seen: string[] = [];
+      let cursor: number | string | undefined;
+      for (let page = 0; page < 10; page++) {
+        const result = await sessionService.listSessions({ cursor, size: 5 });
+        seen.push(...result.items.map((item) => item.sessionId));
+        if (!result.hasMore) break;
+        cursor = result.nextCursor;
+        expect(cursor).toBeDefined();
+      }
+
+      expect(seen).toHaveLength(ids.length);
+      expect(new Set(seen).size).toBe(ids.length);
     });
 
     it('should skip files from different projects', async () => {
@@ -1580,7 +1621,7 @@ describe('SessionService', () => {
       ).resolves.toBe(true);
 
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(7);
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(8);
       expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA, {
         assertCanCommit: assertCleanupOwned,
       });
@@ -2032,7 +2073,7 @@ describe('SessionService', () => {
         errors: [],
       });
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(3);
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(4);
     },
     warnsOnWorktreeSidecarFailure: async (kind: MoveKind) => {
       const m = seeded(kind, '.worktree.json');
@@ -3267,9 +3308,13 @@ describe('SessionService', () => {
         message: userText('backend task'),
       };
 
-      expect(historyOf([realtimeUser, realtimeAssistant, backendUser])).toEqual(
-        [backendUser.message],
-      );
+      const history = historyOf([realtimeUser, realtimeAssistant, backendUser]);
+      expect(history.map(({ role, parts }) => ({ role, parts }))).toEqual([
+        backendUser.message,
+      ]);
+      expect(history.map(getApiHistoryPromptId)).toEqual([
+        'legacy-record:backend-user',
+      ]);
     });
 
     it('does not deep-clone stored messages when rebuilding resume API history', () => {
@@ -3298,7 +3343,14 @@ describe('SessionService', () => {
       const history = historyOf([recordA1, toolResult], '2024-01-01T00:02:00Z');
 
       expect(structuredCloneSpy).not.toHaveBeenCalled();
-      expect(history).toEqual([recordA1.message, toolResult.message]);
+      expect(history.map(({ role, parts }) => ({ role, parts }))).toEqual([
+        recordA1.message,
+        toolResult.message,
+      ]);
+      expect(history.map(getApiHistoryPromptId)).toEqual([
+        'legacy-record:a1',
+        undefined,
+      ]);
       expect(history[1]).not.toBe(toolResult.message);
       expect(history[1].parts).not.toBe(toolResult.message!.parts);
       const response = history[1].parts![0] as {
@@ -3344,10 +3396,15 @@ describe('SessionService', () => {
         '2024-01-01T00:03:00Z',
       );
 
-      expect(history).toEqual([
+      expect(history.map(({ role, parts }) => ({ role, parts }))).toEqual([
         recordA1.message,
         assistantWithToolCall.message,
         merged(toolResult, midTurnUserMessage),
+      ]);
+      expect(history.map(getApiHistoryPromptId)).toEqual([
+        'legacy-record:a1',
+        undefined,
+        undefined,
       ]);
     });
 
@@ -3373,11 +3430,17 @@ describe('SessionService', () => {
         '2024-01-02T04:00:00Z',
       );
 
-      expect(history).toEqual([
+      expect(history.map(({ role, parts }) => ({ role, parts }))).toEqual([
         userText('summary'),
         modelText('Got it. Thanks for the additional context!'),
         recordB2.message,
         postCompressionRecord.message,
+      ]);
+      expect(history.map(getApiHistoryPromptId)).toEqual([
+        undefined,
+        undefined,
+        undefined,
+        'legacy-record:c2',
       ]);
     });
 
@@ -3746,32 +3809,45 @@ describe('SessionService', () => {
       );
     });
 
-    it('remaps lifecycle ownership into the fork without changing execution identity', async () => {
-      seedSession([
-        sys('lifecycle-1', 'u2', 'ui_telemetry', 2, {
-          uiEvent: {
-            'event.name': 'request_lifecycle',
-            v: 1,
-            kind: 'request',
-            executionId: 'execution-1',
-            sessionId: oldId,
-            promptId: `${oldId}#Explore#0`,
-            model: 'model',
-            startedAt: 10,
-            phase: 'started',
-          },
-        }),
-      ]);
-      const result = await fork();
-      const telemetry = readJsonl(result.filePath).find(
-        (record) => record.subtype === 'ui_telemetry',
-      );
-      expect(telemetry.systemPayload.uiEvent).toMatchObject({
-        sessionId: newId,
-        promptId: `${newId}#Explore#0`,
-        executionId: 'execution-1',
-      });
-    });
+    it.each(['request_lifecycle', 'hook_lifecycle'])(
+      'remaps %s ownership into the fork without changing execution identity',
+      async (eventName) => {
+        seedSession([
+          sys('lifecycle-1', 'u2', 'ui_telemetry', 2, {
+            uiEvent: {
+              'event.name': eventName,
+              v: 1,
+              kind: eventName === 'hook_lifecycle' ? 'hook' : 'request',
+              ...(eventName === 'hook_lifecycle'
+                ? {
+                    runtimeId: 'runtime',
+                    agentId: null,
+                    eventName: 'Stop',
+                    hookType: 'command',
+                    source: 'project',
+                    name: 'safe',
+                  }
+                : {}),
+              executionId: 'execution-1',
+              sessionId: oldId,
+              promptId: `${oldId}#Explore#0`,
+              model: 'model',
+              startedAt: 10,
+              phase: 'started',
+            },
+          }),
+        ]);
+        const result = await fork();
+        const telemetry = readJsonl(result.filePath).find(
+          (record) => record.subtype === 'ui_telemetry',
+        );
+        expect(telemetry.systemPayload.uiEvent).toMatchObject({
+          sessionId: newId,
+          promptId: `${newId}#Explore#0`,
+          executionId: 'execution-1',
+        });
+      },
+    );
 
     it('remaps tool lifecycle owner without inventing a prompt id', async () => {
       const event = {

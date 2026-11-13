@@ -1,0 +1,57 @@
+.bar {
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+  margin: -4px 0 8px;
+  flex-shrink: 0;
+}
+
+.reading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 2px 8px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.reading:disabled {
+  cursor: default;
+}
+
+.reading:not(:disabled):hover,
+.reading:focus-visible {
+  color: var(--foreground);
+}
+
+.group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.separator {
+  margin: 0 6px;
+}
