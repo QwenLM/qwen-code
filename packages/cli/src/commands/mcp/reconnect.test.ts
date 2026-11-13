@@ -5,6 +5,7 @@
  */
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import yargs from 'yargs';
 import { reconnectCommand } from './reconnect.js';
 import { loadSettings } from '../../config/settings.js';
 import { assembleMcpServers } from '../../config/mcpServers.js';
@@ -65,6 +66,36 @@ const mockedAssembleMcpServers = assembleMcpServers as vi.Mock;
 const mockedIsWorkspaceTrusted = isWorkspaceTrusted as vi.Mock;
 const MockedConfig = Config as vi.Mock;
 const MockedExtensionManager = ExtensionManager as vi.Mock;
+
+describe('mcp reconnect argument parsing', () => {
+  // Parse only: a no-op handler keeps these tests from connecting anywhere.
+  const parser = () =>
+    yargs([])
+      .command({ ...reconnectCommand, handler: () => {} })
+      .fail(false)
+      .locale('en');
+
+  it('accepts a server name', () => {
+    expect(() => parser().parse('reconnect my-server')).not.toThrow();
+  });
+
+  it('accepts --all', () => {
+    expect(() => parser().parse('reconnect --all')).not.toThrow();
+    expect(() => parser().parse('reconnect -a')).not.toThrow();
+  });
+
+  it('rejects a server name together with --all', () => {
+    expect(() => parser().parse('reconnect my-server --all')).toThrow(
+      /Arguments .* are mutually exclusive/,
+    );
+  });
+
+  it('rejects neither a server name nor --all', () => {
+    expect(() => parser().parse('reconnect')).toThrow(
+      'Please specify a server name or use --all to reconnect all servers.',
+    );
+  });
+});
 
 describe('mcp reconnect command', () => {
   let mockConfig: {
