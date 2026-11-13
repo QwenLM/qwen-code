@@ -393,6 +393,7 @@ import {
   isHostedWorkspacePublicShellProfile,
   HOSTED_WORKSPACE_FILE_PROFILE_V3,
   HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V4,
 } from './hosted-workspace-profiles.js';
 import {
   HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
@@ -6954,6 +6955,10 @@ export function registerHostedHarnessSessionRoutes(
                     allowed: false,
                     reason: 'No active permission classifier for cron arming.',
                   }),
+            shellAvailable: isHostedWorkspaceShellProfile(session.toolProfile),
+            loopWakeupAvailable:
+              session.toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE_V3 ||
+              session.toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE_V4,
           })
         : undefined;
       // H5b: every hosted Session owns its channel funnel — a channel input

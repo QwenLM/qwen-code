@@ -89,6 +89,7 @@ import {
   type HostedLoopSession,
 } from './hosted-loop-session.js';
 import {
+  byteTruncate,
   HostedCronError,
   type HostedCronSession,
 } from './hosted-cron-session.js';
@@ -833,14 +834,24 @@ export const HOSTED_LOOP_WAKEUP_TOOL: FunctionDeclaration = {
     additionalProperties: false,
   },
 };
+// The inline cron_list tool_result must stay under maxInlineResourceBytes
+// (64 KiB) at full capacity: 32 live definitions plus the pending wakeup,
+// each label carried in both the text and the payload. A 256-byte slice per
+// label keeps the union bounded while same-cron schedules stay tellable apart.
+const CRON_LIST_LABEL_MAX_BYTES = 256;
 // Fixed-interval /loop: create a recurring Managed schedule (an H6
 // automation definition) bound to this Session. The schedule runs until
 // cancelled; there is no auto-expiry. One-shot and session-only schedules
 // are refused — use loop_wakeup for a single future wakeup.
+const CRON_CREATE_DESCRIPTION =
+  'Create a recurring schedule that runs a prompt in this Session on a fixed interval (a five-field cron expression). The schedule is durable and runs until cancelled with cron_delete; it does not expire. Always pass recurring:true.';
+// Only profiles that declare loop_wakeup may be pointed at it; the files-only
+// and team-lead revisions carry the cron trio without the wakeup tool.
+const CRON_CREATE_LOOP_FALLBACK =
+  ' For a single future wakeup use loop_wakeup instead.';
 export const HOSTED_CRON_CREATE_TOOL: FunctionDeclaration = {
   name: 'cron_create',
-  description:
-    'Create a recurring schedule that runs a prompt in this Session on a fixed interval (a five-field cron expression). The schedule is durable and runs until cancelled with cron_delete; it does not expire. Always pass recurring:true. For a single future wakeup use loop_wakeup instead.',
+  description: CRON_CREATE_DESCRIPTION + CRON_CREATE_LOOP_FALLBACK,
   parametersJsonSchema: {
     type: 'object',
     properties: {
@@ -870,7 +881,7 @@ export const HOSTED_CRON_CREATE_TOOL: FunctionDeclaration = {
       gate: {
         type: 'string',
         description:
-          'An optional shell command probed before each firing; the schedule fires only while the gate succeeds.',
+          'An optional shell command probed before each firing; the schedule fires only while the gate succeeds. Requires a Session profile with a Shell lane; refused on files-only profiles.',
       },
     },
     required: ['cron', 'prompt'],
@@ -883,7 +894,7 @@ export const HOSTED_CRON_CREATE_TOOL: FunctionDeclaration = {
 export const HOSTED_CRON_LIST_TOOL: FunctionDeclaration = {
   name: 'cron_list',
   description:
-    'List this Session’s recurring cron schedules (created via cron_create) and any pending loop wakeup scheduled via loop_wakeup. Shows each schedule’s id, cron, timezone and state, and each wakeup’s id, fire time and prompt.',
+    'List this Session’s live recurring cron schedules (created via cron_create) and any pending loop wakeup scheduled via loop_wakeup. Shows each schedule’s id, cron, timezone, state and a short goal label, and each wakeup’s id, fire time and a short prompt preview.',
   parametersJsonSchema: {
     type: 'object',
     properties: {},
@@ -2675,6 +2686,10 @@ export class HostedWorkspaceToolTurn {
                 'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.',
               parametersJsonSchema: schema,
             };
+          }
+          if (tool.name === 'cron_create' && !loopTool) {
+            // The profile has no loop_wakeup to fall back to; do not name it.
+            tool = { ...tool, description: CRON_CREATE_DESCRIPTION };
           }
           return extensionToolDeclaration(
             hostedWorkspaceDeclarations([tool], !this.fileBackupsEnabled)[0],
@@ -6634,16 +6649,20 @@ export class HostedWorkspaceToolTurn {
             const union = this.crons
               ? await this.crons.list()
               : { definitions: [], wakeups: await this.loops!.list() };
-            // The goal is omitted from both the text and the payload: it is
-            // up to 4 KiB per definition and the Session holds up to 32, so
-            // carrying it twice would push the committed tool_result past the
-            // inline bound and leave the Session unable to list (and thus
-            // delete) its own schedules. id/cron/timezone/state are what
-            // cron_delete needs.
+            // Labels travel as byte-bounded slices in both the text and the
+            // payload: a goal is up to 4 KiB per definition (32 live) and a
+            // wakeup prompt up to 10,000 characters, so carrying either whole
+            // would push the committed tool_result past the inline bound and
+            // leave the Session unable to list (and thus delete) its own
+            // schedules. The slice keeps same-cron schedules distinguishable.
             const lines = [
               ...union.definitions.map(
                 (definition) =>
-                  `${definition.id} — cron "${definition.cron}" (${definition.timezone}) [${definition.state}]`,
+                  `${definition.id} — cron "${definition.cron}" (${definition.timezone}) [${definition.state}]${
+                    definition.goal
+                      ? `: ${byteTruncate(definition.goal, CRON_LIST_LABEL_MAX_BYTES)}`
+                      : ''
+                  }`,
               ),
               ...union.wakeups.map(
                 (wakeup) =>
@@ -6651,7 +6670,7 @@ export class HostedWorkspaceToolTurn {
                     wakeup.fireAt === null
                       ? 'now'
                       : new Date(wakeup.fireAt).toISOString()
-                  } (one-shot) [durable]: ${wakeup.prompt}`,
+                  } (one-shot) [durable]: ${byteTruncate(wakeup.prompt, CRON_LIST_LABEL_MAX_BYTES)}`,
               ),
             ];
             const text =
@@ -6675,8 +6694,15 @@ export class HostedWorkspaceToolTurn {
                 timezone: definition.timezone,
                 state: definition.state,
                 enabled: definition.enabled,
+                goal: definition.goal
+                  ? byteTruncate(definition.goal, CRON_LIST_LABEL_MAX_BYTES)
+                  : definition.goal,
               })),
-              wakeups: union.wakeups,
+              wakeups: union.wakeups.map((wakeup) => ({
+                id: wakeup.id,
+                fireAt: wakeup.fireAt,
+                prompt: byteTruncate(wakeup.prompt, CRON_LIST_LABEL_MAX_BYTES),
+              })),
               executionStatus: 'success',
             };
           } catch (cause) {

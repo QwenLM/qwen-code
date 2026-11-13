@@ -65,6 +65,14 @@ export class HostedCronError extends Error {
 export interface HostedCronSessionOptions {
   /** The active turn's permission classifier (the sibling's decision 9). */
   readonly classify: HostedLoopClassifier;
+  /** Whether the Session's profile declares a Shell lane. A gate probes
+   * through the Shell lane, so a gated create on a files-only profile is
+   * refused here — before the classifier runs — instead of after the control
+   * plane's 409. Defaults to true for callers without a profile surface. */
+  readonly shellAvailable?: boolean;
+  /** Whether the Session's profile declares loop_wakeup, the one-shot
+   * fallback the refusal text may name. Defaults to true. */
+  readonly loopWakeupAvailable?: boolean;
 }
 
 /** The union list answer: the bound Session's definitions plus the pending
@@ -109,12 +117,23 @@ export class HostedCronSession {
     // retire stay available with the gate off (design decision 2).
     if (params.recurring === false) {
       throw new HostedCronError(
-        'A Managed cron schedule must be recurring; one-shot schedules are not supported. Use loop_wakeup for a single future wakeup.',
+        'A Managed cron schedule must be recurring; one-shot schedules are not supported.' +
+          (this.options.loopWakeupAvailable === false
+            ? ''
+            : ' Use loop_wakeup for a single future wakeup.'),
       );
     }
     if (params.durable === false) {
       throw new HostedCronError(
         'A Managed cron schedule is always durable; durable:false is not supported. Omit durable to keep the schedule until it is cancelled.',
+      );
+    }
+    // A gate probes through the Shell lane; a files-only profile has none.
+    // Refuse before the classifier runs so the model gets a profile-named
+    // refusal it can act on, not the control plane's re-drivable 409.
+    if (params.gate != null && this.options.shellAvailable === false) {
+      throw new HostedCronError(
+        'A gate requires a Shell lane, which this Session profile does not declare. Create the schedule without a gate.',
       );
     }
     const prompt = params.prompt.trim();
@@ -183,9 +202,10 @@ export class HostedCronSession {
   }
 
   /**
-   * The union list: every definition of the bound Session (walking every
-   * ledger page) plus the pending unfired loop wakeup. A create mirrors
-   * before it answers, so a list after a create is consistent.
+   * The union list: every live definition of the bound Session (walking every
+   * ledger page; retired definitions are history, not capacity) plus the
+   * pending unfired loop wakeup. A create mirrors before it answers, so a
+   * list after a create is consistent.
    */
   async list(): Promise<HostedCronList> {
     const definitions: ManagedPublicAutomation[] = [];
@@ -225,7 +245,7 @@ export class HostedCronSession {
 /** A byte-safe truncation for a display label. The cut lands on a code-point
  * boundary so the result re-encodes within the bound: a split sequence would
  * decode to U+FFFD (3 bytes) and could overrun the very limit it truncates to. */
-function byteTruncate(value: string, maxBytes: number): string {
+export function byteTruncate(value: string, maxBytes: number): string {
   const bytes = Buffer.from(value, 'utf8');
   if (bytes.byteLength <= maxBytes) return value;
   let end = maxBytes;
