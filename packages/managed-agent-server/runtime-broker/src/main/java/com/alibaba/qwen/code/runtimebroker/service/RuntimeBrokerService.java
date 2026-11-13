@@ -362,25 +362,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         String harnessId = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
         return resolveScope(harnessId, true, null).thenCompose(scope -> {
             bindingRepository.requireHarnessAdmission(scope, harnessId, null);
-            RuntimeSessionRecord owner = runtimeSessionId == null ? null
-                    : sessionRepository.findHistorical(scope.getTenantId(), harnessId,
-                            BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"));
-            if (runtimeSessionId != null && owner == null) {
-                throw conflict("managed_mcp_owner_unavailable", "The original MCP owner is unavailable.");
-            }
-            if (owner == null) {
-                // A terminal's derived Runtime Session shares the Harness
-                // Session but is not a second MCP owner; exclude it by its
-                // persisted turn kind so opening a terminal does not make the
-                // owner ambiguous. The size() > 1 guard still catches two
-                // genuine Runtime Sessions.
-                var active = sessionRepository.findActiveByHarnessSession(scope.getTenantId(), harnessId, null, 2,
-                        TerminalHolds.TERMINAL_TURN_KIND);
-                if (active.size() > 1) {
-                    throw conflict("managed_mcp_owner_unavailable", "The original MCP owner is ambiguous.");
-                }
-                owner = active.isEmpty() ? null : active.getFirst();
-            }
+            RuntimeSessionRecord owner = McpOwners.resolve(sessionRepository, scope, harnessId, runtimeSessionId);
             CompletionStage<RuntimeBindingRecord> selected;
             if (owner != null) {
                 RuntimeBindingRecord original = bindingRepository.findById(owner.getBindingId());

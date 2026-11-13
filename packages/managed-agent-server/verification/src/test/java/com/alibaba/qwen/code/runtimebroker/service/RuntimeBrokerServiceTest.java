@@ -2250,8 +2250,19 @@ class RuntimeBrokerServiceTest {
             assertEquals("terminal-" + TERMINAL_KEY,
                     admission.hold().getRuntimeSessionId());
             String tenant = owner.getSession().getScope().getTenantId();
-            assertEquals(2, fixture.sessionRepository.findActiveByHarnessSession(
-                    tenant, "harness", null, 10).size());
+            String terminalRuntime = "terminal-" + TERMINAL_KEY;
+            // The unfiltered page (drain and release enumerate through it)
+            // still contains the terminal's Runtime Session, so closing the
+            // Session cleans it up; the owner page excludes it by turn kind.
+            var unfiltered = fixture.sessionRepository.findActiveByHarnessSession(
+                    tenant, "harness", null, 10);
+            assertEquals(2, unfiltered.size());
+            assertTrue(unfiltered.stream().anyMatch(
+                    session -> terminalRuntime.equals(session.getRuntimeSessionId())));
+            var ownerPage = fixture.sessionRepository.findActiveByHarnessSession(
+                    tenant, "harness", null, 10, TerminalHolds.TERMINAL_TURN_KIND);
+            assertEquals(1, ownerPage.size());
+            assertEquals("runtime", ownerPage.getFirst().getRuntimeSessionId());
             // The owner page excludes the terminal's persisted turn kind, so
             // MCP listing still resolves the original owner's server list.
             List<Map<String, Object>> servers = List.of(Map.of("name", "owner-server"));
