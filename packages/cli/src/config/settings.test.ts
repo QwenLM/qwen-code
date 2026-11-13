@@ -858,9 +858,9 @@ describe('Settings Loading and Merging', () => {
       expect(settings.user.settings.security?.folderTrust).toEqual({
         enabled: true,
       });
-      expect(
-        isFolderTrustEnabled(settings.user.settings as Settings),
-      ).toBe(true);
+      expect(isFolderTrustEnabled(settings.user.settings as Settings)).toBe(
+        true,
+      );
     });
 
     it('leaves a canonical value alone and ignores a non-boolean dead key', () => {
