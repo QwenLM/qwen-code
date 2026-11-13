@@ -61,6 +61,9 @@ const two = 2;
       [String.raw`\\u4f60\\u597d`, '你好'],
       [String.raw`\u4f60\u597d` + '\n' + String.raw`\\u4f60\u597d`, '你好'],
       [String.raw`\\u4f60\u4f60\u4f60`, '你你'],
+      [String.raw`\u4f60\u597d\u518d`, '你好\\'],
+      [String.raw`\u4f60\u4f60`, '60你'],
+      ['你好\\\\', String.raw`\u4f60\u597d` + '\\'],
       ['你好', String.raw`\u4f6\u597d`],
       ['你好', String.raw`\u{4f60}\u{597d}`],
       ['a\n', String.raw`\u0061\u000a`],
@@ -100,6 +103,45 @@ const two = 2;
           String.raw`\ud800`,
         ),
       ).toEqual({ oldString: '你好', newString: String.raw`\ud800` });
+    });
+
+    it.each([256, 257])(
+      'bounds recovery at %i decoded code units',
+      (length) => {
+        const old = '你'.repeat(length);
+        const disk = String.raw`\u4f60`.repeat(length);
+
+        expect(normalizeEditStrings(disk, old, '好')).toEqual(
+          length === 256
+            ? { oldString: disk, newString: String.raw`\u597d` }
+            : { oldString: old, newString: '好' },
+        );
+      },
+    );
+
+    it('keeps large escaped arguments outside the recovery budget', () => {
+      const old = String.raw`\u4f60`.repeat(4_000);
+
+      expect(normalizeEditStrings('你'.repeat(4_000), old, '好')).toEqual({
+        oldString: old,
+        newString: '好',
+      });
+    });
+
+    it('returns a normal miss for an engine-sized Unicode needle', () => {
+      const old = '你'.repeat(64_000) + '好';
+      expect(normalizeEditStrings(String.raw`\u4f60`, old, 'new')).toEqual({
+        oldString: old,
+        newString: 'new',
+      });
+    });
+
+    it('preserves exact matching above the recovery budget', () => {
+      const old = '你'.repeat(4_000);
+      expect(normalizeEditStrings(old, old, '好')).toEqual({
+        oldString: old,
+        newString: '好',
+      });
     });
   });
 

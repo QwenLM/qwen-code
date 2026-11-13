@@ -303,6 +303,7 @@ export interface NormalizedEditStrings {
 }
 
 const UNICODE_ESCAPE_PATTERN = /\\\\|\\u[0-9a-fA-F]{4}/g;
+const MAX_UNICODE_RECOVERY_CODE_UNITS = 256;
 
 function decodeUnicodeEscapes(text: string): string | null {
   const decoded = text.replace(UNICODE_ESCAPE_PATTERN, (escape) => {
@@ -317,13 +318,32 @@ function decodeUnicodeEscapes(text: string): string | null {
     : decoded;
 }
 
+function splitsEscapeSequence(text: string, offset: number): boolean {
+  if (text[offset - 1] === '\\' && text[offset] === '\\') return true;
+  for (let start = Math.max(0, offset - 5); start < offset; start++) {
+    if (
+      text[start] === '\\' &&
+      /^\\u[0-9a-fA-F]{4}$/.test(text.slice(start, start + 6))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function findUnicodeEscapeMatch(
   fileContent: string,
   oldString: string,
   newString: string,
 ): NormalizedEditStrings | null {
   const decoded = decodeUnicodeEscapes(oldString);
-  if (decoded === null || !/[\u0080-\uffff]/.test(decoded)) return null;
+  if (
+    decoded === null ||
+    decoded.length > MAX_UNICODE_RECOVERY_CODE_UNITS ||
+    !/[\u0080-\uffff]/.test(decoded)
+  ) {
+    return null;
+  }
   if (decoded === oldString && !fileContent.includes('\\u')) return null;
 
   const pattern = decoded
@@ -343,6 +363,12 @@ function findUnicodeEscapeMatch(
   let canonical: string | undefined;
   let literalSearchStart = 0;
   for (const match of fileContent.matchAll(new RegExp(pattern, 'g'))) {
+    if (
+      splitsEscapeSequence(fileContent, match.index) ||
+      splitsEscapeSequence(fileContent, match.index + match[0].length)
+    ) {
+      return null;
+    }
     // A single canonical slice cannot represent different escaping styles.
     if (canonical !== undefined && canonical !== match[0]) return null;
     canonical = match[0];

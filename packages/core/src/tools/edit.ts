@@ -1068,13 +1068,19 @@ Expectation for required parameters:
           params.old_string,
           params.new_string,
         );
-        return applyReplacement(
+        const oldString = maybeAugmentOldStringForDeletion(
           currentContent,
           normalized.oldString,
           normalized.newString,
+          normalized.lineBasedMatch,
+        );
+        return applyReplacement(
+          currentContent,
+          oldString,
+          normalized.newString,
           params.old_string === '' && currentContent === '',
           normalized.lineBasedMatch
-            ? findLineBasedMatchOffsets(currentContent, normalized.oldString)
+            ? findLineBasedMatchOffsets(currentContent, oldString)
             : undefined,
         );
       },

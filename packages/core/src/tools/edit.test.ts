@@ -304,6 +304,59 @@ describe('EditTool', () => {
       expect(proposed).toBe(' const x = 1 \nfoo\nreplacement\nbar\n');
       expect(readText(filePath)).toBe(content);
     });
+
+    it.each([
+      [String.raw`{"a": "\u4f60\u597d\u518d"}`, '你好\\'],
+      [String.raw`\u4f60\u4f60`, '60你'],
+      ['你好\\\\', String.raw`\u4f60\u597d` + '\\'],
+    ])('refuses recovery that splits an escape in %j', async (content, old) => {
+      const filePath = path.join(rootDir, 'partial-escape.txt');
+      seedFile(filePath, content);
+      const params = edit(filePath, old, 'X');
+
+      const proposed = await tool
+        .getModifyContext(new AbortController().signal)
+        .getProposedContent(params);
+      const result = await run(params);
+
+      expect(proposed).toBe(content);
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
+      expect(readText(filePath)).toBe(content);
+      expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+    });
+
+    it('refuses a large Unicode recovery without an engine error', async () => {
+      const filePath = path.join(rootDir, 'large-unicode.txt');
+      const old = '你'.repeat(4_000);
+      const content = String.raw`\u4f60`.repeat(4_000);
+      seedFile(filePath, content);
+      const params = edit(filePath, old, 'X');
+
+      const proposed = await tool
+        .getModifyContext(new AbortController().signal)
+        .getProposedContent(params);
+      const result = await run(params);
+
+      expect(proposed).toBe(content);
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
+      expect(readText(filePath)).toBe(content);
+      expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+    });
+
+    it('shows the same recovered deletion in the proposal and write', async () => {
+      const filePath = path.join(rootDir, 'unicode-deletion.txt');
+      seedFile(filePath, String.raw`\u4f60\u597d` + '\nnext\n');
+      const params = edit(filePath, '你好', '');
+
+      const proposed = await tool
+        .getModifyContext(new AbortController().signal)
+        .getProposedContent(params);
+      const result = await run(params);
+
+      expect(result.error).toBeUndefined();
+      expect(readText(filePath)).toBe('next\n');
+      expect(proposed).toBe(readText(filePath));
+    });
   });
 
   describe('fuzzy trailing-newline boundaries', () => {
