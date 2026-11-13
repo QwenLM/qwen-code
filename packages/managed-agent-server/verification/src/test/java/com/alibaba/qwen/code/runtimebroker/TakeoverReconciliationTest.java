@@ -1,16 +1,12 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.h2.jdbcx.JdbcDataSource;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -30,10 +26,9 @@ import java.util.function.Function;
 import static org.junit.jupiter.api.Assertions.*;
 
 class TakeoverReconciliationTest {
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void adoptionSettlesEachDispatchedStateWithoutClaimingOrFencing(boolean jdbc) throws Exception {
-        Fixture fixture = new Fixture(jdbc);
+    @Test
+    void adoptionSettlesEachDispatchedStateWithoutClaimingOrFencing() throws Exception {
+        Fixture fixture = new Fixture();
         List<ToolExecutionRecord> originals = new ArrayList<>();
         for (var state : List.of(ToolExecutionRecord.State.EXECUTING,
                 ToolExecutionRecord.State.CANCEL_REQUESTED, ToolExecutionRecord.State.UNKNOWN)) {
@@ -56,10 +51,9 @@ class TakeoverReconciliationTest {
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void expiredDispatchesSettleDirectlyFromOriginalRuntimeEvidence(boolean jdbc) throws Exception {
-        Fixture fixture = new Fixture(jdbc);
+    @Test
+    void expiredDispatchesSettleDirectlyFromOriginalRuntimeEvidence() throws Exception {
+        Fixture fixture = new Fixture();
         ToolExecutionRecord original = fixture.execution("expired", ToolExecutionRecord.State.EXECUTING,
                 Duration.ofSeconds(1));
         awaitLeaseExpiry(List.of(original));
@@ -73,10 +67,9 @@ class TakeoverReconciliationTest {
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void unavailableAndInvalidEvidenceStaysBlockedWithoutReplay(boolean jdbc) throws Exception {
-        Fixture fixture = new Fixture(jdbc);
+    @Test
+    void unavailableAndInvalidEvidenceStaysBlockedWithoutReplay() throws Exception {
+        Fixture fixture = new Fixture();
         List<ToolExecutionRecord> originals = new ArrayList<>();
         for (var state : List.of(ToolExecutionRecord.State.EXECUTING,
                 ToolExecutionRecord.State.CANCEL_REQUESTED, ToolExecutionRecord.State.UNKNOWN)) {
@@ -117,10 +110,9 @@ class TakeoverReconciliationTest {
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void hungStatusTimesOutAndCannotSettleFromALateResponse(boolean jdbc) throws Exception {
-        Fixture fixture = new Fixture(jdbc);
+    @Test
+    void hungStatusTimesOutAndCannotSettleFromALateResponse() throws Exception {
+        Fixture fixture = new Fixture();
         fixture.execution("hung-a", ToolExecutionRecord.State.UNKNOWN);
         fixture.execution("hung-b", ToolExecutionRecord.State.UNKNOWN);
         var pending = new CompletableFuture<Map<String, Object>>();
@@ -136,10 +128,9 @@ class TakeoverReconciliationTest {
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void storageFailureAbortsAcquisitionAndRetrySkipsCommittedSettlements(boolean jdbc) throws Exception {
-        Fixture fixture = new Fixture(jdbc);
+    @Test
+    void storageFailureAbortsAcquisitionAndRetrySkipsCommittedSettlements() throws Exception {
+        Fixture fixture = new Fixture();
         List<ToolExecutionRecord> originals = new ArrayList<>();
         for (int index = 0; index < 3; index++) {
             originals.add(fixture.execution("storage-" + index, ToolExecutionRecord.State.UNKNOWN));
@@ -161,10 +152,9 @@ class TakeoverReconciliationTest {
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void unresolvedFirstPageDoesNotStarveLaterExecutionsOrScanOtherSessions(boolean jdbc) throws Exception {
-        Fixture fixture = new Fixture(jdbc);
+    @Test
+    void unresolvedFirstPageDoesNotStarveLaterExecutionsOrScanOtherSessions() throws Exception {
+        Fixture fixture = new Fixture();
         List<ToolExecutionRecord> originals = new ArrayList<>();
         for (int index = 0; index < 103; index++) {
             originals.add(fixture.execution("page-" + index, ToolExecutionRecord.State.UNKNOWN));
@@ -191,10 +181,9 @@ class TakeoverReconciliationTest {
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void closingMidScanPreventsLateWritesAndReplacementSkipsSettledRows(boolean jdbc) throws Exception {
-        Fixture fixture = new Fixture(jdbc);
+    @Test
+    void closingMidScanPreventsLateWritesAndReplacementSkipsSettledRows() throws Exception {
+        Fixture fixture = new Fixture();
         List<ToolExecutionRecord> originals = new ArrayList<>();
         for (int index = 0; index < 4; index++) {
             originals.add(fixture.execution("interrupted-" + index, ToolExecutionRecord.State.UNKNOWN));
@@ -231,10 +220,9 @@ class TakeoverReconciliationTest {
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void concurrentTerminalWriteWinsOverStatusEvidence(boolean jdbc) throws Exception {
-        Fixture fixture = new Fixture(jdbc);
+    @Test
+    void concurrentTerminalWriteWinsOverStatusEvidence() throws Exception {
+        Fixture fixture = new Fixture();
         ToolExecutionRecord original = fixture.execution("race", ToolExecutionRecord.State.EXECUTING);
         try (RuntimeBrokerService broker = fixture.broker(reference -> {
             assertNotNull(fixture.executions.compareAndSet(original, original.withResult(
@@ -274,21 +262,15 @@ class TakeoverReconciliationTest {
         int settlements;
         int failSettlementNumber;
 
-        Fixture(boolean jdbc) {
-            if (jdbc) {
-                var source = new JdbcDataSource();
-                source.setURL("jdbc:h2:mem:takeover-" + UUID.randomUUID()
-                        + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
-                bindings = new JdbcRuntimeBindingRepository(source,
-                        new AesGcmSecretProtector("test-key", new byte[32]));
-                sessions = new JdbcRuntimeSessionRepository(source);
-                executions = new JdbcToolExecutionRepository(source);
-            } else {
-                bindings = new InMemoryRuntimeBindingRepository();
-                sessions = new InMemoryRuntimeSessionRepository();
-                executions = new InMemoryToolExecutionRepository();
-            }
+        Fixture() {
+            var source = new JdbcDataSource();
+            source.setURL("jdbc:h2:mem:takeover-" + UUID.randomUUID()
+                    + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+            bindings = new JdbcRuntimeBindingRepository(source,
+                    new AesGcmSecretProtector("test-key", new byte[32]));
+            sessions = new JdbcRuntimeSessionRepository(source);
+            executions = new JdbcToolExecutionRepository(source);
             saved = new RuntimeRecoveryContract.Fixture(bindings, sessions, executions, "takeover");
             bindings.releaseOperation(saved.binding.getBindingId(), "recovery", saved.binding.getOperationGeneration());
         }

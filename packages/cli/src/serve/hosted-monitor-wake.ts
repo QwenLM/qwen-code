@@ -70,6 +70,16 @@ export interface HostedMonitorWakeDeps {
    * through {@link failed}.
    */
   next(): Promise<HostedMonitorWakeTurn | undefined>;
+  /**
+   * The earliest future `notBefore` (epoch ms) among the pending wake
+   * inputs that {@link next} skipped as not yet due, or undefined when
+   * none is deferred. Read from the same journal pass as the last
+   * {@link next} call, so the pump arms exactly one timer at that instant
+   * instead of polling on its retry cadence. Optional: a Session with no
+   * delayed-delivery producer omits it and the pump keeps its old
+   * behavior. A kick (a new arm, a cancel, a load) re-evaluates.
+   */
+  deferUntil?(): number | undefined;
   /** Busy Sessions queue; blocked Sessions report their remainder. */
   state(): HostedMonitorWakeState;
   /**
@@ -109,6 +119,13 @@ export class HostedMonitorWakeScheduler {
   private closed = false;
   private pendingKick = false;
   private retry: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * The single deferral timer armed at the earliest future `notBefore`.
+   * Separate from the busy/blocked retry so a due input's short retry is
+   * never held behind a far-future wakeup; cleared at the top of every
+   * pass (a kick re-derives) and on close.
+   */
+  private deferTimer: ReturnType<typeof setTimeout> | undefined;
   /** Callers of {@link exclusive} waiting for the pass in flight. */
   private readonly waiting: Array<(granted: boolean) => void> = [];
   /** Counts every hold of the pump: a pass, or exclusive work. */
@@ -207,10 +224,14 @@ export class HostedMonitorWakeScheduler {
     this.closed = true;
     if (this.retry !== undefined) clearTimeout(this.retry);
     this.retry = undefined;
+    this.clearDeferral();
     for (const take of this.waiting.splice(0)) take(false);
   }
 
   private async pump(): Promise<void> {
+    // A pass re-derives the pending set, so any deferral armed by the
+    // previous pass is stale until this one decides anew.
+    this.clearDeferral();
     for (;;) {
       if (this.closed) return;
       const state = this.deps.state();
@@ -243,7 +264,10 @@ export class HostedMonitorWakeScheduler {
         }
         throw cause;
       }
-      if (next === undefined) return;
+      if (next === undefined) {
+        this.deferIfPending();
+        return;
+      }
       if (state === 'busy' || this.deps.state() === 'busy') {
         this.armRetry();
         return;
@@ -297,6 +321,7 @@ export class HostedMonitorWakeScheduler {
         // returns (a stopped Session's message turn) owes the same
         // reminder, or only an unrelated kick retries that settle.
         if (this.deps.state() === 'blocked') this.armRetry();
+        else this.deferIfPending();
         return;
       }
     }
@@ -324,6 +349,32 @@ export class HostedMonitorWakeScheduler {
       this.kick();
     }, delayMs);
     this.retry.unref();
+  }
+
+  /**
+   * Nothing is due: if a pending input is deferred to a future instant,
+   * arm exactly one timer there instead of polling. An overdue or absent
+   * deferral arms nothing — the next kick re-derives. The timer shares no
+   * slot with the busy/blocked retry, so a due input is never held behind
+   * a far-future wakeup.
+   */
+  private deferIfPending(): void {
+    // A close that lands mid-pass must not leave a timer armed behind it.
+    if (this.closed) return;
+    const until = this.deps.deferUntil?.();
+    if (until === undefined) return;
+    const delay = Math.max(0, until - Date.now());
+    this.clearDeferral();
+    this.deferTimer = setTimeout(() => {
+      this.deferTimer = undefined;
+      this.kick();
+    }, delay);
+    this.deferTimer.unref();
+  }
+
+  private clearDeferral(): void {
+    if (this.deferTimer !== undefined) clearTimeout(this.deferTimer);
+    this.deferTimer = undefined;
   }
 }
 

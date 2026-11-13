@@ -39,6 +39,15 @@ export const MANAGED_CHANNEL_LIMITS = Object.freeze({
   maxReplyContextBytes: 8 * 1024,
   maxSegmentBytes: 48 * 1024,
   maxSegments: CHANNEL_DELIVERY_MAX_SEGMENTS,
+  /**
+   * The segment-text budget one `claim_delivery` answer may carry. The
+   * control plane reads that answer through a 1 MiB JSON response cap, so a
+   * claim returns only the leading unreceipted segments that fit this budget
+   * (with room left for the reply and the delivery record) and the adapter
+   * re-claims the rest after each receipt. Kept well under the cap even for
+   * escape-heavy text; a single segment always fits.
+   */
+  maxClaimTextBytes: 512 * 1024,
   maxSubjectChars: 200,
 } as const);
 
@@ -528,35 +537,94 @@ const TRUNCATION_NOTICE =
 /** The notice a truncation appends, exported so further shrinks keep it. */
 export const CHANNEL_TRUNCATION_NOTICE = TRUNCATION_NOTICE;
 
+const CAPACITY_NOTICE =
+  '\n\n[Reply truncated because it exceeded the channel delivery segment capacity.]';
+
+/**
+ * The notice the segment-count overflow appends: the answer exceeded the
+ * whole delivery's capacity, not any one segment's size. Exported so the
+ * reply envelope-shrink recognizes and strips it like the size notice.
+ */
+export const CHANNEL_CAPACITY_NOTICE = CAPACITY_NOTICE;
+
 /**
  * Cuts text at a code-point boundary under a UTF-8 byte budget and keeps
- * the truncation notice; within the budget the text returns unchanged.
+ * the given notice; within the budget the text returns unchanged.
  */
 export function truncateChannelTextUtf8(
   text: string,
   maxBytes: number,
+  notice: string = TRUNCATION_NOTICE,
 ): string {
   const bytes = Buffer.from(text, 'utf8');
   if (bytes.byteLength <= maxBytes) {
     return text;
   }
-  const limit = Math.max(
-    0,
-    maxBytes - Buffer.byteLength(TRUNCATION_NOTICE, 'utf8'),
-  );
+  const limit = Math.max(0, maxBytes - Buffer.byteLength(notice, 'utf8'));
   let end = limit;
   while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
-  return bytes.subarray(0, end).toString('utf8') + TRUNCATION_NOTICE;
+  return bytes.subarray(0, end).toString('utf8') + notice;
 }
 
 /**
- * The email plan: one segment, bounded. A provider with cards or threads
+ * The email plan: ordered segments under the per-segment byte bound. A
+ * reply that fits one segment plans one, unchanged; a longer reply splits
+ * into up to maxSegments pieces, preferring a line end within the byte
+ * budget when the remainder still fits the remaining segment budget and
+ * falling back to a code-point boundary otherwise. A reply within
+ * maxSegments * maxSegmentBytes is kept whole up to code-point alignment:
+ * the back-off leaves at most 3 bytes of slack per full-width piece, so an
+ * adversarial mixed-width input at exactly the capacity can still overflow
+ * by that slack plus the notice room, visibly marked (uniform-width text
+ * never drifts). A reply past that capacity drops its tail, and the last
+ * kept piece carries the truncation notice. A provider with cards or threads
  * supplies its own plan against the same segment contract.
  */
 export function planChannelSegments(text: string): readonly string[] {
-  return Object.freeze([
-    truncateChannelTextUtf8(text, MANAGED_CHANNEL_LIMITS.maxSegmentBytes),
-  ]);
+  const maxBytes = MANAGED_CHANNEL_LIMITS.maxSegmentBytes;
+  const maxSegments = MANAGED_CHANNEL_LIMITS.maxSegments;
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.byteLength <= maxBytes) {
+    return Object.freeze([text]);
+  }
+  const pieces: string[] = [];
+  let offset = 0;
+  while (offset < bytes.byteLength && pieces.length < maxSegments) {
+    if (bytes.byteLength - offset <= maxBytes) {
+      pieces.push(bytes.subarray(offset).toString('utf8'));
+      offset = bytes.byteLength;
+      break;
+    }
+    let end = offset + maxBytes;
+    const newline = bytes.lastIndexOf(0x0a, end - 1);
+    // A line-end cut is taken only when it is worth a segment slot and the
+    // bytes after it still fit the remaining segment budget. The fill floor
+    // rejects a newline at (or a couple of bytes past) the window start, which
+    // would otherwise emit a 1-2 byte segment — its own publish, claim entry
+    // and provider message — but stays low enough to accept a real paragraph
+    // break a KiB or more into the window instead of cutting mid-word. The
+    // capacity check rejects a cut that would spend the 64-segment count below
+    // the nominal byte capacity on long-line input. Either failure falls back
+    // to the full-width cut, which keeps the whole byte capacity reachable.
+    const fill = newline + 1 - offset;
+    const roomForRest = (maxSegments - pieces.length - 1) * maxBytes;
+    if (fill > 1024 && bytes.byteLength - (newline + 1) <= roomForRest) {
+      end = newline + 1;
+    } else {
+      while (end > offset && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+    }
+    pieces.push(bytes.subarray(offset, end).toString('utf8'));
+    offset = end;
+  }
+  if (offset < bytes.byteLength) {
+    const last = pieces.length - 1;
+    pieces[last] = truncateChannelTextUtf8(
+      pieces[last]! + CAPACITY_NOTICE,
+      maxBytes,
+      CAPACITY_NOTICE,
+    );
+  }
+  return Object.freeze(pieces);
 }
 
 function routeRun(routeId: string): ExtensionRun {

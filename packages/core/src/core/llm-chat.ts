@@ -83,6 +83,8 @@ import type {
   InputModalities,
   PromptCacheSharingParameters,
 } from './contentGenerator.js';
+import { getSystemPromptModel } from './request-model.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   clampOutputTokensToWindow,
   defaultOutputCeiling,
@@ -753,6 +755,12 @@ export interface LlmChatSendOptions {
    * so it is re-appended when the send compacts.
    */
   suppressedHookContext?: string;
+}
+
+export interface DispatchedLlmRequest {
+  readonly model: string;
+  readonly generationConfig: GenerateContentConfig;
+  readonly runtimeView?: RuntimeContentGeneratorView;
 }
 
 export type ChatCompressionObserver = (
@@ -2444,6 +2452,10 @@ export class LlmChat {
     history: Content[];
   };
   private toolBudgetFixedInputVersion = 0;
+  private systemInstructionResolver?: (model: string) => string;
+  private sessionStartContext?: string;
+  private requestSystemInstruction?: GenerateContentConfig['systemInstruction'];
+  private dispatchedRequest?: DispatchedLlmRequest;
   /** Provenances already reported at dispatch, so a retry is not recounted. */
   private readonly injectedToolResults = new WeakSet<ToolOutputProvenance>();
 
@@ -3324,11 +3336,61 @@ export class LlmChat {
     this.generationConfig.systemInstruction = sysInstr;
   }
 
+  setSystemInstructionResolver(resolver: (model: string) => string): void {
+    this.systemInstructionResolver = resolver;
+  }
+
+  private resolveSystemInstruction(model: string): string {
+    const instruction = this.systemInstructionResolver!(model);
+    return this.sessionStartContext
+      ? stripTrailingSessionStartContextBlock(instruction) +
+          buildSessionStartContextBlock(this.sessionStartContext)
+      : instruction;
+  }
+
+  private prepareRequestParams(
+    model: string,
+    params: SendMessageParameters,
+    generation: ContentGeneratorConfig | undefined,
+    hasExplicitInstruction = Object.hasOwn(
+      params.config ?? {},
+      'systemInstruction',
+    ),
+  ): SendMessageParameters {
+    if (!this.systemInstructionResolver || hasExplicitInstruction) {
+      return params;
+    }
+    try {
+      return {
+        ...params,
+        config: {
+          ...params.config,
+          systemInstruction: this.resolveSystemInstruction(
+            getSystemPromptModel(generation ?? {}, model),
+          ),
+        },
+      };
+    } catch (cause) {
+      throw new LlmRequestPreparationError(cause);
+    }
+  }
+
+  private trackRequestSystemInstruction(
+    instruction: GenerateContentConfig['systemInstruction'],
+  ): void {
+    if (!isDeepStrictEqual(this.requestSystemInstruction, instruction)) {
+      this.toolBudgetUsageAnchor = undefined;
+      this.toolBudgetFixedInputVersion++;
+      this.requestSystemInstruction = structuredClone(instruction);
+    }
+  }
+
   setSessionStartContext(extraInstruction: string) {
     const trimmed = extraInstruction.trim();
     if (!trimmed) {
       return;
     }
+    this.sessionStartContext = trimmed;
 
     const current = this.generationConfig.systemInstruction;
     let baseInstruction = '';
@@ -3513,6 +3575,7 @@ export class LlmChat {
       ? this.generationConfig
       : undefined;
     let currentUserContent: Content | undefined;
+    const callerParams = params;
     try {
       if (options?.preparedRequest) {
         const saved = options.preparedRequest;
@@ -3538,6 +3601,14 @@ export class LlmChat {
           compressionStatus: CompressionStatus.NOOP,
         };
       } else {
+        params = this.prepareRequestParams(
+          model,
+          callerParams,
+          cgConfigForThresholds,
+        );
+        this.trackRequestSystemInstruction(
+          { ...this.generationConfig, ...params.config }.systemInstruction,
+        );
         // The send-lock above is held but the generator's `finally` (which
         // resolves it) has not run yet. Any setup error before returning the
         // generator must release the lock or subsequent sends will block forever
@@ -5791,7 +5862,15 @@ export class LlmChat {
                   for await (const event of self.makeFallbackStream(
                     resolvedFallbackModel,
                     fallbackRequestContents,
-                    params,
+                    self.prepareRequestParams(
+                      resolvedFallbackModel,
+                      params,
+                      fallbackConfig,
+                      Object.hasOwn(
+                        callerParams.config ?? {},
+                        'systemInstruction',
+                      ),
+                    ),
                     prompt_id,
                     fallbackGenerator,
                     fallbackRetryAuthType,
@@ -6018,7 +6097,6 @@ export class LlmChat {
     // Bound to the `request.config` snapshot below: `request` is built once and
     // every retry re-sends it, so re-reading this per dispatch would let a
     // setter that fires during backoff relabel stale usage as current.
-    const fixedInputVersion = this.toolBudgetFixedInputVersion;
     const request: PromptCacheSharingParameters = {
       model,
       contents: requestContents,
@@ -6027,6 +6105,8 @@ export class LlmChat {
         continuationInFlight: true,
       }),
     };
+    this.trackRequestSystemInstruction(request.config?.systemInstruction);
+    const fixedInputVersion = this.toolBudgetFixedInputVersion;
     const actualConfig =
       overrides?.contentGeneratorConfig ??
       this.config.getContentGeneratorConfig();
@@ -6108,6 +6188,22 @@ export class LlmChat {
           /* Telemetry is observational. */
         }
       }
+      const {
+        abortSignal: _signal,
+        httpOptions: _http,
+        ...dispatchedConfig
+      } = request.config ?? {};
+      const dispatchedModel = getSystemPromptModel(actualConfig ?? {}, model);
+      this.dispatchedRequest = {
+        model: dispatchedModel,
+        generationConfig: structuredClone(dispatchedConfig),
+        ...(actualConfig && {
+          runtimeView: {
+            contentGenerator: generator,
+            contentGeneratorConfig: { ...actualConfig, model: dispatchedModel },
+          },
+        }),
+      };
       onModelRequestDispatched?.();
       return generator.generateContentStream(request, prompt_id);
     };
@@ -6967,7 +7063,32 @@ export class LlmChat {
 
   /** Returns a shallow copy of the current generation config (for cache param snapshots). */
   getGenerationConfig(): GenerateContentConfig {
-    return { ...this.generationConfig };
+    return {
+      ...this.generationConfig,
+      ...(this.systemInstructionResolver && {
+        systemInstruction: this.resolveSystemInstruction(
+          getSystemPromptModel(
+            this.config.getContentGeneratorConfig() ?? {},
+            this.config.getModel(),
+          ),
+        ),
+      }),
+    };
+  }
+
+  getDispatchedGenerationConfig(): GenerateContentConfig {
+    return structuredClone(
+      this.dispatchedRequest?.generationConfig ?? this.getGenerationConfig(),
+    );
+  }
+
+  getDispatchedRequest(): DispatchedLlmRequest | undefined {
+    return this.dispatchedRequest
+      ? {
+          ...this.dispatchedRequest,
+          generationConfig: this.getDispatchedGenerationConfig(),
+        }
+      : undefined;
   }
 
   async maybeIncludeSchemaDepthContext(error: StructuredError): Promise<void> {
