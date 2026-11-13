@@ -465,6 +465,137 @@ describe('useLocalFilesBridge connect', () => {
   });
 });
 
+describe('useLocalFilesBridge forcePicker', () => {
+  async function connectAndDrive(h: Harness): Promise<void> {
+    await act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    const socket = h.sockets[h.sockets.length - 1]!;
+    socket.emitOpen();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await h.flush();
+  }
+
+  function renderWithPick(pick: () => Promise<FileSystemDirectoryHandle>) {
+    return render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(pick),
+      store: fakeStore(),
+    });
+  }
+
+  it('re-picks and rebuilds even when a grant is already bound', async () => {
+    const first = fakeHandle('first', { query: 'granted' });
+    const second = fakeHandle('second', { query: 'granted' });
+    const pick = vi.fn(async () => first);
+    const store = fakeStore();
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(pick),
+      store,
+    });
+    await h.flush();
+    await connectAndDrive(h);
+    expect(h.get().status.rootName).toBe('first');
+
+    pick.mockClear();
+    pick.mockImplementation(async () => second);
+    await act(async () => {
+      await h.get().connect({ forcePicker: true });
+    });
+    await h.flush();
+    expect(pick).toHaveBeenCalledOnce();
+    expect(store.saves).toEqual([first, second]);
+
+    const socket = h.sockets[h.sockets.length - 1]!;
+    socket.emitOpen();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await h.flush();
+    expect(h.get().status.rootName).toBe('second');
+    h.unmount();
+  });
+
+  it('a plain connect does not re-pick the same bound entry', async () => {
+    const first = fakeHandle('first', { query: 'granted' });
+    const pick = vi.fn(async () => first);
+    const h = renderWithPick(pick);
+    await h.flush();
+    await connectAndDrive(h);
+
+    pick.mockClear();
+    await act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    expect(pick).not.toHaveBeenCalled();
+    expect(h.get().status.phase).toBe('connected');
+    h.unmount();
+  });
+
+  it('a cancelled forcePicker pick keeps the running bridge', async () => {
+    const first = fakeHandle('first', { query: 'granted' });
+    const pick = vi.fn(async () => first);
+    const h = renderWithPick(pick);
+    await h.flush();
+    await connectAndDrive(h);
+
+    pick.mockImplementation(async () => {
+      throw new DOMException('aborted', 'AbortError');
+    });
+    await act(async () => {
+      await h.get().connect({ forcePicker: true });
+    });
+    await h.flush();
+    expect(h.get().status.phase).toBe('connected');
+    expect(h.get().status.rootName).toBe('first');
+    h.unmount();
+  });
+
+  it('a failed forcePicker pick keeps the running bridge connected', async () => {
+    const first = fakeHandle('first', { query: 'granted' });
+    const pick = vi.fn(async () => first);
+    const h = renderWithPick(pick);
+    await h.flush();
+    await connectAndDrive(h);
+
+    pick.mockImplementation(async () => {
+      throw new Error('picker broke');
+    });
+    await act(async () => {
+      await h.get().connect({ forcePicker: true });
+    });
+    await h.flush();
+    // The old bridge is still connected: the failed re-pick must not write a
+    // failed status nor strand a later retry on the same-entry short-circuit.
+    expect(h.get().status.phase).toBe('connected');
+    expect(h.get().status.rootName).toBe('first');
+    h.unmount();
+  });
+});
+
 describe('useLocalFilesBridge restore', () => {
   it('reconnects silently after a reload when the permission is still granted', async () => {
     const handle = fakeHandle('ai_coding', { query: 'granted' });
