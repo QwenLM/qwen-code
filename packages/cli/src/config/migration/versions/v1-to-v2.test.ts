@@ -67,6 +67,34 @@ describe('V1ToV2Migration', () => {
   });
 
   describe('migrate', () => {
+    it.each([true, false])(
+      'preserves the legacy folder-trust feature setting %s at its active path',
+      (enabled) => {
+        const input = { folderTrustFeature: enabled };
+        expect(migration.shouldMigrate(input)).toBe(true);
+        expect(migration.migrate(input, 'user').settings).toEqual({
+          $version: 2,
+          security: { folderTrust: { enabled } },
+        });
+        expect(input).toEqual({ folderTrustFeature: enabled });
+      },
+    );
+
+    it.each([true, false])(
+      'keeps an explicit legacy folderTrust value %s ahead of the feature alias',
+      (enabled) => {
+        expect(
+          migration.migrate(
+            { folderTrustFeature: !enabled, folderTrust: enabled },
+            'user',
+          ).settings,
+        ).toEqual({
+          $version: 2,
+          security: { folderTrust: { enabled } },
+        });
+      },
+    );
+
     it('should migrate flat V1 keys to nested V2 structure', () => {
       const v1Settings = {
         theme: 'dark',
