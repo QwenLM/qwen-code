@@ -42,8 +42,10 @@ import {
   WorktreeResetInterruptedError,
   WorktreeSessionSupersededError,
 } from './worktree-reset-errors.js';
+import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
 import type { SessionArchiveCoordinator } from './session-archive.js';
 import type { SessionRestoreResult } from './session-restore.js';
+import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 import type {
   WorkspaceRegistry,
@@ -66,6 +68,14 @@ export interface PrWatchDepsSources {
   workspaceRegistry: WorkspaceRegistry;
   /** Late-bound: the serve app is built after the refresh timer starts. */
   archiveCoordinator: () => SessionArchiveCoordinator | undefined;
+  /**
+   * Late-bound for the same reason. Only an internal (live-conversation)
+   * runtime needs it, and an admission there without it is refused rather
+   * than run ungated — the route does the same.
+   */
+  conversationRuntimeActivity?: () =>
+    | ConversationRuntimeActivityGate
+    | undefined;
   restore: PrWatchRestore;
   /**
    * Base URLs of the GitHub channels this daemon hosts, already filtered to
@@ -135,10 +145,18 @@ export function createPrWatchDeps(sources: PrWatchDepsSources): PrWatchDeps {
     allowedHosts.add(normalizeWatchHost(hostname));
   }
 
+  // Trust can be revoked while the drain still retains the workspace's rows —
+  // revocation makes the tick partial, and a partial tick keeps them — so the
+  // recipient is re-gated here, not only where the tick picks its workspaces.
+  // Primary stays exempt: it still serves bound sessions (bindings route).
   const resolveRuntime = (workspaceCwd: string): WorkspaceRuntime | undefined =>
     sources.workspaceRegistry
       .listAll()
-      .find((runtime) => runtime.workspaceCwd === workspaceCwd);
+      .find(
+        (runtime) =>
+          runtime.workspaceCwd === workspaceCwd &&
+          (runtime.trusted || runtime.primary),
+      );
 
   const liveSummary = (
     runtime: WorkspaceRuntime,
@@ -160,6 +178,18 @@ export function createPrWatchDeps(sources: PrWatchDepsSources): PrWatchDeps {
       archiveCoordinator,
       ...(sources.daemonLog ? { daemonLog: sources.daemonLog } : {}),
     };
+  };
+
+  const runRuntimeActivity = <T>(
+    runtime: WorkspaceRuntime,
+    operation: () => Promise<T>,
+  ): Promise<T> => {
+    if (!isInternalWorkspaceRuntime(runtime)) return operation();
+    const gate = sources.conversationRuntimeActivity?.();
+    if (!gate) {
+      throw new Error('PR watch: no conversations runtime activity gate');
+    }
+    return gate.run(operation);
   };
 
   const watch: PrWatchObservationTickDeps = {
@@ -220,17 +250,31 @@ export function createPrWatchDeps(sources: PrWatchDepsSources): PrWatchDeps {
     admitPrompt: async (runtime, sessionId, promptText, idempotencyKey) => {
       const deps = admissionDeps();
       if (!deps) throw new Error('PR watch: no archive coordinator');
-      const admission = admitSessionPrompt(deps, {
-        runtime,
-        sessionId,
-        prompt: [{ type: 'text', text: promptText }],
-        request: {},
-        // Both flags: relayed text is an external sender's message, so no
-        // PR-binding backfill may run on it (master §4).
-        classification: { channelPrompt: true, requestedChannelPrompt: true },
-        idempotencyKey,
-      });
-      return { deduplicated: admission.deduplicated };
+      // The caller obligations admitSessionPrompt documents, in the route's
+      // order. Without the shared hold a concurrent archive takes its
+      // exclusive lane, kills the session and drops the turn this admission
+      // enqueues — while the drain records the entry delivered. The seal also
+      // reaches the drain only through runSharedMany.
+      return runRuntimeActivity(runtime, () =>
+        deps.archiveCoordinator.runSharedMany([sessionId], async () => {
+          runtime.generationGuard?.assertOpen();
+          // Synchronous, so no await separates the assert from the call.
+          const admission = admitSessionPrompt(deps, {
+            runtime,
+            sessionId,
+            prompt: [{ type: 'text', text: promptText }],
+            request: {},
+            // Both flags: relayed text is an external sender's message, so no
+            // PR-binding backfill may run on it (master §4).
+            classification: {
+              channelPrompt: true,
+              requestedChannelPrompt: true,
+            },
+            idempotencyKey,
+          });
+          return { deduplicated: admission.deduplicated };
+        }),
+      );
     },
     readPushedHeads: async (
       recipient: PrWatchRecipient,

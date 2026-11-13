@@ -15,6 +15,11 @@ import type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { runQwenServe, type RunHandle } from './run-qwen-serve.js';
 import * as refreshModule from './server/session-pr-refresh.js';
+import type {
+  ChannelWorkerSnapshot,
+  CreateChannelWorkerSupervisorOptions,
+} from './channel-worker-supervisor.js';
+import * as settingsModule from '../config/settings.js';
 
 // The sibling run-qwen-serve.test.ts mocks the refresh chunk to throw for its
 // degradation cases, so the ordered-stop wiring is pinned here instead.
@@ -77,6 +82,7 @@ describe('runQwenServe PR-watch shutdown wiring', () => {
     await handle?.close();
     handle = undefined;
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -128,5 +134,147 @@ describe('runQwenServe PR-watch shutdown wiring', () => {
     // before the lifecycle close runs its drains, so the drain has to reach
     // the stop through its own reference.
     expect(stopWatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('loads hosted channel settings with env injection disabled', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pr-watch-env-')),
+    );
+    const workspace = path.join(tmpDir, 'project');
+    fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+    // The github entry is the positive control: its host can enter the allowed
+    // set only if the hosted-URL loop really ran and really read this
+    // workspace's settings. Without it every assertion below could hold just
+    // because the group list was empty.
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        channels: {
+          telegram: { type: 'telegram' },
+          github: {
+            type: 'github',
+            baseUrl: 'https://ghe.fixture.example.com',
+          },
+        },
+      }),
+    );
+    const evilGhDir = path.join(tmpDir, 'gh-evil');
+    fs.mkdirSync(evilGhDir);
+    fs.writeFileSync(
+      path.join(evilGhDir, 'hosts.yml'),
+      'evil.fixture.example.com:\n    oauth_token: fixture\n',
+    );
+    // Only a trusted workspace's .env is read at all, and loadEnvironment is
+    // no-override — so the key has to start absent for an injection to be
+    // observable. A pre-set value would survive even with the defect.
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      `GH_CONFIG_DIR=${evilGhDir}\n`,
+    );
+    vi.stubEnv('GH_CONFIG_DIR', undefined);
+    const loadSettingsSpy = vi.spyOn(settingsModule, 'loadSettings');
+
+    const snapshot: ChannelWorkerSnapshot = {
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    };
+    const worker = {
+      start: vi.fn(),
+      stop: vi.fn().mockResolvedValue(undefined),
+      restart: vi.fn().mockResolvedValue(snapshot),
+      killAllSync: vi.fn(),
+      snapshot: vi.fn(() => snapshot),
+      enqueueWebhookTask: vi.fn(),
+      deliverChannelMessage: vi.fn(),
+    };
+    const factory = vi.fn((opts: CreateChannelWorkerSupervisorOptions) => {
+      worker.start.mockImplementation(async () => {
+        opts.onReady?.(worker.snapshot());
+      });
+      return worker;
+    });
+    let timerOptions:
+      | Parameters<typeof refreshModule.startSessionPrRefreshTimer>[0]
+      | undefined;
+    vi.spyOn(refreshModule, 'startSessionPrRefreshTimer').mockImplementation(
+      (options) => {
+        timerOptions = options;
+        return {
+          dispose: vi.fn(),
+          stopWatch: vi.fn(async () => {}),
+          drainNow: vi.fn(async () => {}),
+        };
+      },
+    );
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(
+      () => bridge() as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        maxSessions: 1,
+        token: 'secret-token',
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+        trustedWorkspace: true,
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: {
+          readServiceInfo: vi.fn(() => null),
+          writeServeServiceInfo: vi.fn(),
+          reserveServeServiceInfo: vi.fn(),
+          removeServiceInfo: vi.fn(),
+          removeServeServiceInfo: vi.fn(() => true),
+        },
+      },
+    );
+    await fetch(`${handle.url}/health`, {
+      headers: { authorization: 'Bearer secret-token' },
+    });
+    await expect(handle.runtimeReady).resolves.toBeUndefined();
+    await vi.waitFor(() => expect(timerOptions).toBeDefined(), {
+      timeout: 15_000,
+    });
+    // Startup already loaded this workspace's settings through the daemon's
+    // own env-reload path, so only the calls made while the builder resolves
+    // are attributable to this seam.
+    loadSettingsSpy.mockClear();
+    // One resolve of the serve root's builder: it reads the hosted channel
+    // URLs first, then builds the allowed set from the daemon's own env.
+    let allowedHosts: ReadonlySet<string> | undefined;
+    await vi.waitFor(
+      () => {
+        allowedHosts = timerOptions?.getPrWatchDeps?.()?.allowedHosts;
+        expect(allowedHosts).toBeDefined();
+      },
+      { timeout: 15_000 },
+    );
+    // The daemon's own startup env-reload already injects this workspace's
+    // .env into process.env, so the resulting env and allowed set measure the
+    // same with and without this seam's settings argument (A/B, both arms).
+    // What this seam owns is the argument itself: every settings load it
+    // triggers must opt out of env injection, like the grouping's call sites.
+    const seamCalls = loadSettingsSpy.mock.calls.filter(
+      ([cwd]) => cwd === workspace,
+    );
+    expect(seamCalls.length).toBeGreaterThan(0);
+    for (const [, options] of seamCalls) {
+      // loadSettings takes `boolean | LoadSettingsOptions`. The boolean form
+      // carries no env opt-out, so it has to fail this assertion too.
+      const opts = typeof options === 'object' ? options : undefined;
+      expect(opts?.skipLoadEnvironment).toBe(true);
+    }
+    // Positive control: the hosted github entry really reached the allowed
+    // set, so the loop ran instead of iterating an empty group list.
+    expect(allowedHosts?.has('ghe.fixture.example.com')).toBe(true);
   });
 });

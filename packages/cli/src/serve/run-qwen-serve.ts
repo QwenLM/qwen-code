@@ -186,6 +186,7 @@ import type {
   WorkspaceRuntime,
 } from './workspace-registry.js';
 import type { SessionArchiveCoordinator } from './server/session-archive.js';
+import type { ConversationRuntimeActivityGate } from './conversations/conversation-runtime-activity.js';
 import type { RequestedSessionIdAdmission } from './session-id-admission.js';
 import type {
   DaemonTrustPolicySnapshot,
@@ -7683,10 +7684,12 @@ async function runQwenServeImpl(
           };
           void (async () => {
             try {
-              const [depsMod, webhookRuntime] = await Promise.all([
-                import('./server/pr-watch-deps.js'),
-                loadChannelWebhookConfigRuntime(),
-              ]);
+              const [depsMod, webhookRuntime, settingsRuntime] =
+                await Promise.all([
+                  import('./server/pr-watch-deps.js'),
+                  loadChannelWebhookConfigRuntime(),
+                  loadSettingsRuntimeModules(),
+                ]);
               if (refreshGeneration !== sessionPrRefreshGeneration) return;
               createPrWatchDeps = depsMod.createPrWatchDeps;
               prWatchSources = {
@@ -7697,6 +7700,12 @@ async function runQwenServeImpl(
                       sessionArchiveCoordinator?: SessionArchiveCoordinator;
                     }
                   ).sessionArchiveCoordinator,
+                conversationRuntimeActivity: () =>
+                  (
+                    app.locals as {
+                      conversationRuntimeActivity?: ConversationRuntimeActivityGate;
+                    }
+                  ).conversationRuntimeActivity,
                 restore: async (input) => {
                   const admission = (
                     app.locals as {
@@ -7740,11 +7749,33 @@ async function runQwenServeImpl(
               // widen the allowed set.
               readHostedChannelBaseUrls = () => {
                 const urls: unknown[] = [];
+                const runtimes = workspaceRegistry.listAll();
                 for (const group of channelWorkspaceGroups ?? []) {
+                  const runtime = runtimes.find(
+                    (candidate) =>
+                      candidate.workspaceCwd === group.workspaceCwd,
+                  );
+                  if (!runtime) continue;
                   let merged: Record<string, unknown>;
                   try {
+                    // loadChannelsConfig defaults its second argument to
+                    // loadSettings(cwd), which loads that workspace's .env
+                    // into process.env — daemon-wide. A GH_CONFIG_DIR there
+                    // would redirect every gh read this daemon makes and so
+                    // widen the watch's allowed hosts. Load settings the way
+                    // the channel grouping does: no env injection, and no
+                    // workspace settings for an untrusted workspace.
+                    const settings = settingsRuntime.settings.loadSettings(
+                      group.workspaceCwd,
+                      {
+                        skipLoadEnvironment: true,
+                        skipWorkspaceSettings: !runtime.trusted,
+                        workspaceTrusted: runtime.trusted,
+                      },
+                    );
                     merged = webhookRuntime.loadChannelsConfig(
                       group.workspaceCwd,
+                      settings,
                     );
                   } catch {
                     continue;

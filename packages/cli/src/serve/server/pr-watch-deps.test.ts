@@ -33,11 +33,27 @@ import {
   autofixPrPaths,
   type AutofixPrState,
 } from '../../commands/autofix-pr/state.js';
-import { SessionNotFoundError } from '../acp-session-bridge.js';
-import { WorktreeMarkerMissingError } from './worktree-reset-errors.js';
-import type { WorkspaceRuntime } from '../workspace-registry.js';
+import {
+  SessionArchivedError,
+  SessionArchivingError,
+  SessionNotFoundError,
+} from '../acp-session-bridge.js';
+import {
+  WorktreeMarkerMissingError,
+  WorktreeResetInterruptedError,
+  WorktreeSessionSupersededError,
+} from './worktree-reset-errors.js';
+import {
+  createWorkspaceGenerationGuard,
+  WorkspaceGenerationClosedError,
+  type WorkspaceRuntime,
+} from '../workspace-registry.js';
 import type { SessionRestoreResult } from './session-restore.js';
-import type { SessionArchiveCoordinator } from './session-archive.js';
+import {
+  DaemonDrainingError,
+  SessionArchiveCoordinator,
+} from './session-archive.js';
+import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 
 const CWD = '/ws';
 const SESSION = 'session-1';
@@ -52,6 +68,10 @@ function runtime(overrides: Partial<WorkspaceRuntime> = {}): WorkspaceRuntime {
     bridge: {
       listWorkspaceSessions: vi.fn(() => []),
       detachClient: vi.fn(async () => {}),
+      // Present so "release does not kill" is a real assertion: against a
+      // bridge that never had the method, `toBeUndefined()` holds no matter
+      // what the code does.
+      killSession: vi.fn(async () => {}),
     },
     ...overrides,
   } as unknown as WorkspaceRuntime;
@@ -83,13 +103,16 @@ function state(overrides: Partial<AutofixPrState> = {}): AutofixPrState {
 
 describe('createPrWatchDeps', () => {
   let dir: string;
-  const coordinator = {} as SessionArchiveCoordinator;
+  // A real coordinator: the admission envelope's shared hold and its
+  // shutdown seal are the behaviour under test, so a stub would prove nothing.
+  let coordinator: SessionArchiveCoordinator;
   let restore: ReturnType<
     typeof vi.fn<(input: unknown) => Promise<SessionRestoreResult>>
   >;
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    coordinator = new SessionArchiveCoordinator();
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pr-watch-deps-'));
     readGhConfiguredHostsMock.mockReturnValue(new Set<string>());
     scanWorkspaceBindingsMock.mockResolvedValue(false);
@@ -108,6 +131,7 @@ describe('createPrWatchDeps', () => {
       runtimes?: WorkspaceRuntime[];
       hosted?: readonly unknown[];
       withCoordinator?: boolean;
+      activity?: ConversationRuntimeActivityGate;
     } = {},
   ) {
     const runtimes = overrides.runtimes ?? [runtime()];
@@ -115,6 +139,7 @@ describe('createPrWatchDeps', () => {
       workspaceRegistry: { listAll: () => runtimes } as never,
       archiveCoordinator: () =>
         overrides.withCoordinator === false ? undefined : coordinator,
+      conversationRuntimeActivity: () => overrides.activity,
       restore: restore as never,
       hostedChannelBaseUrls: () => overrides.hosted ?? [],
     });
@@ -188,12 +213,30 @@ describe('createPrWatchDeps', () => {
     expect(result.partial).toBe(true);
   });
 
-  it('maps a Gone restore error to gone and any other to unavailable', async () => {
+  it('maps every Gone restore error to gone and any other to unavailable', async () => {
     const { drain } = build();
-    restore.mockRejectedValueOnce(new SessionNotFoundError(SESSION));
-    expect(await drain.wakeSession(SESSION, CWD)).toEqual({ kind: 'gone' });
-    restore.mockRejectedValueOnce(new WorktreeMarkerMissingError(SESSION));
-    expect(await drain.wakeSession(SESSION, CWD)).toEqual({ kind: 'gone' });
+    // One cell per class isGone lists. A class missing from that predicate
+    // would leave a permanently-gone recipient retried on every tick.
+    const goneErrors = [
+      new SessionNotFoundError(SESSION),
+      new SessionArchivedError(SESSION),
+      new WorktreeSessionSupersededError(SESSION, 'replacement'),
+      new WorktreeMarkerMissingError(SESSION),
+      new WorktreeResetInterruptedError(SESSION),
+    ];
+    // Collected and compared as one array so a failure names the class that
+    // regressed, without a second expect argument.
+    const outcomes: Array<{ name: string; kind: string }> = [];
+    for (const error of goneErrors) {
+      restore.mockRejectedValueOnce(error);
+      const outcome = await drain.wakeSession(SESSION, CWD);
+      outcomes.push({ name: error.name, kind: outcome.kind });
+    }
+    expect(outcomes).toEqual(
+      goneErrors.map((error) => ({ name: error.name, kind: 'gone' })),
+    );
+    // Deliberately not Gone: another process holds the writer now and may
+    // release it, so the drain retries instead of excluding the recipient.
     restore.mockRejectedValueOnce(new Error('session_writer_conflict'));
     expect(await drain.wakeSession(SESSION, CWD)).toEqual({
       kind: 'unavailable',
@@ -229,9 +272,7 @@ describe('createPrWatchDeps', () => {
       SESSION,
       'client-1',
     );
-    expect(
-      (target.bridge as unknown as { killSession?: unknown }).killSession,
-    ).toBeUndefined();
+    expect(target.bridge.killSession).not.toHaveBeenCalled();
   });
 
   it('admits relayed text as a channel turn so no binding backfill runs', async () => {
@@ -248,6 +289,110 @@ describe('createPrWatchDeps', () => {
       requestedChannelPrompt: true,
     });
     expect(input.idempotencyKey).toBe('key-1');
+  });
+
+  it('holds the coordinator shared lock across the admission', async () => {
+    // The archive lane is refused only while a shared holder exists, so
+    // attempting it from inside the admission is the witness. Without the
+    // envelope it succeeds: a concurrent archive kills the session and drops
+    // the turn this admission enqueues, while the drain records it delivered.
+    let attempt: Promise<{ ran?: string; refused?: unknown }> | undefined;
+    admitSessionPromptMock.mockImplementation(() => {
+      attempt = coordinator
+        .runExclusiveMany([SESSION], async () => 'archived')
+        .then(
+          (ran) => ({ ran }),
+          (refused: unknown) => ({ refused }),
+        );
+      return { deduplicated: false };
+    });
+    const { drain } = build();
+    await drain.admitPrompt(runtime(), SESSION, 'text', 'key-1');
+    expect(admitSessionPromptMock).toHaveBeenCalledTimes(1);
+    expect((await attempt)?.refused).toBeInstanceOf(SessionArchivingError);
+  });
+
+  it('rejects a sealed coordinator so the entry stays pending', async () => {
+    await coordinator.sealMaintenanceAndWait();
+    const { drain } = build();
+    await expect(
+      drain.admitPrompt(runtime(), SESSION, 'text', 'key-1'),
+    ).rejects.toBeInstanceOf(DaemonDrainingError);
+    expect(admitSessionPromptMock).not.toHaveBeenCalled();
+  });
+
+  it('asserts the generation open before admitting', async () => {
+    admitSessionPromptMock.mockReturnValue({ deduplicated: false });
+    // The real guard, closed: a hand-built stub would only prove the mock
+    // throws, not that a retired generation refuses the admission.
+    const guard = createWorkspaceGenerationGuard();
+    guard.close();
+    const guarded = runtime({ generationGuard: guard });
+    const { drain } = build({ runtimes: [guarded] });
+    await expect(
+      drain.admitPrompt(guarded, SESSION, 'text', 'key-1'),
+    ).rejects.toBeInstanceOf(WorkspaceGenerationClosedError);
+    expect(admitSessionPromptMock).not.toHaveBeenCalled();
+  });
+
+  it('runs an internal runtime admission through the activity gate', async () => {
+    admitSessionPromptMock.mockReturnValue({ deduplicated: false });
+    const gate = {
+      run: vi.fn(async (task: () => Promise<unknown>) => task()),
+    };
+    const internal = runtime({
+      provenance: 'live-conversation',
+    } as Partial<WorkspaceRuntime>);
+    const { drain } = build({
+      runtimes: [internal],
+      activity: gate as unknown as ConversationRuntimeActivityGate,
+    });
+    await drain.admitPrompt(internal, SESSION, 'text', 'key-1');
+    expect(gate.run).toHaveBeenCalledTimes(1);
+    // An ordinary workspace runtime is not gated, so the gate must not be
+    // consulted for it — otherwise every admission would need a conversations
+    // gate this daemon may never have built.
+    const plain = runtime();
+    await drain.admitPrompt(plain, SESSION, 'text', 'key-2');
+    expect(gate.run).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses an internal runtime admission with no activity gate', async () => {
+    const internal = runtime({
+      provenance: 'live-conversation',
+    } as Partial<WorkspaceRuntime>);
+    const { drain } = build({ runtimes: [internal] });
+    await expect(
+      drain.admitPrompt(internal, SESSION, 'text', 'key-1'),
+    ).rejects.toThrow('no conversations runtime activity gate');
+    expect(admitSessionPromptMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses an untrusted non-primary recipient on every seam', async () => {
+    // Trust revocation makes the tick partial, and a partial tick keeps the
+    // retained rows — so the recipient can still arrive here after the
+    // workspace stopped being observable.
+    const untrusted = runtime({ primary: false, trusted: false });
+    const { drain } = build({ runtimes: [untrusted] });
+    expect(drain.resolveRuntime(CWD)).toBeUndefined();
+    expect(await drain.wakeSession(SESSION, CWD)).toEqual({
+      kind: 'unavailable',
+    });
+    expect(restore).not.toHaveBeenCalled();
+    expect(
+      await drain.readPushedHeads({
+        sessionId: SESSION,
+        workspaceCwd: CWD,
+        url: URL,
+      }),
+    ).toBeUndefined();
+    expect(cloneWorktreesOfMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps the primary exempt from the recipient trust gate', async () => {
+    const primary = runtime({ primary: true, trusted: false });
+    const { drain } = build({ runtimes: [primary] });
+    expect(drain.resolveRuntime(CWD)).toBe(primary);
   });
 
   describe('readPushedHeads', () => {

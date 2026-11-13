@@ -768,10 +768,14 @@ export function startSessionPrRefreshTimer(deps: {
   // Retained binding rows, in-flight marks and restore slots for the delivery
   // drain, kept across ticks (master §4/§5).
   const prDrainState = createPrWatchDrainState();
-  // Set only once the gated block actually ran, so shutdown never reads a
-  // watch seam while the switch is off (switch-off parity).
+  // Set only once a gated path actually claimed the watch — the tick's
+  // observation block or an on-demand drain — so shutdown never reads a watch
+  // seam while the switch is off (switch-off parity).
   let activeWatchDir: string | undefined;
   let running = false;
+  // Latched by stopWatch so an on-demand drain cannot claim the watch
+  // directory after the owner record has been handed back.
+  let stopped = false;
   // The observation holds the owner record for the whole tick, and the drain
   // state cannot see that phase, so shutdown waits on the tick itself too.
   const tickWaiters = new Set<() => void>();
@@ -946,6 +950,7 @@ export function startSessionPrRefreshTimer(deps: {
      * stop and reads no seam, so the off state stays inert through shutdown too.
      */
     async stopWatch(): Promise<void> {
+      stopped = true;
       if (activeWatchDir === undefined) {
         dispose();
         return;
@@ -982,6 +987,14 @@ export function startSessionPrRefreshTimer(deps: {
       // non-primary is never observed, so it must not be drained on demand
       // either — the ledger would run git in its checkout.
       if (!runtime || !(runtime.trusted || runtime.primary)) return;
+      // This drain claims the owner record too, and the first tick is a minute
+      // away, so shutdown has to learn about the claim here as well. Otherwise
+      // stopWatch takes its "nothing to stop" return, never waits for the
+      // restores dispatched below, and leaves a record a successor reads as
+      // held by a live pid — its whole watch stays inert until this process
+      // dies. No await separates the latch check from the assignment.
+      if (stopped) return;
+      activeWatchDir = drainDeps.watchDir;
       await runPrWatchDrainTick([runtime], drainDeps, prDrainState, true);
     },
   };

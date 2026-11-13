@@ -2774,6 +2774,52 @@ describe('startSessionPrRefreshTimer', () => {
     }
   });
 
+  it('stopWatch hands back the owner record an on-demand drain claimed', async () => {
+    // The first tick is a minute away, so no observation has run and the
+    // timer's active watch directory is still unset. The drain claims the
+    // owner record regardless, so shutdown must learn about the claim from
+    // drainNow: a leaked record reads as "held by a live pid" to a successor,
+    // whose entire watch then stays inert until this process dies.
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-stop-'),
+    );
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      observationEnabled: true,
+      getPrDrainDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        scanBindings: async () => ({ bindings: [], partial: false }),
+        resolveRuntime: () => trustedRuntime,
+        isSessionLive: () => false,
+        wakeSession: async () => ({ kind: 'unavailable' as const }),
+        admitPrompt: async () => ({ deduplicated: false }),
+        readPushedHeads: async () => undefined,
+      }),
+    });
+    try {
+      // No timer advance: the claim has to come from drainNow alone. Proving
+      // it exists first keeps the release assertion below from passing just
+      // because nothing ever claimed.
+      await handle?.drainNow(trustedCwd);
+      await expect(
+        fsp.access(prWatchOwnerPath(watchDir)),
+      ).resolves.toBeUndefined();
+      await handle?.stopWatch();
+      await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
+      // A resume arriving after shutdown must not claim it back — nothing
+      // would release that record again.
+      await handle?.drainNow(trustedCwd);
+      await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
+    } finally {
+      handle?.dispose();
+      await removeTempTree(watchDir);
+    }
+  });
+
   it('threads the watch log into the listing write seam', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
