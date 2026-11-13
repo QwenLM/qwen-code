@@ -2186,6 +2186,43 @@ describe('multi-workspace session dispatch', () => {
     expect(secondaryBridge.cwdChangeCalls).toEqual([]);
   });
 
+  it('fires the PR-watch resume hook only after a restore succeeded', async () => {
+    // The serve root installs this local and the route's onSessionRestored
+    // reads it at call time, so setting it here exercises the real route seam
+    // rather than a stub of it. The drain itself is switched off in production;
+    // what this pins is that a user's resume reaches the seam at all.
+    const { app } = makeHarness();
+    const drainNow = vi.fn();
+    (
+      app.locals as { prWatchDrainNow?: (workspaceCwd: string) => void }
+    ).prWatchDrainNow = drainNow;
+
+    const ok = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+    expect(ok.status).toBe(200);
+    expect(drainNow).toHaveBeenCalledTimes(1);
+    expect(drainNow).toHaveBeenCalledWith(SECONDARY_CWD);
+
+    // A restore that never succeeded must not schedule a drain: the hook sits
+    // after the response, so every failure exit skips it. An untrusted
+    // workspace is refused by the route's own trust gate.
+    const untrusted = makeHarness({ secondaryTrusted: false });
+    const untrustedDrain = vi.fn();
+    (
+      untrusted.app.locals as {
+        prWatchDrainNow?: (workspaceCwd: string) => void;
+      }
+    ).prWatchDrainNow = untrustedDrain;
+    const failed = await request(untrusted.app)
+      .post('/session/22222222-2222-4222-a222-222222222222/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+    expect(failed.status).not.toBe(200);
+    expect(untrustedDrain).not.toHaveBeenCalled();
+  });
+
   it('restores cold Live load and resume sessions into their server-derived conversation directories', async () => {
     await withStoredLiveCoordinators(
       [LIVE_COLD_LOAD_ID, LIVE_COLD_RESUME_ID],
