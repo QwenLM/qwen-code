@@ -36,12 +36,10 @@ export interface SharedRoundOptions {
   /** Run the round on the event-bus kernel. */
   useEventBus: boolean;
   /**
-   * Right after the model round, before its batch starts, when the round
-   * has calls and did not stop: a stop reason leaves the calls unrun.
+   * Right after the model round, when it has calls and did not stop, before
+   * its batch reads `duplicates`.
    */
-  beforeBatch(
-    calls: readonly ToolCallRequestInfo[],
-  ): AgentLoopStopReason | void;
+  beforeBatch(): void;
 }
 
 /** The live turn ended the round before its events ran out. */
@@ -138,8 +136,7 @@ export function sharedModelRound(
           };
           done = true;
           wake?.();
-          if (model.stop || model.calls.length === 0) return;
-          return options.beforeBatch(model.calls);
+          if (!model.stop && model.calls.length > 0) options.beforeBatch();
         },
         onToolResult: ({ request, response, origin }) => {
           if (origin !== 'executed') answered.push({ request, response });

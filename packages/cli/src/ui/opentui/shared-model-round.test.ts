@@ -262,20 +262,21 @@ describe.each([false, true])('sharedModelRound (kernel=%s)', (kernel) => {
     expect(batch.responses?.map(({ callId }) => callId)).toEqual(['c1']);
   });
 
-  it('leaves the calls unrun when beforeBatch stops the round', async () => {
-    const { client } = fakeClient([call('c1')]);
-    const beforeBatch = vi.fn(() => 'surface_ended' as const);
-    const shared = open(client, undefined, { beforeBatch });
-    for await (const _ of shared.events) {
-      // drain
+  it('calls beforeBatch only for a round with calls to run', async () => {
+    for (const [events, expected] of [
+      [[call('c1')], 1],
+      [[{ type: 'content', value: 'a' }], 0],
+      [[call('c1'), { type: 'loop_detected' }], 0],
+    ] as const) {
+      const { client } = fakeClient([...events]);
+      const beforeBatch = vi.fn();
+      const shared = open(client, undefined, { beforeBatch });
+      for await (const _ of shared.events) {
+        // drain
+      }
+      await shared.close();
+      expect(beforeBatch).toHaveBeenCalledTimes(expected);
     }
-    const executor = okExecutor();
-    expect(await shared.runBatch(executor)).toEqual({
-      parts: [],
-      stop: 'surface_ended',
-    });
-    expect(beforeBatch).toHaveBeenCalledOnce();
-    expect(executor.run).not.toHaveBeenCalled();
   });
 
   it('settles the run, running nothing, when the turn closes the round', async () => {

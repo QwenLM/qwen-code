@@ -1130,11 +1130,8 @@ export async function* livePromptEvents(
                   duplicates: roundDuplicates,
                   useEventBus,
                   beforeBatch: () => {
-                    if (abort.aborted) return 'cancelled';
-                    if (!isCurrentSession()) return 'surface_ended';
                     if (sendOptions.type === SendMessageType.Retry)
                       admitRetriedResults(client, roundDuplicates, nextPrompt);
-                    return undefined;
                   },
                 },
               )
