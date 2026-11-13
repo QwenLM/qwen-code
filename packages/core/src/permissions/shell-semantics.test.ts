@@ -948,6 +948,19 @@ describe('extractShellOperationsAcrossCommand', () => {
       [uncertainWrite('/repo/settings.json')],
     ],
     [
+      // The separator is quoted, so bash keeps `{a,b}` as one literal word and
+      // the cd really lands in that directory: no expansion, no uncertainty.
+      'resolves a brace target whose only separator is quoted',
+      "cd {a','b} && echo x > settings.json",
+      [write('/repo/{a,b}/settings.json')],
+    ],
+    [
+      // Same shape for a range: `{1'..'3}` is one word, not a range.
+      'resolves a brace target whose only range operator is quoted',
+      "cd {1'..'3} && echo x > settings.json",
+      [write('/repo/{1..3}/settings.json')],
+    ],
+    [
       // The cd's own redirect still belongs to the segment, so the early
       // return has to carry it: bash writes `out.txt` before the cd fails.
       'keeps a redirect on the segment of an expanding brace cd',
@@ -1138,6 +1151,26 @@ describe('extractShellOperationsAcrossCommand', () => {
       uncertainWrite('/repo/settings.json'),
     ]);
     expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('does not scan in-bound brace targets past the work budget', () => {
+    // One target just under the length bound, with 600 bare `{` to re-walk.
+    // Every separator is quoted, so no group can return early and the re-walk
+    // runs to the end each time. One segment is affordable; the cost multiplies
+    // across segments, which the length bail never sees. The budget may only
+    // widen the marking, like the length bail.
+    const inBound = '{'.repeat(600) + "xa'".repeat(600) + '}'.repeat(600);
+    const command = Array.from(
+      { length: 50 },
+      () => `cd ${inBound} && echo x > settings.json`,
+    ).join(' && ');
+    const started = Date.now();
+    expect(across(command)).toEqual([
+      ...Array.from({ length: 50 }, () =>
+        uncertainWrite('/repo/settings.json'),
+      ),
+    ]);
+    expect(Date.now() - started).toBeLessThan(250);
   });
 
   it('falls back gracefully on excessively deep wrapper nesting', () => {

@@ -2404,6 +2404,19 @@ const MAX_SHELL_UNWRAP_DEPTH = 4;
 const MAX_BRACE_SCAN_LENGTH = 4096;
 
 /**
+ * Total character comparisons the brace scan may spend on one command. The
+ * length bound caps a single target, not the walk: every bare `{` re-walks to
+ * the end, and `resolveCdTargetCwd` runs once per `cd`/`pushd` segment, so a
+ * command built from in-bound brace-dense targets is still unbounded. The
+ * budget is shared by the whole walk, so splitting the work across segments
+ * cannot reset it. Once spent, every later target bails to "expands", which
+ * likewise only widens the marking.
+ */
+const MAX_BRACE_SCAN_STEPS = 1_000_000;
+
+type BraceScanBudget = { steps: number; exhausted: boolean };
+
+/**
  * Classify a literal `cd` command and resolve its target cwd when static.
  * Dynamic targets (command substitutions, variable expansions, `cd -`) are
  * reported separately so callers can mark subsequent relative paths as
@@ -2432,6 +2445,7 @@ function resolveCdTargetCwd(
   command: string,
   cwd: string,
   cwdUnknown: boolean,
+  braceBudget?: BraceScanBudget,
 ): CdResolution {
   const fdRedirects = new Set<number>();
   const fdCloses = new Set<number>();
@@ -2494,7 +2508,7 @@ function resolveCdTargetCwd(
   // protected relative path would miss. There is no static cwd to derive, so
   // keep the target static-loop-inert and mark the rest of the segment
   // cwd-unknown.
-  if (canBraceExpand(target, targetBare)) {
+  if (canBraceExpand(target, targetBare, braceBudget)) {
     return {
       kind: 'static',
       cwd,
@@ -2536,7 +2550,11 @@ function resolveCdTargetCwd(
  * no separator while the second one encloses the comma. Stopping at the first
  * `}` would publish `a}b` as a real cwd.
  */
-function canBraceExpand(target: string, bare: string | undefined): boolean {
+function canBraceExpand(
+  target: string,
+  bare: string | undefined,
+  budget?: BraceScanBudget,
+): boolean {
   // `bare` is undefined when the caller has no per-character marking; a target
   // reached here is always shell-decoded, so assume the braces were typed bare.
   const isBare = (index: number) => bare === undefined || bare[index] === '1';
@@ -2555,6 +2573,10 @@ function canBraceExpand(target: string, bare: string | undefined): boolean {
   // and bailing only widens the marking to `cwdUnknown` — which escalates to
   // `ask` — so it can never narrow it.
   if (target.length > MAX_BRACE_SCAN_LENGTH) return true;
+  const spent = budget ?? { steps: MAX_BRACE_SCAN_STEPS, exhausted: false };
+  // Once spent it stays spent: re-earning the budget per `cd` segment would
+  // let a command built from in-bound targets multiply the cost.
+  if (spent.exhausted) return true;
   for (
     let opening = target.indexOf('{');
     opening !== -1;
@@ -2569,6 +2591,10 @@ function canBraceExpand(target: string, bare: string | undefined): boolean {
     let depth = 0;
     let separates = false;
     for (let i = opening + 1; i < target.length; i++) {
+      if (--spent.steps < 0) {
+        spent.exhausted = true;
+        return true;
+      }
       if (!isBare(i)) continue;
       const ch = target[i];
       if (ch === '{') {
@@ -2645,7 +2671,10 @@ export function extractShellOperationsAcrossCommand(
   command: string,
   cwd: string,
 ): ShellOperation[] {
-  return walkCompoundCommand(command, cwd, 0, false);
+  return walkCompoundCommand(command, cwd, 0, false, {
+    steps: MAX_BRACE_SCAN_STEPS,
+    exhausted: false,
+  });
 }
 
 function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
@@ -2767,6 +2796,7 @@ function walkCompoundCommand(
   cwd: string,
   depth: number,
   initialCwdUnknown: boolean,
+  braceBudget: BraceScanBudget,
 ): ShellOperation[] {
   const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
 
@@ -2782,7 +2812,12 @@ function walkCompoundCommand(
     // cwd, which is exactly where a protected settings file would be.
     const backgrounded = terminator === '&';
 
-    const cdTarget = resolveCdTargetCwd(sub, effectiveCwd, cwdUnknown);
+    const cdTarget = resolveCdTargetCwd(
+      sub,
+      effectiveCwd,
+      cwdUnknown,
+      braceBudget,
+    );
     if (cdTarget.kind !== 'not-cd') {
       const redirectOps = toRedirectOperations(cdTarget.redirects);
       ops.push(
@@ -2812,6 +2847,7 @@ function walkCompoundCommand(
             effectiveCwd,
             depth + 1,
             cwdUnknown,
+            braceBudget,
           ),
         );
         continue;
