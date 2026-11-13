@@ -25,6 +25,7 @@ import {
   fnResponse,
   modelText,
 } from '../test-utils/model-fixtures.js';
+import { OverlayFs } from './overlayFs.js';
 
 const forkedAgentMocks = vi.hoisted(() => ({
   getCacheSafeParams: vi.fn<
@@ -77,6 +78,23 @@ vi.mock('../agents/forkedAgent.js', () => ({
 afterEach(() => {
   vi.clearAllMocks();
 });
+
+// A response chunk as a real GenerateContentResponse exposes it: the
+// functionCalls getter is derived from the candidate parts, so a fixture
+// cannot disagree with itself. The Turn reads functionCalls; the raw-chunk
+// round reads the parts.
+function responseChunk(parts: Part[]) {
+  const functionCalls = parts
+    .filter((p) => p.functionCall)
+    .map((p) => p.functionCall!);
+  return {
+    type: 'chunk',
+    value: {
+      candidates: [{ content: { parts } }],
+      ...(functionCalls.length > 0 ? { functionCalls } : {}),
+    },
+  };
+}
 
 describe('startSpeculation', () => {
   it('rejects tool sandbox sessions before starting host speculation', async () => {
@@ -944,11 +962,10 @@ describe('acceptSpeculation', () => {
 
 describe('speculation model round on the shared agent loop', () => {
   // Each scenario is the model's rounds as raw chunk parts; the mock exposes
-  // them both as candidate parts (the raw-chunk round) and as functionCalls
-  // (the Turn-backed round), as a real response does.
+  // them as a real response does (functionCalls derived from the parts).
   async function runScenario(
     unified: boolean,
-    rounds: Array<{ parts: Part[]; functionCalls?: unknown[] }>,
+    rounds: Array<{ parts: Part[] }>,
   ) {
     forkedAgentMocks.sendMessageStream.mockReset();
     forkedAgentMocks.runForkedAgent.mockResolvedValue({
@@ -980,15 +997,7 @@ describe('speculation model round on the shared agent loop', () => {
       const round = forkedAgentMocks.sendMessageStream.mock.calls.length;
       const chunk = rounds[round - 1];
       if (!chunk) return;
-      yield {
-        type: 'chunk',
-        value: {
-          candidates: [{ content: { parts: chunk.parts } }],
-          ...(chunk.functionCalls
-            ? { functionCalls: chunk.functionCalls }
-            : {}),
-        },
-      };
+      yield responseChunk(chunk.parts);
     });
 
     const state = await startSpeculation(config, 'read a.ts');
@@ -1005,7 +1014,6 @@ describe('speculation model round on the shared agent loop', () => {
 
   const call = (id: string) => ({
     parts: [fnCall('read_file', { path: 'a.ts' }, id)],
-    functionCalls: [{ id, name: 'read_file', args: { path: 'a.ts' } }],
   });
   const text = (value: string) => ({ parts: [{ text: value }] });
 
@@ -1023,12 +1031,14 @@ describe('speculation model round on the shared agent loop', () => {
             fnCall('read_file', { path: 'a.ts' }, 'call-1'),
             fnCall('read_file', { path: 'b.ts' }, 'call-2'),
           ],
-          functionCalls: [
-            { id: 'call-1', name: 'read_file', args: { path: 'a.ts' } },
-            { id: 'call-2', name: 'read_file', args: { path: 'b.ts' } },
-          ],
         },
         text('done'),
+      ],
+    },
+    {
+      name: 'a thought part is dropped',
+      rounds: [
+        { parts: [{ text: 'reasoning', thought: true }, { text: 'done' }] },
       ],
     },
   ])('matches the raw-chunk round: $name', async ({ rounds }) => {
@@ -1055,13 +1065,7 @@ describe('speculation model round on the shared agent loop', () => {
 });
 
 describe('speculation shared-round event semantics', () => {
-  const chunk = (parts: Part[], functionCalls?: unknown[]) => ({
-    type: 'chunk',
-    value: {
-      candidates: [{ content: { parts } }],
-      ...(functionCalls ? { functionCalls } : {}),
-    },
-  });
+  const chunk = responseChunk;
 
   async function runEventRound(
     unified: boolean,
@@ -1097,6 +1101,7 @@ describe('speculation shared-round event semantics', () => {
       for (const event of events) yield event;
     });
 
+    const cleanupSpy = vi.spyOn(OverlayFs.prototype, 'cleanup');
     const state = await startSpeculation(config, 'read a.ts');
     await vi.waitFor(() =>
       expect(['completed', 'aborted', 'boundary']).toContain(state.status),
@@ -1111,7 +1116,10 @@ describe('speculation shared-round event semantics', () => {
         promptId: call[2] as string | undefined,
       })),
       stateSignal: state.abortController?.signal,
+      // Captured before abortSpeculation, which cleans up unconditionally.
+      overlayCleanups: cleanupSpy.mock.calls.length,
     };
+    cleanupSpy.mockRestore();
     await abortSpeculation(state);
     return snapshot;
   }
@@ -1131,20 +1139,12 @@ describe('speculation shared-round event semantics', () => {
     expect(modelTexts(on.messages)).toEqual(['The answer is ', '42.']);
   });
 
-  it('a fresh retry drops the abandoned attempt', async () => {
-    const on = await runEventRound(true, [
-      chunk([{ text: 'abandoned' }]),
-      { type: 'retry', isContinuation: false },
-      chunk([{ text: 'kept' }]),
-    ]);
-    expect(on.status).toBe('completed');
-    expect(modelTexts(on.messages)).toEqual(['kept']);
-  });
-
-  it('a model fallback drops the failed model output', async () => {
-    const on = await runEventRound(true, [
-      chunk([{ text: 'abandoned' }]),
-      {
+  it.each([
+    { name: 'a fresh retry', event: { type: 'retry', isContinuation: false } },
+    { name: 'an un-flagged retry', event: { type: 'retry' } },
+    {
+      name: 'a model fallback',
+      event: {
         type: 'model_fallback',
         info: {
           fromModel: 'm1',
@@ -1153,13 +1153,26 @@ describe('speculation shared-round event semantics', () => {
           fallbackIndex: 1,
         },
       },
-      chunk([{ text: 'kept' }]),
-    ]);
-    expect(on.status).toBe('completed');
-    expect(modelTexts(on.messages)).toEqual(['kept']);
-  });
+    },
+  ])(
+    '$name drops the abandoned text on the shared round, keeps it on the raw round',
+    async ({ event }) => {
+      const events = [
+        chunk([{ text: 'abandoned' }]),
+        event,
+        chunk([{ text: 'kept' }]),
+      ];
+      const on = await runEventRound(true, events);
+      expect(on.status).toBe('completed');
+      expect(modelTexts(on.messages)).toEqual(['kept']);
+      // The raw round skips non-chunk events, so it keeps both halves.
+      const off = await runEventRound(false, events);
+      expect(off.status).toBe('completed');
+      expect(modelTexts(off.messages)).toEqual(['abandoned', 'kept']);
+    },
+  );
 
-  it('a failed request aborts on both paths', async () => {
+  it('a failed request aborts and cleans the overlay on both paths', async () => {
     const off = await runEventRound(
       false,
       [],
@@ -1168,6 +1181,9 @@ describe('speculation shared-round event semantics', () => {
     const on = await runEventRound(true, [], new Error('429 quota exhausted'));
     expect(off.status).toBe('aborted');
     expect(on.status).toBe('aborted');
+    // The catch's cleanup ran before abortSpeculation's unconditional one.
+    expect(off.overlayCleanups).toBeGreaterThanOrEqual(1);
+    expect(on.overlayCleanups).toBeGreaterThanOrEqual(1);
   });
 
   it('a name-less function call is dropped, not sent to the gate', async () => {
@@ -1175,10 +1191,7 @@ describe('speculation shared-round event semantics', () => {
       chunk([{ functionCall: { args: { path: 'a.ts' } } }]),
     ]);
     const on = await runEventRound(true, [
-      chunk(
-        [{ functionCall: { args: { path: 'a.ts' } } }],
-        [{ args: { path: 'a.ts' } }],
-      ),
+      chunk([{ functionCall: { args: { path: 'a.ts' } } }]),
     ]);
     expect(off.status).toBe('completed');
     expect(on.status).toBe('completed');
@@ -1196,23 +1209,21 @@ describe('speculation shared-round event semantics', () => {
       .filter((p) => p.functionResponse)
       .map((p) => p.functionResponse!.id);
 
-  it('the next round sends the tool results, under the speculation prompt id', async () => {
-    const call = {
-      parts: [fnCall('read_file', { path: 'a.ts' }, 'call-req')],
-      functionCalls: [
-        { id: 'call-req', name: 'read_file', args: { path: 'a.ts' } },
-      ],
-    };
+  it('the rounds send the suggestion then the tool results, under the speculation prompt id', async () => {
     const off = await runEventRound(false, [
-      chunk(call.parts, call.functionCalls),
+      chunk([fnCall('read_file', { path: 'a.ts' }, 'call-req')]),
     ]);
     const on = await runEventRound(true, [
-      chunk(call.parts, call.functionCalls),
+      chunk([fnCall('read_file', { path: 'a.ts' }, 'call-req')]),
     ]);
     for (const arm of [off, on]) {
       expect(arm.requests.length).toBeGreaterThanOrEqual(2);
       expect(arm.requests[0].promptId).toBe('speculation');
       expect(arm.requests[1].promptId).toBe('speculation');
+      // Round 1 carries the suggestion's parts.
+      expect(arm.requests[0].message?.some((p) => p.text === 'read a.ts')).toBe(
+        true,
+      );
       // Round 2 carries the call's functionResponse, not the original prompt.
       expect(arm.requests[1].message?.some((p) => p.functionResponse)).toBe(
         true,
@@ -1232,22 +1243,50 @@ describe('speculation shared-round event semantics', () => {
     expect(off.requests[0].abortSignal).toBeUndefined();
   });
 
-  it('an id-less named call gains a generated id shared by call and response', async () => {
-    const on = await runEventRound(true, [
-      chunk(
-        [{ functionCall: { name: 'read_file', args: { path: 'a.ts' } } }],
-        [{ name: 'read_file', args: { path: 'a.ts' } }],
-      ),
-    ]);
+  it('an id-less named call gains a generated id on the shared round, none on the raw round', async () => {
+    const events = [
+      chunk([{ functionCall: { name: 'read_file', args: { path: 'a.ts' } } }]),
+    ];
+    const on = await runEventRound(true, events);
     expect(on.status).toBe('completed');
     const calls = modelCalls(on.messages);
     expect(calls).toHaveLength(1);
     expect(calls[0].id).toBeTruthy();
     expect(responseIds(on.messages)).toEqual([calls[0].id]);
+    // The raw round keeps no id on the call or its response.
+    const off = await runEventRound(false, events);
+    expect(off.status).toBe('completed');
+    expect(modelCalls(off.messages)[0].id).toBeUndefined();
+    expect(responseIds(off.messages)).toEqual([undefined]);
+  });
+
+  it('a chunk with two text parts becomes one text part on the shared round', async () => {
+    const on = await runEventRound(true, [
+      chunk([{ text: 'a' }, { text: 'b' }]),
+    ]);
+    expect(on.status).toBe('completed');
+    expect(modelTexts(on.messages)).toEqual(['ab']);
+    // The raw round keeps one part per streamed text part.
+    const off = await runEventRound(false, [
+      chunk([{ text: 'a' }, { text: 'b' }]),
+    ]);
+    expect(modelTexts(off.messages)).toEqual(['a', 'b']);
+  });
+
+  it('a thought part never reaches the model message on either round', async () => {
+    const events = [
+      chunk([{ text: 'reasoning', thought: true }, { text: 'done' }]),
+    ];
+    const on = await runEventRound(true, events);
+    expect(on.status).toBe('completed');
+    expect(modelTexts(on.messages)).toEqual(['done']);
+    const off = await runEventRound(false, events);
+    expect(modelTexts(off.messages)).toEqual(['done']);
   });
 
   it.each([
     { name: 'a fresh retry', event: { type: 'retry', isContinuation: false } },
+    { name: 'an un-flagged retry', event: { type: 'retry' } },
     {
       name: 'a model fallback',
       event: {
@@ -1262,15 +1301,9 @@ describe('speculation shared-round event semantics', () => {
     },
   ])('$name drops an abandoned call, not only text', async ({ event }) => {
     const on = await runEventRound(true, [
-      chunk(
-        [fnCall('read_file', { path: 'a.ts' }, 'call-abandoned')],
-        [{ id: 'call-abandoned', name: 'read_file', args: { path: 'a.ts' } }],
-      ),
+      chunk([fnCall('read_file', { path: 'a.ts' }, 'call-abandoned')]),
       event,
-      chunk(
-        [fnCall('read_file', { path: 'b.ts' }, 'call-kept')],
-        [{ id: 'call-kept', name: 'read_file', args: { path: 'b.ts' } }],
-      ),
+      chunk([fnCall('read_file', { path: 'b.ts' }, 'call-kept')]),
     ]);
     expect(on.status).toBe('completed');
     expect(modelCalls(on.messages).map((c) => c.id)).toEqual(['call-kept']);

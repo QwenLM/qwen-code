@@ -513,7 +513,7 @@ Speculation's `runSpeculativeLoop` in `speculation.ts` runs the accepted suggest
 | a name-less function call is dropped                                  | dropped too: the guard reads the raw name, not the `Turn`'s `undefined_tool_name` placeholder          |
 | the request carries no abort signal; cancelling returns the iterator  | the request carries the abort signal, so a cancel also aborts the in-flight request                    |
 
-The parity suite runs a text-only round, a single call and a two-call batch with the setting off and on and compares the resulting history, tool execution and status; a branch marker pins that the shared round runs only with the setting on. Event-seam tests cover a fresh retry, a continuation retry, a model fallback, a failed request (aborted on both paths) and a name-less call.
+The unit suite in `speculation.test.ts` runs a text-only round, a single call, a two-call batch and a thought part with the setting off and on and compares the resulting history, tool execution and status; a branch marker pins that the shared round runs only with the setting on. Event-seam tests cover a fresh retry, an un-flagged retry, a continuation retry, a model fallback, a failed request (aborted and the overlay cleaned on both paths), a name-less call, an id-less call, a two-text-part chunk, and the request bodies (the suggestion, then the tool results), the prompt id and the abort signal. Speculation has no entry in the integration parity suite yet; that run is added when its default flip is prepared.
 
 ## Migration
 

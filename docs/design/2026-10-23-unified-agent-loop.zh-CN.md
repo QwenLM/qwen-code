@@ -513,7 +513,7 @@ speculation 的 `runSpeculativeLoop`（`speculation.ts`）在用户确认前，�
 | 无 name 的 function call 被丢弃                       | 同样丢弃：守卫读原始 name，而非 `Turn` 的 `undefined_tool_name` 占位 |
 | 请求不带 abort 信号；取消时返回迭代器                 | 请求带上 abort 信号，取消同时中止在飞请求                            |
 
-对拍套件以设置开/关各跑一次纯文本轮、单调用与双调用批，比较所得的历史、工具执行与状态；分支标记钉住共享轮仅在开启设置时运行。事件接缝测试覆盖全新重试、续传重试、模型回退、失败请求（两臂均 aborted）与无 name 调用。
+`speculation.test.ts` 的单元套件以设置开/关各跑一次纯文本轮、单调用、双调用批与 thought part，比较所得的历史、工具执行与状态；分支标记钉住共享轮仅在开启设置时运行。事件接缝测试覆盖全新重试、不带标志的重试、续传重试、模型回退、失败请求（两臂均 aborted 且清理 overlay）、无 name 调用、无 id 调用、双文本 part 的 chunk，以及请求体（先是建议、后是工具结果）、prompt id 与 abort 信号。speculation 目前在集成对拍套件中尚无条目；该运行在其准备默认开启时加入。
 
 ## 迁移计划
 
