@@ -14,6 +14,26 @@ afterEach(async () => {
   container?.remove();
 });
 
+function setFilterInput(element: HTMLInputElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLInputElement.prototype,
+    'value',
+  )!.set!;
+  act(() => {
+    setter.call(element, value);
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+
+async function openMenu(element: HTMLElement): Promise<void> {
+  const trigger = element.querySelector('button')!;
+  await act(async () => {
+    trigger.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+    );
+  });
+}
+
 function renderSelector(
   overrides: Partial<React.ComponentProps<typeof WorkspaceSelector>> = {},
 ) {
@@ -354,5 +374,93 @@ describe('WorkspaceSelector', () => {
     expect(document.querySelector('[role="menu"]')).toBeNull();
     expect(document.querySelector('[role="tooltip"]')).toBeNull();
     expect(document.activeElement).not.toBe(trigger);
+  });
+
+  it('renders a filter field that hides non-matching workspaces', async () => {
+    const element = renderSelector();
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    expect(filter).not.toBeNull();
+    expect(filter.placeholder).toBe('Filter workspaces…');
+    // Case-insensitive substring across all options.
+    setFilterInput(filter, 'PRI');
+    let items = [...document.querySelectorAll('[role="menuitemradio"]')];
+    expect(items.length).toBe(1);
+    expect(items[0]!.textContent).toContain('primary');
+    setFilterInput(filter, 'zzz');
+    items = [...document.querySelectorAll('[role="menuitemradio"]')];
+    expect(items.length).toBe(0);
+    expect(document.body.textContent).toContain('No workspaces match');
+  });
+
+  it('keeps matching host groups and drops empty ones while filtering', async () => {
+    const element = renderSelector({
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/primary',
+          label: 'qwen-code',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'remote',
+          cwd: '/srv/remote',
+          label: 'qwen-code',
+          primary: false,
+          trusted: true,
+          hostOrigin: 'https://b.example:4170',
+        },
+        {
+          id: 'other',
+          cwd: '/other',
+          label: 'other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    });
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    setFilterInput(filter, 'qwen');
+    const headers = [
+      ...document.querySelectorAll('[data-slot="dropdown-menu-label"]'),
+    ];
+    expect(headers.map((header) => header.textContent)).toEqual([
+      'Local',
+      'b.example:4170',
+    ]);
+    const items = [...document.querySelectorAll('[role="menuitemradio"]')];
+    expect(items.length).toBe(2);
+  });
+
+  it('resets the filter when the menu closes', async () => {
+    const element = renderSelector();
+    const trigger = element.querySelector('button')!;
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    setFilterInput(filter, 'PRI');
+    await act(async () => {
+      trigger.dispatchEvent(new MouseEvent('pointerleave', { bubbles: true }));
+      document.body.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+      trigger.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+
+    await openMenu(element);
+    const reopened = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    expect(reopened.value).toBe('');
+    expect(document.querySelectorAll('[role="menuitemradio"]').length).toBe(2);
   });
 });

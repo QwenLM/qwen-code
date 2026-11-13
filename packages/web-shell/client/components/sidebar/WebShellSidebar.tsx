@@ -202,6 +202,7 @@ import { RecentSessions } from './RecentSessions';
 import { LocalFilesControl } from '../LocalFilesControl';
 import { DesktopRelayControl } from '../DesktopRelayControl';
 import { workspaceLabelForCwd } from '../../utils/workspace';
+import { matchesWorkspaceQuery } from '../../utils/workspaceFilter';
 import {
   ActivityView,
   useActivityOperations,
@@ -2521,6 +2522,14 @@ export function WebShellSidebar({
     () => orderWorkspaces(projectWorkspaces, workspaceOrder),
     [projectWorkspaces, workspaceOrder],
   );
+  // Name-mode: hide workspace sections only when the search query matches at
+  // least one workspace by name/cwd, so a session-content query that matches
+  // no workspace name keeps the full list visible.
+  const workspaceNameFilterActive =
+    searchQuery.trim() !== '' &&
+    displayedWorkspaces.some((entry) =>
+      matchesWorkspaceQuery([entry.displayName, entry.cwd], searchQuery),
+    );
   useEffect(() => {
     const sourceCwd = workspaceDrag?.cwd ?? workspaceDragStartRef.current?.cwd;
     if (
@@ -8242,82 +8251,91 @@ export function WebShellSidebar({
                 )}
               {!channelView &&
                 (!liveNavigationEnabled || liveView) &&
-                liveWorkspaces.map((ws) => (
-                  <WorkspaceSection
-                    sortBy={questionSortSupported ? sessionSort : undefined}
-                    key={ws.id}
-                    workspace={ws}
-                    hideHeader={liveView}
-                    expanded={liveView ? true : undefined}
-                    renderHeader={(expanded) => (
-                      <span className={styles.liveWorkspaceHeader}>
-                        <AudioLinesIcon
-                          size={16}
-                          strokeWidth={1.2}
-                          aria-hidden="true"
-                        />
-                        <span>{t('sidebar.live')}</span>
-                        <IconChevron expanded={expanded} />
-                      </span>
-                    )}
-                    client={workspace.client}
-                    editingSessionId={editingSessionIdForSections}
-                    untitledSessionLabel={t('sidebar.untitledSession')}
-                    pendingSession={
-                      livePresence &&
-                      (!livePresence.coordinator ||
-                        livePresence.coordinator.workspaceCwd === ws.cwd)
-                        ? {
-                            key: livePresence.callId ?? 'connecting',
-                            sessionId: livePresence.coordinator?.sessionId,
-                            sourceId: livePresence.callId
-                              ? `realtime_voice:${livePresence.callId}`
-                              : undefined,
-                            node: livePendingRow,
-                          }
-                        : undefined
-                    }
-                    reloadToken={workspaceSessionsReloadToken}
-                    untrustedLabel={t('sidebar.workspaceUntrusted')}
-                    readOnlyLabel={t('sidebar.workspaceReadOnly')}
-                    trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
-                    noSessionsLabel={t('sidebar.noSessions')}
-                    loadErrorLabel={t('sidebar.loadFailed')}
-                    organizationEnabled={false}
-                    sessionCatalogRequestsEnabled={
-                      sessionCatalogRequestsEnabled
-                    }
-                    sessionLiveStateEnabled={
-                      workspaceSessionLiveStateEnabled &&
-                      liveStateWorkspaceCwdSet.has(ws.cwd)
-                    }
-                    sourceType={sourceMetadataEnabled ? 'default' : undefined}
-                    channelGroupingEnabled={false}
-                    ungroupedLabel={t('sidebar.groupUngrouped')}
-                    excludePinned={
-                      !liveView && selectedSessionSource !== 'channel'
-                    }
-                    mapSession={applyOptimisticPin}
-                    isPinnedSectionMember={isPinnedSectionMember}
-                    autoExpandKey={
-                      livePresence &&
-                      (!livePresence.coordinator ||
-                        livePresence.coordinator.workspaceCwd === ws.cwd)
-                        ? `live:${livePresence.callId ?? 'connecting'}`
-                        : autoExpandWorkspace?.id === ws.id
-                          ? autoExpandWorkspace.key
+                liveWorkspaces
+                  .filter(
+                    (ws) =>
+                      !workspaceNameFilterActive ||
+                      matchesWorkspaceQuery(
+                        [ws.displayName, ws.cwd],
+                        searchQuery,
+                      ),
+                  )
+                  .map((ws) => (
+                    <WorkspaceSection
+                      sortBy={questionSortSupported ? sessionSort : undefined}
+                      key={ws.id}
+                      workspace={ws}
+                      hideHeader={liveView}
+                      expanded={liveView ? true : undefined}
+                      renderHeader={(expanded) => (
+                        <span className={styles.liveWorkspaceHeader}>
+                          <AudioLinesIcon
+                            size={16}
+                            strokeWidth={1.2}
+                            aria-hidden="true"
+                          />
+                          <span>{t('sidebar.live')}</span>
+                          <IconChevron expanded={expanded} />
+                        </span>
+                      )}
+                      client={workspace.client}
+                      editingSessionId={editingSessionIdForSections}
+                      untitledSessionLabel={t('sidebar.untitledSession')}
+                      pendingSession={
+                        livePresence &&
+                        (!livePresence.coordinator ||
+                          livePresence.coordinator.workspaceCwd === ws.cwd)
+                          ? {
+                              key: livePresence.callId ?? 'connecting',
+                              sessionId: livePresence.coordinator?.sessionId,
+                              sourceId: livePresence.callId
+                                ? `realtime_voice:${livePresence.callId}`
+                                : undefined,
+                              node: livePendingRow,
+                            }
                           : undefined
-                    }
-                    forceAutoExpand={Boolean(livePresence)}
-                    renderSession={(session, options) =>
-                      renderSessionRow(
-                        { ...session, workspaceCwd: ws.cwd },
-                        options,
-                      )
-                    }
-                    showSessionDetails={sessionActionItems.has('details')}
-                  />
-                ))}
+                      }
+                      reloadToken={workspaceSessionsReloadToken}
+                      untrustedLabel={t('sidebar.workspaceUntrusted')}
+                      readOnlyLabel={t('sidebar.workspaceReadOnly')}
+                      trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
+                      noSessionsLabel={t('sidebar.noSessions')}
+                      loadErrorLabel={t('sidebar.loadFailed')}
+                      organizationEnabled={false}
+                      sessionCatalogRequestsEnabled={
+                        sessionCatalogRequestsEnabled
+                      }
+                      sessionLiveStateEnabled={
+                        workspaceSessionLiveStateEnabled &&
+                        liveStateWorkspaceCwdSet.has(ws.cwd)
+                      }
+                      sourceType={sourceMetadataEnabled ? 'default' : undefined}
+                      channelGroupingEnabled={false}
+                      ungroupedLabel={t('sidebar.groupUngrouped')}
+                      excludePinned={
+                        !liveView && selectedSessionSource !== 'channel'
+                      }
+                      mapSession={applyOptimisticPin}
+                      isPinnedSectionMember={isPinnedSectionMember}
+                      autoExpandKey={
+                        livePresence &&
+                        (!livePresence.coordinator ||
+                          livePresence.coordinator.workspaceCwd === ws.cwd)
+                          ? `live:${livePresence.callId ?? 'connecting'}`
+                          : autoExpandWorkspace?.id === ws.id
+                            ? autoExpandWorkspace.key
+                            : undefined
+                      }
+                      forceAutoExpand={Boolean(livePresence)}
+                      renderSession={(session, options) =>
+                        renderSessionRow(
+                          { ...session, workspaceCwd: ws.cwd },
+                          options,
+                        )
+                      }
+                      showSessionDetails={sessionActionItems.has('details')}
+                    />
+                  ))}
               {pinnedSectionVisible && (
                 <>
                   <SidebarSectionHeader
@@ -8461,529 +8479,571 @@ export function WebShellSidebar({
                   {!hideProjectHeader && <WorkspaceHostHeading />}
                   <div className={styles.workspacePicker}>
                     <div className={styles.workspaceList}>
-                      {orderedProjectWorkspaces.map((ws) => (
-                        <div
-                          key={ws.id}
-                          data-sidebar-workspace={ws.cwd}
-                          className={cx(
-                            workspaceDrag?.cwd !== ws.cwd &&
-                              workspaceDrag?.targetCwd === ws.cwd &&
-                              (workspaceDrag.after
-                                ? styles.workspaceDropAfter
-                                : styles.workspaceDropBefore),
-                          )}
-                          onDragOver={(event) => {
-                            if (!workspaceDrag || !canReorderWorkspaces) return;
-                            event.preventDefault();
-                            event.dataTransfer.dropEffect = 'move';
-                            const bounds =
-                              event.currentTarget.getBoundingClientRect();
-                            const after =
-                              event.clientY > bounds.top + bounds.height / 2;
-                            if (
-                              workspaceDrag.targetCwd !== ws.cwd ||
-                              workspaceDrag.after !== after
-                            ) {
+                      {orderedProjectWorkspaces
+                        .filter(
+                          (ws) =>
+                            !workspaceNameFilterActive ||
+                            matchesWorkspaceQuery(
+                              [ws.displayName, ws.cwd],
+                              searchQuery,
+                            ),
+                        )
+                        .map((ws) => (
+                          <div
+                            key={ws.id}
+                            data-sidebar-workspace={ws.cwd}
+                            className={cx(
+                              workspaceDrag?.cwd !== ws.cwd &&
+                                workspaceDrag?.targetCwd === ws.cwd &&
+                                (workspaceDrag.after
+                                  ? styles.workspaceDropAfter
+                                  : styles.workspaceDropBefore),
+                            )}
+                            onDragOver={(event) => {
+                              if (!workspaceDrag || !canReorderWorkspaces)
+                                return;
+                              event.preventDefault();
+                              event.dataTransfer.dropEffect = 'move';
+                              const bounds =
+                                event.currentTarget.getBoundingClientRect();
+                              const after =
+                                event.clientY > bounds.top + bounds.height / 2;
+                              if (
+                                workspaceDrag.targetCwd !== ws.cwd ||
+                                workspaceDrag.after !== after
+                              ) {
+                                setWorkspaceDrag({
+                                  ...workspaceDrag,
+                                  targetCwd: ws.cwd,
+                                  after,
+                                });
+                              }
+                            }}
+                            onDragLeave={(event) => {
+                              if (
+                                event.relatedTarget instanceof Node &&
+                                event.currentTarget.contains(
+                                  event.relatedTarget,
+                                )
+                              ) {
+                                return;
+                              }
+                              if (workspaceDrag?.targetCwd !== ws.cwd) return;
                               setWorkspaceDrag({
                                 ...workspaceDrag,
-                                targetCwd: ws.cwd,
-                                after,
+                                targetCwd: undefined,
                               });
-                            }
-                          }}
-                          onDragLeave={(event) => {
-                            if (
-                              event.relatedTarget instanceof Node &&
-                              event.currentTarget.contains(event.relatedTarget)
-                            ) {
-                              return;
-                            }
-                            if (workspaceDrag?.targetCwd !== ws.cwd) return;
-                            setWorkspaceDrag({
-                              ...workspaceDrag,
-                              targetCwd: undefined,
-                            });
-                          }}
-                          onDrop={(event) => {
-                            if (!workspaceDrag || !canReorderWorkspaces) return;
-                            event.preventDefault();
-                            const bounds =
-                              event.currentTarget.getBoundingClientRect();
-                            const next = reorderWorkspace(
-                              orderedProjectWorkspaces.map(
-                                (entry) => entry.cwd,
-                              ),
-                              workspaceDrag.cwd,
-                              ws.cwd,
-                              event.clientY > bounds.top + bounds.height / 2,
-                            );
-                            if (next) {
-                              void saveOrder(next);
-                            }
-                            setWorkspaceDrag(null);
-                          }}
-                        >
-                          <WorkspaceSection
-                            sortBy={
-                              questionSortSupported ? sessionSort : undefined
-                            }
-                            workspace={ws}
-                            expansionRequest={
-                              workspaceExpansionRequest?.scope ===
-                              workspaceOrderScope
-                                ? workspaceExpansionRequest
-                                : undefined
-                            }
-                            temporarilyCollapsed={workspaceDrag !== null}
-                            dragHandleProps={
-                              !lockedWorkspaceCwd &&
-                              canReorderWorkspaces &&
-                              orderedProjectWorkspaces.length > 1
-                                ? {
-                                    draggable: true,
-                                    onDragStart: (event) => {
-                                      event.dataTransfer.effectAllowed = 'move';
-                                      event.dataTransfer.setData(
-                                        'application/x-qwen-workspace-cwd',
-                                        ws.cwd,
-                                      );
-                                      workspaceDragScrollTopRef.current =
-                                        sidebarBodyRef.current?.scrollTop;
-                                      setOpenWorkspaceMenuId(null);
-                                      // Moving the source during dragstart cancels native dragging.
-                                      workspaceDragStartRef.current = {
-                                        cwd: ws.cwd,
-                                        timer: window.setTimeout(() => {
-                                          workspaceDragStartRef.current =
-                                            undefined;
-                                          setWorkspaceDrag({
-                                            cwd: ws.cwd,
-                                            targetCwd: ws.cwd,
-                                            after: false,
-                                          });
-                                        }, 0),
-                                      };
-                                    },
-                                    onDragEnd: () => {
-                                      window.clearTimeout(
-                                        workspaceDragStartRef.current?.timer,
-                                      );
-                                      workspaceDragStartRef.current = undefined;
-                                      setWorkspaceDrag(null);
-                                    },
-                                  }
-                                : undefined
-                            }
-                            executionLabel={
-                              managedWorkspaces !== undefined
-                                ? t('managed.localMode')
-                                : undefined
-                            }
-                            remote={!isPageOriginDaemon(workspace.baseUrl)}
-                            renderHeader={
-                              lockedWorkspaceCwd &&
-                              lockedWorkspaceOptions?.render
-                                ? (expanded) =>
-                                    lockedWorkspaceOptions.render?.(ws, {
-                                      expanded,
-                                    })
-                                : undefined
-                            }
-                            client={workspace.client}
-                            editingSessionId={editingSessionIdForSections}
-                            untitledSessionLabel={t('sidebar.untitledSession')}
-                            reloadToken={workspaceSessionsReloadToken}
-                            untrustedLabel={t('sidebar.workspaceUntrusted')}
-                            readOnlyLabel={t('sidebar.workspaceReadOnly')}
-                            trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
-                            noSessionsLabel={t('sidebar.noSessions')}
-                            loadErrorLabel={t('sidebar.loadFailed')}
-                            organizationEnabled={organizationEnabled}
-                            sessionCatalogRequestsEnabled={
-                              sessionCatalogRequestsEnabled
-                            }
-                            sessionGroupCatalog={
-                              workspaceSessionLiveStateEnabled &&
-                              liveStateWorkspaceCwdSet.has(ws.cwd)
-                                ? liveStateGroupCatalogs.get(ws.cwd)
-                                : undefined
-                            }
-                            sessionLiveStateEnabled={
-                              workspaceSessionLiveStateEnabled &&
-                              liveStateWorkspaceCwdSet.has(ws.cwd)
-                            }
-                            sourceType={selectedSessionSource}
-                            channelGroupingEnabled={channelGroupingEnabled}
-                            ungroupedLabel={t('sidebar.groupUngrouped')}
-                            onRenameGroup={
-                              canOrganizeWorkspace(ws.cwd)
-                                ? handleRenameGroup
-                                : undefined
-                            }
-                            onDeleteGroup={
-                              canOrganizeWorkspace(ws.cwd)
-                                ? handleDeleteGroup
-                                : undefined
-                            }
-                            renameGroupLabel={t('sidebar.groupRename')}
-                            deleteGroupLabel={t('sidebar.groupDelete')}
-                            groupActionsDisabled={groupBusy}
-                            excludePinned={selectedSessionSource !== 'channel'}
-                            mapSession={applyOptimisticPin}
-                            isPinnedSectionMember={isPinnedSectionMember}
-                            onOpenGitDiff={
-                              projectFeaturesEnabled ? onOpenGitDiff : undefined
-                            }
-                            onOpenCommit={
-                              projectFeaturesEnabled ? onOpenCommit : undefined
-                            }
-                            searchQuery={searchQuery}
-                            expanded={ws.primary ? projectExpanded : undefined}
-                            autoExpandKey={
-                              autoExpandWorkspace?.id === ws.id
-                                ? autoExpandWorkspace?.key
-                                : undefined
-                            }
-                            onExpandedChange={
-                              ws.primary
-                                ? (expanded) => {
-                                    writeWorkspaceExpanded(
-                                      primaryWorkspaceExpansionId,
-                                      expanded,
-                                    );
-                                    writeWorkspaceExpanded(ws.id, expanded);
-                                    setProjectExpanded(expanded);
-                                  }
-                                : (expanded) => {
-                                    setSecondaryWorkspaceExpanded(
-                                      (current) => ({
-                                        ...current,
-                                        [ws.id]: expanded,
-                                      }),
-                                    );
-                                  }
-                            }
-                            renderSessions={!ws.primary}
-                            renderSession={(session, renderOptions) =>
-                              renderSessionRow(
-                                {
-                                  ...session,
-                                  workspaceCwd: ws.cwd,
-                                },
-                                {
-                                  ...renderOptions,
-                                  // Pinned members also render in the
-                                  // sidebar-level Pinned section; while that
-                                  // section is expanded its row hosts the
-                                  // rename form, so this duplicate row must
-                                  // not mount a second autofocused input.
-                                  // Channel mode has no Pinned section, so
-                                  // the workspace row is the only copy and
-                                  // must stay editable. The suppression also
-                                  // requires the Pinned section to actually
-                                  // carry the member: `pinnedSessions` merges
-                                  // only the pinned catalog pages and the
-                                  // primary sessions page, never this
-                                  // workspace's own page, so before the
-                                  // pinned page settles (or while it errors)
-                                  // this row is the only copy and must host
-                                  // the form itself.
-                                  renameFormDisabled:
-                                    selectedSessionSource !== 'channel' &&
-                                    Boolean(session.isPinned) &&
-                                    pinnedExpanded &&
-                                    pinnedSessions.some(
-                                      (candidate) =>
-                                        getIdentityForSession(candidate) ===
-                                        getIdentityForSession(session),
-                                    ),
-                                },
-                              )
-                            }
-                            showSessionDetails={sessionActionItems.has(
-                              'details',
-                            )}
-                            overviewEnabled={
-                              !channelView && workspaceOverviewEnabled
-                            }
-                            overviewMenuOpen={openWorkspaceMenuId === ws.id}
-                            overviewItems={workspaceOverviewItems}
-                            onOpenPathLocally={
-                              localOpenEnabled
-                                ? openWorkspaceFolderLocally
-                                : undefined
-                            }
-                            onOpenTerminalLocally={
-                              localTerminalEnabled
-                                ? openWorkspaceTerminalLocally
-                                : undefined
-                            }
-                            gitBranchWanted={
-                              !sectionView &&
-                              Boolean(onNewWorktreeSession) &&
-                              !lockedWorkspaceCwd
-                            }
-                            sessionStats={
-                              ws.primary
-                                ? (primarySessionStats ?? null)
-                                : undefined
-                            }
-                            // A locked sidebar with a custom header renders no
-                            // action area, so wire nothing: the section then
-                            // skips the git poll that only feeds these actions.
-                            headerActions={
-                              channelView ||
-                              (lockedWorkspaceCwd &&
-                                lockedWorkspaceOptions?.render)
-                                ? undefined
-                                : (visible, { overview, gitBranch }) => {
-                                    const canRemove =
-                                      !lockedWorkspaceCwd &&
-                                      workspaceRemovalEnabled &&
-                                      !ws.primary &&
-                                      ws.removable === true;
-                                    if (!ws.trusted && !canRemove) return null;
-                                    const wsCwd = ws.cwd;
-                                    const realPath = isAbsolutePath(ws.cwd);
-                                    // A display name persists only for registration-backed
-                                    // rows; the daemon's bound (primary) workspace has no
-                                    // registration id, so a rename there would live in
-                                    // memory until the next restart. Trust is not required:
-                                    // the name is registry metadata, not runtime access.
-                                    const canRename =
-                                      !lockedWorkspaceCwd &&
-                                      workspaceRenameEnabled &&
-                                      realPath &&
-                                      !ws.primary;
-                                    // Management pages read the connection's bound
-                                    // workspace, so only the primary row can open
-                                    // its own view today (#10399, layer B1).
-                                    const canManage =
-                                      projectFeaturesEnabled &&
-                                      ws.primary &&
-                                      ws.trusted &&
-                                      Boolean(onOpenWorkspaceManagement);
-                                    const workspaceIndex =
-                                      orderedProjectWorkspaces.findIndex(
-                                        (entry) => entry.cwd === ws.cwd,
-                                      );
-                                    const canMoveWorkspace =
-                                      !lockedWorkspaceCwd &&
-                                      canReorderWorkspaces &&
-                                      ws.trusted &&
-                                      workspaceIndex >= 0 &&
-                                      orderedProjectWorkspaces.length > 1;
-                                    const menuActions: WorkspaceMenuActions = {
-                                      ...(canRename
-                                        ? {
-                                            rename: () =>
-                                              requestWorkspaceRename(ws),
-                                          }
-                                        : {}),
-                                      ...(realPath
-                                        ? {
-                                            copyPath: () =>
-                                              copyWorkspacePath(ws),
-                                          }
-                                        : {}),
-                                      ...(localOpenEnabled &&
-                                      ws.trusted &&
-                                      realPath &&
-                                      !ws.ssh
-                                        ? {
-                                            openFolder: () => {
-                                              void openWorkspaceFolderLocally(
-                                                ws.cwd,
-                                              ).catch(() => undefined);
-                                            },
-                                          }
-                                        : {}),
-                                      ...(localTerminalEnabled &&
-                                      ws.trusted &&
-                                      realPath &&
-                                      !ws.ssh
-                                        ? {
-                                            openTerminal: () => {
-                                              void openWorkspaceTerminalLocally(
-                                                ws.cwd,
-                                              ).catch(() => undefined);
-                                            },
-                                          }
-                                        : {}),
-                                      ...(ws.trusted
-                                        ? {
-                                            newSession: () =>
-                                              handleNewSession(wsCwd),
-                                          }
-                                        : {}),
-                                      // A worktree needs a git repository; without a
-                                      // branch the composer never shows the armed
-                                      // intent and the daemon rejects the session.
-                                      ...(ws.trusted &&
-                                      !ws.ssh &&
-                                      onNewWorktreeSession &&
-                                      gitBranch
-                                        ? {
-                                            newWorktreeSession: () =>
-                                              handleNewWorktreeSession(wsCwd),
-                                          }
-                                        : {}),
-                                      ...(ws.trusted &&
-                                      canOrganizeWorkspace(ws.cwd)
-                                        ? {
-                                            createGroup: () => {
-                                              if (ws.primary) {
-                                                handleCreateGroup();
-                                              } else {
-                                                handleCreateWorkspaceGroup(
-                                                  ws.cwd,
-                                                );
-                                              }
-                                            },
-                                          }
-                                        : {}),
-                                      ...(canMoveWorkspace && workspaceIndex > 0
-                                        ? {
-                                            moveUp: () =>
-                                              moveWorkspaceInList(ws.cwd, -1),
-                                          }
-                                        : {}),
-                                      ...(canMoveWorkspace &&
-                                      workspaceIndex <
-                                        orderedProjectWorkspaces.length - 1
-                                        ? {
-                                            moveDown: () =>
-                                              moveWorkspaceInList(ws.cwd, 1),
-                                          }
-                                        : {}),
-                                      ...(canManage
-                                        ? {
-                                            openManagement: (
-                                              target: WorkspaceManagementTarget,
-                                            ) =>
-                                              onOpenWorkspaceManagement?.(
-                                                target,
-                                                ws.cwd,
-                                              ),
-                                          }
-                                        : {}),
-                                      ...(ws.trusted && realPath
-                                        ? {
-                                            reload: () =>
-                                              reloadWorkspaceRuntime(ws),
-                                          }
-                                        : {}),
-                                      ...(canRemove
-                                        ? {
-                                            remove: () =>
-                                              workspaceRemoval.request(ws),
-                                          }
-                                        : {}),
-                                    };
-                                    return (
-                                      <div
-                                        className={
-                                          styles.workspaceHeaderActions
-                                        }
-                                        style={{
-                                          visibility:
-                                            visible ||
-                                            openWorkspaceMenuId === ws.id
-                                              ? 'visible'
-                                              : 'hidden',
-                                        }}
-                                      >
-                                        {ws.trusted && (
-                                          <button
-                                            className={
-                                              styles.workspaceHeaderAction
-                                            }
-                                            type="button"
-                                            title={t('sidebar.newTask')}
-                                            aria-label={t('sidebar.newTask')}
-                                            onClick={(event) => {
-                                              event.preventDefault();
-                                              event.stopPropagation();
-                                              handleNewSession(wsCwd);
-                                            }}
-                                          >
-                                            <SquarePenIcon
-                                              size={16}
-                                              strokeWidth={1.2}
-                                            />
-                                          </button>
-                                        )}
-                                        {(!lockedWorkspaceCwd ||
-                                          menuActions.createGroup) && (
-                                          <WorkspaceMenu
-                                            workspace={ws}
-                                            actions={
-                                              lockedWorkspaceCwd
-                                                ? {
-                                                    createGroup:
-                                                      menuActions.createGroup,
-                                                  }
-                                                : menuActions
-                                            }
-                                            overview={overview}
-                                            disabled={
-                                              (workspaceRemoval.submitting &&
-                                                workspaceRemoval.candidate
-                                                  ?.id === ws.id) ||
-                                              (workspaceRenameSubmitting &&
-                                                workspaceRenameCandidate?.id ===
-                                                  ws.id)
-                                            }
-                                            triggerClassName={
-                                              styles.workspaceHeaderAction
-                                            }
-                                            contentStyle={
-                                              SESSION_MENU_PORTAL_STYLE
-                                            }
-                                            onOpenChange={(open) => {
-                                              handleSessionMenuOpenChange(open);
-                                              setOpenWorkspaceMenuId(
-                                                (current) =>
-                                                  open
-                                                    ? ws.id
-                                                    : current === ws.id
-                                                      ? null
-                                                      : current,
-                                              );
-                                            }}
-                                            onPointerDownOutside={
-                                              handleSessionMenuPointerDownOutside
-                                            }
-                                            onCloseAutoFocus={(event) => {
-                                              // Radix restores focus to the
-                                              // trigger, which lives inside the
-                                              // details popover's focus-open
-                                              // anchor — without suppression the
-                                              // popover reopens 300 ms after
-                                              // every menu close and never
-                                              // closes.
-                                              event.preventDefault();
-                                            }}
-                                          />
-                                        )}
-                                      </div>
-                                    );
-                                  }
-                            }
-                          />
-                          {ws.primary &&
-                          (projectExpanded || searchQuery.trim()) ? (
-                            <div
-                              className={styles.workspaceSessionBody}
-                              style={
-                                workspaceDrag ? { display: 'none' } : undefined
+                            }}
+                            onDrop={(event) => {
+                              if (!workspaceDrag || !canReorderWorkspaces)
+                                return;
+                              event.preventDefault();
+                              const bounds =
+                                event.currentTarget.getBoundingClientRect();
+                              const next = reorderWorkspace(
+                                orderedProjectWorkspaces.map(
+                                  (entry) => entry.cwd,
+                                ),
+                                workspaceDrag.cwd,
+                                ws.cwd,
+                                event.clientY > bounds.top + bounds.height / 2,
+                              );
+                              if (next) {
+                                void saveOrder(next);
                               }
-                            >
-                              {body}
-                            </div>
-                          ) : null}
-                        </div>
-                      ))}
+                              setWorkspaceDrag(null);
+                            }}
+                          >
+                            <WorkspaceSection
+                              sortBy={
+                                questionSortSupported ? sessionSort : undefined
+                              }
+                              workspace={ws}
+                              expansionRequest={
+                                workspaceExpansionRequest?.scope ===
+                                workspaceOrderScope
+                                  ? workspaceExpansionRequest
+                                  : undefined
+                              }
+                              temporarilyCollapsed={workspaceDrag !== null}
+                              dragHandleProps={
+                                !lockedWorkspaceCwd &&
+                                canReorderWorkspaces &&
+                                orderedProjectWorkspaces.length > 1
+                                  ? {
+                                      draggable: true,
+                                      onDragStart: (event) => {
+                                        event.dataTransfer.effectAllowed =
+                                          'move';
+                                        event.dataTransfer.setData(
+                                          'application/x-qwen-workspace-cwd',
+                                          ws.cwd,
+                                        );
+                                        workspaceDragScrollTopRef.current =
+                                          sidebarBodyRef.current?.scrollTop;
+                                        setOpenWorkspaceMenuId(null);
+                                        // Moving the source during dragstart cancels native dragging.
+                                        workspaceDragStartRef.current = {
+                                          cwd: ws.cwd,
+                                          timer: window.setTimeout(() => {
+                                            workspaceDragStartRef.current =
+                                              undefined;
+                                            setWorkspaceDrag({
+                                              cwd: ws.cwd,
+                                              targetCwd: ws.cwd,
+                                              after: false,
+                                            });
+                                          }, 0),
+                                        };
+                                      },
+                                      onDragEnd: () => {
+                                        window.clearTimeout(
+                                          workspaceDragStartRef.current?.timer,
+                                        );
+                                        workspaceDragStartRef.current =
+                                          undefined;
+                                        setWorkspaceDrag(null);
+                                      },
+                                    }
+                                  : undefined
+                              }
+                              executionLabel={
+                                managedWorkspaces !== undefined
+                                  ? t('managed.localMode')
+                                  : undefined
+                              }
+                              remote={!isPageOriginDaemon(workspace.baseUrl)}
+                              renderHeader={
+                                lockedWorkspaceCwd &&
+                                lockedWorkspaceOptions?.render
+                                  ? (expanded) =>
+                                      lockedWorkspaceOptions.render?.(ws, {
+                                        expanded,
+                                      })
+                                  : undefined
+                              }
+                              client={workspace.client}
+                              editingSessionId={editingSessionIdForSections}
+                              untitledSessionLabel={t(
+                                'sidebar.untitledSession',
+                              )}
+                              reloadToken={workspaceSessionsReloadToken}
+                              untrustedLabel={t('sidebar.workspaceUntrusted')}
+                              readOnlyLabel={t('sidebar.workspaceReadOnly')}
+                              trustToOpenLabel={t(
+                                'sidebar.workspaceTrustToOpen',
+                              )}
+                              noSessionsLabel={t('sidebar.noSessions')}
+                              loadErrorLabel={t('sidebar.loadFailed')}
+                              organizationEnabled={organizationEnabled}
+                              sessionCatalogRequestsEnabled={
+                                sessionCatalogRequestsEnabled
+                              }
+                              sessionGroupCatalog={
+                                workspaceSessionLiveStateEnabled &&
+                                liveStateWorkspaceCwdSet.has(ws.cwd)
+                                  ? liveStateGroupCatalogs.get(ws.cwd)
+                                  : undefined
+                              }
+                              sessionLiveStateEnabled={
+                                workspaceSessionLiveStateEnabled &&
+                                liveStateWorkspaceCwdSet.has(ws.cwd)
+                              }
+                              sourceType={selectedSessionSource}
+                              channelGroupingEnabled={channelGroupingEnabled}
+                              ungroupedLabel={t('sidebar.groupUngrouped')}
+                              onRenameGroup={
+                                canOrganizeWorkspace(ws.cwd)
+                                  ? handleRenameGroup
+                                  : undefined
+                              }
+                              onDeleteGroup={
+                                canOrganizeWorkspace(ws.cwd)
+                                  ? handleDeleteGroup
+                                  : undefined
+                              }
+                              renameGroupLabel={t('sidebar.groupRename')}
+                              deleteGroupLabel={t('sidebar.groupDelete')}
+                              groupActionsDisabled={groupBusy}
+                              excludePinned={
+                                selectedSessionSource !== 'channel'
+                              }
+                              mapSession={applyOptimisticPin}
+                              isPinnedSectionMember={isPinnedSectionMember}
+                              onOpenGitDiff={
+                                projectFeaturesEnabled
+                                  ? onOpenGitDiff
+                                  : undefined
+                              }
+                              onOpenCommit={
+                                projectFeaturesEnabled
+                                  ? onOpenCommit
+                                  : undefined
+                              }
+                              searchQuery={searchQuery}
+                              expanded={
+                                ws.primary ? projectExpanded : undefined
+                              }
+                              autoExpandKey={
+                                autoExpandWorkspace?.id === ws.id
+                                  ? autoExpandWorkspace?.key
+                                  : undefined
+                              }
+                              onExpandedChange={
+                                ws.primary
+                                  ? (expanded) => {
+                                      writeWorkspaceExpanded(
+                                        primaryWorkspaceExpansionId,
+                                        expanded,
+                                      );
+                                      writeWorkspaceExpanded(ws.id, expanded);
+                                      setProjectExpanded(expanded);
+                                    }
+                                  : (expanded) => {
+                                      setSecondaryWorkspaceExpanded(
+                                        (current) => ({
+                                          ...current,
+                                          [ws.id]: expanded,
+                                        }),
+                                      );
+                                    }
+                              }
+                              renderSessions={!ws.primary}
+                              renderSession={(session, renderOptions) =>
+                                renderSessionRow(
+                                  {
+                                    ...session,
+                                    workspaceCwd: ws.cwd,
+                                  },
+                                  {
+                                    ...renderOptions,
+                                    // Pinned members also render in the
+                                    // sidebar-level Pinned section; while that
+                                    // section is expanded its row hosts the
+                                    // rename form, so this duplicate row must
+                                    // not mount a second autofocused input.
+                                    // Channel mode has no Pinned section, so
+                                    // the workspace row is the only copy and
+                                    // must stay editable. The suppression also
+                                    // requires the Pinned section to actually
+                                    // carry the member: `pinnedSessions` merges
+                                    // only the pinned catalog pages and the
+                                    // primary sessions page, never this
+                                    // workspace's own page, so before the
+                                    // pinned page settles (or while it errors)
+                                    // this row is the only copy and must host
+                                    // the form itself.
+                                    renameFormDisabled:
+                                      selectedSessionSource !== 'channel' &&
+                                      Boolean(session.isPinned) &&
+                                      pinnedExpanded &&
+                                      pinnedSessions.some(
+                                        (candidate) =>
+                                          getIdentityForSession(candidate) ===
+                                          getIdentityForSession(session),
+                                      ),
+                                  },
+                                )
+                              }
+                              showSessionDetails={sessionActionItems.has(
+                                'details',
+                              )}
+                              overviewEnabled={
+                                !channelView && workspaceOverviewEnabled
+                              }
+                              overviewMenuOpen={openWorkspaceMenuId === ws.id}
+                              overviewItems={workspaceOverviewItems}
+                              onOpenPathLocally={
+                                localOpenEnabled
+                                  ? openWorkspaceFolderLocally
+                                  : undefined
+                              }
+                              onOpenTerminalLocally={
+                                localTerminalEnabled
+                                  ? openWorkspaceTerminalLocally
+                                  : undefined
+                              }
+                              gitBranchWanted={
+                                !sectionView &&
+                                Boolean(onNewWorktreeSession) &&
+                                !lockedWorkspaceCwd
+                              }
+                              sessionStats={
+                                ws.primary
+                                  ? (primarySessionStats ?? null)
+                                  : undefined
+                              }
+                              // A locked sidebar with a custom header renders no
+                              // action area, so wire nothing: the section then
+                              // skips the git poll that only feeds these actions.
+                              headerActions={
+                                channelView ||
+                                (lockedWorkspaceCwd &&
+                                  lockedWorkspaceOptions?.render)
+                                  ? undefined
+                                  : (visible, { overview, gitBranch }) => {
+                                      const canRemove =
+                                        !lockedWorkspaceCwd &&
+                                        workspaceRemovalEnabled &&
+                                        !ws.primary &&
+                                        ws.removable === true;
+                                      if (!ws.trusted && !canRemove)
+                                        return null;
+                                      const wsCwd = ws.cwd;
+                                      const realPath = isAbsolutePath(ws.cwd);
+                                      // A display name persists only for registration-backed
+                                      // rows; the daemon's bound (primary) workspace has no
+                                      // registration id, so a rename there would live in
+                                      // memory until the next restart. Trust is not required:
+                                      // the name is registry metadata, not runtime access.
+                                      const canRename =
+                                        !lockedWorkspaceCwd &&
+                                        workspaceRenameEnabled &&
+                                        realPath &&
+                                        !ws.primary;
+                                      // Management pages read the connection's bound
+                                      // workspace, so only the primary row can open
+                                      // its own view today (#10399, layer B1).
+                                      const canManage =
+                                        projectFeaturesEnabled &&
+                                        ws.primary &&
+                                        ws.trusted &&
+                                        Boolean(onOpenWorkspaceManagement);
+                                      const workspaceIndex =
+                                        orderedProjectWorkspaces.findIndex(
+                                          (entry) => entry.cwd === ws.cwd,
+                                        );
+                                      const canMoveWorkspace =
+                                        !lockedWorkspaceCwd &&
+                                        canReorderWorkspaces &&
+                                        ws.trusted &&
+                                        workspaceIndex >= 0 &&
+                                        orderedProjectWorkspaces.length > 1;
+                                      const menuActions: WorkspaceMenuActions =
+                                        {
+                                          ...(canRename
+                                            ? {
+                                                rename: () =>
+                                                  requestWorkspaceRename(ws),
+                                              }
+                                            : {}),
+                                          ...(realPath
+                                            ? {
+                                                copyPath: () =>
+                                                  copyWorkspacePath(ws),
+                                              }
+                                            : {}),
+                                          ...(localOpenEnabled &&
+                                          ws.trusted &&
+                                          realPath &&
+                                          !ws.ssh
+                                            ? {
+                                                openFolder: () => {
+                                                  void openWorkspaceFolderLocally(
+                                                    ws.cwd,
+                                                  ).catch(() => undefined);
+                                                },
+                                              }
+                                            : {}),
+                                          ...(localTerminalEnabled &&
+                                          ws.trusted &&
+                                          realPath &&
+                                          !ws.ssh
+                                            ? {
+                                                openTerminal: () => {
+                                                  void openWorkspaceTerminalLocally(
+                                                    ws.cwd,
+                                                  ).catch(() => undefined);
+                                                },
+                                              }
+                                            : {}),
+                                          ...(ws.trusted
+                                            ? {
+                                                newSession: () =>
+                                                  handleNewSession(wsCwd),
+                                              }
+                                            : {}),
+                                          // A worktree needs a git repository; without a
+                                          // branch the composer never shows the armed
+                                          // intent and the daemon rejects the session.
+                                          ...(ws.trusted &&
+                                          !ws.ssh &&
+                                          onNewWorktreeSession &&
+                                          gitBranch
+                                            ? {
+                                                newWorktreeSession: () =>
+                                                  handleNewWorktreeSession(
+                                                    wsCwd,
+                                                  ),
+                                              }
+                                            : {}),
+                                          ...(ws.trusted &&
+                                          canOrganizeWorkspace(ws.cwd)
+                                            ? {
+                                                createGroup: () => {
+                                                  if (ws.primary) {
+                                                    handleCreateGroup();
+                                                  } else {
+                                                    handleCreateWorkspaceGroup(
+                                                      ws.cwd,
+                                                    );
+                                                  }
+                                                },
+                                              }
+                                            : {}),
+                                          ...(canMoveWorkspace &&
+                                          workspaceIndex > 0
+                                            ? {
+                                                moveUp: () =>
+                                                  moveWorkspaceInList(
+                                                    ws.cwd,
+                                                    -1,
+                                                  ),
+                                              }
+                                            : {}),
+                                          ...(canMoveWorkspace &&
+                                          workspaceIndex <
+                                            orderedProjectWorkspaces.length - 1
+                                            ? {
+                                                moveDown: () =>
+                                                  moveWorkspaceInList(
+                                                    ws.cwd,
+                                                    1,
+                                                  ),
+                                              }
+                                            : {}),
+                                          ...(canManage
+                                            ? {
+                                                openManagement: (
+                                                  target: WorkspaceManagementTarget,
+                                                ) =>
+                                                  onOpenWorkspaceManagement?.(
+                                                    target,
+                                                    ws.cwd,
+                                                  ),
+                                              }
+                                            : {}),
+                                          ...(ws.trusted && realPath
+                                            ? {
+                                                reload: () =>
+                                                  reloadWorkspaceRuntime(ws),
+                                              }
+                                            : {}),
+                                          ...(canRemove
+                                            ? {
+                                                remove: () =>
+                                                  workspaceRemoval.request(ws),
+                                              }
+                                            : {}),
+                                        };
+                                      return (
+                                        <div
+                                          className={
+                                            styles.workspaceHeaderActions
+                                          }
+                                          style={{
+                                            visibility:
+                                              visible ||
+                                              openWorkspaceMenuId === ws.id
+                                                ? 'visible'
+                                                : 'hidden',
+                                          }}
+                                        >
+                                          {ws.trusted && (
+                                            <button
+                                              className={
+                                                styles.workspaceHeaderAction
+                                              }
+                                              type="button"
+                                              title={t('sidebar.newTask')}
+                                              aria-label={t('sidebar.newTask')}
+                                              onClick={(event) => {
+                                                event.preventDefault();
+                                                event.stopPropagation();
+                                                handleNewSession(wsCwd);
+                                              }}
+                                            >
+                                              <SquarePenIcon
+                                                size={16}
+                                                strokeWidth={1.2}
+                                              />
+                                            </button>
+                                          )}
+                                          {(!lockedWorkspaceCwd ||
+                                            menuActions.createGroup) && (
+                                            <WorkspaceMenu
+                                              workspace={ws}
+                                              actions={
+                                                lockedWorkspaceCwd
+                                                  ? {
+                                                      createGroup:
+                                                        menuActions.createGroup,
+                                                    }
+                                                  : menuActions
+                                              }
+                                              overview={overview}
+                                              disabled={
+                                                (workspaceRemoval.submitting &&
+                                                  workspaceRemoval.candidate
+                                                    ?.id === ws.id) ||
+                                                (workspaceRenameSubmitting &&
+                                                  workspaceRenameCandidate?.id ===
+                                                    ws.id)
+                                              }
+                                              triggerClassName={
+                                                styles.workspaceHeaderAction
+                                              }
+                                              contentStyle={
+                                                SESSION_MENU_PORTAL_STYLE
+                                              }
+                                              onOpenChange={(open) => {
+                                                handleSessionMenuOpenChange(
+                                                  open,
+                                                );
+                                                setOpenWorkspaceMenuId(
+                                                  (current) =>
+                                                    open
+                                                      ? ws.id
+                                                      : current === ws.id
+                                                        ? null
+                                                        : current,
+                                                );
+                                              }}
+                                              onPointerDownOutside={
+                                                handleSessionMenuPointerDownOutside
+                                              }
+                                              onCloseAutoFocus={(event) => {
+                                                // Radix restores focus to the
+                                                // trigger, which lives inside the
+                                                // details popover's focus-open
+                                                // anchor — without suppression the
+                                                // popover reopens 300 ms after
+                                                // every menu close and never
+                                                // closes.
+                                                event.preventDefault();
+                                              }}
+                                            />
+                                          )}
+                                        </div>
+                                      );
+                                    }
+                              }
+                            />
+                            {ws.primary &&
+                            (projectExpanded || searchQuery.trim()) ? (
+                              <div
+                                className={styles.workspaceSessionBody}
+                                style={
+                                  workspaceDrag
+                                    ? { display: 'none' }
+                                    : undefined
+                                }
+                              >
+                                {body}
+                              </div>
+                            ) : null}
+                          </div>
+                        ))}
                     </div>
                   </div>
                 </div>
