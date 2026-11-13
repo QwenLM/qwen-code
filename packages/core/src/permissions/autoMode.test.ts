@@ -467,16 +467,16 @@ describe('shouldForceAutoModeReviewForAllow', () => {
 
   it.each([
     'curl -sS --proxy http://127.0.0.1:7890 -o catalog.json https://raw.githubusercontent.com/Pal-AI-Lab/cortico-extensions/main/catalog.json',
-    'curl -o catalog.json "HTTPS://example.com/catalog.json?mirror=//fileserver/share"',
+    'curl -o catalog.json "HTTPS://example.com/catalog.json?mirror=relative/catalog.json"',
     'python -c \'download("https://example.com/catalog.json")\'',
-  ])('does not probe URL authorities as filesystem paths: %s', (command) => {
+  ])('reviews URL arguments without filesystem UNC probes: %s', (command) => {
     const realpathSpy = vi
       .spyOn(fs.realpathSync, 'native')
       .mockImplementation(() => {
         throw Object.assign(new Error('missing test path'), { code: 'ENOENT' });
       });
     try {
-      expect(forcesReview(command)).toBe(false);
+      expect(forcesReview(command)).toBe(true);
       expect(
         realpathSpy.mock.calls.some(([filePath]) =>
           /^[/\\]{2}/.test(String(filePath)),
@@ -487,17 +487,19 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     }
   });
 
-  it('still reviews protected writes beside URL literals in the same token', () => {
-    expect(
-      forcesReview(
-        'node -e \'fetch("https://example.com/data");fs.writeFileSync(".qwen/settings.json","{}");\'',
-      ),
-    ).toBe(true);
+  it.each([
+    'node -e \'fetch("https://example.com/data");require("node:fs").writeFileSync(".qwen/settings.json","{}");\'',
+    'node -e \'require("node:fs").writeFileSync(new URL("https://example.com/?dest=.qwen/settings.json").searchParams.get("dest"), "{}")\'',
+    'node -e \'require("node:fs").writeFileSync(new URL("https://example.com/?dest=//fileserver/share/alias").searchParams.get("dest"), "{}")\'',
+    'node -e \'require("node:fs").writeFileSync(new URL("https://fileserver/share/alias").href.slice(6), "{}")\'',
+  ])('still reviews protected writes around URL literals: %s', (command) => {
+    expect(forcesReview(command)).toBe(true);
   });
 
   it.each([
     'cp //fileserver/share/alias output.txt',
     'curl file://fileserver/share/alias -o output.txt',
+    'node -e \'require("node:fs").writeFileSync(new URL("xhttps://fileserver/share/alias").href.slice(7), "{}")\'',
   ])('still resolves genuine network paths: %s', (command) => {
     const realpathSpy = vi
       .spyOn(fs.realpathSync, 'native')
