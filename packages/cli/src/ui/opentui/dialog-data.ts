@@ -1102,6 +1102,7 @@ export async function applyMcpServerAction(
               .getExtensionManager()
               ?.setMcpServerDisabled(extensionName, server.name, false);
           }
+          const removedPatterns = new Set<string>();
           for (const scope of [SettingScope.User, SettingScope.Workspace]) {
             const scopeSettings = settings.forScope(scope).settings;
             const currentExcluded = scopeSettings.mcp?.excluded ?? [];
@@ -1110,12 +1111,22 @@ export async function applyMcpServerAction(
               server.name,
             );
             if (remaining.length !== currentExcluded.length) {
+              for (const pattern of currentExcluded) {
+                if (!remaining.includes(pattern)) removedPatterns.add(pattern);
+              }
               settings.setValue(scope, 'mcp.excluded', remaining);
             }
           }
+          // Only what this action actually removed from a writable scope may
+          // leave the runtime list: it is the merged set across every scope
+          // plus `--disable-mcp-server`, so filtering by name alone would also
+          // drop an operator's System pattern and connect a server whose
+          // exclusion is still on disk.
           const currentExcluded = config.getExcludedMcpServers() ?? [];
           config.setExcludedMcpServers(
-            withoutExcludedServer(currentExcluded, server.name),
+            currentExcluded.filter(
+              (pattern: string) => !removedPatterns.has(pattern),
+            ),
           );
           if (toolRegistry) {
             await toolRegistry.discoverToolsForServer(server.name);
