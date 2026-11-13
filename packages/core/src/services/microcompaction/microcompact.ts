@@ -481,11 +481,12 @@ function getPart(history: Content[], ref: PartRef): Part | undefined {
 }
 
 /**
- * The text output of a tool result this module may clear, with the reason it
- * counts as zero characters when it may not. `persisted` separates a stub the
- * truncation path already paid to make small from an ordinary result: only the
- * former is worth protecting from clearing on the idle path, because no
- * `keepRecent` slot is reserved for it (the stub costs nothing to keep).
+ * The text output of a tool result this module may clear, and whether it is a
+ * persisted-output stub. `persisted` separates a stub the truncation path
+ * already paid to make small from an ordinary result: only the former is worth
+ * protecting from clearing on the idle path, because no `keepRecent` slot is
+ * reserved for it. Both kinds report their full resident length, so `chars` is
+ * only safe to read as "reclaimable" when `persisted` is false.
  */
 function getClearableToolOutput(
   part: Part | undefined,
@@ -680,7 +681,6 @@ function planSizeBasedClearing(
   const callIdentityById = buildToolCallIdentityById(virtualHistory);
   const { tool } = collectCompactablePartRefs(virtualHistory, callIdentityById);
   const charsByRef = new Map<string, number>();
-  const persistedRefs = new Set<string>();
   let totalChars = 0;
   let pendingChars = 0;
   for (const ref of tool) {
@@ -693,9 +693,7 @@ function planSizeBasedClearing(
     // joins the total the trigger reads; it just never joins `charsByRef`,
     // which is the set the clearing loop can spend.
     totalChars += chars;
-    if (persisted) {
-      persistedRefs.add(refKey(ref));
-    } else {
+    if (!persisted) {
       charsByRef.set(refKey(ref), chars);
     }
     if (ref.contentIndex >= history.length) {
