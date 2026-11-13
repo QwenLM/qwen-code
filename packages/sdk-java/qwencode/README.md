@@ -123,6 +123,8 @@ An indeterminate completion is an outcome boundary, not a session-reuse boundary
 
 `HostedHarnessClient` is the Java control-plane transport for `qwen serve --profile hosted-harness`. Construction performs capability negotiation, verifies the deployment capability digest, and pins the process `bootId`. Every Session request then carries protocol and generation fencing automatically. This API keeps model-loop events raw; product services remain responsible for public Session, Turn, Event, tenant, and workspace authorization state.
 
+When a session attachment is removed or replaced, its automatic heartbeat timer is cancelled even if removal races with initial timer registration. Completed session lifecycles do not retain idle periodic heartbeat tasks.
+
 ```java
 Map<String, Object> text = Map.of("type", "text", "text", "hello");
 String payloadDigest = SubmitHarnessTurn.computePayloadDigest(List.of(text));

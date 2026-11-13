@@ -47,6 +47,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class HostedHarnessClientTest {
     private static final String BOOT_ID =
@@ -1867,6 +1868,87 @@ class HostedHarnessClientTest {
         } finally {
             release.countDown();
             client.close();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void cancelsHeartbeatWhenDeletionRacesTaskPublication(boolean deleteBeforePublication)
+            throws Exception {
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID, exchange -> {
+            assertEquals("DELETE", exchange.getRequestMethod());
+            assertPrivateHeaders(exchange, false);
+            exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+            exchange.getResponseHeaders().set("Connection", "close");
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        PublishingHeartbeatScheduler scheduler = new PublishingHeartbeatScheduler(deleteBeforePublication);
+        ExecutorService caller = Executors.newSingleThreadExecutor();
+        try (HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ofMinutes(1))
+                .build()) {
+            Field schedulerField = HostedHarnessClient.class.getDeclaredField("scheduler");
+            schedulerField.setAccessible(true);
+            client.scheduler().shutdownNow();
+            schedulerField.set(client, scheduler);
+
+            Future<HarnessSessionRef> creating = caller.submit(() -> createSession(client));
+            if (deleteBeforePublication) {
+                assertTrue(scheduler.entered.await(5, TimeUnit.SECONDS));
+                // The attachment is visible, but its scheduled future has not
+                // been published. Deletion must still retire the eventual task.
+                client.closeSession(SESSION_ID);
+                scheduler.release.countDown();
+                creating.get(5, TimeUnit.SECONDS);
+            } else {
+                creating.get(5, TimeUnit.SECONDS);
+                assertEquals(1, scheduler.getQueue().size());
+                client.closeSession(SESSION_ID);
+            }
+
+            assertTrue(scheduler.task.isCancelled());
+            assertTrue(scheduler.getQueue().isEmpty(),
+                    "A deleted attachment must not retain a periodic heartbeat task");
+        } finally {
+            scheduler.release.countDown();
+            caller.shutdownNow();
+            scheduler.shutdownNow();
+        }
+    }
+
+    private static final class PublishingHeartbeatScheduler extends ScheduledThreadPoolExecutor {
+        private final CountDownLatch entered = new CountDownLatch(1);
+        private final CountDownLatch release = new CountDownLatch(1);
+        private final boolean pausePublication;
+        private volatile ScheduledFuture<?> task;
+
+        PublishingHeartbeatScheduler(boolean pausePublication) {
+            super(1);
+            this.pausePublication = pausePublication;
+            setRemoveOnCancelPolicy(true);
+        }
+
+        @Override
+        public ScheduledFuture<?> scheduleWithFixedDelay(Runnable command,
+                long initialDelay, long delay, TimeUnit unit) {
+            if (pausePublication) {
+                entered.countDown();
+                try {
+                    if (!release.await(5, TimeUnit.SECONDS)) {
+                        throw new AssertionError("Task publication was not released");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(e);
+                }
+            }
+            task = super.scheduleWithFixedDelay(command, initialDelay, delay, unit);
+            return task;
         }
     }
 
