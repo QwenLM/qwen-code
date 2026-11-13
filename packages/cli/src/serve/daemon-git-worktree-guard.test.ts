@@ -710,6 +710,72 @@ describe('createDaemonToolGuard', () => {
     },
   );
 
+  it
+    .runIf(bashSemanticsLane)
+    .each([
+      () =>
+        `cd ${cmdPath(outsideRepo)}\necho \${X:-"}"} <<'EOF'\ncd ${cmdPath(effectiveCwd)}\nEOF\ngit reset --hard`,
+      () =>
+        `cd ${cmdPath(outsideRepo)}\necho \`echo '\` <<'EOF'\ncd ${cmdPath(effectiveCwd)}\nEOF\ngit reset --hard`,
+      () => `echo $\\\n[1 << 2]\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+      () =>
+        `cd ${cmdPath(outsideRepo)}\ncat <\\\n<'EOF'\ncd ${cmdPath(effectiveCwd)}\nEOF\ngit reset --hard`,
+      () =>
+        `cd ${cmdPath(outsideRepo)}\necho foo\\\n#x <<EOF\ncd ${cmdPath(effectiveCwd)}\nEOF\ngit reset --hard`,
+      () =>
+        `cd ${cmdPath(outsideRepo)}\ncat <<EOF "x #\nbody"\nEOF\ngit reset --hard`,
+      () =>
+        `cd ${cmdPath(outsideRepo)}\necho $(( $(cat <<EOF) ))\ncd ${cmdPath(effectiveCwd)}\nEOF\ngit reset --hard`,
+      () =>
+        `cat <<$((1+2))\nbody\n$((1+2))\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+    ])(
+    'does not hide executable lines behind a heredoc lookalike %#',
+    async (build) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(build()))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it.runIf(bashSemanticsLane).each(['|', ';'])(
+    'does not apply a cd written inside a # %s comment',
+    async (separator) => {
+      const guard = createDaemonToolGuard();
+      const command = `cd ${cmdPath(outsideRepo)}\necho x # ${separator} cd ${cmdPath(effectiveCwd)}\ngit reset --hard`;
+
+      await expect(guard(request(command))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it.runIf(bashSemanticsLane)(
+    'allows a genuine pipeline beside a commented separator',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request('git status | cat # a|b'))).resolves.toEqual({
+        allowed: true,
+      });
+    },
+  );
+
+  it
+    .runIf(bashSemanticsLane)
+    .each(['shopt -s lastpipe', 'builtin shopt -s lastpipe'])(
+    'fails closed on unmodelled pipeline option changes: %s',
+    async (toggle) => {
+      const guard = createDaemonToolGuard();
+      const command = `${toggle}\necho x | cd ${cmdPath(outsideRepo)}\ngit reset --hard`;
+
+      await expect(guard(request(command))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
   // Measured false positives from the old leftmost-match regex: a decoy
   // `<<WORD` inside a quoted string must not latch when the line's real
   // heredoc is quoted, and documentation or grep text about heredocs is not
@@ -894,7 +960,6 @@ describe('createDaemonToolGuard', () => {
         ),
       ).resolves.toMatchObject({
         allowed: false,
-        reason: expect.stringContaining('could not be parsed'),
       });
       await expect(
         guard(request(`cat <<EOF # comment \\\nbody\nEOF`)),
@@ -933,7 +998,6 @@ describe('createDaemonToolGuard', () => {
         ),
       ).resolves.toMatchObject({
         allowed: false,
-        reason: expect.stringContaining('could not be parsed'),
       });
     },
   );
