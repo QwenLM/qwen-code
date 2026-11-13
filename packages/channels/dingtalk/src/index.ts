@@ -1,4 +1,6 @@
 export { DingtalkChannel } from './DingtalkAdapter.js';
+export { DingtalkWebhookChannel } from './DingtalkWebhookChannel.js';
+export { webhookPlugin } from './webhook-plugin.js';
 export { downloadMedia } from './media.js';
 
 import { DingtalkChannel } from './DingtalkAdapter.js';
@@ -9,6 +11,7 @@ export const plugin: ChannelPlugin = {
   channelType: 'dingtalk',
   displayName: 'DingTalk',
   requiredConfigFields: ['clientId', 'clientSecret'],
+  supportsOutputMode: true,
   management: {
     fields: [
       {
@@ -50,6 +53,25 @@ export const plugin: ChannelPlugin = {
           {
             key: 'questionCard',
             label: 'Question Card',
+            kind: 'object',
+            properties: [
+              {
+                key: 'enabled',
+                label: 'Enabled',
+                kind: 'boolean',
+              },
+              {
+                key: 'timeoutMs',
+                label: 'Timeout (ms)',
+                kind: 'number',
+                exclusiveMinimum:
+                  DINGTALK_INTERACTIVE_CARD_TIMEOUT_EXCLUSIVE_MINIMUM,
+              },
+            ],
+          },
+          {
+            key: 'permissionCard',
+            label: 'Permission Card',
             kind: 'object',
             properties: [
               {

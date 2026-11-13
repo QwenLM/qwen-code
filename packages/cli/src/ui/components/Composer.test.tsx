@@ -32,8 +32,8 @@ vi.mock('../contexts/VimModeContext.js', () => ({
     setVimMode: vi.fn(),
   })),
 }));
-import { ApprovalMode } from '@qwen-code/qwen-code-core';
-import { StreamingState } from '../types.js';
+import { ApprovalMode, type Config } from '@qwen-code/qwen-code-core';
+import { MessageType, StreamingState } from '../types.js';
 
 // Mock child components
 vi.mock('./LoadingIndicator.js', () => ({
@@ -103,6 +103,15 @@ vi.mock('./QueuedMessageDisplay.js', () => ({
   },
 }));
 
+const modBand = vi.hoisted(() => ({ current: undefined as unknown }));
+vi.mock('../hooks/use-mod-band.js', () => ({
+  useModBand: () => modBand.current,
+}));
+
+vi.mock('../FeedbackDialog.js', () => ({
+  FeedbackDialog: () => <Text>FeedbackDialog</Text>,
+}));
+
 // Mock contexts
 vi.mock('../contexts/OverflowContext.js', () => ({
   OverflowProvider: ({ children }: { children: React.ReactNode }) => children,
@@ -117,7 +126,9 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     messageQueue: [],
     constrainHeight: false,
     isInputActive: true,
-    buffer: '',
+    isConfigInitialized: true,
+    buffer: { text: '' },
+    history: [],
     inputWidth: 80,
     suggestionsWidth: 40,
     userMessages: [],
@@ -166,6 +177,7 @@ const createMockUIActions = (): UIActions =>
   }) as any;
 
 const createMockConfig = (overrides = {}) => ({
+  getAuthType: vi.fn(() => 'openai'),
   getModel: vi.fn(() => 'gemini-1.5-pro'),
   getTargetDir: vi.fn(() => '/test/dir'),
   getDebugMode: vi.fn(() => false),
@@ -176,21 +188,41 @@ const createMockConfig = (overrides = {}) => ({
   ...overrides,
 });
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+function ComposerOwner({
+  uiState,
+  config,
+  uiActions,
+  showComposer,
+}: {
+  uiState: UIState;
+  config: ReturnType<typeof createMockConfig>;
+  uiActions: UIActions;
+  showComposer: boolean;
+}) {
+  return (
+    <ConfigContext.Provider value={config as unknown as Config}>
+      <UIStateContext.Provider value={uiState}>
+        <UIActionsContext.Provider value={uiActions}>
+          {showComposer ? <Composer /> : <Text>Auth dialog</Text>}
+        </UIActionsContext.Provider>
+      </UIStateContext.Provider>
+    </ConfigContext.Provider>
+  );
+}
+
 const composerElement = (
   uiState: UIState,
   config = createMockConfig(),
   uiActions = createMockUIActions(),
+  showComposer = true,
 ) => (
-  <ConfigContext.Provider value={config as any}>
-    <UIStateContext.Provider value={uiState}>
-      <UIActionsContext.Provider value={uiActions}>
-        <Composer />
-      </UIActionsContext.Provider>
-    </UIStateContext.Provider>
-  </ConfigContext.Provider>
+  <ComposerOwner
+    uiState={uiState}
+    config={config}
+    uiActions={uiActions}
+    showComposer={showComposer}
+  />
 );
-/* eslint-enable @typescript-eslint/no-explicit-any */
 
 const renderComposer = (
   uiState: UIState,
@@ -207,6 +239,34 @@ describe('Composer', () => {
 
       // Smoke check that the Footer renders
       expect(lastFrame()).toContain('Footer');
+    });
+
+    it('renders the startup footer while config initialization is pending', () => {
+      // Footer is the sole production consumer of useConfigInitMessage, which
+      // returns a message only while isConfigInitialized is false. Gating the
+      // footer on isInputActive alone makes the two windows disjoint, so
+      // startup would show no progress feedback at all.
+      const uiState = createMockUIState({
+        isInputActive: false,
+        isConfigInitialized: false,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).toContain('Footer');
+      // The race this change closes must stay closed: no input before init.
+      expect(lastFrame()).not.toContain('InputPrompt');
+    });
+
+    it('keeps the footer hidden when input is inactive and initialization is done', () => {
+      const uiState = createMockUIState({
+        isInputActive: false,
+        isConfigInitialized: true,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).not.toContain('Footer');
     });
   });
 
@@ -300,6 +360,18 @@ describe('Composer', () => {
       expect(output).not.toContain('Esc to cancel');
     });
 
+    it('hides the narrow cancel hint while command cancellation is blocked', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 25,
+        commandCancellationBlocked: true,
+      });
+
+      expect(renderComposer(uiState).lastFrame()).not.toContain(
+        'Esc to cancel',
+      );
+    });
+
     it('shows LoadingIndicator when Responding on a 31-col terminal', () => {
       const uiState = createMockUIState({
         streamingState: StreamingState.Responding,
@@ -364,6 +436,35 @@ describe('Composer', () => {
       // This test verifies that the component receives the correct prop
       const output = lastFrame();
       expect(output).toContain('InputPrompt'); // Verify basic Composer rendering
+    });
+  });
+
+  describe('Mod band', () => {
+    it('draws the band between the survey and the prompt, only while the input shows', () => {
+      modBand.current = {
+        tree: { type: 'Text', children: ['☀ Clear 12%'] },
+        owner: 'token-weather',
+        revision: 1,
+      };
+      try {
+        const { lastFrame } = renderComposer(
+          createMockUIState({ isFeedbackDialogOpen: true, terminalHeight: 24 }),
+        );
+        const output = lastFrame()!;
+        expect(output.indexOf('FeedbackDialog')).toBeLessThan(
+          output.indexOf('☀ Clear 12%'),
+        );
+        expect(output.indexOf('☀ Clear 12%')).toBeLessThan(
+          output.indexOf('InputPrompt'),
+        );
+        expect(
+          renderComposer(createMockUIState({ isInputActive: false }))
+            .lastFrame()!
+            .includes('☀'),
+        ).toBe(false);
+      } finally {
+        modBand.current = undefined;
+      }
     });
   });
 
@@ -496,3 +597,32 @@ describe('Composer', () => {
     });
   });
 });
+
+it.each<{ history: UIState['history'] }>([
+  { history: [] },
+  { history: [{ id: 1, type: MessageType.USER, text: '/auth' }] },
+])(
+  'keeps the subscription placeholder without the command hint row (%j)',
+  ({ history }) => {
+    const actions = createMockUIActions();
+    const ui = renderComposer(
+      createMockUIState({ history }),
+      createMockConfig({ getAuthType: () => 'qwen-subscription' }),
+      actions,
+    );
+    try {
+      expect(ui.lastFrame()).not.toContain('Try:');
+      expect(ui.lastFrame()).not.toContain(
+        '/usage  /status  /upgrade  /logout',
+      );
+      expect(ui.lastFrame()).toContain('Footer');
+      const props = vi.mocked(InputPrompt).mock.calls.at(-1)![0];
+      expect(props.placeholder).toBe('  Type your request, or /usage');
+      const options = { deferUntilIdle: true, submittedPrompt: '/usage' };
+      props.onSubmit('/usage', options);
+      expect(actions.handleFinalSubmit).toHaveBeenCalledWith('/usage', options);
+    } finally {
+      ui.unmount();
+    }
+  },
+);

@@ -28,6 +28,54 @@ describe('isDaemonSessionPrInfo', () => {
     expect(isDaemonSessionPrInfo({ ...valid, state: 'draft' })).toBe(false);
   });
 
+  it('accepts an issue snapshot and rejects malformed issues', () => {
+    const issue = { number: 7, url: 'https://github.com/o/r/issues/7' };
+    expect(isDaemonSessionPrInfo({ ...valid, issues: [] })).toBe(true);
+    // A state-less issue (older sidecar) is served by the daemon and must
+    // not drop the whole binding here.
+    expect(isDaemonSessionPrInfo({ ...valid, issues: [issue] })).toBe(true);
+    const issues = (length: number) =>
+      Array.from({ length }, (_, index) => ({ ...issue, number: index + 1 }));
+    expect(isDaemonSessionPrInfo({ ...valid, issues: issues(10) })).toBe(true);
+    expect(isDaemonSessionPrInfo({ ...valid, issues: issues(11) })).toBe(false);
+    // Control characters would forge the daemon's audit line.
+    expect(
+      isDaemonSessionPrInfo({
+        ...valid,
+        issues: [{ ...issue, url: `${issue.url}\u0007` }],
+      }),
+    ).toBe(false);
+    for (const state of ['open', 'completed', 'not_planned'] as const) {
+      expect(
+        isDaemonSessionPrInfo({ ...valid, issues: [{ ...issue, state }] }),
+      ).toBe(true);
+    }
+    // Issue urls render as links too, so the same url gate applies.
+    expect(
+      isDaemonSessionPrInfo({
+        ...valid,
+        issues: [{ ...issue, url: 'javascript:alert(1)' }],
+      }),
+    ).toBe(false);
+    expect(
+      isDaemonSessionPrInfo({
+        ...valid,
+        issues: [{ ...issue, state: 'closed' }],
+      }),
+    ).toBe(false);
+    expect(isDaemonSessionPrInfo({ ...valid, issues: [{ number: 7 }] })).toBe(
+      false,
+    );
+    expect(
+      isDaemonSessionPrInfo({ ...valid, issues: [{ ...issue, number: 0 }] }),
+    ).toBe(false);
+    expect(
+      isDaemonSessionPrInfo({ ...valid, issues: [{ ...issue, number: 1.5 }] }),
+    ).toBe(false);
+    expect(isDaemonSessionPrInfo({ ...valid, issues: [null] })).toBe(false);
+    expect(isDaemonSessionPrInfo({ ...valid, issues: {} })).toBe(false);
+  });
+
   it('rejects malformed numbers and urls', () => {
     expect(isDaemonSessionPrInfo({ ...valid, number: 0 })).toBe(false);
     expect(isDaemonSessionPrInfo({ ...valid, number: 1.5 })).toBe(false);

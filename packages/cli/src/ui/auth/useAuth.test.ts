@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
@@ -12,6 +13,7 @@ import {
   openRouterProvider,
   tokenPlanProvider,
   customProvider,
+  minimaxProvider,
   generateCustomEnvKey as generateCustomApiKeyEnvKey,
   getDefaultModelIds,
   resolveBaseUrl,
@@ -22,6 +24,13 @@ import {
   normalizeCustomModelIds,
   maskApiKey,
 } from './useAuth.js';
+import { AuthState } from '../types.js';
+import { setNestedPropertySafe } from '../../config/settingsUtils.js';
+
+const activate = vi.hoisted(() => vi.fn());
+vi.mock('./activate-subscription.js', () => ({
+  activateSubscription: activate,
+}));
 
 vi.mock('../hooks/useQwenAuth.js', () => ({
   useQwenAuth: vi.fn(() => ({
@@ -45,27 +54,34 @@ vi.mock('../../config/modelProvidersScope.js', () => ({
   getPersistScopeForModelSelection: vi.fn(() => 'user'),
 }));
 
-const createSettings = () => ({
-  merged: {
-    modelProviders: {},
-  },
-  setValue: vi.fn(),
-  recomputeMerged: vi.fn(),
-  forScope: vi.fn(() => ({
+const createSettings = () => {
+  const file = {
     path: '/tmp/settings.json',
-    settings: {},
-    originalSettings: {},
-  })),
-});
+    settings: { modelProviders: {} } as Record<string, unknown>,
+    originalSettings: {} as Record<string, unknown>,
+  };
+  return {
+    get merged() {
+      return file.settings;
+    },
+    setValue: vi.fn((_scope: unknown, key: string, value: unknown) => {
+      setNestedPropertySafe(file.settings, key, value);
+      setNestedPropertySafe(file.originalSettings, key, value);
+    }),
+    recomputeMerged: vi.fn(),
+    forScope: vi.fn(() => file),
+  };
+};
 
 const createConfig = (recordSlashCommand = vi.fn()) => {
   const modelsConfig = {
     syncAfterAuthRefresh: vi.fn(),
   };
   return {
-    getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+    getAuthType: vi.fn<() => AuthType | undefined>(() => AuthType.USE_OPENAI),
     getUsageStatisticsEnabled: vi.fn(() => false),
     reloadModelProvidersConfig: vi.fn(),
+    syncModelSelection: vi.fn(),
     refreshAuth: vi.fn(async () => undefined),
     getModelsConfig: vi.fn(() => modelsConfig),
     getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
@@ -75,6 +91,19 @@ const createConfig = (recordSlashCommand = vi.fn()) => {
 describe('useAuthCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it('accepts OpenAI Responses as QWEN_DEFAULT_AUTH_TYPE', () => {
+    vi.stubEnv('QWEN_DEFAULT_AUTH_TYPE', AuthType.USE_OPENAI_RESPONSES);
+    const settings = createSettings();
+    const config = createConfig();
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, vi.fn()),
+    );
+
+    expect(result.current.authError).toBeNull();
   });
 
   it('exposes closeAuthDialog that flips isAuthDialogOpen to false', () => {
@@ -90,12 +119,108 @@ describe('useAuthCommand', () => {
       result.current.openAuthDialog();
     });
     expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.state.isAuthDialogDismissible).toBe(true);
 
     act(() => {
       result.current.closeAuthDialog();
     });
     expect(result.current.isAuthDialogOpen).toBe(false);
+    expect(result.current.state.isAuthDialogDismissible).toBe(false);
     expect(result.current.authError).toBe(null);
+  });
+
+  it.each([undefined, AuthType.USE_OPENAI, AuthType.QWEN_SUBSCRIPTION])(
+    'clears an earlier error when explicitly opening /auth with provider %s',
+    (authType) => {
+      const config = createConfig();
+      config.getAuthType.mockReturnValue(authType);
+      const { result } = renderHook(() =>
+        useAuthCommand(createSettings() as never, config as never, vi.fn()),
+      );
+      act(() =>
+        result.current.onAuthError('Could not load Qwen Subscription models.'),
+      );
+      expect(result.current.authError).not.toBeNull();
+
+      act(() => result.current.openAuthDialog());
+      expect(result.current.authError).toBeNull();
+      expect(result.current.isAuthDialogOpen).toBe(true);
+      expect(result.current.state.isAuthDialogDismissible).toBe(true);
+      expect(config.getAuthType()).toBe(authType);
+      expect(config.refreshAuth).not.toHaveBeenCalled();
+      expect(config.syncModelSelection).not.toHaveBeenCalled();
+
+      act(() => result.current.onAuthError('New login attempt failed.'));
+      expect(result.current.authError).toBe('New login attempt failed.');
+    },
+  );
+
+  it('resets authentication UI after logout before opening the picker', () => {
+    const config = createConfig();
+    const onAuthChange = vi.fn();
+    const { result } = renderHook(() =>
+      useAuthCommand(
+        createSettings() as never,
+        config as never,
+        vi.fn(),
+        onAuthChange,
+      ),
+    );
+    act(() => result.current.setAuthState(AuthState.Authenticated));
+    config.getAuthType.mockReturnValue(undefined);
+    act(() => result.current.openAuthDialog());
+    expect(result.current.authState).toBe(AuthState.Unauthenticated);
+    expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.state.isAuthDialogDismissible).toBe(true);
+    expect(result.current.pendingAuthType).toBeUndefined();
+    expect(onAuthChange).toHaveBeenCalledOnce();
+  });
+
+  it('keeps startup authentication required after a command dialog was closed', () => {
+    const config = createConfig();
+    config.getAuthType.mockReturnValue(undefined);
+    const { result } = renderHook(() =>
+      useAuthCommand(createSettings() as never, config as never, vi.fn()),
+    );
+    expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.state.isAuthDialogDismissible).toBe(false);
+    act(() => result.current.openAuthDialog());
+    expect(result.current.state.isAuthDialogDismissible).toBe(true);
+    act(() => result.current.closeAuthDialog());
+    act(() => result.current.onAuthError('Authentication required'));
+    expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.state.isAuthDialogDismissible).toBe(false);
+    expect(config.getAuthType()).toBeUndefined();
+  });
+
+  it('keeps first-time authentication open after saving only a preset image model', async () => {
+    const settings = createSettings();
+    const config = { ...createConfig(), getAuthType: vi.fn(() => undefined) };
+    const addItem = vi.fn();
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, addItem),
+    );
+    await act(async () => {
+      await result.current.handleProviderSubmit(minimaxProvider, {
+        baseUrl: resolveBaseUrl(minimaxProvider),
+        apiKey: 'test-image',
+        modelIds: ['image-01'],
+      });
+    });
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'modelProviders.openai',
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'image-01', imageOnly: true }),
+      ]),
+    );
+    expect(config.refreshAuth).not.toHaveBeenCalled();
+    expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.isAuthenticating).toBe(false);
+    expect(result.current.authError).toBe(
+      'Service models saved. Configure a conversation model to start chatting.',
+    );
+    expect(addItem).not.toHaveBeenCalled();
   });
 
   it('configures DeepSeek via the unified provider submit', async () => {
@@ -314,6 +439,32 @@ describe('useAuthCommand', () => {
     expect(config.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
   });
 
+  it('uses the effective Responses auth state after OpenAI setup', async () => {
+    const settings = createSettings();
+    const config = createConfig();
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, vi.fn()),
+    );
+    await act(async () => {
+      await result.current.handleProviderSubmit(customProvider, {
+        protocol: AuthType.USE_OPENAI,
+        wireApi: 'responses',
+        baseUrl: 'https://responses.test/v1',
+        apiKey: 'test',
+        modelIds: ['model'],
+      });
+    });
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'user',
+      'security.auth.selectedType',
+      AuthType.USE_OPENAI_RESPONSES,
+    );
+    expect(config.refreshAuth).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI_RESPONSES,
+    );
+    expect(result.current.pendingAuthType).toBeUndefined();
+  });
+
   it('cancelAuthentication resets dialog + flags + clears authError', async () => {
     const settings = createSettings();
     const config = createConfig();
@@ -494,4 +645,63 @@ describe('maskApiKey', () => {
     const result = maskApiKey('  sk-or-v1-1234567890abcdef  ');
     expect(result).toBe('sk-...cdef');
   });
+});
+
+it('returns to the prompt and preserves the success summary after subscription activation', async () => {
+  activate.mockResolvedValue({
+    email: 'builder@example.com',
+    member_type: 'pro',
+  });
+  const config = { ...createConfig(), getModel: () => 'qwen3.8-max' };
+  const addItem = vi.fn();
+  const hook = renderHook(() =>
+    useAuthCommand(createSettings() as never, config as never, addItem),
+  );
+  act(() => hook.result.current.openAuthDialog());
+  expect(hook.result.current.isAuthDialogOpen).toBe(true);
+  await act(async () => {
+    await hook.result.current.handleSubscriptionSubmit(
+      new AbortController().signal,
+    );
+  });
+  expect(hook.result.current.isAuthDialogOpen).toBe(false);
+  expect(addItem).toHaveBeenCalledWith(
+    {
+      type: 'info',
+      text: '✓ Signed in successfully · builder@example.com\n✓ Current plan: Qwen Pro. Qwen Code is ready.\n  Model: qwen3.8-max. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.\n  Common commands: /usage   /upgrade   /model   /effort   /status   /logout',
+      presentation: 'subscription-success',
+    },
+    expect.any(Number),
+  );
+  hook.unmount();
+});
+
+it('does not close or publish success if activation fails or is cancelled', async () => {
+  const addItem = vi.fn();
+  const hook = renderHook(() =>
+    useAuthCommand(createSettings() as never, createConfig() as never, addItem),
+  );
+  act(() => hook.result.current.openAuthDialog());
+  activate.mockRejectedValueOnce(new Error('activation failed'));
+  await act(async () => {
+    await expect(
+      hook.result.current.handleSubscriptionSubmit(
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('activation failed');
+  });
+  const controller = new AbortController();
+  controller.abort();
+  activate.mockResolvedValue({
+    email: 'builder@example.com',
+    member_type: 'pro',
+  });
+  await act(async () => {
+    await expect(
+      hook.result.current.handleSubscriptionSubmit(controller.signal),
+    ).rejects.toThrow();
+  });
+  expect(hook.result.current.isAuthDialogOpen).toBe(true);
+  expect(addItem).not.toHaveBeenCalled();
+  hook.unmount();
 });

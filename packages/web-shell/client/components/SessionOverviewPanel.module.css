@@ -44,6 +44,10 @@
   background: color-mix(in srgb, var(--success-color) 14%, transparent);
 }
 
+.attention {
+  color: var(--warning-color);
+}
+
 /* The running indicator mirrors the sidebar's session-loading spinner: only
    shown while a turn is active, so idle sessions stay visually quiet. */
 .loading {

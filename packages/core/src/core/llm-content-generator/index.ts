@@ -45,22 +45,20 @@ export function createLlmContentGenerator(
         baseUrl: config.baseUrl,
       }
     : { headers };
+  const useVertex = config.authType === AuthType.USE_VERTEX_AI;
 
   const llmContentGenerator = new LlmContentGenerator(
     {
       apiKey: config.apiKey === '' ? undefined : config.apiKey,
-      // Derive Vertex mode from the auth type rather than leaving it to the
-      // GOOGLE_GENAI_USE_VERTEXAI side effect: only the CLI pre-flight check
-      // writes that variable, and the session boot paths that skip it would
-      // otherwise build a client pointed at the Gemini API endpoint. Left
-      // undefined for the other auth types so the SDK keeps its own env
-      // fallback for them.
-      vertexai:
-        config.vertexai ??
-        (config.authType === AuthType.USE_VERTEX_AI ? true : undefined),
+      // Ambient SDK settings and the parent's mode cannot select the protocol
+      // of an isolated route. Other callers keep their existing overrides.
+      vertexai: config.isolatedRoute
+        ? useVertex
+        : (config.vertexai ?? (useVertex || undefined)),
       httpOptions,
     },
     config,
+    gcConfig,
   );
 
   return llmContentGenerator;

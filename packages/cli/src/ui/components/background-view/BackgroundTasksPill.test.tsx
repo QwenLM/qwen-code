@@ -6,7 +6,12 @@
 
 import { describe, it, expect } from 'vitest';
 import type { DialogEntry } from '../../hooks/useBackgroundTaskView.js';
-import { getPillLabel, hasPendingApproval } from './BackgroundTasksPill.js';
+import {
+  getPendingBackgroundApprovals,
+  getPillLabel,
+  hasLargeWorkflow,
+  hasPendingApproval,
+} from './BackgroundTasksPill.js';
 import type {
   BackgroundApproval,
   WorkflowApproval,
@@ -289,5 +294,76 @@ describe('hasPendingApproval', () => {
         dreamEntry({ dreamId: 'd-a' }),
       ]),
     ).toBe(false);
+  });
+});
+
+describe('getPendingBackgroundApprovals', () => {
+  it('lists agent and workflow approvals oldest first', () => {
+    const late = { ...approval('c1'), at: 30 };
+    const early = { ...workflowApproval('wfap-1'), name: 'Edit', at: 10 };
+    const middle = { ...approval('c2'), name: 'Grep', at: 20 };
+    expect(
+      getPendingBackgroundApprovals([
+        agentEntry({ agentId: 'a', pendingApprovals: [late] }),
+        workflowEntry({ pendingApprovals: [early] }),
+        agentEntry({ agentId: 'b', pendingApprovals: [middle] }),
+        shellEntry({ shellId: 'bg_a' }),
+        dreamEntry({ dreamId: 'd-a' }),
+      ]).map(({ toolName, at }) => ({ toolName, at })),
+    ).toEqual([
+      { toolName: 'Edit', at: 10 },
+      { toolName: 'Grep', at: 20 },
+      { toolName: 'Shell', at: 30 },
+    ]);
+  });
+
+  it('keeps distinct, stable keys when nested agents share a call ID', () => {
+    const own = approval('call_qwen_1');
+    const firstChild = { ...own, subagentId: 'child-a' };
+    const secondChild = { ...own, subagentId: 'child-b' };
+    const initial = getPendingBackgroundApprovals([
+      agentEntry({ pendingApprovals: [own, firstChild] }),
+    ]);
+    const updated = getPendingBackgroundApprovals([
+      agentEntry({ pendingApprovals: [own, firstChild, secondChild] }),
+    ]);
+
+    expect(new Set(updated.map(({ key }) => key)).size).toBe(3);
+    expect(updated.slice(0, 2)).toEqual(initial);
+  });
+
+  it('is empty when nothing is parked', () => {
+    expect(
+      getPendingBackgroundApprovals([agentEntry(), workflowEntry()]),
+    ).toEqual([]);
+  });
+});
+
+describe('hasLargeWorkflow', () => {
+  const sizeWarning = {
+    axis: 'agents' as const,
+    scheduledAgents: 40,
+    totalTokens: 0,
+    projectedTokens: 2_800_000,
+    agentCap: 15,
+    tokenCap: 1_500_000,
+    capFromGuideline: true,
+    at: 0,
+  };
+
+  it('is true for an active workflow flagged as large', () => {
+    expect(hasLargeWorkflow([workflowEntry({ sizeWarning })])).toBe(true);
+    expect(
+      hasLargeWorkflow([workflowEntry({ status: 'paused', sizeWarning })]),
+    ).toBe(true);
+  });
+
+  // The marker asks the user to consider stopping a run; a settled run has
+  // nothing left to stop.
+  it('is false once the flagged run settled, and without a flag', () => {
+    expect(
+      hasLargeWorkflow([workflowEntry({ status: 'completed', sizeWarning })]),
+    ).toBe(false);
+    expect(hasLargeWorkflow([workflowEntry(), agentEntry()])).toBe(false);
   });
 });

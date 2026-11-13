@@ -34,6 +34,8 @@ import {
   parseCaptureSpecs,
   extractCaptures,
   readCapped,
+  notStartedReport,
+  type DriveArgs,
   type ExecResult,
 } from './drive.js';
 import { BRIEFS } from './lib/agent-briefs.js';
@@ -47,6 +49,7 @@ import {
   makeStaleBundleFixture,
   stampDigest,
 } from './lib/test-utils.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 // The handler's output goes through the same helpers the parse-args suite
 // mocks; the wiring tests below intercept them so no real terminal is touched.
@@ -527,6 +530,51 @@ describe('the working directory', () => {
   });
 });
 
+describe('the all-zero report factory', () => {
+  it('builds the complete zero-valued report, with the note passed through', () => {
+    expect(notStartedReport('a note')).toEqual({
+      outcome: 'unavailable',
+      observed: false,
+      exitCode: null,
+      readyAfterMs: null,
+      droveForMs: 0,
+      output: '',
+      truncated: false,
+      killedStale: false,
+      note: 'a note',
+    });
+  });
+
+  it('is what every path that starts nothing actually returns', () => {
+    // Four exits share every field but `note`. Pinning them to the factory,
+    // rather than to four hand-copied literals, is what keeps a field added
+    // later from landing in three of the four.
+    const cases: Array<{
+      opts: Parameters<typeof harness>[0];
+      args: Partial<DriveArgs>;
+    }> = [
+      { opts: {}, args: { server: '../../PWNED' } },
+      { opts: {}, args: { timeout: -1 } },
+      { opts: {}, args: { capture: ['noequals'] } },
+      { opts: { tmuxAvailable: false }, args: {} },
+    ];
+    for (const c of cases) {
+      const h = harness(c.opts);
+      const r = runDrive({
+        script: 'true',
+        cwd: '/tmp',
+        readyTimeout: 1,
+        timeout: 1,
+        server: 'factory',
+        exec: h.exec,
+        ...c.args,
+      });
+      expect(r.outcome).toBe('unavailable');
+      expect(r).toEqual(notStartedReport(r.note));
+    }
+  });
+});
+
 describe('the environment gate', () => {
   it('reports `unavailable`, not a finding, when tmux is missing', () => {
     const h = harness({ tmuxAvailable: false });
@@ -773,7 +821,7 @@ describe('the log cap', () => {
       rmSync(workDir, { recursive: true, force: true });
       expect(r.outcome).toBe('timed-out'); // returned — did not block on the FIFO
       expect(r.exitCode).toBeNull();
-      expect(Date.now() - started).toBeLessThan(10_000);
+      expectWithinLatencyBudget(Date.now() - started, 10_000);
     },
   );
 

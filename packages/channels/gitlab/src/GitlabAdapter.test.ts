@@ -86,6 +86,7 @@ function makeNote(overrides: Record<string, unknown> = {}) {
 class TestableGitlabChannel extends GitlabChannel {
   inboundEnvelopes: Envelope[] = [];
   handleInboundError: Error | null = null;
+  inboundErrorSourceLabel: string | undefined;
 
   override async handleInbound(envelope: Envelope): Promise<void> {
     if (this.handleInboundError) throw this.handleInboundError;
@@ -96,12 +97,19 @@ class TestableGitlabChannel extends GitlabChannel {
     // no-op: tests call pollOnce() manually
   }
 
+  protected override getInboundErrorSourceLabel(
+    _envelope: Envelope,
+  ): string | undefined {
+    return this.inboundErrorSourceLabel;
+  }
+
   async testSendThreadMessage(
     chatId: string,
     threadId: string,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
-    return this.sendThreadMessage(chatId, threadId, text);
+    return this.sendThreadMessage(chatId, threadId, text, sourceLabel);
   }
 }
 
@@ -220,6 +228,99 @@ describe('GitlabChannel', () => {
       const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
       await ch.connect();
       expect(ch.config.allowedUsers).toEqual(['alice']);
+      ch.disconnect();
+    });
+
+    it('normalizes per-group allowedUsers to lowercase for the group sender gate', async () => {
+      const config = makeConfig({
+        groups: { '*': { senders: 'allowlist', allowedUsers: ['Alice'] } },
+      });
+      const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
+      await ch.connect();
+
+      const groupGate = (
+        ch as unknown as {
+          senderGateFor(target: { isGroup: boolean; chatId: string }): {
+            isAllowed: (senderId: string) => boolean;
+          };
+        }
+      ).senderGateFor({ isGroup: true, chatId: 'owner/repo' });
+      expect(groupGate.isAllowed('alice')).toBe(true);
+      expect(groupGate.isAllowed('bob')).toBe(false);
+      expect(ch.config.groups['*']?.allowedUsers).toEqual(['alice']);
+      ch.disconnect();
+    });
+
+    it('matches a mixed-case project path case-insensitively for the sender policy', async () => {
+      // GitLab routing is case-insensitive but path_with_namespace preserves
+      // case (e.g. CalcProgrammer1/OpenRGB). A lower-case chatId must still
+      // resolve the mixed-case group's sender allowlist instead of falling
+      // back to the open default.
+      const config = makeConfig({
+        groupPolicy: 'allowlist',
+        groups: {
+          'CalcProgrammer1/OpenRGB': {
+            senders: 'allowlist',
+            allowedUsers: ['Alice'],
+          },
+        },
+      });
+      const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
+      await ch.connect();
+
+      const groupGate = (
+        ch as unknown as {
+          senderGateFor(target: { isGroup: boolean; chatId: string }): {
+            isAllowed: (senderId: string) => boolean;
+          };
+        }
+      ).senderGateFor({ isGroup: true, chatId: 'calcprogrammer1/openrgb' });
+      expect(groupGate.isAllowed('alice')).toBe(true);
+      expect(groupGate.isAllowed('bob')).toBe(false);
+      ch.disconnect();
+    });
+
+    it('admits a mixed-case project path through the allowlist case-insensitively', async () => {
+      // The allowlist admission path (GroupGate) resolves the group through the
+      // same normalizer; a lower-case chatId must admit the mixed-case key.
+      const config = makeConfig({
+        groupPolicy: 'allowlist',
+        groups: { 'CalcProgrammer1/OpenRGB': { requireMention: false } },
+      });
+      const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
+      await ch.connect();
+
+      const gate = (
+        ch as unknown as {
+          groupGate: {
+            check(
+              envelope: Envelope,
+              options?: { createPairingRequest?: boolean },
+            ): { allowed: boolean; reason?: string };
+          };
+        }
+      ).groupGate;
+      const envelope = {
+        channelName: 'test-gl',
+        senderId: 'alice',
+        senderName: 'alice',
+        chatId: 'calcprogrammer1/openrgb',
+        text: 'hello',
+        isGroup: true,
+        isMentioned: true,
+        isReplyToBot: false,
+      } as Envelope;
+      expect(
+        gate.check(envelope, { createPairingRequest: false }).allowed,
+      ).toBe(true);
+      ch.disconnect();
+    });
+
+    it('normalizes operators to lowercase for shared-session commands', async () => {
+      const config = makeConfig({ operators: ['Alice'] });
+      const ch = new TestableGitlabChannel('test-gl', config, makeBridge());
+      await ch.connect();
+      expect(ch.config.operators).toEqual(['alice']);
       ch.disconnect();
     });
 
@@ -394,6 +495,34 @@ describe('GitlabChannel', () => {
       expect(mockApi.Issues.show).toHaveBeenCalled();
     });
 
+    it('dispatches provider-generated assignment todos', async () => {
+      const configured = makeConfig({
+        action_prompt_template: {
+          mentioned: 'Mentioned: %description%',
+          assigned: 'Assigned: %description%',
+        },
+      });
+      channel = new TestableGitlabChannel(
+        'test-gitlab',
+        configured,
+        makeBridge(),
+      );
+      await initWithoutLoop();
+
+      const todo = makeTodo({
+        action_name: 'assigned',
+        target_url: 'https://gitlab.com/owner/repo/-/issues/42',
+      });
+      mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
+      mockApi.Issues.show.mockResolvedValueOnce({
+        description: 'Please fix this',
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes[0]!.text).toContain('Please fix this');
+    });
+
     it('skips todo authored by bot', async () => {
       await initWithoutLoop();
 
@@ -458,9 +587,10 @@ describe('GitlabChannel', () => {
       expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 100 });
     });
 
-    it('marks todo done and advances cursor even when handleInbound fails', async () => {
+    it('attributes failures while marking the todo done and advancing', async () => {
       await initWithoutLoop();
       channel.handleInboundError = new Error('agent failed');
+      channel.inboundErrorSourceLabel = '[review_*]';
 
       const todo = makeTodo();
       mockApi.TodoLists.all.mockResolvedValueOnce([todo]);
@@ -469,6 +599,11 @@ describe('GitlabChannel', () => {
 
       expect(mockApi.TodoLists.done).toHaveBeenCalledWith({ todoId: 100 });
       expect(channel.cursor.lastProcessedId).toBe(100);
+      expect(mockApi.IssueNotes.create).toHaveBeenCalledWith(
+        'owner/repo',
+        42,
+        '\\[review\\_\\*\\]\n⚠️ Failed to process this request. Please re-mention the bot to retry.',
+      );
     });
 
     it('advances cursor to max todo id', async () => {
@@ -574,6 +709,23 @@ describe('GitlabChannel', () => {
         'owner/repo',
         42,
         'reply',
+      );
+    });
+
+    it('escapes the source label before posting a note', async () => {
+      await initWithoutLoop();
+
+      await channel.testSendThreadMessage(
+        'owner/repo',
+        'issue:42',
+        'reply',
+        '[review_~~*]',
+      );
+
+      expect(mockApi.IssueNotes.create).toHaveBeenCalledWith(
+        'owner/repo',
+        42,
+        '\\[review\\_\\~\\~\\*\\]\nreply',
       );
     });
 

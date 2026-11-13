@@ -27,13 +27,15 @@ const UI_COMPACT_KEEP_RECENT = 20;
 
 export interface UseHistoryManagerReturn {
   history: HistoryItem[];
+  /** The session owning the history currently committed in the UI. */
+  sessionId?: string;
   addItem: (itemData: HistoryItemWithoutId, baseTimestamp: number) => number; // Returns the generated ID
   updateItem: (
     id: number,
     updates: Partial<HistoryItemWithoutId> | HistoryItemUpdater,
   ) => void;
-  clearItems: () => void;
-  loadHistory: (newHistory: HistoryItem[]) => void;
+  clearItems: (sessionId?: string) => void;
+  loadHistory: (newHistory: HistoryItem[], sessionId?: string) => void;
   truncateToItem: (itemId: number) => void;
   compactOldItems: () => void;
 }
@@ -44,19 +46,73 @@ export interface UseHistoryManagerReturn {
  * Encapsulates the history array, message ID generation, adding items,
  * updating items, and clearing the history.
  */
-export function useHistory(): UseHistoryManagerReturn {
-  const [history, setHistory] = useState<HistoryItem[]>([]);
+export function useHistory(initialSessionId?: string): UseHistoryManagerReturn {
+  const [{ history, sessionId }, setTranscript] = useState(() => ({
+    history: [] as HistoryItem[],
+    sessionId: initialSessionId,
+  }));
+  const setHistory = useCallback(
+    (update: (items: HistoryItem[]) => HistoryItem[]) => {
+      setTranscript((previous) => {
+        const history = update(previous.history);
+        return history === previous.history
+          ? previous
+          : { ...previous, history };
+      });
+    },
+    [],
+  );
   const messageIdCounterRef = useRef(0);
+  const lastMessageIdRef = useRef(0);
 
   // Generates a unique message ID based on a timestamp and a counter.
+  // Callers pass bases captured at different wall-clock times: a turn's items
+  // reuse the timestamp taken at submitQuery entry, while notification items
+  // are minted mid-turn from onRequestStarted with a fresh Date.now(). When
+  // the ms gap between two bases equals the counter delta between the two
+  // mints, base + counter repeats — a duplicate React key in the <Static>
+  // transcript. Clamp against the last minted id so ids stay strictly
+  // increasing no matter which base a caller supplies.
   const getNextMessageId = useCallback((baseTimestamp: number): number => {
     messageIdCounterRef.current += 1;
-    return baseTimestamp + messageIdCounterRef.current;
+    const id = Math.max(
+      baseTimestamp + messageIdCounterRef.current,
+      lastMessageIdRef.current + 1,
+    );
+    lastMessageIdRef.current = id;
+    return id;
   }, []);
 
-  const loadHistory = useCallback((newHistory: HistoryItem[]) => {
-    setHistory(newHistory);
-  }, []);
+  const loadHistory = useCallback(
+    (newHistory: HistoryItem[], sessionId?: string) => {
+      setTranscript((previous) => ({
+        history: newHistory,
+        sessionId: sessionId ?? previous.sessionId,
+      }));
+      // Restored transcripts stamp items with IDs relative to their own load
+      // timestamp (base + 1..N, see buildResumedHistoryItems). Advance the ID
+      // counter past the highest loaded ID so a subsequent addItem — which
+      // computes Date.now() + ++counter — cannot land inside the restored
+      // range and duplicate a React key in the <Static> transcript. The next
+      // getNextMessageId call increments again, so equality here still yields
+      // maxLoadedId + 1 at the earliest.
+      let maxLoadedId = 0;
+      for (const item of newHistory) {
+        if (item.id > maxLoadedId) {
+          maxLoadedId = item.id;
+        }
+      }
+      messageIdCounterRef.current = Math.max(
+        messageIdCounterRef.current,
+        maxLoadedId - Date.now(),
+      );
+      lastMessageIdRef.current = Math.max(
+        lastMessageIdRef.current,
+        maxLoadedId,
+      );
+    },
+    [],
+  );
 
   // Adds a new item to the history state with a unique ID.
   const addItem = useCallback(
@@ -71,7 +127,8 @@ export function useHistory(): UseHistoryManagerReturn {
           if (
             lastItem.type === 'user' &&
             newItem.type === 'user' &&
-            lastItem.text === newItem.text
+            lastItem.text === newItem.text &&
+            lastItem.recallText === newItem.recallText
           ) {
             return prevHistory; // Don't add the duplicate
           }
@@ -102,7 +159,7 @@ export function useHistory(): UseHistoryManagerReturn {
       });
       return id; // Return the generated ID (even if not added, to keep signature)
     },
-    [getNextMessageId],
+    [getNextMessageId, setHistory],
   );
 
   /**
@@ -138,27 +195,34 @@ export function useHistory(): UseHistoryManagerReturn {
         return nextHistory;
       });
     },
-    [],
+    [setHistory],
   );
 
   // Clears the entire history state and resets the ID counter.
-  const clearItems = useCallback(() => {
+  const clearItems = useCallback((sessionId?: string) => {
     if (debugLogger.isEnabled()) {
       debugLogger.debug(
         `[CLEAR_HISTORY] Clearing history, memory before=${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)}MB`,
       );
     }
-    setHistory([]);
+    setTranscript((previous) => ({
+      history: [],
+      sessionId: sessionId ?? previous.sessionId,
+    }));
     messageIdCounterRef.current = 0;
+    lastMessageIdRef.current = 0;
   }, []);
 
   // Truncates history to exclude the item with the given ID and everything after it.
-  const truncateToItem = useCallback((itemId: number) => {
-    setHistory((prev) => {
-      const index = prev.findIndex((h) => h.id === itemId);
-      return index === -1 ? prev : prev.slice(0, index);
-    });
-  }, []);
+  const truncateToItem = useCallback(
+    (itemId: number) => {
+      setHistory((prev) => {
+        const index = prev.findIndex((h) => h.id === itemId);
+        return index === -1 ? prev : prev.slice(0, index);
+      });
+    },
+    [setHistory],
+  );
 
   const compactOldItems = useCallback(() => {
     setHistory((prev) => {
@@ -311,11 +375,12 @@ export function useHistory(): UseHistoryManagerReturn {
         ? next
         : prev;
     });
-  }, []);
+  }, [setHistory]);
 
   return useMemo(
     () => ({
       history,
+      sessionId,
       addItem,
       updateItem,
       clearItems,
@@ -325,6 +390,7 @@ export function useHistory(): UseHistoryManagerReturn {
     }),
     [
       history,
+      sessionId,
       addItem,
       updateItem,
       clearItems,

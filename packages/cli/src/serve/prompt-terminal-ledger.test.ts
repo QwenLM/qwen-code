@@ -9,7 +9,11 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { afterAll, describe, expect, it } from 'vitest';
-import { SessionService, type ChatRecord } from '@qwen-code/qwen-code-core';
+import {
+  SessionService,
+  TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
+  type ChatRecord,
+} from '@qwen-code/qwen-code-core';
 import {
   appendPromptLedgerRecord,
   readPromptLedgerRecords,
@@ -103,9 +107,14 @@ function toolCallRecord(
   uuid: string,
   parentUuid: string,
   callId: string | null,
+  atMs?: number,
 ): ChatRecord {
+  const base =
+    atMs === undefined
+      ? record(fixture, uuid, parentUuid, '')
+      : recordAt(fixture, uuid, parentUuid, '', atMs);
   return {
-    ...record(fixture, uuid, parentUuid, ''),
+    ...base,
     message: {
       role: 'model',
       parts: [
@@ -133,6 +142,43 @@ function systemRecord(
     type: 'system',
     subtype,
     systemPayload,
+  };
+}
+
+/**
+ * A system-injected background notification, shaped like
+ * `createNotificationRecord` (packages/core/src/services/chatRecordingService.ts):
+ * a user-role record with `subtype: 'notification'`, `provenance: 'system'`
+ * and a real `message`, so it enters the api history projection as a plain
+ * user entry whose text is the `<task-notification>` envelope.
+ */
+function notificationRecord(
+  fixture: Fixture,
+  uuid: string,
+  parentUuid: string,
+  atMs?: number,
+): ChatRecord {
+  const base =
+    atMs === undefined
+      ? record(fixture, uuid, parentUuid, '')
+      : recordAt(fixture, uuid, parentUuid, '', atMs);
+  return {
+    ...base,
+    type: 'user',
+    subtype: 'notification',
+    provenance: 'system',
+    message: {
+      role: 'user',
+      parts: [
+        {
+          text:
+            '<task-notification><task-id>agent-1</task-id>' +
+            '<status>completed</status>' +
+            '<summary>Agent "explore" completed.</summary>' +
+            '</task-notification>',
+        },
+      ],
+    },
   };
 }
 
@@ -181,6 +227,55 @@ describe('reconcileDanglingPromptTerminals', () => {
         at: expect.any(Number),
       },
     ]);
+  });
+
+  it('reconstructs a completed Goal tool turn from its recorded boundary', async () => {
+    const fixture = makeFixture();
+    const permit = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
+    writeLedger(fixture, [{ v: 1, promptId: 'p1', state: 'in_flight', at: 1 }]);
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'finish the goal'),
+      {
+        ...toolCallRecord(fixture, 'a1', 'u1', 'finish'),
+        goalContext: permit,
+      },
+      {
+        ...record(fixture, 'result', 'a1', ''),
+        type: 'tool_result',
+        goalContext: permit,
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'finish',
+                name: 'run_shell_command',
+                response: { readyForVerification: true },
+              },
+            },
+          ],
+        },
+      },
+      {
+        ...systemRecord(fixture, 'end', 'result', 'goal_turn_end', {
+          toolCallId: 'finish',
+        }),
+        goalContext: permit,
+      },
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath).at(-1)).toEqual({
+      v: 1,
+      promptId: 'p1',
+      terminal: 'completed',
+      stopReason: 'reconstructed_from_transcript',
+      at: expect.any(Number),
+    });
   });
 
   it('marks an interrupted_prompt dangling prompt interrupted', async () => {
@@ -850,6 +945,277 @@ describe('reconcileDanglingPromptTerminals', () => {
         promptId: 'p1',
         terminal: 'interrupted',
         code: 'daemon_lost',
+        at: expect.any(Number),
+      },
+    ]);
+  });
+
+  it('keeps an id-less functionCall tail interrupted when a notification follows it', async () => {
+    // Both guards have to read the SAME tail. `detectTurnInterruption` trims
+    // the trailing notification, so the id-less guard must look at the trimmed
+    // tail as well: reading the raw last entry lets the notification hide the
+    // model entry from the guard while the trim hides the notification from
+    // detection — both miss at once and a prompt that died mid tool-run gets
+    // stamped `completed`. An ID'd call is unaffected (`danglingCalls` catches
+    // it), which is why the case above does not cover this shape.
+    const fixture = makeFixture();
+    writeLedger(fixture, [{ v: 1, promptId: 'p1', state: 'in_flight', at: 1 }]);
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'run something'),
+      toolCallRecord(fixture, 'a1', 'u1', null),
+      notificationRecord(fixture, 'n1', 'a1'),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toEqual([
+      { v: 1, promptId: 'p1', state: 'in_flight', at: 1 },
+      {
+        v: 1,
+        promptId: 'p1',
+        terminal: 'interrupted',
+        code: 'daemon_lost',
+        at: expect.any(Number),
+      },
+    ]);
+  });
+
+  it('keeps an id-less functionCall interrupted when notifications fill the window', async () => {
+    // The bounded tail has to be cut AFTER the notification trim. Slicing the
+    // raw projection first lets TURN_INTERRUPTION_HISTORY_TAIL_COUNT trailing
+    // notifications fill the whole window: the classifiable tail comes back
+    // empty, detection reads `none` (`boundary >= end` with `end === 0`) and
+    // the id-less guard has nothing to upgrade — while the attribution loop,
+    // which walks the WHOLE transcript rather than the window, still reports
+    // `a1` as the last visible non-system write, so the provenance-bound guard
+    // stamps `completed` for a prompt that died mid tool-run. One notification
+    // short of the window recovered correctly even before the trim-first
+    // window; the boundary is exactly the constant. Notification runs are
+    // unbounded (`MAX_BACKGROUND_NOTIFICATION_QUEUE` caps the pending queue,
+    // not the persisted records), so this is a real shape, not a limit probe.
+    const fixture = makeFixture();
+    writeLedger(fixture, [{ v: 1, promptId: 'p1', state: 'in_flight', at: 1 }]);
+    const notifications: ChatRecord[] = [];
+    for (let i = 0; i < TURN_INTERRUPTION_HISTORY_TAIL_COUNT; i++) {
+      notifications.push(notificationRecord(fixture, `n${i}`, 'a1'));
+    }
+    writeTranscript(fixture, [
+      record(fixture, 'u1', null, 'run something'),
+      toolCallRecord(fixture, 'a1', 'u1', null),
+      ...notifications,
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toEqual([
+      { v: 1, promptId: 'p1', state: 'in_flight', at: 1 },
+      {
+        v: 1,
+        promptId: 'p1',
+        terminal: 'interrupted',
+        code: 'daemon_lost',
+        at: expect.any(Number),
+      },
+    ]);
+  });
+
+  it('fails closed when the only post-admission write is a system notification', async () => {
+    // A notification record is user-role with a real `message`, so it does
+    // enter the projection — but the daemon persists it BEFORE the automatic
+    // turn runs, so it is not evidence that the target's own turn wrote
+    // anything. Counting it lets a notification-only post-admission tail pass
+    // attribution for a prompt that never ran. This shape now fails closed for
+    // TWO independent reasons: the `provenance === 'system'` skip below keeps
+    // the tail out of the temporal evidence, and even without that skip the
+    // provenance-bound completion guard vetoes the user-role tail. So this
+    // case does not witness the skip — the attribution direction (a wrong
+    // `interrupted` terminal rather than a missing `completed` one) is pinned
+    // by the next case.
+    const fixture = makeFixture();
+    const admittedAt = RECORD_BASE_MS + 1500;
+    writeLedger(fixture, [
+      { v: 1, promptId: 'p1', state: 'in_flight', at: admittedAt },
+    ]);
+    writeTranscript(fixture, [
+      recordAt(fixture, 'u1', null, 'earlier question', RECORD_BASE_MS),
+      recordAt(fixture, 'a1', 'u1', 'earlier answer', RECORD_BASE_MS + 1000),
+      notificationRecord(fixture, 'n1', 'a1', RECORD_BASE_MS + 2000),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toEqual([
+      { v: 1, promptId: 'p1', state: 'in_flight', at: admittedAt },
+    ]);
+  });
+
+  it("fails closed when a notification postdates an earlier turn's dangling tool call", async () => {
+    // The ATTRIBUTION direction of the `provenance === 'system'` skip: p1 was
+    // queued and never dispatched, and the only write after its admission is a
+    // system-injected notification. Counting that notification as p1's own
+    // write passes the temporal gate, and the classifier — which trims the
+    // notification — is then left looking at the PREVIOUS turn's dangling
+    // id-less `functionCall`, so the tool-call guard appends
+    // `interrupted / daemon_lost`: a WRONG terminal for a prompt that never
+    // ran, served by every later load because the ledger is append-only. The
+    // notification-only case above cannot cover this (its assistant tail makes
+    // the completion guard veto independently). Deleting the skip reddens this
+    // case AND the assistant-tail case below, which pins the skip's other
+    // direction — see the design doc's test plan
+    // (docs/design/2026-08-19-prompt-terminal-ledger-design.md).
+    const fixture = makeFixture();
+    const admittedAt = RECORD_BASE_MS + 1500;
+    writeLedger(fixture, [
+      { v: 1, promptId: 'p1', state: 'in_flight', at: admittedAt },
+    ]);
+    writeTranscript(fixture, [
+      recordAt(fixture, 'u1', null, 'earlier question', RECORD_BASE_MS),
+      toolCallRecord(fixture, 'a1', 'u1', null, RECORD_BASE_MS + 1000),
+      notificationRecord(fixture, 'n1', 'a1', RECORD_BASE_MS + 3000),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toEqual([
+      { v: 1, promptId: 'p1', state: 'in_flight', at: admittedAt },
+    ]);
+  });
+
+  it('stamps a completed turn whose assistant tail is followed by a notification', async () => {
+    // The `provenance === 'system'` skip in the attribution loop is
+    // load-bearing in BOTH directions. The case immediately above pins one
+    // direction (a notification must not count as the target's own
+    // post-admission write). This one pins the other: a notification must not
+    // become the LAST visible non-system write either. Without the skip, `n1`
+    // (user-role, with a real `message`) overwrites `a1` as the tail type, so
+    // the provenance-bound completion guard vetoes a turn the model actually
+    // answered — and since the ledger is append-only, that prompt stays
+    // `unknown` on every later load. Deleting the skip therefore reddens both
+    // cases.
+    const fixture = makeFixture();
+    const admittedAt = RECORD_BASE_MS + 1500;
+    writeLedger(fixture, [
+      { v: 1, promptId: 'p1', state: 'in_flight', at: admittedAt },
+    ]);
+    writeTranscript(fixture, [
+      recordAt(fixture, 'u1', null, 'question', RECORD_BASE_MS),
+      recordAt(fixture, 'a1', 'u1', 'answer', RECORD_BASE_MS + 2000),
+      notificationRecord(fixture, 'n1', 'a1', RECORD_BASE_MS + 3000),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toEqual([
+      { v: 1, promptId: 'p1', state: 'in_flight', at: admittedAt },
+      {
+        v: 1,
+        promptId: 'p1',
+        terminal: 'completed',
+        stopReason: 'reconstructed_from_transcript',
+        at: expect.any(Number),
+      },
+    ]);
+  });
+
+  it('fails closed when the visible tail is a real prompt shaped like a notification', async () => {
+    // Reconciliation classifies one tail with two models of "system-injected":
+    // record `provenance` for attribution (above) and rendered text shape for
+    // the verdict (`effectiveHistoryEnd`). A real prompt whose whole text
+    // happens to be an envelope — pasted out of a transcript, or forwarded
+    // verbatim by a channel/SDK client — is `provenance: 'real_user'`, so it
+    // counts as the target's own write; the classifier then trims that same
+    // entry, exposing the previous turn's model text as the tail and returning
+    // `none`. Without a provenance-bound guard the ledger synthesizes
+    // `completed` for a prompt the model never answered, and because the
+    // ledger is append-only that wrong terminal is what every later load
+    // serves. `main` stamped `interrupted / daemon_lost` here.
+    const fixture = makeFixture();
+    const admittedAt = RECORD_BASE_MS + 1500;
+    writeLedger(fixture, [
+      { v: 1, promptId: 'p1', state: 'in_flight', at: admittedAt },
+    ]);
+    writeTranscript(fixture, [
+      recordAt(fixture, 'u1', null, 'earlier question', RECORD_BASE_MS),
+      recordAt(fixture, 'a1', 'u1', 'earlier answer', RECORD_BASE_MS + 1000),
+      recordAt(
+        fixture,
+        'u2',
+        'a1',
+        '<task-notification><task-id>agent-1</task-id>' +
+          '<status>completed</status>' +
+          '<summary>Agent "explore" completed.</summary>' +
+          '</task-notification>',
+        RECORD_BASE_MS + 2000,
+      ),
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toEqual([
+      { v: 1, promptId: 'p1', state: 'in_flight', at: admittedAt },
+    ]);
+  });
+
+  it('stamps a locally handled slash command completed', async () => {
+    // A local command (`/help`, `/docs`, `/export md`, ...) never reaches the
+    // model: `Session.prompt()` records the prompt as an ordinary user message
+    // and the command answers with a `system` / `slash_command`
+    // `phase: 'result'` record, which `SessionApiHistoryAccumulator` uses to
+    // pop that user entry back out of the projection
+    // (session-api-history.test.ts asserts the projection is `[]` for exactly
+    // these commands). Detection therefore reads `none` while the last visible
+    // non-system write is `type: 'user'`, so without recognising the result
+    // record the completion guard vetoes and the promptId reports `unknown` on
+    // every later load — where `main` stamped `completed`. The result record is
+    // authoritative evidence rather than a text shape, so accepting it does not
+    // re-open the envelope-shaped real prompt case above.
+    const fixture = makeFixture();
+    const admittedAt = RECORD_BASE_MS + 500;
+    writeLedger(fixture, [
+      { v: 1, promptId: 'p1', state: 'in_flight', at: admittedAt },
+    ]);
+    writeTranscript(fixture, [
+      recordAt(fixture, 'u1', null, '/help', RECORD_BASE_MS + 1000),
+      {
+        ...systemRecord(fixture, 's1', 'u1', 'slash_command', {
+          phase: 'result',
+          rawCommand: '/help',
+          outputHistoryItems: [{ type: 'assistant', text: 'Done.' }],
+        }),
+        timestamp: new Date(RECORD_BASE_MS + 2000).toISOString(),
+      },
+    ]);
+
+    await reconcileDanglingPromptTerminals(
+      fixture.sessionService,
+      fixture.sessionId,
+    );
+
+    expect(readPromptLedgerRecords(fixture.ledgerPath)).toEqual([
+      { v: 1, promptId: 'p1', state: 'in_flight', at: admittedAt },
+      {
+        v: 1,
+        promptId: 'p1',
+        terminal: 'completed',
+        stopReason: 'reconstructed_from_transcript',
         at: expect.any(Number),
       },
     ]);

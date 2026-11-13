@@ -10,8 +10,14 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts'],
+    reporters: ['default', 'junit'],
+    outputFile: {
+      junit: 'junit.xml',
+    },
     // Kernel integration tests spawn real Node child processes.
     testTimeout: 60_000,
     hookTimeout: 60_000,
+    // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
+    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
   },
 });

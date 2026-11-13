@@ -5,16 +5,13 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { AuthType } from '../../../core/contentGenerator.js';
+import { buildInstallPlan, shouldShowStep } from '../../provider-config.js';
 import {
-  AuthType,
-  customProvider,
   CUSTOM_API_KEY_ENV_PREFIX,
-  buildInstallPlan,
-  shouldShowStep,
-} from '@qwen-code/qwen-code-core';
-// Re-import generateCustomEnvKey from the relative source path so the new
-// hash-suffix format is exercised even before dist/ is rebuilt.
-import { generateCustomEnvKey } from '../../presets/custom-provider.js';
+  customProvider,
+  generateCustomEnvKey,
+} from '../../presets/custom-provider.js';
 
 describe('generateCustomEnvKey', () => {
   it('produces a deterministic URL-based key with a stable hash suffix', () => {
@@ -108,6 +105,45 @@ describe('customProvider', () => {
       AuthType.USE_ANTHROPIC,
       AuthType.USE_GEMINI,
     ]);
+  });
+
+  it('builds an OpenAI Responses install plan', () => {
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI,
+      wireApi: 'responses',
+      baseUrl: 'https://api.example.com',
+      apiKey: 'sk-responses',
+      modelIds: ['gpt-5'],
+    });
+
+    expect(plan.authType).toBe(AuthType.USE_OPENAI_RESPONSES);
+    expect(plan.modelProviders?.[0]?.authType).toBe(AuthType.USE_OPENAI);
+    expect(plan.modelProviders?.[0]?.models[0]?.wireApi).toBe('responses');
+  });
+
+  it('shares new credentials between both OpenAI APIs', () => {
+    const inputs = {
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: 'https://gateway.example/v1',
+      apiKey: 'shared-key',
+      modelIds: ['model'],
+    };
+    const chat = buildInstallPlan(customProvider, {
+      ...inputs,
+      wireApi: 'chat-completions',
+    });
+    const responses = buildInstallPlan(customProvider, {
+      ...inputs,
+      wireApi: 'responses',
+    });
+    expect(chat.env).toEqual(responses.env);
+    expect(responses.modelProviders?.[0]?.models[0]).toMatchObject({
+      wireApi: 'responses',
+    });
+    expect(chat.modelProviders?.[0]?.models[0]).toMatchObject({
+      wireApi: 'chat-completions',
+    });
+    expect(responses.authType).toBe(AuthType.USE_OPENAI_RESPONSES);
   });
 
   it('keeps custom ownership detection but merges installs by model identity', () => {

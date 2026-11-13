@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { render } from 'ink-testing-library';
 import { render as inkRender } from 'ink';
@@ -24,7 +25,10 @@ import type {
   ExtensionSource,
 } from '@qwen-code/qwen-code-core';
 import { mcpServerRequiresOAuth } from '@qwen-code/qwen-code-core';
-import type { ExtensionUpdateState } from '../../state/extensions.js';
+import {
+  ExtensionUpdateState,
+  type ExtensionUpdateAction,
+} from '../../state/extensions.js';
 
 // The Installed tab reads real user/workspace settings from disk when MCP
 // servers exist; stub loadSettings to keep these tests hermetic.
@@ -108,7 +112,17 @@ const createConfig = (
 
 const createUIState = (
   extensionsUpdateState = new Map<string, ExtensionUpdateState>(),
-): UIState => ({ extensionsUpdateState }) as unknown as UIState;
+  dispatchExtensionStateUpdate: (
+    action: ExtensionUpdateAction,
+  ) => void = vi.fn(),
+): UIState =>
+  ({
+    extensionsUpdateState,
+    // The dialog reaches the app's update-state reducer through the command
+    // context it already gets on the UI state (the same route ExtensionsList
+    // uses to read the config).
+    commandContext: { ui: { dispatchExtensionStateUpdate } },
+  }) as unknown as UIState;
 
 const mockSettings = new LoadedSettings(
   { path: '', settings: {}, originalSettings: {} },
@@ -859,5 +873,55 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     // The tab content is hidden while the prompt is shown, but the dialog
     // (and its tab state) stays mounted.
     expect(lastFrame()).not.toContain('Discover extensions');
+  });
+
+  it('adopts the state a successful update settled on into the app-level map', async () => {
+    const manager = createManager({ extensions: [mockExtension('alpha')] });
+    manager.updateExtension = vi.fn(
+      async (
+        ext: Extension,
+        _state: ExtensionUpdateState,
+        callback: (name: string, state: ExtensionUpdateState) => void,
+      ) => {
+        callback(ext.name, ExtensionUpdateState.UPDATING);
+        callback(ext.name, ExtensionUpdateState.UPDATED);
+        return {
+          name: ext.name,
+          originalVersion: '1.0.0',
+          updatedVersion: '1.0.1',
+        };
+      },
+    );
+    const dispatchExtensionStateUpdate = vi.fn();
+    const { stdin, lastFrame } = renderDialog(createConfig(manager), {
+      uiState: createUIState(
+        new Map([['alpha', ExtensionUpdateState.UPDATE_AVAILABLE]]),
+        dispatchExtensionStateUpdate,
+      ),
+    });
+
+    await waitFor(() => {
+      expect(lastFrame()).toContain('alpha');
+    });
+    stdin.write('\r'); // Enter -> plugin detail
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Update Now');
+    });
+    // Disable, Add to Favorites, Change scope, Mark for Update, Update Now.
+    for (let i = 0; i < 4; i++) {
+      stdin.write('\x1B[B');
+    }
+    stdin.write('\r');
+
+    await waitFor(() => {
+      expect(dispatchExtensionStateUpdate).toHaveBeenCalledWith({
+        type: 'SET_STATE',
+        payload: { name: 'alpha', state: ExtensionUpdateState.UPDATED },
+      });
+    });
+    // The extension is current again, so the menu stops offering the update.
+    await waitFor(() => {
+      expect(lastFrame()).not.toContain('Update Now');
+    });
   });
 });

@@ -3,6 +3,7 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import express from 'express';
 import request from 'supertest';
@@ -1194,6 +1195,63 @@ describe('workspace memory remember routes', () => {
     expect(bridge.rememberCalls).toHaveLength(0);
   });
 
+  it.each([false, true])(
+    'runs forget with managed memory availability %s',
+    async (available) => {
+      const bridge = buildBridgeStub({ available });
+      const app = buildApp(bridge);
+
+      const post = await request(app)
+        .post('/workspace/memory/forget')
+        .send({ query: 'old preference' })
+        .expect(202);
+
+      await waitFor(() => bridge.forgetCalls.length === 1);
+      await request(app)
+        .get(`/workspace/memory/forget/${post.body.taskId}`)
+        .expect(200)
+        .expect((res) => {
+          expect(res.body.status).toBe('completed');
+          expect(res.body.result.removedEntries).toHaveLength(1);
+        });
+      expect(bridge.events).toHaveLength(1);
+    },
+  );
+
+  it('completes a no-op forget while automatic memory is unavailable', async () => {
+    const bridge = buildBridgeStub({
+      available: false,
+      forgetImpl: vi.fn(async () => ({
+        removedEntries: [],
+        touchedTopics: [],
+        touchedScopes: [],
+      })),
+    });
+    const app = buildApp(bridge);
+
+    const post = await request(app)
+      .post('/workspace/memory/forget')
+      .send({ query: 'missing' })
+      .expect(202);
+
+    await waitFor(() => bridge.forgetCalls.length === 1);
+    await request(app)
+      .get(`/workspace/memory/forget/${post.body.taskId}`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body).toMatchObject({
+          status: 'completed',
+          result: {
+            summary: 'No managed auto-memory entries matched.',
+            removedEntries: [],
+            touchedTopics: [],
+            touchedScopes: [],
+          },
+        });
+      });
+    expect(bridge.events).toHaveLength(0);
+  });
+
   it('returns kind-specific error codes when the availability check throws', async () => {
     const bridge = buildBridgeStub({
       availableImpl: vi.fn().mockRejectedValue(new Error('bridge closed')),
@@ -1205,13 +1263,6 @@ describe('workspace memory remember routes', () => {
       .expect(500)
       .expect((res) => {
         expect(res.body.code).toBe('remember_failed');
-      });
-    await request(app)
-      .post('/workspace/memory/forget')
-      .send({ query: 'old preference' })
-      .expect(500)
-      .expect((res) => {
-        expect(res.body.code).toBe('forget_failed');
       });
     await request(app)
       .post('/workspace/memory/dream')

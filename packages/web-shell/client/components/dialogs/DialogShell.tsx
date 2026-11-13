@@ -1,15 +1,18 @@
 import {
   createContext,
+  useCallback,
   useEffect,
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
+  type RefObject,
 } from 'react';
-import { Maximize2Icon, Minimize2Icon, XIcon } from 'lucide-react';
+import { ExpandIcon, ShrinkIcon, XIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { useTheme, WebShellThemeId } from '../../themeContext';
 import { Button } from '../ui/button';
+import { isFocusUnclaimed } from '../../utils/dom';
 import {
   Dialog,
   DialogClose,
@@ -20,7 +23,7 @@ import {
 } from '../ui/dialog';
 import styles from './DialogShell.module.css';
 
-type DialogSize = 'sm' | 'md' | 'lg' | 'xl';
+type DialogSize = 'sm' | 'md' | 'lg' | 'xl' | 'auto';
 
 interface DialogShellProps {
   title: string;
@@ -28,6 +31,9 @@ interface DialogShellProps {
   size?: DialogSize;
   allowFullscreen?: boolean;
   dismissible?: boolean;
+  modal?: boolean;
+  modalRestoreFocusRef?: RefObject<HTMLElement | null>;
+  'aria-busy'?: boolean;
   onClose: () => void;
   children: ReactNode;
 }
@@ -37,6 +43,18 @@ const sizeClass: Record<DialogSize, string> = {
   md: 'sm:max-w-[560px]',
   lg: 'sm:max-w-[720px]',
   xl: 'sm:max-w-[900px]',
+  // Width follows the content instead of a fixed step, for bodies holding
+  // something with a real intrinsic width — the plan DAG lays out fixed 240px
+  // lanes, so a fixed panel scrolls it sideways while the screen still has
+  // room. `w-max` wins over DialogContent's base `w-full` through
+  // tailwind-merge. The floor keeps small graphs from collapsing to a narrow
+  // panel; the ceiling keeps large ones from spanning a wide monitor.
+  // The floor uses the same 2rem gutter the base ceiling
+  // (`max-w-[calc(100%-2rem)]`) reserves: twMerge keeps both classes, and
+  // below `sm:` a bare `min(100%,560px)` floor outranks that ceiling, so the
+  // panel rendered flush to both screen edges on a phone while every fixed
+  // size kept its gutter.
+  auto: 'w-max min-w-[min(calc(100%-2rem),560px)] sm:max-w-[min(calc(100vw-2rem),1120px)]',
 };
 
 const FOCUSABLE_SELECTOR = [
@@ -70,6 +88,9 @@ export function DialogShell({
   size = 'md',
   allowFullscreen = false,
   dismissible = true,
+  modal = true,
+  modalRestoreFocusRef,
+  'aria-busy': ariaBusy,
   onClose,
   children,
 }: DialogShellProps) {
@@ -77,6 +98,22 @@ export function DialogShell({
   const theme = useTheme();
   const [fullscreen, setFullscreen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const scrollPositionRef = useRef({ top: 0, left: 0 });
+  const restoreModalFocusRef = useRef(false);
+  const setBodyRef = useCallback((node: HTMLDivElement | null) => {
+    if (bodyRef.current) {
+      scrollPositionRef.current = {
+        top: bodyRef.current.scrollTop,
+        left: bodyRef.current.scrollLeft,
+      };
+    }
+    bodyRef.current = node;
+    if (node) {
+      node.scrollTop = scrollPositionRef.current.top;
+      node.scrollLeft = scrollPositionRef.current.left;
+    }
+  }, []);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const [previouslyFocused] = useState<HTMLElement | null>(() =>
@@ -163,6 +200,7 @@ export function DialogShell({
   return (
     <Dialog
       open
+      modal={modal}
       onOpenChange={(open) => {
         if (!open && dismissible) onClose();
       }}
@@ -176,18 +214,20 @@ export function DialogShell({
             onMouseUp: handleBackdropMouseUp,
             onClick: handleBackdropClick,
           }}
-          className={`${themeClass} ${
+          className={`${styles.viewportPanel} ${themeClass} ${
             theme === WebShellThemeId.Dark ? 'dark' : ''
-          } flex max-h-[min(80vh,calc(100vh-48px))] flex-col gap-0 overflow-hidden p-0 font-mono text-sm ${
+          } flex flex-col gap-0 overflow-hidden p-0 font-mono text-sm ${
             fullscreen
-              ? 'h-[calc(100vh-32px)] max-h-[calc(100vh-32px)] max-w-[calc(100vw-32px)] sm:max-w-[calc(100vw-32px)]'
+              ? 'max-w-[calc(100vw-32px)] sm:max-w-[calc(100vw-32px)]'
               : sizeClass[size]
           }`}
           aria-label={title}
+          aria-busy={ariaBusy}
           data-keyboard-scope
           data-web-shell-dialog
+          data-fullscreen={fullscreen ? 'true' : undefined}
           data-web-shell-dialog-title={title}
-          onPointerDownOutside={(event) => event.preventDefault()}
+          onInteractOutside={(event) => event.preventDefault()}
           onEscapeKeyDown={(event) => {
             if (event.defaultPrevented) return;
             if (event.isComposing || event.keyCode === 229) {
@@ -201,6 +241,24 @@ export function DialogShell({
           }}
           onOpenAutoFocus={(event) => {
             event.preventDefault();
+            if (!modal) {
+              restoreModalFocusRef.current = true;
+              const panel = panelRef.current;
+              if (panel && isFocusUnclaimed(panel.getRootNode())) {
+                panel.focus({ preventScroll: true });
+              }
+              return;
+            }
+            if (restoreModalFocusRef.current) {
+              restoreModalFocusRef.current = false;
+              const target = modalRestoreFocusRef?.current;
+              const focusTarget =
+                target?.isConnected && !target.hasAttribute('disabled')
+                  ? target
+                  : panelRef.current;
+              focusTarget?.focus({ preventScroll: true });
+              return;
+            }
             const preferred = getFocusable(panelRef.current).find(
               (element) => !element.hasAttribute('data-dialog-close'),
             );
@@ -231,7 +289,7 @@ export function DialogShell({
                   fullscreen ? 'common.exitFullscreen' : 'common.fullscreen',
                 )}
               >
-                {fullscreen ? <Minimize2Icon /> : <Maximize2Icon />}
+                {fullscreen ? <ShrinkIcon /> : <ExpandIcon />}
               </Button>
             )}
             {dismissible && (
@@ -250,6 +308,7 @@ export function DialogShell({
             )}
           </DialogHeader>
           <div
+            ref={setBodyRef}
             className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4"
             data-dialog-fullscreen={fullscreen ? '' : undefined}
           >

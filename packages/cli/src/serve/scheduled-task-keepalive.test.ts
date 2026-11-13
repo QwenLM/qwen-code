@@ -235,7 +235,9 @@ describe('scheduled-task keepalive', () => {
         condition: 'files_changed',
       } as unknown as Partial<DurableCronTask>),
     ]);
-    const names: Array<[string, { displayName?: string }]> = [];
+    const names: Array<
+      [string, { displayName?: string; titleSource?: 'manual' | 'auto' }]
+    > = [];
     const naming = {
       ...bridge,
       recordHeartbeat: () => {
@@ -243,7 +245,10 @@ describe('scheduled-task keepalive', () => {
         // be attempted for this session in the first place.
         throw new Error('unexpected heartbeat for legacy session');
       },
-      updateSessionMetadata: (id: string, m: { displayName?: string }) => {
+      updateSessionMetadata: (
+        id: string,
+        m: { displayName?: string; titleSource?: 'manual' | 'auto' },
+      ) => {
         names.push([id, m]);
       },
     };
@@ -263,8 +268,13 @@ describe('scheduled-task keepalive', () => {
       boundWorkspace: workspace,
       intervalMs: 60_000,
     });
-    await expect(ka.tick()).resolves.toBeUndefined();
+    expect(ka.activeWork).toBe(false);
+    const tick = ka.tick();
+    expect(ka.activeWork).toBe(true);
     ka.stop();
+    expect(ka.activeWork).toBe(true);
+    await expect(tick).resolves.toBeUndefined();
+    expect(ka.activeWork).toBe(false);
     expect(beats).toEqual([]);
   });
 
@@ -665,7 +675,9 @@ describe('scheduled-task keepalive', () => {
       task({ id: 'unbound-1', prompt: 'check build' }),
     ]);
     const spawns: unknown[] = [];
-    const names: Array<[string, { displayName?: string }]> = [];
+    const names: Array<
+      [string, { displayName?: string; titleSource?: 'manual' | 'auto' }]
+    > = [];
     const binding = {
       ...bridge,
       spawnOrAttach: async (req: unknown) => {
@@ -673,7 +685,10 @@ describe('scheduled-task keepalive', () => {
         return { sessionId: 'new-sess-1' };
       },
       closeSession: async () => {},
-      updateSessionMetadata: (id: string, m: { displayName?: string }) => {
+      updateSessionMetadata: (
+        id: string,
+        m: { displayName?: string; titleSource?: 'manual' | 'auto' },
+      ) => {
         names.push([id, m]);
       },
     };
@@ -694,6 +709,7 @@ describe('scheduled-task keepalive', () => {
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('new-sess-1');
     expect(names[0]![1].displayName).toBe('check build');
+    expect(names[0]![1].titleSource).toBe('auto');
     const tasks = await readCronTasks(workspace);
     expect(tasks[0]!.sessionId).toBe('new-sess-1');
   });
@@ -707,10 +723,15 @@ describe('scheduled-task keepalive', () => {
         sessionOwnedByTask: false,
       }),
     ]);
-    const names: Array<[string, { displayName?: string }]> = [];
+    const names: Array<
+      [string, { displayName?: string; titleSource?: 'manual' | 'auto' }]
+    > = [];
     const naming = {
       ...bridge,
-      updateSessionMetadata: (id: string, m: { displayName?: string }) => {
+      updateSessionMetadata: (
+        id: string,
+        m: { displayName?: string; titleSource?: 'manual' | 'auto' },
+      ) => {
         names.push([id, m]);
       },
     };
@@ -725,6 +746,7 @@ describe('scheduled-task keepalive', () => {
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('existing-sess');
     expect(names[0]![1].displayName).toBe('lint');
+    expect(names[0]![1].titleSource).toBe('auto');
   });
 
   it('does not bind disabled unbound tasks', async () => {

@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useState } from 'react';
 import { act } from '@testing-library/react';
-import { render } from 'ink-testing-library';
+import { cleanup, render } from 'ink-testing-library';
 import type {
   Config,
   WorkflowApproval,
@@ -129,10 +129,17 @@ interface Harness {
   probe: { current: ProbeHandle | null };
 }
 
+// Ink renders stay mounted unless explicitly unmounted. An old tree's 1s
+// activity interval then re-renders it into the next test's mocked keypress
+// handlers, letting a stale dialog steal the key before the current one sees
+// it (#16432 auto-open tests flaked exactly this way).
+const mountedRenders: Array<() => void> = [];
+
 function setup(
   initial: readonly DialogEntry[],
   availableTerminalHeight = 30,
 ): Harness {
+  for (const unmount of mountedRenders.splice(0)) unmount();
   const handlers: Array<(key: { name?: string; sequence?: string }) => void> =
     [];
   mockedUseKeypress.mockImplementation((cb, opts) => {
@@ -228,13 +235,14 @@ function setup(
     return null;
   }
 
-  const { lastFrame } = render(
+  const { lastFrame, unmount } = render(
     <SettingsContext.Provider
       value={{ merged: { general: {} } } as LoadedSettings}
     >
       <Harness />
     </SettingsContext.Provider>,
   );
+  mountedRenders.push(unmount);
 
   return {
     cancel,
@@ -285,6 +293,13 @@ describe('BackgroundTasksDialog', () => {
   });
 
   afterEach(() => {
+    // ink-testing-library does not auto-register cleanup, so every setup()
+    // leaks a render root. A leaked root that re-renders during a later test
+    // calls that test's useKeypress mock and pushes its own closure onto its
+    // handlers, so pressKey drives a foreign provider and the state under
+    // assertion never settles at any budget (#16609). Unmount before the
+    // mocks are restored, while the root can still render safely.
+    cleanup();
     vi.restoreAllMocks();
   });
 
@@ -1566,6 +1581,26 @@ describe('BackgroundTasksDialog', () => {
       expect(f).toContain('3.5kt');
     });
 
+    it('explains the large-workflow flag in the detail view', () => {
+      const wf = workflowEntry({
+        status: 'running',
+        sizeWarning: {
+          axis: 'agents' as const,
+          scheduledAgents: 40,
+          totalTokens: 0,
+          projectedTokens: 2_800_000,
+          agentCap: 15,
+          tokenCap: 1_500_000,
+          capFromGuideline: true,
+          at: 0,
+        },
+      });
+      const h = openWorkflowDetail([wf]);
+      const f = (h.lastFrame() ?? '').replace(/\s+/g, ' ');
+      expect(f).toContain('Large workflow:');
+      expect(f).toContain('40 agents scheduled');
+    });
+
     it('renders plain spent (no cap) when uncapped and zero per-phase chips suppressed', () => {
       const wf = workflowEntry({
         tokensSpent: 850,
@@ -1751,6 +1786,193 @@ describe('BackgroundTasksDialog', () => {
       ToolConfirmationOutcome.Cancel,
       undefined,
     );
+  });
+
+  describe('auto-opened dialog disarm (#16432 Critical 1)', () => {
+    // The auto-open lands mid-keystroke and keypress dispatch is a
+    // broadcast: a letter still aimed at the unmounted composer must not
+    // cancel/pause the run, and a stray Enter must not arm the approval.
+    // The first explicit navigation key acknowledges the auto-open.
+    function parkedApproval(approvalId: string): WorkflowApproval {
+      return {
+        approvalId,
+        subagentId: 'sub-1',
+        callId: `call-${approvalId}`,
+        name: 'Shell',
+        description: 'run',
+        confirmationDetails: {
+          type: 'exec',
+        } as WorkflowApproval['confirmationDetails'],
+        at: Date.now(),
+      };
+    }
+
+    async function autoSurfacedWorkflow() {
+      const wf = workflowEntry({
+        status: 'running',
+        pendingApprovals: [parkedApproval('wfap-1')],
+      });
+      const h = setup([wf]);
+      // ink flushes mount effects on its own scheduler, outside act —
+      // wait for the provider's auto-open instead of asserting on the
+      // pre-effect frame.
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.dialogMode).toBe('list');
+      });
+      // The provider auto-opens in list mode — no explicit openDialog.
+      expect(h.probe.current!.state.autoOpened).toBe(true);
+      return h;
+    }
+
+    it('ignores bare x until a navigation key, then cancels', async () => {
+      const h = await autoSurfacedWorkflow();
+
+      h.pressKey({ sequence: 'x' });
+      expect(h.workflowCancel).not.toHaveBeenCalled();
+
+      h.pressKey({ name: 'up' });
+      // The acknowledge re-registers the keypress closure in a passive
+      // effect; wait for it to flush so the next key sees autoOpened=false.
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ sequence: 'x' });
+      expect(h.workflowCancel).toHaveBeenCalledWith(
+        'wf_test1234',
+        expect.any(Number),
+      );
+    });
+
+    it('ignores bare p until a navigation key, then pauses', async () => {
+      const h = await autoSurfacedWorkflow();
+
+      h.pressKey({ sequence: 'p' });
+      expect(h.workflowPause).not.toHaveBeenCalled();
+
+      h.pressKey({ name: 'up' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ sequence: 'p' });
+      expect(h.workflowPause).toHaveBeenCalledWith('wf_test1234');
+    });
+
+    it('ignores bare r until a navigation key, then resumes the selection', async () => {
+      // R4-2: bare k/j still move the selection (the R2-1 rule above), so
+      // prose typed at the unmounted composer can park the selection on a
+      // paused run. `r` was outside the deny-list, so the next `r` of the
+      // same sentence resumed a run the user deliberately paused.
+      const paused = entry({ id: 'a', agentId: 'a', status: 'paused' });
+      const wf = workflowEntry({
+        status: 'running',
+        pendingApprovals: [parkedApproval('wfap-1')],
+      });
+      const h = setup([paused, wf]);
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.dialogMode).toBe('list');
+      });
+      expect(h.probe.current!.state.autoOpened).toBe(true);
+
+      h.pressKey({ name: 'k' });
+      expect(h.probe.current!.state.selectedIndex).toBe(0);
+      h.pressKey({ sequence: 'r' });
+      expect(h.resume).not.toHaveBeenCalled();
+      expect(h.probe.current!.state.autoOpened).toBe(true);
+
+      h.pressKey({ name: 'up' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ sequence: 'r' });
+      expect(h.resume).toHaveBeenCalledWith('a');
+    });
+
+    it('ignores Enter until a navigation key, then enters detail', async () => {
+      const h = await autoSurfacedWorkflow();
+
+      h.pressKey({ name: 'return' });
+      expect(h.probe.current!.state.dialogMode).toBe('list');
+
+      h.pressKey({ name: 'up' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ name: 'return' });
+      expect(h.probe.current!.state.dialogMode).toBe('detail');
+    });
+
+    it('keeps immediate x behavior for a user-initiated open', async () => {
+      const h = await autoSurfacedWorkflow();
+      // Close the auto-open, then reopen deliberately: the disarm tag
+      // must not survive into a user-initiated open.
+      h.call(() => h.probe.current!.actions.acknowledgeAutoOpen());
+      h.call(() => h.probe.current!.actions.closeDialog());
+      h.call(() => h.probe.current!.actions.openDialog());
+      expect(h.probe.current!.state.autoOpened).toBe(false);
+
+      h.pressKey({ sequence: 'x' });
+      expect(h.workflowCancel).toHaveBeenCalledWith(
+        'wf_test1234',
+        expect.any(Number),
+      );
+    });
+
+    it('does not treat a typed k or j as the acknowledgment', async () => {
+      // The selection matchers also carry bare k/j, and prose typed at the
+      // composer the dialog just unmounted satisfies them. Acknowledging on
+      // those let the next `x`/`p` of the same sentence reach the run
+      // (#16432 R2-1).
+      const h = await autoSurfacedWorkflow();
+
+      h.pressKey({ sequence: 'k' });
+      h.pressKey({ sequence: 'j' });
+      expect(h.probe.current!.state.autoOpened).toBe(true);
+
+      h.pressKey({ sequence: 'x' });
+      expect(h.workflowCancel).not.toHaveBeenCalled();
+
+      h.pressKey({ name: 'up' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ sequence: 'x' });
+      expect(h.workflowCancel).toHaveBeenCalledWith(
+        'wf_test1234',
+        expect.any(Number),
+      );
+    });
+
+    it('swallows Escape until the auto-open is acknowledged', async () => {
+      // A dismissal before the acknowledgment would burn the approval latch
+      // with the prompt never seen — the badge-only hang this PR removes
+      // (#16432 R3-1).
+      const h = await autoSurfacedWorkflow();
+
+      h.pressKey({ name: 'escape' });
+      expect(h.probe.current!.state.dialogMode).toBe('list');
+      expect(h.probe.current!.state.autoOpened).toBe(true);
+
+      h.pressKey({ name: 'down' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      h.pressKey({ name: 'escape' });
+      expect(h.probe.current!.state.dialogMode).toBe('closed');
+    });
+
+    it('advertises only the activation hint while auto-opened', async () => {
+      const h = await autoSurfacedWorkflow();
+
+      expect(h.lastFrame()).not.toContain('Enter view');
+      expect(h.lastFrame()).not.toContain('x stop');
+      expect(h.lastFrame()).toContain('activate');
+
+      h.pressKey({ name: 'up' });
+      await vi.waitFor(() => {
+        expect(h.probe.current!.state.autoOpened).toBe(false);
+      });
+      expect(h.lastFrame()).toContain('Enter view');
+    });
   });
 
   describe('nested sub-agent display', () => {

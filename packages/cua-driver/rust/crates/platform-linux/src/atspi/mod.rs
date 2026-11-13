@@ -13,6 +13,7 @@ use anyhow::Result;
 
 pub mod cache;
 pub mod native;
+pub(crate) mod projection;
 pub mod revision;
 pub use cache::ElementCache;
 pub use native::ensure_listener_active;
@@ -23,7 +24,7 @@ pub struct AtspiIdentity {
     pub object_path: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct AtspiNode {
     pub element_index: Option<usize>,
     pub role: String,
@@ -35,6 +36,7 @@ pub struct AtspiNode {
     pub enabled: Option<bool>,
     /// Toggle/selection state for selectable controls.
     pub selected: Option<bool>,
+    pub focused: Option<bool>,
     pub description: Option<String>,
     pub actions: Vec<String>,
     /// For AT-SPI: element_key = element_index as u64.
@@ -80,41 +82,28 @@ pub struct AtspiTreeResult {
     pub incomplete_notes: Vec<String>,
 }
 
+impl AtspiTreeResult {
+    pub fn read_complete(&self) -> bool {
+        self.window_scoped
+            && (self.complete
+                || (self.truncated
+                    && !self.incomplete_notes.is_empty()
+                    && self.incomplete_notes.iter().all(|note| {
+                        matches!(
+                            note.as_str(),
+                            "max_elements_reached"
+                                | "max_depth_reached"
+                                | "managed_descendants_omitted"
+                                | "hidden_menu_subtrees_omitted"
+                        )
+                    })))
+    }
+}
+
 /// Walk the AT-SPI tree for a window identified by (pid, xid).
 /// Falls back to a minimal X11 property tree if AT-SPI is unavailable.
 pub fn walk_tree(pid: u32, xid: u64, query: Option<&str>) -> AtspiTreeResult {
     walk_tree_bounded(pid, xid, query, None, None)
-}
-
-/// Best-effort accessibility snapshot for synchronous trajectory evidence.
-///
-/// Recording brackets an action with before/after captures, so it must use a
-/// smaller budget than the transport's tool-call deadline. Unlike the
-/// interactive tree walker, evidence capture makes one attempt and accepts an
-/// unavailable tree when the target renderer is blocked.
-pub(crate) fn walk_tree_for_recording(
-    pid: u32,
-    xid: u64,
-    timeout: std::time::Duration,
-) -> AtspiTreeResult {
-    if let Ok(Some(walked)) = native::walk_tree_bounded_with_timeout(pid, xid, None, None, timeout)
-    {
-        if !walked.markdown.is_empty() {
-            return AtspiTreeResult {
-                tree_markdown: walked.markdown,
-                nodes: walked.nodes,
-                bounds: walked.bounds,
-                trusted: true,
-                degraded_reason: None,
-                window_scoped: walked.window_scoped,
-                backend: AtspiBackend::Atspi,
-                complete: walked.complete && walked.window_scoped,
-                truncated: walked.truncated,
-                incomplete_notes: walked.incomplete_notes,
-            };
-        }
-    }
-    walk_via_x11_properties(xid, None)
 }
 
 /// Walk the AT-SPI tree with caller-supplied caps. `None` for either cap
@@ -128,56 +117,77 @@ pub fn walk_tree_bounded(
     max_elements: Option<usize>,
     max_depth: Option<usize>,
 ) -> AtspiTreeResult {
-    // Native AT-SPI (most complete). On a COLD launch the Qt6 (and some GTK)
-    // AT-SPI bridge registers lazily — the first walk against a freshly
-    // launched app can come back with just the root window (element_count=1,
-    // no children) because `org.a11y.atspi.Registry` hasn't finished
-    // enumerating the app's tree yet. Retry a few times with a short backoff
-    // while the tree is suspiciously root-only, so the first get_window_state
-    // after launch returns the real tree instead of an empty one. See #1927.
-    const MAX_ATTEMPTS: usize = 4;
+    walk_tree_bounded_with_timeout(pid, xid, query, max_elements, max_depth, native::OP_TIMEOUT)
+}
+
+pub fn walk_tree_bounded_with_timeout(
+    pid: u32,
+    xid: u64,
+    query: Option<&str>,
+    max_elements: Option<usize>,
+    max_depth: Option<usize>,
+    timeout: std::time::Duration,
+) -> AtspiTreeResult {
     let mut native_failure = None;
-    for attempt in 0..MAX_ATTEMPTS {
-        match native::walk_tree_bounded(pid, xid, max_elements, max_depth) {
-            Ok(Some(walked)) => {
-                // `nodes.len() <= 1` == only the root window resolved: the
-                // cold-registry symptom. Accept any real tree immediately; only
-                // keep waiting on the degenerate case, and accept it anyway on the
-                // final attempt rather than discarding a (minimal) valid result.
-                if !walked.markdown.is_empty()
-                    && (walked.nodes.len() > 1 || attempt == MAX_ATTEMPTS - 1)
-                {
-                    let md = if let Some(q) = query {
-                        filter_tree(&walked.markdown, q)
-                    } else {
-                        walked.markdown
-                    };
-                    return AtspiTreeResult {
-                        tree_markdown: md,
-                        nodes: walked.nodes,
-                        bounds: walked.bounds,
-                        trusted: true,
-                        degraded_reason: None,
-                        window_scoped: walked.window_scoped,
-                        backend: AtspiBackend::Atspi,
-                        complete: walked.complete && walked.window_scoped,
-                        truncated: walked.truncated,
-                        incomplete_notes: walked.incomplete_notes,
-                    };
-                }
-            }
-            Ok(None) => {}
-            Err(error) => native_failure = Some(error.to_string()),
+    match walk_with_cold_start_retries(timeout, |remaining| {
+        native::walk_tree_bounded_with_timeout(pid, xid, max_elements, max_depth, remaining)
+    }) {
+        Ok(Some(walked)) if !walked.markdown.is_empty() => {
+            let md = if let Some(q) = query {
+                filter_tree(&walked.markdown, q)
+            } else {
+                walked.markdown
+            };
+            return AtspiTreeResult {
+                tree_markdown: md,
+                nodes: walked.nodes,
+                bounds: walked.bounds,
+                trusted: true,
+                degraded_reason: None,
+                window_scoped: walked.window_scoped,
+                backend: AtspiBackend::Atspi,
+                complete: walked.complete && walked.window_scoped,
+                truncated: walked.truncated,
+                incomplete_notes: walked.incomplete_notes,
+            };
         }
-        if attempt < MAX_ATTEMPTS - 1 {
-            std::thread::sleep(std::time::Duration::from_millis(150));
-        }
+        Ok(_) => {}
+        Err(error) => native_failure = Some(error.to_string()),
     }
 
     // Fallback: X11 window properties as minimal tree.
     let mut fallback = walk_via_x11_properties(xid, query);
     fallback.degraded_reason = native_failure.map(|error| format!("atspi_walk_failed: {error}"));
     fallback
+}
+
+fn walk_with_cold_start_retries(
+    timeout: std::time::Duration,
+    mut walk: impl FnMut(std::time::Duration) -> Result<Option<native::WalkedTree>>,
+) -> Result<Option<native::WalkedTree>> {
+    const MAX_ATTEMPTS: usize = 4;
+    const BACKOFF: std::time::Duration = std::time::Duration::from_millis(150);
+    let deadline = std::time::Instant::now() + timeout;
+    for attempt in 0..MAX_ATTEMPTS {
+        let result = walk(deadline.saturating_duration_since(std::time::Instant::now()))?;
+        // Qt/GTK can register a complete but root-only tree on cold launch.
+        // Retry only that lazy-registration case, sharing the snapshot budget.
+        // Incomplete reads must reach the caller, not multiply its own retries.
+        let retry = result.as_ref().is_some_and(|walked| {
+            walked.complete && (walked.nodes.len() <= 1 || walked.markdown.is_empty())
+        });
+        if !retry
+            || attempt == MAX_ATTEMPTS - 1
+            || deadline.saturating_duration_since(std::time::Instant::now()) <= BACKOFF
+        {
+            return Ok(result);
+        }
+        std::thread::sleep(BACKOFF);
+        if std::time::Instant::now() >= deadline {
+            return Ok(result);
+        }
+    }
+    unreachable!()
 }
 
 /// Perform the first advertised action on element `idx` within pid's app tree.
@@ -229,15 +239,6 @@ pub fn scroll_element_exact(
     native::scroll_element(pid, idx, Some(identity), direction, amount)
 }
 
-/// Enumerate top-level windows from the AT-SPI registry. The window-listing
-/// fallback for Wayland compositors without `zwlr_foreign_toplevel_management`
-/// (GNOME Mutter / KDE KWin), where native apps have no X11 XID. Returns one
-/// entry per application top-level frame with a synthetic, stable `xid` that
-/// round-trips into the by-pid AT-SPI element flow. See [`native::list_windows`].
-pub fn list_windows(filter_pid: Option<u32>) -> Vec<crate::x11::WindowInfo> {
-    native::list_windows(filter_pid)
-}
-
 /// Resolve a window-local pixel to the actionable AT-SPI element at that point
 /// and perform its primary action — the no-focus-steal way to land a *pixel*
 /// click on toolkits (GTK) that drop synthetic X11 pointer events. Returns
@@ -249,7 +250,7 @@ pub fn perform_action_at_point(pid: u32, win_x: i32, win_y: i32) -> Result<Optio
 
 /// Resolve a *screen* pixel to the indexable element whose reconstructed screen
 /// frame covers it and fire its primary action by `element_index` — the
-/// vision/pixel click that lands on Wayland (no pointer injection) and on GTK4
+/// vision/pixel click using AT-SPI rather than pointer injection on GTK4
 /// generally (no `CoordType::Screen`, which reports (0,0)). See
 /// [`native::perform_action_at_screen_point`].
 pub fn perform_action_at_screen_point(
@@ -371,6 +372,7 @@ fn walk_via_x11_properties(xid: u64, query: Option<&str>) -> AtspiTreeResult {
         checked: None,
         enabled: None,
         selected: None,
+        focused: None,
         description: if wm_class.is_empty() {
             None
         } else {
@@ -424,22 +426,33 @@ pub(crate) fn format_revision_body(node: &AtspiNode) -> String {
         format!("<{}>", node.role),
         serde_json::to_string(label).expect("string labels serialize"),
     ];
-    if let Some(value) = node.value.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(value) = node.value.as_deref().filter(|value| *value != label) {
         fields.push(format!(
             "value={}",
             serde_json::to_string(value).expect("string values serialize")
         ));
     }
-    if let Some(enabled) = node.enabled {
-        fields.push(format!("enabled={enabled}"));
+    if node.enabled == Some(false) {
+        fields.push("disabled".into());
     }
-    if let Some(selected) = node.selected.or(node.checked) {
-        fields.push(format!("selected={selected}"));
+    if node.focused == Some(true) {
+        fields.push("focused".into());
     }
-    if !node.actions.is_empty() {
+    if node.selected.or(node.checked) == Some(true) {
+        fields.push("selected".into());
+    }
+    let primary = native::activation_index(&node.role, &node.actions);
+    let secondary = node
+        .actions
+        .iter()
+        .enumerate()
+        .filter(|(index, action)| Some(*index) != primary && !action.is_empty())
+        .map(|(_, action)| action)
+        .collect::<Vec<_>>();
+    if !secondary.is_empty() {
         fields.push(format!(
             "actions={}",
-            serde_json::to_string(&node.actions).expect("string actions serialize")
+            serde_json::to_string(&secondary).expect("string actions serialize")
         ));
     }
     if node.in_web_content {
@@ -530,4 +543,127 @@ fn filter_tree(markdown: &str, query: &str) -> String {
     let mut r = output.join("\n");
     r.push('\n');
     r
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn tree(count: usize, complete: bool) -> native::WalkedTree {
+        native::WalkedTree {
+            markdown: "root".into(),
+            nodes: (0..count)
+                .map(|index| AtspiNode {
+                    element_index: Some(index),
+                    role: "frame".into(),
+                    name: None,
+                    value: None,
+                    checked: None,
+                    enabled: None,
+                    selected: None,
+                    focused: None,
+                    description: None,
+                    actions: Vec::new(),
+                    element_key: index as u64,
+                    depth: 0,
+                    parent_element_index: None,
+                    in_web_content: false,
+                    identity: None,
+                })
+                .collect(),
+            bounds: Vec::new(),
+            window_scoped: true,
+            complete,
+            truncated: false,
+            incomplete_notes: if complete {
+                Vec::new()
+            } else {
+                vec!["interfaces_unavailable".into()]
+            },
+        }
+    }
+
+    #[test]
+    fn complete_trees_and_incomplete_reads_return_immediately() {
+        for (count, complete) in [(2, true), (0, false), (1, false), (2, false)] {
+            let mut calls = 0;
+            let result = walk_with_cold_start_retries(native::OP_TIMEOUT, |_| {
+                calls += 1;
+                Ok(Some(tree(count, complete)))
+            })
+            .unwrap()
+            .unwrap();
+            assert_eq!(calls, 1);
+            assert_eq!(result.complete, complete);
+            assert_eq!(result.nodes.len(), count);
+            assert_eq!(
+                result.incomplete_notes,
+                tree(count, complete).incomplete_notes
+            );
+        }
+    }
+
+    #[test]
+    fn unavailable_and_failed_reads_return_immediately() {
+        let mut calls = 0;
+        assert!(walk_with_cold_start_retries(native::OP_TIMEOUT, |_| {
+            calls += 1;
+            Ok(None)
+        })
+        .unwrap()
+        .is_none());
+        assert_eq!(calls, 1);
+        calls = 0;
+        let error = walk_with_cold_start_retries(native::OP_TIMEOUT, |_| {
+            calls += 1;
+            Err(anyhow::anyhow!("transport unavailable"))
+        })
+        .err()
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(error.to_string(), "transport unavailable");
+    }
+
+    #[test]
+    fn cold_root_can_recover_within_the_same_budget() {
+        let mut budgets = Vec::new();
+        let result = walk_with_cold_start_retries(native::OP_TIMEOUT, |budget| {
+            budgets.push(budget);
+            Ok(Some(tree(budgets.len(), true)))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(budgets.len(), 2);
+        assert!(budgets[0] - budgets[1] >= Duration::from_millis(150));
+        assert_eq!(result.nodes.len(), 2);
+    }
+
+    #[test]
+    fn cold_root_is_preserved_after_last_attempt() {
+        let mut calls = 0;
+        let result = walk_with_cold_start_retries(native::OP_TIMEOUT, |_| {
+            calls += 1;
+            Ok(Some(tree(1, true)))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(calls, 4);
+        assert_eq!(result.markdown, "root");
+        assert!(result.complete);
+    }
+
+    #[test]
+    fn exhausted_budget_preserves_root_without_another_attempt() {
+        let mut calls = 0;
+        let result = walk_with_cold_start_retries(Duration::ZERO, |budget| {
+            calls += 1;
+            assert!(budget.is_zero());
+            Ok(Some(tree(1, true)))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(result.markdown, "root");
+    }
 }

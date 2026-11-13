@@ -11,7 +11,7 @@ import { parseDialect, parseInstanceConfig } from './schemas.js';
 import type {
   DialectV1,
   ExternalContextItem,
-  InstanceConfigV1,
+  InstanceConfigV2,
   RuntimeConfiguration,
 } from './types.js';
 
@@ -243,7 +243,7 @@ describe('bounded Mem0 request engine', () => {
 });
 
 interface SyntheticFixture {
-  instance: InstanceConfigV1;
+  instance: InstanceConfigV2;
   dialect: DialectV1;
   credential: string;
   query: string;

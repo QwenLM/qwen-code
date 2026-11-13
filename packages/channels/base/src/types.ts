@@ -3,12 +3,18 @@ import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelBase, ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelWebhookConfig } from './ChannelWebhookTask.js';
 
+/** @deprecated Use PrivatePolicy. */
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
 export type SessionScope = 'user' | 'thread' | 'chat_thread' | 'single';
 export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
+export type PrivatePolicy = 'disabled' | 'allowlist' | 'pairing' | 'open';
+/** Members who may speak inside an admitted group. */
+export type GroupSenderPolicy = 'open' | 'allowlist';
+/** @deprecated Use PrivatePolicy. */
 export type DmPolicy = 'disabled' | 'open';
 export type DispatchMode = 'collect' | 'steer' | 'followup';
+export type ChannelOutputMode = 'per_task' | 'per_response' | 'per_turn';
 
 export interface ChannelIdentityConfig {
   id?: string;
@@ -38,18 +44,15 @@ export interface GroupConfig {
   requireMention?: boolean; // default: true
   dispatchMode?: DispatchMode;
   groupHistoryLimit?: number;
+  /** Who may speak in the group. Default: `open`. */
+  senders?: GroupSenderPolicy;
+  /** Members allowed to speak when `senders` is `allowlist`. */
+  allowedUsers?: string[];
 }
 
-export interface BlockStreamingChunkConfig {
-  /** Minimum characters before emitting a block. Default: 400. */
-  minChars?: number;
-  /** Force-emit when buffer exceeds this size. Default: 1000. */
-  maxChars?: number;
-}
-
-export interface BlockStreamingCoalesceConfig {
-  /** Emit buffered text after this many ms of inactivity. Default: 1500. */
-  idleMs?: number;
+export interface SessionRotationConfig {
+  maxTurns?: number;
+  maxAgeHours?: number;
 }
 
 export interface ChannelConfig {
@@ -57,21 +60,37 @@ export interface ChannelConfig {
   token: string;
   clientId?: string;
   clientSecret?: string;
-  senderPolicy: SenderPolicy;
+  privatePolicy?: PrivatePolicy;
+  /** @deprecated Use privatePolicy. Read only as a private-access fallback. */
+  senderPolicy?: SenderPolicy;
   allowedUsers: string[];
   /** Channel routing scope. `thread` is retained for existing configurations only. */
   sessionScope: SessionScope;
+  sessionRotation?: SessionRotationConfig;
   /** Retain an owner-scoped catalog of named sessions in daemon-managed mode. */
   multiSession?: boolean;
   cwd: string;
   approvalMode?: string;
   instructions?: string;
+  /** Exact message prefixes mapped to first-turn session instructions. */
+  messageRoutes?: Record<string, string>;
+  /** Configured route used for messages without a matching prefix. */
+  defaultMessageRoute?: string;
   identity?: ChannelIdentityConfig;
   memoryScope?: ChannelMemoryScopeConfig;
   webhooks?: ChannelWebhookConfig;
   model?: string;
+  /** Output grouping for opted-in adapters. Defaults to `per_turn`. */
+  outputMode?: ChannelOutputMode;
   groupPolicy: GroupPolicy; // default: "disabled"
-  dmPolicy: DmPolicy; // default: "open"
+  /** @deprecated Use privatePolicy. Read only as a private-access fallback. */
+  dmPolicy?: DmPolicy;
+  /**
+   * Who may operate a shared session (/approve, /cancel, /clear, /loop, ...).
+   * Unset or empty grants no shared-session operator permissions.
+   * An attended request owner may still approve once or deny their own request.
+   */
+  operators?: string[];
   groupHistoryLimit?: number;
   groups: Record<string, GroupConfig>; // "*" for defaults, group IDs for overrides
 
@@ -80,13 +99,6 @@ export interface ChannelConfig {
 
   /** Poll interval in ms for polling adapters. Default: 60000. */
   pollInterval?: number;
-
-  /** Enable block streaming — emit completed blocks as separate messages. */
-  blockStreaming?: 'on' | 'off';
-  /** Chunk size bounds for block streaming. */
-  blockStreamingChunk?: BlockStreamingChunkConfig;
-  /** Idle coalescing for block streaming. */
-  blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
 }
 
 export interface Attachment {
@@ -106,11 +118,40 @@ export interface Envelope {
   channelName: string;
   senderId: string;
   senderName: string;
+  /**
+   * Adapter-supplied marker identifying an automated sender (e.g. a peer bot
+   * in a bot-to-bot conversation), rendered as `[tag] ` in front of the
+   * sender attribution.
+   *
+   * Carried on the envelope instead of inside `text` because ChannelBase owns
+   * the sender prefix only after message routing and prompt sanitization run:
+   * a leading `[tag]` in `text` would either stop `matchMessageRoute` from
+   * matching (the route prefix must lead the text) or lose its brackets to
+   * `unwrapStartOfLineTags`. ChannelBase renders it only where it composes
+   * that prefix; self-prefixing adapters (`alreadyPrefixed`) render it
+   * themselves.
+   *
+   * A tagged envelope's text is prose, never a command: slash-command
+   * dispatch, `!` shell execution and channel-memory intents are skipped for
+   * it, because an automated peer is not an operator and its command-shaped
+   * text is model input.
+   */
+  senderTag?: string;
   chatId: string;
   chatName?: string;
   text: string;
-  /** User-authored text to display when `text` contains model-only context. */
-  displayText?: string;
+  /** Selected by the channel's route matcher, never by the remote sender. */
+  messageRoute?: string;
+  /** Internal provider events that are not user-authored messages. */
+  bypassMessageRoutes?: true;
+  /**
+   * `text` is an adapter-synthesized placeholder (`(image)`, `(voice
+   * message)`, `(file: …)`) rather than something the user typed.
+   *
+   * It is never recorded as quoted group history, where it would reach
+   * the next prompt as if a member had typed it.
+   */
+  syntheticText?: true;
   threadId?: string;
   /** Platform-specific message ID for response correlation. */
   messageId?: string;
@@ -158,10 +199,117 @@ export interface Envelope {
 
 export interface SessionTarget {
   channelName: string;
+  messageRoute?: string;
   senderId: string;
   chatId: string;
   threadId?: string;
   isGroup?: boolean;
+}
+
+/**
+ * The closed role vocabulary of role-aware bound delivery. Core owns the
+ * sidecar copy (`PR_BINDING_ROLES` in session-pr-service); the channel
+ * packages cannot depend on core, so this mirror is the channel-side
+ * source. A cross-package pin test (cli's session-pr-bindings.test.ts,
+ * which imports the real core) keeps the two lists identical.
+ */
+export const PR_BINDING_ROLES = ['review', 'verify', 'fix'] as const;
+
+export type PrBindingRole = (typeof PR_BINDING_ROLES)[number];
+
+/** One PR binding mirrored from a daemon session's PR sidecar. */
+export interface PrBindingEntry {
+  number: number;
+  url: string;
+  state?: 'open' | 'merged' | 'closed';
+  /**
+   * The job the bound session does for the PR (role-aware delivery).
+   * Absent means untyped; the adapter groups untyped followers separately.
+   */
+  role?: PrBindingRole;
+  /**
+   * Whether the session holds an active watch on THIS PR (an `/autofix-pr`
+   * watch or a `/verify-pr --watch` standing trigger), derived by the daemon
+   * at scan time. Absent means unknown — watch detection failed or the
+   * daemon predates the field — and consumers must treat unknown as
+   * eligible: the watch gate is a noise filter, not a security boundary.
+   */
+  watching?: boolean;
+}
+
+/**
+ * A daemon session with PR bindings, as returned by the daemon's
+ * `GET /sessions/pr-bindings` reverse-lookup route.
+ */
+export interface PrBindingSummary {
+  sessionId: string;
+  workspaceCwd: string;
+  sourceType?: string;
+  updatedAt?: string;
+  prs: PrBindingEntry[];
+}
+
+/**
+ * Result of a PR-binding reverse lookup. `partial` means the daemon could
+ * not read part of the catalog — a registry entry with no runtime, a chats
+ * directory it could not list, a sidecar or transcript it could not read,
+ * or a live session list it could not fetch — or that the channel worker
+ * dropped a malformed binding row from the daemon's answer. A
+ * directory-listing snapshot is complete regardless of session count;
+ * consumers must not treat a
+ * missing entry in a partial answer as an authoritative absence — in
+ * particular they must not destroy state keyed by bindings.
+ */
+export interface PrBindingsSnapshot {
+  bindings: PrBindingSummary[];
+  partial: boolean;
+}
+
+/**
+ * Daemon-backed delivery into sessions the channel does not own. Provided by
+ * the daemon channel worker; absent in standalone ACP mode, where adapters
+ * must keep their normal channel-session behavior.
+ */
+export interface ChannelBoundSessions {
+  listPrBindings(): Promise<PrBindingsSnapshot>;
+  /**
+   * Inject a prompt into an existing session. Resolves once the daemon
+   * accepts the prompt into the session's queue; does not wait for the turn.
+   * Throws `BoundSessionGoneError` when the session no longer exists,
+   * `BoundSessionQueueFullError` when the session's prompt queue is full,
+   * and `BoundSessionUnavailableError` when the session or its workspace is
+   * temporarily unavailable (draining, session limit, restore in progress,
+   * rate limited). The latter two are backpressure: defer without consuming
+   * the failure budget.
+   *
+   * `idempotencyKey` identifies the delivery attempt's EVENT (the adapter
+   * derives it from the source chat and message id, so it survives task
+   * re-creation after a crash): the daemon deduplicates repeated admissions
+   * of the same key, and a retry after a lost acceptance mark or a lost
+   * response re-injects nothing within the daemon's lifetime. Dedupe is
+   * best-effort under two FIFO caps — 128 keys per session and 1024
+   * sessions — and a key can be evicted while its queue is still live (the
+   * per-session cap bites in a single long-lived session, the ordinary
+   * case), so a retry after such an eviction re-injects. The ring also dies
+   * with the in-memory queue: a daemon restart loses both, making
+   * re-injection the correct recovery there.
+   */
+  deliverPrompt(
+    sessionId: string,
+    prompt: string,
+    idempotencyKey?: string,
+  ): Promise<void>;
+  /**
+   * The set of GitHub comment identifiers the session has itself posted,
+   * canonical as `ic:<id>` (conversation comment) or `rc:<id>` (inline review
+   * comment). The bound PR comment watch uses it to withhold a comment from
+   * the session that wrote it while delivering every other author's comment,
+   * including the same GitHub account used by a different session/agent.
+   * Fail-open: an unavailable lookup resolves to an empty set so delivery is
+   * never suppressed on missing evidence. Optional: absent in standalone
+   * mode, where no suppression is applied.
+   */
+  postedCommentIds?(sessionId: string): Promise<ReadonlySet<string>>;
 }
 
 export interface ObservedChannelIdentity {
@@ -234,11 +382,30 @@ export interface ChannelUserInputRequestContext {
   runId: string;
   owner: ChannelPromptOwner;
   target: SessionTarget;
+  sourceLabel?: string;
   precedingSegmentId?: string;
   questions: ChannelUserQuestion[];
   submitOptionId: string;
   onSettled(listener: (reason: UserInputSettlementReason) => void): () => void;
   respond(response: ChannelUserInputResponse): Promise<boolean>;
+}
+
+export type ChannelPermissionDecision = 'allow_once' | 'allow_always' | 'deny';
+
+export interface ChannelPermissionRequestContext {
+  requestId: string;
+  sessionId: string;
+  runId: string;
+  owner: ChannelPromptOwner;
+  target: SessionTarget;
+  precedingSegmentId?: string;
+  title: string;
+  decisions: Array<{
+    kind: ChannelPermissionDecision;
+    label: string;
+  }>;
+  onSettled(listener: (reason: UserInputSettlementReason) => void): () => void;
+  respond(decision: ChannelPermissionDecision): Promise<boolean>;
 }
 
 export interface ChannelOutputSegmentContext {
@@ -248,7 +415,9 @@ export interface ChannelOutputSegmentContext {
   segmentId: string;
   owner: ChannelPromptOwner;
   target: SessionTarget;
+  sourceLabel?: string;
   messageId?: string;
+  partial?: boolean;
 }
 
 export type ChannelOutputSegmentEndReason =
@@ -290,6 +459,7 @@ export interface SanitizedToolCallEvent {
 /** 'dropped' = loop was disabled/deleted mid-run (not user-cancelled). */
 export type ChannelTaskCancellationReason =
   | 'cancel_command'
+  | 'runtime_cancelled'
   | 'clear'
   | 'steer'
   | 'timeout'
@@ -407,10 +577,23 @@ export type ChannelConfigFieldKind =
   | 'record'
   | 'object';
 
+/**
+ * One selectable value of a config field. `description` explains the value
+ * in management UIs; `group` buckets related values under one picker
+ * section. Both are optional display metadata — validators only ever read
+ * `value`.
+ */
+export interface ChannelConfigFieldOption {
+  value: string;
+  label: string;
+  description?: string;
+  group?: string;
+}
+
 interface ChannelConfigFieldDescriptorBase {
   key: string;
   label: string;
-  options?: ReadonlyArray<{ value: string; label: string }>;
+  options?: readonly ChannelConfigFieldOption[];
   default?: string;
   description?: string;
 }
@@ -420,6 +603,8 @@ export interface ChannelConfigValueFieldDescriptor
   kind: 'string' | 'secret';
   required?: boolean;
   envResolvable?: boolean;
+  /** Render the field as a multi-line text area in management UIs. */
+  multiline?: boolean;
   properties?: never;
 }
 
@@ -428,6 +613,7 @@ export interface ChannelConfigPlainValueFieldDescriptor
   kind: 'boolean' | 'string-list' | 'record';
   required?: boolean;
   envResolvable?: never;
+  multiline?: never;
   properties?: never;
 }
 
@@ -436,7 +622,8 @@ export interface ChannelConfigEnumFieldDescriptor
   kind: 'enum';
   required?: boolean;
   envResolvable?: never;
-  options: ReadonlyArray<{ value: string; label: string }>;
+  multiline?: never;
+  options: readonly ChannelConfigFieldOption[];
   properties?: never;
 }
 
@@ -445,7 +632,19 @@ export interface ChannelConfigNumberFieldDescriptor
   kind: 'number';
   required?: boolean;
   envResolvable?: never;
+  multiline?: never;
+  /** Exclusive lower bound: the value must be strictly greater than this. */
   exclusiveMinimum?: number;
+  /**
+   * Inclusive lower bound: the value may equal this. Needed because a field
+   * whose real floor is 0 cannot express it with `exclusiveMinimum` — writing
+   * -1 to admit 0 also admits (-1, 0), which the editor then accepts and the
+   * adapter rejects at save. When both are declared the stricter one wins.
+   */
+  minimum?: number;
+  /** Inclusive upper bound. A poll interval above Node's 32-bit timer range is
+   * clamped to 1ms, so an unbounded interval field can persist a hot loop. */
+  maximum?: number;
   properties?: never;
 }
 
@@ -454,16 +653,21 @@ export interface ChannelConfigObjectFieldDescriptor
   kind: 'object';
   required?: false;
   envResolvable?: never;
+  multiline?: never;
   properties: readonly ChannelConfigNestedFieldDescriptor[];
 }
 
 export type ChannelConfigNestedFieldDescriptor =
-  | (Omit<ChannelConfigValueFieldDescriptor, 'kind' | 'envResolvable'> & {
+  | (Omit<
+      ChannelConfigValueFieldDescriptor,
+      'kind' | 'envResolvable' | 'multiline'
+    > & {
       kind: Exclude<
         ChannelConfigFieldKind,
         'secret' | 'enum' | 'number' | 'object'
       >;
       envResolvable?: never;
+      multiline?: never;
     })
   | (Omit<ChannelConfigEnumFieldDescriptor, 'kind' | 'envResolvable'> & {
       kind: 'enum';
@@ -482,8 +686,40 @@ export type ChannelConfigFieldDescriptor =
   | ChannelConfigNumberFieldDescriptor
   | ChannelConfigObjectFieldDescriptor;
 
+/**
+ * Handlers an adapter drives during an interactive QR login. The daemon owns
+ * the session lifecycle and the transport; the adapter owns the protocol.
+ */
+export interface ChannelQrLoginHandlers {
+  /** A fresh QR payload URL is ready to render. Never carries a secret. */
+  onQrCode(url: string): void;
+  /** The current QR expired; a replacement is being requested. */
+  onExpired(): void;
+  /**
+   * Login succeeded. Values are keyed by management field key so the daemon can
+   * persist them through the shared config/secret path without knowing which
+   * platform produced them.
+   */
+  onSuccess(values: Readonly<Record<string, string>>): void;
+  onFailure(error: Error): void;
+}
+
+export interface ChannelQrLoginDescriptor {
+  /**
+   * Begin the login handshake. Returns a dispose function that must stop all
+   * upstream polling. Aborting `signal` has the same effect.
+   */
+  start(handlers: ChannelQrLoginHandlers, signal: AbortSignal): () => void;
+}
+
 export interface ChannelManagementDescriptor {
   fields: readonly ChannelConfigFieldDescriptor[];
+
+  /**
+   * Opt in to browser-rendered QR login. Adapters without it can only be
+   * configured by supplying credentials directly.
+   */
+  qrLogin?: ChannelQrLoginDescriptor;
 
   /**
    * Cross-field validation applied to the resolved config during managed
@@ -515,6 +751,19 @@ export interface ChannelPlugin {
 
   /** Optional config fields whose string values may reference environment vars. */
   envResolvableConfigFields?: string[];
+
+  /** Opt in to shared task, response, and turn output grouping. */
+  supportsOutputMode?: boolean;
+
+  /** Sends notifications without receiving messages or creating conversations. */
+  outboundOnly?: boolean;
+
+  /** Adapter-owned logical destination; endpoint credentials stay in config. */
+  defaultDeliveryTarget?: {
+    type: 'user' | 'chat';
+    id: string;
+    label?: string;
+  };
 
   /** Serializable metadata for safe configuration management. */
   management?: ChannelManagementDescriptor;

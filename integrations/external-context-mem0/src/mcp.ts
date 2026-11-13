@@ -11,16 +11,19 @@ import {
   outputSchema,
   renderResult,
 } from './profile.js';
-import type { InstanceConfigV1, SearchProvider } from './types.js';
+import type { InstanceConfigV2, SearchProvider } from './types.js';
 
 export function createMem0McpServer(runtime: {
-  instance: InstanceConfigV1;
+  instance: InstanceConfigV2;
   search: SearchProvider;
 }): McpServer {
-  const server = new McpServer({
-    name: 'external-context-mem0',
-    version: '0.1.0',
-  });
+  const server = new McpServer(
+    {
+      name: 'external-context-mem0',
+      version: '0.1.0',
+    },
+    { maxToolInputElements: 100_000 },
+  );
 
   server.registerTool(
     'context_search',

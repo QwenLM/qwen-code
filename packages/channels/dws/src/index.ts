@@ -5,7 +5,7 @@
  */
 
 import type { ChannelPlugin } from '@qwen-code/channel-base';
-import { DwsChannel } from './dws-channel.js';
+import { DEFAULT_START_REACTION, DwsChannel } from './dws-channel.js';
 
 export { DwsChannel };
 export { DwsClient, DwsCommandError, parseDwsImEvent } from './dws-client.js';
@@ -14,7 +14,9 @@ export type {
   DwsClientLike,
   DwsClientOptions,
   DwsIdentity,
+  DwsImDispatch,
   DwsImMessage,
+  DwsImMessageResult,
   DwsImSource,
   DwsImTarget,
   DwsMessageHistoryPage,
@@ -60,14 +62,15 @@ export const plugin: ChannelPlugin = {
         ],
       },
       {
-        key: 'senderPolicy',
-        label: 'Sender Policy',
+        key: 'privatePolicy',
+        label: 'Private Policy',
         kind: 'enum',
         required: true,
         default: 'pairing',
         description:
-          'Controls which DingTalk users may start direct-message, document-notification, native-todo, and non-paired group tasks',
+          'Controls which DingTalk users may start direct-message, document-notification, and native-todo tasks',
         options: [
+          { value: 'disabled', label: 'Disabled' },
           { value: 'pairing', label: 'Pairing' },
           { value: 'allowlist', label: 'Allowlist' },
           { value: 'open', label: 'Open' },
@@ -80,11 +83,39 @@ export const plugin: ChannelPlugin = {
         description: 'DingTalk IDs used by Allowlist and Pairing policies',
       },
       {
+        key: 'quotePrivateReply',
+        label: 'Quote Private Replies',
+        kind: 'boolean',
+        description:
+          'Quote the originating direct message in the final response. Disabled by default',
+      },
+      {
+        key: 'quoteGroupReply',
+        label: 'Quote Group Replies',
+        kind: 'boolean',
+        description:
+          'Quote the originating group message in the final response. Disabled by default',
+      },
+      {
         key: 'watchTodos',
         label: 'Watch Native Todos',
         kind: 'boolean',
         description:
           'Poll pending todos assigned to this DWS account and run newly assigned or changed tasks',
+      },
+      {
+        key: 'startReaction',
+        label: 'Start Reaction',
+        kind: 'string',
+        default: DEFAULT_START_REACTION,
+        description: `DingTalk reaction emoji or name added while a task is running. Leave empty to use ${DEFAULT_START_REACTION}`,
+      },
+      {
+        key: 'endReaction',
+        label: 'End Reaction',
+        kind: 'string',
+        description:
+          'DingTalk reaction emoji or name added after a task ends. Leave empty to disable it',
       },
     ],
     validateConfig: (config) => {
@@ -104,11 +135,19 @@ export const plugin: ChannelPlugin = {
       ) {
         return 'DWS channels require approvalMode "default", "plan", or "yolo".';
       }
-      if (
-        config['watchTodos'] !== undefined &&
-        typeof config['watchTodos'] !== 'boolean'
-      ) {
-        return 'DWS watchTodos must be a boolean.';
+      for (const field of [
+        'watchTodos',
+        'quotePrivateReply',
+        'quoteGroupReply',
+      ] as const) {
+        if (config[field] !== undefined && typeof config[field] !== 'boolean') {
+          return `DWS ${field} must be a boolean.`;
+        }
+      }
+      for (const field of ['startReaction', 'endReaction'] as const) {
+        if (config[field] !== undefined && typeof config[field] !== 'string') {
+          return `DWS ${field} must be a string.`;
+        }
       }
       return undefined;
     },

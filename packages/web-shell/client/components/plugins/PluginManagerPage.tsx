@@ -1,65 +1,124 @@
-import { useCallback, useMemo, useState, type Ref } from 'react';
-import { SearchIcon, ServerIcon } from 'lucide-react';
-import type { SerializedMcpStatusMessage } from '../messages/McpStatusMessage';
+import { useCallback, useEffect, useMemo, useState, type Ref } from 'react';
+import { ArrowLeftIcon } from 'lucide-react';
+import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import { AgentsManagerPage } from '../agents/AgentsManagerPage';
 import { ExtensionsManagerPage } from '../extensions/ExtensionsManagerPage';
+import {
+  ManagedExtensionsManagerPage,
+  type ManagedExtensionsManagerPageProps,
+} from '../managed/ManagedExtensionsManagerPage';
 import { McpManagerPage } from '../mcp/McpManagerPage';
+import {
+  ManagedMcpManagerPage,
+  type ManagedMcpManagerPageProps,
+} from '../managed/ManagedMcpManagerPage';
 import { SkillsManagerPage } from '../skills/SkillsManagerPage';
-import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
 import { Button } from '../ui/button';
 import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from '../ui/empty';
-import { Input } from '../ui/input';
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import { useI18n } from '../../i18n';
+import { workspaceLabel } from '../../utils/workspace';
 import type { EmbeddedManagerPage } from './manager-page';
 
 type PluginTab = 'extensions' | 'mcp' | 'skills' | 'agents';
 
 interface PluginManagerPageProps {
-  mcpMessage: SerializedMcpStatusMessage | null;
-  loadMcpMessage: () => Promise<void>;
   onClose: () => void;
   onUseSkill: (name: string) => void;
+  showBackButton?: boolean;
   initialFocusRef?: Ref<HTMLButtonElement>;
+  initialTab?: PluginTab;
+  skillsWorkspaceCwd?: string;
+  onSkillsWorkspaceChange?: (cwd: string) => void;
+  managedSkills?: boolean;
+  managedExtensions?: Omit<ManagedExtensionsManagerPageProps, 'onClose'>;
+  managedMcp?: ManagedMcpManagerPageProps;
 }
 
 export function PluginManagerPage({
-  mcpMessage,
-  loadMcpMessage,
   onClose,
   onUseSkill,
+  showBackButton = false,
   initialFocusRef,
+  initialTab = 'extensions',
+  skillsWorkspaceCwd,
+  onSkillsWorkspaceChange,
+  managedSkills = false,
+  managedExtensions,
+  managedMcp,
 }: PluginManagerPageProps) {
   const { t } = useI18n();
-  const [activeTab, setActiveTab] = useState<PluginTab>('extensions');
+  const workspace = useWorkspace();
+  const workspaces = useMemo(() => {
+    const listed = (workspace.capabilities?.workspaces ?? []).filter(
+      (entry) => entry.kind !== 'live',
+    );
+    if (listed.length > 0) return listed;
+    return workspace.workspaceCwd
+      ? [
+          {
+            id: 'primary',
+            cwd: workspace.workspaceCwd,
+            primary: true,
+            trusted: true,
+          },
+        ]
+      : [];
+  }, [workspace.capabilities?.workspaces, workspace.workspaceCwd]);
+  const defaultWorkspaceCwd =
+    workspaces.find(
+      (entry) => entry.cwd === workspace.workspaceCwd && entry.trusted,
+    )?.cwd ??
+    workspaces.find((entry) => entry.primary && entry.trusted)?.cwd ??
+    workspaces.find((entry) => entry.trusted)?.cwd;
+  const splitSkillsRuntimeAvailable =
+    workspace.capabilities?.features?.includes(
+      'workspace_skills_config_runtime',
+    ) === true;
+  const [selectedWorkspaceCwd, setSelectedWorkspaceCwd] = useState(
+    () => skillsWorkspaceCwd ?? defaultWorkspaceCwd,
+  );
+  const [activeTab, setActiveTab] = useState<PluginTab>(initialTab);
   const [detailOpen, setDetailOpen] = useState(false);
   const [pageRevision, setPageRevision] = useState(0);
-  const [mcpLoaded, setMcpLoaded] = useState(false);
-  const [mcpLoadError, setMcpLoadError] = useState<string | null>(null);
+  const skillsWorkspace = splitSkillsRuntimeAvailable
+    ? selectedWorkspaceCwd
+    : workspace.workspaceCwd;
 
-  const loadMcp = useCallback(() => {
-    setMcpLoaded(false);
-    setMcpLoadError(null);
-    void loadMcpMessage()
-      .then(() => setMcpLoaded(true))
-      .catch((error: unknown) => {
-        setMcpLoadError(error instanceof Error ? error.message : String(error));
-      });
-  }, [loadMcpMessage]);
+  useEffect(() => {
+    if (
+      selectedWorkspaceCwd &&
+      workspaces.some(
+        (entry) => entry.cwd === selectedWorkspaceCwd && entry.trusted,
+      )
+    ) {
+      return;
+    }
+    setSelectedWorkspaceCwd(defaultWorkspaceCwd);
+  }, [defaultWorkspaceCwd, selectedWorkspaceCwd, workspaces]);
+
+  useEffect(() => {
+    if (activeTab === 'skills' && skillsWorkspace)
+      onSkillsWorkspaceChange?.(skillsWorkspace);
+  }, [activeTab, onSkillsWorkspaceChange, skillsWorkspace]);
 
   const resetToRoot = useCallback(() => {
     setDetailOpen(false);
     setPageRevision((revision) => revision + 1);
   }, []);
   const embedded = useMemo<EmbeddedManagerPage>(
-    () => ({ onRoot: resetToRoot, onDetailChange: setDetailOpen }),
-    [resetToRoot],
+    () => ({
+      onRoot: resetToRoot,
+      onDetailChange: setDetailOpen,
+      onBack: showBackButton ? onClose : undefined,
+    }),
+    [onClose, resetToRoot, showBackButton],
   );
 
   const handleTabChange = (value: string) => {
@@ -67,39 +126,114 @@ export function PluginManagerPage({
     setActiveTab(nextTab);
     setDetailOpen(false);
     setPageRevision((revision) => revision + 1);
-    if (nextTab === 'mcp') {
-      loadMcp();
-    }
   };
+
+  const workspaceSelect = (disabled: boolean) =>
+    ((activeTab === 'mcp' && !managedMcp) ||
+      (activeTab === 'skills' && splitSkillsRuntimeAvailable)) &&
+    workspaces.length > 1 ? (
+      <Select
+        value={selectedWorkspaceCwd}
+        disabled={disabled}
+        onValueChange={(cwd) => {
+          setSelectedWorkspaceCwd(cwd);
+          setDetailOpen(false);
+          setPageRevision((revision) => revision + 1);
+        }}
+      >
+        <SelectTrigger
+          className="h-8 w-48"
+          aria-label={t('sidebar.workspaceSelectLabel')}
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {workspaces.map((entry) => (
+            <SelectItem
+              key={entry.id}
+              value={entry.cwd}
+              disabled={!entry.trusted}
+            >
+              {workspaceLabel(entry)}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    ) : null;
 
   return (
     <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
       {!detailOpen ? (
-        <div className="sticky -top-4 z-10 -mx-5 -mt-4 border-b bg-background px-5 py-3">
-          <TabsList className="h-8" aria-label={t('plugins.sections')}>
-            <TabsTrigger ref={initialFocusRef} value="extensions">
-              {t('plugins.extensions')}
-            </TabsTrigger>
-            <TabsTrigger value="mcp">{t('plugins.mcp')}</TabsTrigger>
-            <TabsTrigger value="skills">{t('plugins.skills')}</TabsTrigger>
-            <TabsTrigger value="agents">{t('plugins.agents')}</TabsTrigger>
-          </TabsList>
+        <div className="sticky -top-4 z-10 -mx-5 -mt-4 flex flex-wrap items-center justify-between gap-3 border-b bg-background px-5 py-3">
+          <div className="flex items-center gap-2">
+            {showBackButton ? (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onClose}
+                aria-label={t('plugins.backToChat')}
+              >
+                <ArrowLeftIcon />
+              </Button>
+            ) : null}
+            <TabsList className="h-8" aria-label={t('plugins.sections')}>
+              <TabsTrigger
+                ref={activeTab === 'extensions' ? initialFocusRef : undefined}
+                value="extensions"
+              >
+                {t('plugins.extensions')}
+              </TabsTrigger>
+              <TabsTrigger
+                ref={activeTab === 'mcp' ? initialFocusRef : undefined}
+                value="mcp"
+              >
+                {t('plugins.mcp')}
+              </TabsTrigger>
+              <TabsTrigger
+                ref={activeTab === 'skills' ? initialFocusRef : undefined}
+                value="skills"
+              >
+                {t('plugins.skills')}
+              </TabsTrigger>
+              <TabsTrigger
+                ref={activeTab === 'agents' ? initialFocusRef : undefined}
+                value="agents"
+              >
+                {t('plugins.agents')}
+              </TabsTrigger>
+            </TabsList>
+          </div>
+          {workspaceSelect(false)}
         </div>
       ) : null}
 
       <TabsContent value={activeTab} className="mt-0">
+        {activeTab === 'skills' && managedSkills && !managedExtensions && (
+          <p className="my-2 text-sm text-muted-foreground">
+            {t('managed.creationSkillsFromSettings')}
+          </p>
+        )}
         {activeTab === 'extensions' ? (
           <ExtensionsManagerPage
             key={`extensions-${pageRevision}`}
+            managed={managedExtensions}
             onClose={onClose}
             embedded={embedded}
           />
+        ) : activeTab === 'skills' && managedExtensions ? (
+          <ManagedExtensionsManagerPage
+            {...managedExtensions}
+            view="skills"
+            onClose={onClose}
+          />
         ) : activeTab === 'skills' ? (
           <SkillsManagerPage
-            key={`skills-${pageRevision}`}
+            key={`skills-${pageRevision}-${selectedWorkspaceCwd ?? ''}`}
             onClose={onClose}
             onUseSkill={onUseSkill}
             embedded={embedded}
+            workspaceCwd={skillsWorkspace}
+            workspaceControl={workspaceSelect(true)}
           />
         ) : activeTab === 'agents' ? (
           <AgentsManagerPage
@@ -107,44 +241,23 @@ export function PluginManagerPage({
             onClose={onClose}
             embedded={embedded}
           />
-        ) : mcpLoadError ? (
-          <Alert variant="destructive" className="mt-4">
-            <AlertTitle>{t('plugins.mcpLoadFailed')}</AlertTitle>
-            <AlertDescription className="space-y-3">
-              <p>{mcpLoadError}</p>
-              <Button variant="outline" size="sm" onClick={loadMcp}>
-                {t('common.retry')}
-              </Button>
-            </AlertDescription>
-          </Alert>
-        ) : mcpMessage && mcpLoaded ? (
-          <McpManagerPage
-            key={`mcp-${pageRevision}`}
-            message={mcpMessage}
-            onClose={onClose}
-            embedded={embedded}
+        ) : managedMcp ? (
+          <ManagedMcpManagerPage
+            {...managedMcp}
+            onOpenExtensions={
+              managedExtensions
+                ? () => setActiveTab('extensions')
+                : managedMcp.onOpenExtensions
+            }
           />
         ) : (
-          <div className="flex w-full flex-col gap-6 pb-8 pt-4">
-            <div className="relative">
-              <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                aria-label={t('common.search')}
-                readOnly
-                className="pl-9"
-                placeholder={`${t('common.search')} MCP…`}
-              />
-            </div>
-            <Empty className="border">
-              <EmptyHeader>
-                <EmptyMedia variant="icon">
-                  <ServerIcon />
-                </EmptyMedia>
-                <EmptyTitle>{t('mcp.empty')}</EmptyTitle>
-                <EmptyDescription>{t('mcp.emptyDescription')}</EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          </div>
+          <McpManagerPage
+            key={`mcp-${pageRevision}-${selectedWorkspaceCwd ?? ''}`}
+            onClose={onClose}
+            embedded={embedded}
+            workspaceCwd={selectedWorkspaceCwd}
+            workspaceControl={workspaceSelect(true)}
+          />
         )}
       </TabsContent>
     </Tabs>

@@ -10,6 +10,7 @@
     "sourceMap": true,
     "strict": true,
     "skipLibCheck": true,
+    "resolveJsonModule": true,
     "paths": {
       "@lydell/node-pty": ["../../node_modules/@lydell/node-pty/node-pty.d.ts"],
       "@qwen-code/qwen-code/export": ["../cli/src/export/index.ts"]
@@ -18,5 +19,6 @@
     // "noImplicitReturns": true, /* Report error when not all code paths in function return a value. */
     // "noFallthroughCasesInSwitch": true, /* Report errors for fallthrough cases in switch statement. */
     // "noUnusedParameters": true,  /* Report errors on unused parameters. */
-  }
+  },
+  "exclude": ["dist", "node_modules"]
 }

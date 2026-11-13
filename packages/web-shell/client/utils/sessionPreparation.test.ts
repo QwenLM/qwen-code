@@ -24,7 +24,7 @@ function createActions(
 function prepareSession(
   args: Omit<CreateSessionArgs, 'getCurrentSessionId'> &
     Partial<Pick<CreateSessionArgs, 'getCurrentSessionId'>>,
-): Promise<void> {
+) {
   return createAndAttachSessionForPrompt({
     getCurrentSessionId: () => sessionResult.sessionId,
     ...args,
@@ -60,10 +60,176 @@ describe('createAndAttachSessionForPrompt', () => {
       workspaceCwd: '/ws/secondary',
       approvalMode: 'yolo',
       sourceType: 'default',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
     // Model is still a post-create call, sequenced after attach.
     expect(order).toEqual(['create', 'attach', 'model']);
     expect(actions.setModel).toHaveBeenCalledWith('qwen3');
+  });
+
+  it('sends the authenticated draft model with the create request', async () => {
+    const actions = createActions({
+      createSession: vi.fn(async () => ({
+        ...sessionResult,
+        modelApplied: true,
+      })),
+    });
+    const startupConfig = { modelServiceId: 'qwen3.8-max(qwen-subscription)' };
+    await prepareSession({
+      sessionActions: actions,
+      startupConfig,
+    });
+    expect(actions.createSession).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ startupConfig }),
+    );
+    expect(actions.setModel).not.toHaveBeenCalled();
+  });
+
+  it('enables Plan with the selected execution permission after attach', async () => {
+    const order: string[] = [];
+    const actions = createActions({
+      attachSession: vi.fn(async () => {
+        order.push('attach');
+      }),
+      setApprovalMode: vi.fn(async () => {
+        order.push('plan');
+        return { mode: 'plan' };
+      }),
+    });
+    await prepareSession({
+      sessionActions: actions,
+      modeId: 'yolo',
+      planMode: true,
+    });
+    expect(actions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ approvalMode: 'yolo' }),
+    );
+    expect(actions.setApprovalMode).toHaveBeenCalledWith('yolo', {
+      planMode: true,
+    });
+    expect(order).toEqual(['attach', 'plan']);
+  });
+
+  it.each(['rejected', 'unconfirmed'])(
+    'releases the new session if Plan is %s',
+    async (failure) => {
+      const actions = createActions({
+        setApprovalMode: vi.fn(async () => {
+          if (failure === 'rejected') throw new Error('Denied');
+          return { mode: 'yolo' };
+        }),
+      });
+      await expect(
+        prepareSession({
+          sessionActions: actions,
+          modeId: 'yolo',
+          planMode: true,
+          warn: vi.fn(),
+        }),
+      ).rejects.toThrow();
+      expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+      expect(actions.clearSession).toHaveBeenCalled();
+    },
+  );
+
+  it('does not enable Plan on a session selected during model preparation', async () => {
+    let currentSession = 'session-1';
+    const actions = createActions({
+      setModel: vi.fn(async () => {
+        currentSession = 'session-2';
+        return modelResult;
+      }),
+      setApprovalMode: vi.fn(async () => ({ mode: 'plan' })),
+    });
+    await expect(
+      prepareSession({
+        sessionActions: actions,
+        modeId: 'yolo',
+        modelId: 'qwen3',
+        planMode: true,
+        getCurrentSessionId: () => currentSession,
+        warn: vi.fn(),
+      }),
+    ).rejects.toThrow('Session changed');
+    expect(actions.setApprovalMode).not.toHaveBeenCalled();
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+    expect(actions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('creates standalone sessions without workspace-only fields', async () => {
+    const actions = createActions();
+
+    await prepareSession({
+      sessionActions: actions,
+      modelId: 'qwen3.8-max(USE_OPENAI)',
+      reasoningEffort: 'high',
+      modeId: 'yolo',
+      workspaceCwd: '/must-not-leak',
+      sessionContext: { kind: 'standalone' },
+      worktree: { slug: 'must-not-leak' },
+      branch: { name: 'must-not-leak' },
+      sessionSourceType: 'must-not-leak',
+    });
+
+    expect(actions.createSession).toHaveBeenCalledWith({
+      sessionContext: { kind: 'standalone' },
+      modelServiceId: 'qwen3.8-max(USE_OPENAI)',
+      approvalMode: 'yolo',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
+    });
+    expect(actions.setModel).not.toHaveBeenCalled();
+    expect(actions.setReasoningEffort).toHaveBeenCalledWith('high', {
+      persist: false,
+    });
+  });
+
+  it('releases the standalone session when the create landed on the wrong model with a reasoning effort bound', async () => {
+    const warn = vi.fn();
+    const actions = createActions({
+      createSession: vi.fn(async () => ({
+        sessionId: 'session-1',
+        modelApplied: false,
+      })),
+    });
+
+    await expect(
+      prepareSession({
+        sessionActions: actions,
+        modelId: 'qwen3.8-max(USE_OPENAI)',
+        reasoningEffort: 'high',
+        sessionContext: { kind: 'standalone' },
+        warn,
+      }),
+    ).rejects.toThrow(/was not applied to the standalone session/);
+
+    expect(actions.setReasoningEffort).not.toHaveBeenCalled();
+    expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
+    expect(actions.clearSession).toHaveBeenCalledOnce();
+  });
+
+  it('warns and keeps a standalone session that landed on the default model', async () => {
+    const warn = vi.fn();
+    const actions = createActions({
+      createSession: vi.fn(async () => ({
+        sessionId: 'session-1',
+        modelApplied: false,
+      })),
+    });
+
+    await prepareSession({
+      sessionActions: actions,
+      modelId: 'qwen3.8-max(USE_OPENAI)',
+      sessionContext: { kind: 'standalone' },
+      warn,
+    });
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('agent default model'),
+    );
+    expect(actions.releaseSession).not.toHaveBeenCalled();
+    expect(actions.clearSession).not.toHaveBeenCalled();
   });
 
   it('applies an explicit reasoning effort after the model and before resolving', async () => {
@@ -92,7 +258,9 @@ describe('createAndAttachSessionForPrompt', () => {
     });
 
     expect(order).toEqual(['create', 'attach', 'model', 'reasoning']);
-    expect(actions.setReasoningEffort).toHaveBeenCalledWith('medium');
+    expect(actions.setReasoningEffort).toHaveBeenCalledWith('medium', {
+      persist: true,
+    });
   });
 
   it('releases and clears the session when an explicit reasoning effort cannot be applied', async () => {
@@ -159,6 +327,8 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: undefined,
       sourceType: 'default',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
   });
 
@@ -174,6 +344,8 @@ describe('createAndAttachSessionForPrompt', () => {
       workspaceCwd: undefined,
       approvalMode: 'plan',
       sourceType: 'default',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
     expect(actions.setModel).not.toHaveBeenCalled();
   });
@@ -249,6 +421,8 @@ describe('createAndAttachSessionForPrompt', () => {
       workspaceCwd: undefined,
       approvalMode: 'yolo',
       sourceType: 'default',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
     expect(actions.attachSession).not.toHaveBeenCalled();
     expect(actions.setModel).not.toHaveBeenCalled();
@@ -337,6 +511,8 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: '/ws/secondary',
       sourceType: 'default',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
   });
 
@@ -349,6 +525,8 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: undefined,
       sourceType: 'vscode',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
   });
 
@@ -371,6 +549,8 @@ describe('createAndAttachSessionForPrompt', () => {
       workspaceCwd: undefined,
       sourceType: 'default',
       branch: { name: 'feat/x' },
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
   });
 
@@ -470,6 +650,31 @@ describe('createAndAttachSessionForPrompt', () => {
     );
   });
 
+  it('keeps the created session when the attach is superseded by a newer request', async () => {
+    const superseded = new DOMException(
+      'Session load superseded by a newer request',
+      'AbortError',
+    );
+    const actions = createActions({
+      attachSession: vi.fn(() => Promise.reject(superseded)),
+    });
+    const warn = vi.fn();
+
+    await expect(
+      prepareSession({
+        sessionActions: actions,
+        warn,
+      }),
+    ).rejects.toBe(superseded);
+
+    expect(actions.releaseSession).not.toHaveBeenCalled();
+    expect(actions.clearSession).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      '[WebShell] first-prompt preparation superseded; keeping session for later attach:',
+      'session-1',
+    );
+  });
+
   it('cleans up the created session when onSessionCreated rejects', async () => {
     const error = new Error('callback failed');
     const actions = createActions();
@@ -535,6 +740,128 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.attachSession).not.toHaveBeenCalled();
     expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
     expect(actions.clearSession).toHaveBeenCalledOnce();
+  });
+
+  describe('detached creation (user navigated during create)', () => {
+    function createDetachedClient() {
+      return {
+        sessionId: 'session-1',
+        clientId: 'client-1',
+        setModel: vi.fn(async () => modelResult),
+        setConfigOption: vi.fn(async () => ({})),
+        updateMetadata: vi.fn(async () => ({})),
+        close: vi.fn(async () => {}),
+        detach: vi.fn(async () => {}),
+        client: {
+          setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })),
+        },
+      };
+    }
+
+    function createUnboundActions(
+      client: ReturnType<typeof createDetachedClient>,
+    ) {
+      return createActions({
+        createSession: vi.fn(async (options) => {
+          if (options?.navigationOutcome) {
+            options.navigationOutcome.bound = false;
+          }
+          return client;
+        }),
+      });
+    }
+
+    it('returns the unbound client without attaching or touching the connection', async () => {
+      const client = createDetachedClient();
+      const actions = createUnboundActions(client);
+      const onSessionCreated = vi.fn();
+
+      const result = await prepareSession({
+        sessionActions: actions,
+        modelId: 'qwen3',
+        getCurrentSessionId: () => 'session-2',
+        onSessionCreated,
+      });
+
+      expect(result.detachedSession).toBe(client);
+      expect(actions.attachSession).not.toHaveBeenCalled();
+      expect(actions.setModel).not.toHaveBeenCalled();
+      expect(client.setModel).toHaveBeenCalledWith('qwen3');
+      expect(onSessionCreated).toHaveBeenCalledWith('session-1', client);
+      expect(actions.releaseSession).not.toHaveBeenCalled();
+      expect(actions.clearSession).not.toHaveBeenCalled();
+    });
+
+    it('keeps the authenticated draft model when the created session is detached', async () => {
+      const client = { ...createDetachedClient(), modelApplied: true };
+      const actions = createUnboundActions(client);
+      const startupConfig = {
+        modelServiceId: 'qwen3.8-max(qwen-subscription)',
+      };
+
+      await prepareSession({
+        sessionActions: actions,
+        startupConfig,
+        getCurrentSessionId: () => 'session-2',
+      });
+
+      expect(actions.createSession).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ startupConfig }),
+      );
+      expect(actions.attachSession).not.toHaveBeenCalled();
+      expect(client.setModel).not.toHaveBeenCalled();
+    });
+
+    it('applies Plan and reasoning through the created client', async () => {
+      const client = createDetachedClient();
+      const setApprovalMode = vi.fn(async () => ({ mode: 'plan' }));
+      const actions = {
+        ...createUnboundActions(client),
+        setApprovalMode,
+      };
+
+      await prepareSession({
+        sessionActions: actions,
+        modeId: 'yolo',
+        planMode: true,
+        reasoningEffort: 'medium',
+        getCurrentSessionId: () => 'session-2',
+      });
+
+      expect(client.client.setSessionApprovalMode).toHaveBeenCalledWith(
+        'session-1',
+        'yolo',
+        { clientId: 'client-1', planMode: true },
+      );
+      expect(client.setConfigOption).toHaveBeenCalledWith(
+        'reasoning_effort',
+        'medium',
+        { persist: true },
+      );
+      expect(setApprovalMode).not.toHaveBeenCalled();
+      expect(actions.setReasoningEffort).not.toHaveBeenCalled();
+    });
+
+    it('releases through the created client when detached preparation fails', async () => {
+      const client = createDetachedClient();
+      client.setModel.mockRejectedValue(new Error('model failed'));
+      const actions = createUnboundActions(client);
+
+      await expect(
+        prepareSession({
+          sessionActions: actions,
+          modelId: 'qwen3',
+          reasoningEffort: 'medium',
+          getCurrentSessionId: () => 'session-2',
+          warn: vi.fn(),
+        }),
+      ).rejects.toThrow('model failed');
+
+      expect(client.close).toHaveBeenCalledOnce();
+      expect(actions.releaseSession).not.toHaveBeenCalled();
+      expect(actions.clearSession).not.toHaveBeenCalled();
+      expect(client.setConfigOption).not.toHaveBeenCalled();
+    });
   });
 });
 

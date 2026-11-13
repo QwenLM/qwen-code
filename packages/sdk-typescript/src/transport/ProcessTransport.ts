@@ -415,7 +415,7 @@ export class ProcessTransport implements Transport {
     }
 
     if (this.options.sandbox) {
-      args.push('--sandbox');
+      args.push('--sandbox=true');
     }
 
     if (this.options.safeMode) {

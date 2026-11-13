@@ -99,6 +99,75 @@ describe('session-model-persistence', () => {
     });
   });
 
+  it('records and restores the effective Responses API despite a same-id Chat route', async () => {
+    const recordSessionModel = vi.fn().mockResolvedValue(true);
+    const baseUrl = 'https://example.test/v1';
+    const config = {
+      getModel: () => 'gpt-model',
+      getAuthType: () => AuthType.USE_OPENAI_RESPONSES,
+      getCurrentModelRegistryBaseUrl: () => baseUrl,
+      getChatRecordingService: () => ({ recordSessionModel }),
+    } as unknown as Config;
+    await recordDaemonSessionModelFromConfig(config);
+    expect(recordSessionModel).toHaveBeenCalledWith({
+      modelId: 'gpt-model',
+      authType: AuthType.USE_OPENAI_RESPONSES,
+      baseUrl,
+    });
+
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const restoreConfig = {
+      getModel: () => 'gpt-model',
+      getAuthType: () => AuthType.USE_OPENAI,
+      getCurrentModelRegistryBaseUrl: () => baseUrl,
+      getResolvedModelConfig: resolvedWhen(baseUrl),
+      switchModel,
+    } as unknown as Config;
+    await applyRestoredSessionModel(
+      restoreConfig,
+      recordingProjection({
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [null],
+        sessionModel: recordSessionModel.mock.calls[0][0],
+      }),
+    );
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI_RESPONSES,
+      'gpt-model',
+      { baseUrl },
+    );
+  });
+
+  it('does not retry a removed recorded Responses route as Chat', async () => {
+    const switchModel = vi
+      .fn()
+      .mockRejectedValue(new Error('Model route unavailable'));
+    const config = {
+      getModel: () => 'gpt-model',
+      getAuthType: () => AuthType.USE_OPENAI,
+      getResolvedModelConfig: () => undefined,
+      switchModel,
+    } as unknown as Config;
+    await applyRestoredSessionModel(
+      config,
+      recordingProjection({
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [null],
+        sessionModel: {
+          modelId: 'gpt-model',
+          authType: AuthType.USE_OPENAI_RESPONSES,
+          baseUrl: 'https://example.test/v1',
+        },
+      }),
+    );
+    expect(switchModel).toHaveBeenCalledOnce();
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI_RESPONSES,
+      'gpt-model',
+      undefined,
+    );
+  });
+
   it('omits baseUrl for an implicit registry route', async () => {
     const recordSessionModel = vi.fn().mockResolvedValue(true);
     const config = {
@@ -548,6 +617,92 @@ describe('session-model-persistence', () => {
       undefined,
     );
   });
+
+  it.each([
+    {
+      originalModel: 'legacy-api-model',
+      models: ['qwen3.8-max'],
+      healthy: false,
+    },
+    {
+      originalModel: 'qwen3.8-plus',
+      models: ['qwen3.8-plus', 'qwen3.8-max'],
+      healthy: false,
+    },
+    {
+      originalModel: 'legacy-api-model',
+      models: ['qwen3.8-plus'],
+      healthy: false,
+    },
+    { originalModel: 'legacy-api-model', models: [], healthy: true },
+  ])(
+    'restores subscription settings after API auth failure ($originalModel, $models, healthy=$healthy)',
+    async ({ originalModel, models, healthy }) => {
+      let currentAuth = AuthType.QWEN_SUBSCRIPTION;
+      let currentModel = originalModel;
+      const switchModel = vi.fn(async (authType: AuthType, modelId: string) => {
+        if (
+          authType === AuthType.QWEN_SUBSCRIPTION &&
+          !models.includes(modelId)
+        ) {
+          throw new Error('Model not found');
+        }
+        currentAuth = authType;
+        currentModel = modelId;
+      });
+      const refreshSubscriptionModels = vi.fn().mockResolvedValue({ models });
+      const authenticate = vi.fn(async () => {
+        if (!healthy && currentAuth === AuthType.USE_OPENAI) {
+          throw new Error('Missing API key');
+        }
+      });
+      const config = {
+        getModel: () => currentModel,
+        getAuthType: () => currentAuth,
+        switchModel,
+        refreshSubscriptionModels,
+      } as unknown as Config;
+      const restore = restoreSessionModelThenAuthenticate(
+        config,
+        recordingProjection({
+          lastCompletedUuid: 'leaf',
+          turnParentUuids: [],
+          sessionModel: {
+            modelId: 'recorded-api-model',
+            authType: AuthType.USE_OPENAI,
+          },
+        }),
+        authenticate,
+        'qwen3.8-max',
+      );
+      if (
+        !healthy &&
+        !models.includes(originalModel) &&
+        !models.includes('qwen3.8-max')
+      ) {
+        await expect(restore).rejects.toThrow('Run /model');
+        await expect(restore).rejects.toMatchObject({
+          code: -32000,
+          data: { authMethods: expect.any(Array) },
+        });
+        expect(switchModel).toHaveBeenCalledTimes(1);
+        return;
+      }
+      await restore;
+      if (healthy) {
+        expect(currentModel).toBe('recorded-api-model');
+        expect(currentAuth).toBe(AuthType.USE_OPENAI);
+        expect(refreshSubscriptionModels).not.toHaveBeenCalled();
+        expect(authenticate).toHaveBeenCalledTimes(1);
+      } else {
+        expect(currentModel).toBe(
+          models.includes(originalModel) ? originalModel : 'qwen3.8-max',
+        );
+        expect(currentAuth).toBe(AuthType.QWEN_SUBSCRIPTION);
+        expect(authenticate).toHaveBeenCalledTimes(2);
+      }
+    },
+  );
 
   it('does not retry authentication when restore did not change the live model', async () => {
     const switchModel = vi.fn().mockResolvedValue(undefined);

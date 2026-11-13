@@ -11,6 +11,7 @@ import { theme } from '../semantic-colors.js';
 import { useStreamingContext } from '../contexts/StreamingContext.js';
 import { StreamingState } from '../types.js';
 import { RespondingSpinner } from './RespondingSpinner.js';
+import { WAITING_SPINNER_FRAME } from '../constants.js';
 import { formatDuration, formatTokenCount } from '../utils/formatters.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { useAnimationFrame } from '../hooks/useAnimationFrame.js';
@@ -20,6 +21,7 @@ import { t } from '../../i18n/index.js';
 interface LoadingIndicatorProps {
   currentLoadingPhrase?: string;
   elapsedTime: number;
+  showCancelHint?: boolean;
   rightContent?: React.ReactNode;
   candidatesTokens?: number;
   taskStartTokens?: number;
@@ -46,6 +48,7 @@ interface LoadingIndicatorProps {
 export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
   currentLoadingPhrase,
   elapsedTime,
+  showCancelHint = true,
   rightContent,
   candidatesTokens,
   taskStartTokens = 0,
@@ -108,12 +111,13 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
       ? ` · ${formatTokensPerSecond(outputTokensSinceTimerStart / elapsedTime)}`
       : '';
 
+  const tokens = `${tokenStr}${tokenRateStr}`;
+  const timerContent = showCancelHint
+    ? t('({{time}}{{tokens}} · esc to cancel)', { time: timeStr, tokens })
+    : `(${timeStr}${tokens})`;
   const cancelAndTimerContent =
     streamingState !== StreamingState.WaitingForConfirmation
-      ? t('({{time}}{{tokens}} · esc to cancel)', {
-          time: timeStr,
-          tokens: `${tokenStr}${tokenRateStr}`,
-        })
+      ? timerContent
       : null;
 
   return (
@@ -129,7 +133,7 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
             <RespondingSpinner
               nonRespondingDisplay={
                 streamingState === StreamingState.WaitingForConfirmation
-                  ? '⠏'
+                  ? WAITING_SPINNER_FRAME
                   : ''
               }
             />

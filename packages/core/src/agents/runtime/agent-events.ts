@@ -13,6 +13,7 @@
  * - Lifecycle hooks (pre/post tool use, stop) for synchronous callbacks
  */
 
+import type { ToolLifecycleEvent } from '../../telemetry/tool-lifecycle.js';
 import { EventEmitter } from 'events';
 import type {
   ToolCallConfirmationDetails,
@@ -22,6 +23,7 @@ import type {
 } from '../../tools/tools.js';
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { AgentStatus } from './agent-types.js';
+import type { RetryWaitEvent } from '../../utils/retry-wait.js';
 
 type WithoutConfirmationCallback<T> = T extends unknown
   ? Omit<T, 'onConfirm'>
@@ -43,7 +45,9 @@ export type AgentEvent =
   | 'tool_responses_finalized'
   | 'tool_output_update'
   | 'tool_waiting_approval'
+  | 'tool_approval_resolved'
   | 'usage_metadata'
+  | 'retry_wait'
   | 'external_message'
   | 'finish'
   | 'error'
@@ -61,7 +65,10 @@ export enum AgentEventType {
   TOOL_RESPONSES_FINALIZED = 'tool_responses_finalized',
   TOOL_OUTPUT_UPDATE = 'tool_output_update',
   TOOL_WAITING_APPROVAL = 'tool_waiting_approval',
+  TOOL_APPROVAL_RESOLVED = 'tool_approval_resolved',
   USAGE_METADATA = 'usage_metadata',
+  /** Start/end of a retry-owned backoff sleep inside the round's request. */
+  RETRY_WAIT = 'retry_wait',
   /** External user message injected mid-run (e.g. via send_message). */
   EXTERNAL_MESSAGE = 'external_message',
   FINISH = 'finish',
@@ -120,6 +127,8 @@ export interface AgentToolCallEvent {
   callId: string;
   name: string;
   args: Record<string, unknown>;
+  modelFacingName?: string;
+  modelFacingArgs?: Record<string, unknown>;
   description: string;
   /** Whether the tool's output should be rendered as markdown. */
   isOutputMarkdown?: boolean;
@@ -127,6 +136,7 @@ export interface AgentToolCallEvent {
 }
 
 export interface AgentToolResultEvent {
+  lifecycle?: ToolLifecycleEvent;
   subagentId: string;
   round: number;
   callId: string;
@@ -154,6 +164,7 @@ export interface AgentToolResponsesFinalizedEvent {
 }
 
 export interface AgentToolOutputUpdateEvent {
+  lifecycle?: ToolLifecycleEvent;
   subagentId: string;
   round: number;
   callId: string;
@@ -192,6 +203,14 @@ export interface AgentApprovalRequestEvent {
   timestamp: number;
 }
 
+/** The active approval was retired, before the tool batch returns results. */
+export interface AgentApprovalResolvedEvent {
+  subagentId: string;
+  round: number;
+  callId: string;
+  timestamp: number;
+}
+
 export interface AgentExternalMessageEvent {
   subagentId: string;
   /** Source kind for observability; messages are parent send_message text. */
@@ -204,6 +223,12 @@ export interface AgentExternalMessageEvent {
 export interface AgentFinishEvent {
   subagentId: string;
   terminateReason: string;
+  /**
+   * Which loop detector fired when terminateReason is LOOP_DETECTED
+   * (issue #9450), so stops are attributable in journals/telemetry instead
+   * of collapsing into one generic label.
+   */
+  loopType?: string;
   timestamp: number;
   rounds?: number;
   totalDurationMs?: number;
@@ -220,6 +245,13 @@ export interface AgentErrorEvent {
   error: string;
   timestamp: number;
 }
+
+export type AgentRetryWaitEvent = RetryWaitEvent & {
+  subagentId: string;
+  round: number;
+  promptId: string;
+  timestamp: number;
+};
 
 export interface AgentStatusChangeEvent {
   agentId: string;
@@ -246,7 +278,9 @@ export interface AgentEventMap {
   [AgentEventType.TOOL_RESPONSES_FINALIZED]: AgentToolResponsesFinalizedEvent;
   [AgentEventType.TOOL_OUTPUT_UPDATE]: AgentToolOutputUpdateEvent;
   [AgentEventType.TOOL_WAITING_APPROVAL]: AgentApprovalRequestEvent;
+  [AgentEventType.TOOL_APPROVAL_RESOLVED]: AgentApprovalResolvedEvent;
   [AgentEventType.USAGE_METADATA]: AgentUsageEvent;
+  [AgentEventType.RETRY_WAIT]: AgentRetryWaitEvent;
   [AgentEventType.EXTERNAL_MESSAGE]: AgentExternalMessageEvent;
   [AgentEventType.FINISH]: AgentFinishEvent;
   [AgentEventType.ERROR]: AgentErrorEvent;

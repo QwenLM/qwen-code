@@ -17,6 +17,7 @@ export interface ReloadPluginsSummary {
   commandCount: number;
   skillCount: number;
   agentCount: number;
+  workflowCount: number;
   hookCount: number;
   mcpServerCount: number;
   lspServerCount: number;
@@ -88,6 +89,7 @@ function summarizeExtensions(extensions: Extension[]): ReloadPluginsSummary {
       summary.commandCount += extension.commands?.length ?? 0;
       summary.skillCount += extension.skills?.length ?? 0;
       summary.agentCount += extension.agents?.length ?? 0;
+      summary.workflowCount += extension.workflows?.length ?? 0;
       summary.hookCount += countHooks(extension);
       summary.mcpServerCount += Object.keys(extension.mcpServers ?? {}).length;
       summary.lspServerCount += countLspServers(extension);
@@ -98,6 +100,7 @@ function summarizeExtensions(extensions: Extension[]): ReloadPluginsSummary {
       commandCount: 0,
       skillCount: 0,
       agentCount: 0,
+      workflowCount: 0,
       hookCount: 0,
       mcpServerCount: 0,
       lspServerCount: 0,

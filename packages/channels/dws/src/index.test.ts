@@ -16,14 +16,52 @@ describe('DWS channel plugin', () => {
     expect(plugin.management?.fields.map((field) => field.key)).toEqual([
       'profile',
       'groupPolicy',
-      'senderPolicy',
+      'privatePolicy',
       'allowedUsers',
+      'quotePrivateReply',
+      'quoteGroupReply',
       'watchTodos',
+      'startReaction',
+      'endReaction',
     ]);
   });
 
   it('accepts the default @ message source', () => {
     expect(plugin.management?.validateConfig?.({})).toBeUndefined();
+  });
+
+  it.each(['quotePrivateReply', 'quoteGroupReply'])(
+    'exposes and validates the %s switch',
+    (field) => {
+      expect(
+        plugin.management?.fields.find((entry) => entry.key === field),
+      ).toMatchObject({ kind: 'boolean' });
+      for (const value of [undefined, false, true]) {
+        expect(
+          plugin.management?.validateConfig?.({ [field]: value }),
+        ).toBeUndefined();
+      }
+      for (const value of ['false', 0, null]) {
+        expect(
+          plugin.management?.validateConfig?.({ [field]: value }),
+        ).toContain(`${field} must be a boolean`);
+      }
+    },
+  );
+
+  it('exposes all four private policies with pairing as the new default', () => {
+    expect(
+      plugin.management?.fields.find((field) => field.key === 'privatePolicy'),
+    ).toMatchObject({
+      kind: 'enum',
+      default: 'pairing',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'open', label: 'Open' },
+      ],
+    });
   });
 
   it('defaults sender and group access to pairing', () => {
@@ -38,13 +76,36 @@ describe('DWS channel plugin', () => {
       'disabled',
     ]);
     expect(
-      plugin.management?.fields.find((field) => field.key === 'senderPolicy')
+      plugin.management?.fields.find((field) => field.key === 'privatePolicy')
         ?.default,
     ).toBe('pairing');
     expect(
       plugin.management?.fields.find((field) => field.key === 'watchTodos')
         ?.default,
     ).toBeUndefined();
+  });
+
+  it('exposes configurable task reactions', () => {
+    expect(
+      plugin.management?.fields.find((field) => field.key === 'startReaction')
+        ?.default,
+    ).toBe('🤔');
+    expect(
+      plugin.management?.fields.find((field) => field.key === 'endReaction')
+        ?.default,
+    ).toBeUndefined();
+    expect(
+      plugin.management?.validateConfig?.({
+        startReaction: '👏',
+        endReaction: '赞',
+      }),
+    ).toBeUndefined();
+    expect(plugin.management?.validateConfig?.({ startReaction: 1 })).toContain(
+      'startReaction must be a string',
+    );
+    expect(
+      plugin.management?.validateConfig?.({ endReaction: false }),
+    ).toContain('endReaction must be a string');
   });
 
   it('ignores removed source settings', () => {

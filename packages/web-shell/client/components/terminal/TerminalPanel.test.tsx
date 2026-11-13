@@ -10,24 +10,77 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const workspace = vi.hoisted(() => ({ baseUrl: 'http://localhost' }));
-const fit = vi.hoisted(() => vi.fn());
-const terminal = vi.hoisted(() => ({
-  options: {} as Record<string, unknown>,
-  cols: 80,
-  rows: 24,
-  loadAddon: vi.fn(),
-  open: vi.fn(),
-  reset: vi.fn(),
-  write: vi.fn(),
-  writeln: vi.fn(),
-  focus: vi.fn(),
-  blur: vi.fn(),
-  refresh: vi.fn(),
-  dispose: vi.fn(),
-  onData: vi.fn((_listener: (data: string) => void) => ({ dispose: vi.fn() })),
+const availabilityMock = vi.hoisted(() => ({
+  enabled: false,
+  available: true,
+  resumes: new Set<() => void>(),
+  listeners: new Set<() => void>(),
+  controller: {
+    getSnapshot: () =>
+      availabilityMock.available ? 'available' : 'unavailable',
+    subscribe: (listener: () => void) => {
+      availabilityMock.listeners.add(listener);
+      return () => availabilityMock.listeners.delete(listener);
+    },
+    check: vi.fn(async () => {}),
+    waitUntilAvailable: vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          availabilityMock.resumes.add(resolve);
+        }),
+    ),
+  },
+}));
+vi.mock('../../daemon/availability-context', () => ({
+  useDaemonAvailabilityController: () =>
+    availabilityMock.enabled ? availabilityMock.controller : undefined,
+}));
+vi.mock('../../daemon/availability', () => ({
+  findDaemonAvailability: () =>
+    availabilityMock.enabled ? availabilityMock.controller : undefined,
 }));
 
-vi.mock('@xterm/xterm', () => ({ Terminal: vi.fn(() => terminal) }));
+const fit = vi.hoisted(() => vi.fn());
+const { terminal, terminalInstances, createMockTerminal } = vi.hoisted(() => {
+  const createMockTerminal = () => ({
+    options: {} as Record<string, unknown>,
+    cols: 80,
+    rows: 24,
+    loadAddon: vi.fn(),
+    open: vi.fn(),
+    resize: vi.fn(),
+    write: vi.fn<(text: string, callback?: () => void) => void>(),
+    writeln: vi.fn(),
+    focus: vi.fn(),
+    blur: vi.fn(),
+    refresh: vi.fn(),
+    dispose: vi.fn(),
+    onData: vi.fn((_listener: (data: string) => void) => ({
+      dispose: vi.fn(),
+    })),
+    parser: {
+      registerCsiHandler: vi.fn(
+        (_id: { final: string }, _handler: () => boolean) => ({
+          dispose: vi.fn(),
+        }),
+      ),
+    },
+  });
+  return {
+    terminal: createMockTerminal(),
+    terminalInstances: [] as Array<ReturnType<typeof createMockTerminal>>,
+    createMockTerminal,
+  };
+});
+
+vi.mock('@xterm/xterm', () => ({
+  Terminal: vi.fn((options: Record<string, unknown>) => {
+    const instance = terminalInstances.length ? createMockTerminal() : terminal;
+    instance.options = options;
+    terminalInstances.push(instance);
+    return instance;
+  }),
+}));
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: vi.fn(() => ({ fit })),
 }));
@@ -44,11 +97,18 @@ vi.mock('../../i18n', () => ({
         'terminal.notice.error': `Error: ${values?.['message'] ?? ''}`,
         'terminal.notice.unknownError': 'Unknown error',
         'terminal.notice.reconnecting': 'Connection lost — reconnecting…',
+        'terminal.notice.protocolMismatch':
+          'Terminal protocol changed; restart the daemon and reload this page.',
       })[key] ?? key,
   }),
 }));
 
-import { releaseWebTerminal, TerminalPanel } from './TerminalPanel';
+import { Terminal } from '@xterm/xterm';
+import {
+  releaseDetachedWebTerminal,
+  releaseWebTerminal,
+  TerminalPanel,
+} from './TerminalPanel';
 
 class FakeWebSocket {
   static readonly CONNECTING = 0;
@@ -64,7 +124,7 @@ class FakeWebSocket {
   onerror: (() => void) | null = null;
   onclose: ((event: CloseEvent) => void) | null = null;
   readonly send = vi.fn();
-  readonly close = vi.fn(() => {
+  readonly close = vi.fn((_code?: number, _reason?: string) => {
     this.readyState = FakeWebSocket.CLOSED;
   });
 
@@ -97,6 +157,11 @@ describe('TerminalPanel', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    availabilityMock.enabled = false;
+    availabilityMock.available = true;
+    availabilityMock.resumes.clear();
+    availabilityMock.listeners.clear();
+    terminalInstances.length = 0;
     workspace.baseUrl = 'http://localhost';
     FakeWebSocket.instances.length = 0;
     vi.stubGlobal('WebSocket', FakeWebSocket);
@@ -136,9 +201,134 @@ describe('TerminalPanel', () => {
     return FakeWebSocket.instances[0]!;
   }
 
+  it('waits for shared recovery without rebuilding the terminal and releases detached PTYs on recovery', async () => {
+    availabilityMock.enabled = true;
+    availabilityMock.available = false;
+    render();
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    releaseDetachedWebTerminal('http://localhost', 'detached');
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(terminalInstances).toHaveLength(1);
+    expect(terminal.writeln).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining('Connection lost'),
+    );
+    await act(async () => {
+      availabilityMock.available = true;
+      for (const resume of availabilityMock.resumes) resume();
+      availabilityMock.resumes.clear();
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(
+      new URL(FakeWebSocket.instances[1]!.url).searchParams.get('release'),
+    ).toBe('1');
+    expect(terminalInstances).toHaveLength(1);
+    expect(terminal.dispose).not.toHaveBeenCalled();
+  });
+
+  it('closes a live socket when the shared daemon becomes unavailable', () => {
+    availabilityMock.enabled = true;
+    const ws = render();
+    ws.open();
+    act(() => {
+      availabilityMock.available = false;
+      for (const listener of availabilityMock.listeners) listener();
+    });
+    expect(ws.close).toHaveBeenCalled();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it('checks an unexpected close once and parks websocket retries until shared recovery', async () => {
+    availabilityMock.enabled = true;
+    const ws = render();
+    ws.open();
+    availabilityMock.controller.check.mockImplementationOnce(async () => {
+      availabilityMock.available = false;
+    });
+    await act(async () => {
+      ws.closeWith(1006);
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(availabilityMock.controller.check).toHaveBeenCalledTimes(1);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    await act(async () => {
+      availabilityMock.available = true;
+      for (const resume of availabilityMock.resumes) resume();
+      availabilityMock.resumes.clear();
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(terminalInstances).toHaveLength(1);
+  });
+
+  it.each([false, true])(
+    'preserves a release across outage and component removal (late close: %s)',
+    async (lateClose) => {
+      availabilityMock.enabled = true;
+      const ws = render();
+      ws.open();
+      availabilityMock.available = false;
+      if (lateClose) ws.close();
+      else {
+        await act(async () => ws.closeWith(1006));
+        await act(async () => vi.advanceTimersByTimeAsync(500));
+      }
+      act(() => {
+        releaseWebTerminal('terminal:one');
+        root.render(null);
+      });
+      if (lateClose) await act(async () => ws.closeWith(1006));
+      await act(async () => vi.advanceTimersByTimeAsync(60_000));
+      expect(FakeWebSocket.instances).toHaveLength(1);
+      await act(async () => {
+        availabilityMock.available = true;
+        for (const resume of availabilityMock.resumes) resume();
+        availabilityMock.resumes.clear();
+      });
+      expect(FakeWebSocket.instances).toHaveLength(2);
+      expect(
+        new URL(FakeWebSocket.instances[1]!.url).searchParams.get('release'),
+      ).toBe('1');
+    },
+  );
+
+  it('parks a failed detached release and finishes it once the daemon recovers', async () => {
+    availabilityMock.enabled = true;
+    releaseDetachedWebTerminal(
+      'http://localhost',
+      'terminal:detached',
+      '/workspace',
+    );
+    availabilityMock.controller.check.mockImplementationOnce(async () => {
+      availabilityMock.available = false;
+    });
+    await act(async () => FakeWebSocket.instances[0]!.closeWith(1006));
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    await act(async () => {
+      availabilityMock.available = true;
+      for (const resume of availabilityMock.resumes) resume();
+      availabilityMock.resumes.clear();
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    await act(async () => FakeWebSocket.instances[1]!.closeWith(4004));
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
   it('keeps binary PTY output distinct from text control frames', async () => {
     const ws = render();
     act(() => ws.open());
+    act(() => {
+      ws.message(
+        '\x00{"type":"snapshot","replay":true,"handlesPrimaryDa":false}',
+      );
+      ws.message(new ArrayBuffer(0));
+      terminalInstances[1]!.write.mock.calls[0]?.[1]?.();
+    });
+    const restored = terminalInstances[1]!;
 
     await act(async () => {
       ws.message(
@@ -148,14 +338,14 @@ describe('TerminalPanel', () => {
       await Promise.resolve();
     });
 
-    expect(terminal.write).toHaveBeenCalledWith(
+    expect(restored.write).toHaveBeenCalledWith(
       '\x00{"type":"exit","exitCode":0}',
     );
-    expect(terminal.writeln).toHaveBeenCalledWith(
+    expect(restored.writeln).toHaveBeenCalledWith(
       expect.stringContaining('[Error: denied]'),
     );
 
-    const handleInput = terminal.onData.mock.calls.at(-1)?.[0];
+    const handleInput = restored.onData.mock.calls.at(-1)?.[0];
     ws.send.mockClear();
     act(() => handleInput?.('\x00{"type":"release"}'));
     const sent = ws.send.mock.calls[0]?.[0];
@@ -164,6 +354,48 @@ describe('TerminalPanel', () => {
       '\x00{"type":"release"}',
     );
   });
+
+  it.each(['held\r\n', ''])(
+    'replays failed-session output %j without a protocol mismatch',
+    async (output) => {
+      const ws = render();
+      act(() => {
+        ws.open();
+        ws.message(
+          '\x00{"type":"snapshot","replay":true,"handlesPrimaryDa":false}',
+        );
+      });
+      expect(terminalInstances).toHaveLength(1);
+
+      act(() => ws.message(new TextEncoder().encode(output).buffer));
+      expect(terminalInstances).toHaveLength(2);
+      const restored = terminalInstances[1]!;
+      expect(restored.write).toHaveBeenCalledExactlyOnceWith(
+        output,
+        expect.any(Function),
+      );
+      expect(terminal.dispose).not.toHaveBeenCalled();
+
+      act(() => {
+        ws.message('\x00{"type":"error","message":"resource limit reached"}');
+        ws.closeWith(4001);
+      });
+      expect(restored.writeln).toHaveBeenCalledExactlyOnceWith(
+        expect.stringContaining('[Error: resource limit reached]'),
+      );
+      expect(terminal.writeln).not.toHaveBeenCalled();
+      expect(ws.send).not.toHaveBeenCalledWith('\x00{"type":"release"}');
+      expect(ws.close).not.toHaveBeenCalled();
+      expect(restored.dispose).not.toHaveBeenCalled();
+
+      act(() => restored.write.mock.calls[0]![1]!());
+      expect(terminal.dispose).toHaveBeenCalledOnce();
+      expect(restored.onData).toHaveBeenCalledOnce();
+      await act(async () => vi.advanceTimersByTimeAsync(30_000));
+      expect(FakeWebSocket.instances).toHaveLength(1);
+      expect(ws.send).not.toHaveBeenCalledWith('\x00{"type":"release"}');
+    },
+  );
 
   it.each([4000, 4001, 4002, 4004])(
     'does not reconnect after non-retryable close code %s',
@@ -176,31 +408,127 @@ describe('TerminalPanel', () => {
     },
   );
 
-  it('releases a connecting socket without reconnecting afterward', async () => {
+  it('confirms an unacknowledged connecting release without reconnecting a PTY', async () => {
     const ws = render();
     act(() => releaseWebTerminal('terminal:one'));
 
     act(() => ws.open());
     expect(ws.send).toHaveBeenCalledWith('\x00{"type":"release"}');
     act(() => ws.closeWith(1000));
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(
+      new URL(FakeWebSocket.instances[1]!.url).searchParams.get('release'),
+    ).toBe('1');
+    await act(async () => FakeWebSocket.instances[1]!.closeWith(4004));
     await act(async () => vi.advanceTimersByTimeAsync(30_000));
-    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(FakeWebSocket.instances).toHaveLength(2);
   });
 
-  it('reconnects transient failures without clearing the notice early', async () => {
+  it('keeps the old terminal interactive until reconnect replay finishes', async () => {
     const ws = render();
     act(() => ws.open());
-    terminal.reset.mockClear();
     act(() => ws.closeWith(1006));
 
     expect(terminal.writeln).toHaveBeenCalledWith(
       expect.stringContaining('Connection lost'),
     );
-    expect(terminal.reset).not.toHaveBeenCalled();
+    expect(terminal.dispose).not.toHaveBeenCalled();
     await act(async () => vi.advanceTimersByTimeAsync(500));
     expect(FakeWebSocket.instances).toHaveLength(2);
     act(() => FakeWebSocket.instances[1]!.open());
-    expect(terminal.reset).toHaveBeenCalledOnce();
+    const reconnected = FakeWebSocket.instances[1]!;
+    act(() => {
+      reconnected.message(
+        '\x00{"type":"snapshot","replay":true,"handlesPrimaryDa":true}',
+      );
+      reconnected.message(
+        new TextEncoder().encode('history\x1b]11;?\x07').buffer,
+      );
+      reconnected.message(new TextEncoder().encode('live\x1b]11;?\x07').buffer);
+    });
+    const restored = terminalInstances[1]!;
+    expect(restored.write.mock.calls.map(([text]) => text)).toEqual([
+      'history\x1b]11;?\x07',
+      'live\x1b]11;?\x07',
+    ]);
+    expect(restored.onData).not.toHaveBeenCalled();
+    const oldInput = terminal.onData.mock.calls[0]![0];
+    reconnected.send.mockClear();
+    act(() => oldInput('k'));
+    expect(new TextDecoder().decode(reconnected.send.mock.calls[0]![0])).toBe(
+      'k',
+    );
+    expect(terminal.dispose).not.toHaveBeenCalled();
+
+    act(() => restored.write.mock.calls[0]![1]!());
+    expect(terminal.dispose).toHaveBeenCalledOnce();
+    expect(restored.onData).toHaveBeenCalledOnce();
+    expect(restored.parser.registerCsiHandler.mock.calls[0]![1]()).toBe(true);
+    act(() => restored.onData.mock.calls[0]![0]('live reply'));
+    expect(
+      new TextDecoder().decode(reconnected.send.mock.calls.at(-1)![0]),
+    ).toBe('live reply');
+  });
+
+  it('allows first-connection queries and leaves DA to the browser without a server responder', () => {
+    const ws = render();
+    act(() => {
+      ws.open();
+      ws.message(
+        '\x00{"type":"snapshot","replay":false,"handlesPrimaryDa":false}',
+      );
+      ws.message(new TextEncoder().encode('\x1b[c').buffer);
+    });
+    const next = terminalInstances[1]!;
+    expect(next.onData).toHaveBeenCalledOnce();
+    expect(next.parser.registerCsiHandler.mock.calls[0]![1]()).toBe(false);
+    act(() => next.onData.mock.calls[0]![0]('\x1b[?1;2c'));
+    expect(new TextDecoder().decode(ws.send.mock.calls.at(-1)![0])).toBe(
+      '\x1b[?1;2c',
+    );
+  });
+
+  it('disposes an interrupted replay and ignores its late write callback', () => {
+    const ws = render();
+    act(() => {
+      ws.open();
+      ws.message(
+        '\x00{"type":"snapshot","replay":true,"handlesPrimaryDa":true}',
+      );
+      ws.message(new TextEncoder().encode('history').buffer);
+      ws.closeWith(1006);
+    });
+    const next = terminalInstances[1]!;
+    expect(next.dispose).toHaveBeenCalledOnce();
+    act(() => next.write.mock.calls[0]![1]!());
+    expect(terminal.dispose).not.toHaveBeenCalled();
+    expect(next.onData).not.toHaveBeenCalled();
+  });
+
+  it('rejects an old server that does not mark the snapshot boundary', () => {
+    const ws = render();
+    act(() => {
+      ws.open();
+      ws.message(new TextEncoder().encode('unmarked history').buffer);
+    });
+    expect(ws.send).toHaveBeenCalledWith('\x00{"type":"release"}');
+    expect(ws.send.mock.invocationCallOrder.at(-1)).toBeLessThan(
+      ws.close.mock.invocationCallOrder[0]!,
+    );
+    expect(ws.close).toHaveBeenCalledWith(4002, 'Terminal protocol mismatch');
+    act(() => ws.closeWith(4002));
+    // The localized restart notice is a named deliverable; without pinning it
+    // the mock's `?? key` fallback would silently render the raw key instead.
+    expect(terminal.writeln).toHaveBeenCalledWith(
+      expect.stringContaining('Terminal protocol changed'),
+    );
+    const sent = ws.send.mock.calls.length;
+    act(() => releaseWebTerminal('terminal:one'));
+    expect(ws.send).toHaveBeenCalledTimes(sent);
+    // The mismatch branch already released this PTY: the releaseRequested flag
+    // must keep release() from opening a second, release-only socket.
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(terminal.write).not.toHaveBeenCalled();
   });
 
   it('sends an explicit release control when the tab is closed', () => {
@@ -210,6 +538,66 @@ describe('TerminalPanel', () => {
     act(() => releaseWebTerminal('terminal:one'));
 
     expect(ws.send).toHaveBeenCalledWith('\x00{"type":"release"}');
+  });
+
+  it('releases a detached terminal through a release-only socket', () => {
+    releaseDetachedWebTerminal(
+      'http://localhost/base',
+      'terminal:detached',
+      '/workspace',
+    );
+
+    expect(FakeWebSocket.instances[0]?.url).toBe(
+      'ws://localhost/base/terminal?terminalId=terminal%3Adetached&replay=1&cwd=%2Fworkspace&release=1',
+    );
+  });
+
+  it('does not connect a restored inactive terminal until it is enabled', () => {
+    act(() => {
+      root.render(
+        <TerminalPanel
+          terminalId="terminal:one"
+          cwd="/workspace"
+          active={false}
+          enabled={false}
+        />,
+      );
+    });
+
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    act(() => {
+      root.render(
+        <TerminalPanel
+          terminalId="terminal:one"
+          cwd="/workspace"
+          active
+          enabled
+        />,
+      );
+    });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(
+      new URL(FakeWebSocket.instances[0]!.url).searchParams.has('release'),
+    ).toBe(false);
+  });
+
+  it('releases a restored terminal that was never enabled', () => {
+    act(() => {
+      root.render(
+        <TerminalPanel
+          terminalId="terminal:one"
+          cwd="/workspace"
+          active={false}
+          enabled={false}
+        />,
+      );
+    });
+
+    act(() => releaseWebTerminal('terminal:one'));
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(
+      new URL(FakeWebSocket.instances[0]!.url).searchParams.get('release'),
+    ).toBe('1');
   });
 
   it('releases an exited session through a release handshake', async () => {
@@ -241,6 +629,12 @@ describe('TerminalPanel', () => {
     expect(
       new URL(FakeWebSocket.instances[2]!.url).searchParams.get('release'),
     ).toBe('1');
+    await act(async () => FakeWebSocket.instances[2]!.closeWith(1006));
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    expect(FakeWebSocket.instances).toHaveLength(4);
+    await act(async () => FakeWebSocket.instances[3]!.closeWith(1006));
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(FakeWebSocket.instances).toHaveLength(4);
   });
 
   it('sends the connection contract and initial terminal size', () => {
@@ -251,6 +645,7 @@ describe('TerminalPanel', () => {
     expect(url.pathname).toBe('/terminal');
     expect(url.searchParams.get('terminalId')).toBe('terminal:one');
     expect(url.searchParams.get('cwd')).toBe('/workspace');
+    expect(url.searchParams.get('replay')).toBe('1');
 
     act(() => ws.open());
     expect(ws.send).toHaveBeenCalledWith(
@@ -322,5 +717,18 @@ describe('TerminalPanel', () => {
 
     expect(terminal.blur).toHaveBeenCalledOnce();
     expect(ws.send).not.toHaveBeenCalled();
+  });
+
+  it('passes a visible selection background to xterm in the light theme', () => {
+    // xterm falls back to white rgba(255,255,255,0.3) for an unset
+    // selectionBackground, which blends into the white terminal background
+    // and leaves text selection invisible in the light theme.
+    render();
+
+    expect(Terminal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        theme: expect.objectContaining({ selectionBackground: '#bdd8fe' }),
+      }),
+    );
   });
 });

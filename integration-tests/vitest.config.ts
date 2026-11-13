@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const timeoutMinutes = Number(process.env['TB_TIMEOUT_MINUTES'] || '5');
 const testTimeoutMs = timeoutMinutes * 60 * 1000;
+const isSelfHostedRunner = process.env['RUNNER_ENVIRONMENT'] === 'self-hosted';
 
 export default defineConfig({
   test: {
@@ -19,6 +20,7 @@ export default defineConfig({
     reporters: ['default'],
     include: ['**/*.test.ts'],
     exclude: [
+      '**/installed/**',
       '**/terminal-bench/*.test.ts',
       '**/hook-integration/**',
       '**/qwen-daemon-loadtest*',
@@ -30,8 +32,11 @@ export default defineConfig({
     pool: 'forks',
     poolOptions: {
       forks: {
-        minForks: 2,
-        maxForks: 4,
+        // Each ECS host runs several Actions runners. Keep every E2E shard to
+        // one child process there so concurrent jobs cannot multiply the host
+        // load and starve latency-sensitive integration paths.
+        minForks: isSelfHostedRunner ? 1 : 2,
+        maxForks: isSelfHostedRunner ? 1 : 4,
       },
     },
     // The worker->main `onTaskUpdate` RPC runs on a 60s budget; under
@@ -44,8 +49,7 @@ export default defineConfig({
     // the run; only unhandled errors stop being fatal — github-hosted Linux
     // (the nightly isolated legs) and local Linux runs keep the signal.
     dangerouslyIgnoreUnhandledErrors:
-      process.platform !== 'linux' ||
-      process.env['RUNNER_ENVIRONMENT'] === 'self-hosted',
+      process.platform !== 'linux' || isSelfHostedRunner,
   },
   resolve: {
     alias: {

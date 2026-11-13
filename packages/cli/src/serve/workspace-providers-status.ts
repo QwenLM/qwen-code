@@ -11,7 +11,14 @@ import {
   ModelsConfig,
   tokenLimit,
 } from '@qwen-code/qwen-code-core';
-import type { AuthType } from '@qwen-code/qwen-code-core';
+import {
+  captureReasoningSnapshot,
+  resolveReasoningForModel,
+} from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import type {
+  AuthType,
+  ContentGeneratorConfig,
+} from '@qwen-code/qwen-code-core';
 import type {
   ServeWorkspaceProviderCurrent,
   ServeWorkspaceProviderModel,
@@ -20,6 +27,7 @@ import type {
 } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import { loadSettings } from '../config/settings.js';
+import { filterModelEntriesForDisplay } from '../utils/model-display-order.js';
 import type { Settings } from '../config/settings.js';
 import {
   getAuthTypeFromEnv,
@@ -33,8 +41,10 @@ import {
   parseAcpBaseModelId,
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
-import { buildModelReasoningConfigPreview } from '../acp-integration/model-configuration.js';
+import { publicAuxModelSelectorValue } from '../utils/aux-model-selector.js';
+import { buildModelReasoningRoutePreview } from '../acp-integration/model-configuration.js';
 import { snapshotProcessEnv } from './env-snapshot.js';
+import { getModelConfigurationKey } from './model-configuration.js';
 
 const debugLogger = createDebugLogger('WORKSPACE_PROVIDERS_STATUS');
 
@@ -95,37 +105,48 @@ function buildWorkspaceProvidersStatus(
       env,
     });
     const modelsConfig = new ModelsConfig({
-      initialAuthType: selectedAuthType,
+      initialAuthType: resolvedCliConfig.authType,
       modelProvidersConfig: settings.modelProviders,
       providerProtocolConfig: settings.providerProtocol,
       generationConfig: resolvedCliConfig.generationConfig,
       generationConfigSources: resolvedCliConfig.sources,
     });
-    const currentAuth = selectedAuthType;
-    const currentModelId = (
+    const currentAuth = resolvedCliConfig.authType;
+    let currentModelId = (
       resolvedCliConfig.model ||
       modelsConfig.getModel() ||
       ''
     ).trim();
+    const requestedModelId = currentModelId;
+    if (
+      currentAuth &&
+      !modelsConfig.getResolvedModel(currentAuth, currentModelId)
+    ) {
+      modelsConfig.syncAfterAuthRefresh(currentAuth, currentModelId);
+      currentModelId = (modelsConfig.getModel() || '').trim();
+    }
+    const usedFallback = currentModelId !== requestedModelId;
     const hasCurrentModel = currentModelId.length > 0;
     const modelCameFromSettings =
       !argv.model && settings.model?.name?.trim() === currentModelId;
-    const currentBaseUrl =
-      modelCameFromSettings && settings.model?.baseUrl !== undefined
+    const currentBaseUrl = usedFallback
+      ? modelsConfig.getGenerationConfig().baseUrl
+      : modelCameFromSettings && settings.model?.baseUrl !== undefined
         ? settings.model.baseUrl || undefined
         : resolvedCliConfig.sources['baseUrl']
           ? resolvedCliConfig.baseUrl || undefined
           : undefined;
-    const currentRegistryBaseUrl =
-      modelCameFromSettings && currentAuth
+    const currentRegistryBaseUrl = usedFallback
+      ? modelsConfig.getCurrentRegistryBaseUrl()
+      : modelCameFromSettings && currentAuth
         ? settings.model?.baseUrl !== undefined
           ? settings.model.baseUrl || null
           : (modelsConfig.getResolvedModel(currentAuth, currentModelId)
               ?.registryBaseUrl ?? null)
         : undefined;
-    const modelOptions = buildAcpModelOptions(
-      modelsConfig.getAllConfiguredModels(),
-    );
+    const models = modelsConfig.getAllConfiguredModels();
+    const modelOptions = buildAcpModelOptions(models);
+    const reasoningSnapshot = captureReasoningSnapshot(models);
     const currentAcpModelId = hasCurrentModel
       ? getCurrentAcpModelId(
           modelOptions,
@@ -145,7 +166,7 @@ function buildWorkspaceProvidersStatus(
         : undefined;
     const approvalMode = resolveApprovalMode(settings);
     const providers = new Map<string, ServeWorkspaceProviderStatus>();
-    for (const option of modelOptions) {
+    for (const option of filterModelEntriesForDisplay(modelOptions)) {
       const { model, effectiveModelId, modelId } = option;
       if (model.isRuntimeModel) continue;
       const authType = String(model.authType);
@@ -163,24 +184,45 @@ function buildWorkspaceProvidersStatus(
 
       const isCurrent =
         currentAuth === model.authType && currentAcpModelId === modelId;
-      const configOptions = modelId.startsWith(ACP_ROUTE_ID_PREFIX)
-        ? undefined
-        : buildModelReasoningConfigPreview(model.id, {
-            thinkingMandatory:
-              modelsConfig.getResolvedModel(
-                model.authType,
-                model.id,
-                model.registryBaseUrl ?? model.baseUrl,
-              )?.generationConfig.thinkingMandatory === true,
-          });
+      const resolved = modelsConfig.getResolvedModel(
+        model.authType,
+        model.id,
+        model.registryBaseUrl,
+      );
+      const generation: ContentGeneratorConfig = {
+        ...resolved?.generationConfig,
+        model: model.id,
+        authType: model.authType,
+        baseUrl: resolved?.baseUrl,
+        reasoningSnapshot,
+        reasoningRouteBaseUrl: model.registryBaseUrl ?? null,
+      };
+      const configOptions = buildModelReasoningRoutePreview(
+        generation,
+        resolveReasoningForModel(undefined, generation),
+        settings.model?.reasoningEffort,
+        modelId.startsWith(ACP_ROUTE_ID_PREFIX),
+      );
+      const configurationKey = getModelConfigurationKey(
+        loaded,
+        authType,
+        model.id,
+        model.registryBaseUrl,
+      );
       const providerModel: ServeWorkspaceProviderModel = {
+        ...(configurationKey ? { configurationKey } : {}),
         modelId,
         baseModelId: parseAcpBaseModelId(effectiveModelId),
         name: model.label,
         ...(model.description !== undefined
           ? { description: model.description }
           : {}),
-        contextLimit: model.contextWindowSize ?? tokenLimit(effectiveModelId),
+        // A non-positive contextWindowSize is meaningless (the SDK rejects it
+        // on the wire); treat it as unset and fall back to the estimate.
+        contextLimit:
+          model.contextWindowSize !== undefined && model.contextWindowSize > 0
+            ? model.contextWindowSize
+            : tokenLimit(effectiveModelId),
         ...(model.modalities !== undefined
           ? { modalities: model.modalities }
           : {}),
@@ -351,7 +393,13 @@ function buildCurrent(
     ...(authType ? { authType: String(authType) } : {}),
     ...(modelId ? { modelId } : {}),
     ...(baseUrl ? { baseUrl: sanitizeProviderBaseUrl(baseUrl) } : {}),
-    ...(fastModelId ? { fastModelId } : {}),
-    ...(visionModelId ? { visionModelId } : {}),
+    // The aux selectors persist as `authType:id\0baseUrl`; publish the
+    // credential-stripped form like the neighbouring baseUrl field.
+    ...(fastModelId
+      ? { fastModelId: publicAuxModelSelectorValue(fastModelId) }
+      : {}),
+    ...(visionModelId
+      ? { visionModelId: publicAuxModelSelectorValue(visionModelId) }
+      : {}),
   };
 }

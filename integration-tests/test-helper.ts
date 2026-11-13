@@ -5,7 +5,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, realpathSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,7 +14,18 @@ import fs from 'node:fs';
 import { EOL } from 'node:os';
 import * as pty from '@lydell/node-pty';
 import stripAnsi from 'strip-ansi';
-import type { FakeOpenAIServerOptions } from './fake-openai-server.js';
+import { vi } from 'vitest';
+import {
+  startFakeOpenAIServer,
+  type FakeOpenAIServerOptions,
+  type FakeOpenAIToolCall,
+} from './fake-openai-server.js';
+import {
+  e2eRendererEnv,
+  pickE2eRenderer,
+  resolveE2eCliCommand,
+} from './renderer-matrix.js';
+import { E2E_MEMORY_SETTINGS_DEFAULTS } from './e2e-memory-defaults.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -189,12 +200,22 @@ interface ParsedLog {
   }[];
 }
 
+/**
+ * `TestRig.getDefaultTimeout()`'s CI branch. Exported so a suite that derives
+ * its own ceilings multiplies this value instead of re-spelling it.
+ */
+export const CI_DEFAULT_WAIT_MS = 60_000;
+
 export class TestRig {
   bundlePath: string;
   testDir: string | null;
   testName?: string;
   _lastRunStdout?: string;
   _interactiveOutput = '';
+  // cleanup() sets this so an abandoned poll stops instead of scanning a dead
+  // pty until its own budget expires.
+  _closed = false;
+  private readonly interactiveProcesses: pty.IPty[] = [];
 
   constructor() {
     this.bundlePath = join(__dirname, '..', 'dist/cli.js');
@@ -203,7 +224,7 @@ export class TestRig {
 
   // Get timeout based on environment
   getDefaultTimeout() {
-    if (env['CI']) return 60000; // 1 minute in CI
+    if (env['CI']) return CI_DEFAULT_WAIT_MS; // 1 minute in CI
     if (env['QWEN_SANDBOX']) return 30000; // 30s in containers
     return 15000; // 15s locally
   }
@@ -213,9 +234,14 @@ export class TestRig {
     options: { settings?: Record<string, unknown> } = {},
   ) {
     this.testName = testName;
+    // setup() re-arms a rig reused after cleanup().
+    this._closed = false;
     const sanitizedName = sanitizeTestName(testName);
-    this.testDir = join(env['INTEGRATION_TEST_FILE_DIR']!, sanitizedName);
-    // Two cases that set up under the same name share this directory, and
+    this.testDir = join(
+      env['INTEGRATION_TEST_FILE_DIR']!,
+      `${sanitizedName}-${process.pid}`,
+    );
+    // Same-name cases in one worker share this directory, and
     // cleanup() below keeps it whenever KEEP_OUTPUT is set — which CI always
     // sets. Reset it so a case never inherits the previous one's files; see the
     // SDK helper, where exactly that made a suite pass locally and fail in CI.
@@ -229,6 +255,13 @@ export class TestRig {
     // The container mounts the test directory at the same path as the host
     const telemetryPath = join(this.testDir, 'telemetry.log'); // Always use test directory for telemetry
 
+    const optionsSettings = options.settings ?? {};
+    const memorySettings =
+      typeof optionsSettings['memory'] === 'object' &&
+      optionsSettings['memory'] !== null
+        ? (optionsSettings['memory'] as Record<string, unknown>)
+        : {};
+
     const settings = {
       telemetry: {
         enabled: true,
@@ -238,11 +271,37 @@ export class TestRig {
       },
       sandbox: env.QWEN_SANDBOX !== 'false' ? env.QWEN_SANDBOX : false,
       ...options.settings, // Allow tests to override/add settings
+      // Per-key merge: a suite opting back into one flag keeps the other off.
+      memory: { ...E2E_MEMORY_SETTINGS_DEFAULTS, ...memorySettings },
     };
     writeFileSync(
       join(qwenDir, 'settings.json'),
       JSON.stringify(settings, null, 2),
     );
+
+    // Hooks declared in this project settings file now require explicit
+    // folder trust. Grant the rig directory in an isolated trust store so
+    // hook fixtures keep executing; tests about untrusted behavior override
+    // QWEN_CODE_TRUSTED_FOLDERS_PATH themselves.
+    const qwenHome = join(this.testDir, '.qwen-home');
+    mkdirSync(qwenHome, { recursive: true });
+    const userSettingsPath = join(qwenHome, 'settings.json');
+    if (!fs.existsSync(userSettingsPath)) {
+      writeFileSync(
+        userSettingsPath,
+        JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+      );
+    }
+    const trustStorePath = join(qwenHome, 'trustedFolders.json');
+    if (!fs.existsSync(trustStorePath)) {
+      writeFileSync(
+        trustStorePath,
+        JSON.stringify({ [realpathSync(this.testDir)]: 'TRUST_FOLDER' }),
+      );
+    }
+    vi.stubEnv('QWEN_HOME', qwenHome);
+    vi.stubEnv('QWEN_RUNTIME_DIR', qwenHome);
+    vi.stubEnv('QWEN_CODE_TRUSTED_FOLDERS_PATH', trustStorePath);
   }
 
   createFile(fileName: string, content: string) {
@@ -260,16 +319,24 @@ export class TestRig {
    * between using the bundled gemini.js (the default) and using the installed
    * 'qwen' (used to verify npm bundles).
    */
-  private _getCommandAndArgs(extraInitialArgs: string[] = []): {
+  private _getCommandAndArgs(
+    extraInitialArgs: string[] = [],
+    options: { chatRecording?: boolean } = {},
+  ): {
     command: string;
     initialArgs: string[];
   } {
     const isNpmReleaseTest =
       process.env.INTEGRATION_TEST_USE_INSTALLED_GEMINI === 'true';
     const command = isNpmReleaseTest ? 'qwen' : 'node';
+    // Runs leave no conversation behind by default. A test that drives
+    // `--continue` has to opt back in: without a recorded session there is
+    // nothing to resume, and the resumed run then looks indistinguishable
+    // from a fresh one.
+    const recordingArgs = options.chatRecording ? [] : ['--no-chat-recording'];
     const initialArgs = isNpmReleaseTest
-      ? ['--no-chat-recording', ...extraInitialArgs]
-      : [this.bundlePath, '--no-chat-recording', ...extraInitialArgs];
+      ? [...recordingArgs, ...extraInitialArgs]
+      : [this.bundlePath, ...recordingArgs, ...extraInitialArgs];
     return { command, initialArgs };
   }
 
@@ -488,6 +555,18 @@ export class TestRig {
   }
 
   async cleanup() {
+    this._closed = true;
+    // A session a test never closed keeps its CLI child forwarding PTY bytes
+    // into this worker's stdout; after vitest tears the worker down those
+    // writes EPIPE and fail an otherwise all-green run (#10969).
+    for (const ptyProcess of this.interactiveProcesses.splice(0)) {
+      try {
+        ptyProcess.kill();
+      } catch {
+        // Process may have already exited
+      }
+    }
+
     // Clean up test directory
     if (this.testDir && !env['KEEP_OUTPUT']) {
       try {
@@ -591,7 +670,7 @@ export class TestRig {
     const startTime = Date.now();
     let attempts = 0;
     let lastError: unknown;
-    while (Date.now() - startTime < timeout) {
+    while (!this._closed && Date.now() - startTime < timeout) {
       attempts++;
       try {
         const result = predicate();
@@ -869,6 +948,18 @@ export class TestRig {
     return apiRequests.pop() || null;
   }
 
+  // Unlike waitForTelemetryEvent's boolean poll, this exposes the latest
+  // matching payload so integration tests can assert event semantics.
+  readTelemetryEvent(eventName: string): ParsedLog | null {
+    const logs = this._readAndParseTelemetryLog();
+    const events = logs.filter(
+      (logData) =>
+        logData.attributes &&
+        logData.attributes['event.name'] === `qwen-code.${eventName}`,
+    );
+    return events.pop() || null;
+  }
+
   readMetric(metricName: string): Record<string, unknown> | null {
     const logs = this._readAndParseTelemetryLog();
     for (const logData of logs) {
@@ -903,7 +994,32 @@ export class TestRig {
     ptyProcess: pty.IPty;
     promise: Promise<{ exitCode: number; signal?: number; output: string }>;
   } {
-    const { command, initialArgs } = this._getCommandAndArgs(['--yolo']);
+    return this.runInteractiveWith({}, ...args);
+  }
+
+  /**
+   * `runInteractive` with the launch knobs it does not expose. Currently just
+   * `chatRecording`, which a `--continue` test needs so the first session is
+   * on disk for the second one to resume.
+   */
+  runInteractiveWith(
+    options: { chatRecording?: boolean },
+    ...args: string[]
+  ): {
+    ptyProcess: pty.IPty;
+    promise: Promise<{ exitCode: number; signal?: number; output: string }>;
+  } {
+    const renderer = pickE2eRenderer();
+    const { command: cliCommand, initialArgs } = this._getCommandAndArgs(
+      ['--yolo'],
+      options,
+    );
+    // The renderer matrix swaps node for bun only when driving the repo
+    // bundle directly; installed-release runs keep their own launcher and
+    // still get the pinned QWEN_TUI_RENDERER below.
+    const isNpmRelease =
+      process.env.INTEGRATION_TEST_USE_INSTALLED_GEMINI === 'true';
+    const command = isNpmRelease ? cliCommand : resolveE2eCliCommand(renderer);
     const commandArgs = [...initialArgs, ...args];
 
     this._interactiveOutput = ''; // Reset output for the new run
@@ -913,8 +1029,12 @@ export class TestRig {
       cols: 80,
       rows: 30,
       cwd: this.testDir!,
-      env: process.env as { [key: string]: string },
+      env: {
+        ...process.env,
+        ...e2eRendererEnv(renderer),
+      } as { [key: string]: string },
     });
+    this.interactiveProcesses.push(ptyProcess);
 
     ptyProcess.onData((data) => {
       this._interactiveOutput += data;
@@ -934,5 +1054,59 @@ export class TestRig {
     });
 
     return { ptyProcess, promise };
+  }
+}
+
+export async function runForcedToolCallScenario(options: {
+  rig: TestRig;
+  toolCall: FakeOpenAIToolCall;
+  prompt: string;
+  finalResponse: string;
+}): Promise<Array<Record<string, unknown>>> {
+  const { rig, toolCall, prompt, finalResponse } = options;
+  let streamingRequestIndex = 0;
+  const fakeServer = await startFakeOpenAIServer(({ body }) => {
+    if (body['stream'] !== true) {
+      return { content: '{"selected_memories":[]}' };
+    }
+    if (streamingRequestIndex++ === 0) {
+      return { toolCalls: [toolCall] };
+    }
+    return { content: finalResponse };
+  }, fakeServerHostOptions());
+
+  const noProxy = IS_CONTAINER_SANDBOX
+    ? CONTAINER_SANDBOX_NO_PROXY
+    : '127.0.0.1,localhost';
+  vi.stubEnv('OPENAI_API_KEY', 'fake-key');
+  vi.stubEnv('OPENAI_BASE_URL', fakeServer.baseUrl);
+  vi.stubEnv('OPENAI_MODEL', 'fake-model');
+  vi.stubEnv('QWEN_MODEL', 'fake-model');
+  vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
+  vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
+  vi.stubEnv('QWEN_CODE_MODELS_DEV_REFRESH', 'off');
+  vi.stubEnv('NO_PROXY', noProxy);
+  vi.stubEnv('no_proxy', noProxy);
+
+  try {
+    // Explicit CLI flags outrank a developer's ~/.qwen/settings.json
+    // (settings.model.name beats the OPENAI_MODEL env var and can silently
+    // route the run to a real model endpoint instead of the fake server).
+    await rig.run(
+      prompt,
+      '--auth-type',
+      'openai',
+      '--model',
+      'fake-model',
+      '--openai-base-url',
+      fakeServer.baseUrl,
+      '--openai-api-key',
+      'fake-key',
+    );
+    return fakeServer.requests
+      .filter(({ body }) => body['stream'] === true)
+      .map(({ body }) => body);
+  } finally {
+    await fakeServer.close();
   }
 }

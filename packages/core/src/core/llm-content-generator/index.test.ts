@@ -41,6 +41,28 @@ describe('createLlmContentGenerator', () => {
     expect(generator).toBeDefined();
   });
 
+  it.each([
+    [AuthType.USE_GEMINI, undefined, false],
+    [AuthType.USE_GEMINI, true, false],
+    [AuthType.USE_VERTEX_AI, false, true],
+  ])(
+    'uses %s for an isolated route regardless of vertexai=%s',
+    (authType, vertexai, expected) => {
+      const config = {
+        model: 'test-model',
+        authType,
+        vertexai,
+        isolatedRoute: true,
+      };
+      createLlmContentGenerator(config, mockConfig);
+      expect(LlmContentGenerator).toHaveBeenCalledWith(
+        expect.objectContaining({ vertexai: expected }),
+        config,
+        mockConfig,
+      );
+    },
+  );
+
   it('should pass baseUrl through httpOptions when provided', () => {
     const config = {
       model: 'gemini-1.5-flash',
@@ -61,6 +83,7 @@ describe('createLlmContentGenerator', () => {
         }),
       }),
       config,
+      mockConfig,
     );
   });
 
@@ -82,6 +105,7 @@ describe('createLlmContentGenerator', () => {
         }),
       }),
       config,
+      mockConfig,
     );
     expect(vi.mocked(LlmContentGenerator).mock.calls[0]?.[0]).not.toEqual(
       expect.objectContaining({

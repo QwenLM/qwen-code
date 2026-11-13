@@ -28,6 +28,10 @@ import {
 } from '../models/modelConfigErrors.js';
 import { PROVIDER_SOURCED_FIELDS } from '../models/constants.js';
 import { preloadRuntimeFetchModule } from '../utils/runtimeFetchOptions.js';
+import {
+  getModuleNotFoundError,
+  wrapLazyModuleLoadError,
+} from '../utils/errors.js';
 import type { ReasoningEffort } from './reasoning-effort.js';
 
 /**
@@ -56,6 +60,16 @@ export type PromptCacheSharingParameters = GenerateContentParameters & {
    * final message is deliberately excluded from cache breakpoints.
    */
   promptCacheSharing?: boolean;
+  /**
+   * Local control signal, never sent on the wire: true when a streaming send
+   * is a transport-continuation attempt resuming an answer whose prefix was
+   * already delivered (LlmChat's transportContinuationPrefix). The OpenAI
+   * pipeline seeds its per-stream delivered-content flag from it, because
+   * with a continuation in flight the turn's replay gate is already shut by
+   * the accumulated prefix — so a parked tool-call finish must be released
+   * rather than withheld for a replay that can no longer happen.
+   */
+  continuationInFlight?: boolean;
 };
 
 /**
@@ -76,6 +90,8 @@ export type ContentGeneratorConfig = {
   baseUrl?: string;
   vertexai?: boolean;
   authType?: AuthType | undefined;
+  /** Separate model route that must use its own provider configuration. */
+  isolatedRoute?: boolean;
   enableOpenAILogging?: boolean;
   openAILoggingDir?: string;
   timeout?: number; // Timeout configuration in milliseconds
@@ -97,10 +113,23 @@ export type ContentGeneratorConfig = {
   retryMaxDelayMs?: number; // Maximum delay for stream rate-limit retries
   retryErrorCodes?: number[]; // Additional error codes that trigger rate-limit retry
   enableCacheControl?: boolean; // Enable provider prompt-cache controls
-  // Force `scope: 'global'` on Anthropic cache_control entries even when the
-  // base URL is not an Anthropic-native origin (e.g. proxy providers like
-  // Routify, OpenRouter). Requires the proxy to forward `cache_control` fields
-  // and the `prompt-caching-scope-2026-01-05` beta. See issue #6642.
+  /**
+   * Whether to send DashScope's request-body `metadata` object (sessionId /
+   * promptId / channel). Undefined means auto: sent for qwen-family wire models
+   * only, because DashScope's endpoint is an aggregating gateway and a
+   * third-party vendor backend types `metadata` as a string and rejects the
+   * object with a flat 400 (issue #11590). Set `true` to send it regardless,
+   * for a non-qwen model that DashScope serves first-party and whose tracing
+   * you still want; `false` to never send it.
+   */
+  enableRequestMetadata?: boolean;
+  // Opt in to `scope: 'global'` on Anthropic cache_control entries. Off by
+  // default for every base URL, `api.anthropic.com` included: the API only
+  // accepts a global breakpoint when every preceding block is globally scoped
+  // too, which a real tool list cannot satisfy within the four-breakpoint cap
+  // (issue #15039). Kept for backends whose validation differs and that
+  // forward `cache_control` plus the `prompt-caching-scope-2026-01-05` beta.
+  // See issue #6642.
   forceGlobalCacheScope?: boolean;
   /**
    * Default Anthropic `cache_control` retention for every cache anchor
@@ -130,6 +159,8 @@ export type ContentGeneratorConfig = {
     // (e.g. `max_completion_tokens` for GPT-5 / o-series, `reasoning_effort`).
     [key: string]: unknown;
   };
+  reasoningSnapshot?: import('./reasoning-overrides.js').ReasoningSnapshot;
+  reasoningRouteBaseUrl?: string | null;
   reasoning?:
     | false
     | {
@@ -138,9 +169,10 @@ export type ContentGeneratorConfig = {
         // each provider adapter maps + clamps this tier onto the active model:
         //   - 'xhigh'/'max' are extra-strong tiers (DeepSeek `reasoning_effort`,
         //     Anthropic `output_config.effort` on Opus 4.7+, OpenAI `xhigh`).
-        //   - Generic OpenAI-compatible endpoints and the DashScope
-        //     qwen3.8-max family cap at 'xhigh' ('max' is a vendor extension,
-        //     not part of the generic ladder); Gemini caps at 'high'.
+        //   - Generic OpenAI-compatible endpoints cap at 'xhigh' ('max' is a
+        //     vendor extension, not part of the generic ladder); DashScope
+        //     qwen3.8 models accept the tiers their preset declares (up to
+        //     'max'); Gemini caps at 'high'.
         //   - Real Anthropic clamps each tier to the active model's supported
         //     set (Opus 4.7+/5.x accept 'xhigh'/'max'; Opus/Sonnet 4.6 accept
         //     'max'; older models cap at 'high'), logged once per generator via
@@ -235,6 +267,12 @@ export function resolveContentGeneratorConfigWithSources(
   const newContentGeneratorConfig: Partial<ContentGeneratorConfig> = {
     ...(generationConfig || {}),
     authType,
+    reasoningSnapshot:
+      generationConfig?.reasoningSnapshot ?? config?.getReasoningSnapshot?.(),
+    reasoningRouteBaseUrl:
+      generationConfig && 'reasoningRouteBaseUrl' in generationConfig
+        ? generationConfig.reasoningRouteBaseUrl
+        : config?.getCurrentModelRegistryBaseUrl?.(),
     proxy: config?.getProxy(),
   };
 
@@ -326,7 +364,10 @@ export function validateModelConfig(
   const errors: Error[] = [];
 
   // Qwen OAuth doesn't need validation - it uses dynamic tokens
-  if (config.authType === AuthType.QWEN_OAUTH) {
+  if (
+    config.authType === AuthType.QWEN_OAUTH ||
+    config.authType === AuthType.QWEN_SUBSCRIPTION
+  ) {
     return { valid: true, errors: [] };
   }
 
@@ -394,35 +435,8 @@ export function createContentGeneratorConfig(
   ).config;
 }
 
-function getModuleNotFoundError(
-  error: unknown,
-): NodeJS.ErrnoException | undefined {
-  let current = error;
-
-  while (current instanceof Error) {
-    if (
-      'code' in current &&
-      (current as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND'
-    ) {
-      return current as NodeJS.ErrnoException;
-    }
-    current = current.cause;
-  }
-
-  return undefined;
-}
-
 function wrapProviderLoadError(error: unknown, authType: AuthType): unknown {
-  const moduleNotFoundError = getModuleNotFoundError(error);
-  if (!moduleNotFoundError) {
-    return error;
-  }
-
-  return new Error(
-    `Qwen Code was updated in the background and needs to be restarted.\n` +
-      `Please exit and restart Qwen Code to use the '${authType}' provider.`,
-    { cause: moduleNotFoundError },
-  );
+  return wrapLazyModuleLoadError(error, `the '${authType}' provider`);
 }
 
 class LazyContentGenerator implements ContentGenerator {
@@ -528,6 +542,20 @@ export async function createContentGenerator(
           './openaiContentGenerator/index.js'
         );
         return createOpenAIContentGenerator(generatorConfig, config);
+      };
+    } else if (authType === AuthType.USE_OPENAI_RESPONSES) {
+      loadBaseGenerator = async () => {
+        const { createOpenAIResponsesContentGenerator } = await import(
+          './openaiResponsesContentGenerator/index.js'
+        );
+        return createOpenAIResponsesContentGenerator(generatorConfig, config);
+      };
+    } else if (authType === AuthType.QWEN_SUBSCRIPTION) {
+      loadBaseGenerator = async () => {
+        const { createSubscriptionContentGenerator } = await import(
+          '../qwen/subscription-content-generator.js'
+        );
+        return createSubscriptionContentGenerator(generatorConfig, config);
       };
     } else if (authType === AuthType.QWEN_OAUTH) {
       const { getQwenOAuthClient: getQwenOauthClient } = await import(

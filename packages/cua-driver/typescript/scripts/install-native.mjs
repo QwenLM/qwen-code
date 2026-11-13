@@ -12,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { basename, join, resolve } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import { Readable, Transform } from "node:stream"
 import { pipeline } from "node:stream/promises"
 import { fileURLToPath } from "node:url"
@@ -22,7 +22,10 @@ import { x as extractTar } from "tar"
 
 const DEFAULT_RELEASE_ROOT =
   "https://github.com/QwenLM/qwen-code/releases/download"
-const NATIVE_ASSETS_MODULE = new URL("../dist/native-assets.js", import.meta.url)
+const NATIVE_ASSETS_MODULE = new URL(
+  "../dist/native-assets.js",
+  import.meta.url,
+)
 const SOURCE_NATIVE_ASSETS = new URL("../src/native-assets.ts", import.meta.url)
 const CUA_SDK_NATIVE_DIR_ENV = "QWEN_CUA_SDK_NATIVE_DIR"
 const CUA_SDK_RELEASE_BASE_URL_ENV = "QWEN_CUA_SDK_RELEASE_BASE_URL"
@@ -58,7 +61,9 @@ async function fetchFirst(filename, version, env, fetchImpl) {
       await response.body?.cancel()
       failures.push(`${url}: HTTP ${response.status}`)
     } catch (error) {
-      failures.push(`${url}: ${error instanceof Error ? error.message : String(error)}`)
+      failures.push(
+        `${url}: ${error instanceof Error ? error.message : String(error)}`,
+      )
     }
   }
   throw new Error(`unable to download ${filename}: ${failures.join("; ")}`)
@@ -109,7 +114,8 @@ async function extractZip(archive, destination) {
 }
 
 async function installFiles(extracted, destination, target, metadata) {
-  for (const filename of [target.library, target.runtime]) {
+  const files = [target.library, target.runtime, ...target.companions]
+  for (const filename of files) {
     const source = join(extracted, filename)
     const sourceStatus = await stat(source).catch(() => undefined)
     if (!sourceStatus?.isFile()) {
@@ -118,7 +124,7 @@ async function installFiles(extracted, destination, target, metadata) {
   }
 
   await mkdir(destination, { recursive: true })
-  for (const filename of [target.library, target.runtime]) {
+  for (const filename of files) {
     const temporary = join(destination, `.${filename}.${process.pid}.tmp`)
     await copyFile(join(extracted, filename), temporary)
     await rename(temporary, join(destination, filename))
@@ -126,6 +132,91 @@ async function installFiles(extracted, destination, target, metadata) {
   const marker = join(destination, `.complete.${process.pid}.tmp`)
   await writeFile(marker, `${JSON.stringify(metadata, null, 2)}\n`)
   await rename(marker, join(destination, "complete.json"))
+}
+
+export function uiAccessWorkerPath(version, env = process.env) {
+  const programFiles = env.ProgramFiles ?? env.PROGRAMFILES
+  if (!programFiles) {
+    throw new Error(
+      "ProgramFiles is unavailable for the required UIAccess worker",
+    )
+  }
+  return join(
+    programFiles,
+    "Qwen",
+    "CuaDriver",
+    version,
+    "qwen-cua-driver-uia.exe",
+  )
+}
+
+async function requireValidAuthenticodeSignature(source) {
+  const run = promisify(execFile)
+  const command =
+    `$signature = Get-AuthenticodeSignature -LiteralPath ${quotePowerShell(source)}; ` +
+    `if ($signature.Status -ne 'Valid') { ` +
+    `throw \"UIAccess worker Authenticode status is $($signature.Status)\" }`
+  const args = ["-NoProfile", "-NonInteractive", "-Command", command]
+  try {
+    await run("powershell", args, { timeout: 30_000 })
+  } catch (error) {
+    // Windows PowerShell 5.1 can fail to autoload the Security module, which
+    // reports the error id below instead of running Get-AuthenticodeSignature.
+    // Observed on the windows-2025 runner during a CUA release dry run. The id
+    // is not localized, unlike the message text, and ordinary failures of the
+    // signature check do not carry it, so the retry cannot mask a real result.
+    if (!String(error?.stderr).includes("CouldNotAutoloadMatchingModule")) {
+      throw error
+    }
+    try {
+      await run("pwsh", args, { timeout: 30_000 })
+    } catch (retryError) {
+      // The population that hits the 5.1 autoload failure is largely the
+      // population without pwsh — chain the original diagnostic or the user
+      // is sent chasing a missing pwsh instead of the autoload failure. The
+      // entry renderer prints only error.message, so interpolate it.
+      throw new Error(
+        `Get-AuthenticodeSignature failed under Windows PowerShell (${error.message}) and the pwsh retry failed: ${retryError.message}`,
+        { cause: error },
+      )
+    }
+  }
+}
+
+// `verifySignature`/`mkdirImpl` are injectable (same pattern as
+// ensureNativePayload's fetchImpl) so the deploy path is testable off
+// Windows.
+export async function installUiAccessWorker(
+  source,
+  version,
+  env,
+  verifySignature = requireValidAuthenticodeSignature,
+  mkdirImpl = mkdir,
+  copyFileImpl = copyFile,
+) {
+  await verifySignature(source)
+  const destination = uiAccessWorkerPath(version, env)
+  const installed = await stat(destination).catch(() => undefined)
+  if (installed?.isFile()) {
+    await verifySignature(destination)
+    return destination
+  }
+  const temporary = `${destination}.${process.pid}.tmp`
+  try {
+    await mkdirImpl(dirname(destination), { recursive: true })
+    await copyFileImpl(source, temporary)
+    await rename(temporary, destination)
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => {})
+    if (error?.code === "EPERM" || error?.code === "EACCES") {
+      throw new Error(
+        `Installing the UIAccess worker requires an elevated terminal: the worker must be deployed to ${destination} (${error.message}). Rerun the SDK installation from an elevated terminal with CUA_DRIVER_USE_UIACCESS=1.`,
+        { cause: error },
+      )
+    }
+    throw error
+  }
+  return destination
 }
 
 export async function ensureNativePayload({
@@ -144,17 +235,31 @@ export async function ensureNativePayload({
   } = await import(NATIVE_ASSETS_MODULE.href)
   version ??= cuaSdkVersion()
   const target = nativeTarget(platform, arch, version)
+  const uiAccess = platform === "win32" && env.CUA_DRIVER_USE_UIACCESS === "1"
+  if (uiAccess) target.companions = ["qwen-cua-driver-uia.exe"]
   if (env[CUA_SDK_NATIVE_DIR_ENV]) {
-    return resolveNativeDirectory(env, platform, arch, version)
+    const directory = resolveNativeDirectory(env, platform, arch, version)
+    if (uiAccess) {
+      await installUiAccessWorker(
+        join(directory, "qwen-cua-driver-uia.exe"),
+        version,
+        env,
+      )
+    }
+    return directory
   }
 
-  const destination = cachedNativeDirectory(
-    target,
-    version,
-    env,
-    platform,
-  )
-  if (hasCompletedNativePayload(destination, target)) return destination
+  const destination = cachedNativeDirectory(target, version, env, platform)
+  if (hasCompletedNativePayload(destination, target)) {
+    if (uiAccess) {
+      await installUiAccessWorker(
+        join(destination, "qwen-cua-driver-uia.exe"),
+        version,
+        env,
+      )
+    }
+    return destination
+  }
   await rm(join(destination, "complete.json"), {
     force: true,
     recursive: true,
@@ -201,6 +306,13 @@ export async function ensureNativePayload({
       source: archiveResult.url,
       version,
     })
+    if (uiAccess) {
+      await installUiAccessWorker(
+        join(destination, "qwen-cua-driver-uia.exe"),
+        version,
+        env,
+      )
+    }
     return destination
   } finally {
     await rm(temporary, { recursive: true, force: true })
@@ -216,7 +328,9 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
   } else {
     ensureNativePayload()
       .then((directory) => {
-        process.stdout.write(`@qwen-code/cua-sdk native payload ready: ${directory}\n`)
+        process.stdout.write(
+          `@qwen-code/cua-sdk native payload ready: ${directory}\n`,
+        )
       })
       .catch((error) => {
         process.stderr.write(

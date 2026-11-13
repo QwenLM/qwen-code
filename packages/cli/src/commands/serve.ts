@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { parseJoinLink } from '../serve/agent-host-join.js';
+import { listExplicitCandidates } from '../serve/local-control/lan-interfaces.js';
 import type { Argv, CommandModule } from 'yargs';
 import type { ServeChannelSelection } from '../serve/types.js';
 import type { RunHandle } from '../serve/run-qwen-serve.js';
@@ -14,7 +16,11 @@ import { normalizeServeChannelSelection } from '../serve/channel-selection.js';
 // with ~50ms of cold ESM resolution. The runtime import is deferred to the
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
-import { DEFAULT_RING_SIZE } from '@qwen-code/acp-bridge/eventBus';
+import {
+  DEFAULT_RING_SIZE,
+  DEFAULT_RING_MAX_BYTES,
+  normalizeMaxRingBytes,
+} from '@qwen-code/acp-bridge/eventBus';
 import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   DEFAULT_MAX_JOURNAL_BYTES,
@@ -55,6 +61,49 @@ function blockForever(): Promise<never> {
 
 const DEFAULT_SERVE_HOSTNAME = '127.0.0.1';
 
+export function validateManagedLocalFlags(args: readonly string[]): void {
+  const supported = new Set([
+    '--managed',
+    '--managed-data-dir',
+    '--port',
+    '--hostname',
+    '--open',
+    '--no-open',
+    '--open-with-auth',
+    '--no-open-with-auth',
+    '--web',
+    '--require-auth',
+    '--http-bridge',
+  ]);
+  const unsupported = args.find(
+    (arg) => arg.startsWith('--') && !supported.has(arg.split('=')[0]!),
+  );
+  if (unsupported) {
+    throw new Error(
+      `${unsupported.split('=')[0]} is not supported with --managed. Use --port, --managed-data-dir, and --open.`,
+    );
+  }
+}
+
+export function validateManagedWebFlags(args: readonly string[]): void {
+  const supported = new Set([
+    '--managed-web-config',
+    '--hostname',
+    '--port',
+    '--allow-origin',
+    '--token',
+    '--require-auth',
+  ]);
+  const unsupported = args.find(
+    (arg) => arg.startsWith('--') && !supported.has(arg.split('=')[0]!),
+  );
+  if (unsupported) {
+    throw new Error(
+      `${unsupported.split('=')[0]} is not supported with --managed-web-config. Only hostname, port, allow-origin and browser authentication options are supported.`,
+    );
+  }
+}
+
 /**
  * Turn Local Control on through the daemon and print the pairing QR.
  *
@@ -77,16 +126,44 @@ async function startLocalControl(
   }
   let status;
   try {
-    status = await service.enable(address ? { address } : {});
+    status = await service.enable(
+      // The flag is the operator's explicit opt-in: record the named address
+      // as the daemon's standing grant so the HTTP enable route (and the Web
+      // Shell card) can re-enable it, while ungranted non-candidate POSTs
+      // keep failing with unknown_lan_interface.
+      address ? { address, allowExplicitAddress: true } : {},
+    );
   } catch (err) {
     // The service reports ambiguity to its caller rather than picking for
     // them; in a terminal the way to answer is a flag, which only this caller
-    // knows about.
+    // knows about. The same holds for the no-candidate and unknown-address
+    // failures: their messages are rendered verbatim to browser clients, so
+    // the CLI-only remedy hints belong here, not in the shared errors.
     if (
       err instanceof Error &&
       (err as { code?: string }).code === 'ambiguous_lan_interface'
     ) {
       throw new Error(`${err.message}. Pass --local-control-address <ip>.`);
+    }
+    if (
+      err instanceof Error &&
+      (err as { code?: string }).code === 'no_lan_interface'
+    ) {
+      throw new Error(
+        `${err.message} If this host's usable address is outside private/link-local space, or sits on a VPN/tunnel interface, name it: --local-control-address <ip>.`,
+      );
+    }
+    if (
+      err instanceof Error &&
+      (err as { code?: string }).code === 'unknown_lan_interface'
+    ) {
+      // Enumerate the acceptance space, not the automatic-candidate list:
+      // the operator reaches this failure precisely on hosts whose usable
+      // address is one listLanCandidates would never offer (#14136).
+      const candidates = listExplicitCandidates();
+      throw new Error(
+        `${err.message}${candidates.length ? ` This host currently has: ${candidates.map((c) => `${c.interfaceName} (${c.address})`).join(', ')}.` : ''}`,
+      );
     }
     throw err;
   }
@@ -195,16 +272,23 @@ export async function maybeOpenWebShellBrowser(
 interface ServeArgs {
   port: number;
   hostname: string;
+  profile: 'default' | 'hosted-harness';
+  managed: boolean;
+  'managed-data-dir'?: string;
+  'managed-web-config'?: string;
+  'hosted-harness-capability-digest'?: string;
   token?: string;
-  'max-sessions': number;
+  'max-sessions'?: number;
   'max-total-sessions'?: number;
   'max-pending-prompts-per-session': number;
   'max-connections': number;
   'event-ring-size': number;
+  'event-ring-max-bytes': number;
   'compacted-replay-max-bytes': number;
   'max-journal-events'?: number;
   'max-journal-bytes'?: number;
   workspace?: string | string[];
+  'conversations-dir'?: string;
   'memory-project-scope'?: MemoryProjectScope;
   'require-auth': boolean;
   'enable-session-shell': boolean;
@@ -213,8 +297,14 @@ interface ServeArgs {
   web: boolean;
   open: boolean;
   'open-with-auth': boolean;
+  'token-qr'?: boolean;
   'local-control': boolean;
   'local-control-address'?: string;
+  'agent-host-server'?: string;
+  'agent-host-workspace-id'?: string;
+  join?: string;
+  'agent-host-name'?: string;
+  'agent-host-allow-http'?: boolean;
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
   // handler reads `argv['http-bridge']` directly.
@@ -227,12 +317,21 @@ interface ServeArgs {
   'allow-origin'?: string[];
   'allow-private-auth-base-url': boolean;
   'prompt-deadline-ms'?: number;
+  'experimental-paired-engines': boolean;
+  'experimental-managed-agents': boolean;
+  'experimental-managed-runtime-worker': boolean;
+  'experimental-managed-runtime-auto-local': boolean;
+  'experimental-managed-runtime-url'?: string;
+  'experimental-managed-runtime-token'?: string;
+  'managed-runtime-broker-url'?: string;
+  'managed-runtime-broker-token'?: string;
   'writer-idle-timeout-ms'?: number;
   'channel-idle-timeout-ms'?: number;
   'initialize-timeout-ms'?: number;
   'session-restore-timeout-ms'?: number;
   'session-reap-interval-ms'?: number;
   'session-idle-timeout-ms'?: number;
+  'session-prompt-settled-close-grace-ms'?: number;
   'permission-response-timeout-ms'?: number;
   'external-tool-guard-mode': 'off' | 'required';
   'external-tool-guard-endpoint'?: string;
@@ -269,19 +368,49 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         default: DEFAULT_SERVE_HOSTNAME,
         description:
-          'Interface to bind. Loopback (127.0.0.0/8, localhost, ::1, [::1]) is auth-free; anything else requires a token.',
+          'Interface to bind. Loopback (127.0.0.0/8, localhost, ::1, [::1]) is auth-free; anything else requires a token (one is generated and printed when neither --token nor QWEN_SERVER_TOKEN supplies one). A localhost bind that resolves off-loopback never generates, and still refuses when no token source resolved; an empty value is rejected as operator error.',
+      })
+      .option('profile', {
+        choices: ['default', 'hosted-harness'] as const,
+        default: 'default' as const,
+        description:
+          'Deployment profile. hosted-harness enables the private no-tool Managed Session API on loopback.',
+      })
+      .option('hosted-harness-capability-digest', {
+        type: 'string',
+        description:
+          'SHA-256 capability digest for the private Hosted Harness profile. Falls back to QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST.',
+      })
+      .option('managed', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Start the daemon and Managed Agent with shared WebShell and embedded storage; downloads the server on first use and requires Java 21.',
+      })
+      .option('managed-data-dir', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Private persistent data directory for --managed; defaults to <Qwen home>/managed-local.',
+      })
+      .option('managed-web-config', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Run only the authenticated Managed Web gateway using a JSON file with apiUrl, tenantId, actorId and signingKeyFile. Requires a non-empty independent browser token via QWEN_SERVER_TOKEN or --token.',
       })
       .option('token', {
         type: 'string',
         description:
-          'Bearer token required on every request. Falls back to the QWEN_SERVER_TOKEN env var.',
+          'Bearer token required on every request. Falls back to the QWEN_SERVER_TOKEN env var; a non-loopback bind with neither generates an ephemeral token at startup, while loopback keeps the trusted tokenless mode unless --require-auth is set.',
       })
       .option('max-sessions', {
         type: 'number',
-        default: 32,
         description:
           'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
-          'attach to existing sessions still works. Set to 0 to disable.',
+          'attach to existing sessions still works. Set to 0 to disable. ' +
+          'Defaults to 32, or to the serve.maxSessions setting (user, system, and ' +
+          'system-defaults scopes only); the flag wins when passed.',
       })
       .option('max-total-sessions', {
         type: 'number',
@@ -306,6 +435,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Defaults to process.cwd() when omitted. ' +
           'Repeat to register isolated workspace runtimes; the first is primary.',
       })
+      .option('conversations-dir', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Absolute working-directory root shared by standalone and Live Conversations. Overrides QWEN_CONVERSATIONS_DIR; defaults to ~/Documents/Qwen Code/Conversations.',
+      })
       .option('memory-project-scope', {
         type: 'string',
         choices: MEMORY_PROJECT_SCOPES,
@@ -329,7 +464,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Refuse to start without a bearer token, even on loopback. ' +
           'Hardens the loopback developer default for shared dev hosts / CI ' +
           'runners / multi-tenant workstations where any local user can hit ' +
-          '127.0.0.1. Requires --token or QWEN_SERVER_TOKEN. /health also ' +
+          '127.0.0.1. Requires --token, QWEN_SERVER_TOKEN, or --open-with-auth ' +
+          '(which installs its own generated loopback token); on non-loopback ' +
+          'binds the generated ephemeral token also satisfies it, so the ' +
+          'no-configured-secret fail-fast is loopback-only. /health also ' +
           'requires Authorization when enabled (no loopback exemption — ' +
           'k8s/Compose probes must pass the bearer too).',
       })
@@ -388,6 +526,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Open the Web Shell with bearer authentication on loopback. Reuse --token or QWEN_SERVER_TOKEN, or generate a temporary 256-bit token and deliver it in the URL fragment. In headless environments, print the fragment URL for manual opening.',
       })
+      .option('token-qr', {
+        type: 'boolean',
+        description:
+          'Print the token-bearing QR even when stdout is captured (not an interactive terminal) and the bearer is an operator-supplied (stable) token, which is withheld by default to keep stable credentials out of collected logs. Enable only when the log pipeline is as trusted as the daemon host. Can also be set via the serve.tokenQr setting (user, system, and system-defaults scopes only); the flag wins when passed. --no-token-qr suppresses the startup quickstart token QR for that run on every quickstart path — interactive terminal and generated token included. It does not govern the Local Control pairing QR, which --local-control prints by design.',
+      })
       .option('local-control', {
         type: 'boolean',
         default: false,
@@ -397,15 +540,45 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('local-control-address', {
         type: 'string',
         description:
-          'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice.',
+          'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice. Naming an address outside RFC 1918/3927 space, or one on a VPN/tunnel interface (e.g. phone and laptop on the same corporate VPN), is accepted as an explicit opt-in; out-of-private-space picks are logged with a warning.',
+      })
+      .option('join', {
+        type: 'string',
+        description:
+          'Join another Qwen Code as a runtime, with the one-line link it shows under Agent → Runtime → Add runtime.',
+      })
+      .option('agent-host-server', {
+        type: 'string',
+        description:
+          'Register this daemon as an Agent Host with a primary Qwen daemon.',
+      })
+      .option('agent-host-workspace-id', {
+        type: 'string',
+        description:
+          'Control-plane workspace id printed by the primary daemon.',
+      })
+      .option('agent-host-name', {
+        type: 'string',
+        description: 'Display name advertised for this Agent Host.',
+      })
+      .option('agent-host-allow-http', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Allow unencrypted Agent Host HTTP connections outside loopback (trusted demo networks only).',
       })
       .check((argv) => {
-        // A wildcard or LAN primary bind already owns the port Local Control
-        // needs on its selected address. Token and Origin settings remain
-        // independent because the second listener owns those.
+        if (Array.isArray(argv['conversations-dir'])) {
+          throw new Error('pass --conversations-dir once.');
+        }
+        normalizeMaxRingBytes(
+          argv['event-ring-max-bytes'] as number | undefined,
+        );
         if (argv['local-control'] === true && argv['web'] === false) {
           throw new Error('Local Control requires the Web Shell.');
         }
+        // Preserve the documented deployment boundary: Local Control adds its
+        // pairing-scoped LAN listener only to a loopback primary daemon.
         if (
           argv['local-control'] === true &&
           argv.hostname !== DEFAULT_SERVE_HOSTNAME
@@ -423,6 +596,25 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         if (argv['local-control-address'] === '') {
           throw new Error('--local-control-address must not be empty.');
         }
+        if (
+          Boolean(argv['agent-host-server']) !==
+          Boolean(argv['agent-host-workspace-id'])
+        ) {
+          throw new Error(
+            '--agent-host-server and --agent-host-workspace-id must be used together.',
+          );
+        }
+        if (argv['agent-host-name'] === '') {
+          throw new Error('--agent-host-name must not be empty.');
+        }
+        if (argv['join'] !== undefined) {
+          if (argv['agent-host-server'] || argv['agent-host-workspace-id']) {
+            throw new Error(
+              '--join already names the coordinator and workspace; drop --agent-host-server and --agent-host-workspace-id.',
+            );
+          }
+          parseJoinLink(argv['join']);
+        }
         return true;
       })
       .option('event-ring-size', {
@@ -438,6 +630,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'that send a `Last-Event-ID: N` header. Larger = more reconnect ' +
           'headroom at the cost of a few hundred KB extra RAM per session. ' +
           'Must be a positive finite integer.',
+      })
+      .option('event-ring-max-bytes', {
+        type: 'number',
+        nargs: 1,
+        default: DEFAULT_RING_MAX_BYTES,
+        description:
+          'Per-session retained SSE replay ring byte cap, including the latest full commands snapshot. Must be a positive safe integer up to 256 MiB; no unlimited sentinel.',
       })
       .option('compacted-replay-max-bytes', {
         type: 'number',
@@ -483,8 +682,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: true,
         description:
-          'HTTP bridge mode: attempt to preheat one primary `qwen --acp` child; trusted ' +
-          'secondaries start one on demand. Stage 2 native in-process mode is ' +
+          'HTTP bridge mode: attempt to preheat the primary `qwen --acp` child; ' +
+          'trusted secondaries start one on demand. Stage 2 native in-process mode is ' +
           'not yet implemented; this flag will become opt-in then.',
       })
       .option('memory-budget-mb', {
@@ -493,8 +692,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Total memory budget in MB for the daemon process tree. When unset, ' +
           'derived as 50% of cgroup-constrained ' +
           'or host memory, and capped at the resolved available memory either ' +
-          'way. It does not change how any `qwen --acp` child is sized; the ' +
-          'one consumer today is adaptive live-journal growth: one ' +
+          'way. In `admit` and `enforce` modes it determines managed ACP ' +
+          'child capacity; `enforce` also applies the modeled per-child ' +
+          'old-space ceiling. It also sizes one ' +
           'daemon-wide pool of ' +
           JOURNAL_GROWTH_POOL_FRACTION * 100 +
           '% of the effective budget (capped at ' +
@@ -520,7 +720,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'either mode.',
       })
       .option('child-heap-mode', {
-        choices: ['off', 'observe'] as const,
+        choices: ['off', 'observe', 'admit', 'enforce'] as const,
         default: 'observe' as const,
         description:
           'Whether the daemon models a per-child heap partition of the ' +
@@ -532,7 +732,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'refusal count of 0 does NOT mean the partition would be safe to ' +
           'apply; children still run on the much larger host-derived ' +
           'ceiling, so a workload needing more old space than the modeled ' +
-          'ceiling looks healthy here.',
+          'ceiling looks healthy here. `admit` rejects starts past the modeled ' +
+          'process limit but keeps the existing child heap arguments. ' +
+          'Experimental `enforce` also applies the fixed modeled old-space ' +
+          'ceiling to each managed child; it does not cap total process RSS.',
       })
       .option('mcp-client-budget', {
         type: 'number',
@@ -558,7 +761,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('allow-origin', {
         type: 'string',
         array: true,
-        description: 'Cross-origin allowlist for browser webui clients.',
+        description:
+          'Cross-origin allowlist for browser clients. Accepts `*`, a canonical origin, or a loopback port wildcard like `http://127.0.0.1:*` (requires a bearer token).',
       })
       .option('allow-private-auth-base-url', {
         type: 'boolean',
@@ -573,6 +777,57 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Server-side wallclock cap on POST /session/:id/prompt (ms). ' +
           'Falls back to QWEN_SERVE_PROMPT_DEADLINE_MS. Positive integer.',
       })
+      .option('experimental-paired-engines', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Experimental: build workspace runtimes, other than the private ' +
+          'Conversations one, with paired Legacy and Managed engines. No ' +
+          'Managed engine is available yet, so sessions run on Legacy with a ' +
+          'durable owner.',
+      })
+      .option('experimental-managed-agents', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Reserved experimental mode; not implemented and rejects startup.',
+      })
+      .option('experimental-managed-runtime-worker', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Reserved experimental mode; not implemented and rejects startup.',
+      })
+      .option('experimental-managed-runtime-auto-local', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Reserved experimental mode; not implemented and rejects startup.',
+      })
+      .option('experimental-managed-runtime-url', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Reserved experimental Runtime URL; not implemented and rejects startup.',
+      })
+      .option('experimental-managed-runtime-token', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Reserved experimental Runtime credential; not implemented and rejects startup.',
+      })
+      .option('managed-runtime-broker-url', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Private Broker URL for --profile hosted-harness; required together with token for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_URL.',
+      })
+      .option('managed-runtime-broker-token', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_TOKEN; prefer the variable, since this option puts the credential in the process list.',
+      })
       .option('writer-idle-timeout-ms', {
         type: 'number',
         description:
@@ -582,8 +837,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('channel-idle-timeout-ms', {
         type: 'number',
         description:
-          'Milliseconds to keep ACP child alive after last session closes. ' +
-          '0 or unset = immediate kill (default).',
+          'Compatibility auto-reap delay for an idle workspace ACP child. ' +
+          '0 or unset = reap after work drains; keepalive windows may extend it (default).',
       })
       .option('initialize-timeout-ms', {
         type: 'number',
@@ -607,6 +862,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Idle timeout before a disconnected session is reaped (ms). ' +
           '0 = disabled. Default: 1800000 (30 min).',
+      })
+      .option('session-prompt-settled-close-grace-ms', {
+        type: 'number',
+        description:
+          'Grace period after a prompt settles before an otherwise-idle ' +
+          'session may be auto-closed (ms). Poll-based SSE clients use this ' +
+          'window to reconnect without triggering a session rebuild. ' +
+          '0 = disabled (immediate close). Default: 0.',
       })
       .option('permission-response-timeout-ms', {
         type: 'number',
@@ -663,6 +926,109 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Requires --rate-limit.',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
+    if (argv['managed-web-config'] !== undefined) {
+      try {
+        const serveIndex = process.argv.indexOf('serve');
+        if (serveIndex >= 0)
+          validateManagedWebFlags(process.argv.slice(serveIndex + 1));
+        if (
+          argv.managed ||
+          argv.profile !== 'default' ||
+          !argv.web ||
+          argv.workspace !== undefined ||
+          argv['conversations-dir'] !== undefined
+        ) {
+          throw new Error(
+            '--managed-web-config cannot be combined with daemon execution or Managed local mode.',
+          );
+        }
+        const { runManagedWebServe } = await import(
+          '../serve/managed-web-serve.js'
+        );
+        const handle = await runManagedWebServe({
+          configFile: argv['managed-web-config'],
+          hostname: argv.hostname,
+          port: argv.port,
+          token: argv.token,
+          allowOrigins: argv['allow-origin'],
+        });
+        writeStdoutLine(`Managed WebShell: ${handle.url}`);
+        process.exit(await handle.finished);
+      } catch (error) {
+        writeStderrLine(
+          `qwen serve: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        process.exit(1);
+      }
+    }
+    if (argv.managed) {
+      try {
+        const serveIndex = process.argv.indexOf('serve');
+        if (serveIndex >= 0)
+          validateManagedLocalFlags(process.argv.slice(serveIndex + 1));
+        if (
+          argv.hostname !== DEFAULT_SERVE_HOSTNAME ||
+          argv.profile !== 'default' ||
+          !argv.web ||
+          argv.workspace !== undefined ||
+          argv['conversations-dir'] !== undefined ||
+          argv.token !== undefined ||
+          argv['tls-cert'] ||
+          argv['tls-key'] ||
+          argv['local-control'] ||
+          argv.join ||
+          argv['agent-host-server'] ||
+          argv.channel !== undefined ||
+          argv['experimental-paired-engines'] ||
+          argv['experimental-managed-agents'] ||
+          argv['experimental-managed-runtime-worker'] ||
+          argv['experimental-managed-runtime-auto-local'] ||
+          argv['experimental-managed-runtime-url'] !== undefined ||
+          argv['managed-runtime-broker-url'] !== undefined ||
+          argv['managed-runtime-broker-token'] !== undefined ||
+          argv['allow-origin']?.length ||
+          argv['enable-session-shell'] ||
+          !argv['http-bridge']
+        ) {
+          throw new Error(
+            '--managed uses its own loopback services, persistent credentials, and application-owned Workspaces. Use --port, --managed-data-dir, and --open; other deployment, workspace-import, or execution modes cannot be combined.',
+          );
+        }
+        const { runManagedLocalServe } = await import(
+          '../serve/managed-local-serve.js'
+        );
+        const handle = await runManagedLocalServe({
+          port: argv.port,
+          dataDirectory: argv['managed-data-dir'],
+        });
+        await maybeOpenWebShellBrowser(
+          handle,
+          argv.open || argv['open-with-auth'],
+          argv['open-with-auth'],
+        );
+        process.exit(await handle.finished);
+      } catch (error) {
+        writeStderrLine(
+          `qwen serve: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        process.exit(1);
+      }
+    }
+    if (argv['managed-data-dir'] !== undefined) {
+      writeStderrLine('qwen serve: --managed-data-dir requires --managed.');
+      process.exit(1);
+    }
+    const managedRuntimeBrokerUrl =
+      argv['managed-runtime-broker-url'] ??
+      process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'];
+    const managedRuntimeBrokerToken =
+      argv['managed-runtime-broker-token'] ??
+      process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'];
+    delete process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'];
+    delete process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'];
+    const agentHostEnrollmentToken =
+      process.env['QWEN_AGENT_HOST_ENROLLMENT_TOKEN']?.trim();
+    delete process.env['QWEN_AGENT_HOST_ENROLLMENT_TOKEN'];
     if (!argv['http-bridge']) {
       writeStderrLine(
         'qwen serve: --no-http-bridge (native mode) is not yet implemented; ' +
@@ -678,6 +1044,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         'qwen serve: --token is visible in the process command line; ' +
           'prefer the QWEN_SERVER_TOKEN env var for any non-trivial ' +
           'deployment.',
+      );
+    }
+    if (argv['managed-runtime-broker-token'] !== undefined) {
+      // Same exposure for the Broker credential the Harness holds.
+      writeStderrLine(
+        'qwen serve: --managed-runtime-broker-token is visible in the ' +
+          'process command line; prefer the ' +
+          'QWEN_MANAGED_RUNTIME_BROKER_TOKEN env var.',
       );
     }
     let channelSelection: ServeChannelSelection | undefined;
@@ -847,6 +1221,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       const serveOptions = {
         port: argv.port,
         hostname: argv.hostname,
+        profile: argv.profile,
         token: argv.token,
         mode: 'http-bridge',
         maxSessions: argv['max-sessions'],
@@ -856,6 +1231,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         maxPendingPromptsPerSession,
         maxConnections: argv['max-connections'],
         eventRingSize: argv['event-ring-size'],
+        eventRingMaxBytes: argv['event-ring-max-bytes'],
         compactedReplayMaxBytes: argv['compacted-replay-max-bytes'],
         ...(argv['max-journal-events'] !== undefined
           ? { maxJournalEvents: argv['max-journal-events'] }
@@ -864,12 +1240,18 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           ? { maxJournalBytes: argv['max-journal-bytes'] }
           : {}),
         workspace: argv.workspace,
+        ...(argv['conversations-dir'] !== undefined
+          ? { conversationsDir: argv['conversations-dir'] }
+          : {}),
         ...(argv['memory-project-scope'] !== undefined
           ? { memoryProjectScope: argv['memory-project-scope'] }
           : {}),
         requireAuth: argv['require-auth'],
         enableSessionShell: argv['enable-session-shell'],
         serveWebShell: argv.web,
+        ...(argv['token-qr'] !== undefined
+          ? { tokenQr: argv['token-qr'] }
+          : {}),
         ...(argv['tls-cert'] !== undefined
           ? { tlsCert: argv['tls-cert'] }
           : {}),
@@ -887,6 +1269,46 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : {}),
         ...(argv['prompt-deadline-ms'] !== undefined
           ? { promptDeadlineMs: argv['prompt-deadline-ms'] }
+          : {}),
+        ...(argv['experimental-paired-engines']
+          ? { experimentalPairedEngines: true }
+          : {}),
+        ...(argv['experimental-managed-agents']
+          ? { experimentalManagedAgents: true }
+          : {}),
+        ...(argv['experimental-managed-runtime-auto-local']
+          ? { experimentalManagedRuntimeAutoLocal: true }
+          : {}),
+        ...(argv['experimental-managed-runtime-worker']
+          ? { experimentalManagedRuntimeWorker: true }
+          : {}),
+        ...(argv['experimental-managed-runtime-url'] !== undefined
+          ? {
+              experimentalManagedRuntimeUrl:
+                argv['experimental-managed-runtime-url'],
+            }
+          : {}),
+        ...(argv['experimental-managed-runtime-token'] !== undefined
+          ? {
+              experimentalManagedRuntimeToken:
+                argv['experimental-managed-runtime-token'],
+            }
+          : {}),
+        ...(managedRuntimeBrokerUrl !== undefined
+          ? {
+              managedRuntimeBrokerUrl,
+            }
+          : {}),
+        ...(managedRuntimeBrokerToken !== undefined
+          ? {
+              managedRuntimeBrokerToken,
+            }
+          : {}),
+        ...(argv['hosted-harness-capability-digest'] !== undefined
+          ? {
+              hostedHarnessCapabilityDigest:
+                argv['hosted-harness-capability-digest'],
+            }
           : {}),
         ...(argv['writer-idle-timeout-ms'] !== undefined
           ? { writerIdleTimeoutMs: argv['writer-idle-timeout-ms'] }
@@ -907,6 +1329,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : {}),
         ...(argv['session-idle-timeout-ms'] !== undefined
           ? { sessionIdleTimeoutMs: argv['session-idle-timeout-ms'] }
+          : {}),
+        ...(argv['session-prompt-settled-close-grace-ms'] !== undefined
+          ? {
+              sessionPromptSettledCloseGraceMs:
+                argv['session-prompt-settled-close-grace-ms'],
+            }
           : {}),
         ...(argv['permission-response-timeout-ms'] !== undefined
           ? {
@@ -945,7 +1373,54 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         );
         applyOpenWithAuth(serveOptions);
       }
-      const handle = await runQwenServe(serveOptions);
+      const handle = await runQwenServe(serveOptions, {
+        updateRestartArgv: process.argv.slice(2),
+      });
+      const joined = argv['join'] ? parseJoinLink(argv['join']) : undefined;
+      const hostTarget = joined
+        ? { ...joined, token: agentHostEnrollmentToken }
+        : argv['agent-host-server'] && argv['agent-host-workspace-id']
+          ? {
+              serverUrl: argv['agent-host-server'],
+              workspaceId: argv['agent-host-workspace-id'],
+              token: agentHostEnrollmentToken,
+            }
+          : undefined;
+      if (hostTarget) {
+        try {
+          await handle.runtimeReady;
+          const runtime = handle.getPrimaryWorkspaceRuntime();
+          if (
+            !runtime?.trusted ||
+            !runtime.generationGuard ||
+            runtime.generationGuard.closed
+          ) {
+            throw new Error(
+              'Agent Host join requires a trusted active workspace.',
+            );
+          }
+          const { startAgentHostConnection } = await import(
+            '../serve/agent-host-client.js'
+          );
+          await startAgentHostConnection({
+            bridge: runtime.bridge,
+            serverUrl: hostTarget.serverUrl,
+            workspaceId: hostTarget.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+            allowHttp: argv['agent-host-allow-http'] === true,
+            generationGuard: runtime.generationGuard,
+            ...(hostTarget.token ? { enrollmentToken: hostTarget.token } : {}),
+            ...(argv['agent-host-name']
+              ? { name: argv['agent-host-name'] }
+              : {}),
+          });
+        } catch (error) {
+          await handle.close().catch(() => undefined);
+          throw error;
+        }
+      }
+      // Saved Host connections (`qwen agents join`) of every trusted
+      // workspace are restored by the daemon itself (serve/server.ts).
       // Open the Web Shell in a browser once the listener is up (best-effort;
       // never throws — see maybeOpenWebShellBrowser).
       if (argv['local-control']) {

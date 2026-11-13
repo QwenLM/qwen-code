@@ -7,11 +7,38 @@ function getRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
+export function resolveToolCallName(
+  toolName: string | undefined,
+  rawInput: unknown,
+): string | undefined {
+  const name = getRecord(rawInput)?.['name'];
+  return toolName === 'tool_call' && typeof name === 'string' && name.trim()
+    ? name
+    : toolName;
+}
+
 export function isActiveToolStatus(
   status: ACPToolCall['status'] | string,
 ): boolean {
   return (
     status === 'pending' || status === 'running' || status === 'in_progress'
+  );
+}
+
+export type TerminalBackgroundAgentStatus =
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'canceled';
+
+export function isTerminalBackgroundAgentStatus(
+  status: unknown,
+): status is TerminalBackgroundAgentStatus {
+  return (
+    status === 'completed' ||
+    status === 'failed' ||
+    status === 'cancelled' ||
+    status === 'canceled'
   );
 }
 
@@ -25,6 +52,7 @@ export function isTaskExecutionRaw(raw: unknown): boolean {
 
 export function isSubAgentToolCall(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
+  if (name === 'workflow') return false;
   if (name === 'agent' || name === 'task') return true;
   if (tool.subTools || tool.subContent) return true;
   if (isTaskExecutionRaw(tool.rawOutput)) return true;
@@ -39,7 +67,9 @@ export function isSubAgentToolCall(tool: ACPToolCall): boolean {
 // changes in core — the live rule lives in packages/core/src/tools/agent/
 // agent.ts (`backgroundRequested`/`shouldRunInBackground`), and the desktop
 // adapter that used to mirror it has been forked out of this repo. A
-// divergence already exists: `subagentConfig.background` is invisible here.
+// divergence is intentional: `subagentConfig.background` and
+// `agents.defaultBackground` are invisible here. Without `executionMode`, a
+// foreground launch under defaultBackground: false can still appear background.
 export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
   if (!isSubAgentToolCall(tool)) return false;
   if (tool.executionMode) return tool.executionMode === 'background';
@@ -70,6 +100,35 @@ export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
     explicitlyBackground ||
     defaultsToBackground
   );
+}
+
+export function projectTerminalBackgroundAgentTool(
+  tool: ACPToolCall,
+  status: unknown,
+  endTime?: number,
+  safeToolProjection = false,
+): ACPToolCall {
+  if (!isTerminalBackgroundAgentStatus(status)) return tool;
+  const cancelled = status === 'cancelled' || status === 'canceled';
+  return {
+    ...tool,
+    status:
+      status === 'failed' || (cancelled && safeToolProjection)
+        ? 'failed'
+        : 'completed',
+    ...(endTime !== undefined ? { endTime } : {}),
+    ...(cancelled && safeToolProjection ? { wasCancelled: true } : {}),
+    ...(cancelled
+      ? {
+          rawOutput: {
+            ...(safeToolProjection && typeof tool.rawOutput === 'string'
+              ? { text: tool.rawOutput }
+              : (getRecord(tool.rawOutput) ?? {})),
+            status: 'cancelled',
+          },
+        }
+      : {}),
+  };
 }
 
 const BACKGROUND_SHELL_NAMES = new Set([

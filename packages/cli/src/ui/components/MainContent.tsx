@@ -27,6 +27,7 @@ import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
+import type { ScrollActions } from '../contexts/ScrollContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
 import {
@@ -39,7 +40,12 @@ import {
   SCROLL_TO_ITEM_END,
   type ScrollableListRef,
 } from './shared/ScrollableList.js';
-import { TextSelectionController } from '../selection/use-text-selection.js';
+import {
+  TextSelectionController,
+  type SelectionQuery,
+} from '../selection/use-text-selection.js';
+import { ContentMouseController } from '../context-menu/ContentMouseController.js';
+import { useContextMenu } from '../context-menu/ContextMenuContext.js';
 import { measureElementPosition } from '../utils/measure-element-position.js';
 
 // Limit LLM messages to a very high number of lines to mitigate performance
@@ -125,11 +131,16 @@ const virtualIsStaticItem = (item: VpItem) =>
 
 interface MainContentProps {
   footerRef?: RefObject<DOMElement | null>;
+  scrollActionsRef?: React.MutableRefObject<ScrollActions | null>;
 }
 
-export const MainContent = ({ footerRef }: MainContentProps) => {
+export const MainContent = ({
+  footerRef,
+  scrollActionsRef,
+}: MainContentProps) => {
   const { version } = useAppContext();
   const uiState = useUIState();
+  const transcriptSessionId = uiState.historyManager.sessionId;
   const { allExpanded: fullDetail } = useThoughtExpanded();
   const streamingState = uiState.streamingState;
   const showScrollbar = uiState.showScrollbar ?? true;
@@ -156,6 +167,32 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
   // useMemo keeps it cheap when nothing changes.
   const useVirtualScroll = uiState.useTerminalBuffer;
   const scrollRef = useRef<ScrollableListRef<VpItem>>(null);
+  const selectionQueryRef = useRef<SelectionQuery | null>(null);
+  const { menu: contextMenuOpen } = useContextMenu();
+
+  // Expose the transcript's scroll controls to sibling components (e.g.
+  // InputPrompt) so bare Up/Down keys can scroll the conversation in VP mode
+  // when the input is empty. The ref is populated here but the
+  // ScrollContext.Provider lives in DefaultAppLayout so it wraps both
+  // MainContent and Composer.
+  useEffect(() => {
+    if (!scrollActionsRef) return;
+    scrollActionsRef.current = {
+      scrollBy: (delta: number) => scrollRef.current?.scrollBy(delta),
+      hasScrollableTranscript: () => {
+        const state = scrollRef.current?.getScrollState();
+        // innerHeight is 0 until the viewport has been measured.
+        return (
+          !!state &&
+          state.innerHeight > 0 &&
+          state.scrollHeight > state.innerHeight
+        );
+      },
+    };
+    return () => {
+      scrollActionsRef.current = null;
+    };
+  }, [scrollActionsRef]);
 
   const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
     useMemo(() => {
@@ -472,6 +509,7 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
           thoughtHeadId={thoughtHeadIdByItemRef.current.get(item)}
           fullDetail={fullDetail}
+          modSessionId={transcriptSessionId}
         />
       );
     },
@@ -485,6 +523,7 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
       fullDetail,
       pendingAvailableTerminalHeight,
       uiState.constrainHeight,
+      transcriptSessionId,
     ],
   );
 
@@ -493,12 +532,29 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
       0,
       uiState.availableTerminalHeight ?? 0,
     );
+    // While the context menu is open it owns the pointer and keyboard: the
+    // scroll list goes quiet so clicks/keys don't leak into the content under
+    // the menu. The selection controller only PAUSES (it must keep the current
+    // selection — the menu's Copy Selection offers it — and clearing it the
+    // instant the menu opens would hide what is about to be copied).
+    // While the /btw answer panel is open it owns keyboard and wheel
+    // scrolling: it renders its own viewport in the bottom controls region, so
+    // leaving this list subscribed too would scroll both surfaces on every
+    // keypress and wheel tick. A pending answer has no viewport yet — the
+    // panel only mounts its scroller once the answer arrives — so during that
+    // window the transcript keeps the keys instead of nothing owning them.
+    const btwPanelOwnsViewport =
+      uiState.btwItem !== null && !uiState.btwItem.btw.isPending;
+    const viewportInteractive =
+      !uiState.dialogsVisible &&
+      contextMenuOpen === null &&
+      !btwPanelOwnsViewport;
 
     return (
       <OverflowProvider>
         <ScrollableList
           ref={scrollRef}
-          hasFocus={!uiState.dialogsVisible}
+          hasFocus={viewportInteractive}
           data={allVirtualItems}
           renderItem={renderVirtualItem}
           estimatedItemHeight={virtualEstimatedItemHeight}
@@ -513,6 +569,7 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
         />
         <TextSelectionController
           isActive={!uiState.dialogsVisible}
+          eventsPaused={contextMenuOpen !== null}
           getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
           getAdditionalSelectableRects={() =>
             footerRef?.current
@@ -529,6 +586,15 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
           hitTestScrollbar={(location) =>
             scrollRef.current?.hitTestScrollbar(location) ?? false
           }
+          selectionQueryRef={selectionQueryRef}
+        />
+        <ContentMouseController
+          isActive={!uiState.dialogsVisible}
+          getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
+          hitTestScrollbar={(location) =>
+            scrollRef.current?.hitTestScrollbar(location) ?? false
+          }
+          selectionQueryRef={selectionQueryRef}
         />
         <ShowMoreLines constrainHeight={uiState.constrainHeight} />
       </OverflowProvider>

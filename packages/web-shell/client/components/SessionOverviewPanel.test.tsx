@@ -12,9 +12,15 @@ import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonCapabilities,
   DaemonSessionSummary,
+  DaemonStandaloneSessionSummary,
   DaemonStatusReportSession,
 } from '@qwen-code/sdk/daemon';
+import type { DaemonProductSessionContext } from '../daemon/session/types';
 import { I18nProvider } from '../i18n';
+import {
+  McpAppGeneratedUiOwnerContext,
+  type McpAppGeneratedUiOwner,
+} from '../mcpAppHostContext';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -35,8 +41,10 @@ let connectionState: {
   sessionId?: string;
   capabilities?: DaemonCapabilities;
   workspaceCwd?: string;
+  sessionContext?: DaemonProductSessionContext;
 };
 let workspaceCapabilities: DaemonCapabilities | undefined;
+let generatedUiOwner: McpAppGeneratedUiOwner | undefined;
 let sessionsState: {
   sessions: DaemonSessionSummary[];
   loading: boolean;
@@ -47,11 +55,18 @@ let statusState: {
 };
 // Live sessions the mock daemon returns per non-primary workspace cwd.
 let otherWorkspaceSessions: Record<string, DaemonSessionSummary[]>;
+// Standalone pages queued (FIFO) for the mocked listStandaloneSessionsPage.
+let standalonePages: {
+  sessions: DaemonStandaloneSessionSummary[];
+  nextCursor?: string;
+}[];
+const standaloneListPage = vi.fn();
 // Options captured from the (mocked) useScopedSessions call, so tests can
 // assert the live-state vs catalog-poll fallback.
 let scopedSessionsOptions: { pollIntervalMs?: number };
 let workspaceLiveStateOptions: {
   enabled: boolean;
+  pollIntervalMs?: number;
   workspaceCwds?: string[];
 };
 let statusReportOptions: { autoLoad?: boolean; detail?: string };
@@ -66,12 +81,19 @@ let workspaceClient: {
   workspaceByCwd: ReturnType<typeof vi.fn>;
   archiveSessionsData: ReturnType<typeof vi.fn>;
   deleteSessionsData: ReturnType<typeof vi.fn>;
+  listStandaloneSessionsPage: ReturnType<typeof vi.fn>;
+  renameStandaloneSession: ReturnType<typeof vi.fn>;
+  exportStandaloneSession: ReturnType<typeof vi.fn>;
+  archiveStandaloneSessions: ReturnType<typeof vi.fn>;
+  deleteStandaloneSessions: ReturnType<typeof vi.fn>;
+  updateSessionMetadata: ReturnType<typeof vi.fn>;
 };
 // Primary-workspace actions surfaced by useWorkspace / useActions.
 let workspaceActions: {
   deleteSession: ReturnType<typeof vi.fn>;
   archiveSession: ReturnType<typeof vi.fn>;
   renameSession: ReturnType<typeof vi.fn>;
+  bindSessionPr: ReturnType<typeof vi.fn>;
   exportSession: ReturnType<typeof vi.fn>;
 };
 
@@ -120,7 +142,11 @@ vi.mock('../hooks/useScopedSessions', () => ({
 vi.mock('../session-catalog/workspace-session-live-state', () => ({
   useWorkspaceSessionLiveState: (
     _client: unknown,
-    options: { enabled: boolean; workspaceCwds?: string[] },
+    options: {
+      enabled: boolean;
+      workspaceCwds?: string[];
+      pollIntervalMs?: number;
+    },
   ) => {
     workspaceLiveStateOptions = options;
     return new Map();
@@ -150,6 +176,18 @@ function session(
   };
 }
 
+function standaloneSession(
+  id: string,
+  extra: Partial<DaemonStandaloneSessionSummary> = {},
+): DaemonStandaloneSessionSummary {
+  return {
+    ...session(id, { workspaceCwd: '/standalone' }),
+    sourceType: 'standalone',
+    context: { kind: 'standalone' },
+    ...extra,
+  };
+}
+
 function statusSession(
   id: string,
   extra: Partial<DaemonStatusReportSession> = {},
@@ -165,6 +203,11 @@ function statusSession(
     pendingPermissionCount: 0,
     hasActivePrompt: false,
     lastEventId: 0,
+    eventRingCount: 0,
+    eventRingBytes: 0,
+    eventRingEvictedEvents: 0,
+    eventRingEvictedBytes: 0,
+    availableCommandsSnapshotBytes: 0,
     ...extra,
   };
 }
@@ -189,9 +232,15 @@ beforeEach(() => {
     workspaceCwd: '/w',
   };
   workspaceCapabilities = undefined;
+  generatedUiOwner = undefined;
   sessionsState = { sessions: [], loading: false };
   statusState = { report: { full: { sessions: [] } } };
   otherWorkspaceSessions = {};
+  standalonePages = [];
+  standaloneListPage.mockReset();
+  standaloneListPage.mockImplementation(
+    async () => standalonePages.shift() ?? { sessions: [] },
+  );
   scopedSessionsOptions = {};
   workspaceLiveStateOptions = { enabled: false };
   statusReportOptions = {};
@@ -201,6 +250,7 @@ beforeEach(() => {
     deleteSession: vi.fn(async () => true),
     archiveSession: vi.fn(async () => true),
     renameSession: vi.fn(async () => ({ displayName: 'Renamed' })),
+    bindSessionPr: vi.fn(async () => ({ prs: [] })),
     exportSession: vi.fn(async () => ({
       content: '<html></html>',
       filename: 'session.html',
@@ -228,6 +278,12 @@ beforeEach(() => {
         errors: [],
       })),
       updateSessionMetadata: vi.fn(async () => ({ displayName: 'Renamed' })),
+      workspaceGitHubPullRequests: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: cwd,
+        available: true,
+        pullRequests: [],
+      })),
       exportSession: vi.fn(async () => ({
         content: '<html></html>',
         filename: 'session.html',
@@ -246,6 +302,26 @@ beforeEach(() => {
       notFound: [],
       errors: [],
     })),
+    listStandaloneSessionsPage: standaloneListPage,
+    renameStandaloneSession: vi.fn(async () => {}),
+    exportStandaloneSession: vi.fn(async () => ({
+      content: '<html></html>',
+      filename: 'session.html',
+      mimeType: 'text/html',
+    })),
+    archiveStandaloneSessions: vi.fn(async (ids: string[]) => ({
+      archived: ids,
+      alreadyArchived: [],
+      notFound: [],
+      errors: [],
+    })),
+    deleteStandaloneSessions: vi.fn(async (ids: string[]) => ({
+      removed: ids,
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [],
+    })),
+    updateSessionMetadata: vi.fn(async () => ({ prs: [] })),
   };
   sessionsReload.mockClear();
   statusReload.mockClear();
@@ -277,6 +353,7 @@ function render(
     }) => Promise<boolean | void> | boolean | void;
     manageLiveState?: boolean;
     workspaceCwd?: string;
+    onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
   } = {},
 ): void {
   container = document.createElement('div');
@@ -285,7 +362,9 @@ function render(
   act(() =>
     root!.render(
       <I18nProvider language="en">
-        <SessionOverviewPanel onOpenSession={onOpenSession} {...props} />
+        <McpAppGeneratedUiOwnerContext.Provider value={generatedUiOwner}>
+          <SessionOverviewPanel onOpenSession={onOpenSession} {...props} />
+        </McpAppGeneratedUiOwnerContext.Provider>
       </I18nProvider>,
     ),
   );
@@ -300,12 +379,15 @@ function rerender(
     }) => Promise<boolean | void> | boolean | void;
     manageLiveState?: boolean;
     workspaceCwd?: string;
+    onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
   } = {},
 ): void {
   act(() =>
     root!.render(
       <I18nProvider language="en">
-        <SessionOverviewPanel onOpenSession={onOpenSession} {...props} />
+        <McpAppGeneratedUiOwnerContext.Provider value={generatedUiOwner}>
+          <SessionOverviewPanel onOpenSession={onOpenSession} {...props} />
+        </McpAppGeneratedUiOwnerContext.Provider>
       </I18nProvider>,
     ),
   );
@@ -379,6 +461,26 @@ function setInputValue(input: HTMLInputElement, value: string): void {
     'value',
   )?.set?.call(input, value);
   input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function statusFilterButton(label: string): HTMLButtonElement {
+  return Array.from(
+    container!.querySelectorAll<HTMLButtonElement>(
+      '[aria-label="Filter by session status"] button',
+    ),
+  ).find((button) => button.textContent?.startsWith(label))!;
+}
+
+function deletionOwner(
+  captureSessionDeletion: McpAppGeneratedUiOwner['captureSessionDeletion'],
+): McpAppGeneratedUiOwner {
+  return {
+    scopeId: 'overview-owner',
+    workspaceCwd: '/w',
+    subscribeInvalidation: () => () => {},
+    invalidate: vi.fn(),
+    captureSessionDeletion,
+  };
 }
 
 describe('deriveSessionCards', () => {
@@ -466,6 +568,28 @@ describe('deriveSessionCards', () => {
     ).toBe(true);
   });
 
+  it('matches a standalone current session by context kind, not cwd', () => {
+    const cards = deriveSessionCards(
+      [
+        {
+          ...session('st1', { workspaceCwd: '/conversations' }),
+          sourceType: 'standalone',
+        },
+        session('st1', { workspaceCwd: '/w' }),
+      ],
+      'st1',
+      [],
+      '/w',
+      'standalone',
+    );
+    expect(
+      cards.find((card) => card.workspaceCwd === '/conversations')?.isCurrent,
+    ).toBe(true);
+    expect(cards.find((card) => card.workspaceCwd === '/w')?.isCurrent).toBe(
+      false,
+    );
+  });
+
   it('uses status-report approval details as a compatibility fallback', () => {
     const cards = deriveSessionCards([session('s')], undefined, [
       statusSession('s', {
@@ -509,6 +633,100 @@ describe('deriveSessionCards', () => {
 });
 
 describe('SessionOverviewPanel', () => {
+  it('disables single and batch cleanup of idle Qwen Live tasks', () => {
+    sessionsState.sessions = [
+      session('live', {
+        displayName: 'Live task',
+        sourceType: 'qwen-live',
+        clientCount: 1,
+        hasActivePrompt: false,
+      }),
+    ];
+    render();
+    expect(rowTitles()).toEqual(['Live task']);
+    for (const action of ['Archive', 'Delete']) {
+      expect(rowActionButton(rows()[0]!, action).disabled).toBe(true);
+    }
+    act(() => click(selectAllCheckbox()));
+    expect(footerButton('Archive')!.disabled).toBe(true);
+    expect(footerButton('Delete')!.disabled).toBe(true);
+    expect(workspaceClient.deleteSessionsData).not.toHaveBeenCalled();
+    expect(workspaceClient.archiveSessionsData).not.toHaveBeenCalled();
+  });
+
+  it.each(['FEATURE/TOPIC', '1234', '#1234', 'SESSION-SEARCH'])(
+    'searches branch, PR and ID metadata: %s',
+    (query) => {
+      sessionsState.sessions = [
+        session('session-search', {
+          displayName: 'Match',
+          branch: { name: 'feature/topic', baseBranch: 'main' },
+          prs: [{ number: 1234, url: 'https://github.com/o/r/pull/1234' }],
+        }),
+        session('other', { displayName: 'Other' }),
+      ];
+      render();
+      act(() => setInputValue(container!.querySelector('input')!, query));
+      expect(rowTitles()).toEqual(['Match']);
+    },
+  );
+
+  it('groups approval and question sessions as needing attention and drops stale selections', () => {
+    sessionsState.sessions = [
+      session('approval', {
+        displayName: 'Approval',
+        isWaitingForPermission: true,
+      }),
+      session('question', {
+        displayName: 'Question',
+        isWaitingForUserQuestion: true,
+      }),
+      session('running', { displayName: 'Run', hasActivePrompt: true }),
+      session('idle', { displayName: 'Idle' }),
+    ];
+    render();
+    act(() => click(statusFilterButton('Needs attention')));
+    expect(rowTitles()).toEqual(['Approval', 'Question']);
+    expect(
+      statusFilterButton('Needs attention').getAttribute('aria-pressed'),
+    ).toBe('true');
+    act(() => click(rowCheckbox(rows()[0]!)));
+    sessionsState.sessions = sessionsState.sessions.map((s) =>
+      s.sessionId === 'approval'
+        ? { ...s, isWaitingForPermission: false, hasActivePrompt: true }
+        : s,
+    );
+    rerender();
+    expect(rowTitles()).toEqual(['Question']);
+    expect(footerButton('Open in new tab')).toBeNull();
+    expect(statusFilterButton('Running').textContent).toContain('2');
+  });
+
+  it('resets page and selection on status changes and combines them with search', () => {
+    window.localStorage.setItem(
+      'qwen-web-shell-session-overview-page-size',
+      '10',
+    );
+    sessionsState.sessions = [
+      ...Array.from({ length: 12 }, (_, i) =>
+        session(`run-${i}`, { displayName: `Run ${i}`, hasActivePrompt: true }),
+      ),
+      session('idle', { displayName: 'Idle match' }),
+    ];
+    render();
+    act(() => click(footerButton('Next')!));
+    act(() => click(rowCheckbox(rows()[0]!)));
+    act(() => click(statusFilterButton('Idle')));
+    expect(rowTitles()).toEqual(['Idle match']);
+    expect(container!.textContent).toContain('Page 1 of 1');
+    expect(footerButton('Open in new tab')).toBeNull();
+    act(() => setInputValue(container!.querySelector('input')!, 'Run'));
+    expect(container!.textContent).toContain('No data');
+    act(() => click(statusFilterButton('Running')));
+    expect(rowTitles()).toHaveLength(10);
+    expect(statusFilterButton('Idle').textContent).toContain('0');
+  });
+
   it('renders an empty state when there are no sessions', () => {
     render();
     const empty = container!.querySelector('[data-slot="data-table-empty"]');
@@ -540,46 +758,508 @@ describe('SessionOverviewPanel', () => {
     expect(rowTitles()).toEqual(['Charlie', 'Alpha', 'Bravo']);
   });
 
-  it('shows loading after the title for every non-idle session', () => {
+  it('distinguishes actionable states and only spins for running turns', () => {
     sessionsState.sessions = [
       session('s-run', { displayName: 'Run', hasActivePrompt: true }),
       session('s-appr', {
         displayName: 'Approval',
         isWaitingForPermission: true,
+        hasActivePrompt: true,
       }),
       session('s-q', {
         displayName: 'Question',
         isWaitingForUserQuestion: true,
+        hasActivePrompt: true,
       }),
       session('s-idle', { displayName: 'Still' }),
     ];
     render();
-    for (const label of ['Run', 'Approval', 'Question']) {
-      const row = rows().find((candidate) =>
-        candidate.textContent?.includes(label),
-      )!;
-      expect(
-        titleTrigger(row).nextElementSibling?.hasAttribute(
-          'data-web-shell-session-loading',
-        ),
-      ).toBe(true);
+    const states = rows().map((row) =>
+      row.querySelector('[data-web-shell-session-status]'),
+    );
+    expect(states.map((state) => state?.textContent)).toEqual([
+      'Needs approval',
+      'User input needed',
+      'Running',
+      'Idle',
+    ]);
+    expect(
+      states.map(
+        (state) => !!state?.querySelector('[data-web-shell-session-loading]'),
+      ),
+    ).toEqual([false, false, true, false]);
+    expect(
+      states[0]?.querySelector('svg.lucide-shield-question-mark'),
+    ).not.toBeNull();
+    expect(
+      states[1]?.querySelector('svg.lucide-circle-question-mark'),
+    ).not.toBeNull();
+    expect(states[3]?.querySelector('svg.lucide-circle')).not.toBeNull();
+    // The attention cue and the status column pick their icon twice; pin
+    // them to the same glyph so the mappings cannot drift apart.
+    for (const index of [0, 1]) {
+      const cueIcon = rows()[index]!.querySelector(
+        '[data-web-shell-session-status-cue] svg',
+      );
+      expect(cueIcon?.outerHTML).toBe(
+        states[index]?.querySelector('svg')?.outerHTML,
+      );
     }
-    const idle = rows().find((tr) => tr.textContent?.includes('Still'))!;
-    expect(idle.querySelector('[data-web-shell-session-loading]')).toBeNull();
+    const runningCue = rows()[2]!.querySelector(
+      '[data-web-shell-session-status-cue="running"]',
+    )?.firstElementChild;
+    const statusSpinner = states[2]?.querySelector(
+      '[data-web-shell-session-loading]',
+    );
+    expect(runningCue).toBeInstanceOf(HTMLSpanElement);
+    expect(statusSpinner).toBeInstanceOf(HTMLSpanElement);
+    expect(runningCue?.className).toBe(statusSpinner?.className);
+    // An idle row renders no attention cue at all.
+    expect(
+      rows()[3]!.querySelector('[data-web-shell-session-status-cue]'),
+    ).toBeNull();
   });
 
-  it('toggles selection when the row is clicked', () => {
+  it('counts background work as running even without an active prompt', () => {
+    sessionsState.sessions = [
+      session('s-bg', {
+        displayName: 'Background',
+        hasActivePrompt: false,
+        activeWorkState: 'active',
+      }),
+      session('s-idle', { displayName: 'Plain idle' }),
+    ];
+    render();
+    const state = rows()[0]!.querySelector('[data-web-shell-session-status]');
+    expect(state?.textContent).toBe('Running');
+    expect(
+      state?.querySelector('[data-web-shell-session-loading]'),
+    ).not.toBeNull();
+    expect(statusFilterButton('Running').textContent).toContain('1');
+    expect(statusFilterButton('Idle').textContent).toContain('1');
+    // A session with live background work is not safe to archive or delete.
+    expect(rowActionButton(rows()[0]!, 'Archive').disabled).toBe(true);
+    expect(rowActionButton(rows()[0]!, 'Delete').disabled).toBe(true);
+  });
+
+  it('opens the owning session on row click and selects only with the checkbox', () => {
     sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
     render();
     act(() => click(rows()[0]!.querySelectorAll('td')[2] as HTMLElement));
-    expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe('checked');
-    expect(onOpenSession).not.toHaveBeenCalled();
-
-    act(() => click(rows()[0]!.querySelectorAll('td')[2] as HTMLElement));
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      's-run',
+      '/w',
+      undefined,
+    );
     expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
       'unchecked',
     );
+    onOpenSession.mockClear();
+    act(() => click(rowCheckbox(rows()[0]!)));
+    expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe('checked');
+    expect(onOpenSession).not.toHaveBeenCalled();
   });
+
+  it('keeps text selection in the overview without navigating', () => {
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    const cell = rows()[0]!.querySelectorAll('td')[2]!;
+    const selection = window.getSelection()!;
+    const range = document.createRange();
+    range.selectNodeContents(cell);
+    selection.addRange(range);
+    try {
+      act(() => click(cell));
+      expect(onOpenSession).not.toHaveBeenCalled();
+      const title = titleTrigger(rows()[0]!);
+      act(() =>
+        title.dispatchEvent(
+          new MouseEvent('click', { bubbles: true, detail: 1 }),
+        ),
+      );
+      expect(onOpenSession).not.toHaveBeenCalled();
+      act(() => title.click());
+      expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+        's1',
+        '/w',
+        undefined,
+      );
+      onOpenSession.mockClear();
+    } finally {
+      selection.removeAllRanges();
+    }
+    act(() => click(cell));
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      's1',
+      '/w',
+      undefined,
+    );
+  });
+
+  it('keeps an inline rename draft when clicking a plain row cell', () => {
+    connectionState.sessionId = 's1';
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Rename')));
+    const input = container!.querySelector<HTMLInputElement>(
+      'input[aria-label="Rename: One"]',
+    )!;
+    act(() => setInputValue(input, 'Renamed'));
+    // The editor keeps native mousedown so the caret can be placed.
+    const editorMouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    act(() => input.dispatchEvent(editorMouseDown));
+    expect(editorMouseDown.defaultPrevented).toBe(false);
+    // In-row controls get a prevented mousedown instead: no blur-cancel may
+    // remount the pressed node before mouseup, so their click still lands.
+    const actionMouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    act(() =>
+      rowActionButton(rows()[0]!, 'Rename').dispatchEvent(actionMouseDown),
+    );
+    expect(actionMouseDown.defaultPrevented).toBe(true);
+    expect(input.value).toBe('Renamed');
+    const cell = rows()[0]!.querySelectorAll('td')[2]!;
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      cell.dispatchEvent(mouseDown);
+      if (!mouseDown.defaultPrevented) input.blur();
+    });
+    expect(mouseDown.defaultPrevented).toBe(true);
+    act(() => click(cell));
+    expect(onOpenSession).not.toHaveBeenCalled();
+    expect(input.isConnected).toBe(true);
+    expect(input.value).toBe('Renamed');
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('keeps an inline rename draft when clicking the details button', () => {
+    connectionState.sessionId = 's1';
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Rename')));
+    const input = container!.querySelector<HTMLInputElement>(
+      'input[aria-label="Rename: One"]',
+    )!;
+    act(() => setInputValue(input, 'Renamed'));
+    const details = rowActionButton(rows()[0]!, 'Details for One');
+    expect(details.disabled).toBe(true);
+    // Native activation: a click on the disabled button fires nothing, so
+    // the popover cannot steal focus and blur-cancel the draft.
+    act(() => details.click());
+    expect(input.isConnected).toBe(true);
+    expect(input.value).toBe('Renamed');
+    expect(document.activeElement).toBe(input);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it.each([4, 11])(
+    'ends rename and focuses the sort header with %i sessions',
+    async (count) => {
+      connectionState.sessionId = 's0';
+      window.localStorage.setItem(
+        'qwen-web-shell-session-overview-page-size',
+        '10',
+      );
+      sessionsState.sessions = Array.from({ length: count }, (_, index) =>
+        session(`s${index}`, {
+          displayName: `Session ${index}`,
+          updatedAt: new Date(Date.UTC(2026, 8, 20 - index)).toISOString(),
+        }),
+      );
+      render();
+      act(() => click(rowActionButton(rows()[0]!, 'Rename')));
+      const input = container!.querySelector<HTMLInputElement>(
+        'input[aria-label="Rename: Session 0"]',
+      )!;
+      act(() => setInputValue(input, 'Unsaved name'));
+      const sortButton = () =>
+        container!.querySelector<HTMLButtonElement>(
+          'thead th:nth-child(4) button',
+        )!;
+      act(() => click(sortButton()));
+      await flushAsync();
+      expect(
+        container!.querySelector('input[aria-label="Rename: Session 0"]'),
+      ).toBeNull();
+      expect(
+        container!
+          .querySelector('thead th:nth-child(4)')
+          ?.getAttribute('aria-sort'),
+      ).toBe('ascending');
+      expect(document.activeElement).toBe(sortButton());
+      expect(rowTitles().includes('Session 0')).toBe(count === 4);
+      expect(workspaceActions.renameSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'keeps only one details popover when hovering after click (same row: %s)',
+    async (sameRow) => {
+      sessionsState.sessions = [
+        session('a', { displayName: 'Alpha' }),
+        session('b', { displayName: 'Bravo' }),
+      ];
+      vi.useFakeTimers();
+      try {
+        render();
+        await act(async () =>
+          click(rowActionButton(rows()[0]!, 'Details for Alpha')),
+        );
+        const target = titleTrigger(rows()[sameRow ? 0 : 1]!);
+        await act(async () => {
+          target.dispatchEvent(new Event('pointerover', { bubbles: true }));
+          vi.advanceTimersByTime(300);
+        });
+        await act(async () => vi.advanceTimersByTime(0));
+        const dialogs = document.querySelectorAll('[role="dialog"]');
+        expect(dialogs).toHaveLength(1);
+        expect(dialogs[0]?.getAttribute('aria-label')).toBe(
+          sameRow ? 'Alpha' : 'Bravo',
+        );
+        expect(dialogs[0]?.getAttribute('data-state')).toBe('open');
+        expect(document.activeElement).toBe(target);
+        await act(async () => {
+          target.dispatchEvent(new Event('pointerout', { bubbles: true }));
+          vi.advanceTimersByTime(100);
+        });
+        expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(0);
+        expect(document.activeElement).toBe(target);
+        expect(onOpenSession).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(['Escape', 'blur'])(
+    'does not reopen hover details after cancelling rename with %s',
+    async (dismissal) => {
+      connectionState.sessionId = 'a';
+      sessionsState.sessions = [session('a', { displayName: 'Alpha' })];
+      vi.useFakeTimers();
+      try {
+        render();
+        const title = titleTrigger(rows()[0]!);
+        await act(async () => {
+          title.dispatchEvent(new Event('pointerover', { bubbles: true }));
+          vi.advanceTimersByTime(300);
+        });
+        expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+        await act(async () => {
+          title.dispatchEvent(new Event('pointerout', { bubbles: true }));
+          vi.advanceTimersByTime(50);
+          click(rowActionButton(rows()[0]!, 'Rename'));
+        });
+        const input = container!.querySelector<HTMLInputElement>(
+          'input[aria-label="Rename: Alpha"]',
+        )!;
+        expect(input).not.toBeNull();
+        expect(document.querySelector('[role="dialog"]')).toBeNull();
+        await act(async () => {
+          if (dismissal === 'blur') input.blur();
+          else
+            input.dispatchEvent(
+              new KeyboardEvent('keydown', {
+                key: 'Escape',
+                bubbles: true,
+              }),
+            );
+        });
+        await act(async () => vi.advanceTimersByTime(300));
+        expect(
+          container!.querySelector('input[aria-label="Rename: Alpha"]'),
+        ).toBeNull();
+        expect(document.querySelector('[role="dialog"]')).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(['details', 'rename'])(
+    'preserves %s when a catalog shrink clamps its still-visible row to the last page',
+    async (mode) => {
+      connectionState.sessionId = 's12';
+      window.localStorage.setItem(
+        'qwen-web-shell-session-overview-page-size',
+        '10',
+      );
+      sessionsState.sessions = Array.from({ length: 15 }, (_, i) =>
+        session(`s${i}`, { displayName: `Session ${i}` }),
+      );
+      render();
+      act(() => click(footerButton('Next')!));
+      const row = rows().find(
+        (entry) => titleTrigger(entry).textContent === 'Session 12',
+      )!;
+      await act(async () =>
+        click(
+          rowActionButton(
+            row,
+            mode === 'details' ? 'Details for Session 12' : 'Rename',
+          ),
+        ),
+      );
+      if (mode === 'rename')
+        act(() =>
+          setInputValue(
+            container!.querySelector<HTMLInputElement>(
+              'input[aria-label="Rename: Session 12"]',
+            )!,
+            'Preserved draft',
+          ),
+        );
+      sessionsState.sessions = sessionsState.sessions.slice(5);
+      rerender();
+      await flushAsync();
+      expect(container!.textContent).toContain('Page 1 of 1');
+      if (mode === 'details') {
+        expect(rowTitles()).toContain('Session 12');
+        expect(
+          document.querySelector('[role="dialog"]')?.getAttribute('aria-label'),
+        ).toBe('Session 12');
+      } else {
+        expect(
+          container!.querySelector<HTMLInputElement>(
+            'input[aria-label="Rename: Session 12"]',
+          )?.value,
+        ).toBe('Preserved draft');
+      }
+    },
+  );
+
+  it.each(['filter', 'page'])(
+    'cancels an invisible rename after a live update changes its %s',
+    async (mode) => {
+      connectionState.sessionId = 'target';
+      window.localStorage.setItem(
+        'qwen-web-shell-session-overview-page-size',
+        '10',
+      );
+      const target = session('target', {
+        displayName: 'Target',
+        isWaitingForPermission: true,
+      });
+      sessionsState.sessions = [
+        session('question', {
+          displayName: 'Question',
+          isWaitingForUserQuestion: true,
+        }),
+        ...Array.from({ length: 9 }, (_, i) => session(`idle-${i}`)),
+        target,
+      ];
+      render();
+      if (mode === 'filter')
+        act(() => click(statusFilterButton('Needs attention')));
+      const row = rows().find(
+        (entry) => titleTrigger(entry).textContent === 'Target',
+      )!;
+      act(() => click(rowActionButton(row, 'Rename')));
+      act(() =>
+        setInputValue(
+          container!.querySelector<HTMLInputElement>(
+            'input[aria-label="Rename: Target"]',
+          )!,
+          'Hidden draft',
+        ),
+      );
+      sessionsState.sessions = sessionsState.sessions.map((entry) =>
+        entry.sessionId === 'target'
+          ? { ...entry, isWaitingForPermission: false }
+          : entry,
+      );
+      rerender();
+      await flushAsync();
+      expect(
+        container!.querySelector('input[aria-label="Rename: Target"]'),
+      ).toBeNull();
+      const cell = rows()[0]!.querySelectorAll('td')[2]!;
+      const mouseDown = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      });
+      act(() => cell.dispatchEvent(mouseDown));
+      expect(mouseDown.defaultPrevented).toBe(false);
+      act(() => click(cell));
+      expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+        'question',
+        '/w',
+        undefined,
+      );
+      sessionsState.sessions = sessionsState.sessions.map((entry) =>
+        entry.sessionId === 'target' ? target : entry,
+      );
+      rerender();
+      await flushAsync();
+      expect(rowTitles()).toContain('Target');
+      expect(
+        container!.querySelector('input[aria-label="Rename: Target"]'),
+      ).toBeNull();
+      expect(workspaceActions.renameSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['filter', 'page'])(
+    'closes details when live state removes its anchor through a %s',
+    async (mode) => {
+      window.localStorage.setItem(
+        'qwen-web-shell-session-overview-page-size',
+        '10',
+      );
+      const target = session('target', {
+        displayName: 'Target',
+        isWaitingForPermission: true,
+      });
+      sessionsState.sessions = [
+        ...Array.from({ length: 10 }, (_, i) =>
+          session(`idle-${i}`, { displayName: `Idle ${i}` }),
+        ),
+        target,
+      ];
+      render();
+      if (mode === 'filter')
+        act(() => click(statusFilterButton('Needs attention')));
+      const row = rows().find((candidate) =>
+        candidate.textContent?.includes('Target'),
+      )!;
+      await act(async () => click(rowActionButton(row, 'Details for Target')));
+      const dialog = document.querySelector('[role="dialog"]');
+      expect(dialog).not.toBeNull();
+      expect(dialog!.contains(document.activeElement)).toBe(true);
+      sessionsState.sessions = sessionsState.sessions.map((entry) =>
+        entry.sessionId === 'target'
+          ? { ...entry, isWaitingForPermission: false }
+          : entry,
+      );
+      rerender();
+      await flushAsync();
+      expect(rowTitles()).not.toContain('Target');
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      // The pinned popover held focus when its row left; the handoff must
+      // land on the panel, not <body> or a detached node.
+      expect(document.activeElement).toBe(
+        container!.querySelector('[data-web-shell-session-panel]'),
+      );
+      sessionsState.sessions = sessionsState.sessions.map((entry) =>
+        entry.sessionId === 'target' ? target : entry,
+      );
+      rerender();
+      await flushAsync();
+      expect(rowTitles()).toContain('Target');
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+    },
+  );
 
   it('keeps the title keyboard-focusable for opening a session', () => {
     sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
@@ -587,87 +1267,141 @@ describe('SessionOverviewPanel', () => {
     const title = titleTrigger(rows()[0]!);
     expect(title.tagName).toBe('BUTTON');
     act(() => click(title));
-    expect(onOpenSession).toHaveBeenCalledWith('s-run', '/w');
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      's-run',
+      '/w',
+      undefined,
+    );
     expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
       'unchecked',
     );
   });
 
-  it('shows the full title in a tooltip on hover', async () => {
+  it('shows full session details on title hover including compatibility approval state', async () => {
     sessionsState.sessions = [
-      session('s1', { displayName: 'A long session title' }),
+      session('session-details', {
+        displayName: 'A long session title',
+        workspaceCwd: '/workspace/long/path',
+        branch: { name: 'feature/details', baseBranch: 'main' },
+        prs: [
+          {
+            number: 123,
+            url: 'https://github.com/o/r/pull/123',
+            issues: [
+              {
+                number: 45,
+                url: 'https://github.com/o/r/issues/45',
+                state: 'open',
+              },
+            ],
+          },
+        ],
+      }),
     ];
+    statusState.report = {
+      full: {
+        sessions: [
+          statusSession('session-details', {
+            workspaceCwd: '/workspace/long/path',
+            pendingPermissionCount: 1,
+          }),
+        ],
+      },
+    };
     vi.useFakeTimers();
     try {
       render();
       await act(async () => {
         titleTrigger(rows()[0]!).dispatchEvent(
-          new Event('pointermove', { bubbles: true }),
+          new Event('pointerover', { bubbles: true }),
         );
-        vi.advanceTimersByTime(300);
-        await Promise.resolve();
+        vi.advanceTimersByTime(299);
       });
-      expect(
-        document.querySelector('[data-slot="tooltip-content"]')?.textContent,
-      ).toContain('A long session title');
-      expect(
-        document
-          .querySelector('[data-slot="tooltip-arrow"]')
-          ?.getAttribute('viewBox'),
-      ).toBe('0 0 30 10');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('shows the full session id in a tooltip on hover', async () => {
-    sessionsState.sessions = [session('session-id-for-tooltip')];
-    vi.useFakeTimers();
-    try {
-      render();
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
       await act(async () => {
-        rows()[0]!
-          .querySelector('[data-web-shell-session-id]')!
-          .dispatchEvent(new Event('pointermove', { bubbles: true }));
-        vi.advanceTimersByTime(300);
+        vi.advanceTimersByTime(1);
         await Promise.resolve();
       });
-      expect(
-        document.querySelector('[data-slot="tooltip-content"]')?.textContent,
-      ).toContain('session-id-for-tooltip');
-      expect(
-        rows()[0]!
-          .querySelector('[data-web-shell-session-id]')!
-          .className.includes('truncate'),
-      ).toBe(true);
+      const details = document.querySelector('[role="dialog"]');
+      for (const text of [
+        'A long session title',
+        '/workspace/long/path',
+        'feature/details',
+        'session-details',
+        'Pull Request #123',
+        'Issue #45',
+        'Needs approval',
+      ]) {
+        expect(details?.textContent).toContain(text);
+      }
+      expect(onOpenSession).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('shows the full workspace path in a tooltip on hover', async () => {
+  it('uses compatibility status reports for running details', async () => {
     sessionsState.sessions = [
-      session('s1', { workspaceCwd: '/workspace/with/a/long/path' }),
+      session('report-run', { displayName: 'Report run' }),
     ];
-    vi.useFakeTimers();
-    try {
-      render();
-      await act(async () => {
-        rows()[0]!
-          .querySelector('[data-web-shell-session-workspace]')!
-          .dispatchEvent(new Event('pointermove', { bubbles: true }));
-        vi.advanceTimersByTime(300);
-        await Promise.resolve();
-      });
-      expect(
-        document.querySelector('[data-slot="tooltip-content"]')?.textContent,
-      ).toContain('/workspace/with/a/long/path');
-    } finally {
-      vi.useRealTimers();
-    }
+    statusState.report = {
+      full: {
+        sessions: [statusSession('report-run', { hasActivePrompt: true })],
+      },
+    };
+    render();
+    await act(async () =>
+      click(rowActionButton(rows()[0]!, 'Details for Report run')),
+    );
+    expect(
+      rows()[0]!.querySelector('[data-web-shell-session-status]')?.textContent,
+    ).toBe('Running');
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain('Running');
+    expect(dialog?.textContent).not.toContain('Idle');
   });
 
-  it('shows worktree metadata in a column immediately after the title', () => {
+  it('keeps the session ID out of the table and offers a details button', async () => {
+    sessionsState.sessions = [
+      session('session-id-for-details', { displayName: 'Details' }),
+    ];
+    render();
+    expect(container!.querySelector('[data-web-shell-session-id]')).toBeNull();
+    expect(
+      Array.from(container!.querySelectorAll('thead th')).map(
+        (header) => header.textContent,
+      ),
+    ).not.toContain('Session ID');
+    await act(async () =>
+      click(rowActionButton(rows()[0]!, 'Details for Details')),
+    );
+    expect(
+      document.querySelector('[role="dialog"] [data-web-shell-session-id]')
+        ?.textContent,
+    ).toBe('session-id-for-details');
+    expect(onOpenSession).not.toHaveBeenCalled();
+    expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
+      'unchecked',
+    );
+  });
+
+  it('shows the full workspace path through the explicit details entry', async () => {
+    sessionsState.sessions = [
+      session('s1', {
+        displayName: 'One',
+        workspaceCwd: '/workspace/with/a/long/path',
+      }),
+    ];
+    render();
+    await act(async () =>
+      click(rowActionButton(rows()[0]!, 'Details for One')),
+    );
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      '/workspace/with/a/long/path',
+    );
+  });
+
+  it('keeps workspace, branch and PR together below the session title', () => {
     sessionsState.sessions = [
       session('s1', {
         displayName: 'One',
@@ -686,100 +1420,80 @@ describe('SessionOverviewPanel', () => {
     ];
     render();
     const headers = Array.from(container!.querySelectorAll('thead th'));
-    expect(headers[1]?.textContent).toBe('Title');
-    expect(headers[2]?.textContent).toBe('Worktree');
-    expect(headers[3]?.textContent).toBe('Session ID');
+    expect(headers.map((header) => header.textContent)).toEqual([
+      '',
+      'Title',
+      'Status',
+      'Time',
+      'Actions',
+    ]);
+    const titleCell = titleTrigger(rows()[0]!).closest('td');
     expect(
-      rows()[0]?.querySelector('[data-web-shell-session-git]')?.textContent,
+      titleCell?.querySelector('[data-web-shell-session-git]')?.textContent,
     ).toBe('feature/a-very-long-branch-name');
     expect(
-      rows()[0]?.querySelector('[data-web-shell-session-git] svg'),
-    ).toBeNull();
-    const gitCell = rows()[0]
-      ?.querySelector('[data-web-shell-session-git]')
-      ?.closest('td');
-    const worktree = rows()[0]?.querySelector('[data-web-shell-session-git]');
-    expect(worktree?.className).toContain('min-w-0');
-    expect(worktree?.className).toContain('flex-1');
-    expect(worktree?.className).toContain('truncate');
-    expect(gitCell?.querySelector('a')?.textContent).toBe('#123 +2');
+      titleCell?.querySelector('[data-web-shell-session-workspace]')
+        ?.textContent,
+    ).toBe('w');
     expect(
-      rows()[0]
-        ?.querySelector('[data-web-shell-session-title]')
-        ?.closest('td')
-        ?.querySelector('a'),
-    ).toBeNull();
+      titleCell
+        ?.querySelector('[data-web-shell-session-workspace]')
+        ?.getAttribute('title'),
+    ).toBe('/w');
     expect(
-      rows()[1]?.querySelector('[data-web-shell-session-git]')?.textContent,
-    ).toBe('-');
-  });
-
-  it('shows the sidebar details popover from the worktree column', async () => {
-    vi.useFakeTimers();
-    try {
-      sessionsState.sessions = [
-        session('session-details', {
-          displayName: 'Detailed session',
-          workspaceCwd: '/work/qwen-code',
-          updatedAt: '2026-08-26T09:00:00.000Z',
-          clientCount: 2,
-          worktree: {
-            slug: 'details',
-            path: '/work/qwen-code/.worktrees/details',
-            branch: 'worktree/details',
-          },
-          prs: [
-            { number: 121, url: 'https://github.com/o/r/pull/121' },
-            { number: 123, url: 'https://github.com/o/r/pull/123' },
-          ],
-        }),
-      ];
-      render();
-      const trigger = container!
-        .querySelector('[data-web-shell-session-git]')!
-        .closest('div')!;
-      await act(async () => {
-        trigger.dispatchEvent(new Event('pointerover', { bubbles: true }));
-        vi.advanceTimersByTime(300);
-        await Promise.resolve();
-      });
-
-      const details = document.querySelector('[role="dialog"]');
-      expect(details?.getAttribute('data-align')).toBe('center');
-      expect(details?.textContent).toContain('worktree/details');
-      expect(details?.textContent).toContain('Pull Request #123');
-      expect(details?.textContent).toContain('Pull Request #121');
-      expect(details?.textContent).not.toContain('Detailed session');
-      expect(details?.textContent).not.toContain('qwen-code');
-      expect(details?.textContent).not.toContain('session-details');
-      expect(details?.textContent).not.toContain('2 client(s)');
-      expect(
-        details?.querySelectorAll('a[href*="/pull/"]')[0]?.getAttribute('href'),
-      ).toBe('https://github.com/o/r/pull/123');
-    } finally {
-      vi.useRealTimers();
+      titleCell
+        ?.querySelector('[data-web-shell-session-git]')
+        ?.getAttribute('title'),
+    ).toBe('feature/a-very-long-branch-name');
+    expect(titleCell?.querySelector('a')?.textContent).toBe('#123 +2');
+    for (const selector of [
+      '[data-web-shell-session-git]',
+      '[data-web-shell-session-workspace]',
+    ]) {
+      expect(titleCell?.querySelector(selector)?.className).toContain(
+        'truncate',
+      );
     }
+    expect(rows()[1]?.querySelector('[data-web-shell-session-git]')).toBeNull();
   });
 
-  it('does not show an empty worktree popover', async () => {
-    vi.useFakeTimers();
-    try {
-      sessionsState.sessions = [session('no-worktree')];
-      render();
-      const trigger = container!.querySelector('[data-web-shell-session-git]')!;
-      await act(async () => {
-        trigger.dispatchEvent(new Event('pointerover', { bubbles: true }));
-        vi.advanceTimersByTime(300);
-        await Promise.resolve();
-      });
-
-      expect(document.querySelector('[role="dialog"]')).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
+  it('does not open the session when a PR badge is clicked', async () => {
+    sessionsState.sessions = [
+      session('s1', {
+        displayName: 'One',
+        prs: [{ number: 123, url: 'https://github.com/o/r/pull/123' }],
+      }),
+    ];
+    render();
+    const badge = rows()[0]!.querySelector('a')!;
+    await act(async () =>
+      badge.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      ),
+    );
+    expect(onOpenSession).not.toHaveBeenCalled();
+    expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
+      'unchecked',
+    );
   });
 
-  it('copies the session ID and restores the hover icon after two seconds', async () => {
+  it('provides details even when a session has no Git metadata', async () => {
+    sessionsState.sessions = [
+      session('no-worktree', { displayName: 'No worktree' }),
+    ];
+    render();
+    await act(async () =>
+      click(rowActionButton(rows()[0]!, 'Details for No worktree')),
+    );
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'no-worktree',
+    );
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'Idle',
+    );
+  });
+
+  it('copies the session ID from details without opening or selecting the row', async () => {
     vi.useFakeTimers();
     const writeText = vi.fn(async () => {});
     Object.defineProperty(navigator, 'clipboard', {
@@ -787,30 +1501,27 @@ describe('SessionOverviewPanel', () => {
       value: { writeText },
     });
     try {
-      sessionsState.sessions = [session('session-to-copy')];
+      sessionsState.sessions = [
+        session('session-to-copy', { displayName: 'Copy' }),
+      ];
       render();
-      const copy = container!.querySelector(
+      await act(async () =>
+        click(rowActionButton(rows()[0]!, 'Details for Copy')),
+      );
+      const copy = document.querySelector(
         '[data-web-shell-session-id-copy]',
       ) as HTMLButtonElement;
-      expect(copy.className).toContain('opacity-0');
-      expect(copy.className).toContain('group-hover:opacity-100');
-      expect(copy.querySelector('.lucide-copy')).not.toBeNull();
-
+      expect(copy.tabIndex).toBe(0);
       await act(async () => copy.click());
       expect(writeText).toHaveBeenCalledWith('session-to-copy');
       expect(copy.querySelector('.lucide-check')).not.toBeNull();
-      expect(copy.className).not.toContain('opacity-0');
+      expect(onOpenSession).not.toHaveBeenCalled();
       expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
         'unchecked',
       );
-
       act(() => vi.advanceTimersByTime(2000));
       expect(copy.querySelector('.lucide-copy')).not.toBeNull();
     } finally {
-      act(() => root?.unmount());
-      container?.remove();
-      root = null;
-      container = null;
       Reflect.deleteProperty(navigator, 'clipboard');
       vi.useRealTimers();
     }
@@ -833,7 +1544,11 @@ describe('SessionOverviewPanel', () => {
     await flushAsync();
     const beta = rows().find((tr) => tr.textContent?.includes('Beta'))!;
     act(() => click(titleTrigger(beta)));
-    expect(onOpenSession).toHaveBeenCalledWith('b1', '/wsB');
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      'b1',
+      '/wsB',
+      undefined,
+    );
   });
 
   it('keeps equal session ids in different workspaces independent', async () => {
@@ -883,24 +1598,25 @@ describe('SessionOverviewPanel', () => {
     expect(onCurrentSessionRemoved).not.toHaveBeenCalled();
   });
 
-  it('keeps footer actions visible and disables them until a row is selected', () => {
+  it('shows batch actions only while selected and keeps pagination available', () => {
     sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
     render({ onOpenSplit: vi.fn() });
-    expect(selectAllCheckbox()).not.toBeNull();
-    const actions = [
-      footerButton('Archive'),
-      footerButton('Delete'),
-      footerButton('Open in new tab'),
-      footerButton('Open in split'),
-    ] as HTMLButtonElement[];
-    expect(actions.every((button) => button.disabled)).toBe(true);
+    const labels = ['Archive', 'Delete', 'Open in new tab', 'Open in split'];
+    expect(labels.map(footerButton)).toEqual([null, null, null, null]);
+    expect(container!.textContent).toContain('1 session(s)');
+    expect(footerButton('Next')).not.toBeNull();
     act(() => click(rowCheckbox(rows()[0]!)));
     expect(onOpenSession).not.toHaveBeenCalled();
     expect(container!.textContent).toContain('1 of 1 row(s) selected.');
-    const openInTab = footerButton('Open in new tab') as HTMLButtonElement;
-    expect(actions.every((button) => button.disabled)).toBe(false);
-    // The new-tab action is not the primary button style.
-    expect(openInTab.getAttribute('data-variant')).toBe('outline');
+    for (const label of labels) {
+      const button = footerButton(label);
+      expect(button).not.toBeNull();
+      expect(button!.disabled).toBe(false);
+    }
+    act(() => click(rowCheckbox(rows()[0]!)));
+    expect(labels.map(footerButton)).toEqual([null, null, null, null]);
+    expect(container!.textContent).toContain('1 session(s)');
+    expect(footerButton('Next')).not.toBeNull();
   });
 
   it('opens the selected sessions as a split in ONE new tab (?split=…)', () => {
@@ -1100,7 +1816,7 @@ describe('SessionOverviewPanel', () => {
     render();
 
     const search = container!.querySelector(
-      'input[aria-label="Search sessions…"]',
+      'input[aria-label="Search title, branch, PR or ID…"]',
     ) as HTMLInputElement;
     expect(search.parentElement?.className).toContain('w-full');
     expect(search.parentElement?.className).toContain('max-w-[300px]');
@@ -1165,7 +1881,7 @@ describe('SessionOverviewPanel', () => {
     expect(rows()).toHaveLength(50);
     act(() => click(selectAllCheckbox()));
     expect(container!.textContent).toContain('60 of 60 row(s) selected.');
-  });
+  }, 15000);
 
   it('lists an other-workspace session as a row with its folder', async () => {
     connectionState.capabilities = {
@@ -1201,7 +1917,7 @@ describe('SessionOverviewPanel', () => {
       primary.querySelector('[data-web-shell-session-workspace]')?.textContent,
     ).toBe('w');
     expect(
-      container!.querySelector('button[aria-label="Filter by workspace"]'),
+      container!.querySelector('button[aria-label^="Filter by workspace:"]'),
     ).not.toBeNull();
   });
 
@@ -1219,7 +1935,7 @@ describe('SessionOverviewPanel', () => {
     ];
     render();
     const input = container!.querySelector(
-      '[aria-label="Search sessions…"]',
+      '[aria-label="Search title, branch, PR or ID…"]',
     ) as HTMLInputElement;
     act(() => {
       setInputValue(input, 'Alpha');
@@ -1263,9 +1979,11 @@ describe('SessionOverviewPanel', () => {
     expect(rowTitles()).toContain('Alpha');
     expect(rowTitles()).toContain('Beta');
     const trigger = container!.querySelector(
-      'button[aria-label="Filter by workspace"]',
+      'button[aria-label^="Filter by workspace:"]',
     ) as HTMLElement;
-    expect(trigger.closest('th')?.textContent).toContain('Workspace');
+    expect(trigger.closest('th')).toBeNull();
+    expect(trigger.textContent).toContain('All workspaces');
+    expect(trigger.getAttribute('aria-label')).toContain(trigger.textContent);
     expect(trigger.querySelector('.lucide-funnel')).not.toBeNull();
     act(() => click(trigger));
     const filterPanel = document.querySelector(
@@ -1281,6 +1999,8 @@ describe('SessionOverviewPanel', () => {
     ) as HTMLElement;
     act(() => click(main));
     expect(rowTitles()).toEqual(['Beta']);
+    expect(trigger.textContent).toContain('1/2 workspaces');
+    expect(trigger.getAttribute('aria-label')).toContain(trigger.textContent);
 
     const payments = document.querySelector(
       '#session-overview-workspace-1',
@@ -1290,7 +2010,7 @@ describe('SessionOverviewPanel', () => {
       container!.querySelector('[data-slot="data-table-empty"]')?.textContent,
     ).toContain('No data');
     expect(
-      container!.querySelector('button[aria-label="Filter by workspace"]'),
+      container!.querySelector('button[aria-label^="Filter by workspace:"]'),
     ).not.toBeNull();
 
     const all = document.querySelector(
@@ -1323,7 +2043,7 @@ describe('SessionOverviewPanel', () => {
       ),
     );
     expect(
-      container!.querySelector('button[aria-label="Filter by workspace"]'),
+      container!.querySelector('button[aria-label^="Filter by workspace:"]'),
     ).toBeNull();
   });
 
@@ -1344,7 +2064,7 @@ describe('SessionOverviewPanel', () => {
     await flushAsync();
     // Exclude /wsB through the funnel filter.
     const trigger = container!.querySelector(
-      'button[aria-label="Filter by workspace"]',
+      'button[aria-label^="Filter by workspace:"]',
     ) as HTMLElement;
     act(() => click(trigger));
     const payments = document.querySelector(
@@ -1371,7 +2091,7 @@ describe('SessionOverviewPanel', () => {
     );
     await flushAsync();
     expect(
-      container!.querySelector('button[aria-label="Filter by workspace"]'),
+      container!.querySelector('button[aria-label^="Filter by workspace:"]'),
     ).toBeNull();
     expect(rowTitles()).toEqual(['Beta']);
   });
@@ -1393,7 +2113,7 @@ describe('SessionOverviewPanel', () => {
     await flushAsync();
     // Exclude the primary workspace through the funnel filter.
     const trigger = container!.querySelector(
-      'button[aria-label="Filter by workspace"]',
+      'button[aria-label^="Filter by workspace:"]',
     ) as HTMLElement;
     act(() => click(trigger));
     const main = document.querySelector(
@@ -1417,7 +2137,7 @@ describe('SessionOverviewPanel', () => {
     rerender();
     await flushAsync();
     expect(
-      container!.querySelector('button[aria-label="Filter by workspace"]'),
+      container!.querySelector('button[aria-label^="Filter by workspace:"]'),
     ).toBeNull();
     expect(rowTitles()).toEqual(['Alpha']);
   });
@@ -1474,41 +2194,32 @@ describe('SessionOverviewPanel', () => {
       '[data-slot="table"]',
     ) as HTMLTableElement;
     expect(renderedTable.dataset.layout).toBe('scroll');
-    expect(renderedTable.style.minWidth).toBe('912px');
+    expect(renderedTable.style.minWidth).toBe('720px');
     expect(renderedTable.style.tableLayout).toBe('fixed');
     expect(renderedTable.querySelectorAll('col')).toHaveLength(headers.length);
     expect(
       (renderedTable.querySelectorAll('col')[1] as HTMLTableColElement).style
         .width,
-    ).toBe('224px');
+    ).toBe('260px');
     expect(headers.at(-1)?.textContent).toContain('Actions');
     expect(headers.at(-1)?.className).toContain('text-center');
-    expect((headers.at(-1) as HTMLElement).style.width).toBe('128px');
-    expect((cells.at(-1) as HTMLElement).style.width).toBe('128px');
+    expect((headers.at(-1) as HTMLElement).style.width).toBe('180px');
+    expect((cells.at(-1) as HTMLElement).style.width).toBe('180px');
     expect(cells.at(-1)?.firstElementChild?.className).toContain(
       'justify-center',
     );
     const timeHeader = headers.find((header) =>
       header.textContent?.includes('Time'),
     );
-    const sessionIdHeader = headers.find((header) =>
-      header.textContent?.includes('Session ID'),
+    expect(headers.some((header) => header.textContent === 'Session ID')).toBe(
+      false,
     );
-    const gitHeader = headers.find(
-      (header) => header.textContent === 'Worktree',
+    expect(headers.some((header) => header.textContent === 'Worktree')).toBe(
+      false,
     );
-    const workspaceHeader = headers.find((header) =>
-      header.textContent?.includes('Workspace'),
-    );
-    const sessionIdColumnIndex = headers.indexOf(sessionIdHeader!);
-    expect((gitHeader as HTMLElement).style.width).toBe('144px');
+    expect((headers[2] as HTMLElement).style.width).toBe('144px');
     expect(cells[2]?.firstElementChild?.className).toContain('truncate');
-    expect((sessionIdHeader as HTMLElement).style.width).toBe('136px');
-    expect((cells[sessionIdColumnIndex] as HTMLElement).style.width).toBe(
-      '136px',
-    );
-    expect((workspaceHeader as HTMLElement).style.width).toBe('128px');
-    expect((timeHeader as HTMLElement).style.width).toBe('112px');
+    expect((timeHeader as HTMLElement).style.width).toBe('96px');
     const timeSortButton = timeHeader?.querySelector('button');
     expect(timeSortButton?.className).toContain('px-0');
     expect(timeSortButton?.className).toContain('text-sm');
@@ -1521,7 +2232,7 @@ describe('SessionOverviewPanel', () => {
     expect((headers[0] as HTMLElement).style.width).toBe('40px');
     expect(headers[1]?.className).toContain('sticky');
     expect((headers[1] as HTMLElement).style.left).toBe('40px');
-    expect((headers[1] as HTMLElement).style.width).toBe('224px');
+    expect((headers[1] as HTMLElement).style.width).toBe('260px');
     expect(headers.at(-1)?.className).toContain('sticky');
     expect((headers.at(-1) as HTMLElement).style.right).toBe('0px');
     expect(cells[0]?.className).toContain('sticky');
@@ -1529,14 +2240,10 @@ describe('SessionOverviewPanel', () => {
     expect((cells[0] as HTMLElement).style.width).toBe('40px');
     expect(cells[1]?.className).toContain('sticky');
     expect((cells[1] as HTMLElement).style.left).toBe('40px');
-    expect((cells[1] as HTMLElement).style.width).toBe('224px');
+    expect((cells[1] as HTMLElement).style.width).toBe('260px');
     expect(titleTrigger(rows()[0]!).closest('.truncate')).not.toBeNull();
-    expect(titleTrigger(rows()[0]!).className).toContain('text-xs');
+    expect(titleTrigger(rows()[0]!).className).toContain('text-sm');
     expect(cells[1]?.querySelector('.font-semibold')).not.toBeNull();
-    for (const cell of cells.slice(2, 6)) {
-      expect(cell.querySelector('.text-muted-foreground')).toBeNull();
-      expect(cell.querySelector('.text-current')).not.toBeNull();
-    }
     expect(cells.at(-1)?.className).toContain('sticky');
     expect((cells.at(-1) as HTMLElement).style.right).toBe('0px');
     expect(headers.at(-1)?.className).not.toContain('border-l');
@@ -1590,9 +2297,9 @@ describe('SessionOverviewPanel', () => {
       expect(table.style.tableLayout).toBe('fixed');
       expect(
         parseFloat((headers[1] as HTMLElement).style.width),
-      ).toBeGreaterThan(224);
-      expect((headers[1] as HTMLElement).style.minWidth).toBe('224px');
-      expect((headers.at(-1) as HTMLElement).style.width).toBe('128px');
+      ).toBeGreaterThan(260);
+      expect((headers[1] as HTMLElement).style.minWidth).toBe('260px');
+      expect((headers.at(-1) as HTMLElement).style.width).toBe('180px');
       const columnWidth = Array.from(table.querySelectorAll('col')).reduce(
         (total, column) => total + parseFloat(column.style.width),
         0,
@@ -2032,6 +2739,158 @@ describe('SessionOverviewPanel', () => {
     expect(workspaceClient.deleteSessionsData).toHaveBeenCalledWith(['s1']);
   });
 
+  it.each(['removed', 'notFound'] as const)(
+    'cleans up a %s background session using the owner captured before deletion',
+    async (outcome) => {
+      sessionsState.sessions = [session('background', { displayName: 'Old' })];
+      const deleted = vi.fn();
+      const capture = vi.fn(() => deleted);
+      generatedUiOwner = deletionOwner(capture);
+      const result = {
+        removed: outcome === 'removed' ? ['background'] : [],
+        notFound: outcome === 'notFound' ? ['background'] : [],
+        errors: [],
+      };
+      let resolveDeletion!: (value: typeof result) => void;
+      workspaceClient.deleteSessionsData.mockImplementationOnce(
+        () =>
+          new Promise<typeof result>((resolve) => {
+            resolveDeletion = resolve;
+          }),
+      );
+      render();
+      act(() => click(rowActionButton(rows()[0]!, 'Delete')));
+      expect(capture).not.toHaveBeenCalled();
+      act(() =>
+        click(
+          document.querySelector<HTMLElement>(
+            '[data-slot="alert-dialog-action"]',
+          )!,
+        ),
+      );
+      expect(workspaceClient.deleteSessionsData).toHaveBeenCalledWith([
+        'background',
+      ]);
+      expect(capture).toHaveBeenCalledExactlyOnceWith('/w');
+      expect(capture.mock.invocationCallOrder[0]).toBeLessThan(
+        workspaceClient.deleteSessionsData.mock.invocationCallOrder[0]!,
+      );
+      expect(deleted).not.toHaveBeenCalled();
+
+      const nextDeleted = vi.fn();
+      const nextCapture = vi.fn(() => nextDeleted);
+      generatedUiOwner = {
+        ...deletionOwner(nextCapture),
+        scopeId: 'replacement-owner',
+        workspaceCwd: '/replacement',
+      };
+      rerender();
+      await act(async () => resolveDeletion(result));
+      await flushAsync();
+
+      expect(deleted).toHaveBeenCalledExactlyOnceWith(['background']);
+      expect(nextCapture).not.toHaveBeenCalled();
+      expect(nextDeleted).not.toHaveBeenCalled();
+    },
+  );
+
+  it('cleans up only confirmed batch deletions in each owning workspace', async () => {
+    connectionState.capabilities = {
+      features: ['session_archive', 'workspace_qualified_rest_core'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    sessionsState.sessions = [
+      session('same', { displayName: 'Primary same' }),
+      session('missing', { displayName: 'Primary missing' }),
+      session('failed', { displayName: 'Primary failed' }),
+    ];
+    otherWorkspaceSessions['/wsB'] = [
+      session('same', { workspaceCwd: '/wsB', displayName: 'Secondary same' }),
+      session('other', {
+        workspaceCwd: '/wsB',
+        displayName: 'Secondary other',
+      }),
+    ];
+    const primaryDeleted = vi.fn();
+    const secondaryDeleted = vi.fn();
+    const capture = vi.fn((cwd: string | undefined) =>
+      cwd === '/w' ? primaryDeleted : secondaryDeleted,
+    );
+    generatedUiOwner = deletionOwner(capture);
+    workspaceClient.deleteSessionsData.mockResolvedValueOnce({
+      removed: ['same'],
+      notFound: ['missing'],
+      errors: [{ sessionId: 'failed', error: 'primary locked' }],
+    });
+    const qualified = workspaceClient.workspaceByCwd('/wsB');
+    qualified.deleteSessionsData.mockResolvedValueOnce({
+      removed: ['other'],
+      notFound: [],
+      errors: [{ sessionId: 'same', error: 'secondary locked' }],
+    });
+    workspaceClient.workspaceByCwd.mockReturnValue(qualified);
+
+    render();
+    await flushAsync();
+    expect(rows()).toHaveLength(5);
+    act(() => click(selectAllCheckbox()));
+    act(() => click(footerButton('Delete')!));
+    act(() =>
+      click(
+        document.querySelector<HTMLElement>(
+          '[data-slot="alert-dialog-action"]',
+        )!,
+      ),
+    );
+    await flushAsync();
+
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledWith([
+      'same',
+      'missing',
+      'failed',
+    ]);
+    expect(qualified.deleteSessionsData).toHaveBeenCalledWith([
+      'same',
+      'other',
+    ]);
+    expect(capture.mock.calls).toEqual([['/w'], ['/wsB']]);
+    expect(primaryDeleted).toHaveBeenCalledExactlyOnceWith(['same', 'missing']);
+    expect(secondaryDeleted).toHaveBeenCalledExactlyOnceWith(['other']);
+    expect(container!.textContent).toContain(
+      'Failed to delete session: primary locked',
+    );
+  });
+
+  it('keeps retained sessions when the overview delete request rejects', async () => {
+    sessionsState.sessions = [session('background', { displayName: 'Old' })];
+    const deleted = vi.fn();
+    const capture = vi.fn(() => deleted);
+    generatedUiOwner = deletionOwner(capture);
+    workspaceClient.deleteSessionsData.mockRejectedValueOnce(
+      new Error('daemon unavailable'),
+    );
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Delete')));
+    act(() =>
+      click(
+        document.querySelector<HTMLElement>(
+          '[data-slot="alert-dialog-action"]',
+        )!,
+      ),
+    );
+    await flushAsync();
+
+    expect(capture).toHaveBeenCalledExactlyOnceWith('/w');
+    expect(deleted).not.toHaveBeenCalled();
+    expect(container!.textContent).toContain(
+      'Failed to delete session: daemon unavailable',
+    );
+  });
+
   it('batch-archives the selected sessions', async () => {
     workspaceClient.archiveSessionsData.mockResolvedValueOnce({
       archived: ['a'],
@@ -2058,6 +2917,34 @@ describe('SessionOverviewPanel', () => {
       'b',
     ]);
     expect(container!.textContent).not.toContain('Failed to archive session');
+  });
+
+  it('splits archive batches at the route limit when more than 100 sessions are selected', async () => {
+    const many = Array.from({ length: 101 }, (_, index) =>
+      session(`bulk-${index}`, { displayName: `Bulk ${index}` }),
+    );
+    sessionsState.sessions = many;
+    render();
+    await flushAsync();
+
+    act(() => click(selectAllCheckbox()));
+    act(() => click(footerButton('Archive')!));
+    expect(document.body.textContent).toContain('Archive 101 sessions?');
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+
+    expect(workspaceClient.archiveSessionsData).toHaveBeenCalledTimes(2);
+    expect(workspaceClient.archiveSessionsData).toHaveBeenNthCalledWith(
+      1,
+      many.slice(0, 100).map((item) => item.sessionId),
+    );
+    expect(workspaceClient.archiveSessionsData).toHaveBeenNthCalledWith(
+      2,
+      many.slice(100).map((item) => item.sessionId),
+    );
   });
 
   it('disables row actions while a batch mutation is running', async () => {
@@ -2140,6 +3027,361 @@ describe('SessionOverviewPanel', () => {
     expect(container!.textContent).not.toContain('Failed to delete session');
   });
 
+  it.each([
+    { count: 100, batchSizes: [100] },
+    { count: 101, batchSizes: [100, 1] },
+    { count: 201, batchSizes: [100, 100, 1] },
+  ])(
+    'keeps delete requests within the route limit for $count selected sessions',
+    async ({ count, batchSizes }) => {
+      const many = Array.from({ length: count }, (_, index) =>
+        session(`bulk-${index}`, { displayName: `Bulk ${index}` }),
+      );
+      sessionsState.sessions = many;
+      const invalidators = batchSizes.map(() => vi.fn());
+      const capture = vi.fn();
+      for (const invalidate of invalidators) {
+        capture.mockReturnValueOnce(invalidate);
+      }
+      generatedUiOwner = deletionOwner(capture);
+      const completeBatches: Array<() => void> = [];
+      workspaceClient.deleteSessionsData.mockImplementation(
+        async (ids: string[]) => {
+          if (ids.length > 100) throw new Error('max 100 session IDs');
+          await new Promise<void>((resolve) => completeBatches.push(resolve));
+          return { removed: ids, notFound: [], errors: [] };
+        },
+      );
+      render();
+      act(() => click(selectAllCheckbox()));
+      act(() => click(footerButton('Delete')!));
+      expect(document.body.textContent).toContain(`Delete ${count} sessions?`);
+      const confirm = document.querySelector(
+        '[data-slot="alert-dialog-action"]',
+      ) as HTMLElement;
+      act(() => click(confirm));
+      await flushAsync();
+
+      for (let index = 0; index < batchSizes.length; index += 1) {
+        expect(workspaceClient.deleteSessionsData).toHaveBeenCalledTimes(
+          index + 1,
+        );
+        expect(completeBatches).toHaveLength(index + 1);
+        expect(capture).toHaveBeenCalledTimes(index + 1);
+        expect(capture).toHaveBeenNthCalledWith(index + 1, '/w');
+        expect(capture.mock.invocationCallOrder[index]).toBeLessThan(
+          workspaceClient.deleteSessionsData.mock.invocationCallOrder[index]!,
+        );
+        expect(invalidators[index]).not.toHaveBeenCalled();
+        await act(async () => completeBatches[index]!());
+        await flushAsync();
+        expect(invalidators[index]).toHaveBeenCalledExactlyOnceWith(
+          many
+            .slice(index * 100, (index + 1) * 100)
+            .map((item) => item.sessionId),
+        );
+      }
+      for (const invalidate of invalidators) {
+        expect(invalidate).toHaveBeenCalledOnce();
+      }
+
+      const batches = workspaceClient.deleteSessionsData.mock.calls.map(
+        ([ids]) => ids as string[],
+      );
+      expect(batches.map((ids) => ids.length)).toEqual(batchSizes);
+      expect(batches.flat()).toEqual(many.map((item) => item.sessionId));
+      expect(container!.textContent).not.toContain('Failed to delete session');
+      expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledOnce();
+      expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+        '/w',
+      );
+    },
+  );
+
+  it('splits qualified delete batches without mixing workspace scopes', async () => {
+    connectionState.capabilities = {
+      features: ['workspace_qualified_rest_core'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    sessionsState.sessions = [session('primary')];
+    const many = Array.from({ length: 101 }, (_, index) =>
+      session(`secondary-${index}`, { workspaceCwd: '/wsB' }),
+    );
+    otherWorkspaceSessions['/wsB'] = many;
+    const qualified = workspaceClient.workspaceByCwd('/wsB');
+    workspaceClient.workspaceByCwd.mockReturnValue(qualified);
+    render();
+    await flushAsync();
+    act(() => click(selectAllCheckbox()));
+    act(() => click(footerButton('Delete')!));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledOnce();
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledWith([
+      'primary',
+    ]);
+    expect(qualified.deleteSessionsData).toHaveBeenCalledTimes(2);
+    expect(qualified.deleteSessionsData).toHaveBeenNthCalledWith(
+      1,
+      many.slice(0, 100).map((item) => item.sessionId),
+    );
+    expect(qualified.deleteSessionsData).toHaveBeenNthCalledWith(2, [
+      many[100]!.sessionId,
+    ]);
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledTimes(2);
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/w',
+    );
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/wsB',
+    );
+  });
+
+  it.each(['request', 'per-session'])(
+    'retains cross-workspace delete failures when the first is %s',
+    async (firstFailure) => {
+      connectionState.capabilities = {
+        features: ['workspace_qualified_rest_core'],
+        workspaceCwd: '/w',
+        workspaces: [
+          { id: 'w0', cwd: '/w', primary: true, trusted: true },
+          { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+        ],
+      };
+      sessionsState.sessions = [
+        session('primary', { updatedAt: '2026-01-02T00:00:00.000Z' }),
+      ];
+      otherWorkspaceSessions['/wsB'] = [
+        session('secondary', {
+          workspaceCwd: '/wsB',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        }),
+      ];
+      const qualified = workspaceClient.workspaceByCwd('/wsB');
+      workspaceClient.workspaceByCwd.mockReturnValue(qualified);
+      let completePrimary!: () => void;
+      workspaceClient.deleteSessionsData.mockImplementationOnce(
+        () =>
+          new Promise((resolve, reject) => {
+            completePrimary = () => {
+              if (firstFailure === 'request') {
+                reject(new Error('request failed'));
+              } else {
+                resolve({
+                  removed: [],
+                  notFound: [],
+                  errors: [{ sessionId: 'primary', error: 'locked' }],
+                });
+              }
+            };
+          }),
+      );
+      if (firstFailure === 'request') {
+        qualified.deleteSessionsData.mockResolvedValueOnce({
+          removed: [],
+          notFound: [],
+          errors: [{ sessionId: 'secondary', error: 'locked' }],
+        });
+      } else {
+        qualified.deleteSessionsData.mockRejectedValueOnce(
+          new Error('request failed'),
+        );
+      }
+      render();
+      await flushAsync();
+      act(() => click(selectAllCheckbox()));
+      act(() => click(footerButton('Delete')!));
+      act(() =>
+        click(
+          document.querySelector(
+            '[data-slot="alert-dialog-action"]',
+          ) as HTMLElement,
+        ),
+      );
+      await flushAsync();
+      expect(workspaceClient.deleteSessionsData).toHaveBeenCalledOnce();
+      expect(workspaceClient.deleteSessionsData).toHaveBeenCalledWith([
+        'primary',
+      ]);
+      expect(qualified.deleteSessionsData).not.toHaveBeenCalled();
+      await act(async () => completePrimary());
+      await flushAsync();
+      expect(qualified.deleteSessionsData).toHaveBeenCalledOnce();
+      expect(qualified.deleteSessionsData).toHaveBeenCalledWith(['secondary']);
+      expect(container!.textContent).toContain('locked');
+      expect(container!.textContent).toContain('request failed');
+      expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+        '/w',
+      );
+      expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+        '/wsB',
+      );
+    },
+  );
+
+  it('reports distinct per-session failures from consecutive delete batches', async () => {
+    const many = Array.from({ length: 101 }, (_, index) =>
+      session(`review-${index}`),
+    );
+    sessionsState.sessions = many;
+    connectionState.sessionId = many[0]!.sessionId;
+    workspaceClient.deleteSessionsData
+      .mockResolvedValueOnce({
+        removed: many.slice(0, 98).map((item) => item.sessionId),
+        notFound: [],
+        errors: [
+          { sessionId: many[98]!.sessionId, error: 'locked' },
+          { sessionId: many[99]!.sessionId, error: 'permission denied' },
+        ],
+      })
+      .mockResolvedValueOnce({
+        removed: [],
+        notFound: [],
+        errors: [{ sessionId: many[100]!.sessionId, error: 'busy' }],
+      });
+    render({ onCurrentSessionRemoved });
+    act(() => click(selectAllCheckbox()));
+    act(() => click(footerButton('Delete')!));
+    act(() =>
+      click(
+        document.querySelector(
+          '[data-slot="alert-dialog-action"]',
+        ) as HTMLElement,
+      ),
+    );
+    await flushAsync();
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledTimes(2);
+    expect(workspaceClient.deleteSessionsData).toHaveBeenNthCalledWith(
+      1,
+      many.slice(0, 100).map((item) => item.sessionId),
+    );
+    expect(workspaceClient.deleteSessionsData).toHaveBeenNthCalledWith(2, [
+      many[100]!.sessionId,
+    ]);
+    expect(container!.textContent).toContain(
+      'Failed to delete session: locked; permission denied; busy',
+    );
+    expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
+    expect(onCurrentSessionRemoved).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: many[0]!.sessionId }),
+    );
+  });
+
+  it('keeps partial delete results and clears a current session removed in a later batch', async () => {
+    const many = Array.from({ length: 201 }, (_, index) =>
+      session(`bulk-${index}`, { displayName: `Bulk ${index}` }),
+    );
+    sessionsState.sessions = many;
+    connectionState.sessionId = many[200]!.sessionId;
+    workspaceClient.deleteSessionsData.mockResolvedValueOnce({
+      removed: many.slice(0, 98).map((item) => item.sessionId),
+      notFound: [many[98]!.sessionId],
+      errors: [{ sessionId: many[99]!.sessionId, error: 'locked' }],
+    });
+    render({ onCurrentSessionRemoved });
+    act(() => click(selectAllCheckbox()));
+    act(() => click(footerButton('Delete')!));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledTimes(3);
+    expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
+    expect(onCurrentSessionRemoved).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: many[200]!.sessionId }),
+    );
+    expect(container!.textContent).toContain(
+      'Failed to delete session: locked',
+    );
+    expect(sessionsReload).toHaveBeenCalled();
+  });
+
+  it('keeps a successful deletion when a later batch request fails', async () => {
+    const many = Array.from({ length: 101 }, (_, index) =>
+      session(`bulk-${index}`, { displayName: `Bulk ${index}` }),
+    );
+    sessionsState.sessions = many;
+    connectionState.sessionId = many[0]!.sessionId;
+    workspaceClient.deleteSessionsData
+      .mockResolvedValueOnce({
+        removed: many.slice(0, 100).map((item) => item.sessionId),
+        notFound: [],
+        errors: [],
+      })
+      .mockRejectedValueOnce(new Error('request failed'));
+    render({ onCurrentSessionRemoved });
+    act(() => click(selectAllCheckbox()));
+    act(() => click(footerButton('Delete')!));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledTimes(2);
+    expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
+    expect(container!.textContent).toContain(
+      'Failed to delete session: request failed',
+    );
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/w',
+    );
+    expect(sessionsReload).toHaveBeenCalled();
+  });
+
+  it('reports a later delete request failure after a per-session error', async () => {
+    const many = Array.from({ length: 201 }, (_, index) =>
+      session(`bulk-${index}`, { displayName: `Bulk ${index}` }),
+    );
+    sessionsState.sessions = many;
+    connectionState.sessionId = many[0]!.sessionId;
+    workspaceClient.deleteSessionsData
+      .mockResolvedValueOnce({
+        removed: many.slice(0, 99).map((item) => item.sessionId),
+        notFound: [],
+        errors: [{ sessionId: many[99]!.sessionId, error: 'locked' }],
+      })
+      .mockRejectedValueOnce(new Error('live_session_active'));
+    render({ onCurrentSessionRemoved });
+    act(() => click(selectAllCheckbox()));
+    act(() => click(footerButton('Delete')!));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledTimes(2);
+    expect(workspaceClient.deleteSessionsData).toHaveBeenNthCalledWith(
+      2,
+      many.slice(100, 200).map((item) => item.sessionId),
+    );
+    expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
+    expect(onCurrentSessionRemoved).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: many[0]!.sessionId }),
+    );
+    expect(container!.textContent).toContain(
+      'Failed to delete session: locked',
+    );
+    expect(container!.textContent).toContain('live_session_active');
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/w',
+    );
+  });
+
   it('clears a deleted current session after a partial batch failure', async () => {
     connectionState.sessionId = 'current';
     connectionState.capabilities = {
@@ -2210,7 +3452,7 @@ describe('SessionOverviewPanel', () => {
     ) as HTMLElement;
     act(() => click(confirm));
     await flushAsync();
-    expect(container!.textContent).toContain('Failed to create a new chat');
+    expect(container!.textContent).toContain('Failed to create a new session');
     expect(container!.textContent).not.toContain('Failed to delete session');
   });
 
@@ -2225,7 +3467,7 @@ describe('SessionOverviewPanel', () => {
     ) as HTMLElement;
     act(() => click(confirm));
     await flushAsync();
-    expect(container!.textContent).toContain('Failed to create a new chat');
+    expect(container!.textContent).toContain('Failed to create a new session');
     expect(container!.textContent).not.toContain('Failed to archive session');
   });
 
@@ -2445,6 +3687,339 @@ describe('SessionOverviewPanel', () => {
     );
   });
 
+  it('binds a PR to the current session through its own actions', async () => {
+    connectionState.sessionId = 's1';
+    connectionState.capabilities = { features: [], workspaceCwd: '/w' };
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    expect(input).not.toBeNull();
+    const url = 'https://github.com/QwenLM/qwen-code/pull/16865';
+    act(() => setInputValue(input, url));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    expect(workspaceActions.bindSessionPr).toHaveBeenCalledWith({
+      number: 16865,
+      url,
+    });
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/w',
+    );
+    expect(document.querySelector('input[aria-label="Bind PR"]')).toBeNull();
+  });
+
+  it('binds a PR number resolved through the workspace PR list', async () => {
+    connectionState.sessionId = 's1';
+    connectionState.capabilities = { features: [], workspaceCwd: '/w' };
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    const prUrl = 'https://github.com/QwenLM/qwen-code/pull/16865';
+    workspaceClient.workspaceByCwd.mockImplementation((cwd: string) => ({
+      listWorkspaceSessionsPage: vi.fn(async () => ({
+        sessions: otherWorkspaceSessions[cwd] ?? [],
+      })),
+      updateSessionMetadata: vi.fn(async () => ({})),
+      workspaceGitHubPullRequests: vi.fn(async () => ({
+        v: 1,
+        workspaceCwd: cwd,
+        available: true,
+        pullRequests: [{ number: 16865, url: prUrl, title: 'feat' }],
+      })),
+    }));
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    act(() => setInputValue(input, '16865'));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    // Pin the workspaceCwd the panel handed the bind dialog: the bare-number
+    // resolution fetches the PR list through that cwd, so routing the dialog
+    // at the wrong workspace would be caught here.
+    expect(workspaceClient.workspaceByCwd).toHaveBeenCalledWith('/w');
+    expect(workspaceActions.bindSessionPr).toHaveBeenCalledWith({
+      number: 16865,
+      url: prUrl,
+      state: 'open',
+    });
+  });
+
+  it('binds a PR to an other-workspace session through the qualified client', async () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_metadata', 'workspace_qualified_rest_core'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    sessionsState.sessions = [session('a', { displayName: 'Alpha' })];
+    otherWorkspaceSessions['/wsB'] = [
+      session('b1', { workspaceCwd: '/wsB', displayName: 'Beta' }),
+    ];
+    render();
+    await flushAsync();
+    const beta = rows().find((tr) => tr.textContent?.includes('Beta'))!;
+    act(() => click(rowActionButton(beta, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    const url = 'https://github.com/QwenLM/qwen-code/pull/42';
+    act(() => setInputValue(input, url));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    // Pin the cwd the qualified client was opened for, not just "the last
+    // object": routing through the primary workspace must be caught.
+    expect(workspaceClient.workspaceByCwd).toHaveBeenCalledWith('/wsB');
+    const qualified = workspaceClient.workspaceByCwd.mock.results.at(-1)!.value;
+    expect(qualified.updateSessionMetadata).toHaveBeenCalledWith('b1', {
+      pr: { number: 42, url },
+    });
+    expect(workspaceActions.bindSessionPr).not.toHaveBeenCalled();
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/wsB',
+    );
+  });
+
+  it('binds a legacy primary session without a workspace cwd through the top-level client', async () => {
+    connectionState.sessionId = 'current';
+    connectionState.workspaceCwd = '';
+    connectionState.capabilities = {
+      features: ['workspace_session_metadata'],
+      workspaceCwd: '',
+    };
+    sessionsState.sessions = [
+      session('legacy', { workspaceCwd: '', displayName: 'Legacy' }),
+    ];
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    const url = 'https://github.com/QwenLM/qwen-code/pull/7';
+    act(() => setInputValue(input, url));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    expect(workspaceClient.updateSessionMetadata).toHaveBeenCalledWith(
+      'legacy',
+      { pr: { number: 7, url } },
+    );
+    expect(workspaceActions.bindSessionPr).not.toHaveBeenCalled();
+  });
+
+  it('keeps the bind dialog open with an error when the bind fails', async () => {
+    connectionState.sessionId = 's1';
+    connectionState.capabilities = { features: [], workspaceCwd: '/w' };
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    workspaceActions.bindSessionPr.mockRejectedValue(new Error('locked'));
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    act(() =>
+      setInputValue(input, 'https://github.com/QwenLM/qwen-code/pull/1'),
+    );
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    expect(
+      document.querySelector('input[aria-label="Bind PR"]'),
+    ).not.toBeNull();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'Bind PR failed',
+    );
+  });
+
+  it('reports a late bind failure on the panel notice after the dialog is dismissed', async () => {
+    connectionState.sessionId = 's1';
+    connectionState.capabilities = { features: [], workspaceCwd: '/w' };
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    let rejectBind!: (err: Error) => void;
+    workspaceActions.bindSessionPr.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectBind = reject;
+        }),
+    );
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    act(() =>
+      setInputValue(input, 'https://github.com/QwenLM/qwen-code/pull/1'),
+    );
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    // Dismiss the dialog while the write is in flight.
+    const cancel = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.trim() === 'cancel');
+    act(() => click(cancel!));
+    await flushAsync();
+    expect(document.querySelector('input[aria-label="Bind PR"]')).toBeNull();
+    // The write now fails; with the dialog gone the panel notice is the only
+    // report path (the settle-time else arm), so it must carry the error.
+    await act(async () => {
+      rejectBind(new Error('locked'));
+    });
+    await flushAsync();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'Bind PR failed',
+    );
+  });
+
+  it('hides Bind PR on a non-current card when metadata mutation is unavailable', async () => {
+    connectionState.sessionId = 'someone-else';
+    connectionState.capabilities = { features: [], workspaceCwd: '/w' };
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('One'))!;
+    expect(rowActionButton(row, 'Bind PR')).toBeNull();
+  });
+
+  it('refuses number resolution for a cwd-less legacy card', async () => {
+    connectionState.sessionId = 'current';
+    connectionState.workspaceCwd = '';
+    connectionState.capabilities = {
+      features: ['workspace_session_metadata'],
+      workspaceCwd: '',
+    };
+    sessionsState.sessions = [
+      session('legacy', { workspaceCwd: '', displayName: 'Legacy' }),
+    ];
+    const prList = vi.fn(async () => ({
+      v: 1,
+      workspaceCwd: '',
+      available: true,
+      pullRequests: [],
+    }));
+    workspaceClient.workspaceByCwd.mockImplementation((cwd: string) => ({
+      listWorkspaceSessionsPage: vi.fn(async () => ({
+        sessions: otherWorkspaceSessions[cwd] ?? [],
+      })),
+      updateSessionMetadata: vi.fn(async () => ({})),
+      workspaceGitHubPullRequests: prList,
+    }));
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    act(() => setInputValue(input, '42'));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    // The card's own (empty) cwd is passed to the dialog, so it refuses the
+    // lookup and asks for the URL instead of resolving against a workspace.
+    expect(prList).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'full PR URL',
+    );
+  });
+
+  it('does not close another card dialog when a bind completes late', async () => {
+    connectionState.sessionId = 's1';
+    connectionState.capabilities = {
+      features: ['workspace_session_metadata'],
+      workspaceCwd: '/w',
+    };
+    sessionsState.sessions = [
+      session('s1', { displayName: 'One' }),
+      session('s2', { displayName: 'Two' }),
+    ];
+    let resolveBind!: (value: { prs: never[] }) => void;
+    workspaceActions.bindSessionPr.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveBind = resolve;
+        }),
+    );
+    render();
+    await flushAsync();
+    const one = rows().find((tr) => tr.textContent?.includes('One'))!;
+    act(() => click(rowActionButton(one, 'Bind PR')));
+    const input = document.querySelector(
+      'input[aria-label="Bind PR"]',
+    ) as HTMLInputElement;
+    act(() =>
+      setInputValue(input, 'https://github.com/QwenLM/qwen-code/pull/1'),
+    );
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    // Dismiss One's dialog while its bind is still in flight, then open Two's.
+    const cancel = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.trim() === 'cancel');
+    act(() => click(cancel!));
+    await flushAsync();
+    const two = rows().find((tr) => tr.textContent?.includes('Two'))!;
+    act(() => click(rowActionButton(two, 'Bind PR')));
+    await flushAsync();
+    expect(
+      document.querySelector('input[aria-label="Bind PR"]'),
+    ).not.toBeNull();
+    // One's bind now completes; it must not close Two's dialog.
+    await act(async () => {
+      resolveBind({ prs: [] });
+    });
+    await flushAsync();
+    expect(
+      document.querySelector('input[aria-label="Bind PR"]'),
+    ).not.toBeNull();
+  });
+
   it('exports a session as an html download', async () => {
     connectionState.capabilities = {
       features: ['session_export'],
@@ -2552,6 +4127,21 @@ describe('SessionOverviewPanel', () => {
 });
 
 describe('SessionOverviewPanel polling', () => {
+  it('uses the polling interval advertised by the workspace daemon', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+    };
+    workspaceCapabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      sessionLiveStatePollIntervalMs: 10_000,
+    };
+    render();
+    expect(workspaceLiveStateOptions.enabled).toBe(true);
+    expect(workspaceLiveStateOptions.pollIntervalMs).toBe(10_000);
+  });
+
   it('keeps the old status-report details fresh', async () => {
     sessionsState.sessions = [session('s')];
     vi.useFakeTimers();
@@ -2652,6 +4242,28 @@ describe('SessionOverviewPanel polling', () => {
     expect(statusReportOptions).toEqual({ autoLoad: true, detail: 'full' });
   });
 
+  it('keeps polling when a Live workspace has no session live-state route', async () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        {
+          id: 'live',
+          cwd: '/conversations/live',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+      ],
+    };
+    render();
+    await flushAsync();
+    expect(workspaceLiveStateOptions.enabled).toBe(false);
+    expect(scopedSessionsOptions.pollIntervalMs).toBe(3000);
+    expect(statusReportOptions).toEqual({ autoLoad: true, detail: 'full' });
+  });
+
   it('subscribes live state for every visible workspace', async () => {
     connectionState.capabilities = {
       features: ['workspace_session_live_state'],
@@ -2677,6 +4289,101 @@ describe('SessionOverviewPanel polling', () => {
     };
     render({ workspaceCwd: '/wsB' });
     expect(workspaceLiveStateOptions.workspaceCwds).toEqual(['/wsB']);
+  });
+
+  it('reports its displayed live-state workspace set and clears it on unmount (#16355)', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    const onLiveStateWorkspaceCwdsChange = vi.fn();
+    render({ onLiveStateWorkspaceCwdsChange });
+
+    // All entries are pollable here, so the reported subset coincides with
+    // what the panel would poll when it owns the channel.
+    expect(workspaceLiveStateOptions.workspaceCwds).toEqual(['/w', '/wsB']);
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith([
+      '/w',
+      '/wsB',
+    ]);
+
+    act(() => root?.unmount());
+    root = null;
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith([]);
+  });
+
+  it('reports live-state workspace set changes to the host poller', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [{ id: 'w0', cwd: '/w', primary: true, trusted: true }],
+    };
+    const onLiveStateWorkspaceCwdsChange = vi.fn();
+    render({ onLiveStateWorkspaceCwdsChange });
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith(['/w']);
+
+    connectionState.capabilities = {
+      ...connectionState.capabilities,
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    rerender({ onLiveStateWorkspaceCwdsChange });
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith([
+      '/w',
+      '/wsB',
+    ]);
+  });
+
+  it('reports the pollable subset when a live workspace shares the catalog (#16355)', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        {
+          id: 'live',
+          cwd: '/conversations/live',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    const onLiveStateWorkspaceCwdsChange = vi.fn();
+    render({ onLiveStateWorkspaceCwdsChange });
+
+    // The panel's own adoption stays all-or-nothing: a live entry in the
+    // visible set keeps it on the catalog fallback.
+    expect(workspaceLiveStateOptions.enabled).toBe(false);
+    // ...but the app-level poller still receives the pollable subset.
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith([
+      '/w',
+      '/wsB',
+    ]);
+  });
+
+  it('reports the displayed set without untrusted or non-absolute entries', () => {
+    connectionState.capabilities = {
+      features: ['workspace_session_live_state'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: false },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+        { id: 'w2', cwd: 'relative/path', primary: false, trusted: true },
+      ],
+    };
+    const onLiveStateWorkspaceCwdsChange = vi.fn();
+    render({ onLiveStateWorkspaceCwdsChange });
+
+    expect(workspaceLiveStateOptions.enabled).toBe(false);
+    expect(onLiveStateWorkspaceCwdsChange).toHaveBeenLastCalledWith(['/wsB']);
   });
 
   it('falls back to the catalog poll without live-state', () => {
@@ -2751,5 +4458,675 @@ describe('SessionOverviewPanel polling', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('SessionOverviewPanel standalone sessions', () => {
+  function useStandaloneCapabilities(): void {
+    connectionState.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaceCwd: '/w',
+    };
+  }
+
+  // Production shape (wire-observed): the daemon advertises its internal
+  // Conversations runtime as a trusted non-primary live workspace, and every
+  // standalone card carries that cwd — so the capability gates pass and the
+  // routing, not the gating, decides which client serves the action.
+  function useConversationsRuntimeCapabilities(): void {
+    connectionState.capabilities = {
+      features: [
+        'standalone_sessions_v1',
+        'workspace_qualified_rest_core',
+        'workspace_session_metadata',
+        'workspace_session_export',
+        'session_archive',
+      ],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        {
+          id: 'conv',
+          cwd: '/conv',
+          displayName: 'Conversations',
+          primary: false,
+          trusted: true,
+          kind: 'live',
+        },
+      ],
+    };
+  }
+
+  it('does not request standalone sessions without the capability', async () => {
+    render();
+    await flushAsync();
+    expect(standaloneListPage).not.toHaveBeenCalled();
+  });
+
+  it('keeps the standalone catalog hidden on a host-locked shell', async () => {
+    useStandaloneCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render({ workspaceCwd: '/w' });
+    await flushAsync();
+    expect(standaloneListPage).not.toHaveBeenCalled();
+    // No standalone row is merged (only the empty-state row remains).
+    expect(rowTitles()).not.toContain('Solo');
+  });
+
+  it('merges standalone sessions into the overview when advertised', async () => {
+    useStandaloneCapabilities();
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    expect(standaloneListPage).toHaveBeenCalledWith({
+      archiveState: 'active',
+      pageSize: 50,
+    });
+    expect(rowTitles()).toEqual(['Solo', 'One']);
+  });
+
+  it('collects every standalone page before rendering', async () => {
+    useStandaloneCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            displayName: 'First',
+            updatedAt: '2026-07-06T12:00:00.000Z',
+          }),
+        ],
+        nextCursor: 'c1',
+      },
+      {
+        sessions: [
+          standaloneSession('st2', {
+            displayName: 'Second',
+            updatedAt: '2026-07-06T11:30:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    expect(standaloneListPage).toHaveBeenCalledTimes(2);
+    expect(standaloneListPage).toHaveBeenLastCalledWith({
+      archiveState: 'active',
+      pageSize: 50,
+      cursor: 'c1',
+    });
+    expect(rowTitles()).toEqual(['First', 'Second']);
+  });
+
+  it('deduplicates a standalone session a workspace already lists', async () => {
+    useStandaloneCapabilities();
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('s1', {
+            workspaceCwd: '/w',
+            displayName: 'One',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    expect(rowTitles()).toEqual(['One']);
+  });
+
+  it('warns and keeps the overview when the standalone list fails', async () => {
+    useStandaloneCapabilities();
+    standaloneListPage.mockRejectedValue(new Error('offline'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      render();
+      await flushAsync();
+      expect(warn).toHaveBeenCalledWith(
+        '[web-shell] overview standalone sessions list failed:',
+        expect.any(Error),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('opens a standalone row with the standalone context', async () => {
+    useStandaloneCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    act(() => click(row.querySelectorAll('td')[2] as HTMLElement));
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      'st1',
+      '/standalone',
+      { kind: 'standalone' },
+    );
+  });
+
+  it('opens a standalone row from its title with the standalone context', async () => {
+    useStandaloneCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    act(() => click(titleTrigger(row)));
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      'st1',
+      '/standalone',
+      { kind: 'standalone' },
+    );
+  });
+
+  it('opens a workspace row without a standalone context', async () => {
+    useStandaloneCapabilities();
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    await flushAsync();
+    act(() => click(rows()[0]!.querySelectorAll('td')[2] as HTMLElement));
+    expect(onOpenSession).toHaveBeenCalledWith('s1', '/w', undefined);
+  });
+
+  it('classifies standalone rows by catalog, not by an empty cwd', async () => {
+    useStandaloneCapabilities();
+    sessionsState.sessions = [
+      session('e1', { displayName: 'Empty', workspaceCwd: '' }),
+    ];
+    render();
+    await flushAsync();
+    act(() => click(rows()[0]!.querySelectorAll('td')[2] as HTMLElement));
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('e1', '', undefined);
+  });
+
+  it('keeps the split and tab buttons disabled for a standalone selection', async () => {
+    useStandaloneCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render({ onOpenSplit: vi.fn() });
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    act(() => click(rowCheckbox(row)));
+    expect(footerButton('Open in split')?.disabled).toBe(true);
+    expect(footerButton('Open in new tab')?.disabled).toBe(true);
+  });
+
+  it('skips poll ticks while a standalone walk is still in flight', async () => {
+    useStandaloneCapabilities();
+    let resolveFirstPage!: (value: {
+      sessions: DaemonStandaloneSessionSummary[];
+    }) => void;
+    const firstPage = new Promise<{
+      sessions: DaemonStandaloneSessionSummary[];
+    }>((resolve) => {
+      resolveFirstPage = resolve;
+    });
+    standaloneListPage.mockImplementation(async () => firstPage);
+    vi.useFakeTimers();
+    try {
+      render();
+      // The initial walk is still in flight when the 3s cadence fires:
+      // the ticks must be skipped, not started as duplicate walks.
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(standaloneListPage).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(standaloneListPage).toHaveBeenCalledTimes(1);
+      resolveFirstPage({
+        sessions: [standaloneSession('st1', { displayName: 'Solo' })],
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(rowTitles()).toEqual(['Solo']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops a standalone walk superseded by a host lock', async () => {
+    useStandaloneCapabilities();
+    let resolvePage!: (value: {
+      sessions: DaemonStandaloneSessionSummary[];
+    }) => void;
+    standaloneListPage.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePage = resolve;
+        }),
+    );
+    render();
+    await flushAsync();
+    expect(standaloneListPage).toHaveBeenCalledTimes(1);
+    // The lock lands while the walk's page is still pending: the walk's
+    // effect is gone, so its page must not repopulate the hidden catalog.
+    rerender({ workspaceCwd: '/w' });
+    await flushAsync();
+    resolvePage({
+      sessions: [standaloneSession('st1', { displayName: 'LeakedSolo' })],
+    });
+    await flushAsync();
+    expect(rowTitles()).not.toContain('LeakedSolo');
+  });
+
+  it('routes standalone rename and export to the standalone client routes', async () => {
+    useConversationsRuntimeCapabilities();
+    // Page 1 feeds the initial walk; page 2 feeds the post-rename refresh.
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo Two',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    act(() => click(rowActionButton(row, 'Rename')));
+    const input = container!.querySelector(
+      'input[aria-label="Rename: Solo"]',
+    ) as HTMLInputElement;
+    act(() => setInputValue(input, 'Solo Two'));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    expect(workspaceClient.renameStandaloneSession).toHaveBeenCalledWith(
+      'st1',
+      'Solo Two',
+    );
+    for (const call of workspaceClient.workspaceByCwd.mock.results) {
+      expect(call.value.updateSessionMetadata).not.toHaveBeenCalled();
+    }
+    const row2 = rows().find((tr) => tr.textContent?.includes('Solo Two'))!;
+    act(() => click(rowActionButton(row2, 'Export conversation record')));
+    await flushAsync();
+    expect(workspaceClient.exportStandaloneSession).toHaveBeenCalledWith(
+      'st1',
+      { format: 'html' },
+    );
+    for (const call of workspaceClient.workspaceByCwd.mock.results) {
+      expect(call.value.exportSession).not.toHaveBeenCalled();
+    }
+    expect(anchorClick).toHaveBeenCalled();
+  });
+
+  it('does not offer Bind PR on a standalone card', async () => {
+    useConversationsRuntimeCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    // Rename is available on the standalone card, but Bind PR is not: the
+    // standalone metadata route only accepts displayName.
+    expect(rowActionButton(row, 'Rename')).not.toBeNull();
+    expect(rowActionButton(row, 'Bind PR')).toBeNull();
+  });
+
+  it('routes standalone archive through the standalone client route', async () => {
+    useConversationsRuntimeCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+      { sessions: [] },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    act(() => click(rowActionButton(row, 'Archive')));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+    expect(workspaceClient.archiveStandaloneSessions).toHaveBeenCalledWith([
+      'st1',
+    ]);
+    expect(workspaceClient.archiveSessionsData).not.toHaveBeenCalled();
+    for (const call of workspaceClient.workspaceByCwd.mock.results) {
+      expect(call.value.archiveSessionsData).not.toHaveBeenCalled();
+    }
+  });
+
+  it('routes standalone delete through the standalone client route', async () => {
+    useConversationsRuntimeCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+      { sessions: [] },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    act(() => click(rowActionButton(row, 'Delete')));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+    expect(workspaceClient.deleteStandaloneSessions).toHaveBeenCalledWith([
+      'st1',
+    ]);
+    expect(workspaceClient.deleteSessionsData).not.toHaveBeenCalled();
+    for (const call of workspaceClient.workspaceByCwd.mock.results) {
+      expect(call.value.deleteSessionsData).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(['per-session', 'request'] as const)(
+    'retains workspace and standalone delete failures for %s failures',
+    async (failure) => {
+      useConversationsRuntimeCapabilities();
+      sessionsState.sessions = [
+        session('primary', { displayName: 'Workspace row' }),
+      ];
+      standaloneListPage.mockResolvedValue({
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Standalone one',
+          }),
+          standaloneSession('st2', {
+            workspaceCwd: '/conv',
+            displayName: 'Standalone two',
+          }),
+        ],
+      });
+      workspaceClient.deleteSessionsData.mockResolvedValueOnce({
+        removed: [],
+        notFound: [],
+        errors: [{ sessionId: 'primary', error: 'workspace locked' }],
+      });
+      if (failure === 'request') {
+        workspaceClient.deleteStandaloneSessions.mockRejectedValueOnce(
+          new Error('solo unavailable'),
+        );
+      } else {
+        workspaceClient.deleteStandaloneSessions.mockResolvedValueOnce({
+          removed: [],
+          notFound: [],
+          errors: [
+            { sessionId: 'st1', message: 'solo locked' },
+            { sessionId: 'st2', message: 'solo busy' },
+          ],
+          fileCleanupPending: [],
+        });
+      }
+      render();
+      await flushAsync();
+      expect(rows()).toHaveLength(3);
+      act(() => click(selectAllCheckbox()));
+      act(() => click(footerButton('Delete')!));
+      act(() =>
+        click(
+          document.querySelector<HTMLElement>(
+            '[data-slot="alert-dialog-action"]',
+          )!,
+        ),
+      );
+      await flushAsync();
+
+      expect(
+        workspaceClient.deleteSessionsData,
+      ).toHaveBeenCalledExactlyOnceWith(['primary']);
+      expect(
+        workspaceClient.deleteStandaloneSessions,
+      ).toHaveBeenCalledExactlyOnceWith(['st1', 'st2']);
+      expect(container!.textContent).toContain(
+        `Failed to delete session: workspace locked; ${
+          failure === 'request' ? 'solo unavailable' : 'solo locked; solo busy'
+        }`,
+      );
+      expect(rows()).toHaveLength(3);
+    },
+  );
+
+  it('labels a standalone row "No workspace" instead of the internal root', async () => {
+    useConversationsRuntimeCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    const workspaceCell = row.querySelector(
+      '[data-web-shell-session-workspace]',
+    )!;
+    expect(workspaceCell.textContent).toBe('No workspace');
+    expect(workspaceCell.getAttribute('title')).toBe('No workspace');
+    await act(async () => click(rowActionButton(row, 'Details for Solo')));
+    const details = document.querySelector(
+      '[role="dialog"][aria-label="Solo"]',
+    ) as HTMLElement;
+    expect(details).not.toBeNull();
+    expect(details.textContent).toContain('No workspace');
+    expect(details.innerHTML).not.toContain('/conv');
+  });
+
+  it('labels the Conversations runtime facet "No workspace" in the workspace filter', async () => {
+    useConversationsRuntimeCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const trigger = container!.querySelector(
+      'button[aria-label^="Filter by workspace:"]',
+    ) as HTMLElement;
+    act(() => click(trigger));
+    const filterPanel = document.querySelector(
+      '[role="dialog"][aria-label="Filter by workspace"]',
+    ) as HTMLElement;
+    expect(filterPanel.textContent).toContain('No workspace');
+    expect(filterPanel.textContent).not.toContain('Conversations');
+  });
+
+  it('renames the open standalone session through the standalone route', async () => {
+    useConversationsRuntimeCapabilities();
+    connectionState.sessionId = 'st1';
+    connectionState.workspaceCwd = undefined;
+    connectionState.sessionContext = { kind: 'standalone' };
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    expect(row.textContent).toContain('Current');
+    act(() => click(rowActionButton(row, 'Rename')));
+    const input = container!.querySelector(
+      'input[aria-label="Rename: Solo"]',
+    ) as HTMLInputElement;
+    act(() => setInputValue(input, 'Solo Two'));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    expect(workspaceClient.renameStandaloneSession).toHaveBeenCalledWith(
+      'st1',
+      'Solo Two',
+    );
+    expect(workspaceActions.renameSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['Archive', 'archiveStandaloneSessions'],
+    ['Delete', 'deleteStandaloneSessions'],
+  ] as const)(
+    'splits standalone %s batches at the route limit of 100 ids',
+    async (label, method) => {
+      useConversationsRuntimeCapabilities();
+      const many = Array.from({ length: 101 }, (_, index) =>
+        standaloneSession(`st-${index}`, {
+          workspaceCwd: '/conv',
+          displayName: `Solo ${index}`,
+        }),
+      );
+      standalonePages = [{ sessions: many }, { sessions: [] }];
+      render();
+      await flushAsync();
+      act(() => click(selectAllCheckbox()));
+      act(() => click(footerButton(label)!));
+      const confirm = document.querySelector(
+        '[data-slot="alert-dialog-action"]',
+      ) as HTMLElement;
+      act(() => click(confirm));
+      await flushAsync();
+      expect(workspaceClient[method]).toHaveBeenCalledTimes(2);
+      expect(workspaceClient[method]).toHaveBeenNthCalledWith(
+        1,
+        many.slice(0, 100).map((item) => item.sessionId),
+      );
+      expect(workspaceClient[method]).toHaveBeenNthCalledWith(
+        2,
+        many.slice(100).map((item) => item.sessionId),
+      );
+    },
+  );
+
+  it('marks the open standalone session as current and clears it on delete', async () => {
+    useConversationsRuntimeCapabilities();
+    connectionState.sessionId = 'st1';
+    connectionState.workspaceCwd = undefined;
+    connectionState.sessionContext = { kind: 'standalone' };
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+      { sessions: [] },
+    ];
+    render({ onCurrentSessionRemoved });
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    expect(row.textContent).toContain('Current');
+    act(() => click(rowActionButton(row, 'Delete')));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+    expect(workspaceClient.deleteStandaloneSessions).toHaveBeenCalledWith([
+      'st1',
+    ]);
+    expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
   });
 });

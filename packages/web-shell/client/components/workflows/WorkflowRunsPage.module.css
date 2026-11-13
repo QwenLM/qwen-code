@@ -1,0 +1,379 @@
+.root {
+  width: min(100%, 1160px);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tabs {
+  min-height: 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+  padding: 2px 0 9px;
+}
+
+.toolbarActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+/*
+ * The two run panes are force-mounted so their pollers keep the badge
+ * counts and the saved cards' recent-runs list live while the user browses
+ * the Saved tab. Radix's forceMount does NOT hide inactive content — it
+ * only keeps it mounted — so the hiding is ours to do. Mounted and hidden
+ * is exactly what is wanted here: effects keep running, nothing renders.
+ */
+.content[data-state='inactive'] {
+  display: none;
+}
+
+.content {
+  padding-top: 10px;
+}
+
+.loading,
+.error,
+.emptyState {
+  padding: 24px 4px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.error {
+  color: var(--error-color);
+}
+
+.savedList {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+}
+
+.savedEntry {
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.savedEntry:last-child {
+  border-bottom: 0;
+}
+
+.savedCard {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px 6px 6px;
+}
+
+/* The identity block is the disclosure control for the definition detail. */
+.savedIdentity {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.savedIdentity:hover {
+  background: var(--secondary);
+}
+
+.savedIdentity:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
+  outline-offset: 1px;
+}
+
+.savedChevron {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  transition: transform 120ms ease;
+}
+
+.savedEntry[data-expanded] .savedChevron {
+  transform: rotate(90deg);
+}
+
+.savedIdentityText {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.savedDetail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 14px 14px 32px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.detailDescription {
+  margin: 10px 0 0;
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.detailSection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.detailLabel {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.detailText,
+.detailMuted {
+  margin: 0;
+  color: var(--muted-foreground);
+}
+
+.detailWarning {
+  padding: 6px 10px;
+  border-radius: 0 4px 4px 0;
+  box-shadow: inset 2px 0 0 var(--warning-color);
+  background: color-mix(in srgb, var(--warning-color) 8%, transparent);
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+
+.detailPhases {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.detailPhases li {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.detailPhaseIndex {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.detailPhaseCopy {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 8px;
+}
+
+.detailPhaseCopy strong {
+  font-weight: 600;
+}
+
+.detailPhaseCopy span {
+  color: var(--muted-foreground);
+}
+
+.detailPhaseModel {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+}
+
+.detailRuns {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.detailRuns li {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr) auto;
+  gap: 12px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.detailRunStatus {
+  color: var(--foreground);
+}
+
+/* Flexible middle column of `.detailRuns li` — truncate rather than widen the
+   row when a timestamp renders long. */
+.detailRunTime {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detailRuns li[data-status='running'] .detailRunStatus {
+  color: var(--agent-blue-500);
+}
+
+.detailRuns li[data-status='completed'] .detailRunStatus {
+  color: var(--success-color);
+}
+
+.detailRuns li[data-status='failed'] .detailRunStatus {
+  color: var(--error-color);
+}
+
+.detailRuns li[data-status='paused'] .detailRunStatus,
+.detailRuns li[data-status='pausing'] .detailRunStatus,
+.detailRuns li[data-status='cancelled'] .detailRunStatus {
+  color: var(--warning-color);
+}
+
+.detailRunRuntime {
+  font-family: var(--font-mono);
+}
+
+.detailLink {
+  align-self: flex-start;
+  margin-left: -8px;
+}
+
+.detailSourceBar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.detailPath {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detailSource {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.detailSource pre {
+  margin: 0;
+  font-size: 12px;
+}
+
+.savedName {
+  overflow: hidden;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.savedDescription,
+.savedEmptyDescription {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.savedEmpty {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 22px 16px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+
+.savedEmpty > svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--muted-foreground);
+}
+
+.savedEmptyTitle {
+  margin-bottom: 3px;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.startingIcon {
+  animation: workflow-saved-spin 900ms linear infinite;
+}
+
+@keyframes workflow-saved-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .startingIcon {
+    animation: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .root {
+    gap: 10px;
+  }
+
+  .toolbar {
+    align-items: flex-end;
+    overflow: hidden;
+  }
+
+  .toolbar > [role='tablist'] {
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .savedCard {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .savedCard > button:not(.savedIdentity) {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+}

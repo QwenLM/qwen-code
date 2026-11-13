@@ -85,6 +85,36 @@ pub fn list_windows(filter_pid: Option<u32>) -> Vec<WindowInfo> {
     merged
 }
 
+pub(crate) fn resolve_app_window(windows: &[WindowInfo]) -> Option<u64> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetLastActivePopup};
+    let visible: Vec<_> = windows.iter().filter(|w| w.is_on_screen).collect();
+    if visible.is_empty() && windows.len() == 1 {
+        return Some(windows[0].hwnd);
+    }
+    let foreground = unsafe { GetForegroundWindow() }.0 as usize as u64;
+    let selected = visible
+        .iter()
+        .find(|w| w.hwnd == foreground)
+        // Start at an owner before resolving its active popup, not an idle helper.
+        .or_else(|| {
+            visible.iter().find(|w| {
+                window_owner_handle(w.hwnd)
+                    .is_none_or(|owner| !visible.iter().any(|parent| parent.hwnd == owner))
+            })
+        })
+        .or_else(|| visible.first())?;
+    let popup = unsafe { GetLastActivePopup(HWND(selected.hwnd as *mut _)) }.0 as usize as u64;
+    if visible
+        .iter()
+        .any(|w| w.hwnd == popup && w.pid == selected.pid)
+        && (popup == selected.hwnd
+            || owner_chain_reaches_target(selected.hwnd, popup, window_owner_handle))
+    {
+        return Some(popup);
+    }
+    Some(selected.hwnd)
+}
+
 /// Resolve one exact Win32 window without entering the global UIA tree.
 ///
 /// Exact `(pid, HWND)` callers already have a native identity anchor. Avoiding
@@ -111,6 +141,90 @@ pub(crate) fn window_owner_pid(hwnd: u64) -> Option<u32> {
     let mut pid = 0;
     let thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     (thread_id != 0 && pid != 0).then_some(pid)
+}
+
+/// Return the direct native owner of one exact HWND.
+pub(crate) fn window_owner_handle(hwnd: u64) -> Option<u64> {
+    let native = HWND(hwnd as *mut _);
+    if native.0.is_null() || !unsafe { IsWindow(native) }.as_bool() {
+        return None;
+    }
+    unsafe { GetWindow(native, GW_OWNER) }
+        .ok()
+        .filter(|owner| !owner.0.is_null())
+        .map(|owner| owner.0 as usize as u64)
+}
+
+/// Return visible same-process windows whose complete native owner chain
+/// reaches the requested HWND. This is an exact Win32 relationship, not a UIA
+/// or title-based surface inference.
+pub(crate) fn visible_owned_windows(requested: u64, pid: u32) -> Vec<WindowInfo> {
+    list_windows_via_win32(Some(pid))
+        .into_iter()
+        .filter(|window| {
+            window.hwnd != requested
+                && owner_chain_reaches_target(requested, window.hwnd, |hwnd| {
+                    window_owner_handle(hwnd)
+                })
+        })
+        .collect()
+}
+
+pub(crate) enum PendingActionChange {
+    Owned(WindowInfo),
+    Unowned(WindowInfo),
+    TargetUnavailable,
+}
+
+pub(crate) struct PendingActionWindows {
+    target: u64,
+    pid: u32,
+    before: HashSet<u64>,
+    allow_unowned: bool,
+    target_was_visible: bool,
+}
+
+impl PendingActionWindows {
+    pub(crate) fn new(target: u64, pid: u32) -> Self {
+        use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+        Self {
+            target,
+            pid,
+            before: list_windows_via_win32(Some(pid))
+                .into_iter()
+                .map(|window| window.hwnd)
+                .collect(),
+            // These hosts are disabled by our foreground shield, not by a modal.
+            allow_unowned: unsafe { IsWindowEnabled(HWND(target as *mut _)) }.as_bool()
+                && !crate::input::is_xaml_host_hwnd(target)
+                && !crate::input::is_chromium_target_window(target),
+            target_was_visible: unsafe { IsWindowVisible(HWND(target as *mut _)) }.as_bool(),
+        }
+    }
+
+    pub(crate) fn change(&self) -> Option<PendingActionChange> {
+        use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+        if window_owner_pid(self.target) != Some(self.pid)
+            || (self.target_was_visible
+                && !unsafe { IsWindowVisible(HWND(self.target as *mut _)) }.as_bool())
+        {
+            return Some(PendingActionChange::TargetUnavailable);
+        }
+        let disabled = self.allow_unowned
+            && !unsafe { IsWindowEnabled(HWND(self.target as *mut _)) }.as_bool();
+        for window in list_windows_via_win32(Some(self.pid)) {
+            if window.hwnd == self.target || self.before.contains(&window.hwnd) {
+                continue;
+            }
+            if owner_chain_reaches_target(self.target, window.hwnd, window_owner_handle) {
+                return Some(PendingActionChange::Owned(window));
+            }
+            if disabled && window.is_on_screen && !window.minimized {
+                return Some(PendingActionChange::Unowned(window));
+            }
+        }
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -165,10 +279,7 @@ pub(crate) struct ForegroundTarget {
 /// Snapshot the exact target identity and owner before global input is sent.
 pub(crate) fn capture_foreground_target(target: u64) -> Option<ForegroundTarget> {
     let pid = window_owner_pid(target)?;
-    let owner = unsafe { GetWindow(HWND(target as *mut _), GW_OWNER) }
-        .ok()
-        .filter(|owner| !owner.0.is_null())
-        .map(|owner| owner.0 as usize as u64);
+    let owner = window_owner_handle(target);
     Some(ForegroundTarget {
         hwnd: target,
         pid,
@@ -211,6 +322,67 @@ pub(crate) fn foreground_matches_target_or_owned_window(
         ownership_reaches_target,
         actual_is_prior_owner: target.owner == Some(actual),
     })
+}
+
+pub(crate) fn restore_input_foreground(prior: u64, target: ForegroundTarget) -> anyhow::Result<()> {
+    use std::time::{Duration, Instant};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, IsWindow, SetForegroundWindow,
+    };
+    if prior == 0 || prior == target.hwnd || !unsafe { IsWindow(HWND(prior as *mut _)) }.as_bool() {
+        return Ok(());
+    }
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut requested = false;
+    loop {
+        let current = unsafe { GetForegroundWindow() }.0 as usize as u64;
+        if current == prior {
+            return Ok(());
+        }
+        if !foreground_matches_target_or_owned_window(target, current) {
+            if window_owner_pid(current) == Some(target.pid) {
+                anyhow::bail!("focus_restore_unconfirmed: another window of the app took focus; input may have been dispatched; observe before retrying");
+            }
+            // A foreign focus change belongs to the user. Never wait for the
+            // target to return and steal focus from a later operation.
+            return Ok(());
+        }
+        if !requested {
+            let _ = unsafe { SetForegroundWindow(HWND(prior as *mut _)) };
+            requested = true;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("focus_restore_failed: input may have been dispatched; observe the app before retrying");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+pub(crate) fn restore_minimized_app_window(pid: u32, hwnd: u64) -> anyhow::Result<()> {
+    use std::time::{Duration, Instant};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, ShowWindowAsync, SW_SHOWNOACTIVATE,
+    };
+    let target = capture_foreground_target(hwnd)
+        .filter(|target| target.pid == pid)
+        .ok_or_else(|| anyhow::anyhow!("app_window_unavailable: target identity changed"))?;
+    let native = HWND(hwnd as *mut _);
+    if !unsafe { IsIconic(native) }.as_bool() {
+        return Ok(());
+    }
+    let prior = unsafe { GetForegroundWindow() }.0 as usize as u64;
+    let _ = unsafe { ShowWindowAsync(native, SW_SHOWNOACTIVATE) };
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while unsafe { IsIconic(native) }.as_bool() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    restore_input_foreground(prior, target)?;
+    anyhow::ensure!(
+        window_owner_pid(hwnd) == Some(pid) && !unsafe { IsIconic(native) }.as_bool(),
+        "app_window_unavailable: minimized window could not be restored"
+    );
+    let _ = unsafe { windows::Win32::Graphics::Dwm::DwmFlush() };
+    Ok(())
 }
 
 fn window_info_by_handle(hwnd: u64) -> Option<WindowInfo> {
@@ -339,6 +511,146 @@ mod exact_window_tests {
     }
 
     #[test]
+    fn app_fallback_starts_at_owner_instead_of_idle_owned_window() {
+        use super::{resolve_app_window, window_owner_handle};
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW, WS_POPUP,
+        };
+        struct Window(windows::Win32::Foundation::HWND);
+        impl Drop for Window {
+            fn drop(&mut self) {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+        // Hidden native windows exercise ownership without changing the desktop.
+        let create = |owner: Option<windows::Win32::Foundation::HWND>| {
+            Window(unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    w!("STATIC"),
+                    w!("CUA owner selection test"),
+                    if owner.is_some() {
+                        WS_POPUP
+                    } else {
+                        WS_OVERLAPPEDWINDOW
+                    },
+                    0,
+                    0,
+                    100,
+                    100,
+                    owner.unwrap_or_default(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            })
+        };
+        let owner = create(None);
+        let helper = create(Some(owner.0));
+        let owner_id = owner.0 .0 as usize as u64;
+        let helper_id = helper.0 .0 as usize as u64;
+        assert_eq!(window_owner_handle(helper_id), Some(owner_id));
+        let owner_info = window(std::process::id(), owner_id);
+        let helper_info = window(std::process::id(), helper_id);
+        assert_eq!(
+            resolve_app_window(&[helper_info.clone(), owner_info]),
+            Some(owner_id)
+        );
+        assert_eq!(resolve_app_window(&[helper_info]), Some(helper_id));
+    }
+
+    #[test]
+    #[ignore = "requires an isolated interactive Windows desktop"]
+    fn pending_actions_detect_ownerless_modals_and_closed_popups_without_changing_ownership() {
+        use super::{PendingActionChange, PendingActionWindows};
+        use windows::core::w;
+        use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE,
+            WINDOW_EX_STYLE, WS_EX_NOACTIVATE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        };
+        struct Window(windows::Win32::Foundation::HWND);
+        impl Drop for Window {
+            fn drop(&mut self) {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+        let create = || {
+            Window(unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(WS_EX_NOACTIVATE.0),
+                    w!("STATIC"),
+                    w!("CUA pending test"),
+                    WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                    -30000,
+                    -30000,
+                    100,
+                    100,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            })
+        };
+        let target = create();
+        let target_hwnd = target.0 .0 as usize as u64;
+        let pid = std::process::id();
+        let existing = create();
+        let pending = PendingActionWindows::new(target_hwnd, pid);
+        let modal = create();
+        let modal_hwnd = modal.0 .0 as usize as u64;
+        assert!(
+            pending.change().is_none(),
+            "an enabled sibling is not a modal"
+        );
+        unsafe {
+            let _ = EnableWindow(target.0, false);
+        }
+        assert!(super::visible_owned_windows(target_hwnd, pid).is_empty());
+        assert!(
+            matches!(pending.change(), Some(PendingActionChange::Unowned(window)) if window.hwnd == modal_hwnd)
+        );
+        let already_disabled = PendingActionWindows::new(target_hwnd, pid);
+        let later = create();
+        assert!(
+            already_disabled.change().is_none(),
+            "preexisting disable is not modal evidence"
+        );
+        assert!(
+            matches!(pending.change(), Some(PendingActionChange::Unowned(window)) if window.hwnd != existing.0.0 as usize as u64)
+        );
+        drop(later);
+        drop(modal);
+        unsafe {
+            let _ = EnableWindow(target.0, true);
+        }
+        let hiding_popup = PendingActionWindows::new(target_hwnd, pid);
+        unsafe {
+            let _ = ShowWindow(target.0, SW_HIDE);
+        }
+        assert!(matches!(
+            hiding_popup.change(),
+            Some(PendingActionChange::TargetUnavailable)
+        ));
+        let initially_hidden = PendingActionWindows::new(target_hwnd, pid);
+        assert!(initially_hidden.change().is_none());
+        unsafe {
+            let _ = ShowWindow(target.0, SW_SHOWNOACTIVATE);
+        }
+        assert!(hiding_popup.change().is_none());
+        let closing_popup = PendingActionWindows::new(target_hwnd, pid);
+        drop(target);
+        assert!(matches!(
+            closing_popup.change(),
+            Some(PendingActionChange::TargetUnavailable)
+        ));
+    }
+
+    #[test]
     fn exact_lookup_probes_only_the_requested_native_handle() {
         let calls = AtomicUsize::new(0);
         let found = exact_window_from_probe(42, 0x1234, |hwnd| {
@@ -355,6 +667,114 @@ mod exact_window_tests {
     fn exact_lookup_rejects_wrong_pid_or_handle() {
         assert!(exact_window_from_probe(42, 7, |_| Some(window(43, 7))).is_none());
         assert!(exact_window_from_probe(42, 7, |_| Some(window(42, 8))).is_none());
+    }
+
+    #[test]
+    #[ignore = "requires an isolated interactive Windows desktop"]
+    fn live_app_minimized_restore_and_sibling_focus_uncertainty() {
+        use super::{
+            capture_foreground_target, resolve_app_window, restore_input_foreground,
+            restore_minimized_app_window,
+        };
+        use windows::core::w;
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        struct DesktopFixture {
+            thread_id: u32,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+        impl Drop for DesktopFixture {
+            fn drop(&mut self) {
+                let _ = unsafe {
+                    PostThreadMessageW(
+                        self.thread_id,
+                        WM_QUIT,
+                        windows::Win32::Foundation::WPARAM(0),
+                        windows::Win32::Foundation::LPARAM(0),
+                    )
+                };
+                self.thread.take().unwrap().join().unwrap();
+            }
+        }
+        let (send, receive) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let create = |name| unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    w!("STATIC"),
+                    name,
+                    WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                    20,
+                    20,
+                    300,
+                    200,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            };
+            let target = create(w!("CUA review target"));
+            let prior = create(w!("CUA review prior"));
+            let sibling = create(w!("CUA review sibling"));
+            let id = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+            send.send((id, target.0 as usize, prior.0 as usize, sibling.0 as usize))
+                .unwrap();
+            unsafe {
+                let mut message = MSG::default();
+                while GetMessageW(&mut message, None, 0, 0).0 > 0 {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                for window in [target, prior, sibling] {
+                    let _ = DestroyWindow(window);
+                }
+            }
+        });
+        let (thread_id, target, prior, sibling) = receive
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .unwrap();
+        let _fixture = DesktopFixture {
+            thread_id,
+            thread: Some(thread),
+        };
+        let (target, prior, sibling) = (
+            HWND(target as *mut _),
+            HWND(prior as *mut _),
+            HWND(sibling as *mut _),
+        );
+        let focus = |window| {
+            let _ = unsafe { SetForegroundWindow(window) };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while unsafe { GetForegroundWindow() } != window {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "fixture foreground must settle"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let pid = std::process::id();
+        unsafe {
+            let _ = ShowWindow(target, SW_MINIMIZE);
+        }
+        focus(prior);
+        assert!(unsafe { IsIconic(target) }.as_bool());
+        assert_eq!(unsafe { GetForegroundWindow() }, prior);
+        let mut info = window(pid, target.0 as usize as u64);
+        info.is_on_screen = false;
+        info.minimized = true;
+        assert_eq!(resolve_app_window(&[info]), Some(target.0 as usize as u64));
+        restore_minimized_app_window(pid, target.0 as usize as u64).unwrap();
+        assert!(!unsafe { IsIconic(target) }.as_bool());
+        assert_eq!(unsafe { GetForegroundWindow() }, prior);
+        let identity = capture_foreground_target(target.0 as usize as u64).unwrap();
+        focus(sibling);
+        assert_eq!(unsafe { GetForegroundWindow() }, sibling);
+        let error = restore_input_foreground(prior.0 as usize as u64, identity).unwrap_err();
+        assert!(error.to_string().contains("focus_restore_unconfirmed"));
+        assert_eq!(unsafe { GetForegroundWindow() }, sibling);
     }
 
     fn relation(

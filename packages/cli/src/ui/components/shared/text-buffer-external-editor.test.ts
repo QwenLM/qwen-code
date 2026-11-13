@@ -3,13 +3,26 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 
-const { mockSpawnSync, mockGetExternalEditorCommand } = vi.hoisted(() => ({
+const {
+  mockSpawnSync,
+  mockGetExternalEditorCommand,
+  mockReleaseProgramStatus,
+  mockRestoreProgramStatus,
+} = vi.hoisted(() => ({
   mockSpawnSync: vi.fn().mockReturnValue({ status: 0, error: null }),
   mockGetExternalEditorCommand: vi.fn().mockReturnValue(null),
+  mockReleaseProgramStatus: vi.fn(),
+  mockRestoreProgramStatus: vi.fn(),
+}));
+
+vi.mock('../../../utils/program-status.js', () => ({
+  releaseProgramStatus: mockReleaseProgramStatus,
+  restoreProgramStatus: mockRestoreProgramStatus,
 }));
 
 vi.mock('node:child_process', async (importOriginal) => {
@@ -46,9 +59,11 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
-vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+vi.mock('@qwen-code/qwen-code-core/utils/editor.js', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+    await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/utils/editor.js')
+    >();
   return {
     ...actual,
     getExternalEditorCommand: mockGetExternalEditorCommand,
@@ -71,7 +86,36 @@ describe('openInExternalEditor', () => {
     (fs.rmSync as Mock).mockImplementation(() => {});
     mockSpawnSync.mockReturnValue({ status: 0, error: null });
     mockGetExternalEditorCommand.mockReturnValue(null);
+    mockReleaseProgramStatus.mockClear();
+    mockRestoreProgramStatus.mockClear();
   });
+
+  it.each([
+    ['exits cleanly', { status: 0, error: null }],
+    ['fails', { status: 1, error: null }],
+  ])(
+    'releases the program status around the editor when it %s',
+    async (_label, spawnResult) => {
+      mockSpawnSync.mockClear().mockReturnValue(spawnResult);
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          initialText: 'hello',
+          viewport,
+          isValidPath: () => false,
+        }),
+      );
+
+      await act(async () => {
+        await result.current.openInExternalEditor();
+      });
+
+      const [released] = mockReleaseProgramStatus.mock.invocationCallOrder;
+      const [spawned] = mockSpawnSync.mock.invocationCallOrder;
+      const [restored] = mockRestoreProgramStatus.mock.invocationCallOrder;
+      expect(released).toBeLessThan(spawned);
+      expect(restored).toBeGreaterThan(spawned);
+    },
+  );
 
   it('should create temp file in private mkdtemp directory', async () => {
     const { result } = renderHook(() =>
