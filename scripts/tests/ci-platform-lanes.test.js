@@ -336,6 +336,34 @@ it('gives the shared Linux test lane one ceiling on both pools', () => {
   expect(ci.jobs.test.strategy.matrix.shard).toEqual([1, 2]);
 });
 
+it.each([
+  'test_build',
+  'test',
+  'lint_and_static',
+  'web_shell_e2e_smoke',
+  'integration_no_ak',
+])(
+  'uses HTTP/1.1 for %s checkout without persisting Git configuration',
+  (job) => {
+    const checkout = ci.jobs[job].steps.find(
+      (step) => step.name === 'Checkout',
+    );
+    expect(checkout.env).toEqual({
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'http.version',
+      GIT_CONFIG_VALUE_0: 'HTTP/1.1',
+    });
+    expect(
+      execFileSync('git', ['config', '--get', 'http.version'], {
+        env: { ...process.env, ...checkout.env },
+        encoding: 'utf8',
+      }).trim(),
+    ).toBe('HTTP/1.1');
+    expect(ci.jobs[job].env?.GIT_CONFIG_COUNT).toBeUndefined();
+    expect(ci.env.GIT_CONFIG_COUNT).toBeUndefined();
+  },
+);
+
 it('initializes missing machine identity before Linux SSH runtime tests', () => {
   const steps = ci.jobs.test.steps;
   const identityIndex = steps.findIndex(

@@ -564,6 +564,11 @@ jobs:
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        # ECS egress has repeatedly terminated Git fetches with HTTP/2 framing errors.
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: 'http.version'
+          GIT_CONFIG_VALUE_0: 'HTTP/1.1'
         with:
           # Pin push runs to the event SHA: the `github.ref` fallback resolves
           # `refs/heads/main` at fetch time — a moving tip — while the check run
@@ -1047,6 +1052,11 @@ jobs:
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        # ECS egress has repeatedly terminated Git fetches with HTTP/2 framing errors.
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: 'http.version'
+          GIT_CONFIG_VALUE_0: 'HTTP/1.1'
         with:
           # Pin push runs to the event SHA: the `github.ref` fallback resolves
           # `refs/heads/main` at fetch time — a moving tip — while the check run
@@ -1797,6 +1807,11 @@ jobs:
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        # ECS egress has repeatedly terminated Git fetches with HTTP/2 framing errors.
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: 'http.version'
+          GIT_CONFIG_VALUE_0: 'HTTP/1.1'
         with:
           # Pin push runs to the event SHA: the `github.ref` fallback resolves
           # `refs/heads/main` at fetch time — a moving tip — while the check run
@@ -2442,6 +2457,11 @@ jobs:
 
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        # ECS egress has repeatedly terminated Git fetches with HTTP/2 framing errors.
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: 'http.version'
+          GIT_CONFIG_VALUE_0: 'HTTP/1.1'
         with:
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.ref }}"
           fetch-depth: 1
@@ -3238,6 +3258,11 @@ jobs:
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        # ECS egress has repeatedly terminated Git fetches with HTTP/2 framing errors.
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: 'http.version'
+          GIT_CONFIG_VALUE_0: 'HTTP/1.1'
         with:
           ref: "${{ (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
           fetch-depth: 1
