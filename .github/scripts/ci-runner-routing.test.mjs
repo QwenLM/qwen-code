@@ -2,14 +2,14 @@
 // qwen-autofix.yml scan lane, the trusted-PR lanes of #13245, and the
 // control-plane jobs that run no PR code.
 //
-// classify_pr's own runner is unconditional ECS (kill-switch excepted):
-// the gate executes only trusted base-SHA code with a read-only token, and
-// keeping it on hosted for forks queued the whole fork CI chain behind a
-// scarce pool (2026-10-31 decision, same accepted risk class as lint).
+// classify_pr's own runner is association-gated ECS (kill-switch excepted):
+// a pull_request run executes the PR's own YAML, so an untrusted fork can
+// rewrite runs-on; the association check ensures only trusted authors reach
+// the persistent pool. Untrusted fork PRs fall back to ubuntu-latest.
 // The association routing for DOWNSTREAM lanes lives in the `pick_runner`
 // shell step, which publishes `ubuntu_runner` (association-gated) and
 // `lint_runner` (untrusted forks use the disposable ARM64 pool). The matrix below
-// pins the gate's unconditional routing AND that ubuntu_runner keeps the
+// pins the gate's association-gated routing AND that ubuntu_runner keeps the
 // association gate for the test/integration lanes.
 //
 // test_windows carries a deliberately different policy. A pull_request run
@@ -190,12 +190,14 @@ const ASSOCIATIONS = [
 ];
 
 describe('ci.yml classify_pr runner routing', () => {
-  it('the gate routes every association to ECS; the kill-switch wins', () => {
-    // classify executes trusted base-SHA code only, so its own runner needs
-    // no association gate — a hosted gate queued the entire fork CI chain.
-    // The downstream ubuntu_runner keeps the gate (next test).
+  it('the gate routes trusted authors and same-repo to ECS; untrusted forks stay hosted', () => {
+    // A pull_request run executes the PR's own YAML, so an untrusted fork can
+    // rewrite runs-on. The association check ensures only trusted authors and
+    // same-repo PRs reach the persistent pool; untrusted forks fall back to
+    // ubuntu-latest. The kill-switch still wins for everyone.
     for (const sameRepo of [true, false]) {
       for (const assoc of ASSOCIATIONS) {
+        const isTrusted = sameRepo || TRUSTED.includes(assoc);
         assert.deepEqual(
           evalRunsOn(classifyRunsOn, {
             ecsDisabled: false,
@@ -203,8 +205,8 @@ describe('ci.yml classify_pr runner routing', () => {
             sameRepo,
             assoc,
           }),
-          JSON.parse(ECS),
-          `gate sameRepo=${sameRepo} assoc='${assoc}' must reach ECS`,
+          JSON.parse(isTrusted ? ECS : HOSTED),
+          `gate sameRepo=${sameRepo} assoc='${assoc}' must ${isTrusted ? 'reach ECS' : 'stay hosted'}`,
         );
         assert.deepEqual(
           evalRunsOn(classifyRunsOn, {
@@ -296,12 +298,12 @@ describe('ci.yml classify_pr runner routing', () => {
     }
   });
 
-  it('the gate expression is unconditional except the kill-switch', () => {
-    // Structural pins: no association/head-repo clause may creep back into
-    // the gate (it would re-queue fork CI on hosted), and the kill-switch
-    // must stay the single escape hatch.
-    assert.doesNotMatch(classifyRunsOn, /author_association/);
-    assert.doesNotMatch(classifyRunsOn, /head\.repo\.full_name/);
+  it('the gate expression requires trusted author or same-repo for self-hosted', () => {
+    // Structural pins: the gate must check author association and head repo
+    // so that untrusted fork PRs cannot rewrite runs-on to reach the
+    // persistent pool. The kill-switch must stay as an escape hatch.
+    assert.match(classifyRunsOn, /author_association/);
+    assert.match(classifyRunsOn, /head\.repo\.full_name/);
     assert.match(
       classifyRunsOn,
       /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/,
