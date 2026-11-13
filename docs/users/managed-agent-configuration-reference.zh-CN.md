@@ -38,7 +38,7 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | `child-relay.scan-delay` | — | 时长 | `2s` | 子结果中继两次运行之间的间隔；每次运行推进尚未完成创建或尚未将结果回传父 Session 的子 agent 与 workflow 运行。仅在 `qwen.managed-agent.runtime-broker.enabled` 为 true 时生效。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
 | `child-workspace.scan-delay` | — | 时长 | `2s` | 子 Workspace 任务两次运行之间的间隔；每次运行继续未完成的子 Workspace Git 步骤（准备、合并、应用、丢弃）。仅在 `qwen.managed-agent.runtime-broker.child-workspaces-enabled` 为 true 时生效。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
 | `definition-models` | `QWEN_MANAGED_AGENT_DEFINITION_MODELS` | 列表 | *（空）* | 存储的 AgentDefinition 可在 `model.id` 中指定的模型 ID，以逗号分隔；定义中指定其他模型的 Session 会在准入时被拒绝。每个 ID 应对应 Harness 中配置的一个模型提供方路由。为空时只接受未指定模型的定义。 |
-| `definition-tool-profiles` | `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` | 列表 | `hosted-workspace-files/1` | 存储的 AgentDefinition 可在 `tools` 中选择的托管工具配置，以逗号分隔（如 `hosted-workspace-files/1`、`hosted-workspace-shell/1` 或 `hosted-workspace-mcp/1`）；定义选择其他配置的 Session 会在准入时被拒绝。`hosted-workspace-team-lead/1` 以及 `hosted-workspace-shell/1` 以外的 Shell 配置始终被拒绝，审批模式为 `yolo` 的 Shell 配置同样被拒绝。预检会确认 Harness 支持所列的每个配置。 |
+| `definition-tool-profiles` | `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` | 列表 | `hosted-workspace-files/1` | 存储的 AgentDefinition 可在 `tools` 中选择的托管工具配置，以逗号分隔（如 `hosted-workspace-files/1`、`hosted-workspace-shell/1`、`hosted-workspace-shell/3` 或 `hosted-workspace-mcp/1`）；定义选择其他配置的 Session 会在准入时被拒绝。`hosted-workspace-team-lead/1` 以及 `hosted-workspace-shell/1`、`hosted-workspace-shell/3` 以外的 Shell 配置始终被拒绝，审批模式为 `yolo` 的 Shell 配置同样被拒绝。预检会确认 Harness 支持所列的每个配置。 |
 | `message-relay.scan-delay` | — | 时长 | `2s` | Session 消息中继两次运行之间的间隔；每次运行推进 Session 之间待投递的消息（移交、回执、接受），并结算无法投递的消息。没有可用 Hosted Harness 的节点会跳过。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
 | `model-catalog` | — | YAML 列表 | *（空）* | 为内置 `qwen-code` agent 的 Session 提供的可选模型，可在创建 Session 时选择，之后也可由 Workspace operator 更改。元素为对象列表，包含 `model-id`（Harness 中配置的模型 ID；必填、唯一、最多 512 字节）和 `label`（显示名称，默认等于 `model-id`，最多 512 个字符）；条目无效或重复时启动时拒绝。需在 YAML 配置文件中设置，没有对应的环境变量。模型选择还要求开启 `qwen.managed-agent.harness.workspace-files-enabled`，且 Harness 支持模型选择。 |
 | `model-config-base-urls` | — | YAML 列表 | *（空）* | 允许完整 Session 模型配置使用的 HTTP(S) API 地址，按完整字符串精确匹配，以 YAML 列表设置。为空时禁止准入新配置。公共创建接口接受 `model_config`，WebShell 创建接口接受 `modelConfig`。要求启用 Session Store、Harness 能力 `session-model-config/1` 和 `SecretProtector`（标准服务由已启用的 Runtime Broker 及其凭据密钥环提供）。模型 ID 和 API key 无需在 Harness 注册。参见 [Session 模型配置设计](../design/managed-session-model-config.zh-CN.md)。 |
@@ -98,6 +98,19 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | `claim-lease` | `QWEN_MANAGED_AGENT_CHANNELS_CLAIM_LEASE` | 时长 | `10m` | 渠道适配器对一条出站投递的认领在未收到回执时保持有效的时长。超时后，对账任务将该投递结果记为未知，且不会自动重发。不带单位的数字按秒计。 |
 | `enabled` | `QWEN_MANAGED_AGENT_CHANNELS_ENABLED` | 布尔 | `false` | 是否提供 `/internal/managed-channels/` 下的受信渠道适配器路由（注册、断开、入站事件、投递认领、回执与重发）。这些路由仅凭租户请求头鉴权，因此未通过 `qwen.managed-agent.internal-server.port` 配置独立的内部监听端口时，启动时拒绝。 |
 | `scan-delay` | — | 时长 | `30s` | 渠道对账任务两次运行之间的间隔；每次运行把认领时间超过 `qwen.managed-agent.channels.claim-lease` 的出站投递认领结算为未知，每次最多 50 条。接受 `30s` 这类时长；不带单位的数字按毫秒计。 |
+
+## `qwen.managed-agent.client-files`
+
+通过控制面 MCP relay 把 Managed Web Shell 用户的客户端目录注册进 Session：功能开关与 relay 端点、绑定与请求的生命周期，以及队列深度与 payload 上限。
+
+| 属性 | 环境变量 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `binding-ttl` | — | 时长 | `8h` | 单次客户端文件系统注册的有效时长，到期后浏览器须以新的目录授权重新注册；relay 凭据随绑定一同过期。接受 `8h` 这类时长；不带单位的数字按秒计。 |
+| `enabled` | — | 布尔 | `false` | 是否允许 Managed Web Shell 用户把客户端目录注册进 Session，让 agent 经控制面 relay 使用其文件工具。默认关闭；关闭时所有 client-files 路由拒绝注册，不创建任何 relay 状态。注册是临时会话状态：不持久化任何凭据或目录路径，relay 的有界 TTL 队列仅在受大小限制的 JSON-RPC 请求/响应体（可能含文件内容）结算或过期前暂存，随后删除。文件内容不进入 relay 状态、relay 也从不持久化它；浏览器工具结果遵循 Session 常规的持久化工具结果策略。 |
+| `max-payload-bytes` | — | 整数 | `61440` | relay 在 Runtime 与浏览器之间转发的单条 JSON-RPC 请求或响应体的最大字节数；更大的 payload 以结构化错误拒绝。默认与 worker MCP 结果上限对齐（60 KiB）。 |
+| `queue-depth` | — | 整数 | `32` | 单个 Session 注册可为浏览器排队等待应答的 JSON-RPC 请求上限；超出的请求以结构化错误拒绝，而不是阻塞 Turn。默认与 worker MCP 在途上限对齐（32）。 |
+| `relay-url` | — | 字符串 | *（空）* | 从 Hosted Harness 可达的本控制面内部监听器基地址，用于构造 Harness 回连的 relay MCP 端点（`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`）。`qwen.managed-agent.client-files.enabled` 为 true 且留空时，从 internal listener 推导；推导不出则启动失败。显式配置的值必须是不带凭据、查询串或片段的 http(s) URL。 |
+| `request-ttl` | — | 时长 | `25s` | 单条排队 JSON-RPC 请求等待浏览器应答的时长，到期后过期并向 Runtime 返回结构化离线错误。接受 `25s` 这类时长；不带单位的数字按秒计。 |
 
 ## `qwen.managed-agent.dispatch`
 
