@@ -221,6 +221,27 @@ export function WorkspaceSelector({
               onChange={(event) => setFilterQuery(event.target.value)}
               onPointerDown={(event) => event.stopPropagation()}
               onKeyDown={(event) => {
+                if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                  const content = event.currentTarget.closest(
+                    '[data-radix-menu-content]',
+                  );
+                  const items = content
+                    ? Array.from(
+                        content.querySelectorAll<HTMLElement>(
+                          '[role="menuitem"], [role="menuitemradio"]',
+                        ),
+                      ).filter((item) => !item.hasAttribute('data-disabled'))
+                    : [];
+                  if (items.length > 0) {
+                    event.preventDefault();
+                    const target =
+                      event.key === 'ArrowDown'
+                        ? items[0]
+                        : items[items.length - 1];
+                    target.focus();
+                  }
+                  return;
+                }
                 if (event.key !== 'Escape') event.stopPropagation();
               }}
               placeholder={t('sidebar.filterWorkspaces')}
