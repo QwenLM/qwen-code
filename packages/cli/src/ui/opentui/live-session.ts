@@ -543,7 +543,6 @@ async function applyPromptVisionBridge(
   return { parts: textOnly.length > 0 ? textOnly : null, events };
 }
 
-/** Rejects as soon as `signal` fires, so a read that ignores it cannot park the boundary. */
 /**
  * A retried continuation can pair a tool result the pre-send snapshot did not
  * yet see. Only its real results and their aliases join `handled`.
@@ -567,6 +566,7 @@ function admitRetriedResults(
   }
 }
 
+/** Rejects as soon as `signal` fires, so a read that ignores it cannot park the boundary. */
 function abortRejection(signal: AbortSignal): Promise<never> {
   return new Promise<never>((_, reject) => {
     const rejectWithAbort = () =>
