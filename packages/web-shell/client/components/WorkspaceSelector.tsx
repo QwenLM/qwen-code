@@ -71,6 +71,53 @@ interface WorkspaceSelectorProps {
 const STANDALONE_OPTION_ID = '__standalone__';
 
 /**
+ * Composer focus target inside the owning pane: CodeMirror's
+ * contenteditable on desktop, the textarea itself on the mobile composer.
+ */
+function findComposerFocusTarget(scope: ParentNode): HTMLElement | null {
+  const editor = scope.querySelector<HTMLElement>(
+    '[data-web-shell-composer-editor]',
+  );
+  return editor?.querySelector<HTMLElement>('.cm-content') ?? editor;
+}
+
+/**
+ * Moves focus into the prompt composer after a workspace is picked. While
+ * the menu closes, its trapped focus scope keeps claiming focus, and a
+ * selection from an active session switches sessions, in which case the
+ * owning pane remounts (SplitView keys panes by session and workspace)
+ * and nodes captured before the dispatch go stale. Re-query the composer's
+ * editor from the captured pane — falling back to the document once it is
+ * gone — and retry until the focus lands; `onCloseAutoFocus` suppresses
+ * Radix's restore to the trigger, so the composer keeps it once it does.
+ */
+function scheduleComposerFocus(pane: Element | null): void {
+  let attemptsLeft = 3;
+  const attempt = (): void => {
+    try {
+      if (pane && !pane.isConnected) pane = null;
+      const target = findComposerFocusTarget(pane ?? document);
+      if (target) {
+        target.focus({ preventScroll: true });
+        if (
+          document.activeElement === target ||
+          target.contains(document.activeElement)
+        ) {
+          return;
+        }
+      }
+    } catch {
+      // focus() can throw in exotic hosts; keep retrying.
+    }
+    if (attemptsLeft > 0) {
+      attemptsLeft -= 1;
+      window.setTimeout(attempt, 150);
+    }
+  };
+  attempt();
+}
+
+/**
  * Composer workspace menu. Capability-gated creation actions and disabled
  * untrusted entries keep presentation aligned with daemon authorization.
  */
@@ -98,6 +145,10 @@ export function WorkspaceSelector({
   const menuOpenRef = useRef(false);
   const suppressTooltipRef = useRef(false);
   const pointerDismissedRef = useRef(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  // A radio selection was dispatched for the in-flight close; the composer
+  // takes focus, so Radix must not restore it to the trigger.
+  const selectedRef = useRef(false);
   const selected = workspaces.find((workspace) =>
     selectedWorkspaceCwd
       ? workspace.cwd === selectedWorkspaceCwd
@@ -159,6 +210,7 @@ export function WorkspaceSelector({
           <TooltipTrigger asChild>
             <DropdownMenuTrigger asChild disabled={disabled || busy}>
               <button
+                ref={triggerRef}
                 type="button"
                 className={className}
                 aria-label={t('sidebar.workspaceSelectLabel')}
@@ -202,15 +254,31 @@ export function WorkspaceSelector({
             pointerDismissedRef.current = true;
           }}
           onCloseAutoFocus={(event) => {
-            if (pointerDismissedRef.current) event.preventDefault();
+            // After a selection the composer takes focus; escape and
+            // outside clicks keep Radix's restore to the trigger.
+            if (pointerDismissedRef.current || selectedRef.current) {
+              event.preventDefault();
+            }
             pointerDismissedRef.current = false;
+            selectedRef.current = false;
           }}
         >
           <DropdownMenuRadioGroup
             value={selectedStandalone ? STANDALONE_OPTION_ID : selected?.id}
             onValueChange={(id) => {
+              // Every accepted selection ends with the prompt composer in
+              // focus; the trigger's pane is captured before dispatch so it
+              // still identifies the right composer if the selection
+              // remounts it.
+              const focusComposerAfterSelect = (): void => {
+                selectedRef.current = true;
+                scheduleComposerFocus(
+                  triggerRef.current?.closest('[data-pane-session-id]') ?? null,
+                );
+              };
               if (standaloneSelectable && id === STANDALONE_OPTION_ID) {
                 onSelectStandalone?.();
+                focusComposerAfterSelect();
                 return;
               }
               const next = workspaces.find((workspace) => workspace.id === id);
@@ -221,6 +289,7 @@ export function WorkspaceSelector({
               } else {
                 onSelectWorkspace(cwd);
               }
+              focusComposerAfterSelect();
             }}
           >
             {groups.map((group) => (

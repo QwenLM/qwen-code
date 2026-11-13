@@ -356,3 +356,139 @@ describe('WorkspaceSelector', () => {
     expect(document.activeElement).not.toBe(trigger);
   });
 });
+
+describe('WorkspaceSelector composer focus', () => {
+  function renderInPanes(
+    markup: string,
+    overrides: Partial<React.ComponentProps<typeof WorkspaceSelector>> = {},
+  ) {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    container.innerHTML = markup;
+    const slot = container.querySelector<HTMLElement>('#fixture-slot')!;
+    root = createRoot(slot);
+    act(() => {
+      root?.render(
+        <I18nProvider language="en">
+          <WorkspaceSelector
+            workspaces={[
+              {
+                id: 'primary',
+                cwd: '/primary',
+                label: 'primary',
+                primary: true,
+                trusted: true,
+              },
+              {
+                id: 'second',
+                cwd: '/second',
+                label: 'second',
+                primary: false,
+                trusted: true,
+              },
+            ]}
+            scratchSupported
+            existingFolderSupported
+            onSelectWorkspace={vi.fn()}
+            onCreateScratch={vi.fn()}
+            onOpenExistingFolder={vi.fn()}
+            {...overrides}
+          />
+        </I18nProvider>,
+      );
+    });
+    return container;
+  }
+
+  async function openAndSelect(element: HTMLElement, label: string) {
+    const trigger = element.querySelector('button')!;
+    await act(async () => {
+      trigger.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    const option = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ].find((entry) => entry.textContent?.includes(label))!;
+    await act(async () => {
+      option.click();
+    });
+  }
+
+  // While the menu is closing, the open menu's focus scope still claims
+  // focus; the selection's focus handling reclaims it on its 150 ms
+  // retry, so wait that window out instead of asserting synchronously.
+  async function waitForFocus(target: Element | null) {
+    for (let i = 0; i < 25 && document.activeElement !== target; i += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+    }
+  }
+
+  it('moves focus to the composer editor after a workspace selection', async () => {
+    const onSelectWorkspace = vi.fn();
+    const element = renderInPanes(
+      '<div data-pane-session-id="fixture-pane"><textarea data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>',
+      { onSelectWorkspace },
+    );
+    const composer = element.querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-composer-editor]',
+    )!;
+    await openAndSelect(element, 'second');
+    expect(onSelectWorkspace).toHaveBeenCalledExactlyOnceWith('/second');
+    await waitForFocus(composer);
+    expect(document.activeElement).toBe(composer);
+  });
+
+  it('scopes the focus to the composer of the pane that made the selection', async () => {
+    const element = renderInPanes(
+      '<div data-pane-session-id="pane-a"><textarea id="composer-a" data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>' +
+        '<div data-pane-session-id="pane-b"><textarea id="composer-b" data-web-shell-composer-editor></textarea></div>',
+    );
+    await openAndSelect(element, 'second');
+    await waitForFocus(element.querySelector('#composer-a'));
+    expect(document.activeElement).toBe(element.querySelector('#composer-a'));
+  });
+
+  it('recovers from a pane remount via the document scope', async () => {
+    const element = renderInPanes(
+      '<div data-pane-session-id="pane-a"><textarea id="composer-a" data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>',
+    );
+    const trigger = element.querySelector('button')!;
+    await act(async () => {
+      trigger.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    const option = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ].find((entry) => entry.textContent?.includes('second'))!;
+    // The selection switches sessions: SplitView remounts the pane, so the
+    // captured pane goes away before the click lands and a fresh composer
+    // comes up in the replacement pane.
+    await act(async () => {
+      element.querySelector('[data-pane-session-id="pane-a"]')!.remove();
+      document.body.insertAdjacentHTML(
+        'beforeend',
+        '<div data-pane-session-id="pane-a2"><textarea id="composer-a2" data-web-shell-composer-editor></textarea></div>',
+      );
+      option.click();
+    });
+    await waitForFocus(document.querySelector('#composer-a2'));
+    expect(document.activeElement).toBe(document.querySelector('#composer-a2'));
+  });
+
+  it('moves focus to the composer after a standalone selection', async () => {
+    const onSelectStandalone = vi.fn();
+    const element = renderInPanes(
+      '<div data-pane-session-id="fixture-pane"><textarea data-web-shell-composer-editor></textarea><div id="fixture-slot"></div></div>',
+      { standaloneSupported: true, onSelectStandalone },
+    );
+    await openAndSelect(element, 'No workspace');
+    expect(onSelectStandalone).toHaveBeenCalledOnce();
+    const composer = element.querySelector('[data-web-shell-composer-editor]');
+    await waitForFocus(composer);
+    expect(document.activeElement).toBe(composer);
+  });
+});
