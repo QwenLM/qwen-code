@@ -5558,65 +5558,6 @@ describe('ManagedSessionsPage', () => {
     ).not.toBe(originalKey);
   });
 
-  it.each([
-    ['approval mode', (props) => props.onSelectMode!('default')],
-    ['plan mode', (props) => props.onTogglePlan!()],
-  ] as const)(
-    'leaves the foreign session %s controls usable while another session owns the pending request',
-    async (_label, invoke) => {
-      const approval = {
-        approvalMode: 'default' as const,
-        approvalRevision: 0,
-        planModeSupported: true,
-        capabilities: {
-          canSend: true,
-          canCancel: false,
-          approvalModeChange: true,
-        },
-      };
-      const s2 = { ...approval, approvalMode: 'yolo' as const };
-      mocks.client.listSessions.mockResolvedValue({
-        sessions: [summary('s1', approval), summary('s2', s2)],
-      });
-      mocks.client.getSession.mockImplementation(async (id: string) =>
-        summary(id, id === 's1' ? approval : s2),
-      );
-      mocks.client.submitPrompt.mockRejectedValue(
-        new TypeError('Network failed'),
-      );
-      provider.approvalChange = {
-        queryOptions: vi.fn(async () => ({
-          supported: true,
-          approvalMode: 'default',
-          approvalRevision: 0,
-          availableApprovalModes: ['default', 'yolo'],
-          planModeSupported: true,
-        })),
-        submit: vi.fn(),
-      };
-
-      await render('s1');
-      await input('Pending in s1 only');
-      await click('Send');
-      expect(container.textContent).toContain('not confirmed as submitted');
-
-      await render('s2');
-      // 异会话的未决提交只拦提交，不应该锁住当前会话自己的审批控件。
-      expect(container.textContent).toContain(
-        'Another conversation has an unconfirmed request',
-      );
-      // 等审批 hook 的 summaryRef 跟上本次会话切换，再模拟用户点击。
-      await render('s2');
-      expect(mocks.editorProps?.planControlsDisabled).toBe(false);
-      expect(mocks.editorProps?.modeControlsDisabled).toBe(false);
-      await act(async () => {
-        invoke(mocks.editorProps!);
-        await flush();
-      });
-      expect(provider.approvalChange.submit).toHaveBeenCalledTimes(1);
-    },
-  );
-
   it('resolves a foreign pending prompt through its owning session', async () => {
     mocks.client.listSessions.mockResolvedValue({
       sessions: [summary('s1'), summary('s2')],

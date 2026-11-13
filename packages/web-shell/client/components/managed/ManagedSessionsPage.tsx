@@ -2819,7 +2819,7 @@ function ManagedSessionsContent({
                   busy ||
                   Boolean(active) ||
                   Boolean(pendingApproval) ||
-                  Boolean(pendingHere) ||
+                  Boolean(pending) ||
                   modelChange.isBlocked() ||
                   approvalChange.options.approvalRevision !==
                     (summary?.approvalRevision ?? 0)
@@ -2832,7 +2832,7 @@ function ManagedSessionsContent({
                           !encoding.current &&
                           !active &&
                           !pendingApproval &&
-                          pendingRef.current?.sessionId !== sessionId &&
+                          !pendingRef.current &&
                           !modelChange.isBlocked() &&
                           !compression.isBlocked()
                         )
@@ -2859,7 +2859,7 @@ function ManagedSessionsContent({
                   ((Boolean(active) || Boolean(pendingApproval)) &&
                     !approvalChange.options.liveSupported) ||
                   summary?.phase === 'cancelling' ||
-                  Boolean(pendingHere) ||
+                  Boolean(pending) ||
                   modelChange.blocked ||
                   modelChange.busy ||
                   approvalChange.options.approvalRevision !==
@@ -2872,7 +2872,7 @@ function ManagedSessionsContent({
                           !interactive ||
                           busy ||
                           encoding.current ||
-                          pendingRef.current?.sessionId === sessionId ||
+                          pendingRef.current ||
                           ((active || pendingApproval) &&
                             !approvalChange.options?.liveSupported) ||
                           summary?.phase === 'cancelling' ||
@@ -3056,7 +3056,7 @@ function ManagedSessionsContent({
                       busy ||
                       Boolean(active) ||
                       Boolean(pendingApproval) ||
-                      Boolean(pendingHere) ||
+                      Boolean(pending) ||
                       approvalChange.options.approvalRevision !==
                         (summary?.approvalRevision ?? 0)
                     }
