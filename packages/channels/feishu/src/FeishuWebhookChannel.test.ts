@@ -144,8 +144,13 @@ describe('Feishu webhook configuration', () => {
       webhookUrl:
         'https://open.feishu.cn.evil.test/open-apis/bot/v2/hook/private-token',
     });
-    await expect(channel.connect()).rejects.toThrow(
-      'Feishu webhook URL must be https://open.feishu.cn/open-apis/bot/v2/hook/ with one URL-safe token path segment.',
+    const connecting = channel.connect();
+    await expect(connecting).rejects.toThrow(
+      /^Feishu webhook URL must be https:\/\/open\.feishu\.cn\/open-apis\/bot\/v2\/hook\/ with one URL-safe token path segment\.$/,
+    );
+    await expect(connecting).rejects.toHaveProperty(
+      'message',
+      expect.not.stringContaining('private-token'),
     );
     await expect(channel.sendMessage('default', 'text')).rejects.toMatchObject({
       disposition: 'permanent',
@@ -160,7 +165,7 @@ describe('Feishu webhook configuration', () => {
       expect(() =>
         parseFeishuWebhookConfig({ webhookUrl: WEBHOOK_URL, signingSecret }),
       ).toThrow(
-        'Feishu signing secret must be a non-empty string without surrounding whitespace.',
+        /^Feishu signing secret must be a non-empty string without surrounding whitespace\.$/,
       );
     },
   );
