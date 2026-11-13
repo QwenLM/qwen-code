@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { runToolBatch } from '../core/agent-loop.js';
+import { batchOptions, runToolBatch } from '../core/agent-loop.js';
 import type { ToolCallRequestInfo } from '../core/turn.js';
 import type { LoopEventBus } from './bus.js';
 import type { AnyBusEvent } from './events.js';
@@ -50,16 +50,10 @@ export class ToolHandler {
     calls: ToolCallRequestInfo[],
     round: number,
   ): Promise<void> {
-    const { config, client, signal, toolSignal, host = {} } = state.input;
-    const batch = await runToolBatch(calls, {
-      config,
-      client,
-      signal,
-      toolSignal,
-      host,
-      duplicates: state.duplicates,
-      executor: state.executor,
-    });
+    const batch = await runToolBatch(
+      calls,
+      batchOptions(state.input, state.duplicates, state.executor),
+    );
     if (this.store.get(state.runId) !== state || state.round !== round) return;
     state.batch = batch;
     publishFor(this.bus, state, 'tool.settled', { round }, round);

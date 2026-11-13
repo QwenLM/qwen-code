@@ -111,10 +111,11 @@ Constraints:
   are live and documented. The `"kubernetes"` strings in `HarnessConfiguration`
   and `HarnessPoolConnector` are the Harness pool discovery mode, unrelated to
   the Runtime provisioner.
-- **`JdbcRuntimeBrokerSchema` is not deletable.** It has zero `src/main` callers
-  but is the schema initializer used by 13+ verification test classes and is
-  documented in `docs/runtime-broker.md` as the Broker schema entry point. The
-  review claim "production-unused, delete" is incorrect.
+- **`JdbcRuntimeBrokerSchema` is a redundant alias.** It is a one-line
+  pass-through to `ManagedSchema.initialize` with zero `src/main` callers; 8
+  verification test classes call it while 133 others call `ManagedSchema`
+  directly. Delete the wrapper and point those 8 tests at `ManagedSchema` — no
+  test is deleted and no coverage is lost.
 - `ManagedArtifactConfiguration.sessionWorktreeScheduler` is the only scheduler
   bean in that class missing `defaultCandidate = false`. All 24 `@Scheduled`
   methods in the module specify an explicit `scheduler=` qualifier; none relies
@@ -198,8 +199,6 @@ Constraints:
   drifted versioned bucket; pinned by the deletion regression test).
 - Removing the `validateConfiguration()` SPI method or its two explicit
   production call sites.
-- Deleting `JdbcRuntimeBrokerSchema` (test-only but load-bearing; relocation to
-  verification is a separate future decision).
 - Removing the `kubernetes` reservation guards, or touching the unrelated
   Harness pool-discovery `"kubernetes"` strings.
 - Unifying `W1_JDBC_*` / `K2_JDBC_*` / `SPRING_DATASOURCE_*` into one dialect
@@ -276,10 +275,14 @@ resident/CSI provisioners. Keep the `RuntimeProviderRegistry` reservation guards
 The unreachable `"kubernetes"` disjuncts in `ManagedAgentProperties` and
 `EmbeddedRuntimeBroker` are left as-is (harmless, guarded by the reservation).
 
-### 2b. JdbcRuntimeBrokerSchema
+### 2b. JdbcRuntimeBrokerSchema deletion
 
-No change. Keep the class and its documentation. Record relocation to
-verification fixtures as a separate future decision rather than a deletion.
+Delete the `JdbcRuntimeBrokerSchema` wrapper (a one-line pass-through to
+`ManagedSchema.initialize`) and replace its 14 call sites across 8 verification
+test classes with `ManagedSchema.initialize`, matching the 133 tests that already
+use `ManagedSchema` directly. No test is deleted; coverage is unchanged. Update
+`docs/runtime-broker.md` to name `ManagedSchema.initialize` as the schema entry
+point.
 
 ### 2c. sessionWorktreeScheduler default candidate
 
@@ -356,8 +359,10 @@ in the admin-launcher design and the deployment guide.
 - **A neutral object-storage flag that defaults to follow `tool-publication.enabled`**:
   reuses an established `application.yml` pattern and keeps the custom-store
   failure mode; OSS properties stay under `tool-publication.oss-*` (no migration).
-- **Keep `JdbcRuntimeBrokerSchema`**: the review's "production-unused" claim is
-  true only of `src/main`; 13+ tests and the module doc depend on it.
+- **Delete the `JdbcRuntimeBrokerSchema` alias**: it adds nothing over
+  `ManagedSchema.initialize`; the 8 tests that used it migrate to the production
+  initializer rather than being deleted, so the production-unused class goes away
+  without losing coverage.
 - **Keep the K1 reservation guards and the live `KubernetesRuntimeClient` SPI**:
   only the unregistered K1 provisioner and its test-only fixture are dead.
 - **Uniform strict mode**: pre-production removes the reason to leave standalone
@@ -463,7 +468,6 @@ until the required CI gates pass on the accepted revision.
 - Optional rename of `AliyunToolPublicationStorageAutoConfiguration` and its bean
   names to a neutral object-storage name (touches the auto-configuration imports,
   the embedded `@Import`, the hosted fixtures and the configuration test).
-- Optional relocation of `JdbcRuntimeBrokerSchema` to verification fixtures.
 - Optional simplification of the unreachable `"kubernetes"` disjuncts.
 - Optional neutral `object-storage.*` prefix for the OSS connection properties
   (currently `tool-publication.oss-*`); deferred as churn outweighs the gain.
