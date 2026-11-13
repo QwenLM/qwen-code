@@ -17,6 +17,7 @@ import {
   withConsoleLogSuppressedSync,
 } from './connect-logging.js';
 import { splitChunks } from './markdown.js';
+import { isRetryableDingtalkStatus } from './interactive-card-client.js';
 
 const WEBHOOK_TIMEOUT_MS = 30_000;
 
@@ -52,20 +53,33 @@ function createStreamClient(
     withConsoleLogSuppressedSync(() => sdkOnDownStream(data));
   };
   // The SDK reconnects by calling this.connect, whose getEndpoint() logs the
-  // clientSecret and can reject unhandled against a down network; connect()
-  // also resets userDisconnect, so a timer pending at disconnect would reopen
-  // a socket. Route every connect — including the SDK's own reconnects —
-  // through the logging suppression, swallow a failed attempt so it cannot
-  // raise an unhandled rejection (the next timer retries), and stop once the
-  // adapter disconnects.
+  // clientSecret; connect() also resets userDisconnect, so a timer pending at
+  // disconnect would reopen a socket. Route every connect through the logging
+  // suppression and stop once the adapter disconnects. The adapter's FIRST
+  // connect must surface its failure (a bad credential or unreachable gateway
+  // creates no socket and arms no retry, so swallowing it would report a
+  // healthy start that is permanently deaf); only a reconnect after a
+  // successful connect may fail quietly, since the SDK's close-handler timer
+  // owns the retry.
   let stopped = false;
+  let everConnected = false;
   const sdkConnect = internals.connect.bind(client);
-  internals.connect = () => {
+  const guardedConnect = () => {
     if (stopped) return Promise.resolve();
-    return withConnectLoggingSuppressed(sdkConnect).catch(() => undefined);
+    return withConnectLoggingSuppressed(sdkConnect).then(
+      (result) => {
+        everConnected = true;
+        return result;
+      },
+      (error) => {
+        if (!everConnected) throw error;
+        return undefined;
+      },
+    );
   };
+  internals.connect = guardedConnect;
   return {
-    connect: () => internals.connect(),
+    connect: () => guardedConnect(),
     disconnect: () => {
       stopped = true;
       client.disconnect();
@@ -111,9 +125,11 @@ async function postTextChunk(
     );
   }
   if (response.status >= 400 && response.status < 500) {
+    // Retryable statuses (408/425/429) are transient, matching the package's
+    // own classifier; the rest (expired/invalid webhook, banned) are definitive.
     throw webhookFailure(
-      `DingTalk webhook refused the send (HTTP ${response.status}).`,
-      true,
+      `DingTalk webhook answered HTTP ${response.status}.`,
+      !isRetryableDingtalkStatus(response.status),
     );
   }
   if (!response.ok) {
@@ -129,11 +145,29 @@ async function postTextChunk(
     if (signal.aborted) {
       throw webhookFailure('DingTalk webhook body read timed out.', false);
     }
-    body = undefined;
+    // HTTP 200 is not DingTalk's success verdict (non-zero errcode arrives with
+    // 200 too); an unreadable body proves nothing, so the outcome is unknown.
+    throw webhookFailure(
+      'DingTalk webhook answered without a readable body; the send outcome is unknown.',
+      false,
+    );
   }
-  if (body && typeof body.errcode === 'number' && body.errcode !== 0) {
-    // A non-zero errcode is the provider's definitive verdict (an expired or
-    // invalid webhook, a banned robot): nothing retries it.
+  if (!body || typeof body.errcode !== 'number') {
+    throw webhookFailure(
+      'DingTalk webhook answered without an errcode; the send outcome is unknown.',
+      false,
+    );
+  }
+  if (body.errcode !== 0) {
+    // System-busy and throttling verdicts are transient (the package's own
+    // classifier treats -1 / 410100 as transient): the outcome is unknown, not
+    // a definitive refusal the ledger could never revise.
+    if (body.errcode === -1 || body.errcode === 410100) {
+      throw webhookFailure(
+        `DingTalk webhook is busy (errcode ${body.errcode}); the send outcome is unknown.`,
+        false,
+      );
+    }
     throw webhookFailure(
       `DingTalk webhook refused the send (errcode ${body.errcode}: ${String(body.errmsg)}).`,
       true,

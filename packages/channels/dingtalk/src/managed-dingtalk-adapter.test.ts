@@ -764,4 +764,23 @@ describe('managed DingTalk adapter review fixes', () => {
     ]);
     await adapter.disconnect();
   });
+
+  it('the shutdown drain never evicts an already-persisted claim (R2-1)', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    first.plane.setRefuseSubmit({ status: 503 });
+    for (let i = 1; i <= 32; i += 1) {
+      first.fake.push(`m${i}`, messageData({ msgId: `m${i}` }));
+    }
+    await first.adapter.tick(); // pending fills to the 32-claim cap
+    first.fake.push('m33', messageData({ msgId: 'm33' })); // parks in the inbox
+    await first.adapter.disconnect(); // bounded drain must not evict m1
+
+    const second = await connectedAdapter(cwd);
+    await second.adapter.tick();
+    expect(second.plane.submit.map((event) => event.platformEventId)).toContain(
+      'dingtalk:m1',
+    );
+    await second.adapter.disconnect();
+  });
 });

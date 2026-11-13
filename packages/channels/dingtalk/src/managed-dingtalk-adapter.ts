@@ -246,15 +246,30 @@ export class ManagedDingtalkAdapter {
   async disconnect(): Promise<void> {
     this.stop();
     await this.loop;
-    // The stream acked these messages and will never redeliver them; persist
-    // them as claims before releasing the lock so a graceful restart re-drives
-    // them instead of losing them. They are not submitted here — the next
-    // process owns the admission.
-    while (this.inbox.length > 0) {
-      await this.admit(this.inbox.shift()!, false);
+    try {
+      // The stream acked these messages and will never redeliver them; persist
+      // them as claims before releasing the lock so a graceful restart re-drives
+      // them instead of losing them. They are not submitted here — the next
+      // process owns the admission. Bound the drain by the pending cap so it
+      // never evicts an already-persisted claim (the provider acked that one
+      // too and will not redeliver it).
+      const state = this.state!;
+      while (
+        this.inbox.length > 0 &&
+        state.pending.length < MANAGED_DINGTALK_PENDING_LIMIT
+      ) {
+        await this.admit(this.inbox.shift()!, false);
+      }
+      if (this.inbox.length > 0) {
+        this.log(
+          `Managed DingTalk could not persist ${this.inbox.length} acked message(s): the pending claim table is full.`,
+        );
+        this.inbox.length = 0;
+      }
+    } finally {
+      await this.controlPlane.disconnect().catch(() => undefined);
+      await this.release();
     }
-    await this.controlPlane.disconnect().catch(() => undefined);
-    await this.release();
   }
 
   /** One admission drain and one outbound pull, for callers that drive it. */
@@ -456,10 +471,14 @@ export class ManagedDingtalkAdapter {
               );
               this.persist();
             }
-            this.instanceStalled = true;
-            this.log(
-              `Managed DingTalk stopped admitting: every message is refused with ${status} ${String(code)}; check the instance's --workspace and --actor flags.`,
-            );
+            // Log only on the transition: a stalled adapter re-probes the held
+            // claim every tick, and re-emitting the line would drown the log.
+            if (!this.instanceStalled) {
+              this.instanceStalled = true;
+              this.log(
+                `Managed DingTalk stopped admitting: every message is refused with ${status} ${String(code)}; check the instance's --workspace and --actor flags.`,
+              );
+            }
             return;
           }
         }

@@ -111,3 +111,92 @@ describe('managed DingTalk webhook chunking', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('managed DingTalk webhook verdict honesty (R2-2)', () => {
+  it('a 200 with an unreadable body is unknown, not accepted', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () => new Response('<html>proxy blocked</html>', { status: 200 }),
+      ),
+    );
+    const { sendWebhook } = createManagedDingtalkDeps();
+    await expect(sendWebhook(WEBHOOK, 'hello')).rejects.toMatchObject({
+      definitive: false,
+    });
+  });
+
+  it('a 200 with an empty body is unknown, not accepted', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('', { status: 200 })),
+    );
+    const { sendWebhook } = createManagedDingtalkDeps();
+    await expect(sendWebhook(WEBHOOK, 'hello')).rejects.toMatchObject({
+      definitive: false,
+    });
+  });
+
+  it('a 200 with a string errcode is unknown, not accepted', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ errcode: '310000' })),
+    );
+    const { sendWebhook } = createManagedDingtalkDeps();
+    await expect(sendWebhook(WEBHOOK, 'hello')).rejects.toMatchObject({
+      definitive: false,
+    });
+  });
+});
+
+describe('managed DingTalk webhook transient verdicts (R2-3)', () => {
+  it.each([{ errcode: 410100 }, { errcode: -1 }])(
+    'errcode $errcode is transient (non-definitive)',
+    async (body) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => jsonResponse(body)),
+      );
+      const { sendWebhook } = createManagedDingtalkDeps();
+      await expect(sendWebhook(WEBHOOK, 'hello')).rejects.toMatchObject({
+        definitive: false,
+      });
+    },
+  );
+
+  it.each([429, 408, 425])(
+    'HTTP %i is retryable (non-definitive)',
+    async (status) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => jsonResponse({}, status)),
+      );
+      const { sendWebhook } = createManagedDingtalkDeps();
+      await expect(sendWebhook(WEBHOOK, 'hello')).rejects.toMatchObject({
+        definitive: false,
+      });
+    },
+  );
+
+  it('HTTP 403 stays definitive', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({}, 403)),
+    );
+    const { sendWebhook } = createManagedDingtalkDeps();
+    await expect(sendWebhook(WEBHOOK, 'hello')).rejects.toMatchObject({
+      definitive: true,
+    });
+  });
+
+  it('a permanent errcode stays definitive', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ errcode: 310000 })),
+    );
+    const { sendWebhook } = createManagedDingtalkDeps();
+    await expect(sendWebhook(WEBHOOK, 'hello')).rejects.toMatchObject({
+      definitive: true,
+    });
+  });
+});
