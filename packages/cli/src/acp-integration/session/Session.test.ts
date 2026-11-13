@@ -28,6 +28,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { detectTurnInterruption } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
+import type { UserTurnInput } from '@qwen-code/qwen-code-core/core/client.js';
 import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import {
@@ -4945,6 +4946,9 @@ describe('Session', () => {
     /** Streams each round's events from LlmClient, then empty rounds. */
     function useSharedRounds(...rounds: RoundEvent[][]) {
       mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
+      agentTelemetry.getActiveInteractionSpan.mockReturnValue(
+        agentTelemetry.span,
+      );
       Object.assign(mockLlmClient, {
         admitUserPrompt: vi.fn().mockResolvedValue({ blocked: false }),
       });
@@ -5073,13 +5077,23 @@ describe('Session', () => {
       expect(send).toHaveBeenCalledOnce();
       expect(send.mock.calls[0][3]).toMatchObject({
         type: core.SendMessageType.UserQuery,
-        userTurnRecordedByHost: true,
+        userTurn: {
+          promptId: send.mock.calls[0][2],
+          todoWorkChain: { promptId: send.mock.calls[0][2] },
+          fileHistory: { promptId: send.mock.calls[0][2] },
+        },
         workflowModeEligible: true,
-        interactionSpanByHost: true,
+        interactionSpan: agentTelemetry.span,
         promptAdmission: { blocked: false },
         // Recall searches the prompt text, not the resolved request.
         memoryRecallQuery: 'hello',
       });
+      // The host recorded the user message before the send, so the client does
+      // not record it again.
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledOnce();
+      expect(mockChatRecordingService.recordUserMessage.mock.calls[0][0]).toBe(
+        'hello',
+      );
       expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
       // The client runs its own tool-call guards for the shared tool batch.
       expect(send.mock.calls[0][3]).not.toHaveProperty('toolLoopGuardsByHost');
@@ -6170,7 +6184,7 @@ describe('Session', () => {
           expect(send).toHaveBeenCalledOnce();
           expect(send.mock.calls[0][3]).toMatchObject({
             type: core.SendMessageType.Retry,
-            userTurnRecordedByHost: true,
+            userTurn: { promptId: send.mock.calls[0][2] },
             historyPromptId: promptId,
           });
           // A retry runs UserPromptSubmit, as before; a continue does not.
@@ -6331,6 +6345,9 @@ describe('Session', () => {
         > = [];
         let pushCount = 0;
         mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
+        agentTelemetry.getActiveInteractionSpan.mockReturnValue(
+          agentTelemetry.span,
+        );
         Object.assign(mockChat, {
           getUserContentPushCount: vi.fn(() => pushCount),
         });
@@ -6403,8 +6420,8 @@ describe('Session', () => {
         expect(sends[1][0]).toEqual([{ text: 'nightly report' }]);
         expect(sends[1][3]).toMatchObject({
           type: core.SendMessageType.Cron,
-          userTurnRecordedByHost: true,
-          interactionSpanByHost: true,
+          userTurn: { promptId: sends[1][2] },
+          interactionSpan: agentTelemetry.span,
           toolCallPreparations: true,
         });
         expect(sends[1][3]['stopPolicies']).toHaveLength(1);
@@ -6576,9 +6593,9 @@ describe('Session', () => {
         expect(execute).toHaveBeenCalledOnce();
         expect(sends[2][3]).toMatchObject({
           type: core.SendMessageType.ToolResult,
-          interactionSpanByHost: true,
+          interactionSpan: agentTelemetry.span,
         });
-        expect(sends[2][3]).not.toHaveProperty('userTurnRecordedByHost');
+        expect(sends[2][3]).not.toHaveProperty('userTurn');
         expect(sends[2][0]).toContainEqual(
           expect.objectContaining({
             functionResponse: expect.objectContaining({ id: 'call-1' }),
@@ -6610,9 +6627,20 @@ describe('Session', () => {
         expect(sends).toHaveLength(1);
         expect(sends[0][3]).toMatchObject({
           type: core.SendMessageType.Notification,
-          userTurnRecordedByHost: true,
+          userTurn: { promptId: sends[0][2] },
         });
-        expect(sends[0][3]).not.toHaveProperty('interactionSpanByHost');
+        // Already persisted, so the turn tells the client not to record it and
+        // keeps the task identity on the strict record the host wrote.
+        expect(
+          mockChatRecordingService.recordNotificationStrict,
+        ).toHaveBeenCalledOnce();
+        expect(
+          mockChatRecordingService.recordNotificationStrict.mock.calls[0]![2],
+        ).toMatchObject({ taskId: 'task-1' });
+        expect(
+          mockChatRecordingService.recordNotification,
+        ).not.toHaveBeenCalled();
+        expect(sends[0][3]).not.toHaveProperty('interactionSpan');
         expect(sends[0][0]).toContainEqual({ text: '<task-notification />' });
         expect(
           backgroundResponses().map(
@@ -10743,16 +10771,19 @@ describe('Session', () => {
       expect(execute).toHaveBeenCalled();
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
       expect(send).toHaveBeenCalledOnce();
-      const [parts, , , options] = send.mock.calls[0] as unknown as [
+      const [parts, , promptId, options] = send.mock.calls[0] as unknown as [
         Part[],
         AbortSignal,
         string,
-        { type: string; userTurnRecordedByHost?: boolean },
+        { type: string; userTurn?: UserTurnInput },
       ];
       expect(parts[0]?.functionResponse?.id).toBe('call-auq');
       expect(options).toMatchObject({
         type: core.SendMessageType.Retry,
-        userTurnRecordedByHost: true,
+        userTurn: {
+          promptId,
+          fileHistory: { promptId },
+        },
       });
       expect(options).not.toHaveProperty('promptAdmission');
     });
@@ -39494,7 +39525,7 @@ describe('Session', () => {
             goalPermit: permit,
             goalTurnKey: turnKey,
             goalOrigin: 'runtime',
-            userTurnRecordedByHost: true,
+            userTurn: { promptId: sends[0][2] },
           });
           // The round's own signal: a cut or a cancel is left to the session.
           expect(sends[0][3]['goalSignal']).toBe(sends[0][1]);
@@ -39534,7 +39565,7 @@ describe('Session', () => {
             goalPermit: permit,
             goalTurnKey: expect.stringMatching(/^goal-user:/),
             goalOrigin: 'user',
-            userTurnRecordedByHost: true,
+            userTurn: { promptId: sends[0][2] },
           });
           expect(
             mockChatRecordingService.recordUserMessage,
