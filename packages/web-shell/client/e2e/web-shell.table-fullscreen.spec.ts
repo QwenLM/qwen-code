@@ -384,6 +384,15 @@ test.describe('enhanced table fullscreen', () => {
         await page.setViewportSize({ width, height: 844 });
         await toolbar.scrollIntoViewIfNeeded();
         await expect(
+          toolbar.getByText('Selected 1', { exact: true }),
+        ).toBeInViewport({ ratio: 1 });
+        await expect(
+          toolbar.getByText('Non-empty 1', { exact: true }),
+        ).toBeHidden();
+        await expect(
+          toolbar.getByText('Numeric 1', { exact: true }),
+        ).toBeHidden();
+        await expect(
           toolbar.getByRole('button', { name: 'Copy text', exact: true }),
         ).toBeInViewport({ ratio: 1 });
         await expect(
@@ -406,14 +415,35 @@ test.describe('enhanced table fullscreen', () => {
     const toolbar = table.locator(':scope > [data-selection-copy-ignore]');
 
     await expect(
-      toolbar.getByRole('button', { name: 'Copy text', exact: true }),
-    ).toHaveCount(0);
-    await expect(
       toolbar.getByRole('button', { name: 'Copy', exact: true }),
     ).toBeInViewport({ ratio: 1 });
     expect(
       await toolbar.evaluate((el) => el.scrollWidth - el.clientWidth),
     ).toBe(0);
+  });
+
+  test('@smoke compacts the mid-width toolbar only while cells are selected', async ({
+    page,
+  }, testInfo) => {
+    await openFixture(page, testInfo, { width: 700, theme: 'light' });
+    const table = page.locator('[data-selection-copy-table]');
+    const toolbar = table.locator(':scope > [data-selection-copy-ignore]');
+    const copy = toolbar.getByRole('button', { name: 'Copy', exact: true });
+    const copyLabel = copy.getByText('Copy', { exact: true });
+    await expect(copyLabel).toBeVisible();
+
+    await table.getByRole('cell', { name: '80', exact: true }).click();
+
+    await expect(copyLabel).toBeHidden();
+    await expect(copy).toBeInViewport({ ratio: 1 });
+    expect(
+      await toolbar.evaluate((el) => el.scrollWidth - el.clientWidth),
+    ).toBe(0);
+
+    await page
+      .getByRole('heading', { name: 'Fullscreen table acceptance' })
+      .click();
+    await expect(copyLabel).toBeVisible();
   });
 
   test('@smoke keeps every toolbar action in view after selecting a numeric cell at desktop width', async ({
