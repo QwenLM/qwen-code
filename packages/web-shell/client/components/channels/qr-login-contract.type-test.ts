@@ -3,54 +3,55 @@
  * not a per-call argument on anything the channels hook publishes.
  *
  * `tsc` is the runner — this file is never imported and never executed. Each
- * directive below turns into TS2578 ("Unused '@ts-expect-error' directive") the
- * moment one of these surfaces advertises the wider contract again. The types
- * are derived from the real hook return value and the real props, so widening
- * any one of them is caught here rather than only at the interface.
+ * surface is asserted to be *exactly* the narrow handler contract, so any
+ * widening, renaming or optionality change fails the build regardless of which
+ * encoding it uses. Sampling call shapes with `@ts-expect-error` cannot do that:
+ * a suppression keeps swallowing an unrelated error (a renamed member, an
+ * excess property) and goes silent about the thing it names.
+ *
+ * The positive controls below exist so a rename reds the build instead of
+ * leaving the identity assertions comparing two types that no longer describe
+ * the published members.
  *
  * The name deliberately avoids `*.test.ts`: this package's tsconfig excludes
  * test files from typechecking, which would make these pins inert.
  */
 import type { useDaemonChannels } from '../../daemon/workspace/hooks/useDaemonChannels';
+import type { DaemonChannelQrLoginHandlers } from '../../daemon/workspace/types';
 import type { ChannelEditorDialogProps } from './ChannelEditorDialog';
 import type { ChannelQrLoginProps } from './ChannelQrLogin';
 
-declare const hook: ReturnType<typeof useDaemonChannels>['qrLogin'];
+// Mutual assignability is not identity: a function with an extra *optional*
+// parameter is assignable in both directions, so `extends` both ways would
+// accept exactly the widening these pins exist to reject.
+type Identical<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+    ? true
+    : false;
+type Assert<T extends true> = T;
+
+type HookQrLogin = ReturnType<typeof useDaemonChannels>['qrLogin'];
+
+export type HookIdentity = Assert<
+  Identical<HookQrLogin, DaemonChannelQrLoginHandlers>
+>;
+export type PanelIdentity = Assert<
+  Identical<ChannelQrLoginProps['actions'], DaemonChannelQrLoginHandlers>
+>;
+export type EditorIdentity = Assert<
+  Identical<
+    NonNullable<ChannelEditorDialogProps['qrLoginActions']>,
+    DaemonChannelQrLoginHandlers
+  >
+>;
+
+declare const hook: HookQrLogin;
 declare const panel: ChannelQrLoginProps;
 declare const editor: ChannelEditorDialogProps;
 
-// @ts-expect-error a per-call client id must not be expressible
-void hook.start('bot', 'peer-tab');
-// @ts-expect-error a per-call client id must not be expressible
-void hook.state('login-1', 'peer-tab');
-// @ts-expect-error a per-call client id must not be expressible
-void hook.cancel('login-1', 'peer-tab');
-// @ts-expect-error a per-call client id must not be expressible
-void hook.release('login-1', 'peer-tab');
-// @ts-expect-error a per-call workspace must not be expressible either
-void hook.release('login-1', 'peer-tab', '/workspace-x');
-
-// The options-bag encoding has to be pinned too: a bare string would still be
-// rejected by `(name, options?: { clientId?: string })`, so a positional-only
-// pin would stay silent while a per-call id became expressible again.
-// @ts-expect-error a per-call client id must not be expressible as an option
-void hook.start('bot', { clientId: 'peer-tab' });
-// @ts-expect-error a per-call client id must not be expressible as an option
-void hook.state('login-1', { clientId: 'peer-tab' });
-// @ts-expect-error a per-call client id must not be expressible as an option
-void hook.cancel('login-1', { clientId: 'peer-tab' });
-// @ts-expect-error neither identity nor workspace may arrive as an option
-void hook.release('login-1', {
-  clientId: 'peer-tab',
-  workspaceCwd: '/workspace-x',
-});
-
-// The props that carry the handlers to the UI must not re-widen them.
-// @ts-expect-error the panel cannot attribute a login per call
-void panel.actions.start('bot', 'peer-tab');
-// @ts-expect-error the panel cannot attribute a login per call via an option
-void panel.actions.start('bot', { clientId: 'peer-tab' });
-// @ts-expect-error the editor cannot attribute a login per call
-void editor.qrLoginActions?.state('login-1', 'peer-tab');
-// @ts-expect-error the editor cannot attribute a login per call via an option
-void editor.qrLoginActions?.state('login-1', { clientId: 'peer-tab' });
+void hook.start('bot');
+void hook.state('login-1');
+void hook.cancel('login-1');
+void hook.release('login-1');
+void panel.actions.start('bot');
+void editor.qrLoginActions?.state('login-1');
