@@ -144,8 +144,9 @@ is new relative to Legacy and is the price of the ack-once re-drive.
   admission refusal, the instance-scoped stall (including across a restart) and
   the registration-refusal re-register each red their case. Resuming the
   still-unsent segments after an interruption is the control plane's
-  partial/resume re-claim (#17002), unchanged here. Each rule disabled in turn
-  reds its case.
+  partial/resume re-claim (#17002), unchanged here. The load-bearing rules are
+  pinned by mutation-verified witnesses; remaining coverage gaps are tracked in
+  #17173.
 - The real-provider leg (stream inbound + sessionWebhook outbound) is exercised
   against a fake DingTalk endpoint in the deps, mirroring the email adapter's
   fake-transport tests; a live-tenant smoke is a follow-up, not a merge gate.

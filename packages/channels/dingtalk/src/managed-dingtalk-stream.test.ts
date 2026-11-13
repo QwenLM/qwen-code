@@ -21,9 +21,12 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => {
     constructor() {
       mockState.instance = this as unknown as typeof mockState.instance;
     }
-    // Simulate the SDK dispatch: JSON.parse + route with NO error boundary —
-    // the deps wrapper must provide it (R3-1).
+    // Simulate the SDK dispatch: it console.log()s every raw frame (ungated by
+    // its debug flag) and JSON.parse + routes with NO error boundary — the deps
+    // wrapper must suppress the log (R3-4) and provide the boundary (R3-1).
     onDownStream(data: unknown): void {
+      // eslint-disable-next-line no-console -- mirrors the real SDK's raw-frame log
+      console.log(data);
       const msg = JSON.parse(data as string) as {
         type?: string;
         headers?: { messageId?: string };

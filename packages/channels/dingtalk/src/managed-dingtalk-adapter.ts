@@ -768,7 +768,12 @@ function extractText(parsed: Record<string, unknown>): string | undefined {
  * overflow the byte envelope, so the byte cut lands on a code-point boundary.
  */
 function fitInboundText(text: string): string {
-  const bounded = text.slice(0, MAX_WIRE_TEXT_CHARS);
+  // The cap counts UTF-16 units (the server's maxTextChars does too), so a
+  // code-point cap could overshoot it; but a UTF-16 slice can land inside a
+  // surrogate pair, so back off a trailing high surrogate to keep the text
+  // well-formed.
+  let bounded = text.slice(0, MAX_WIRE_TEXT_CHARS);
+  if (/[\uD800-\uDBFF]$/.test(bounded)) bounded = bounded.slice(0, -1);
   const byteLimit = ENVELOPE_BYTE_LIMIT - TEXT_ENVELOPE_OVERHEAD_BYTES;
   // The bound is enforced on the JSON-serialized envelope, where a control
   // character costs six bytes and a quote/backslash two — not on the raw UTF-8

@@ -804,4 +804,21 @@ describe('managed DingTalk adapter review fixes', () => {
     expect(text.length).toBeLessThan(32_000);
     await adapter.disconnect();
   });
+
+  it('does not admit a lone surrogate at the character-cap boundary (F1)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    // 31,001 ASCII + 1,000 emoji: the 32,000-UTF-16-unit cap lands inside a
+    // surrogate pair; the admitted text must stay well-formed.
+    fake.push(
+      'msg-astral',
+      messageData({
+        msgId: 'msg-astral',
+        text: { content: 'x'.repeat(31_001) + '😀'.repeat(1_000) },
+      }),
+    );
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(1);
+    expect(plane.submit[0]!.text.isWellFormed()).toBe(true);
+    await adapter.disconnect();
+  });
 });
