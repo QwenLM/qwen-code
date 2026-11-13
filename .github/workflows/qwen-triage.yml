@@ -91,7 +91,7 @@ jobs:
     # The job IS the write-permission check, so it cannot route on its own
     # output; downstream jobs (triage, tmux, verify) route on what it finds
     # instead.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && ((github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == ''issue_comment'' || github.event_name == ''workflow_dispatch'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''workflow_dispatch'' || github.event_name == ''push'' || github.event_name == ''schedule'' || (github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) || ((github.event_name == ''issue_comment'' || github.event_name == ''pull_request_review_comment'') && contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.comment.author_association)) || (github.event_name == ''pull_request_review'' && contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.review.author_association)) || (github.event_name == ''issues'' && contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.issue.author_association)))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -524,7 +524,7 @@ jobs:
     # side. Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED falls back to
     # ubuntu-latest, which stays safe because the controls are additive.
     # Forks of this repo fall back to ubuntu-latest as before.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''workflow_dispatch'' || github.event_name == ''push'' || github.event_name == ''schedule'' || (github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) || ((github.event_name == ''issue_comment'' || github.event_name == ''pull_request_review_comment'') && contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.comment.author_association)) || (github.event_name == ''pull_request_review'' && contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.review.author_association)) || (github.event_name == ''issues'' && contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.issue.author_association)))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # Read-only by construction: the agent's GH_TOKEN is this job's
     # GITHUB_TOKEN. Every write goes through publish-triage's PAT. The
     # pre-agent reaction step uses the PAT explicitly (reactions need write).
@@ -1571,7 +1571,7 @@ jobs:
     # (issue_comment/pull_request_target events resolve github.sha there);
     # no agent-provided code runs here. Kill-switch:
     # MAINTAINER_ECS_RUNNER_DISABLED.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''workflow_dispatch'' || github.event_name == ''push'' || github.event_name == ''schedule'' || (github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) || ((github.event_name == ''issue_comment'' || github.event_name == ''pull_request_review_comment'') && contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.comment.author_association)) || (github.event_name == ''pull_request_review'' && contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.review.author_association)) || (github.event_name == ''issues'' && contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.issue.author_association)))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
     steps:
@@ -2564,7 +2564,7 @@ jobs:
     # Checks out nothing and runs no repository code (base-repo YAML events)
     # — the controls that let this job use the persistent ECS pool.
     # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''workflow_dispatch'' || github.event_name == ''push'' || github.event_name == ''schedule'' || (github.event.pull_request && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) || ((github.event_name == ''issue_comment'' || github.event_name == ''pull_request_review_comment'') && contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.comment.author_association)) || (github.event_name == ''pull_request_review'' && contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.review.author_association)) || (github.event_name == ''issues'' && contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.issue.author_association)))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       pull-requests: 'write'
     steps:
