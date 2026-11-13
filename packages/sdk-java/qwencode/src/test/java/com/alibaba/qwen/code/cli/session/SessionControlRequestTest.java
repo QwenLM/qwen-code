@@ -3,14 +3,20 @@ package com.alibaba.qwen.code.cli.session;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
+import com.alibaba.qwen.code.cli.protocol.data.behavior.Behavior;
+import com.alibaba.qwen.code.cli.protocol.data.behavior.Behavior.Operation;
 import com.alibaba.qwen.code.cli.protocol.message.control.CLIControlRequest;
 import com.alibaba.qwen.code.cli.protocol.message.control.CLIControlResponse;
+import com.alibaba.qwen.code.cli.protocol.message.control.payload.CLIControlPermissionRequest;
+import com.alibaba.qwen.code.cli.protocol.message.control.payload.ControlRequestPayload;
 import com.alibaba.qwen.code.cli.protocol.message.control.payload.ControlResponsePayload;
+import com.alibaba.qwen.code.cli.session.event.consumers.AssistantContentSimpleConsumers;
 import com.alibaba.qwen.code.cli.session.event.consumers.SessionEventSimpleConsumers;
 import com.alibaba.qwen.code.cli.transport.Transport;
 import com.alibaba.qwen.code.cli.transport.TransportOptions;
@@ -20,6 +26,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -42,6 +49,33 @@ class SessionControlRequestTest {
                 response.getString("error"));
         assertFalse(response.getString("error").contains("host-secret"));
         assertTrue(transport.resultConsumed);
+    }
+
+    @Test
+    void sendsCorrelatedErrorWhenControlHandlerThrowsACyclicCause() {
+        FixtureTransport transport = new FixtureTransport();
+        RuntimeException first = new RuntimeException("first");
+        RuntimeException second = new RuntimeException("second");
+        first.initCause(second);
+        second.initCause(first);
+        FutureTask<Void> read = new FutureTask<>(() -> {
+            new Session(transport).sendPrompt("test", consumers(request -> {
+                throw first;
+            }));
+            return null;
+        });
+        Thread reader = new Thread(read, "cyclic-control-request");
+        reader.setDaemon(true);
+        try {
+            reader.start();
+            assertDoesNotThrow(() -> read.get(2, TimeUnit.SECONDS), "A cyclic cause must not wedge the session reader");
+
+            assertEquals("Control request handler failed (RuntimeException); see SDK logs for details",
+                    assertErrorResponse(transport).getString("error"));
+            assertTrue(transport.resultConsumed);
+        } finally {
+            read.cancel(true);
+        }
     }
 
     @Test
@@ -169,6 +203,99 @@ class SessionControlRequestTest {
         assertTrue(transport.resultConsumed);
     }
 
+    @Test
+    void preservesTheDefaultPermissionProducerResponse() throws Exception {
+        FixtureTransport transport = new FixtureTransport();
+        SessionEventSimpleConsumers consumers = new SessionEventSimpleConsumers().setAssistantContentConsumer(
+                new AssistantContentSimpleConsumers().setDefaultPermissionOperation(Operation.allow));
+        new Session(transport).sendPrompt("test", consumers);
+
+        JSONObject payload = assertSuccessResponse(transport).getJSONObject("response");
+        assertEquals("allow", payload.getString("behavior"));
+        assertNotNull(payload.getJSONObject("updatedInput"));
+    }
+
+    @Test
+    void preservesTheDefaultOtherControlProducerResponse() throws Exception {
+        FixtureTransport transport = new FixtureTransport("interrupt");
+        new Session(transport).sendPrompt("test", new SessionEventSimpleConsumers());
+
+        assertTrue(assertSuccessResponse(transport).getJSONObject("response").isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"can_use_tool", "interrupt"})
+    @org.junit.jupiter.api.Timeout(value = 3, unit = TimeUnit.SECONDS)
+    void preservesTheDefaultInnerTimeoutFallback(String subtype) throws Exception {
+        FixtureTransport transport = new FixtureTransport(subtype);
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            SessionEventSimpleConsumers consumers = new SessionEventSimpleConsumers(
+                    new Timeout(2L, TimeUnit.SECONDS),
+                    blockingContentConsumers(entered, release, new Timeout(20L, TimeUnit.MILLISECONDS)));
+            new Session(transport).sendPrompt("test", consumers);
+
+            assertTrue(entered.await(1, TimeUnit.SECONDS));
+            JSONObject payload = assertSuccessResponse(transport).getJSONObject("response");
+            if ("can_use_tool".equals(subtype)) {
+                assertEquals("deny", payload.getString("behavior"));
+                assertEquals("Default Behavior Permission denied", payload.getString("message"));
+            } else {
+                assertTrue(payload.isEmpty());
+            }
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 3, unit = TimeUnit.SECONDS)
+    void reportsTheOuterTimeoutWhileTheDefaultPermissionConsumerIsWaiting() throws Exception {
+        FixtureTransport transport = new FixtureTransport();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            SessionEventSimpleConsumers consumers = new SessionEventSimpleConsumers(
+                    new Timeout(100L, TimeUnit.MILLISECONDS),
+                    blockingContentConsumers(entered, release, new Timeout(3L, TimeUnit.SECONDS)));
+            new Session(transport).sendPrompt("test", consumers);
+
+            assertTrue(entered.await(1, TimeUnit.SECONDS));
+            assertEquals("Control request handler timed out after 100 milliseconds",
+                    assertErrorResponse(transport).getString("error"));
+            assertTrue(transport.resultConsumed);
+        } finally {
+            release.countDown();
+        }
+    }
+
+    private static AssistantContentSimpleConsumers blockingContentConsumers(
+            CountDownLatch entered, CountDownLatch release, Timeout timeout) {
+        return new AssistantContentSimpleConsumers(Operation.allow, timeout) {
+            @Override
+            public Behavior onPermissionRequest(Session session, CLIControlPermissionRequest request) {
+                awaitRelease(entered, release);
+                return super.onPermissionRequest(session, request);
+            }
+
+            @Override
+            public ControlResponsePayload onOtherControlRequest(Session session, ControlRequestPayload request) {
+                awaitRelease(entered, release);
+                return new ControlResponsePayload();
+            }
+        };
+    }
+
+    private static void awaitRelease(CountDownLatch entered, CountDownLatch release) {
+        entered.countDown();
+        try {
+            release.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     private static SessionEventSimpleConsumers consumers(
             Function<CLIControlRequest<?>, CLIControlResponse<? extends ControlResponsePayload>> handler) {
         return new SessionEventSimpleConsumers() {
@@ -199,9 +326,32 @@ class SessionControlRequestTest {
         return response;
     }
 
+    private static JSONObject assertSuccessResponse(FixtureTransport transport) {
+        assertEquals(1, transport.written.size());
+        JSONObject envelope = JSON.parseObject(transport.written.get(0));
+        assertEquals("control_response", envelope.getString("type"));
+        JSONObject response = envelope.getJSONObject("response");
+        assertNotNull(response);
+        assertEquals(REQUEST_ID, response.getString("request_id"));
+        assertEquals("success", response.getString("subtype"));
+        assertNotNull(response.getJSONObject("response"));
+        assertFalse(response.containsKey("error"));
+        assertTrue(transport.resultConsumed);
+        return response;
+    }
+
     private static class FixtureTransport implements Transport {
         private final List<String> written = new ArrayList<>();
+        private final String requestSubtype;
         private boolean resultConsumed;
+
+        private FixtureTransport() {
+            this("can_use_tool");
+        }
+
+        private FixtureTransport(String requestSubtype) {
+            this.requestSubtype = requestSubtype;
+        }
 
         @Override
         public TransportOptions getTransportOptions() {
@@ -232,9 +382,11 @@ class SessionControlRequestTest {
 
         @Override
         public void inputWaitForMultiLine(String message, Function<String, Boolean> consumer) {
-            consumer.apply("{\"type\":\"control_request\",\"request_id\":\"" + REQUEST_ID
-                    + "\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"run_shell_command\",\"input\":{}}}");
-            resultConsumed = consumer.apply("{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}");
+            boolean stopped = consumer.apply("{\"type\":\"control_request\",\"request_id\":\"" + REQUEST_ID
+                    + "\",\"request\":{\"subtype\":\"" + requestSubtype + "\",\"tool_name\":\"run_shell_command\",\"input\":{}}}");
+            if (!stopped) {
+                resultConsumed = consumer.apply("{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}");
+            }
         }
 
         @Override

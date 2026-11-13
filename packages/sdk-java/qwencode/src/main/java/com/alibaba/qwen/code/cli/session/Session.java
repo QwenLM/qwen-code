@@ -251,7 +251,12 @@ public class Session {
                                 () -> sessionEventConsumers.onControlRequest(this, controlRequest), controlRequestTimeout);
                     } catch (Exception e) {
                         Throwable cause = e;
-                        while ((cause instanceof ExecutionException || cause.getClass() == RuntimeException.class) && cause.getCause() != null) {
+                        // Throwable cause chains may contain cycles.
+                        for (int depth = 0; depth < 8; depth++) {
+                            if (!(cause instanceof ExecutionException || cause.getClass() == RuntimeException.class)
+                                    || cause.getCause() == null) {
+                                break;
+                            }
                             cause = cause.getCause();
                         }
                         error = e instanceof TimeoutException
