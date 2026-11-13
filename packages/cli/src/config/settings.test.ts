@@ -853,8 +853,8 @@ describe('Settings Loading and Merging', () => {
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
-      // The V1 chain still maps this legacy key to the dead target on main;
-      // the load-time repair has to close the loop on the same startup.
+      // Whatever the V1 chain maps this legacy key to, the load-time repair
+      // has to close the loop on the same startup.
       expect(settings.user.settings.security?.folderTrust).toEqual({
         enabled: true,
       });
