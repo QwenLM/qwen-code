@@ -1073,18 +1073,32 @@ const CLOSE_DESCRIPTOR_OPERATORS = new Set(['<&-', '>&-']);
 const HEREDOC_OWN_PART =
   /^(?:heredoc_(?:start|body|end)|file_descriptor|comment)$/;
 
+/** A heredoc delimiter that is one plain word: bash expands the body. */
+const PLAIN_HEREDOC_DELIMITER = /^[\w.-]+$/;
+
 /**
- * A heredoc body is expanded unless its delimiter is quoted. tree-sitter shows
- * `$(...)` in the body as a node, which `evaluateSubstitutions` judges, but a
- * backtick substitution stays plain text inside `heredoc_body`. A backtick in
- * a body that bash will expand is therefore a command no rule has read.
+ * A heredoc delimiter quoted as a whole, with nothing in it that bash could
+ * expand: `'EOF'`, `"EOF"` or `\EOF`. bash then leaves the body as text.
+ */
+const QUOTED_HEREDOC_DELIMITER = /^(?:'[^']*'|"[^"$`\\]*"|\\[\w.-]+)$/;
+
+/**
+ * A heredoc body is expanded unless its delimiter is quoted. Under a plain
+ * delimiter tree-sitter shows `$(...)` in the body as a node, which
+ * `evaluateSubstitutions` judges, but a backtick substitution stays plain
+ * text inside `heredoc_body`, so a backtick there is a command no rule has
+ * read. Any other delimiter (`${X:-'E'}`, `$X`, `E"O"F`) is not vouched for:
+ * a quote character in it need not quote it, and the parser can hide `$(...)`
+ * in its body too.
  */
 function evaluateHeredocBody(heredoc: SyntaxNode): ShellCommandSafety {
   const part = (type: string) =>
     heredoc.namedChildren.find((child) => child.type === type);
-  const delimiterIsQuoted = /['"\\]/.test(part('heredoc_start')?.text ?? '');
+  const delimiter = part('heredoc_start')?.text ?? '';
+  if (QUOTED_HEREDOC_DELIMITER.test(delimiter)) return 'read-only';
+  if (!PLAIN_HEREDOC_DELIMITER.test(delimiter)) return 'unknown';
   const body = part('heredoc_body')?.text ?? '';
-  return !delimiterIsQuoted && body.includes('`') ? 'unknown' : 'read-only';
+  return body.includes('`') ? 'unknown' : 'read-only';
 }
 
 /**

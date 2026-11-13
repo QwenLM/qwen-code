@@ -1182,6 +1182,13 @@ describe('words after a redirection in the middle of a command', () => {
     // shows a backtick substitution in it as plain text.
     'cat <<EOF\n`id -u`\nEOF',
     'cat <<-EOF\n\t`id -u`\n\tEOF',
+    // A quote inside an expansion does not quote the delimiter, and with a
+    // delimiter that is not a plain word the parser hides `$(...)` in the
+    // body as well, so such a heredoc is never taken as read-only.
+    "cat <<${X:-'E'}\n`id -u`\n${X:-'E'}",
+    'cat <<${X:-E}\n$(id -u)\n${X:-E}',
+    'cat <<$X\n$(id -u)\n$X',
+    'cat <<$X\nhi\n$X',
   ])('does not classify %j as read-only', async (command) => {
     expect(await classifyShellCommandSafety(command)).toBe('unknown');
   });
@@ -1209,6 +1216,8 @@ describe('words after a redirection in the middle of a command', () => {
     "cat <<'EOF'\n`id -u`\nEOF",
     'cat <<"EOF"\n`id -u`\nEOF',
     'cat <<\\EOF\n`id -u`\nEOF',
+    'cat <<"END OF"\n`id -u`\nEND OF',
+    'cat <<E-O.F_1\nhi\nE-O.F_1',
   ])('keeps %j read-only', async (command) => {
     expect(await classifyShellCommandSafety(command)).toBe('read-only');
   });
