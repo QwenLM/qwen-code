@@ -23,6 +23,8 @@ import {
 } from '@qwen-code/qwen-code-core/services/chatCompressionService.js';
 import { loadCliConfig } from '../config/config.js';
 import { HostedContextCompression } from './hosted-context-compression.js';
+import { readManagedMessageBody } from '@qwen-code/qwen-code-core/managed-runtime/managed-message-chunks.js';
+import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { enableManagedSessionDiagnostics } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
 import { startModelInvocationObservation } from '@qwen-code/qwen-code-core/telemetry/model-observation.js';
 
@@ -351,6 +353,45 @@ describe('Hosted context compression', () => {
     expect(await compression.admit(request)).toEqual(result);
     await compression.wait();
     expect(summarize).toHaveBeenCalledOnce();
+  });
+
+  it('persists the synthetic prefix boundary separately from retained original messages', async () => {
+    const prepared: ChatCompressionCandidate = {
+      ...candidate,
+      newHistory: [
+        { role: 'user', parts: [{ text: 'earlier summary' }] },
+        { role: 'model', parts: [{ text: 'Understood.' }] },
+        { role: 'user', parts: [{ text: 'Recent operation follows.' }] },
+        { role: 'model', parts: [{ text: 'latest original response' }] },
+      ],
+      info: { ...candidate.info, summaryPrefixLength: 3 },
+    };
+    engine(prepared);
+    const request = intent();
+
+    await compression.admit(request);
+    await compression.wait();
+
+    expect(compression.status(request.operationId)?.outcome).toBe('compressed');
+    const event = session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .findLast((event) => event.kind === 'context.compacted')!;
+    const checkpoint = JSON.parse(
+      (
+        await readManagedMessageBody(
+          (ref) => session.resources.read(ref),
+          event.payload['summaryRef'] as unknown as ManagedSessionDurableRef,
+        )
+      ).toString(),
+    );
+    expect(checkpoint.systemPayload).toMatchObject({
+      summaryPrefixLength: 3,
+      compressedHistory: prepared.newHistory,
+    });
+    await reopen();
+    expect((await session.sink.projectModelHistory()).apiHistory).toEqual(
+      prepared.newHistory,
+    );
   });
 
   it('notifies the loop resolver seam when a route-driven compaction commits', async () => {

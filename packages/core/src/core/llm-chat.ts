@@ -3121,6 +3121,11 @@ export class LlmChat {
       config: this.config,
       consecutiveFailures: this.consecutiveFailures,
       originalTokenCount,
+      unaccountedOutputTokens:
+        !originalTokenCountIsEstimated &&
+        originalTokenCountOverride === undefined
+          ? this.lastOutputTokenCount
+          : 0,
       pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       observedServerCeiling: options?.observedServerCeiling,
@@ -3160,7 +3165,7 @@ export class LlmChat {
           compressedHistory: options?.pendingUserMessage
             ? [...newHistory, options.pendingUserMessage]
             : newHistory,
-          summaryPrefixLength: newHistory.length,
+          summaryPrefixLength: info.summaryPrefixLength ?? newHistory.length,
           completedToolCallIds: this.completedToolCallIds,
         });
       }
@@ -4120,7 +4125,9 @@ export class LlmChat {
           await this.recordCompression({
             info: compressionInfo,
             compressedHistory: [...this.getHistoryShallow(), userContent],
-            summaryPrefixLength: this.getHistoryShallow().length,
+            summaryPrefixLength:
+              compressionInfo.summaryPrefixLength ??
+              this.getHistoryShallow().length,
             completedToolCallIds: this.completedToolCallIds,
           });
         }

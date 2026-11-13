@@ -615,7 +615,11 @@ describe('ChatCompressionService', () => {
     const result = await run();
 
     expectCompressed(result);
-    expect(result.info.newTokenCount).toBe(27_450); // 28000 - (1600 - 1000) + 50
+    // The retained operation was never subtracted; only new temporal context is added.
+    const reminderTokens = Math.ceil(
+      result.newHistory![2].parts!.at(-1)!.text!.length / 4,
+    );
+    expect(result.info.newTokenCount).toBe(27_450 + reminderTokens);
     // postProcessSummary appends the resume trailer to the summary body,
     // so it's "Summary\n\n<trailer>" rather than a strict equality.
     expect(result.newHistory![0].parts![0].text).toContain('Summary');
@@ -949,8 +953,10 @@ describe('ChatCompressionService', () => {
 
     expectCompressed(result);
     expect(result.info.originalTokenCount).toBe(5_000);
-    expect(result.info.newTokenCount).toBeGreaterThan(1_000);
-    expect(result.info.newTokenCount).toBeLessThan(1_100);
+    expect(result.info.newTokenCount).toBe(
+      1_000 + estimateContentTokens(result.newHistory!),
+    );
+    expect(result.newHistory!.at(-1)?.parts?.[0].text).toBe(largeMessage);
     expect(result.newHistory![0].parts![0].text).toContain('Summary');
     expect(debug).toHaveBeenCalledWith(
       expect.stringContaining('usage metadata missing'),
@@ -1662,7 +1668,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expectCacheLog(config, true, true);
   });
 
-  it('preserves the main system, tools, and complete history before the compression directive', async () => {
+  it('preserves the main system, tools, and summarized prefix before the compression directive', async () => {
     const history = makeHistory(42);
     const { config, generateText } = await expectShared(
       { history },
@@ -1678,11 +1684,11 @@ describe('ChatCompressionService.compress cache sharing', () => {
       COMPACT_MAX_OUTPUT_TOKENS - 1,
     );
     expect(request.config?.maxOutputTokens).toBe(COMPACT_MAX_OUTPUT_TOKENS);
-    expect(request.contents.slice(0, -1)).toEqual(history);
+    expect(request.contents.slice(0, -1)).toEqual(history.slice(0, -1));
     expect(JSON.stringify(request.contents)).not.toContain(
       REQUEST_ONLY_CATALOG,
     );
-    expect(request.contents).toHaveLength(43);
+    expect(request.contents).toHaveLength(42);
     expect(request.contents.at(-1)?.parts?.[0]?.text).toContain(
       'Keep the exact command output.',
     );
@@ -2456,7 +2462,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     // few hundred tokens, the truncation guard drops the summary, and the
     // session never compacts.
     const chunk = 'x'.repeat(4_000);
-    const history = Array.from({ length: 195 }, (_, i) =>
+    const history = Array.from({ length: 196 }, (_, i) =>
       i % 2
         ? modelText(`chunk-${i} ${chunk}`)
         : userText(`chunk-${i} ${chunk}`),
@@ -2840,7 +2846,7 @@ describe('computeThresholds', () => {
   });
 });
 
-describe('ChatCompressionService.compress — claude-code-style full-history compression', () => {
+describe('ChatCompressionService.compress — summary and retained operation', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -2856,7 +2862,7 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
   const readResult = (output: string) =>
     content('user', fnResponse('read_file', { output }, 'tool-call-1'));
 
-  it('sends the ENTIRE history to the summary side-query (no split)', async () => {
+  it('sends only history before the latest complete response to the summary side-query', async () => {
     const runSideQuerySpy = spySideQuery('TEST SUMMARY', usage(100, 50));
 
     await compressWith(
@@ -2870,8 +2876,9 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
     const calledWith = runSideQuerySpy.mock.calls[0]![1] as {
       contents: Array<{ parts: Array<{ text?: string }> }>;
     };
-    // Full 4 history entries + 1 trailing scratchpad prompt = 5 contents.
-    expect(calledWith.contents).toHaveLength(5);
+    // Three prefix entries + the summary directive; the last response is retained.
+    expect(calledWith.contents).toHaveLength(4);
+    expect(JSON.stringify(calledWith.contents)).not.toContain('second reply');
     expect(calledWith.contents[0].parts[0].text).toContain('first request');
   });
 
@@ -3024,11 +3031,13 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
         trigger: 'auto',
       });
       expectCompressed(result);
+      // A preserved image is already in the original count; only restored
+      // images from the summarized prefix add new cost.
       expect(result.info.newTokenCount).toBeGreaterThanOrEqual(
-        11_500 + 3 * 1600,
+        11_500 + (pendingCall ? 3 : 2) * 1600,
       );
       expect(result.info.newTokenCount).toBeLessThan(16_600);
-      expect(result.newHistory).toHaveLength(pendingCall ? 4 : 3);
+      expect(result.newHistory).toHaveLength(pendingCall ? 4 : 5);
     },
   );
 
@@ -3093,8 +3102,7 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
     // Assertion 1: summary text (mocked) carries the user prompt verbatim.
     expect(flatText).toContain('open Safari and read the first headline');
 
-    // Assertion 2: Image restoration block exists and contains exactly s3, s4, s5
-    // (the 3 most recent screenshots), in chronological order.
+    // Assertion 2: restore s3/s4; s5 is retained verbatim in its tool result.
     const inlineDataParts = flat.flatMap((c) =>
       (c.parts ?? []).filter((p) =>
         (
@@ -3106,7 +3114,10 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
       inlineDataParts.map(
         (p) => (p as { inlineData: { data: string } }).inlineData.data,
       ),
-    ).toEqual(['s3', 's4', 's5']);
+    ).toEqual(['s3', 's4']);
+    // The newest screenshot remains inside its original tool response.
+    expect(flat.at(-1)).toEqual(history.at(-1));
+    expect(JSON.stringify(flat.at(-1))).toContain('s5');
 
     // Assertion 3: Image metadata header mentions the source tool and args.
     expect(flatText).toContain('mcp__node-repl__node_repl');

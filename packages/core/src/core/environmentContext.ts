@@ -34,6 +34,8 @@ export const SYSTEM_REMINDER_OPEN = '<system-reminder>';
 export const SYSTEM_REMINDER_CLOSE = '</system-reminder>';
 const MAX_DEFERRED_TOOL_DESC_LEN = 160;
 const COMPRESSED_PREFIX_LENGTH = Symbol('compressedPrefixLength');
+export const RETAINED_COMPACTION_TAIL_REMINDER =
+  'The summary above covers only earlier history. The original messages below happened later and are not included in that summary; follow their newer results and instructions when continuing.';
 
 type CompressedSummary = Content & {
   [COMPRESSED_PREFIX_LENGTH]?: number;
@@ -837,6 +839,17 @@ function detectCompressedPrefixLength(
     ackText !== 'Got it. Thanks for the additional context!'
   ) {
     return 0;
+  }
+  const bridge = history[offset + 2];
+  if (
+    bridge?.role === 'user' &&
+    getApiHistoryPromptId(bridge) === undefined &&
+    bridge.parts?.at(-1)?.text === RETAINED_COMPACTION_TAIL_REMINDER
+  ) {
+    // Unlike the legacy trailing-call restore, the following model entry is
+    // an original operation, not synthetic context. Preserve this boundary
+    // after JSON round trips as well as in live history.
+    return 3;
   }
   const remembered = (firstEntry as CompressedSummary)[
     COMPRESSED_PREFIX_LENGTH
