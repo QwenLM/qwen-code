@@ -38,7 +38,7 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | `child-relay.scan-delay` | — | 时长 | `2s` | 子结果中继两次运行之间的间隔；每次运行推进尚未完成创建或尚未将结果回传父 Session 的子 agent 与 workflow 运行。仅在 `qwen.managed-agent.runtime-broker.enabled` 为 true 时生效。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
 | `child-workspace.scan-delay` | — | 时长 | `2s` | 子 Workspace 任务两次运行之间的间隔；每次运行继续未完成的子 Workspace Git 步骤（准备、合并、应用、丢弃）。仅在 `qwen.managed-agent.runtime-broker.child-workspaces-enabled` 为 true 时生效。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
 | `definition-models` | `QWEN_MANAGED_AGENT_DEFINITION_MODELS` | 列表 | *（空）* | 存储的 AgentDefinition 可在 `model.id` 中指定的模型 ID，以逗号分隔；定义中指定其他模型的 Session 会在准入时被拒绝。每个 ID 应对应 Harness 中配置的一个模型提供方路由。为空时只接受未指定模型的定义。 |
-| `definition-tool-profiles` | `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` | 列表 | `hosted-workspace-files/1` | 存储的 AgentDefinition 可在 `tools` 中选择的托管工具配置，以逗号分隔（如 `hosted-workspace-files/1`、`hosted-workspace-shell/1` 或 `hosted-workspace-mcp/1`）；定义选择其他配置的 Session 会在准入时被拒绝。`hosted-workspace-team-lead/1` 以及 `hosted-workspace-shell/1` 以外的 Shell 配置始终被拒绝，审批模式为 `yolo` 的 Shell 配置同样被拒绝。预检会确认 Harness 支持所列的每个配置。 |
+| `definition-tool-profiles` | `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` | 列表 | `hosted-workspace-files/1` | 存储的 AgentDefinition 可在 `tools` 中选择的托管工具配置，以逗号分隔（如 `hosted-workspace-files/1`、`hosted-workspace-shell/1`、`hosted-workspace-shell/3` 或 `hosted-workspace-mcp/1`）；定义选择其他配置的 Session 会在准入时被拒绝。`hosted-workspace-team-lead/1` 以及 `hosted-workspace-shell/1`、`hosted-workspace-shell/3` 以外的 Shell 配置始终被拒绝，审批模式为 `yolo` 的 Shell 配置同样被拒绝。预检会确认 Harness 支持所列的每个配置。 |
 | `message-relay.scan-delay` | — | 时长 | `2s` | Session 消息中继两次运行之间的间隔；每次运行推进 Session 之间待投递的消息（移交、回执、接受），并结算无法投递的消息。没有可用 Hosted Harness 的节点会跳过。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
 | `model-catalog` | — | YAML 列表 | *（空）* | 为内置 `qwen-code` agent 的 Session 提供的可选模型，可在创建 Session 时选择，之后也可由 Workspace operator 更改。元素为对象列表，包含 `model-id`（Harness 中配置的模型 ID；必填、唯一、最多 512 字节）和 `label`（显示名称，默认等于 `model-id`，最多 512 个字符）；条目无效或重复时启动时拒绝。需在 YAML 配置文件中设置，没有对应的环境变量。模型选择还要求开启 `qwen.managed-agent.harness.workspace-files-enabled`，且 Harness 支持模型选择。 |
 | `model-config-base-urls` | — | YAML 列表 | *（空）* | 允许完整 Session 模型配置使用的 HTTP(S) API 地址，按完整字符串精确匹配，以 YAML 列表设置。为空时禁止准入新配置。公共创建接口接受 `model_config`，WebShell 创建接口接受 `modelConfig`。要求启用 Session Store、Harness 能力 `session-model-config/1` 和 `SecretProtector`（标准服务由已启用的 Runtime Broker 及其凭据密钥环提供）。模型 ID 和 API key 无需在 Harness 注册。参见 [Session 模型配置设计](../design/managed-session-model-config.zh-CN.md)。 |
@@ -98,6 +98,19 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | `claim-lease` | `QWEN_MANAGED_AGENT_CHANNELS_CLAIM_LEASE` | 时长 | `10m` | 渠道适配器对一条出站投递的认领在未收到回执时保持有效的时长。超时后，对账任务将该投递结果记为未知，且不会自动重发。不带单位的数字按秒计。 |
 | `enabled` | `QWEN_MANAGED_AGENT_CHANNELS_ENABLED` | 布尔 | `false` | 是否提供 `/internal/managed-channels/` 下的受信渠道适配器路由（注册、断开、入站事件、投递认领、回执与重发）。这些路由仅凭租户请求头鉴权，因此未通过 `qwen.managed-agent.internal-server.port` 配置独立的内部监听端口时，启动时拒绝。 |
 | `scan-delay` | — | 时长 | `30s` | 渠道对账任务两次运行之间的间隔；每次运行把认领时间超过 `qwen.managed-agent.channels.claim-lease` 的出站投递认领结算为未知，每次最多 50 条。接受 `30s` 这类时长；不带单位的数字按毫秒计。 |
+
+## `qwen.managed-agent.client-files`
+
+通过控制面 MCP relay 把 Managed Web Shell 用户的客户端目录注册进 Session：功能开关与 relay 端点、绑定与请求的生命周期，以及队列深度与 payload 上限。
+
+| 属性 | 环境变量 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `binding-ttl` | — | 时长 | `8h` | 单次客户端文件系统注册的有效时长，到期后浏览器须以新的目录授权重新注册；relay 凭据随绑定一同过期。接受 `8h` 这类时长；不带单位的数字按秒计。 |
+| `enabled` | — | 布尔 | `false` | 是否允许 Managed Web Shell 用户把客户端目录注册进 Session，让 agent 经控制面 relay 使用其文件工具。默认关闭；关闭时所有 client-files 路由拒绝注册，不创建任何 relay 状态。注册是临时会话状态：不持久化任何凭据或目录路径，relay 的有界 TTL 队列仅在受大小限制的 JSON-RPC 请求/响应体（可能含文件内容）结算或过期前暂存，随后删除。文件内容不进入 relay 状态、relay 也从不持久化它；浏览器工具结果遵循 Session 常规的持久化工具结果策略。 |
+| `max-payload-bytes` | — | 整数 | `61440` | relay 在 Runtime 与浏览器之间转发的单条 JSON-RPC 请求或响应体的最大字节数；更大的 payload 以结构化错误拒绝。默认与 worker MCP 结果上限对齐（60 KiB）。 |
+| `queue-depth` | — | 整数 | `32` | 单个 Session 注册可为浏览器排队等待应答的 JSON-RPC 请求上限；超出的请求以结构化错误拒绝，而不是阻塞 Turn。默认与 worker MCP 在途上限对齐（32）。 |
+| `relay-url` | — | 字符串 | *（空）* | 从 Hosted Harness 可达的本控制面内部监听器基地址，用于构造 Harness 回连的 relay MCP 端点（`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`）。`qwen.managed-agent.client-files.enabled` 为 true 且留空时，从 internal listener 推导；推导不出则启动失败。显式配置的值必须是不带凭据、查询串或片段的 http(s) URL。 |
+| `request-ttl` | — | 时长 | `25s` | 单条排队 JSON-RPC 请求等待浏览器应答的时长，到期后过期并向 Runtime 返回结构化离线错误。接受 `25s` 这类时长；不带单位的数字按秒计。 |
 
 ## `qwen.managed-agent.dispatch`
 
@@ -231,6 +244,14 @@ Workspace 扩展包的发布与管理，以及哪些 actor 有权执行这些操
 | `enabled` | — | 布尔 | `false` | 是否提供个人记忆，默认为 false。仅在验证专用 Mem0 服务并关闭跨服务共享后启用。要求开启 Session Store 且 Hosted 声明 session-memory/1 能力；Session 必须在创建时明确选择 Store。 |
 | `endpoint` | — | 字符串 | — | 专用 Mem0 服务的基础 URL，仅在开启记忆时读取。除回环 HTTP 测试外要求 HTTPS；拒绝内嵌凭据、查询参数和片段。该地址仅保留在 Control Plane。 |
 
+## `qwen.managed-agent.object-storage`
+
+tool publication 与 Session 资源 / journal 冷存储共用的通用 Aliyun OSS 对象存储。
+
+| 属性 | 环境变量 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `enabled` | `QWEN_MANAGED_AGENT_OBJECT_STORAGE_ENABLED` | 布尔 | 同 `qwen.managed-agent.tool-publication.enabled` | 通用 Aliyun OSS 对象存储自动装配是否启用。默认跟随 `qwen.managed-agent.tool-publication.enabled`；在关闭 tool publication 时设为 true，可在不启用发布的情况下支撑 Session 资源与 journal 冷存储。OSS endpoint、region、bucket 仍从 `qwen.managed-agent.tool-publication.oss-*` 读取。 |
+
 ## `qwen.managed-agent.runtime-broker`
 
 内嵌 Runtime Broker：包括面向 Hosted Harness 的私有 HTTP 监听器、放置并恢复执行 Hosted 工具的 Runtime worker 的 provisioner、worker 的 Workspace 挂载与隔离方式，以及加密其持久化 Runtime 凭据的密钥。
@@ -257,7 +278,7 @@ Workspace 扩展包的发布与管理，以及哪些 actor 有权执行这些操
 | `isolation-class` | `QWEN_MANAGED_AGENT_RUNTIME_ISOLATION` | 字符串 | `session` | Broker 如何在未绑定 Workspace 的 Session 之间共享 Runtime worker：`session` 为每个 Hosted Session 单独启动 worker，`workspace` 让配置的整个 Workspace 共用一个 worker。在 `local-process` 上启用 Hosted Workspace 文件、启用子 Workspace 或使用外部 provisioner 时，`workspace` 启动时拒绝；使用 `static` 或 `kubernetes-workspace` provisioner 时，`session` 启动时拒绝。绑定 Workspace 的 Session 改用 `qwen.managed-agent.runtime-broker.bound-session-isolation-class`。 |
 | `local-directory-import-enabled` | `QWEN_MANAGED_AGENT_LOCAL_DIRECTORY_IMPORT_ENABLED` | 布尔 | `false` | 是否允许 WebShell 将本机上已有的目录导入为 Workspace：导入时把其父目录登记为存储，并授予发起导入的 actor OWNER 权限。仅适用于可信的单用户主机：要求 `server.address` 为回环地址并使用 signed 认证或 `qwen.managed-agent.trusted-actor-header`，同时开启 `qwen.managed-agent.harness.workspace-files-enabled`、`qwen.managed-agent.runtime-broker.durable-local-process` 和 `qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled`，否则启动时拒绝。 |
 | `node-executable` | `QWEN_MANAGED_AGENT_NODE_EXECUTABLE` | 字符串 | *（空）* | Node.js 可执行文件的路径，用于运行本地 Runtime worker（`qwen.managed-agent.runtime-broker.worker-entry`）以及本地 Workspace 文件读取和上传的辅助进程。使用 `local-process` provisioner 时必填，留空时启动时拒绝。预检会检查它是否可执行。 |
-| `operator-recovery-enabled` | `QWEN_MANAGED_AGENT_RUNTIME_OPERATOR_RECOVERY_ENABLED` | 布尔 | `false` | 是否允许离线的运维恢复命令（`bin/qwen-managed-agent-operator-recovery`）对仍占用 Workspace 租约的 Hosted Shell 捕获执行 `inspect`、`prepare` 与 `complete` 步骤。请在该维护进程中设置：除非此项开启，且同时开启 `qwen.managed-agent.runtime-broker.durable-local-process`、使用 `local-process` provisioner 并配置 `qwen.managed-agent.runtime-broker.state-directory`，否则该命令拒绝运行。使用外部 provisioner 时，服务端启动时拒绝此项。 |
+| `operator-recovery-enabled` | `QWEN_MANAGED_AGENT_RUNTIME_OPERATOR_RECOVERY_ENABLED` | 布尔 | `false` | 是否允许离线的运维恢复命令（`bin/qwen-managed-agent-admin operator-recovery`）对仍占用 Workspace 租约的 Hosted Shell 捕获执行 `inspect`、`prepare` 与 `complete` 步骤。请在该维护进程中设置：除非此项开启，且同时开启 `qwen.managed-agent.runtime-broker.durable-local-process`、使用 `local-process` provisioner 并配置 `qwen.managed-agent.runtime-broker.state-directory`，否则该命令拒绝运行。使用外部 provisioner 时，服务端启动时拒绝此项。 |
 | `port` | `QWEN_MANAGED_AGENT_RUNTIME_BROKER_PORT` | 整数 | `4182` | 内嵌 Runtime Broker HTTP 监听器的 TCP 端口；Hosted Harness 的 `QWEN_MANAGED_RUNTIME_BROKER_URL` 必须能到达它：回环地址时直接指向它，非回环绑定时经由前置的 TLS 终止代理。监听器无法绑定该端口时启动失败。预检会检查端口是否空闲（使用 `--online` 时检查是否在监听），并与 Harness 凭据文件中的 Broker URL 比对。 |
 | `previous-credential-keys` | — | YAML 映射 | *（空）* | 密钥轮换后保留的旧 Runtime 凭据密钥，形式为 key ID 到 base64 编码 32 字节密钥的映射，使以旧密钥加密的行仍可读取，而写入始终只使用当前密钥。属于机密。须在配置文件（YAML）中设置，并用方括号包住每个 ID，例如 `'[old-v1]': <key>`；无法通过环境变量提供。密钥不是 32 字节，或 ID 与 `qwen.managed-agent.runtime-broker.credential-key-id` 相同时启动时拒绝。 |
 | `provider-options` | — | YAML 映射 | `{}` | 传递给选中 Runtime 工厂的专用字符串配置，以 YAML 映射设置。其含义及校验由该 provider 决定；内置后端继续使用原有配置项。默认为空映射。 |
