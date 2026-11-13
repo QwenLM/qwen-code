@@ -20,7 +20,8 @@
 
 `classify_pr` 自身的 runner 走 association 门禁的 ECS（kill-switch 除外）：
 同仓库 head、`OWNER` / `MEMBER` / `COLLABORATOR` 的 fork 作者、`merge_group`、
-`push` 与 `workflow_dispatch` 进池；不可信 fork PR 退回 `ubuntu-latest`。
+`push` 与 `workflow_dispatch` 进池——但 `linux_runner` 输入为 `hosted` 的调度
+除外，按下方 2026-11-14 修订仍走 hosted；不可信 fork PR 退回 `ubuntu-latest`。
 门禁 job 只执行可信 base-SHA 的代码、拿只读 token——暴露面严格小于 lint 车道。
 
 2026-11-14（PR #17178）反转了 2026-10-31 把门禁扩到无条件 ECS 的决定：门禁
@@ -160,6 +161,14 @@ lane。
   `self-hosted` 与 `self-hosted-arm64` 落 `ecs-qwen`。这是本次修订记录的行为
   变化——无条件门禁不带任何 event 子句、一律送 `ecs-qwen`——所以移动的不只是
   不可信 fork 的 classify，dispatch 这条边也一并变了（ECS → hosted）。
+  `self-hosted-arm64` 不是干净的跟随，本次修订要记下这个例外，而不是暗示该输入
+  端到端被遵守：门禁没有 arm64 label，它请求的是
+  `["self-hosted","linux","x64","ecs-qwen"]`，而 `pick_runner` 把下游车道送到
+  `["self-hosted","linux","arm64"]`。若当时没有 x64 runner 在线，`classify_pr`
+  ——所有 Linux 车道的 `needs` 前置——会无界排队，因为 `timeout-minutes` 只在
+  runner 接单后才起算；那个 10 分钟上限兜的是「已开跑但挂住」的 classify，不是
+  这段排队。维护者最可能正是在 x64 机队被排空时去调度 `self-hosted-arm64`，而那
+  恰恰是没人会接走门禁的时候。
 - PR 自身 CI 在池上验证路由管道（作者是 collaborator，该运行中两个输出一致）；
   fork 分歧由路由回归矩阵证明，其首个线上端到端见证是下一个不可信 fork PR。
 - 另行拥有的后续：per-run HOME 下恢复热共享 pnpm store（no-AK 车道现在与 lint 同付已接受的冷装成本）（如通过 `XDG_DATA_HOME`

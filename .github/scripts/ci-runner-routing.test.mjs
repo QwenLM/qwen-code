@@ -279,8 +279,10 @@ describe('ci.yml classify_pr runner routing', () => {
     // A maintainer who asks for hosted gets hosted here too: `pick_runner`
     // treats the `linux_runner` input as authoritative for the downstream
     // lanes, and a gate that ignored it would sit on the pool the maintainer
-    // just drained. (The arm64 option stays a residual — the gate has no arm64
-    // labels — which the job's `timeout-minutes` bounds.)
+    // just drained. (The arm64 option is a residual with no bound: the gate has
+    // no arm64 labels, so it asks the x64 pool, and `timeout-minutes` cannot
+    // cover the wait because its clock starts only at pickup — with no x64
+    // runner online, `classify_pr` queues unbounded.)
     assert.deepEqual(
       evalRunsOn(classifyRunsOn, {
         ecsDisabled: false,

@@ -21,7 +21,9 @@ assigned from a single resolved fleet ladder:
 
 `classify_pr`'s OWN runner is association-gated ECS (kill-switch excepted):
 same-repo heads, `OWNER` / `MEMBER` / `COLLABORATOR` fork authors, `merge_group`,
-`push` and `workflow_dispatch` reach the pool; untrusted fork PRs fall back to
+`push` and `workflow_dispatch` reach the pool — except a dispatch whose
+`linux_runner` input is `hosted`, which stays hosted under the 2026-11-14
+amendment below; untrusted fork PRs fall back to
 `ubuntu-latest`. The gate executes only trusted base-SHA code with a read-only
 token — strictly less exposure than the lint lane.
 
@@ -201,7 +203,16 @@ a strictly larger surface than the vitest side lane.
   `ecs-qwen`. That is a behaviour change this amendment records — the
   unconditional gate carried no event terms and sent every dispatch to
   `ecs-qwen` — so the dispatch edge moves too, not only untrusted-fork classify
-  (ECS → hosted).
+  (ECS → hosted). `self-hosted-arm64` is not a clean follow, and this amendment
+  records the exception rather than implying the input is honoured end to end:
+  the gate has no arm64 labels, so it requests
+  `["self-hosted","linux","x64","ecs-qwen"]` while `pick_runner` sends the
+  downstream lanes to `["self-hosted","linux","arm64"]`. With no x64 runner
+  online, `classify_pr` — the `needs` prerequisite of every Linux lane — queues
+  unbounded, because `timeout-minutes` starts only once a runner picks the job
+  up; the job's 10-minute cap bounds a started-and-stalled classify, not that
+  wait. A maintainer is most likely to dispatch `self-hosted-arm64` when the x64
+  fleet is drained, which is exactly when nothing will pick the gate up.
 - The PR's own CI exercises the routing plumbing on the pool (the author is a
   collaborator, so both outputs agree on that run); the fork divergence is
   proven by the routing battery, and its first live end-to-end witness is the
