@@ -212,13 +212,23 @@ const VOLATILE_KEYS = new Set([
   'backupTime',
   // A shell command's process.
   'pid',
-  // The byte counts of a shell result's text, whose process id width varies.
-  'content_length',
-  'raw_content_length',
 ]);
 
 // Timings, such as the telemetry recorded with each response.
 const TIMING_KEY = /(_ms|Ms)$/;
+
+// The background shell scenario's launch text names its task id, its process,
+// the project's runtime directory, and the byte counts of that text. The
+// counts are the one piece normalize() cannot recover from the normalized
+// text: the kernel picks the process id's width, which sets them.
+const BACKGROUND_SHELL_VOLATILE: Volatile = {
+  keys: ['content_length', 'raw_content_length'],
+  text: [
+    [/\bbg_[0-9a-f]{8}\b/g, 'bg_<ID>'],
+    [/(pid: |pid |<pid>)\d+/g, '$1<PID>'],
+    [/\/tmp\/[0-9a-f]{64}\//g, '/tmp/<HASH>'],
+  ],
+};
 
 const DATE_REMINDER =
   /^<system-reminder>\n(?:Today's date is |The date has changed since earlier in this conversation\. )/;
@@ -311,17 +321,71 @@ describe('normalize', () => {
     );
   });
 
-  // A shell result names its process, whose width the kernel picks, so the
-  // byte count of that text differs between two runs even after the text
-  // itself is normalized.
+  // The background shell's launch text names its process, whose width the
+  // kernel picks, so the telemetry record's byte counts of that text differ
+  // between the two parity runs even after the pid text is normalized. This
+  // replays the pair the original CI failure recorded.
   it('normalizes a byte count derived from a process id', () => {
-    const launch = (pid: number) => ({
-      call_id: 'call_job',
-      content_length: 1024 + String(pid).length,
-      raw_content_length: 1024 + String(pid).length,
-    });
-    expect(normalize(launch(9999), '/workspace', '/scratch')).toEqual(
-      normalize(launch(10000), '/workspace', '/scratch'),
+    const launchText = (pid: number) =>
+      'Background shell started.\n' +
+      'id: bg_0123abcd\n' +
+      `pid: ${pid}\n` +
+      'output file: /tmp/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/bg_0123abcd.output\n' +
+      'status file: /tmp/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/bg_0123abcd.status\n' +
+      'To inspect: /tasks';
+    const record = (pid: number, output = 'The job is done.') => {
+      const text = launchText(pid);
+      return {
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'tool_call',
+            call_id: 'call_job',
+            content_length: text.length,
+            raw_content_length: text.length,
+          },
+        },
+        message: {
+          role: 'user',
+          content: [
+            {
+              text:
+                `<task-notification>\nBackground shell bg_0123abcd (pid ${pid}) completed.\n` +
+                `${output}\n</task-notification>`,
+            },
+          ],
+        },
+      };
+    };
+    const normalized = (pid: number, output?: string) =>
+      normalize(
+        record(pid, output),
+        '/workspace',
+        '/scratch',
+        BACKGROUND_SHELL_VOLATILE,
+      );
+
+    expect(normalized(9999)).toEqual(normalized(10000));
+    // The notification and the answer the scenario asserts still compare.
+    const message = normalized(9999) as {
+      message: { content: Array<{ text: string }> };
+    };
+    expect(message.message.content[0].text).toContain(
+      'Background shell bg_<ID> (pid <PID>) completed.\nThe job is done.',
+    );
+    // A real content difference still compares unequal.
+    expect(normalized(9999)).not.toEqual(normalized(10000, 'The job failed.'));
+    // The counts stay comparable outside this scenario, where no launch text
+    // derives them from a pid.
+    const plain = normalize(record(9999), '/workspace', '/scratch') as {
+      systemPayload: { uiEvent: JsonObject };
+    };
+    expect(plain.systemPayload.uiEvent['content_length']).toBe(
+      launchText(9999).length,
+    );
+    expect(plain.systemPayload.uiEvent['raw_content_length']).toBe(
+      launchText(9999).length,
     );
   });
 });
@@ -1033,15 +1097,9 @@ describeTui(SUITE, () => {
       files: { 'job.log': 'job log\n' },
       laterTurns: true,
       recorded: 'The job is done.',
-      // The job's task id, its process and the project's runtime directory,
-      // named by a hash of the workspace path.
-      volatile: {
-        text: [
-          [/\bbg_[0-9a-f]{8}\b/g, 'bg_<ID>'],
-          [/(pid: |pid |<pid>)\d+/g, '$1<PID>'],
-          [/\/tmp\/[0-9a-f]{64}\//g, '/tmp/<HASH>/'],
-        ],
-      },
+      // The job's task id, its process, the project's runtime directory and
+      // the launch text's byte counts, which the process id's width sets.
+      volatile: BACKGROUND_SHELL_VOLATILE,
       reply: (_messages, dir, index) =>
         index === 0
           ? {
