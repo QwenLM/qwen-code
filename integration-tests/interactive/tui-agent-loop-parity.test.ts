@@ -218,15 +218,21 @@ const VOLATILE_KEYS = new Set([
 const TIMING_KEY = /(_ms|Ms)$/;
 
 // The background shell scenario's launch text names its task id, its process,
-// the project's runtime directory, and the byte counts of that text. The
-// counts are the one piece normalize() cannot recover from the normalized
-// text: the kernel picks the process id's width, which sets them.
+// the project's runtime directory, and the sizes of that text. The sizes are
+// the one piece normalize() cannot recover from the normalized text: the
+// kernel picks the process id's width, which sets them. The token estimates
+// are ceilings of the same lengths, so they step with it too.
 const BACKGROUND_SHELL_VOLATILE: Volatile = {
-  keys: ['content_length', 'raw_content_length'],
+  keys: [
+    'content_length',
+    'raw_content_length',
+    'processed_estimated_tokens',
+    'raw_estimated_tokens',
+  ],
   text: [
     [/\bbg_[0-9a-f]{8}\b/g, 'bg_<ID>'],
     [/(pid: |pid |<pid>)\d+/g, '$1<PID>'],
-    [/\/tmp\/[0-9a-f]{64}\//g, '/tmp/<HASH>'],
+    [/\/tmp\/[0-9a-f]{64}\//g, '/tmp/<HASH>/'],
   ],
 };
 
@@ -322,9 +328,10 @@ describe('normalize', () => {
   });
 
   // The background shell's launch text names its process, whose width the
-  // kernel picks, so the telemetry record's byte counts of that text differ
-  // between the two parity runs even after the pid text is normalized. This
-  // replays the pair the original CI failure recorded.
+  // kernel picks, so the telemetry record's byte and token counts of that text
+  // differ between the two parity runs even after the pid text is normalized.
+  // The recorded failure sat where both ceilings coincide; a pid one digit
+  // wider diverges only when the shorter text's length is a multiple of four.
   it('normalizes a byte count derived from a process id', () => {
     const launchText = (pid: number) =>
       'Background shell started.\n' +
@@ -344,6 +351,8 @@ describe('normalize', () => {
             call_id: 'call_job',
             content_length: text.length,
             raw_content_length: text.length,
+            raw_estimated_tokens: Math.ceil(text.length / 4),
+            processed_estimated_tokens: Math.ceil((text.length + 64) / 4),
           },
         },
         message: {
@@ -358,34 +367,55 @@ describe('normalize', () => {
         },
       };
     };
+    const launchRecord = (pid: number) => ({
+      type: 'tool_result',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call_job',
+              name: 'run_shell_command',
+              response: { output: launchText(pid) },
+            },
+          },
+        ],
+      },
+    });
     const normalized = (pid: number, output?: string) =>
       normalize(
-        record(pid, output),
+        [record(pid, output), launchRecord(pid)],
         '/workspace',
         '/scratch',
         BACKGROUND_SHELL_VOLATILE,
       );
 
-    expect(normalized(9999)).toEqual(normalized(10000));
+    // Both ceilings step only when the shorter text is a multiple of four.
+    expect(launchText(99).length % 4).toBe(0);
+    expect(normalized(99)).toEqual(normalized(100));
     // The notification and the answer the scenario asserts still compare.
-    const message = normalized(9999) as {
+    const [message] = normalized(99) as Array<{
       message: { content: Array<{ text: string }> };
-    };
+    }>;
     expect(message.message.content[0].text).toContain(
       'Background shell bg_<ID> (pid <PID>) completed.\nThe job is done.',
     );
+    // The runtime directory stays a directory in the launch text's paths.
+    expect(JSON.stringify(normalized(99))).toContain(
+      '/tmp/<HASH>/bg_<ID>.output',
+    );
     // A real content difference still compares unequal.
-    expect(normalized(9999)).not.toEqual(normalized(10000, 'The job failed.'));
+    expect(normalized(99)).not.toEqual(normalized(100, 'The job failed.'));
     // The counts stay comparable outside this scenario, where no launch text
     // derives them from a pid.
-    const plain = normalize(record(9999), '/workspace', '/scratch') as {
+    const plain = normalize(record(99), '/workspace', '/scratch') as {
       systemPayload: { uiEvent: JsonObject };
     };
     expect(plain.systemPayload.uiEvent['content_length']).toBe(
-      launchText(9999).length,
+      launchText(99).length,
     );
     expect(plain.systemPayload.uiEvent['raw_content_length']).toBe(
-      launchText(9999).length,
+      launchText(99).length,
     );
   });
 });
