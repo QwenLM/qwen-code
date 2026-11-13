@@ -1032,7 +1032,9 @@ describeTui(SUITE, () => {
                 fakeToolCall(
                   'run_shell_command',
                   {
-                    command: 'sleep 3; echo job done',
+                    // A generous bound: the prompt turn's duration is
+                    // unbounded under CI load, and the job must outlast it.
+                    command: 'sleep 10; echo job done',
                     description: 'Run the job',
                     is_background: true,
                   },
