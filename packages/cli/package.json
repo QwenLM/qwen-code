@@ -46,7 +46,7 @@
     "@alcalzone/ansi-tokenize": "0.3.0",
     "@google/genai": "2.6.0",
     "@iarna/toml": "^2.2.5",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@opentelemetry/api": "^1.9.0",
     "@qwen-code/acp-bridge": "file:../acp-bridge",
     "@qwen-code/audio-capture": "file:../audio-capture",
