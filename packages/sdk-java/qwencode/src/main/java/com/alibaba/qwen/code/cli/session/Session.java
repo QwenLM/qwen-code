@@ -251,13 +251,12 @@ public class Session {
                                 () -> sessionEventConsumers.onControlRequest(this, controlRequest), controlRequestTimeout);
                     } catch (Exception e) {
                         Throwable cause = e;
-                        // Throwable cause chains may contain cycles.
-                        for (int depth = 0; depth < 8; depth++) {
-                            if (!(cause instanceof ExecutionException || cause.getClass() == RuntimeException.class)
-                                    || cause.getCause() == null) {
-                                break;
-                            }
+                        if (cause instanceof ExecutionException && cause.getCause() != null) {
                             cause = cause.getCause();
+                            // MyConcurrentUtils adds one RuntimeException below ExecutionException.
+                            if (cause.getClass() == RuntimeException.class && cause.getCause() != null) {
+                                cause = cause.getCause();
+                            }
                         }
                         error = e instanceof TimeoutException
                                 ? "Control request handler timed out after " + controlRequestTimeout.getValue() + " "

@@ -52,6 +52,18 @@ class SessionControlRequestTest {
     }
 
     @Test
+    void preservesTheControlHandlerRuntimeExceptionType() throws Exception {
+        FixtureTransport transport = new FixtureTransport();
+        new Session(transport).sendPrompt("test", consumers(request -> {
+            throw new RuntimeException("outer", new IllegalStateException("inner"));
+        }));
+
+        assertEquals("Control request handler failed (RuntimeException); see SDK logs for details",
+                assertErrorResponse(transport).getString("error"));
+        assertTrue(transport.resultConsumed);
+    }
+
+    @Test
     void sendsCorrelatedErrorWhenControlHandlerThrowsACyclicCause() {
         FixtureTransport transport = new FixtureTransport();
         RuntimeException first = new RuntimeException("first");
