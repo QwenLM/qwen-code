@@ -8,6 +8,7 @@ import {
   normalizeLanguage,
 } from './i18n';
 import type { WebShellLanguage } from './i18n';
+import { CHANNEL_METHOD_PLATFORMS } from './components/channels/channel-platform';
 
 // getTranslator returns the raw key when EN has no entry. SettingsMessage
 // translateSettingText then substitutes the settingsSchema.ts description,
@@ -202,6 +203,16 @@ describe('web-shell i18n catalog', () => {
       }
     },
   );
+
+  it('defines names for every grouped channel platform', () => {
+    for (const platform of new Set(Object.values(CHANNEL_METHOD_PLATFORMS))) {
+      if (!platform) continue;
+      const key = `channels.platform.name.${platform.type}`;
+      for (const language of WEB_SHELL_LANGUAGES) {
+        expect(getTranslator(language)(key)).not.toBe(key);
+      }
+    }
+  });
 
   it.each([
     { type: 'dingtalk', english: 'DingTalk', chinese: '钉钉' },

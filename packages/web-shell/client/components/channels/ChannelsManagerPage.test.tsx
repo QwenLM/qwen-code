@@ -125,6 +125,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 
 const { ChannelsManagerPage } = await import('./ChannelsManagerPage');
 const { I18nProvider } = await import('../../i18n');
+const { CHANNEL_METHOD_PLATFORMS } = await import('./channel-platform');
 
 let container: HTMLDivElement;
 let root: Root;
@@ -453,6 +454,17 @@ describe('ChannelsManagerPage', () => {
       const dialog = document.querySelector('[role="dialog"]')!;
       for (const language of ['zh-CN', 'en', 'zh-CN'] as const) {
         await renderPage(language);
+        const card = container.querySelector<HTMLButtonElement>(
+          `[data-testid="channel-platform-${platform.type}"]`,
+        )!;
+        expect(card.textContent).toContain(
+          language === 'zh-CN' ? platform.chinese : platform.english,
+        );
+        expect(card.getAttribute('aria-label')).toBe(
+          language === 'zh-CN'
+            ? `配置${platform.chinese}`
+            : `Configure ${platform.english}`,
+        );
         expect(document.querySelector('[role="dialog"]')).toBe(dialog);
         expect(
           document.getElementById(dialog.getAttribute('aria-labelledby')!)
@@ -473,6 +485,64 @@ describe('ChannelsManagerPage', () => {
       }
     },
   );
+
+  it('uses the group name when a platform translation is missing', async () => {
+    const previous = { ...CHANNEL_METHOD_PLATFORMS };
+    const platform = {
+      type: 'test-untranslated-platform',
+      displayName: 'Example platform',
+    };
+    try {
+      CHANNEL_METHOD_PLATFORMS['wecom'] = platform;
+      CHANNEL_METHOD_PLATFORMS['wecom-callback'] = platform;
+      channelState.current.catalog.unshift({
+        type: 'wecom-callback',
+        displayName: 'Example callback',
+        manageable: true,
+        fields: [],
+      });
+      await renderPage('zh-CN');
+      const card = container.querySelector<HTMLButtonElement>(
+        '[data-testid="channel-platform-test-untranslated-platform"]',
+      )!;
+      await act(async () => card.click());
+      const dialog = document.querySelector('[role="dialog"]')!;
+      for (const language of ['zh-CN', 'en'] as const) {
+        await renderPage(language);
+        expect(card.textContent).toContain('Example platform');
+        expect(card.getAttribute('aria-label')).toBe(
+          language === 'zh-CN'
+            ? '配置Example platform'
+            : 'Configure Example platform',
+        );
+        expect(document.querySelector('[role="dialog"]')).toBe(dialog);
+        expect(
+          document.getElementById(dialog.getAttribute('aria-labelledby')!)
+            ?.textContent,
+        ).toBe(
+          language === 'zh-CN'
+            ? '选择Example platform的连接方式'
+            : 'Choose a Example platform connection',
+        );
+        expect(
+          document.getElementById(dialog.getAttribute('aria-describedby')!)
+            ?.textContent,
+        ).toBe(
+          language === 'zh-CN'
+            ? '选择此频道连接Example platform的方式。'
+            : 'Choose how this Channel connects to Example platform.',
+        );
+      }
+    } finally {
+      for (const type of ['wecom', 'wecom-callback']) {
+        if (previous[type]) {
+          CHANNEL_METHOD_PLATFORMS[type] = previous[type];
+        } else {
+          delete CHANNEL_METHOD_PLATFORMS[type];
+        }
+      }
+    }
+  });
 
   it('shows only the three enabled platforms and configured instances', async () => {
     await renderPage();

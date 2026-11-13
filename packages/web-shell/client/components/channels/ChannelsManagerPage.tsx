@@ -223,10 +223,16 @@ export function ChannelsManagerPage({
   }>();
   const [methodChoices, setMethodChoices] = useState<{
     type: string;
+    displayName: string;
     methods: DaemonChannelTypeDescriptor[];
   }>();
+  const getPlatformName = (platform: { type: string; displayName: string }) => {
+    const key = `channels.platform.name.${platform.type}`;
+    const name = t(key);
+    return name === key ? platform.displayName : name;
+  };
   const methodPlatformVariables = methodChoices && {
-    platform: t(`channels.platform.name.${methodChoices.type}`),
+    platform: getPlatformName(methodChoices),
   };
   const editorRef = useRef(editor);
   useEffect(() => {
@@ -872,7 +878,7 @@ export function ChannelsManagerPage({
                   data-testid={`channel-platform-${platform.type}`}
                   disabled={!canManage || !snapshot}
                   aria-label={t('channels.platform.configureNamed', {
-                    platform: platform.displayName,
+                    platform: getPlatformName(platform),
                   })}
                   onClick={() => {
                     if (platform.methods.length > 1) {
@@ -892,7 +898,7 @@ export function ChannelsManagerPage({
                   </span>
                   <span className={styles.platformCopy}>
                     <span className={styles.platformName}>
-                      {platform.displayName}
+                      {getPlatformName(platform)}
                     </span>
                     <span className={styles.platformHint}>
                       {t('channels.platform.add')}
