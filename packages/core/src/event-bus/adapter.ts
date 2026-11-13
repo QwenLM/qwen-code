@@ -21,7 +21,6 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { createBusEvent } from './bus.js';
 import { createLoopEventRuntime } from './runtime.js';
-import type { LoopRunState } from './state.js';
 
 const debugLogger = createDebugLogger('EVENT_BUS');
 
@@ -50,10 +49,10 @@ export async function runAgentLoopOnBus(
     `(prompt ${options.first.promptId})`,
   );
   const runtime = createLoopEventRuntime();
-  let state!: LoopRunState;
+  // Read only once the run is under way, after `state` exists.
   const host =
     options.host && untilFinished(options.host, () => !!state.finished);
-  state = runtime.store.create({
+  const state = runtime.store.create({
     runId,
     promptId: options.first.promptId,
     input: { ...options, ...(host ? { host } : {}) },
