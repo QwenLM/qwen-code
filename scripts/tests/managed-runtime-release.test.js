@@ -537,6 +537,14 @@ describe('Managed runtime publication gates', () => {
     expect(verification).not.toContain('-DargLine=');
   });
 
+  it('never disables the javadoc gate', () => {
+    // Workflow-wide: no release step may turn off Javadoc validation (the
+    // v0.26.5 repair escaped doclint rather than skipping the javadoc gate).
+    expect(JSON.stringify(workflow)).not.toMatch(
+      /-D(?:maven\.javadoc\.skip|doclint=|additionalJOption=)/,
+    );
+  });
+
   it('ships a single executable JAR and keeps the Central release plugins', () => {
     const pom = fs.readFileSync(
       path.join(root, 'packages/managed-agent-server/pom.xml'),

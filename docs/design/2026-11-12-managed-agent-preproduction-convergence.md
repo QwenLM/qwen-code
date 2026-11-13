@@ -9,7 +9,8 @@
   earlier "retain the classifier jars" framing below; the operator tools survive
   as admin subcommands), #17047 (pack-aware readers) and #17044 (ratchet trim).
   Slice 1's fix landed via #17058; its embedding regression assertion is retained
-  here. Slice 2 (dead-tag release repair removal) is rebased and pending. Slice 3
+  here. Slice 2 (dead-tag release repair removal) is implemented in this PR
+  (pending review). Slice 3
   is dropped (see below). Slices 4–8 remain.
 - Date: 2026-11-12
 - Scope: `packages/managed-agent-server/**`, its packaging/release scripts, the
@@ -45,9 +46,10 @@ are removable, and the single-V1 schema baseline is at its cheapest editing
 window. This document records what may be removed, what must survive, and a
 sliced plan that keeps each step independently verifiable.
 
-## Current state (verified against `fcc2394474`)
+## Current state (verified against current main)
 
-Counts below were measured by whole-repository scans, not estimated.
+Counts below are whole-repository scans; figures affected by the tier-1 merges
+(#17058 / #17064 / #17075) are re-measured against the merging tree.
 
 - **Interfaces.** 136 production interface names (97 top-level files); only 9
   have more than one production implementation. All 41 `*Store`/`*Repository`
@@ -57,16 +59,18 @@ Counts below were measured by whole-repository scans, not estimated.
   fakes, reused by 5 subsystems).
 - **Settings mirrors.** `ManagedAgentSettings` (20 interfaces, 252 lines) plus
   `SshSettings` (3) = 23 read-only mirrors of `ManagedAgentProperties`
-  (1,076 lines, 21 nested classes). 51 production files import
-  `ManagedAgentSettings`. `configuration-descriptions.json` is referenced only
-  by the README (it generates the configuration reference doc); no test pins it.
+  (1,076 lines, 21 nested classes). 62 production files import
+  `ManagedAgentSettings`. `configuration-descriptions.json` generates the
+  configuration reference doc; `release-managed-agent-reference.yml` runs
+  `generate-managed-agent-configuration-reference.mjs --check` as a drift gate
+  over the two committed pages.
 - **Structural cause.** `ModuleArchitectureTest` forces
   `control-plane`/`persistence`/`runtime-*` to depend only on themselves plus
   `contracts`; `ClassSizeRatchetTest` forces splitting classes ≥800 lines in
   `persistence`/`runtime-broker` (global ceiling 2,549, monotonic). Splitting a
   class then needing cross-module visibility manufactures a new `contracts`
   interface. The mirrors are a product of these two gates, not of discipline.
-- **API surfaces.** `SurfaceRegistry` enumerates 227 route constants across
+- **API surfaces.** `SurfaceRegistry` enumerates 234 route constants across
   Public, WebShell, and internal surfaces. The two public surfaces are a
   capability split, not isomorphic mirrors: Public is read/manage-oriented
   (`PUBLIC_TURN_GET/LIST/EVENTS`, workspace list/get) while WebShell carries the
@@ -86,26 +90,28 @@ Counts below were measured by whole-repository scans, not estimated.
   `YamlWalk` comment AST at :794), `HarnessBrokerUrl` (410, WHATWG subset shared
   with `packages/cli/src/serve/managed-runtime-broker-url.fixtures.json`),
   `ServiceAccount` (194, user-space `namei`).
-- **Packaging.** 6 classifier fat-JAR `repackage` executions (plus the main boot
-  jar); the maintenance family is 13 classes / 1,402 lines, referenced by
-  `scripts/package-managed-agent-reference.mjs`, e2e tests, and the README.
-- **Ratchets.** `verification/pom.xml` is 1,190 lines with 17 profiles and
-  ~435 lines of near-duplicate Failsafe XML; its `pluginManagement` shape is
-  pinned byte-for-byte by `scripts/tests/managed-runtime-release.test.js`
-  reverse-applying `scripts/patches/managed-runtime-v0.26.5-verification.patch`.
-  `ManagedSchemaCatalog` (630 lines; 1,198 across the `managedschema` package)
-  re-parses the canonical DDL with indentation-sensitive regexes at startup.
-- **Registered providers, not dead code (corrects the review).** All five
-  `runtime-*` modules register a `RuntimeProviderFactory` via
-  `META-INF/services`, so they are ServiceLoader-discovered providers, not
-  statically wired beans. `KubernetesRuntimeProvisioner` has dedicated tests
-  (`KubernetesRuntimeProvisionerTest`, `KubernetesRuntimeWorkerTest`) and docs
-  (`docs/runtime-broker.md`); `runtime-external` likewise registers
-  `ExternalRuntimeProviderFactory`. `JdbcRuntimeBrokerSchema` is a schema
-  initializer used by 10+ tests and documented as the catalog-refusal entry
-  point. The review's "0 callers / 0 tests" claim was wrong: these are optional
-  capabilities and test infrastructure, not dead code. Removing the Kubernetes
-  or external provider is a capability decision, not cleanup.
+- **Packaging.** A single `exec` repackage remains (#17064 removed the six
+  classifier fat-JAR executions; the operator tools survive as admin
+  subcommands). The maintenance family is 13 classes / 1,402 lines, referenced
+  by `scripts/package-managed-agent-reference.mjs`, e2e tests, and the README.
+- **Ratchets.** `verification/pom.xml` is 831 lines with 17 profiles and
+  ~435 lines of near-duplicate Failsafe XML. The v0.26.5 pom pin
+  (`scripts/patches/managed-runtime-v0.26.5-verification.patch` and its
+  meta-test) was removed by the dead-tag release-repair cleanup, so profile
+  dedup is no longer blocked by a pin. `ManagedSchemaCatalog` (630 lines;
+  1,198 across the `managedschema` package) re-parses the canonical DDL with
+  indentation-sensitive regexes at startup.
+- **Registered providers, not dead code.** All five `runtime-*` modules register
+  a `RuntimeProviderFactory` via `META-INF/services`, so they are
+  ServiceLoader-discovered providers, not statically wired beans.
+  `runtime-kubernetes` (kind `kubernetes-workspace`) is the resident-workspace /
+  CSI provisioner (`KubernetesRuntimeProviderFactory`), actively developed and
+  load-bearing; `runtime-external` registers `ExternalRuntimeProviderFactory`
+  (`external-scratch` functional, `external-workspace` intentionally fail-closed).
+  The earlier K1 scratch provisioner (`KubernetesRuntimeProvisioner`) and the
+  `JdbcRuntimeBrokerSchema` alias were subsequently removed as genuinely dead /
+  redundant (#17058, #17075). Removing a remaining provider is a capability
+  decision, not cleanup.
 
 ## Goals
 
@@ -211,20 +217,25 @@ series) with its own focused verification; CI owns the full gates.
   assertion), all 15 modules compile, Checkstyle (both executions) and SpotBugs
   green.
 - The verification ratchet trim (Javadoc pin, lock inventory, legacy-table
-  TSVs; −1,301 lines) is the separate open PR #17044; it is not duplicated here.
-- The former "dead code" deletion targets are reclassified (see Current state):
-  `runtime-kubernetes`/`runtime-external` are registered providers and
-  `JdbcRuntimeBrokerSchema` is test infrastructure. None is deleted as dead
-  code; dropping a provider is a separate capability decision.
+  TSVs; −1,301 lines) is the merged PR #17044; it is not duplicated here.
+- The former "dead code" deletion targets were re-examined: the K1 scratch
+  provisioner (`KubernetesRuntimeProvisioner`) and the `JdbcRuntimeBrokerSchema`
+  alias were genuinely dead / redundant and removed (#17058, #17075); the
+  remaining `runtime-kubernetes` (`kubernetes-workspace` CSI) and
+  `runtime-external` providers are registered, load-bearing capabilities, not
+  dead code. Dropping a remaining provider is a separate capability decision.
 
 ### Slice 2 — Release repair removal (requires D3); packaging reclassified
 
 - **Done — old-tag release repair removed.** Deleted all three repair patches
   (`v0.26.3-tests`, `v0.26.5-javadoc`, `v0.26.5-verification`), the two
   conditional workflow repair steps (`RELEASE_TAG == v0.26.3 / v0.26.5`), and
-  their meta-tests in `managed-runtime-release.test.js` (−309 lines). These only
+  their meta-tests in `managed-runtime-release.test.js` (−396 lines). These only
   ran when re-releasing dead tags, so removal does not affect future releases.
-  Verified: release meta-tests 47/48 (the one failure is a pre-existing
+  This abandons the v0.26.3 managed-runtime backfill (locked decision D3); the
+  `managed-runtime-0263-test-repair` runbook is retired accordingly. The
+  workflow-wide guard forbidding disabling the Javadoc gate is retained as its
+  own test. Verified: release meta-tests 48/49 (the one failure is a pre-existing
   environmental `semver` resolution issue in a temp fixture, unrelated),
   Prettier + ESLint green.
 - **Deferred — profile deduplication.** Removing the pom-pinning meta-test
@@ -304,8 +315,12 @@ still wanted, it needs its own design effort; otherwise the dual server stands.
 - Require canonical `http(s)://host:port` at the config entry; delete the
   WHATWG subset and the shared URL fixtures (or move validation to the Node
   side). Replace `StackWalker` format sniffing with Spring's ConfigData API;
-  reduce secret scanning to a key-name heuristic; test `ServiceAccount` access
-  as the service identity rather than root user-space `namei`.
+  keep value-based secret detection (URL user-information passwords and
+  `?password=`/`?token=` parameters under any key) while removing only the
+  YAML/comment AST and path machinery — a key-name-only scan would miss a
+  credential in e.g. `spring.datasource.url` and lose the `chmod 600` warning;
+  test `ServiceAccount` access as the service identity rather than root
+  user-space `namei`.
 - Rationale: the URL parity contract is only needed while arbitrary URL
   spellings are accepted; pre-production can refuse them.
 - Verification: rewritten preflight tests over canonical input; `--check`
@@ -384,9 +399,9 @@ design effort if ever wanted; the multi-version surface is functional diversity
 
 - Per slice: focused tests for changed consumers plus the named gates above;
   record command, tested state, and outcome.
-- Cross-language slices (4, 8): root build/typecheck and affected consumer
+- Cross-language slice (4): root build/typecheck and affected consumer
   tests; CI retains full cross-language gates.
-- SQL/recovery slices (3, 7): real MySQL evidence locally within budget; full
+- SQL/recovery slice (7): real MySQL evidence locally within budget; full
   `mysql-integration` / Hosted / fault profiles in CI.
 - Acceptance is pending until the required CI gates pass on the accepted
   revision; report local passes, failures, skips, and CI gaps separately.
