@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -319,6 +319,48 @@ describe('CLI', () => {
     writeFileSync(path, '{not json');
     const started = run(root, [...START, '--artifact-dir', 'r11']);
     expect(started.status).toBe(0);
+    expect(readState(root, 16866).inFlight).toBe(true);
+  });
+
+  // The state lives in the clone's main worktree, not the arm the round
+  // runs in — the same place the watch gate keeps its cursor. Every other
+  // CLI test passes --state-root; this one exercises the default resolution
+  // from inside a real linked worktree.
+  it('defaults the state root to the main worktree from a linked worktree', () => {
+    const root = makeRoot();
+    const gitEnv = {
+      ...process.env,
+      HOME: root,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_AUTHOR_NAME: 't',
+      GIT_AUTHOR_EMAIL: 't@t',
+      GIT_COMMITTER_NAME: 't',
+      GIT_COMMITTER_EMAIL: 't@t',
+    };
+    const git = (args, cwd) =>
+      execFileSync('git', args, { cwd, env: gitEnv, stdio: 'pipe' });
+    git(['init', '--quiet', '.'], root);
+    git(['commit', '--allow-empty', '--quiet', '-m', 'base'], root);
+    const arm = join(root, 'arm');
+    git(['worktree', 'add', '--quiet', '--detach', arm, 'HEAD'], root);
+    const res = spawnSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '16866',
+        '--start',
+        '--head',
+        HEAD,
+        '--round',
+        '11',
+        '--artifact-dir',
+        'r11',
+      ],
+      { cwd: arm, env: gitEnv, encoding: 'utf8' },
+    );
+    expect(res.status).toBe(0);
+    expect(existsSync(statePath(root, 16866))).toBe(true);
+    expect(existsSync(statePath(arm, 16866))).toBe(false);
     expect(readState(root, 16866).inFlight).toBe(true);
   });
 });
