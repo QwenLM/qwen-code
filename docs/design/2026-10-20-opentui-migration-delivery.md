@@ -171,7 +171,8 @@ returns nothing. 0.5.10 repaints each updated streaming block with a
 marked-based preview before tree-sitter replaces it, so every delta flipped
 between two renderers. On upgrade, confirm the private method still exists
 and whether the preview still repaints updated blocks before keeping or
-dropping the override.
+dropping the override. 0.8.4 still does: its streaming-preview update writes
+the preview into the buffer on every change before tree-sitter returns.
 
 ## Completion and rollout gates
 
