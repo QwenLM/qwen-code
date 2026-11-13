@@ -194,13 +194,26 @@ map refuses the boot, matching `validatePolicyConfig` (`:692`, which throws
 disables delivery is worse than a loud failure, and the channel already throws
 for the same three rules.
 
-### 2. Enablement derived from the effective event set
+### 2. Enablement is deps presence
 
-The constant becomes `true` and the gate becomes "the effective event set is
-non-empty", resolved per tick from the same source for both the periodic tick
-(`session-pr-refresh.ts:812`) and the on-demand drain (`:981`). The test seam
-`observationEnabled` stays. Deriving the two entry points from one resolver is
-the point: #17032's last Critical was exactly two entry points disagreeing.
+The internal constant is **removed**, not flipped to `true`: a constant that is
+always true is a dead switch. The daemon builds no deps when the effective event
+set is empty, and both the periodic tick and the on-demand drain already gate on
+deps presence — so the two entry points agree by construction rather than by a
+second gate that could drift from the first. The test seam `observationEnabled`
+stays as a force-off override.
+
+This is the fail-closed property the observation design already recorded:
+flipping the switch alone never watched until the deps seam was populated.
+#17032's last Critical was two entry points disagreeing; here there is only one
+condition to disagree with.
+
+Two existing parity cases change with the gate. They asserted the seam was
+**never read** while the switch was off; the gate now reads it and finds it
+unprovisioned. Their assertions become "the getter was consulted", which is
+weaker, and the inertness they used to pin directly is now structural in the
+`if (watchDeps)` guard that the on-path cases and the `stopWatch` case cover.
+This is named rather than papered over.
 
 ### 3. One event filter, inside the detector
 

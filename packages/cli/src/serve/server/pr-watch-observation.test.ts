@@ -128,6 +128,75 @@ describe('detectPrTransitions', () => {
     expect(next.transitions).toEqual([]);
   });
 
+  it('records every type when no subscription is given', () => {
+    const first = detectPrTransitions(identity, undefined, obs(), T0);
+    const next = detectPrTransitions(
+      identity,
+      first.state,
+      obs({ headSha: 'b'.repeat(40), checks: 'failing' }),
+      T1,
+    );
+    expect(types(next.transitions)).toEqual(['head_change', 'ci_failure']);
+  });
+
+  it('drops an unsubscribed type from both the transitions and pending', () => {
+    const first = detectPrTransitions(identity, undefined, obs(), T0);
+    const next = detectPrTransitions(
+      identity,
+      first.state,
+      obs({ headSha: 'b'.repeat(40), checks: 'failing' }),
+      T1,
+      new Set(['ci_failure']),
+    );
+    expect(types(next.transitions)).toEqual(['ci_failure']);
+    expect((next.state.pending ?? []).map((entry) => entry.type)).toEqual([
+      'ci_failure',
+    ]);
+  });
+
+  it('keeps only the subscribed type when several fire at once', () => {
+    const first = detectPrTransitions(identity, undefined, obs(), T0);
+    const next = detectPrTransitions(
+      identity,
+      first.state,
+      obs({
+        headSha: 'b'.repeat(40),
+        checks: 'failing',
+        mergeable: 'conflicting',
+        state: 'closed',
+      }),
+      T1,
+      new Set(['state_change']),
+    );
+    expect(types(next.transitions)).toEqual(['state_change']);
+  });
+
+  it('still records ciFired for an unsubscribed ci_failure', () => {
+    // Subscribing later must not fire retroactively for a head that was
+    // already failing: the bookkeeping is deliberately not filtered, the
+    // same rule that makes a first observation initialise silently.
+    const headA = 'a'.repeat(40);
+    const s0 = detectPrTransitions(identity, undefined, obs(), T0);
+    const s1 = detectPrTransitions(
+      identity,
+      s0.state,
+      obs({ headSha: headA, checks: 'failing' }),
+      T1,
+      new Set(['head_change']),
+    );
+    expect(s1.transitions).toEqual([]);
+    expect(s1.state.ciFired).toEqual([headA]);
+
+    const s2 = detectPrTransitions(
+      identity,
+      s1.state,
+      obs({ headSha: headA, checks: 'failing' }),
+      T2,
+      new Set(['head_change', 'ci_failure']),
+    );
+    expect(s2.transitions).toEqual([]);
+  });
+
   it('fires ci_failure once per head across a force-push revisit', () => {
     const headA = 'a'.repeat(40);
     const headB = 'b'.repeat(40);
@@ -602,6 +671,32 @@ describe('observeWorkspacePrBindings', () => {
     expect(after.kind).toBe('state');
     if (after.kind === 'state') {
       expect(after.state.pending?.map((p) => p.type)).toEqual(['head_change']);
+    }
+  });
+
+  it('writes no transition the subscription excludes', async () => {
+    // The sweep-level witness for the view call site. The detector's filter
+    // has its own direct cases, but only this one proves the sweep passes its
+    // subscription down: dropping `deps.events` at the call site leaves every
+    // other case in this file green.
+    const view = vi.fn(async (url: string) => okResult(url));
+    await observeWorkspacePrBindings([binding(42)], makeDeps(view));
+    view.mockImplementation(async (url: string) =>
+      okResult(url, { headSha: 'b'.repeat(40), checks: 'failing' }),
+    );
+    const result = await observeWorkspacePrBindings(
+      [binding(42)],
+      makeDeps(view, {
+        now: () => Date.parse(T2),
+        events: new Set(['ci_failure']),
+      }),
+    );
+    expect(result.observed).toBe(1);
+    const id = prWatchIdentityFromUrl(prUrl(42))!;
+    const after = readPrWatchStateSync(dir, id);
+    expect(after.kind).toBe('state');
+    if (after.kind === 'state') {
+      expect(after.state.pending?.map((p) => p.type)).toEqual(['ci_failure']);
     }
   });
 

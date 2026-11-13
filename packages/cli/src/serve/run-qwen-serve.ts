@@ -4300,6 +4300,17 @@ async function runQwenServeImpl(
     bootSettings ?? {},
     'serve / ACP / web terminals',
   );
+  // Resolved here, outside the settings try/catch, so an invalid action
+  // template refuses startup the way an invalid policy does: a typo that
+  // silently disabled delivery would be worse than a loud failure. The
+  // module is imported dynamically to stay out of the fast path's pre-listen
+  // closure, like every other runtime server module.
+  const prWatchConfigMod = await import('./server/pr-watch-config.js');
+  const sessionPrWatchConfig = prWatchConfigMod.resolveSessionPrWatchConfig(
+    bootSettings?.serve?.sessionPrWatch,
+    process.env,
+    writeStderrLine,
+  );
   // Init daemon logger early so all subsequent lifecycle events
   // (bridge spawn diagnostics, shutdown errors) are captured to file.
   const daemonLogBaseDir = await resolveDaemonLogBaseDirForRun({
@@ -7657,7 +7668,12 @@ async function runQwenServeImpl(
             | undefined;
           let readHostedChannelBaseUrls: (() => readonly unknown[]) | undefined;
           const resolvePrWatchDeps = () => {
+            // No subscribed event means no deps, and no deps is the single
+            // enablement gate both the tick and the on-demand drain read. An
+            // operator who configures nothing gets no view, no watch file and
+            // no ownership claim.
             if (
+              sessionPrWatchConfig.events.size === 0 ||
               !createPrWatchDeps ||
               !prWatchSources ||
               !readHostedChannelBaseUrls
@@ -7694,6 +7710,7 @@ async function runQwenServeImpl(
               createPrWatchDeps = depsMod.createPrWatchDeps;
               prWatchSources = {
                 workspaceRegistry,
+                config: sessionPrWatchConfig,
                 archiveCoordinator: () =>
                   (
                     app.locals as {

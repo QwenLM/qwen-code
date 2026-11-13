@@ -37,6 +37,7 @@ vi.mock('../../commands/autofix-pr/state.js', async (importOriginal) => ({
 }));
 
 import { createPrWatchDeps } from './pr-watch-deps.js';
+import type { SessionPrWatchConfig } from './pr-watch-config.js';
 import { PathMutexRegistry } from '../fs/path-mutex-registry.js';
 import {
   autofixPrPaths,
@@ -145,11 +146,17 @@ describe('createPrWatchDeps', () => {
       withCoordinator?: boolean;
       activity?: ConversationRuntimeActivityGate;
       deadline?: number;
+      config?: SessionPrWatchConfig;
     } = {},
   ) {
     const runtimes = overrides.runtimes ?? [runtime()];
     return createPrWatchDeps({
       workspaceRegistry: { listAll: () => runtimes } as never,
+      config: overrides.config ?? {
+        events: new Set(['head_change']),
+        wakeDormant: true,
+        actions: undefined,
+      },
       archiveCoordinator: () =>
         overrides.withCoordinator === false ? undefined : coordinator,
       conversationRuntimeActivity: () => overrides.activity,
@@ -180,6 +187,35 @@ describe('createPrWatchDeps', () => {
     expect(drain.locks).toBe(watch.locks);
   });
 
+  it('carries the subscription to the observation seam', () => {
+    const { watch } = build({
+      config: {
+        events: new Set(['state_change']),
+        wakeDormant: true,
+        actions: undefined,
+      },
+    });
+    expect([...(watch.events ?? [])]).toEqual(['state_change']);
+  });
+
+  it('carries actions and wakeDormant to the drain', () => {
+    // Both were declared-and-read seams with no setter until the operator
+    // setting existed; a drain that never receives them silently stays on
+    // the legacy single winner and always wakes dormant sessions.
+    const actions = new Map([['review:head_change', 'Attribute it.']]);
+    const { drain } = build({
+      config: { events: new Set(['head_change']), wakeDormant: false, actions },
+    });
+    expect(drain.actions).toBe(actions);
+    expect(drain.wakeDormant).toBe(false);
+  });
+
+  it('leaves actions absent so the drain keeps the legacy single winner', () => {
+    const { drain } = build();
+    expect(drain.actions).toBeUndefined();
+    expect(drain.wakeDormant).toBe(true);
+  });
+
   it('reuses an injected lock registry across both seams', () => {
     // A rebuild after the hosted channels change must keep the registry, or a
     // channel committing between the observation's and the drain's read hands
@@ -187,6 +223,11 @@ describe('createPrWatchDeps', () => {
     const locks = new PathMutexRegistry();
     const { watch, drain } = createPrWatchDeps({
       workspaceRegistry: { listAll: () => [runtime()] } as never,
+      config: {
+        events: new Set(['head_change']),
+        wakeDormant: true,
+        actions: undefined,
+      },
       archiveCoordinator: () => coordinator,
       restore: restore as never,
       hostedChannelBaseUrls: () => [],

@@ -2343,6 +2343,42 @@ describe('refreshWorkspaceSessionPrStates', () => {
       });
     });
 
+    it('records no state_change the operator did not subscribe', async () => {
+      // The mirror of the case above, and the only witness that the filter
+      // reaches the SECOND producer. The listing write is a producer in its
+      // own right: a filter applied at the view path alone would still queue
+      // this state_change and deliver it to an operator who subscribed only
+      // head_change. The state write itself is not filtered — only the
+      // transition it implies.
+      await seedBinding();
+      await withWatchDir(async (watchDir) => {
+        writePrWatchStateSync(watchDir, identity42, {
+          pr: identity42,
+          state: 'open',
+          headSha: 'c'.repeat(40),
+          checks: 'passing',
+        });
+        fetchGitHubPullRequestsMock.mockResolvedValue({
+          kind: 'ok',
+          pullRequests: [pr(42, 'merged')],
+        });
+        await refreshWorkspaceSessionPrStates(runtime, undefined, {
+          prWatch: {
+            watchDir,
+            locks: new PathMutexRegistry(),
+            allowedHosts,
+            events: new Set(['head_change']),
+          },
+          now: () => Date.parse('2026-11-10T00:00:00.000Z'),
+        });
+        const after = readPrWatchStateSync(watchDir, identity42);
+        expect(after.kind).toBe('state');
+        if (after.kind !== 'state') throw new Error('unreachable');
+        expect(after.state.state).toBe('merged');
+        expect(after.state.pending).toBeUndefined();
+      });
+    });
+
     it('initialises silently when the watch file has no head baseline', async () => {
       await seedBinding();
       await withWatchDir(async (watchDir) => {
@@ -2684,13 +2720,15 @@ describe('startSessionPrRefreshTimer', () => {
     }
   });
 
-  it('drainNow reads no drain deps while the observation switch is off', async () => {
+  it('drainNow delivers nothing when no drain deps are provisioned', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
     const getPrDrainDeps = vi.fn(() => undefined);
-    // No observationEnabled: production is governed by the internal constant,
-    // which is off. A resume must not deliver from watch files a previous
-    // owner left behind.
+    // No observationEnabled and no deps: enablement is deps presence, which
+    // the daemon derives from the operator's subscription. The getter IS
+    // consulted — the gate moved from "never read the seam" to "read it and
+    // find it unprovisioned" — and a resume must still deliver nothing from
+    // watch files a previous owner left behind.
     const handle = startSessionPrRefreshTimer({
       workspaceRegistry: registry,
       env: {},
@@ -2698,7 +2736,7 @@ describe('startSessionPrRefreshTimer', () => {
     });
     try {
       await handle?.drainNow(trustedCwd);
-      expect(getPrDrainDeps).not.toHaveBeenCalled();
+      expect(getPrDrainDeps).toHaveBeenCalled();
     } finally {
       handle?.dispose();
     }
@@ -3128,7 +3166,7 @@ describe('startSessionPrRefreshTimer', () => {
     }
   });
 
-  it('never reads the PR-watch deps while the observation switch is off', async () => {
+  it('never watches when no PR-watch deps are provisioned', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
     await seedPendingBinding(trustedRuntime, SESSION_A);
@@ -3148,9 +3186,10 @@ describe('startSessionPrRefreshTimer', () => {
     await vi.waitFor(() => {
       expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
     });
-    // The switch is off: the tick refreshes state but never touches the
-    // PR-watch seam (no claim, no view, no watch-file write).
-    expect(getPrWatchDeps).not.toHaveBeenCalled();
+    // Enablement is deps presence: the tick consults the seam, finds it
+    // unprovisioned, and does nothing further — no claim, no view, no
+    // watch-file write — while the state refresh below still runs.
+    expect(getPrWatchDeps).toHaveBeenCalled();
     handle?.dispose();
   });
 

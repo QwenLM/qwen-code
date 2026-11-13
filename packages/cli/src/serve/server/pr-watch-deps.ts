@@ -18,6 +18,7 @@ import type {
   PrWatchRecipient,
   PrWatchWakeOutcome,
 } from './pr-watch-drain.js';
+import type { SessionPrWatchConfig } from './pr-watch-config.js';
 import {
   scanWorkspaceBindings,
   type SessionPrBindingSummary,
@@ -66,6 +67,12 @@ type PrWatchRestore = (input: {
 
 export interface PrWatchDepsSources {
   workspaceRegistry: WorkspaceRegistry;
+  /**
+   * The operator's resolved subscription (master §6). The caller builds no
+   * deps at all when `events` is empty, so that is the single enablement gate
+   * both the tick and the on-demand drain read.
+   */
+  config: SessionPrWatchConfig;
   /** Late-bound: the serve app is built after the refresh timer starts. */
   archiveCoordinator: () => SessionArchiveCoordinator | undefined;
   /**
@@ -204,12 +211,20 @@ export function createPrWatchDeps(sources: PrWatchDepsSources): PrWatchDeps {
     watchDir,
     locks,
     allowedHosts,
+    events: sources.config.events,
     log,
   };
 
   const drain: PrWatchDrainDeps = {
     watchDir,
     locks,
+    // Absent actions keep the legacy single winner; absent wakeDormant means
+    // the drain's own default (true). Both were declared-and-read seams with
+    // no setter until the operator setting existed.
+    ...(sources.config.actions !== undefined
+      ? { actions: sources.config.actions }
+      : {}),
+    wakeDormant: sources.config.wakeDormant,
     scanBindings: async (runtime) => {
       const bindings: SessionPrBindingSummary[] = [];
       const partial = await scanWorkspaceBindings(runtime, bindings);

@@ -97,6 +97,16 @@ export function detectPrTransitions(
   previous: PrWatchState | undefined,
   observation: PrWatchObservation,
   detectedAt: string,
+  /**
+   * The subscribed transition types. Absent means every type, which is what
+   * the direct unit tests and any caller without a subscription want;
+   * production always passes a non-empty set, because an empty one means the
+   * watch is off and no observation runs at all.
+   *
+   * The filter lives here rather than at the two call sites (the view path
+   * and the listing write) so the two producers cannot drift apart.
+   */
+  events?: ReadonlySet<PrTransitionType>,
 ): PrWatchDetection {
   const transitions: DetectedPrTransition[] = [];
   const prevHead = previous?.headSha;
@@ -188,9 +198,19 @@ export function detectPrTransitions(
     }
   }
 
+  // An unsubscribed type is neither queued nor returned. `ciFired` above is
+  // deliberately NOT filtered: an unsubscribed ci_failure still records its
+  // head, so subscribing later does not fire retroactively for a head that
+  // was already failing — the same rule that makes a first observation
+  // initialise silently.
+  const subscribed =
+    events === undefined
+      ? transitions
+      : transitions.filter((transition) => events.has(transition.type));
+
   const pending = [
     ...(previous?.pending ?? []),
-    ...transitions.map(({ type, key, summary, detectedAt: at, headSha }) => ({
+    ...subscribed.map(({ type, key, summary, detectedAt: at, headSha }) => ({
       type,
       key,
       summary,
@@ -221,7 +241,7 @@ export function detectPrTransitions(
     ...(pending.length > 0 ? { pending } : {}),
   };
 
-  return { state, transitions };
+  return { state, transitions: subscribed };
 }
 
 /** View cap per workspace sweep (master design §1). */
@@ -257,6 +277,12 @@ export interface PrWatchObservationDeps {
   locks: PathMutexRegistry;
   /** Normalised allowed hosts (see {@link normalizeWatchHost}). */
   allowedHosts: ReadonlySet<string>;
+  /**
+   * The subscribed transition types (master §6). Absent records every type,
+   * which is what the direct sweep tests want; the daemon always passes the
+   * operator's non-empty set, since an empty one means no observation runs.
+   */
+  events?: ReadonlySet<PrTransitionType>;
   /** The swept workspace's environment (its own GH_TOKEN/GH_CONFIG_DIR). */
   env?: Readonly<Record<string, string | undefined>>;
   /** Test seam; defaults to {@link fetchGitHubPullRequestView}. */
@@ -453,6 +479,7 @@ export async function observeWorkspacePrBindings(
           previous,
           observationFromView(result.view),
           detectedAt,
+          deps.events,
         );
         if (
           (previous?.pending?.length ?? 0) + detection.transitions.length >
@@ -480,6 +507,8 @@ export interface PrWatchObservationTickDeps {
   watchDir: string;
   locks: PathMutexRegistry;
   allowedHosts: ReadonlySet<string>;
+  /** Subscribed transition types; see {@link PrWatchObservationDeps.events}. */
+  events?: ReadonlySet<PrTransitionType>;
   viewPullRequest?: typeof fetchGitHubPullRequestView;
   now?: () => number;
   log?: (message: string) => void;
@@ -555,6 +584,7 @@ export async function runPrWatchObservationTick(
         watchDir: deps.watchDir,
         locks: deps.locks,
         allowedHosts: deps.allowedHosts,
+        events: deps.events,
         // Master §1: a workspace's own GH_TOKEN/GH_CONFIG_DIR applies to its
         // PRs, but the untrusted primary's views run with the daemon's own
         // environment (undefined → ghEnv falls back to process.env), so a
