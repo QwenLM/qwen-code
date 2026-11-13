@@ -776,6 +776,135 @@ describe('createDaemonToolGuard', () => {
     },
   );
 
+  it
+    .runIf(bashSemanticsLane)
+    .each([
+      `bash -O lastpipe -c 'true | cd OUTSIDE; git reset --hard'`,
+      `env BASHOPTS=lastpipe bash -c 'true | cd OUTSIDE; git reset --hard'`,
+      `env SHELLOPTS=lastpipe bash -c 'true | cd OUTSIDE; git reset --hard'`,
+      `bash -O "$OPT" -c 'true | cd OUTSIDE; git reset --hard'`,
+    ])(
+    'fails closed on lastpipe arriving through argv or environment: %s',
+    async (template) => {
+      const guard = createDaemonToolGuard();
+      const command = template.replaceAll('OUTSIDE', cmdPath(outsideRepo));
+
+      await expect(guard(request(command))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it.runIf(bashSemanticsLane)(
+    'reads a substitution heredoc body before the enclosing line body',
+    async () => {
+      const guard = createDaemonToolGuard();
+      const command = `cat <<A ; echo "$(cat <<B)"\nB\nA\ngit -C ${cmdPath(outsideRepo)} reset --hard`;
+
+      await expect(guard(request(command))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it
+    .runIf(bashSemanticsLane)
+    .each([
+      `cat <<'EOF'\nx\\\nEOF\ngit -C OUTSIDE reset --hard`,
+      `cat <<"EOF"\nx\\\nEOF\ngit -C OUTSIDE reset --hard`,
+      `cat <<\${X:-a b}\nbody\n\${X:-a b}\ngit -C OUTSIDE reset --hard`,
+      `echo hi # note \\\ngit -C OUTSIDE reset --hard`,
+    ])(
+    'does not let the strip delete lines bash executes: %s',
+    async (template) => {
+      const guard = createDaemonToolGuard();
+      const command = template.replaceAll('OUTSIDE', cmdPath(outsideRepo));
+
+      await expect(guard(request(command))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it
+    .runIf(bashSemanticsLane)
+    .each([
+      `echo $(( $(cat <<A) + $(cat <<B) ))\nbodyA\nA\nbodyB\nB\ngit -C OUTSIDE reset --hard`,
+      `echo $(( $(cat <<A) )) <<B\na-body\nA\nb-body\nB\ngit -C OUTSIDE reset --hard`,
+    ])(
+    'pairs nested arithmetic heredoc markers with the right bodies: %s',
+    async (template) => {
+      const guard = createDaemonToolGuard();
+      const command = template.replaceAll('OUTSIDE', cmdPath(outsideRepo));
+
+      await expect(guard(request(command))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it.runIf(bashSemanticsLane)(
+    'does not read a # glued to an arithmetic close as a comment',
+    async () => {
+      const guard = createDaemonToolGuard();
+      const command = `echo $((1+2))#; git -C ${cmdPath(outsideRepo)} reset --hard`;
+
+      await expect(guard(request(command))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it.runIf(bashSemanticsLane)(
+    'allows a bare arithmetic command close followed by a real comment',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request('(( 1 ))# note\necho ok'))).resolves.toEqual({
+        allowed: true,
+      });
+    },
+  );
+
+  it.runIf(bashSemanticsLane)(
+    'does not apply a backgrounded cd from an eval body to the tracked shell',
+    async () => {
+      const guard = createDaemonToolGuard();
+      const command = `cd ${cmdPath(outsideRepo)}\neval 'cd ${cmdPath(effectiveCwd)} &'\ngit reset --hard`;
+
+      await expect(guard(request(command))).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it
+    .runIf(bashSemanticsLane)
+    .each([
+      '# note\ngit status | cat',
+      'git status | cat\n# trailing note',
+      'ls\n# note\ngit status | cat',
+      'git status &> /tmp/qwenlog | head -5',
+    ])(
+    'allows a legitimate command beside comments or &> redirects: %s',
+    async (command) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
+    },
+  );
+
+  it.runIf(bashSemanticsLane)(
+    'allows a bash -O control without lastpipe',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(request(`bash -O extglob -c 'echo ok'`)),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
   // Measured false positives from the old leftmost-match regex: a decoy
   // `<<WORD` inside a quoted string must not latch when the line's real
   // heredoc is quoted, and documentation or grep text about heredocs is not

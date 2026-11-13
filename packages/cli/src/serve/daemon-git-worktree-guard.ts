@@ -354,6 +354,10 @@ interface PrefixState {
   // travels as a `BASH_FUNC_foo%%` entry, so unsetting it strips the function
   // from the child even though the environment is otherwise intact.
   unsetEnvKeys?: Set<string>;
+  // `env BASHOPTS=lastpipe …` arms lastpipe for the child shell: the final
+  // pipeline stage runs in the current shell, so a `cd` behind a pipe outlives
+  // it and the subshell scoping this guard relies on no longer holds.
+  armsLastpipe?: boolean;
 }
 
 // Bash exports a function `foo` as a `BASH_FUNC_foo%%` (4.3+) or
@@ -901,6 +905,17 @@ function recordEnvAssignment(token: GuardToken, state: PrefixState): void {
     state.unresolved = true;
     return;
   }
+  // BASHOPTS/SHELLOPTS seed the child shell's option set. `lastpipe` moves
+  // the final pipeline stage into the current shell, breaking the subshell
+  // scoping the pipeline analysis relies on; a dynamic value could carry it
+  // unreadably, so both shapes fail closed downstream.
+  if (key === 'BASHOPTS' || key === 'SHELLOPTS') {
+    const value = token.text.slice(token.text.indexOf('=') + 1);
+    if (token.dynamic || value.split(':').includes('lastpipe')) {
+      state.armsLastpipe = true;
+    }
+    return;
+  }
   if (!GIT_DIR_ENV_KEYS.has(key) && !GIT_WORK_TREE_ENV_KEYS.has(key)) return;
   const value = token.text.slice(token.text.indexOf('=') + 1);
   if (
@@ -1137,7 +1152,7 @@ function consumeTimeoutWrapper(run: GuardToken[], start: number): number {
 
 type ShellWrapperScan =
   | { kind: 'none' }
-  | { kind: 'static'; payload: string }
+  | { kind: 'static'; payload: string; armsLastpipe?: boolean }
   | { kind: 'dynamic' };
 
 // The next real argv entry: a redirection between the flag and its payload
@@ -1151,6 +1166,25 @@ function nextArgvIndex(run: GuardToken[], from: number): number {
     index++;
   }
   return index;
+}
+
+// `-O lastpipe` / `-o lastpipe` on the wrapper's argv arms lastpipe for the
+// payload shell; a dynamic option value could carry it unreadably.
+function shellArgvArmsLastpipe(run: GuardToken[], start: number): boolean {
+  for (let index = start + 1; index < run.length; index++) {
+    const token = run[index]!;
+    if (token.text === '-c') break;
+    if (token.text === '-O' || token.text === '-o') {
+      const value = run[index + 1];
+      if (value === undefined || value.dynamic) return true;
+      if (value.text === 'lastpipe') return true;
+      index++;
+      continue;
+    }
+    if (token.dynamic) return true;
+    if (token.text.startsWith('-') && token.text.includes('c')) break;
+  }
+  return false;
 }
 
 function consumeShellWrapper(
@@ -1167,7 +1201,11 @@ function consumeShellWrapper(
         return { kind: 'static', payload: '' };
       }
       if (payloadToken.dynamic) return { kind: 'dynamic' };
-      return { kind: 'static', payload: payloadToken.text };
+      return {
+        kind: 'static',
+        payload: payloadToken.text,
+        armsLastpipe: shellArgvArmsLastpipe(run, start),
+      };
     }
     if (token.dynamic) {
       // `bash -c$CMD`, `bash $A "$P"`: any unreadable word in a shell's argv
@@ -1183,7 +1221,11 @@ function consumeShellWrapper(
       // Anything else is a payload fused into the token (`bash -c'cmd'`); a
       // pure-letter remainder cannot hide a relocation either way.
       if (remainder.length > 0 && !/^[A-Za-z]+$/.test(remainder)) {
-        return { kind: 'static', payload: remainder };
+        return {
+          kind: 'static',
+          payload: remainder,
+          armsLastpipe: shellArgvArmsLastpipe(run, start),
+        };
       }
       let payloadIndex = nextArgvIndex(run, index + 1);
       // `-o`/`-O` on either side of the `c` each consume one argv entry
@@ -1199,7 +1241,11 @@ function consumeShellWrapper(
         return { kind: 'static', payload: '' };
       }
       if (payloadToken.dynamic) return { kind: 'dynamic' };
-      return { kind: 'static', payload: payloadToken.text };
+      return {
+        kind: 'static',
+        payload: payloadToken.text,
+        armsLastpipe: shellArgvArmsLastpipe(run, start),
+      };
     }
     if (token.text.startsWith('+')) {
       index++;
@@ -1604,6 +1650,9 @@ function analyzeRun(
         return { kind: 'other', state, assignmentsOnly: false };
       }
       if (scan.kind === 'dynamic') return { kind: 'undecidable' };
+      if (scan.armsLastpipe || state.armsLastpipe) {
+        return { kind: 'undecidable' };
+      }
       return {
         kind: 'payload',
         payload: scan.payload,
@@ -2373,8 +2422,12 @@ function skipParenthesizedArithmetic(
         return line.length;
       }
       const body = line.slice(cursor + 2, end);
+      // Take the queue out before descending so the nested call cannot
+      // drain and rebase markers that belong to an earlier substitution.
+      const inherited = state.pendingMarkers?.splice(0) ?? [];
       const nested = findHeredocMarkers(body, state);
       if (nested === null) {
+        state.pendingMarkers?.push(...inherited);
         state.arithmeticDepth = depth;
         return line.length;
       }
@@ -2387,6 +2440,7 @@ function skipParenthesizedArithmetic(
           endIndex: marker.endIndex + cursor + 2,
         });
       }
+      state.pendingMarkers?.push(...inherited);
       cursor = end + 1;
       continue;
     }
@@ -2460,6 +2514,27 @@ function parseHeredocDelimiter(
           end++;
         }
         if (depth !== 0) return null;
+        delimiter += line.slice(cursor, end + 1);
+        cursor = end + 1;
+        continue;
+      }
+      // `${…}` and `$(…)` in the delimiter word are one token (bash does
+      // not expand the delimiter, but the construct's spaces/parens must
+      // not terminate the word early). Fail closed when unbalanced.
+      if (character === '$' && line[cursor + 1] === '{') {
+        const end = matchingBrace(line, cursor + 2);
+        if (end === -1) return null;
+        delimiter += line.slice(cursor, end + 1);
+        cursor = end + 1;
+        continue;
+      }
+      if (
+        character === '$' &&
+        line[cursor + 1] === '(' &&
+        line[cursor + 2] !== '('
+      ) {
+        const end = findSubstitutionEnd(line, cursor + 2);
+        if (end === -1) return null;
         delimiter += line.slice(cursor, end + 1);
         cursor = end + 1;
         continue;
@@ -2876,49 +2951,136 @@ function stripHeredocBodies(command: string): HeredocStrip {
   const lines = command.split('\n');
   const out: string[] = [];
   const scanState = createHeredocScanState();
-  // A backslash-newline pair is spliced by the shell before anything else
-  // reads the text, so a marker (or a comment) can straddle physical lines.
-  // Join live pairs before scanning; quoted bodies keep their own join below.
-  const joined = joinLogicalLines(lines);
-  for (let index = 0; index < joined.length; index++) {
-    const line = joined[index]!;
+  let index = 0;
+  while (index < lines.length) {
+    // Join backslash-newline continuations for the COMMAND line only.
+    // Bash splices these before tokenizing, but a quoted heredoc body
+    // is read verbatim (no splice), so the body loop below uses raw lines.
+    let line = lines[index]!;
+    let consumed = 1;
+    while (true) {
+      const slashes = /\\+$/.exec(line)?.[0].length ?? 0;
+      // Track quotes and comments: a trailing backslash inside a comment
+      // is comment text, not a continuation (bash ends the comment at the
+      // newline regardless).
+      let single = false;
+      let double = false;
+      let inComment = false;
+      let wordStart = true;
+      for (let ci = 0; ci < line.length; ci++) {
+        const ch = line[ci]!;
+        if (inComment) break;
+        if (!single && ch === '\\' && ci + 1 < line.length) {
+          ci++;
+          wordStart = false;
+          continue;
+        }
+        if (ch === "'" && !double) {
+          single = !single;
+          wordStart = false;
+          continue;
+        }
+        if (ch === '"' && !single) {
+          double = !double;
+          wordStart = false;
+          continue;
+        }
+        if (!single && !double && ch === '#' && wordStart) {
+          inComment = true;
+          break;
+        }
+        wordStart = ' \t;&|()<>'.includes(ch);
+      }
+      if (
+        single ||
+        inComment ||
+        slashes % 2 === 0 ||
+        index + consumed >= lines.length
+      )
+        break;
+      line = line.slice(0, -1) + lines[index + consumed]!;
+      consumed++;
+    }
     const markers = findHeredocMarkers(line, scanState);
     if (markers === null) return { kind: 'unresolved' };
     let rewritten = '';
     let cursor = 0;
     for (const marker of markers) {
-      // Nested evaluation must not see a dangling heredoc or its delimiter
-      // as a command. Keep the redirect, but retire the consumed syntax.
+      if (marker.startIndex < cursor) return { kind: 'unresolved' };
       rewritten += line.slice(cursor, marker.startIndex) + '< /dev/null';
       cursor = marker.endIndex;
     }
     out.push(rewritten + line.slice(cursor));
-    // A quote opened on the marker line but closed inside the heredoc body
-    // would leave the stripped text with an unclosed quote, swallowing every
-    // later command into one "quoted" segment. Fail closed instead.
     if (
       markers.length > 0 &&
       (scanState.single || scanState.double || scanState.backtick)
     ) {
       return { kind: 'unresolved' };
     }
-    for (const marker of markers) {
+    // Consume heredoc bodies from the ORIGINAL physical lines (no splice).
+    // Bash reads a substitution's heredoc body before the enclosing line's,
+    // so markers inside $(…) consume their bodies first.
+    let bodyStart = index + consumed;
+    const substitutionSpans: Array<[number, number]> = [];
+    {
+      let si = 0;
+      let sq = false;
+      let dq = false;
+      while (si < line.length) {
+        const ch = line[si]!;
+        if (!sq && ch === '\\' && si + 1 < line.length) {
+          si += 2;
+          continue;
+        }
+        if (ch === "'" && !dq) {
+          sq = !sq;
+          si++;
+          continue;
+        }
+        if (ch === '"' && !sq) {
+          dq = !dq;
+          si++;
+          continue;
+        }
+        if (!sq && ch === '$' && line[si + 1] === '(' && line[si + 2] !== '(') {
+          const end = findSubstitutionEnd(line, si + 2);
+          if (end !== -1) {
+            substitutionSpans.push([si, end]);
+            si = end + 1;
+            continue;
+          }
+        }
+        si++;
+      }
+    }
+    const isInsideSubstitution = (pos: number) =>
+      substitutionSpans.some(([s, e]) => pos > s && pos < e);
+    const innerMarkers = markers.filter((m) =>
+      isInsideSubstitution(m.startIndex),
+    );
+    const outerMarkers = markers.filter(
+      (m) => !isInsideSubstitution(m.startIndex),
+    );
+    for (const marker of [...innerMarkers, ...outerMarkers]) {
       const bodyLines: string[] = [];
-      while (index + 1 < joined.length) {
-        let body = joined[++index]!;
+      let bi = bodyStart;
+      while (bi < lines.length) {
+        let body = lines[bi]!;
         if (marker.stripTabs) body = body.replace(/^\t+/, '');
         if (!marker.quoted) {
-          while (index + 1 < joined.length) {
+          while (bi + 1 < lines.length) {
             const slashes = /\\+$/.exec(body)?.[0].length ?? 0;
             if (slashes % 2 === 0) break;
-            let next = joined[++index]!;
+            let next = lines[++bi]!;
             if (marker.stripTabs) next = next.replace(/^\t+/, '');
             body = body.slice(0, -1) + next;
           }
         }
+        bi++;
         if (body === marker.delimiter) break;
         bodyLines.push(body);
       }
+      bodyStart = bi;
       if (
         !marker.quoted &&
         expansionCanExecute(joinContinuations(bodyLines.join('\n')))
@@ -2926,15 +3088,11 @@ function stripHeredocBodies(command: string): HeredocStrip {
         return { kind: 'expanding' };
       }
     }
+    index = bodyStart;
   }
   return { kind: 'ok', text: out.join('\n') };
 }
 
-// Splice backslash-newline pairs the way bash does before tokenizing, but
-// only outside single quotes (where a backslash is literal). Quote state is
-// tracked across lines with the same scanner the marker pass uses, so a
-// continuation inside a double-quoted string joins too. An odd trailing
-// backslash on the last line has nothing to join and stays as-is.
 function joinLogicalLines(lines: string[]): string[] {
   const out: string[] = [];
   let single = false;
@@ -2975,11 +3133,35 @@ function stripBashComments(command: string): string {
   let double = false;
   let backtick = false;
   let substitution = 0;
+  let arithmeticDepth = 0;
   let wordStart = true;
   const quoteStack: Array<[boolean, boolean]> = [];
   for (let index = 0; index < command.length; index++) {
     const character = command[index]!;
     const next = command[index + 1];
+    if (arithmeticDepth > 0) {
+      result += character;
+      if (character === '(') arithmeticDepth++;
+      else if (character === ')') {
+        arithmeticDepth--;
+        if (arithmeticDepth === 0) wordStart = false;
+      }
+      continue;
+    }
+    if (
+      !single &&
+      !double &&
+      !backtick &&
+      character === '$' &&
+      next === '(' &&
+      command[index + 2] === '('
+    ) {
+      arithmeticDepth = 2;
+      result += '$((';
+      index += 2;
+      wordStart = false;
+      continue;
+    }
     if (!single && character === '\\' && index + 1 < command.length) {
       result += character + command[index + 1];
       index++;
@@ -3055,6 +3237,7 @@ function readTopLevelSeparators(
   let double = false;
   let backtick = false;
   let substitution = 0;
+  let arithmeticDepth = 0;
   let wordStart = true;
   let segmentStart = 0;
   const quoteStack: Array<[boolean, boolean]> = [];
@@ -3065,6 +3248,27 @@ function readTopLevelSeparators(
   for (let index = 0; index < command.length; index++) {
     const character = command[index]!;
     const next = command[index + 1];
+    if (arithmeticDepth > 0) {
+      if (character === '(') arithmeticDepth++;
+      else if (character === ')') {
+        arithmeticDepth--;
+        if (arithmeticDepth === 0) wordStart = false;
+      }
+      continue;
+    }
+    if (
+      !single &&
+      !double &&
+      !backtick &&
+      character === '$' &&
+      next === '(' &&
+      command[index + 2] === '('
+    ) {
+      arithmeticDepth = 2;
+      index += 2;
+      wordStart = false;
+      continue;
+    }
     if (!single && character === '\\' && index + 1 < command.length) {
       index++;
       wordStart = false;
@@ -3142,7 +3346,14 @@ function readTopLevelSeparators(
     }
     wordStart = ' \t;&|()<>\n'.includes(character);
   }
-  if (!command.slice(segmentStart).trim()) separators.pop();
+  const tail = command.slice(segmentStart).trim();
+  if (!tail) {
+    // Only reconcile separators that cannot carry subshell meaning; a
+    // trailing `&` backgrounds the last segment and `isPipeComponent`
+    // reads it to scope that segment's cwd/exports.
+    const last = separators.at(-1);
+    if (last === ';' || last === '\n') separators.pop();
+  }
   return separators;
 }
 
@@ -3356,7 +3567,7 @@ async function evaluateCommandWithCwd(
     ? normalizedCommand
     : stripBashComments(normalizedCommand);
   const segments = splitCommands(commentStripped);
-  const separators = readTopLevelSeparators(normalizedCommand, !windowsNative);
+  const separators = readTopLevelSeparators(commentStripped, false);
   const separatorsMatch = separators.length === segments.length - 1;
   if (
     !windowsNative &&
