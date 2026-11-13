@@ -69,15 +69,6 @@ const mocks = vi.hoisted(() => {
           children,
         );
       }
-      if (type === 'markdown') {
-        const source = (config ?? {}) as Record<string, unknown>;
-        const dom: Record<string, unknown> = key === undefined ? {} : { key };
-        for (const name of ['content', 'internalBlockMode']) {
-          if (source[name] !== undefined) dom[name] = source[name];
-        }
-        dom['data-streaming'] = String(source['streaming']);
-        return React.createElement('markdown', dom, children);
-      }
       return React.createElement(
         type as React.ElementType,
         config as Record<string, unknown>,
@@ -905,101 +896,6 @@ describe('OpenTuiTranscriptView', () => {
       expanded.container.querySelector('markdown')?.getAttribute('content'),
     ).toContain('INSPECTING_THE_REPOSITORY');
     expect(expanded.container.textContent).toContain('ctrl+o to collapse');
-  });
-
-  it('renders a streaming thought as one markdown element', () => {
-    const items: LiveThinkingItem[] = [
-      {
-        kind: 'thinking',
-        id: 'th1',
-        text: 'FIRST_BLOCK\n\nSECOND_BLOCK',
-        done: false,
-        startedAt: Date.now(),
-      },
-    ];
-    const { container } = render(
-      <OpenTuiTranscriptView items={items} thoughtsExpanded />,
-    );
-    const elements = [...container.querySelectorAll('markdown')];
-    expect(elements).toHaveLength(1);
-    expect(elements[0].getAttribute('content')).toBe(
-      'FIRST_BLOCK\n\nSECOND_BLOCK',
-    );
-    expect(elements[0].getAttribute('internalBlockMode')).toBeNull();
-    expect(elements[0].getAttribute('data-streaming')).toBe('true');
-  });
-
-  it('masks every URL in a streaming thought', () => {
-    const items: LiveThinkingItem[] = [
-      {
-        kind: 'thinking',
-        id: 'th1',
-        text: 'a https://a.dev\n\nb https://b.dev\n\nc https://c.dev\n\nd https://d.dev',
-        done: false,
-        startedAt: Date.now(),
-      },
-    ];
-    const { container } = render(
-      <OpenTuiTranscriptView items={items} thoughtsExpanded />,
-    );
-    const content =
-      container.querySelector('markdown')?.getAttribute('content') ?? '';
-    expect(content).toContain('a `https://a.dev`');
-    expect(content).toContain('b `https://b.dev`');
-    expect(content).toContain('c `https://c.dev`');
-    expect(content).toContain('d `https://d.dev`');
-  });
-
-  it('does not apply the streaming mask or options to a settled thought', () => {
-    const items: LiveThinkingItem[] = [
-      {
-        kind: 'thinking',
-        id: 'th1',
-        text: 'see https://a.dev\n\nsee https://b.dev',
-        done: true,
-        durationMs: 12_000,
-      },
-    ];
-    const { container } = render(
-      <OpenTuiTranscriptView items={items} thoughtsExpanded />,
-    );
-    const markdown = container.querySelector('markdown');
-    expect(markdown?.getAttribute('content')).toBe(
-      'see https://a.dev\n\nsee https://b.dev',
-    );
-    expect(markdown?.getAttribute('internalBlockMode')).toBeNull();
-    expect(markdown?.getAttribute('data-streaming')).toBe('false');
-  });
-
-  it('uses the coalesced default in both streaming and settled states', () => {
-    const item = (streaming: boolean): LiveAssistantItem => ({
-      kind: 'assistant',
-      id: 'a1',
-      text: 'ANSWER',
-      streaming,
-    });
-    const live = render(<OpenTuiTranscriptView items={[item(true)]} />);
-    expect(
-      live.container
-        .querySelector('markdown')
-        ?.getAttribute('internalBlockMode'),
-    ).toBeNull();
-    expect(
-      live.container.querySelector('markdown')?.getAttribute('data-streaming'),
-    ).toBe('true');
-    live.unmount();
-
-    const settled = render(<OpenTuiTranscriptView items={[item(false)]} />);
-    expect(
-      settled.container
-        .querySelector('markdown')
-        ?.getAttribute('internalBlockMode'),
-    ).toBeNull();
-    expect(
-      settled.container
-        .querySelector('markdown')
-        ?.getAttribute('data-streaming'),
-    ).toBe('false');
   });
 
   it('drops the click affordance from both hints when ui.mouseTracking is off (#172)', () => {

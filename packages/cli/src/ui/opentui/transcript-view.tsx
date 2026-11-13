@@ -62,10 +62,7 @@ import {
   itemOffsets,
   type TranscriptWindow,
 } from './transcript-window.js';
-import {
-  maskThinkingEmphasis,
-  streamingMarkdownForRender,
-} from './markdown-heal.js';
+import { assistantMarkdownForRender } from './markdown-heal.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { ModAssistantMessageInput } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { useModRow } from '../hooks/use-mod-row.js';
@@ -862,11 +859,8 @@ function AssistantRow({
     [modRows, streaming, id, text, isFirstOfReply],
   );
   const modProps = useModRow(modRows?.config, modRows?.sessionId, modInput);
-  const renderedText = modProps?.text ?? text;
-  const content = useMemo(
-    () =>
-      sanitizeTerminalText(streamingMarkdownForRender(renderedText, streaming)),
-    [renderedText, streaming],
+  const content = sanitizeTerminalText(
+    assistantMarkdownForRender(modProps?.text ?? text, streaming),
   );
   // The two shapes differ, and `output.showTimestamps` is a setting the dialog
   // can flip mid-session: without keys the stamped branch's second child would
@@ -914,15 +908,6 @@ function ThinkingRow({
     (item.startedAt === undefined ? undefined : Date.now() - item.startedAt);
   const meta = thinkingMeta(item.done, expanded, durationMs, mouseTracking);
   const body = item.text.trimEnd();
-  const content = useMemo(
-    () =>
-      meta.collapsed || !body
-        ? ''
-        : sanitizeTerminalText(
-            streamingMarkdownForRender(maskThinkingEmphasis(body), !item.done),
-          ),
-    [body, item.done, meta.collapsed],
-  );
   return (
     <box
       flexDirection="column"
@@ -941,7 +926,7 @@ function ThinkingRow({
           <box width={STATUS_INDICATOR_WIDTH} />
           <box flexGrow={1}>
             <markdown
-              content={content}
+              content={sanitizeTerminalText(body)}
               syntaxStyle={SYNTAX_DIM}
               streaming={!item.done}
               fg={C.dim}
@@ -1454,9 +1439,7 @@ function AdvisorRow({ text, model }: { text: string; model: string }) {
       </box>
       <box paddingLeft={2}>
         <markdown
-          content={sanitizeTerminalText(
-            streamingMarkdownForRender(text, false),
-          )}
+          content={sanitizeTerminalText(text)}
           syntaxStyle={SYNTAX}
           streaming={false}
         />

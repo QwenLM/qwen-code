@@ -167,6 +167,7 @@ vi.mock('@opentui/react', () => ({
   useRenderer: () => mocks.state.renderer,
   useTerminalDimensions: () => ({ width: 120, height: 40 }),
 }));
+vi.mock('./stable-markdown.js', () => ({}));
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 

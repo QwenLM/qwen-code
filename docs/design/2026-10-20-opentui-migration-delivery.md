@@ -165,18 +165,13 @@ unless evidence proves an upstream change replaces their contracts. Upgrading
 is conditional on a measured benefit and passing gates, not the critical path
 for independent parity fixes.
 
-Upgrade checklist: once the `@opentui/core` pin reaches 0.8.4 or newer, drop
-the bare-URL/email autolink mask (the `https://`, `www.` and email rules in
-`maskAutolinksInProse`) in `packages/cli/src/ui/opentui/markdown-heal.ts` —
-0.8.4 already suppresses the `label (href)` suffix when the label equals the
-href. Keep the shortcut-label strip (`[expr.add]` → `expr.add`): the settled
-renderer conceals those brackets and 0.8.4 does not change that. Keep
-stripping ATX heading markers from the streaming text until a coalesced-mode
-streaming preview is verified to conceal them without flipping (0.8.4 still
-flips them). Also revisit the width-preserving substitutions when the new
-streaming Markdown engine is wired in: lone `~` → U+223C, unpaired backticks
-→ U+02CB, and thinking-only literal asterisks → U+2217 should be removed
-only after the preview and settled passes agree on those literal markers.
+Upgrade checklist: `packages/cli/src/ui/opentui/stable-markdown.ts` replaces
+the `<markdown>` intrinsic with a subclass whose `createInitialStyledText`
+returns nothing. 0.5.10 repaints each updated streaming block with a
+marked-based preview before tree-sitter replaces it, so every delta flipped
+between two renderers. On upgrade, confirm the private method still exists
+and whether the preview still repaints updated blocks before keeping or
+dropping the override.
 
 ## Completion and rollout gates
 
