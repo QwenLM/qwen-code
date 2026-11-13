@@ -3308,6 +3308,9 @@ export class LlmChat {
     this.chatRecordingService?.recordChatCompression({
       info,
       compressedHistory: newHistory,
+      summaryPrefixLength:
+        getStartupContextLength(newHistory, { includeCompressed: true }) ||
+        undefined,
       completedToolCallIds: this.completedToolCallIds,
     });
     logChatCompression(

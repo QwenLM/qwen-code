@@ -77,6 +77,9 @@ function setup(history: Content[], planMode = false) {
       planMode ? ApprovalMode.PLAN : ApprovalMode.DEFAULT,
     getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
     getTargetDir: () => '/tmp/retained-tail-test-workspace',
+    getProjectRoot: () => '/tmp/retained-tail-test-workspace',
+    getClearContextOnIdle: () => ({ toolResultsNumToKeep: 1 }),
+    getToolRegistry: () => undefined,
   } as unknown as Config;
   const compress = (options: Partial<CompressOptions> = {}) =>
     new ChatCompressionService().compress(chat, {
@@ -180,14 +183,26 @@ describe('retained latest operation through compression', () => {
     expect(restored).toEqual(result.newHistory);
   });
 
-  it.each(['text', 'tool'] as const)(
-    'deletes the retained %s operation from a recorded checkpoint',
-    async (operation) => {
+  it.each([
+    { operation: 'text', fast: false },
+    { operation: 'tool', fast: false },
+    { operation: 'text', fast: true },
+    { operation: 'tool', fast: true },
+  ])(
+    'deletes the retained $operation operation from a checkpoint (fast=$fast)',
+    async ({ operation, fast }) => {
       for (const hasPendingPrompt of [false, true]) {
         const tail =
           operation === 'tool' ? toolGroup() : [modelText('Raw latest reply.')];
         if (tail[1]) markApiHistoryPrompt(tail[1], 'latest-prompt');
         const history = [...older(), ...tail];
+        if (fast) {
+          history[0].parts!.push(
+            ...['one', 'two', 'three'].map((data) => ({
+              inlineData: { mimeType: 'image/png', data },
+            })),
+          );
+        }
         const envelope = {
           sessionId: 'retained-tail-session',
           timestamp: '2026-11-13T00:00:00Z',
@@ -209,7 +224,7 @@ describe('retained latest operation through compression', () => {
         }));
         const pending = userText('Next task.');
         markApiHistoryPrompt(pending, 'next-prompt');
-        const { compress } = setup(history);
+        const { compress, config } = setup(history);
         const result = await compress({
           pendingUserMessage: hasPendingPrompt ? pending : undefined,
         });
@@ -220,7 +235,7 @@ describe('retained latest operation through compression', () => {
         expect(getApiHistoryPromptId(result.newHistory![3])).toBe(
           'latest-prompt',
         );
-        const compressedHistory = [
+        let compressedHistory = [
           ...result.newHistory!,
           ...(hasPendingPrompt ? [pending] : []),
         ];
@@ -238,25 +253,46 @@ describe('retained latest operation through compression', () => {
           activeBranchRecords: records,
           createBaseRecord: () => ({
             ...envelope,
-            uuid: 'compressed',
+            uuid: `compressed-${records.length}`,
             parentUuid: records.at(-1)!.uuid,
             type: 'system',
           }),
           appendRecord: (record: ChatRecord) =>
             records.push(JSON.parse(JSON.stringify(record)) as ChatRecord),
+          recordChatCompression:
+            ChatRecordingService.prototype.recordChatCompression,
         } as unknown as ChatRecordingService;
         ChatRecordingService.prototype.recordChatCompression.call(recorder, {
           info: result.info,
           compressedHistory,
           summaryPrefixLength: result.info.summaryPrefixLength,
         });
+        if (fast) {
+          const chat = new LlmChat(
+            config,
+            {},
+            buildApiHistoryFromConversation({ messages: records }),
+            recorder,
+          );
+          const fastResult = chat.compressFast();
+          expect(fastResult.info.compressionStatus).toBe(
+            CompressionStatus.COMPRESSED,
+          );
+          expect(fastResult.microcompactMeta?.mediaCleared).toBe(2);
+          compressedHistory = chat.getHistoryShallow();
+          const checkpoint = records.at(-1)!
+            .systemPayload as ChatCompressionRecordPayload;
+          expect(checkpoint.summaryPrefixLength).toBe(3);
+          expect(checkpoint.promptIds?.[3]).toBe('latest-prompt');
+        }
         const { records: kept } = deleteTranscriptMessageGroups(
           records,
           ['2'],
           { ...envelope, uuid: 'deleted', parentUuid: null, type: 'system' },
         );
-        const payload = kept.find((record) => record.uuid === 'compressed')!
-          .systemPayload as ChatCompressionRecordPayload;
+        const payload = kept.findLast(
+          (record) => record.subtype === 'chat_compression',
+        )!.systemPayload as ChatCompressionRecordPayload;
         expect(payload.compressedHistory).toEqual(
           JSON.parse(
             JSON.stringify([
