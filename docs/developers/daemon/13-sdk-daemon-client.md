@@ -516,6 +516,7 @@ The value must be a finite, non-negative integer (validated at construction). In
 - **Disposing the optional `AutoReconnectTransport` stops reconnect retries.** If an asynchronous transport factory finishes after disposal, its returned transport is released and pending retry calls reject with `DaemonTransportClosedError`.
 
 - **`fetchTimeoutMs` is per-call, not connection-level.** Long body reads share the timer. A daemon that streams responses must override per-call or set the timeout to `0`.
+- **Transport negotiation bounds the complete capabilities probe.** `negotiateTransport` uses `probeTimeoutMs` (5 seconds by default) for both response headers and JSON body consumption. If the body stalls, the probe aborts and negotiation falls back to REST; receiving headers alone does not end the deadline.
 - **SSE bypasses the fetch timeout** — long-lived SSE connections are not killed by `fetchTimeoutMs`. Use `AbortSignal` for caller-controlled cancellation.
 - **`parseSseStream` buffer cap is 16 MiB** as a defensive bound. A single frame larger than this aborts the iterator (the daemon never legitimately emits such frames).
 - **`asKnownDaemonEvent` returns `undefined` for unrecognized event types.** SDK consumers must handle this branch rather than assuming the union is exhaustive; that is the forward-compatibility contract. Unrecognized events increment `DaemonSessionViewState.unrecognizedKnownEventCount`.

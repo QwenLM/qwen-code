@@ -31,6 +31,7 @@ function installMockFetch(
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  vi.useRealTimers();
 });
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -197,6 +198,110 @@ describe('negotiateTransport', () => {
   // ---- Probe timeout behavior -------------------------------------------
 
   describe('probe timeout', () => {
+    it('falls back to REST when the capabilities body stalls after headers', async () => {
+      vi.useFakeTimers();
+      let responseSignal: AbortSignal | undefined;
+      let bodyController: ReadableStreamDefaultController<Uint8Array>;
+      let receivedHeaders!: () => void;
+      const headersReady = new Promise<void>((resolve) => {
+        receivedHeaders = resolve;
+      });
+      installMockFetch((_url, init) => {
+        responseSignal = init?.signal ?? undefined;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            bodyController = controller;
+            controller.enqueue(new TextEncoder().encode('{"transports":'));
+            responseSignal?.addEventListener(
+              'abort',
+              () => controller.error(responseSignal?.reason),
+              { once: true },
+            );
+          },
+        });
+        receivedHeaders();
+        return new Response(body, {
+          headers: { 'content-type': 'application/json' },
+        });
+      });
+
+      const pending = negotiateTransport('http://localhost:8080', undefined, {
+        probeTimeoutMs: 100,
+      });
+      try {
+        await headersReady;
+        await vi.advanceTimersByTimeAsync(99);
+        expect(responseSignal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(responseSignal?.aborted).toBe(true);
+        const transport = await pending;
+        expect(transport.type).toBe('rest');
+        transport.dispose();
+      } finally {
+        bodyController!.error(new Error('fixture cleanup'));
+        (await pending).dispose();
+      }
+    });
+
+    it('keeps a complete delayed capabilities response and clears its deadline', async () => {
+      vi.useFakeTimers();
+      let responseSignal: AbortSignal | undefined;
+      let bodyController: ReadableStreamDefaultController<Uint8Array>;
+      let receivedHeaders!: () => void;
+      const headersReady = new Promise<void>((resolve) => {
+        receivedHeaders = resolve;
+      });
+      installMockFetch((_url, init) => {
+        responseSignal = init?.signal ?? undefined;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            bodyController = controller;
+          },
+        });
+        receivedHeaders();
+        return new Response(body);
+      });
+
+      const pending = negotiateTransport('http://localhost:8080', undefined, {
+        probeTimeoutMs: 100,
+      });
+      try {
+        await headersReady;
+        await vi.advanceTimersByTimeAsync(99);
+        bodyController!.enqueue(
+          new TextEncoder().encode('{"transports":["acp-http"]}'),
+        );
+        bodyController!.close();
+        const transport = await pending;
+        expect(transport.type).toBe('acp-http');
+        await vi.advanceTimersByTimeAsync(100);
+        expect(responseSignal?.aborted).toBe(false);
+        transport.dispose();
+      } finally {
+        bodyController!.error(new Error('fixture cleanup'));
+        (await pending).dispose();
+      }
+    });
+
+    it('clears the capabilities deadline when body parsing fails', async () => {
+      vi.useFakeTimers();
+      let responseSignal: AbortSignal | undefined;
+      installMockFetch((_url, init) => {
+        responseSignal = init?.signal ?? undefined;
+        return new Response('{');
+      });
+
+      const transport = await negotiateTransport(
+        'http://localhost:8080',
+        undefined,
+        { probeTimeoutMs: 100 },
+      );
+      expect(transport.type).toBe('rest');
+      await vi.advanceTimersByTimeAsync(100);
+      expect(responseSignal?.aborted).toBe(false);
+      transport.dispose();
+    });
+
     it('uses default 5000ms timeout when not specified', async () => {
       installMockFetch((url) => {
         if (url.includes('/capabilities')) {
