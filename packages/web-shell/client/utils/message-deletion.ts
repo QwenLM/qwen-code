@@ -1,3 +1,4 @@
+import { randomUUID } from './random-uuid';
 import type {
   DaemonTranscriptBlock,
   DaemonTranscriptStore,
@@ -172,7 +173,7 @@ export function restoreLocalDeletionBlocks(
   else pendingLocalHistory.delete(store);
   for (const block of blocks) {
     if (localIds.has(block.id))
-      remapped.set(block.id, `reloaded:${crypto.randomUUID()}`);
+      remapped.set(block.id, `reloaded:${randomUUID()}`);
   }
   const indices = new Map(
     blocks.flatMap((block, index) => {
