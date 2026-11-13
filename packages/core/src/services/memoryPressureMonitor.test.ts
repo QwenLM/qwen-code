@@ -174,6 +174,7 @@ function createMockConfig(
         evictNotAccessedSince: vi.fn().mockReturnValue(0),
         ...overrides.fileReadCache,
       }) as unknown as FileReadCache,
+    getConditionalRulesRegistry: () => undefined,
     getLlmClient: () => client as never,
     getMemoryManager: () => ({
       markMemoryBodiesEvictedFromHistory: vi.fn(),
