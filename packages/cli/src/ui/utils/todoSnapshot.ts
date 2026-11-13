@@ -73,6 +73,7 @@ function extractTodosFromResultDisplay(
     try {
       const parsed = JSON.parse(resultDisplay) as Record<string, unknown>;
       if (parsed['type'] === 'todo_list' && Array.isArray(parsed['todos'])) {
+        if (parsed['unchanged'] === true) return null;
         return parsed['todos'] as TodoItem[];
       }
     } catch {

@@ -467,7 +467,10 @@ describe('sticky todo layout helpers', () => {
     });
   });
 
-  describe('unchanged snapshot guard', () => {
+  describe.each([false, true])('unchanged guard (JSON: %s)', (json) => {
+    const encodeDisplay = <T>(display: T): T | string =>
+      json ? JSON.stringify(display) : display;
+
     it('falls back to previous snapshot when the latest committed snapshot is unchanged', () => {
       const history = [
         makeCustomTodoToolGroup(
@@ -483,13 +486,13 @@ describe('sticky todo layout helpers', () => {
               callId: 'todo-unchanged',
               name: 'TodoWrite',
               description: 'Update todos',
-              resultDisplay: {
+              resultDisplay: encodeDisplay({
                 type: 'todo_list' as const,
                 todos: [
                   { id: '1', content: 'Old Task', status: 'in_progress' },
                 ],
                 unchanged: true,
-              },
+              }),
               status: ToolCallStatus.Success,
               confirmationDetails: undefined,
             },
@@ -522,13 +525,13 @@ describe('sticky todo layout helpers', () => {
               callId: 'todo-pending-unchanged',
               name: 'TodoWrite',
               description: 'Update todos',
-              resultDisplay: {
+              resultDisplay: encodeDisplay({
                 type: 'todo_list' as const,
                 todos: [
                   { id: '1', content: 'History Task', status: 'pending' },
                 ],
                 unchanged: true,
-              },
+              }),
               status: ToolCallStatus.Success,
               confirmationDetails: undefined,
             },
@@ -539,6 +542,38 @@ describe('sticky todo layout helpers', () => {
       expect(getStickyTodos(history, pendingHistoryItems)).toEqual([
         { id: '1', content: 'History Task', status: 'pending' },
       ]);
+    });
+
+    it('does not revive an unchanged task list after a later user turn', () => {
+      const todos = [
+        { id: '1', content: 'Old task', status: 'pending' as const },
+      ];
+      const history: HistoryItem[] = [
+        makeCustomTodoToolGroup(todos, 1) as HistoryItem,
+        makeUserHistoryItem('A new task', 2),
+        {
+          type: 'tool_group',
+          id: 3,
+          tools: [
+            {
+              callId: 'unchanged',
+              name: 'TodoWrite',
+              description: 'Update todos',
+              resultDisplay: encodeDisplay({
+                type: 'todo_list' as const,
+                todos,
+                unchanged: true,
+              }),
+              status: ToolCallStatus.Success,
+              confirmationDetails: undefined,
+            },
+          ],
+        },
+        makeLlmHistoryItem('Response', 4),
+        makeLlmHistoryItem('More output', 5),
+      ];
+
+      expect(getStickyTodos(history, [])).toBeNull();
     });
   });
 });
