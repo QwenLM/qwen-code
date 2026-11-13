@@ -2916,6 +2916,107 @@ export interface DaemonWorkspaceMemoryDreamOptions {
   clientId?: string;
 }
 
+export type DaemonMemoryImportScope = 'project' | 'user';
+
+export interface DaemonMemoryImportSourceFile {
+  path: string;
+  content: string;
+}
+
+export interface DaemonMemoryImportSource {
+  version: 1;
+  source: 'codex';
+  files: DaemonMemoryImportSourceFile[];
+}
+
+export interface DaemonMemoryImportSection {
+  id: string;
+  groupId: string;
+  title: string;
+  path: string;
+  line: number;
+  content: string;
+  references: string[];
+  suggestedScope: DaemonMemoryImportScope | 'unassigned';
+  sourceProject?: string;
+  reason: string;
+  selectable: boolean;
+}
+
+export interface DaemonMemoryImportEstimate {
+  basis: 'source-only-with-context-reserve';
+  modelCalls: number;
+  sourceTokens: number;
+  maxOutputTokens: number;
+  reservedTokens: number;
+  exceedsBudget: boolean;
+  limits: {
+    maxCalls: number;
+    maxReservedTokens: number;
+    batchSections: number;
+    sourceBytes: number;
+    contextBytes: number;
+    outputTokens: number;
+    promptBytes: number;
+  };
+}
+
+export interface DaemonMemoryImportPreview {
+  version: 1;
+  kind: 'preview';
+  digest: string;
+  groups: Array<{
+    id: string;
+    scope: DaemonMemoryImportSection['suggestedScope'];
+    sourceProject?: string;
+    sectionIds: string[];
+    estimate: DaemonMemoryImportEstimate;
+  }>;
+  sections: DaemonMemoryImportSection[];
+  warnings: string[];
+  estimate: DaemonMemoryImportEstimate;
+}
+
+export interface DaemonMemoryImportSelection {
+  id: string;
+  scope: DaemonMemoryImportScope;
+}
+
+export interface DaemonMemoryImportRequest {
+  source: DaemonMemoryImportSource;
+  selection: DaemonMemoryImportSelection[];
+  idempotencyKey: string;
+}
+
+export interface DaemonMemoryImportItemResult {
+  id: string;
+  scope: DaemonMemoryImportScope;
+  status: 'pending' | 'added' | 'duplicate' | 'conflict' | 'skipped' | 'failed';
+  reason?: string;
+  refs?: string[];
+}
+
+export interface DaemonMemoryImportResult {
+  sourceSections: number;
+  newDocuments: number;
+  duplicateSections: number;
+  conflictSections: number;
+  failedSections: number;
+}
+
+export interface DaemonMemoryImportTask {
+  version: 1;
+  kind: 'task';
+  id: string;
+  status: 'queued' | 'running' | 'completed' | 'partial' | 'cancelled';
+  createdAt: string;
+  updatedAt: string;
+  items: DaemonMemoryImportItemResult[];
+  usage: { modelCalls: number; reservedTokens: number };
+  budget: { maxCalls: number; maxReservedTokens: number };
+  result?: DaemonMemoryImportResult;
+}
+
 export type DaemonContentHash = `sha256:${string}`;
 
 const DAEMON_CONTENT_HASH_RE = /^sha256:[0-9a-f]{64}$/;
