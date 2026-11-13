@@ -24,7 +24,10 @@ export function splitByTables(text: string): string[] {
   for (const line of lines) {
     const fenceLine = codeFence
       ? line
-      : line.replace(/^[ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)+/, '');
+      : line.replace(
+          /^[ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+(?:\[[ \txX]\][ \t]+)?)+/,
+          '',
+        );
     const fence = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(
       fenceLine.replace(/\r$/, ''),
     );

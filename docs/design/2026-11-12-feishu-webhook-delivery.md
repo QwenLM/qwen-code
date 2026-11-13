@@ -124,7 +124,11 @@ static envelope rather than changing that builder's output.
 Reuse the pure `splitByTables` logic through a small export, preserving the
 application-bot card structure and transport. Its fence recognition needs a
 small correction: backtick or tilde fences may open at the start of a line after
-spaces, tabs or list markers. Closing fences must match the opener and may have
+spaces, tabs or list markers. For content preservation, the opening prefix may
+include an optional task checkbox (`[ ]`, `[x]`, `[X]`, or a single tab inside
+brackets) after each list marker. This leaves the original text unchanged; it
+does not guarantee task-list fence rendering or full GFM compatibility.
+Closing fences must match the opener and may have
 only whitespace before them; list markers inside code remain literal text.
 This preserves nested list code blocks and prevents table-like
 content inside a tilde fence from being separated into broken card elements. This puts table
@@ -326,7 +330,9 @@ bot and manual-target tests must remain passing.
 
 Run relevant package tests, type checks, lint/format checks and builds. Record the
 baseline, detailed E2E steps, simulated transport and results in
-`.qwen/e2e-tests/feishu-webhook-delivery.md`. A local HTTPS/proxy fixture proves
+the git-ignored local artifact `.qwen/e2e-tests/feishu-webhook-delivery.md`.
+Include reproduction steps and a result summary with the PR so reviewers do not
+need that local file. A local HTTPS/proxy fixture proves
 our request and lifecycle handling;
 it does not prove Feishu accepts credentials, renders cards or suppresses
 notifications.

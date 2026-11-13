@@ -64,7 +64,12 @@ describe('Feishu webhook workspace proxy', () => {
         dispatchers.push(dispatcher);
         return dispatcher;
       });
-      vi.mocked(undici.fetch).mockImplementation(realUndici.fetch);
+      vi.mocked(undici.fetch).mockImplementation((input, options) => {
+        if (!options?.dispatcher) {
+          throw new Error('Unexpected unproxied fetch');
+        }
+        return realUndici.fetch(input, options);
+      });
       const connects: Array<{ authority: string; authorization?: string }> = [];
       const sockets = new Set<Socket>();
       const proxy = createServer((_request, response) =>
@@ -220,6 +225,9 @@ describe('Feishu webhook workspace proxy', () => {
         const originPort = (origin.address() as AddressInfo).port;
         const proxyPort = (proxy.address() as AddressInfo).port;
         vi.mocked(undici.fetch).mockImplementation((input, options) => {
+          if (!options?.dispatcher) {
+            throw new Error('Unexpected unproxied fetch');
+          }
           const target = new URL(String(input));
           expect(target.origin).toBe('https://open.feishu.cn');
           dispatcher = options?.dispatcher;

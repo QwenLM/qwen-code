@@ -55,11 +55,16 @@ describe('Feishu webhook static card', () => {
     );
   });
 
-  it.each(['```', '~~~'])(
-    'preserves %s code blocks beside real tables',
-    (fence) => {
+  it.each(
+    ['', '- [ ] ', '- [X] '].flatMap((prefix) =>
+      ['```', '~~~'].map((fence) => ({ prefix, fence })),
+    ),
+  )(
+    'preserves $prefix / $fence code regions beside real tables',
+    ({ prefix, fence }) => {
       const table = '| A | B |\n| --- | --- |\n| 1 | 2 |';
-      const code = `${fence}text\n${table}\n${fence}`;
+      const indent = ' '.repeat(prefix.length);
+      const code = `${prefix}${fence}text\n${indent}${table.replaceAll('\n', `\n${indent}`)}\n${indent}${fence}`;
       const card = buildFeishuWebhookCard(`${table}\n${code}\n${table}`);
       expect(card.body.elements.map(({ content }) => content)).toEqual([
         table,
