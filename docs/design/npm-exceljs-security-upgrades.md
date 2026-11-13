@@ -4,7 +4,7 @@
 
 ## Problem and baseline
 
-This batch stacks on P4 #17149 (`12ed4e0f7f`). ExcelJS 4.4.0 still brings three
+This batch follows merged P4 #17149 on main `7bb953cc7d`. ExcelJS 4.4.0 still brings three
 glob 7/inflight paths through archiver-utils 2, zip-stream's archiver-utils 3,
 and unzipper 0.10/fstream/rimraf. archiver also uses readdir-glob 1/minimatch 5.
 ExcelJS is already a Web Shell bundled development dependency. Its rebuilt
@@ -103,8 +103,13 @@ SpreadsheetPreview chunk is still dynamic. The package and consumer output
 retain identical inline-worker bytes, and controlled Node worker-thread
 load/sheet messages correctly parse a normal workbook. This asset/protocol
 control is separate from the 11 real-browser repository tests; it does not
-certify every browser Blob Worker lifecycle or publication. Keep this batch a
-draft stacked on #17149 until the parent merges and it can be retargeted.
+certify every browser Blob Worker lifecycle or publication.
+
+After #17149 merged, the original PR was retargeted to main with its five-file
+increment preserved. Normal strict frozen installation and full prepare
+build/bundle, full typecheck/lint and lock/Playwright parity passed again, as
+did Web Shell 36, CLI archive/management 83 and Chromium Excel 11 tests. Remote
+CI/review remain separate acceptance checks on the current PR head.
 
 ## Remaining work
 

@@ -4,7 +4,7 @@
 
 ## 问题与基线
 
-本批基于 P4 #17149（`12ed4e0f7f`）继续开发。ExcelJS 4.4.0 仍通过
+本批接续已合并的 P4 #17149，基于 main `7bb953cc7d`。ExcelJS 4.4.0 仍通过
 archiver-utils 2、zip-stream 的 archiver-utils 3、unzipper 0.10/fstream/rimraf
 引入三条 glob 7/inflight 父链，archiver 还使用 readdir-glob 1/minimatch 5。
 ExcelJS 已是 Web Shell 的 bundled 开发依赖。其重建的浏览器入口使用 JSZip，
@@ -84,7 +84,12 @@ Web Shell 发布前 verifier 通过。实际 tarball 含 874 个文件，压缩 
 SpreadsheetPreview 仍为动态 chunk，包内与消费端输出的 inline worker 字节一致，
 受控 Node worker_threads 的 load/sheet 消息能正确解析普通工作簿。该资产/协议
 控制与仓库 11 项真实浏览器测试分开，不代表所有浏览器 Blob Worker 生命周期或
-发布完成。在 #17149 父 PR 合并并可 retarget 前，保持 stacked 草稿。
+发布完成。
+
+#17149 合并后，原 PR 已 retarget 到 main，保留五文件增量。正常严格冻结安装及
+prepare 完整构建/bundle、全量 typecheck/lint、锁/Playwright parity 再次通过，
+Web Shell 36、CLI 归档/管理 83、Chromium Excel 11 项测试也再次通过。远端 CI/
+评审作为当前 PR head 的独立验收继续跟进。
 
 ## 剩余工作
 
