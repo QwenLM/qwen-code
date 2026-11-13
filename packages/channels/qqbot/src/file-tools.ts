@@ -18,8 +18,10 @@
 import {
   closeSync,
   constants,
+  existsSync,
   fstatSync,
   openSync,
+  readlinkSync,
   readSync,
   realpathSync,
 } from 'node:fs';
@@ -219,9 +221,11 @@ function makeHandler(deps: QQFileToolDeps, spec: OutboundMediaSpec) {
  * ways a path check alone is blind: a file with more than one hard link is
  * refused (a hard link has no target to resolve, so the check would otherwise
  * read the linked contents), and where the platform exposes `/proc/self/fd` the
- * descriptor is re-resolved after opening, which catches a directory component
- * swapped between the check and the open. The read is re-checked against
- * `fstat` so a file rewritten mid-read is reported instead of sent truncated.
+ * path the kernel records for the descriptor is compared after opening, which
+ * catches a directory component swapped between the check and the open; a
+ * descriptor whose path cannot be read there is refused rather than trusted.
+ * The read is re-checked against `fstat` so a file rewritten mid-read is
+ * reported instead of sent truncated.
  *
  * `kind` picks the byte cap and the format the bytes must match. The sniff runs
  * on the same descriptor that was already validated, so the bytes that were
@@ -271,7 +275,7 @@ export function readOutboundFile(
       );
     }
     const openedPath = descriptorPath(fd);
-    if (openedPath !== undefined && !insideRoots(openedPath, roots)) {
+    if (openedPath !== 'unavailable' && !insideRoots(openedPath, roots)) {
       throw new QQOutboundFileError(
         'the file is outside the session workspace and the temporary directory.',
       );
@@ -396,14 +400,30 @@ function insideRoots(path: string, roots: string[]): boolean {
 /**
  * The path a descriptor actually points at, when the platform exposes one.
  * `/proc/self/fd` is the Linux answer; elsewhere there is nothing to ask, so
- * the caller keeps the pre-open check as its only guard.
+ * `'unavailable'` tells the caller to keep the pre-open check as its only guard.
+ *
+ * `readlinkSync` rather than `realpathSync` on purpose: `realpathSync` throws
+ * `ENOENT` once the opened name is unlinked (the kernel appends ` (deleted)` to
+ * the link target), which would turn the containment re-check into no check at
+ * the exact moment it matters. The recorded path survives the unlink.
+ *
+ * Where procfs exists but the link cannot be read, the descriptor cannot be
+ * identified at all; that is a refusal, not a fallback to the weaker guard.
  */
-function descriptorPath(fd: number): string | undefined {
+function descriptorPath(fd: number): string | 'unavailable' {
+  const deletedSuffix = ' (deleted)';
+  let link: string;
   try {
-    return realpathSync(`/proc/self/fd/${fd}`);
+    link = readlinkSync(`/proc/self/fd/${fd}`);
   } catch {
-    return undefined;
+    if (!existsSync('/proc/self/fd')) return 'unavailable';
+    throw new QQOutboundFileError(
+      'the file could not be identified after opening.',
+    );
   }
+  return link.endsWith(deletedSuffix)
+    ? link.slice(0, -deletedSuffix.length)
+    : link;
 }
 
 /**

@@ -34,18 +34,24 @@ const OUTSIDE_PATH =
 const fsHooks = vi.hoisted(() => ({
   realOpenSync: undefined as typeof import('node:fs').openSync | undefined,
   realFstatSync: undefined as typeof import('node:fs').fstatSync | undefined,
+  realReadlinkSync: undefined as
+    | typeof import('node:fs').readlinkSync
+    | undefined,
   openSync: vi.fn(),
   fstatSync: vi.fn(),
+  readlinkSync: vi.fn(),
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   fsHooks.realOpenSync = actual.openSync;
   fsHooks.realFstatSync = actual.fstatSync;
+  fsHooks.realReadlinkSync = actual.readlinkSync;
   return {
     ...actual,
     openSync: fsHooks.openSync,
     fstatSync: fsHooks.fstatSync,
+    readlinkSync: fsHooks.readlinkSync,
   };
 });
 
@@ -54,6 +60,8 @@ beforeEach(() => {
   fsHooks.openSync.mockImplementation(fsHooks.realOpenSync as never);
   fsHooks.fstatSync.mockReset();
   fsHooks.fstatSync.mockImplementation(fsHooks.realFstatSync as never);
+  fsHooks.readlinkSync.mockReset();
+  fsHooks.readlinkSync.mockImplementation(fsHooks.realReadlinkSync as never);
 });
 
 describe('readOutboundFile', () => {
@@ -144,6 +152,43 @@ describe('readOutboundFile', () => {
       /more than one hard link/,
     );
   });
+
+  // The post-open re-check reads the kernel-recorded descriptor path through
+  // procfs; macOS and Windows take the documented pre-open-only path.
+  const itLinux = process.platform === 'linux' ? it : it.skip;
+
+  itLinux('refuses a descriptor that procfs reports outside the roots', () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'hello');
+    // Simulate a directory component swapped between realpath() and open(): the
+    // descriptor points outside, and the outside file is unlinked before the
+    // guard runs, so realpath() on the descriptor throws ENOENT and would skip
+    // the check. The path the kernel recorded still names the outside file.
+    fsHooks.readlinkSync.mockImplementationOnce(
+      () => `${OUTSIDE_PATH} (deleted)`,
+    );
+
+    expect(() => readOutboundFile(path, workspace)).toThrow(
+      /outside the session workspace/,
+    );
+  });
+
+  itLinux(
+    'fails closed when procfs exists but the descriptor link is gone',
+    () => {
+      const path = join(workspace, 'report.txt');
+      writeFileSync(path, 'hello');
+      fsHooks.readlinkSync.mockImplementationOnce(() => {
+        throw Object.assign(new Error('ENOENT: no such file or directory'), {
+          code: 'ENOENT',
+        });
+      });
+
+      expect(() => readOutboundFile(path, workspace)).toThrow(
+        /could not be identified after opening/,
+      );
+    },
+  );
 
   // Windows has neither constant (`fs.constants.O_NOFOLLOW`/`O_NONBLOCK` are
   // `undefined` there), so `flags & undefined` is 0 and the assertion can never
