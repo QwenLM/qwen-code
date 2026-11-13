@@ -77,9 +77,14 @@ function errno(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(code), { code });
 }
 
+// One liveness signal for every group, so a test that only tracks "the group
+// is still up" reads as such instead of hand-rolling a second probe.
+const SAME_GROUP = Symbol('same-group-liveness');
+
 function mockGroupKills(
-  aliveGroups: Set<number>,
+  aliveGroups: Set<number> | typeof SAME_GROUP,
   onSignal: (group: number, signal?: NodeJS.Signals | number) => void,
+  isAlive: () => boolean = () => true,
 ) {
   return vi.spyOn(process, 'kill').mockImplementation(((
     pid: number,
@@ -87,7 +92,9 @@ function mockGroupKills(
   ) => {
     const group = -pid;
     if (signal === 0) {
-      if (!aliveGroups.has(group)) throw errno('ESRCH');
+      const alive =
+        aliveGroups === SAME_GROUP ? isAlive() : aliveGroups.has(group);
+      if (!alive) throw errno('ESRCH');
       return true;
     }
     onSignal(group, signal);
@@ -466,17 +473,13 @@ describe('ProcessRegistry', () => {
     const child = fakeChild(1234);
     registry.reserve().attach(child, { ownsProcessTree: true });
     let groupAlive = true;
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(((
-      _pid: number,
-      signal?: NodeJS.Signals | number,
-    ) => {
-      if (signal === 0) {
-        if (!groupAlive) throw errno('ESRCH');
-        return true;
-      }
-      if (signal === 'SIGKILL') groupAlive = false;
-      return true;
-    }) as typeof process.kill);
+    const killSpy = mockGroupKills(
+      SAME_GROUP,
+      (_group, signal) => {
+        if (signal === 'SIGKILL') groupAlive = false;
+      },
+      () => groupAlive,
+    );
 
     child.emit('exit', 0, null);
     await Promise.resolve();
@@ -493,10 +496,11 @@ describe('ProcessRegistry', () => {
     const child = fakeChild(1234);
     const tracked = registry.reserve().attach(child, { ownsProcessTree: true });
     let groupAlive = true;
-    vi.spyOn(process, 'kill').mockImplementation(((_pid: number, signal) => {
-      if (signal === 0 && !groupAlive) throw errno('ESRCH');
-      return true;
-    }) as typeof process.kill);
+    mockGroupKills(
+      SAME_GROUP,
+      () => {},
+      () => groupAlive,
+    );
 
     child.emit('exit', 0, null);
     let settled = false;
@@ -582,10 +586,11 @@ describe('ProcessRegistry', () => {
     const child = fakeChild(1234);
     registry.reserve().attach(child, { ownsProcessTree: true });
     let groupAlive = true;
-    vi.spyOn(process, 'kill').mockImplementation(((_pid: number, signal) => {
-      if (signal === 0 && !groupAlive) throw errno('ESRCH');
-      return true;
-    }) as typeof process.kill);
+    mockGroupKills(
+      SAME_GROUP,
+      () => {},
+      () => groupAlive,
+    );
 
     child.emit('exit', 0, null);
     await vi.advanceTimersByTimeAsync(0);
@@ -608,10 +613,11 @@ describe('ProcessRegistry', () => {
     const child = fakeChild(1234);
     registry.reserve().attach(child, { ownsProcessTree: true });
     let groupAlive = true;
-    vi.spyOn(process, 'kill').mockImplementation(((_pid: number, signal) => {
-      if (signal === 0 && !groupAlive) throw errno('ESRCH');
-      return true;
-    }) as typeof process.kill);
+    mockGroupKills(
+      SAME_GROUP,
+      () => {},
+      () => groupAlive,
+    );
 
     child.emit('exit', 0, null);
     await vi.advanceTimersByTimeAsync(250);
