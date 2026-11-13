@@ -11,6 +11,7 @@ import {
   type AgentLoopOptions,
   type AgentLoopToolExecutor,
   type AgentLoopHost,
+  type ModelRoundSource,
 } from '../core/agent-loop.js';
 import * as agentLoop from '../core/agent-loop.js';
 import { SendMessageType } from '../core/client.js';
@@ -128,7 +129,9 @@ function makeHost(
     onModelEvent: (event, discarded) => {
       log.push(`model:${event.type}:${discarded.length}`);
     },
-    onRoundEnd: (round) => log.push(`end:${round}`),
+    onRoundEnd: (round) => {
+      log.push(`end:${round}`);
+    },
     onToolResult: (result) => {
       log.push(`tool:${result.request.callId}:${result.origin}`);
       return endOnResult;
@@ -485,6 +488,236 @@ describe('runAgentLoop event-bus parity', () => {
     });
     await expect(procedural).rejects.toThrow('toolboom');
     await expect(bus).rejects.toThrow('toolboom');
+  });
+
+  it('matches when onRoundEnd stops the loop before the tool batch', async () => {
+    const toolCall = {
+      type: LlmEventType.ToolCallRequest,
+      value: call('c1'),
+    } as ServerLlmStreamEvent;
+    const stopping = (): HostFixture => {
+      const fixture = makeHost();
+      fixture.host.onRoundEnd = (round) => {
+        fixture.log.push(`end:${round}`);
+        return 'surface_ended';
+      };
+      return fixture;
+    };
+    const procedural = stopping();
+    const bus = stopping();
+    const proceduralResult = await runAgentLoop(
+      options([[toolCall]], procedural.host),
+    );
+    const busResult = await runAgentLoop({
+      ...options([[toolCall]], bus.host),
+      useEventBus: true,
+    });
+    expect(busResult).toEqual(proceduralResult);
+    expect(busResult.reason).toBe('surface_ended');
+    expect(bus.log).toEqual(procedural.log);
+    expect(bus.log).not.toContain('tool:c1:executed');
+  });
+
+  it("gives onRoundEnd the round's calls and stop on both paths", async () => {
+    const rounds = [
+      [{ type: LlmEventType.ToolCallRequest, value: call('c1') }],
+      [
+        { type: LlmEventType.ToolCallRequest, value: call('c2') },
+        { type: LlmEventType.MaxSessionTurns },
+      ],
+    ] as ServerLlmStreamEvent[][];
+    const run = async (useEventBus: boolean) => {
+      const seen: unknown[] = [];
+      const result = await runAgentLoop({
+        ...options(rounds, {
+          onRoundEnd: (round, model) => {
+            seen.push({
+              round,
+              calls: model.calls.map(({ callId }) => callId),
+              stop: model.stop,
+            });
+          },
+        }),
+        useEventBus,
+      });
+      return { seen, reason: result.reason };
+    };
+    const procedural = await run(false);
+    const bus = await run(true);
+    expect(bus).toEqual(procedural);
+    expect(bus).toEqual({
+      seen: [
+        { round: 0, calls: ['c1'], stop: undefined },
+        { round: 1, calls: ['c2'], stop: 'max_session_turns' },
+      ],
+      reason: 'max_session_turns',
+    });
+  });
+
+  it('matches on the batch options and returns each call result', async () => {
+    const calls = [call('c1'), call('c2')];
+    const round = calls.map((value) => ({
+      type: LlmEventType.ToolCallRequest,
+      value,
+    })) as ServerLlmStreamEvent[];
+    const run = async (useEventBus: boolean) => {
+      const recorded: string[] = [];
+      const abort = new AbortController();
+      const isolated = {
+        handled: new Map<string, string>(),
+        responded: new Set<string>(),
+      };
+      const shared = {
+        handled: new Map<string, string>(),
+        responded: new Set<string>(),
+      };
+      const { host, log } = makeHost();
+      const result = await runAgentLoop({
+        ...options([round, [content]], host, {
+          config: {
+            getChatRecordingService: () => ({
+              recordToolResult: (
+                _parts: Part[],
+                { callId }: { callId: string },
+              ) => recorded.push(callId),
+            }),
+          } as unknown as Config,
+          signal: abort.signal,
+          duplicates: shared,
+          duplicateStateForCall: (request) =>
+            request.callId === 'c2' ? isolated : shared,
+          executor: {
+            run: async (requests, _signal, hooks) => {
+              abort.abort();
+              return requests.map((request) => {
+                hooks.beforeLaunch(request, []);
+                return {
+                  request,
+                  response: response(request),
+                  status: 'success' as const,
+                };
+              });
+            },
+          },
+          keepCancelledResults: true,
+          deferRecording: true,
+        }),
+        useEventBus,
+      });
+      const recordedBefore = [...recorded];
+      for (const entry of result.responses ?? []) entry.record?.();
+      return {
+        reason: result.reason,
+        parts: result.parts,
+        responses: result.responses?.map(({ callId, parts }) => ({
+          callId,
+          parts,
+        })),
+        recordedBefore,
+        recorded,
+        handled: [...shared.handled.keys(), ...isolated.handled.keys()],
+        isolated: [...isolated.handled.keys()],
+        log,
+      };
+    };
+    const procedural = await run(false);
+    const bus = await run(true);
+    expect(bus).toEqual(procedural);
+    // The aborted batch keeps its results, unrecorded until the caller records them.
+    expect(bus.reason).toBe('cancelled');
+    expect(bus.responses?.map(({ callId }) => callId)).toEqual(['c1', 'c2']);
+    expect(bus.recordedBefore).toEqual([]);
+    expect(bus.recorded).toEqual(['c1', 'c2']);
+    expect(bus.isolated).toEqual(['c2']);
+  });
+
+  it.each([false, true])(
+    'exposes deferred recordings before the next round (event bus: %s)',
+    async (useEventBus) => {
+      const recorded: string[] = [];
+      const nextRound: AgentLoopHost['nextRound'] = (
+        round,
+        parts,
+        responses,
+      ) => {
+        expect(recorded).toHaveLength(round - 1);
+        expect(responses).toHaveLength(1);
+        responses?.[0]?.record?.();
+        return {
+          parts,
+          promptId: 'p0',
+          options: { type: SendMessageType.ToolResult },
+        };
+      };
+      const result = await runAgentLoop({
+        ...options(
+          [
+            [{ type: LlmEventType.ToolCallRequest, value: call('c1') }],
+            [{ type: LlmEventType.ToolCallRequest, value: call('c2') }],
+            [content],
+          ],
+          { nextRound },
+          {
+            config: {
+              getChatRecordingService: () => ({
+                recordToolResult: (
+                  _parts: Part[],
+                  { callId }: { callId: string },
+                ) => recorded.push(callId),
+              }),
+            } as unknown as Config,
+            deferRecording: true,
+          },
+        ),
+        useEventBus,
+      });
+      expect(result).toMatchObject({ reason: 'completed', rounds: 3 });
+      expect(recorded).toEqual(['c1', 'c2']);
+    },
+  );
+
+  it('matches on a round source and counts no calls toward a client', async () => {
+    const toolCall = {
+      type: LlmEventType.ToolCallRequest,
+      value: call('c1'),
+    } as ServerLlmStreamEvent;
+    const run = async (useEventBus: boolean) => {
+      const rounds = [[toolCall], [content]];
+      let index = 0;
+      const sent: unknown[] = [];
+      const client: ModelRoundSource = {
+        async *sendRound(round) {
+          sent.push(round.parts);
+          for (const event of rounds[index++] ?? []) yield event;
+          return undefined;
+        },
+      };
+      const { host, log } = makeHost();
+      const result = await runAgentLoop({
+        ...options([], host, {
+          client,
+          executor: {
+            run: async (requests, _signal, hooks) =>
+              requests.map((request) => {
+                hooks.beforeLaunch(request, []);
+                return {
+                  request,
+                  response: response(request),
+                  status: 'success' as const,
+                };
+              }),
+          },
+        }),
+        useEventBus,
+      });
+      return { result, log, sent };
+    };
+    const procedural = await run(false);
+    const bus = await run(true);
+    expect(bus).toEqual(procedural);
+    expect(bus.result.reason).toBe('completed');
+    expect(bus.result.rounds).toBe(2);
+    expect(bus.log).toContain('tool:c1:executed');
   });
 
   it('proves the bus path runs by its event sequence, and the flag-off run publishes nothing', async () => {

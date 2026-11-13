@@ -64,7 +64,7 @@ import type {
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
 import { AgentCore } from './agent-core.js';
-import { runToolBatch } from '../../core/agent-loop.js';
+import { runAgentLoop } from '../../core/agent-loop.js';
 import { beginRetryWait } from '../../utils/retry-wait.js';
 import {
   attachStallWatchdog,
@@ -94,7 +94,7 @@ import {
 vi.mock('../../core/agent-loop.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../core/agent-loop.js')>();
-  return { ...actual, runToolBatch: vi.fn(actual.runToolBatch) };
+  return { ...actual, runAgentLoop: vi.fn(actual.runAgentLoop) };
 });
 vi.mock('../../core/llm-chat.js');
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
@@ -258,6 +258,17 @@ const createMockStream = (
     );
   });
 };
+
+/**
+ * The loops a test runs on: the current loop, the shared loop, and the shared
+ * loop on the event-bus kernel.
+ */
+type Loop = { name: string; shared: boolean; kernel: boolean };
+const LOOPS: Loop[] = [
+  { name: 'current', shared: false, kernel: false },
+  { name: 'shared', shared: true, kernel: false },
+  { name: 'kernel', shared: true, kernel: true },
+];
 
 const contextWith = (values: Record<string, unknown> = {}) => {
   const context = new ContextState();
@@ -567,23 +578,28 @@ describe('subagent.ts', () => {
     /**
      * Sets `experimental.unifiedAgentLoop` for the test. The returned check
      * asserts that the run took the loop it was set to: on the shared loop
-     * each model request goes out on a `Turn` and each tool step runs as the
-     * loop's batch, on the current loop neither does.
+     * each round, its model request on a `Turn` and its tool batch, runs in
+     * one `runAgentLoop` call, and the current tool step never runs; on the
+     * current loop neither the loop nor a `Turn` runs.
      */
-    const useAgentLoop = (shared: boolean) => {
+    const useAgentLoop = ({ shared, kernel }: Loop) => {
       vi.spyOn(Config.prototype, 'isUnifiedAgentLoopEnabled').mockReturnValue(
         shared,
       );
+      vi.spyOn(Config.prototype, 'isEventBusAgentLoopEnabled').mockReturnValue(
+        kernel,
+      );
       const turn = vi.spyOn(Turn.prototype, 'run');
       const toolSteps = vi.spyOn(AgentCore.prototype, 'processFunctionCalls');
-      vi.mocked(runToolBatch).mockClear();
+      vi.mocked(runAgentLoop).mockClear();
       return () => {
-        expect(turn).toHaveBeenCalledTimes(
-          shared ? mockSendMessageStream.mock.calls.length : 0,
-        );
-        expect(vi.mocked(runToolBatch)).toHaveBeenCalledTimes(
-          shared ? toolSteps.mock.calls.length : 0,
-        );
+        const rounds = shared ? mockSendMessageStream.mock.calls.length : 0;
+        expect(turn).toHaveBeenCalledTimes(rounds);
+        expect(vi.mocked(runAgentLoop)).toHaveBeenCalledTimes(rounds);
+        for (const [options] of vi.mocked(runAgentLoop).mock.calls) {
+          expect(options.useEventBus).toBe(kernel);
+        }
+        if (shared) expect(toolSteps).not.toHaveBeenCalled();
       };
     };
     const expectExecuteError = async (
@@ -1142,12 +1158,12 @@ describe('subagent.ts', () => {
       });
     });
 
-    describe.each([false, true])(
-      'execute - Execution and Tool Use (unifiedAgentLoop=%s)',
-      (shared) => {
+    describe.each(LOOPS)(
+      'execute - Execution and Tool Use ($name loop)',
+      (loop) => {
         let expectLoop: () => void;
         beforeEach(() => {
-          expectLoop = useAgentLoop(shared);
+          expectLoop = useAgentLoop(loop);
         });
         afterEach(() => expectLoop());
 
@@ -1405,6 +1421,30 @@ describe('subagent.ts', () => {
           );
           expect(inv.execute).toHaveBeenCalledTimes(1);
           expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        });
+
+        it('ends with TIMEOUT before running the calls of a round that outlived the time limit', async () => {
+          const { config, inv, toolConfig } = await setupListFiles();
+          vi.useFakeTimers();
+          try {
+            mockSendMessageStream.mockImplementation(async () => {
+              // The model answers after the agent's time limit has passed.
+              await new Promise((resolve) => setTimeout(resolve, 2 * 60_000));
+              return streamOf(callsChunk([call('list_files', {}, 'call_1')]));
+            });
+            const scope = await createAgent(config, {
+              tools: toolConfig,
+              run: { max_turns: 5, max_time_minutes: 1 },
+            });
+            const run = scope.execute(new ContextState());
+            await vi.advanceTimersByTimeAsync(2 * 60_000);
+            await run;
+            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+            expect(inv.execute).not.toHaveBeenCalled();
+          } finally {
+            vi.useRealTimers();
+          }
         });
 
         it('keeps declarations unchanged while enforcing the execution allowlist', async () => {
@@ -2209,7 +2249,7 @@ describe('subagent.ts', () => {
           expect(errorFor(sentParts(1), 'call_1')).toContain(
             'Tool "write_file" not found',
           );
-          if (shared) {
+          if (loop.shared) {
             expectDuplicateResponse(3, 'call_1__qwen_dup_3');
           } else {
             expect(errorFor(sentParts(3), 'call_1__qwen_dup_3')).toContain(
@@ -2986,226 +3026,237 @@ describe('subagent.ts', () => {
         });
       });
 
-      describe('agent time limit during a wait', () => {
-        // Each variant waits 2h after spending 30s of a 1-minute budget, so
-        // the limit passes 30s into the wait.
-        const variants = {
-          'the stream rejects': (params: unknown) =>
-            (async function* () {
-              await backoff(7_200_000, signalOf(params));
-              yield doneChunk;
-            })(),
-          'the stream yields after the abort': (params: unknown) =>
-            (async function* () {
-              await backoff(7_200_000, signalOf(params)).catch(() => {});
-              yield doneChunk;
-            })(),
-        };
+      describe.each(LOOPS)(
+        'agent time limit during a wait ($name loop)',
+        (loop) => {
+          let expectLoop: () => void;
+          beforeEach(() => {
+            expectLoop = useAgentLoop(loop);
+          });
+          afterEach(() => expectLoop());
 
-        it.each(Object.keys(variants))(
-          'ends with TIMEOUT when %s',
-          async (name) => {
+          // Each variant waits 2h after spending 30s of a 1-minute budget, so
+          // the limit passes 30s into the wait.
+          const variants = {
+            'the stream rejects': (params: unknown) =>
+              (async function* () {
+                await backoff(7_200_000, signalOf(params));
+                yield doneChunk;
+              })(),
+            'the stream yields after the abort': (params: unknown) =>
+              (async function* () {
+                await backoff(7_200_000, signalOf(params)).catch(() => {});
+                yield doneChunk;
+              })(),
+          };
+
+          it.each(Object.keys(variants))(
+            'ends with TIMEOUT when %s',
+            async (name) => {
+              vi.useFakeTimers();
+              try {
+                mockSendMessageStream.mockImplementation(async (_m, params) => {
+                  await new Promise((r) => setTimeout(r, 30_000));
+                  return variants[name as keyof typeof variants](params);
+                });
+                const { scope } = await createScope({
+                  max_turns: 5,
+                  max_time_minutes: 1,
+                });
+                let settled = false;
+                const run = scope
+                  .execute(new ContextState(), undefined, {
+                    enforceTimeLimitDuringRetryWait: true,
+                  })
+                  .finally(() => (settled = true));
+                await vi.advanceTimersByTimeAsync(59_999);
+                expect(settled).toBe(false);
+                await vi.advanceTimersByTimeAsync(1);
+                await run;
+                expect(scope.getTerminateMode()).toBe(
+                  AgentTerminateMode.TIMEOUT,
+                );
+                expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+                expect(vi.getTimerCount()).toBe(0);
+              } finally {
+                vi.useRealTimers();
+              }
+            },
+          );
+
+          it('ends with TIMEOUT when the send itself rejects during the wait', async () => {
             vi.useFakeTimers();
             try {
               mockSendMessageStream.mockImplementation(async (_m, params) => {
                 await new Promise((r) => setTimeout(r, 30_000));
-                return variants[name as keyof typeof variants](params);
+                await backoff(7_200_000, signalOf(params));
+                return (async function* () {
+                  yield doneChunk;
+                })();
               });
+              const { scope } = await createScope({
+                max_turns: 5,
+                max_time_minutes: 1,
+              });
+              const run = scope.execute(new ContextState(), undefined, {
+                enforceTimeLimitDuringRetryWait: true,
+              });
+              await vi.advanceTimersByTimeAsync(60_000);
+              await run;
+              expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+            } finally {
+              vi.useRealTimers();
+            }
+          });
+
+          it('times out at once when the limit already passed as the wait starts', async () => {
+            vi.useFakeTimers();
+            try {
+              mockSendMessageStream.mockImplementation(async (_m, params) =>
+                (async function* () {
+                  // Spent the whole budget inside the round before the retry.
+                  await new Promise((r) => setTimeout(r, 61_000));
+                  await backoff(7_200_000, signalOf(params));
+                  yield doneChunk;
+                })(),
+              );
+              const { scope } = await createScope({
+                max_turns: 5,
+                max_time_minutes: 1,
+              });
+              const run = scope.execute(new ContextState(), undefined, {
+                enforceTimeLimitDuringRetryWait: true,
+              });
+              await vi.advanceTimersByTimeAsync(61_000);
+              // The guard fires on the next tick, not after the 2h backoff.
+              await vi.advanceTimersByTimeAsync(1);
+              await run;
+              expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+            } finally {
+              vi.useRealTimers();
+            }
+          });
+
+          it('measures the limit from the original start and shares it across waits', async () => {
+            vi.useFakeTimers();
+            try {
+              mockSendMessageStream.mockImplementation(async (_m, params) =>
+                (async function* () {
+                  for (let i = 0; i < 10; i++) {
+                    await backoff(20_000, signalOf(params));
+                  }
+                  yield doneChunk;
+                })(),
+              );
+              const { scope, waits } = await createScope({
+                max_turns: 5,
+                max_time_minutes: 1,
+              });
+              const run = scope.execute(new ContextState(), undefined, {
+                enforceTimeLimitDuringRetryWait: true,
+              });
+              await vi.advanceTimersByTimeAsync(60_001);
+              await run;
+              expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+              // The third wait is cut as the minute passes: no wait renewed the
+              // limit, and no fourth request or wait followed.
+              expect(waits.filter((w) => w.phase === 'start')).toHaveLength(3);
+            } finally {
+              vi.useRealTimers();
+            }
+          });
+
+          it('clears the guard when the last wait ends early', async () => {
+            vi.useFakeTimers();
+            try {
+              let release!: () => void;
+              mockSendMessageStream.mockImplementation(async (_m, params) =>
+                (async function* () {
+                  await backoff(1_000, signalOf(params));
+                  await new Promise<void>((r) => (release = r));
+                  yield doneChunk;
+                })(),
+              );
+              const { scope } = await createScope({
+                max_turns: 5,
+                max_time_minutes: 1,
+              });
+              const run = scope.execute(new ContextState(), undefined, {
+                enforceTimeLimitDuringRetryWait: true,
+              });
+              await vi.advanceTimersByTimeAsync(1_000);
+              expect(vi.getTimerCount()).toBe(0);
+              // Past the limit with no active wait: only the loop's own
+              // cooperative checks apply, so the round is not aborted.
+              await vi.advanceTimersByTimeAsync(120_000);
+              release();
+              await run;
+              expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+              expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+            } finally {
+              vi.useRealTimers();
+            }
+          });
+
+          it('lets a parent cancel during the wait win as CANCELLED', async () => {
+            vi.useFakeTimers();
+            try {
+              mockSendMessageStream.mockImplementation(async (_m, params) =>
+                (async function* () {
+                  await backoff(7_200_000, signalOf(params));
+                  yield doneChunk;
+                })(),
+              );
+              const { scope } = await createScope({
+                max_turns: 5,
+                max_time_minutes: 1,
+              });
+              const parent = new AbortController();
+              const run = scope.execute(new ContextState(), parent.signal, {
+                enforceTimeLimitDuringRetryWait: true,
+              });
+              await vi.advanceTimersByTimeAsync(10_000);
+              parent.abort();
+              await run.catch(() => {});
+              expect(scope.getTerminateMode()).not.toBe(
+                AgentTerminateMode.TIMEOUT,
+              );
+              await vi.advanceTimersByTimeAsync(120_000);
+              expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+            } finally {
+              vi.useRealTimers();
+            }
+          });
+
+          it('leaves agents without the opt-in on their between-round checks', async () => {
+            vi.useFakeTimers();
+            try {
+              mockSendMessageStream.mockImplementation(async (_m, params) =>
+                (async function* () {
+                  await backoff(7_200_000, signalOf(params));
+                  yield doneChunk;
+                })(),
+              );
               const { scope } = await createScope({
                 max_turns: 5,
                 max_time_minutes: 1,
               });
               let settled = false;
               const run = scope
-                .execute(new ContextState(), undefined, {
-                  enforceTimeLimitDuringRetryWait: true,
-                })
+                .execute(new ContextState())
                 .finally(() => (settled = true));
-              await vi.advanceTimersByTimeAsync(59_999);
+              await vi.advanceTimersByTimeAsync(7_199_000);
               expect(settled).toBe(false);
-              await vi.advanceTimersByTimeAsync(1);
+              await vi.advanceTimersByTimeAsync(1_000);
               await run;
+              // Checked after the round, as before.
               expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
-              expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
-              expect(vi.getTimerCount()).toBe(0);
             } finally {
               vi.useRealTimers();
             }
-          },
-        );
-
-        it('ends with TIMEOUT when the send itself rejects during the wait', async () => {
-          vi.useFakeTimers();
-          try {
-            mockSendMessageStream.mockImplementation(async (_m, params) => {
-              await new Promise((r) => setTimeout(r, 30_000));
-              await backoff(7_200_000, signalOf(params));
-              return (async function* () {
-                yield doneChunk;
-              })();
-            });
-            const { scope } = await createScope({
-              max_turns: 5,
-              max_time_minutes: 1,
-            });
-            const run = scope.execute(new ContextState(), undefined, {
-              enforceTimeLimitDuringRetryWait: true,
-            });
-            await vi.advanceTimersByTimeAsync(60_000);
-            await run;
-            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
-          } finally {
-            vi.useRealTimers();
-          }
-        });
-
-        it('times out at once when the limit already passed as the wait starts', async () => {
-          vi.useFakeTimers();
-          try {
-            mockSendMessageStream.mockImplementation(async (_m, params) =>
-              (async function* () {
-                // Spent the whole budget inside the round before the retry.
-                await new Promise((r) => setTimeout(r, 61_000));
-                await backoff(7_200_000, signalOf(params));
-                yield doneChunk;
-              })(),
-            );
-            const { scope } = await createScope({
-              max_turns: 5,
-              max_time_minutes: 1,
-            });
-            const run = scope.execute(new ContextState(), undefined, {
-              enforceTimeLimitDuringRetryWait: true,
-            });
-            await vi.advanceTimersByTimeAsync(61_000);
-            // The guard fires on the next tick, not after the 2h backoff.
-            await vi.advanceTimersByTimeAsync(1);
-            await run;
-            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
-          } finally {
-            vi.useRealTimers();
-          }
-        });
-
-        it('measures the limit from the original start and shares it across waits', async () => {
-          vi.useFakeTimers();
-          try {
-            mockSendMessageStream.mockImplementation(async (_m, params) =>
-              (async function* () {
-                for (let i = 0; i < 10; i++) {
-                  await backoff(20_000, signalOf(params));
-                }
-                yield doneChunk;
-              })(),
-            );
-            const { scope, waits } = await createScope({
-              max_turns: 5,
-              max_time_minutes: 1,
-            });
-            const run = scope.execute(new ContextState(), undefined, {
-              enforceTimeLimitDuringRetryWait: true,
-            });
-            await vi.advanceTimersByTimeAsync(60_001);
-            await run;
-            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
-            // The third wait is cut as the minute passes: no wait renewed the
-            // limit, and no fourth request or wait followed.
-            expect(waits.filter((w) => w.phase === 'start')).toHaveLength(3);
-          } finally {
-            vi.useRealTimers();
-          }
-        });
-
-        it('clears the guard when the last wait ends early', async () => {
-          vi.useFakeTimers();
-          try {
-            let release!: () => void;
-            mockSendMessageStream.mockImplementation(async (_m, params) =>
-              (async function* () {
-                await backoff(1_000, signalOf(params));
-                await new Promise<void>((r) => (release = r));
-                yield doneChunk;
-              })(),
-            );
-            const { scope } = await createScope({
-              max_turns: 5,
-              max_time_minutes: 1,
-            });
-            const run = scope.execute(new ContextState(), undefined, {
-              enforceTimeLimitDuringRetryWait: true,
-            });
-            await vi.advanceTimersByTimeAsync(1_000);
-            expect(vi.getTimerCount()).toBe(0);
-            // Past the limit with no active wait: only the loop's own
-            // cooperative checks apply, so the round is not aborted.
-            await vi.advanceTimersByTimeAsync(120_000);
-            release();
-            await run;
-            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
-            expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
-          } finally {
-            vi.useRealTimers();
-          }
-        });
-
-        it('lets a parent cancel during the wait win as CANCELLED', async () => {
-          vi.useFakeTimers();
-          try {
-            mockSendMessageStream.mockImplementation(async (_m, params) =>
-              (async function* () {
-                await backoff(7_200_000, signalOf(params));
-                yield doneChunk;
-              })(),
-            );
-            const { scope } = await createScope({
-              max_turns: 5,
-              max_time_minutes: 1,
-            });
-            const parent = new AbortController();
-            const run = scope.execute(new ContextState(), parent.signal, {
-              enforceTimeLimitDuringRetryWait: true,
-            });
-            await vi.advanceTimersByTimeAsync(10_000);
-            parent.abort();
-            await run.catch(() => {});
-            expect(scope.getTerminateMode()).not.toBe(
-              AgentTerminateMode.TIMEOUT,
-            );
-            await vi.advanceTimersByTimeAsync(120_000);
-            expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
-          } finally {
-            vi.useRealTimers();
-          }
-        });
-
-        it('leaves agents without the opt-in on their between-round checks', async () => {
-          vi.useFakeTimers();
-          try {
-            mockSendMessageStream.mockImplementation(async (_m, params) =>
-              (async function* () {
-                await backoff(7_200_000, signalOf(params));
-                yield doneChunk;
-              })(),
-            );
-            const { scope } = await createScope({
-              max_turns: 5,
-              max_time_minutes: 1,
-            });
-            let settled = false;
-            const run = scope
-              .execute(new ContextState())
-              .finally(() => (settled = true));
-            await vi.advanceTimersByTimeAsync(7_199_000);
-            expect(settled).toBe(false);
-            await vi.advanceTimersByTimeAsync(1_000);
-            await run;
-            // Checked after the round, as before.
-            expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
-          } finally {
-            vi.useRealTimers();
-          }
-        });
-      });
+          });
+        },
+      );
     });
 
     describe('execute - Streaming and Thought Handling', () => {
@@ -3409,119 +3460,116 @@ describe('subagent.ts', () => {
         expect(readResult!.success).toBe(true);
       });
 
-      describe.each([false, true])(
-        'model rounds with unifiedAgentLoop=%s',
-        (shared) => {
-          let expectLoop: () => void;
-          beforeEach(() => {
-            expectLoop = useAgentLoop(shared);
-          });
-          afterEach(() => expectLoop());
+      describe.each(LOOPS)('model rounds on the $name loop', (loop) => {
+        let expectLoop: () => void;
+        beforeEach(() => {
+          expectLoop = useAgentLoop(loop);
+        });
+        afterEach(() => expectLoop());
 
-          it('should mark truncated subagent write_file calls as output-truncated errors', async () => {
-            const { config, toolConfig } = await setupWriteFile();
-            mockSendMessageStream.mockImplementation(async () =>
+        it('should mark truncated subagent write_file calls as output-truncated errors', async () => {
+          const { config, toolConfig } = await setupWriteFile();
+          mockSendMessageStream.mockImplementation(async () =>
+            streamOf<object>(
+              writeCall('call_write', { file_path: '/tmp/truncated.txt' }),
+              partsChunk([], 'MAX_TOKENS'),
+              partsChunk([{ text: 'done' }]),
+            ),
+          );
+          const writeResult = await runWrite(config, toolConfig);
+
+          expect(writeResult.success).toBe(false);
+          expect(writeResult.error).toContain(
+            'truncated due to max_tokens limit',
+          );
+          expect(writeResult.error).toContain(
+            'rejected to prevent writing truncated content',
+          );
+          expect(writeResult.error).not.toContain(
+            "params must have required property 'content'",
+          );
+        });
+
+        it('clears the truncation flag when a retry replaces the attempt', async () => {
+          const { config, toolConfig } = await setupWriteFile();
+          // First call: truncated (MAX_TOKENS). Retry resets state, second call:
+          // complete write_file. The scheduler should see wasOutputTruncated=false
+          // for the retried response and allow the tool to proceed. The second
+          // round's plain text ends the agent loop.
+          mockSendMessageStream
+            .mockImplementationOnce(async () =>
               streamOf<object>(
-                writeCall('call_write', { file_path: '/tmp/truncated.txt' }),
+                // Truncated response with incomplete write_file args
+                writeCall('call_write_truncated', {
+                  file_path: '/tmp/retry-test.txt',
+                }),
                 partsChunk([], 'MAX_TOKENS'),
-                partsChunk([{ text: 'done' }]),
+                { type: 'retry' },
+                // After retry, complete response with all required args
+                writeCall('call_write_complete', {
+                  file_path: '/tmp/retry-test.txt',
+                  content: 'hello',
+                }),
+                partsChunk([], 'STOP'),
+              ),
+            )
+            .mockImplementation(async () =>
+              streamOf(partsChunk([{ text: 'done' }], 'STOP')),
+            );
+          const writeResult = await runWrite(config, toolConfig);
+
+          // After retry the wasOutputTruncated flag must have been cleared, so
+          // the call should NOT be rejected with a truncation error — even if
+          // execution fails for unrelated reasons (e.g. mock filesystem).
+          // The retry also dropped the truncated attempt's call.
+          expect(writeResult.callId).toBe('call_write_complete');
+          expect(writeResult.error).not.toContain(
+            'truncated due to max_tokens limit',
+          );
+          expect(writeResult.error).not.toContain(
+            'rejected to prevent writing truncated content',
+          );
+        });
+
+        it.each([
+          { retry: { type: 'retry' as const, isContinuation: true } },
+          { retry: { type: 'retry' as const } },
+        ])(
+          'forwards retry events to subagent loop detection',
+          async ({ retry }) => {
+            const loopSpy = vi
+              .spyOn(
+                LoopDetectionService.prototype,
+                'addAndCheckHeuristicLoops',
+              )
+              .mockReturnValue(false);
+
+            const { config } = await createMockConfig();
+            mockSendMessageStream.mockResolvedValue(
+              streamOf<object>(
+                { ...retry },
+                partsChunk([{ text: 'done' }], 'STOP'),
               ),
             );
-            const writeResult = await runWrite(config, toolConfig);
+            await runAgent(config, {
+              tools: { tools: [] },
+              emitter: new AgentEventEmitter(),
+            });
 
-            expect(writeResult.success).toBe(false);
-            expect(writeResult.error).toContain(
-              'truncated due to max_tokens limit',
+            const retryArg = loopSpy.mock.calls.find(
+              ([event]) => event.type === LlmEventType.Retry,
+            )?.[0] as { type: LlmEventType; isContinuation?: boolean };
+            expect(retryArg).toEqual(
+              expect.objectContaining({ type: LlmEventType.Retry }),
             );
-            expect(writeResult.error).toContain(
-              'rejected to prevent writing truncated content',
-            );
-            expect(writeResult.error).not.toContain(
-              "params must have required property 'content'",
-            );
-          });
-
-          it('clears the truncation flag when a retry replaces the attempt', async () => {
-            const { config, toolConfig } = await setupWriteFile();
-            // First call: truncated (MAX_TOKENS). Retry resets state, second call:
-            // complete write_file. The scheduler should see wasOutputTruncated=false
-            // for the retried response and allow the tool to proceed. The second
-            // round's plain text ends the agent loop.
-            mockSendMessageStream
-              .mockImplementationOnce(async () =>
-                streamOf<object>(
-                  // Truncated response with incomplete write_file args
-                  writeCall('call_write_truncated', {
-                    file_path: '/tmp/retry-test.txt',
-                  }),
-                  partsChunk([], 'MAX_TOKENS'),
-                  { type: 'retry' },
-                  // After retry, complete response with all required args
-                  writeCall('call_write_complete', {
-                    file_path: '/tmp/retry-test.txt',
-                    content: 'hello',
-                  }),
-                  partsChunk([], 'STOP'),
-                ),
-              )
-              .mockImplementation(async () =>
-                streamOf(partsChunk([{ text: 'done' }], 'STOP')),
-              );
-            const writeResult = await runWrite(config, toolConfig);
-
-            // After retry the wasOutputTruncated flag must have been cleared, so
-            // the call should NOT be rejected with a truncation error — even if
-            // execution fails for unrelated reasons (e.g. mock filesystem).
-            // The retry also dropped the truncated attempt's call.
-            expect(writeResult.callId).toBe('call_write_complete');
-            expect(writeResult.error).not.toContain(
-              'truncated due to max_tokens limit',
-            );
-            expect(writeResult.error).not.toContain(
-              'rejected to prevent writing truncated content',
-            );
-          });
-
-          it.each([
-            { retry: { type: 'retry' as const, isContinuation: true } },
-            { retry: { type: 'retry' as const } },
-          ])(
-            'forwards retry events to subagent loop detection',
-            async ({ retry }) => {
-              const loopSpy = vi
-                .spyOn(
-                  LoopDetectionService.prototype,
-                  'addAndCheckHeuristicLoops',
-                )
-                .mockReturnValue(false);
-
-              const { config } = await createMockConfig();
-              mockSendMessageStream.mockResolvedValue(
-                streamOf<object>(
-                  { ...retry },
-                  partsChunk([{ text: 'done' }], 'STOP'),
-                ),
-              );
-              await runAgent(config, {
-                tools: { tools: [] },
-                emitter: new AgentEventEmitter(),
-              });
-
-              const retryArg = loopSpy.mock.calls.find(
-                ([event]) => event.type === LlmEventType.Retry,
-              )?.[0] as { type: LlmEventType; isContinuation?: boolean };
-              expect(retryArg).toEqual(
-                expect.objectContaining({ type: LlmEventType.Retry }),
-              );
-              if ('isContinuation' in retry) {
-                expect(retryArg.isContinuation).toBe(true);
-              } else {
-                expect(retryArg).not.toHaveProperty('isContinuation');
-              }
-            },
-          );
-        },
-      );
+            if ('isContinuation' in retry) {
+              expect(retryArg.isContinuation).toBe(true);
+            } else {
+              expect(retryArg).not.toHaveProperty('isContinuation');
+            }
+          },
+        );
+      });
 
       it('keeps automatic max token escalation warm for the next agent round', async () => {
         const { config, toolConfig } = await setupWriteFile();
@@ -3551,7 +3599,7 @@ describe('subagent.ts', () => {
       });
     });
 
-    describe('on the shared agent loop (experimental.unifiedAgentLoop)', () => {
+    describe('on the shared agent loop and its event-bus kernel', () => {
       const EVENTS = [
         AgentEventType.ROUND_START,
         AgentEventType.STREAM_TEXT,
@@ -3595,18 +3643,22 @@ describe('subagent.ts', () => {
         turns: number;
       };
       /**
-       * Runs `scenario` with the setting off and on: what the model received,
-       * the agent's events and how the run ended.
+       * Runs `scenario` on each loop: what the model received, the agent's
+       * events and how the run ended.
        */
-      const onBothPaths = async (
+      const onEachLoop = async (
         scenario: (run: AbortController) => void,
       ): Promise<Outcome[]> => {
         const outcomes: Outcome[] = [];
         try {
-          for (const shared of [false, true]) {
+          for (const { shared, kernel } of LOOPS) {
             vi.stubEnv(
               'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
               shared ? '1' : '0',
+            );
+            vi.stubEnv(
+              'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
+              kernel ? '1' : undefined,
             );
             mockSendMessageStream.mockReset();
             const run = new AbortController();
@@ -3663,7 +3715,7 @@ describe('subagent.ts', () => {
       );
 
       it('sends each round on a Turn with the same requests and events', async () => {
-        const [current, shared] = await onBothPaths(() =>
+        const [current, shared, kernel] = await onEachLoop(() =>
           mockSendMessageStream
             .mockImplementationOnce(async () =>
               streamOf<object>(
@@ -3677,10 +3729,11 @@ describe('subagent.ts', () => {
         );
         expect(shared.turns).toBe(2);
         expect(shared).toEqual(current);
+        expect(kernel).toEqual(shared);
       });
 
       it('keeps the escalated output limit and drops a retried attempt as before', async () => {
-        const [current, shared] = await onBothPaths(() =>
+        const [current, shared, kernel] = await onEachLoop(() =>
           mockSendMessageStream
             .mockImplementationOnce(async () =>
               streamOf<object>(
@@ -3694,6 +3747,7 @@ describe('subagent.ts', () => {
         expect(shared.requests[1]).toMatchObject({ maxOutputTokens: 65_536 });
         expect(JSON.stringify(shared.requests[1])).not.toContain('call_stale');
         expect(shared).toEqual(current);
+        expect(kernel).toEqual(shared);
       });
 
       it.each([
@@ -3718,12 +3772,12 @@ describe('subagent.ts', () => {
         'correlates tool requests when $description',
         async ({ chunks, responseId }) => {
           const schedule = vi.spyOn(CoreToolScheduler.prototype, 'schedule');
-          await onBothPaths(() =>
+          await onEachLoop(() =>
             mockSendMessageStream
               .mockImplementationOnce(async () => streamOf<object>(...chunks))
               .mockImplementation(async () => streamOf(answer)),
           );
-          expect(schedule).toHaveBeenCalledTimes(2);
+          expect(schedule).toHaveBeenCalledTimes(LOOPS.length);
           for (const [requests] of schedule.mock.calls) {
             expect(requests).toMatchObject([
               { callId: 'call_1', response_id: responseId },
@@ -3733,7 +3787,7 @@ describe('subagent.ts', () => {
       );
 
       it('ends the run with the failure the request threw', async () => {
-        const [current, shared] = await onBothPaths(() =>
+        const [current, shared, kernel] = await onEachLoop(() =>
           mockSendMessageStream.mockImplementation(async () =>
             (async function* () {
               yield partsChunk([{ text: 'Partial' }]);
@@ -3746,11 +3800,12 @@ describe('subagent.ts', () => {
           error: 'upstream exploded',
         });
         expect(shared).toEqual(current);
+        expect(kernel).toEqual(shared);
       });
 
       it('stops the round at a loop the stream shows, and closes the stream', async () => {
         const closed: boolean[] = [];
-        const [current, shared] = await onBothPaths(() => {
+        const [current, shared, kernel] = await onEachLoop(() => {
           vi.spyOn(
             LoopDetectionService.prototype,
             'addAndCheckHeuristicLoops',
@@ -3771,8 +3826,9 @@ describe('subagent.ts', () => {
         });
         expect(shared.terminateMode).toBe(AgentTerminateMode.LOOP_DETECTED);
         expect(shared.turns).toBe(1);
-        expect(closed).toEqual([true, true]);
+        expect(closed).toEqual(LOOPS.map(() => true));
         expect(shared).toEqual(current);
+        expect(kernel).toEqual(shared);
       });
 
       it('streams the visible text already received when a thought trips the loop guard', async () => {
@@ -3780,7 +3836,7 @@ describe('subagent.ts', () => {
           text: 'I need to check the workspace.',
           thought: true,
         };
-        const [current, shared] = await onBothPaths(() =>
+        const [current, shared, kernel] = await onEachLoop(() =>
           mockSendMessageStream.mockImplementation(async () =>
             streamOf(
               partsChunk([thought]),
@@ -3803,10 +3859,11 @@ describe('subagent.ts', () => {
           expect.objectContaining({ text: 'Never seen.' }),
         ]);
         expect(shared).toEqual(current);
+        expect(kernel).toEqual(shared);
       });
 
       it('cancels the run when its signal aborts mid-stream', async () => {
-        const [current, shared] = await onBothPaths((run) =>
+        const [current, shared, kernel] = await onEachLoop((run) =>
           mockSendMessageStream.mockImplementation(async () =>
             (async function* () {
               yield partsChunk([{ text: 'Started.' }]);
@@ -3818,11 +3875,12 @@ describe('subagent.ts', () => {
         );
         expect(shared.terminateMode).toBe(AgentTerminateMode.CANCELLED);
         expect(shared).toEqual(current);
+        expect(kernel).toEqual(shared);
       });
 
       it('cancels the run when its signal aborts during a tool batch', async () => {
         const schedule = CoreToolScheduler.prototype.schedule;
-        const [current, shared] = await onBothPaths((run) => {
+        const [current, shared, kernel] = await onEachLoop((run) => {
           mockSendMessageStream.mockImplementation(async () =>
             streamOf(callsChunk([listFiles('call_1')])),
           );
@@ -3836,10 +3894,11 @@ describe('subagent.ts', () => {
         });
         expect(shared.terminateMode).toBe(AgentTerminateMode.CANCELLED);
         expect(shared).toEqual(current);
+        expect(kernel).toEqual(shared);
       });
 
       it('drops the calls of a model the fallback replaced (intended difference)', async () => {
-        const [current, shared] = await onBothPaths(() =>
+        const [current, shared, kernel] = await onEachLoop(() =>
           mockSendMessageStream
             .mockImplementationOnce(async () =>
               streamOf<object>(
@@ -3857,6 +3916,7 @@ describe('subagent.ts', () => {
           JSON.stringify(outcome.requests[1]).match(/call_\w+/g);
         expect(sentIds(current)).toEqual(['call_failed_model', 'call_1']);
         expect(sentIds(shared)).toEqual(['call_1']);
+        expect(kernel).toEqual(shared);
       });
     });
   });

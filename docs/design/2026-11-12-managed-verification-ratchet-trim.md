@@ -64,12 +64,13 @@ lane invokes these profiles; the CI Hosted lanes run the same classes under
 fast tier skips that lane, which owns the suite) and is unchanged.
 
 Deeper structural dedup of the profiles (moving the shared Failsafe version
-and executions into `pluginManagement`) is intentionally not done: the
-v0.26.5 release-repair patch
-`scripts/patches/managed-runtime-v0.26.5-verification.patch`, exercised by
-`scripts/tests/managed-runtime-release.test.js`, reverse-applies against the
-current pom and pins the `pluginManagement` block byte-for-byte. Restructuring
-it would break the pinned release repair for ~100 lines of XML savings.
+and executions into `pluginManagement`) was originally blocked by the v0.26.5
+release-repair patch `scripts/patches/managed-runtime-v0.26.5-verification.patch`,
+which reverse-applied against the current pom and pinned the `pluginManagement`
+block byte-for-byte. That patch and its meta-test were removed by the dead-tag
+release-repair cleanup (pre-production convergence design, Slice 2), so the
+dedup is no longer blocked by a pin. It remains a separate careful change
+because it touches the CI lane definitions.
 
 ## Documentation policy
 
