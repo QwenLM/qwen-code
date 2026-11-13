@@ -6770,14 +6770,14 @@ describe('Session', () => {
       mockChat.sendMessageStream = vi
         .fn()
         .mockResolvedValue(createEmptyStream());
-      // Blocking work that never settles on its own: if the ACP branch drops
-      // the drain promise instead of awaiting it, the turn still completes and
-      // the race below sees 'turn-finished'. Both drains read it — the skill
-      // review's and the one after the delegated background work.
+      // The queue carries Extract and Dream as well as the review. A turn must
+      // not wait on the first two (design doc §6: background agents that can
+      // run for minutes), so a never-settling drained promise must NOT hold
+      // the turn open.
+      const neverSettles = new Promise<number>(() => {});
       mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValue([
-        new Promise<number>(() => {}),
+        neverSettles,
       ]);
-
       const outcome = await Promise.race([
         session
           .prompt({
@@ -6789,7 +6789,7 @@ describe('Session', () => {
           setTimeout(() => resolve('turn-still-waiting'), 50),
         ),
       ]);
-      expect(outcome).toBe('turn-still-waiting');
+      expect(outcome).toBe('turn-finished');
 
       // The skill review is the client's job now — it schedules one on every
       // UserQuery/ToolResult turn — so the ACP branch only has to reach that
@@ -6811,6 +6811,37 @@ describe('Session', () => {
         mockLlmClient.consumePendingMemoryTaskPromises.mock
           .invocationCallOrder[0]!,
       );
+    });
+
+    it('waits for the managed skill review itself, though not for Extract or Dream', async () => {
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      // The review is what this round owes the caller, so an unsettled review
+      // must hold the turn open — and it must do so through the promise
+      // `runManagedAutoSkillReview` returned, not through the drained queue.
+      const reviewNeverSettles = new Promise<number>(() => {});
+      mockLlmClient.runManagedAutoSkillReview.mockReturnValue(
+        reviewNeverSettles,
+      );
+      mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValue([]);
+
+      const outcome = await Promise.race([
+        session
+          .prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          })
+          .then(() => 'turn-finished'),
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve('turn-still-waiting'), 50),
+        ),
+      ]);
+      expect(outcome).toBe('turn-still-waiting');
     });
 
     it("schedules no extraction or Dream after a channel's turn", async () => {

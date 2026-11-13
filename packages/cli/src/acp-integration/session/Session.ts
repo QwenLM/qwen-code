@@ -11527,13 +11527,17 @@ export class Session implements SessionContext {
    */
   async #runManagedAutoSkillReview(): Promise<void> {
     const llmClient = this.config.getLlmClient();
-    llmClient.runManagedAutoSkillReview();
-    for (const promise of llmClient.consumePendingMemoryTaskPromises()) {
-      await promise;
+    const review = llmClient.runManagedAutoSkillReview();
+    // Extract and Dream are fire-and-forget (design doc §6) — draining the
+    // whole queue here would hold the turn open on those background agents,
+    // which can run for minutes.
+    void llmClient.consumePendingMemoryTaskPromises();
+    if (review) {
+      await review;
     }
   }
 
-  #recordPromptCompletionEffects(
+  async #recordPromptCompletionEffects(
     result: {
       stopReason: PromptResponse['stopReason'];
       loopProtectionStopped?: boolean;
@@ -11592,19 +11596,23 @@ export class Session implements SessionContext {
     }
     const llmClient = this.config.getLlmClient();
     llmClient.captureCacheSafeParams();
+    // Capture the review promise before the queue is consumed: the review is
+    // pushed onto that same queue, and a waiting host must await the review
+    // without inheriting Extract and Dream.
+    const sharedRoundReview = llmClient.runManagedAutoSkillReview();
     llmClient.runManagedAutoMemoryBackgroundTasks(SendMessageType.UserQuery, {
       skipMemoryExtraction: channelTurn,
     });
     // ACP reports no memory updates, so take the tasks the client queued for
-    // that report instead of leaving them to pile up over the session, and
-    // hand the caller the drain so the turn really waits for it.
-    const drained = llmClient.consumePendingMemoryTaskPromises();
-    if (drained.length === 0) {
-      return;
+    // that report instead of leaving them to pile up over the session. Extract
+    // and Dream are fire-and-forget (design doc §6); the turn must not wait on
+    // them, or `session/prompt` would stay open until those agents finish. The
+    // only part this round owes the caller is the skill review, which
+    // `runManagedAutoSkillReview` already returned and scheduled above.
+    void llmClient.consumePendingMemoryTaskPromises();
+    if (sharedRoundReview) {
+      await sharedRoundReview;
     }
-    return Promise.all(drained.map((promise) => promise.catch(() => {}))).then(
-      () => undefined,
-    );
   }
 
   async #buildNextMessageAfterToolRun(

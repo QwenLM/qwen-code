@@ -3358,14 +3358,22 @@ export class LlmClient {
    * reaches Extract and Dream — can run the same gate. Must be called on the
    * tool-call counters this client keeps, since it resets both.
    */
-  runManagedAutoSkillReview(): void {
+  /**
+   * Schedules the managed skill review and returns its promise, so a host that
+   * has to wait for the review can await exactly that and nothing else.
+   *
+   * Extract and Dream stay fire-and-forget by design (design doc §6): they are
+   * background agents that can run for minutes, so a host awaiting the whole
+   * pending-task queue would hold its turn open on them.
+   */
+  runManagedAutoSkillReview(): Promise<number> | undefined {
     if (this.shutdownRequested) {
       debugLogger.debug('Skipping skill review: shutdown requested.');
-      return;
+      return undefined;
     }
     const autoSkillEnabled = this.config.getAutoSkillEnabled();
     if (!autoSkillEnabled) {
-      return;
+      return undefined;
     }
     const skillReviewResult = this.config
       .getMemoryManager()
@@ -3385,17 +3393,19 @@ export class LlmClient {
       // review only fires after a full new threshold worth of tool calls.
       this.toolCallCount = 0;
       if (skillReviewResult.promise) {
-        this.pendingMemoryTaskPromises.push(
-          skillReviewResult.promise
-            .then((record) => {
-              const touched = record.metadata?.['touchedSkillFiles'];
-              return Array.isArray(touched) ? touched.length : 0;
-            })
-            .catch((error: unknown) => {
-              debugLogger.warn('Failed to run managed skill review.', error);
-              return 0;
-            }),
-        );
+        const reviewPromise = skillReviewResult.promise
+          .then((record) => {
+            const touched = record.metadata?.['touchedSkillFiles'];
+            return Array.isArray(touched) ? touched.length : 0;
+          })
+          .catch((error: unknown) => {
+            debugLogger.warn('Failed to run managed skill review.', error);
+            return 0;
+          });
+        this.pendingMemoryTaskPromises.push(reviewPromise);
+        // Returned so a waiting host can await the review itself rather than
+        // the whole queue, which also carries Extract and Dream.
+        return reviewPromise;
       }
     } else if (
       skillReviewResult.status === 'skipped' &&
@@ -3413,6 +3423,7 @@ export class LlmClient {
     // the flag is set, scheduleSkillReview returns 'skipped' immediately
     // (never 'scheduled'), so without this reset the flag can never clear.
     this.skillsModifiedInSession = false;
+    return undefined;
   }
 
   /**
