@@ -344,12 +344,17 @@ function prettierFetch(
     baseScope = {},
     headScope = {},
     truncated = false,
+    // Per-side flags: a single shared one cannot tell the two halves of
+    // `baseTree.truncated || headTree.truncated` apart, so each arm would
+    // survive its own removal. `truncated` stays as shorthand for both.
+    baseTruncated = truncated,
+    headTruncated = truncated,
     baseRef = BASE_REF,
   },
   calls = [],
 ) {
-  const treeFor = (scope, pi) => ({
-    truncated,
+  const treeFor = (scope, pi, isTruncated) => ({
+    truncated: isTruncated,
     tree: [
       { type: 'blob', path: '.prettierignore', sha: blob(ignoreFile(pi)) },
       ...Object.entries(scope).map(([path, text]) => ({
@@ -361,8 +366,8 @@ function prettierFetch(
     ],
   });
   const trees = {
-    [baseRef]: treeFor(baseScope, basePi),
-    [HEAD_SHA]: treeFor(headScope, headPi),
+    [baseRef]: treeFor(baseScope, basePi, baseTruncated),
+    [HEAD_SHA]: treeFor(headScope, headPi, headTruncated),
   };
   const piText = {
     [baseRef]: ignoreFile(basePi),
@@ -789,35 +794,45 @@ test('an ignore file added or removed on either side blocks the narrowing', asyn
   }
 });
 
-test('a truncated tree never narrows, and says so', async () => {
-  // Same principle as the extraction miss: a silent false would stop the
-  // narrowing with nothing in the log to explain the stale verdict.
-  const logged = [];
-  const original = console.log;
-  let stale;
-  console.log = (m) => logged.push(String(m));
-  try {
-    stale = await findStaleGateFiles({
-      ...PRETTIER_OPTS,
-      ...prettierFetch({
-        basePi: ['node_modules', 'packages/live-host/'],
-        headPi: ['node_modules'],
-        truncated: true,
-      }),
-    });
-  } finally {
-    console.log = original;
-  }
-  assert.equal(stale.length, 1);
-  assert.ok(
-    logged.some(
-      (m) =>
-        m.includes('could not narrow .prettierignore') &&
-        m.includes('truncated'),
-    ),
-    'a truncated tree must annotate why the verdict was kept',
-  );
-});
+// One case per side, not just both at once: the guard is
+// `baseTree.truncated || headTree.truncated`, and a shared flag lets either
+// arm be deleted with the suite still green. Each shape below is the sole
+// witness for its own arm.
+for (const [shape, flags] of [
+  ['both trees', { truncated: true }],
+  ['only the base tree', { baseTruncated: true }],
+  ['only the head tree', { headTruncated: true }],
+]) {
+  test(`a truncated tree never narrows, and says so (${shape})`, async () => {
+    // Same principle as the extraction miss: a silent false would stop the
+    // narrowing with nothing in the log to explain the stale verdict.
+    const logged = [];
+    const original = console.log;
+    let stale;
+    console.log = (m) => logged.push(String(m));
+    try {
+      stale = await findStaleGateFiles({
+        ...PRETTIER_OPTS,
+        ...prettierFetch({
+          basePi: ['node_modules', 'packages/live-host/'],
+          headPi: ['node_modules'],
+          ...flags,
+        }),
+      });
+    } finally {
+      console.log = original;
+    }
+    assert.equal(stale.length, 1);
+    assert.ok(
+      logged.some(
+        (m) =>
+          m.includes('could not narrow .prettierignore') &&
+          m.includes('truncated'),
+      ),
+      'a truncated tree must annotate why the verdict was kept',
+    );
+  });
+}
 
 test('a base ref containing a hash is URI-encoded in the tree path', async () => {
   // This is the shape the encoder is actually for. '#' and '%' are legal in a
