@@ -37,9 +37,11 @@ const fsHooks = vi.hoisted(() => ({
   realReadlinkSync: undefined as
     | typeof import('node:fs').readlinkSync
     | undefined,
+  realExistsSync: undefined as typeof import('node:fs').existsSync | undefined,
   openSync: vi.fn(),
   fstatSync: vi.fn(),
   readlinkSync: vi.fn(),
+  existsSync: vi.fn(),
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -47,12 +49,27 @@ vi.mock('node:fs', async (importOriginal) => {
   fsHooks.realOpenSync = actual.openSync;
   fsHooks.realFstatSync = actual.fstatSync;
   fsHooks.realReadlinkSync = actual.readlinkSync;
+  fsHooks.realExistsSync = actual.existsSync;
   return {
     ...actual,
     openSync: fsHooks.openSync,
     fstatSync: fsHooks.fstatSync,
     readlinkSync: fsHooks.readlinkSync,
+    existsSync: fsHooks.existsSync,
   };
+});
+
+// The reported temporary directory is a mockable seam too: one containment case
+// needs a workspace that is outside the process's real temporary directory.
+const osHooks = vi.hoisted(() => ({
+  realTmpdir: undefined as typeof import('node:os').tmpdir | undefined,
+  tmpdir: vi.fn(),
+}));
+
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  osHooks.realTmpdir = actual.tmpdir;
+  return { ...actual, tmpdir: osHooks.tmpdir };
 });
 
 beforeEach(() => {
@@ -62,6 +79,10 @@ beforeEach(() => {
   fsHooks.fstatSync.mockImplementation(fsHooks.realFstatSync as never);
   fsHooks.readlinkSync.mockReset();
   fsHooks.readlinkSync.mockImplementation(fsHooks.realReadlinkSync as never);
+  fsHooks.existsSync.mockReset();
+  fsHooks.existsSync.mockImplementation(fsHooks.realExistsSync as never);
+  osHooks.tmpdir.mockReset();
+  osHooks.tmpdir.mockImplementation(osHooks.realTmpdir as never);
 });
 
 describe('readOutboundFile', () => {
@@ -173,6 +194,23 @@ describe('readOutboundFile', () => {
     );
   });
 
+  itLinux('refuses a sibling whose literal name is the deletion marker', () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'hello');
+    // A real file may carry the literal name `<workspace> (deleted)` beside the
+    // workspace, and the kernel appends the same text to an unlinked file's
+    // link. Trimming the suffix would collapse this path onto the workspace root
+    // and pass the equality arm, so the recorded path is compared as it is. The
+    // temporary directory is pointed elsewhere so that sibling is outside both
+    // allowed roots, as it is for a workspace outside the system temp dir.
+    osHooks.tmpdir.mockReturnValue(join(root, 'elsewhere'));
+    fsHooks.readlinkSync.mockImplementationOnce(() => `${workspace} (deleted)`);
+
+    expect(() => readOutboundFile(path, workspace)).toThrow(
+      /outside the session workspace/,
+    );
+  });
+
   itLinux(
     'fails closed when procfs exists but the descriptor link is gone',
     () => {
@@ -189,6 +227,23 @@ describe('readOutboundFile', () => {
       );
     },
   );
+
+  itLinux('keeps the pre-open guard alone where procfs is absent', () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'hello');
+    // macOS and Windows expose no `/proc/self/fd`; the same code runs there in
+    // the nightly lanes, where an upload must not start failing.
+    fsHooks.existsSync.mockImplementation(
+      ((p: string) => p !== '/proc/self/fd') as never,
+    );
+    fsHooks.readlinkSync.mockImplementationOnce(() => {
+      throw Object.assign(new Error('ENOENT: no such file or directory'), {
+        code: 'ENOENT',
+      });
+    });
+
+    expect(readOutboundFile(path, workspace).bytes.toString()).toBe('hello');
+  });
 
   // Windows has neither constant (`fs.constants.O_NOFOLLOW`/`O_NONBLOCK` are
   // `undefined` there), so `flags & undefined` is 0 and the assertion can never

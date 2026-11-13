@@ -405,25 +405,24 @@ function insideRoots(path: string, roots: string[]): boolean {
  * `readlinkSync` rather than `realpathSync` on purpose: `realpathSync` throws
  * `ENOENT` once the opened name is unlinked (the kernel appends ` (deleted)` to
  * the link target), which would turn the containment re-check into no check at
- * the exact moment it matters. The recorded path survives the unlink.
+ * the exact moment it matters. The recorded path is compared as the kernel
+ * reports it: `insideRoots` already accepts a descendant by prefix, so the
+ * suffix is harmless for a file under a root — while trimming it would collapse
+ * a sibling literally named `<root> (deleted)` onto the root and accept an
+ * outside file through the equality arm.
  *
  * Where procfs exists but the link cannot be read, the descriptor cannot be
  * identified at all; that is a refusal, not a fallback to the weaker guard.
  */
 function descriptorPath(fd: number): string | 'unavailable' {
-  const deletedSuffix = ' (deleted)';
-  let link: string;
   try {
-    link = readlinkSync(`/proc/self/fd/${fd}`);
+    return readlinkSync(`/proc/self/fd/${fd}`);
   } catch {
     if (!existsSync('/proc/self/fd')) return 'unavailable';
     throw new QQOutboundFileError(
       'the file could not be identified after opening.',
     );
   }
-  return link.endsWith(deletedSuffix)
-    ? link.slice(0, -deletedSuffix.length)
-    : link;
 }
 
 /**
