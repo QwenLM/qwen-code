@@ -627,6 +627,9 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'RUNTIME_NODE_LIST',
   // Loopback operator registration has no client capability.
   'EXTERNAL_STORAGE_REGISTER',
+  // Internal relay MCP leg the Hosted Harness connects back to, behind the
+  // relay credential, never a client capability.
+  'INTERNAL_CLIENT_FILES_MCP',
   // Internal writer and publication routes: between the control plane and its
   // own stores, behind writer credentials, never a client capability.
   'PUB_ADMISSION_PREPARE',
@@ -650,7 +653,11 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'STORE_LIFECYCLE_AUTHORIZE',
   'STORE_RECOVERY_BLOCK',
   'STORE_RESOURCE_GET',
+  'STORE_RESOURCE_ALLOCATE',
+  'STORE_RESOURCE_UPLOAD',
+  'STORE_RESOURCE_FINALIZE',
   'STORE_RESTORE',
+  'STORE_SIDE_QUERY',
   'STORE_SNAPSHOT_GET',
   'STORE_SNAPSHOT_PAGES',
   'STORE_SNAPSHOT_PUBLISH',
@@ -677,6 +684,11 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
  * Personal MemoryStore create/list differs from Workspace memory-file CRUD.
  */
 export const MANAGED_ONLY_REPORTED: readonly string[] = [
+  'CLIENT_FILES_REGISTER',
+  'CLIENT_FILES_RESPOND',
+  'CLIENT_FILES_STATUS',
+  'CLIENT_FILES_STREAM',
+  'CLIENT_FILES_UNREGISTER',
   'EXTENSION_ARCHIVE',
   'EXTENSION_CONFIG_APPLY',
   'EXTENSION_CONFIG_GET',
@@ -696,6 +708,12 @@ export const MANAGED_ONLY_REPORTED: readonly string[] = [
   'SESSION_RECOVERY_QUERY',
   'SESSION_RECOVERY_RECHECK',
   'SESSION_WORKTREE',
+  'SIDE_QUERY_CANCEL',
+  'SIDE_QUERY_CONTEXT',
+  'SIDE_QUERY_CREATE',
+  'SIDE_QUERY_GET',
+  'SIDE_QUERY_LIST',
+  'SIDE_QUERY_STREAM',
 ];
 
 /**

@@ -23,6 +23,69 @@ import java.util.Set;
  * exactly one rule class.
  */
 public enum SurfaceRegistry {
+    PUBLIC_SIDE_QUERY_CREATE(Method.POST, "/v1/agents/sessions/{sessionId}/side-queries",
+            Surface.PUBLIC, RuleClass.SIDE_QUERY_OPERATOR, EnumSet.of(Capability.SIDE_QUERY_CREATE)),
+    WEBSHELL_SIDE_QUERY_CREATE(Method.POST, "/api/agent/web-shell/v1/session-side-queries/create",
+            Surface.WEBSHELL, RuleClass.SIDE_QUERY_OPERATOR, EnumSet.of(Capability.SIDE_QUERY_CREATE)),
+    PUBLIC_SIDE_QUERY_LIST(Method.GET, "/v1/agents/sessions/{sessionId}/side-queries",
+            Surface.PUBLIC, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_LIST)),
+    WEBSHELL_SIDE_QUERY_LIST(Method.POST, "/api/agent/web-shell/v1/session-side-queries/list",
+            Surface.WEBSHELL, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_LIST)),
+    PUBLIC_SIDE_QUERY_CONTEXT(Method.GET, "/v1/agents/sessions/{sessionId}/side-queries/context",
+            Surface.PUBLIC, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_CONTEXT)),
+    WEBSHELL_SIDE_QUERY_CONTEXT(Method.POST, "/api/agent/web-shell/v1/session-side-queries/context",
+            Surface.WEBSHELL, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_CONTEXT)),
+    PUBLIC_SIDE_QUERY_GET(Method.GET, "/v1/agents/sessions/{sessionId}/side-queries/{queryId}",
+            Surface.PUBLIC, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_GET)),
+    WEBSHELL_SIDE_QUERY_GET(Method.POST, "/api/agent/web-shell/v1/session-side-queries/get",
+            Surface.WEBSHELL, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_GET)),
+    PUBLIC_SIDE_QUERY_CANCEL(Method.POST, "/v1/agents/sessions/{sessionId}/side-queries/{queryId}/cancel",
+            Surface.PUBLIC, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_CANCEL)),
+    WEBSHELL_SIDE_QUERY_CANCEL(Method.POST, "/api/agent/web-shell/v1/session-side-queries/cancel",
+            Surface.WEBSHELL, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_CANCEL)),
+    PUBLIC_SIDE_QUERY_STREAM(Method.GET, "/v1/agents/sessions/{sessionId}/side-queries/{queryId}/events",
+            Surface.PUBLIC, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_STREAM)),
+    WEBSHELL_SIDE_QUERY_STREAM(Method.POST, "/api/agent/web-shell/v1/session-side-queries/stream",
+            Surface.WEBSHELL, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_STREAM)),
+    WEBSHELL_CLIENT_FILES_REGISTER(Method.POST, "/api/agent/web-shell/v1/client-files/register",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_OPERATOR, EnumSet.of(Capability.CLIENT_FILES_REGISTER)),
+    WEBSHELL_CLIENT_FILES_UNREGISTER(Method.POST, "/api/agent/web-shell/v1/client-files/unregister",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_OPERATOR, EnumSet.of(Capability.CLIENT_FILES_UNREGISTER)),
+    WEBSHELL_CLIENT_FILES_STATUS(Method.POST, "/api/agent/web-shell/v1/client-files/status",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_ACTOR, EnumSet.of(Capability.CLIENT_FILES_STATUS)),
+    WEBSHELL_CLIENT_FILES_STREAM(Method.POST, "/api/agent/web-shell/v1/client-files/requests/stream",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_ACTOR, EnumSet.of(Capability.CLIENT_FILES_STREAM)),
+    WEBSHELL_CLIENT_FILES_RESPOND(Method.POST, "/api/agent/web-shell/v1/client-files/responses",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_ACTOR, EnumSet.of(Capability.CLIENT_FILES_RESPOND)),
+    INTERNAL_CLIENT_FILES_MCP(Method.POST, "/internal/managed-client-files/v1/sessions/{sessionId}/mcp",
+            Surface.INTERNAL, RuleClass.INTERNAL_CLIENT_FILES, EnumSet.of(Capability.INTERNAL_CLIENT_FILES_MCP)),
+    INTERNAL_SIDE_QUERY_INPUT(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/input",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
+    INTERNAL_SIDE_QUERY_TRANSACTIONS(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/transactions",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
+    INTERNAL_SIDE_QUERY_RESOURCES_READ(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/resources/read",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
+    INTERNAL_SIDE_QUERY_MODEL_CONFIG(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/model-config",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
+    INTERNAL_SIDE_QUERY_RESOURCES_STAGE(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/resources/stage",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
+    INTERNAL_SIDE_QUERY_INPUT_READY(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/input-ready",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
+    INTERNAL_SIDE_QUERY_RUNNING(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/running",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
+    INTERNAL_SIDE_QUERY_RESULT(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/result",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
+    INTERNAL_SIDE_QUERY_HEARTBEAT(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/heartbeat",
+            Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
     PUBLIC_MEMORY_STORE_CREATE(Method.POST, "/v1/agents/memory-stores",
             Surface.PUBLIC, RuleClass.PERSONAL_MEMORY, EnumSet.of(Capability.MEMORY_STORE_CREATE)),
     PUBLIC_MEMORY_STORE_LIST(Method.GET, "/v1/agents/memory-stores",
@@ -259,6 +322,12 @@ public enum SurfaceRegistry {
             Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_LIST)),
     PUBLIC_EXTENSION_CREATE(Method.POST, "/v1/agents/workspaces/{workspaceId}/extensions",
             Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_PUBLISH)),
+    PUBLIC_EXTENSION_SOURCE_IMPORT(Method.POST, "/v1/agents/workspaces/{workspaceId}/extensions/source-imports",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_PUBLISH)),
+    PUBLIC_EXTENSION_SOURCE_RECEIPT(Method.GET, "/v1/agents/workspaces/{workspaceId}/extensions/source-imports/{operationId}",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_OPERATION)),
+    PUBLIC_EXTENSION_SOURCE_LOOKUP(Method.GET, "/v1/agents/workspaces/{workspaceId}/extensions/source-imports",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_OPERATION)),
     PUBLIC_EXTENSION_PUBLISH(Method.PUT, "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/packages/{packageDigest}",
             Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_PUBLISH)),
     PUBLIC_EXTENSION_GET(Method.GET, "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/packages/{packageRevision}",
@@ -606,6 +675,20 @@ public enum SurfaceRegistry {
                     + "/resources/{resourceId}",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
             EnumSet.of(Capability.STORE_RESOURCE_GET)),
+    INTERNAL_RESOURCE_ALLOCATE(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/resources:allocate",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_RESOURCE_ALLOCATE)),
+    INTERNAL_RESOURCE_UPLOAD(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}"
+                    + "/resources/{resourceId}:upload",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_RESOURCE_UPLOAD)),
+    INTERNAL_RESOURCE_FINALIZE(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}"
+                    + "/resources/{resourceId}:finalize",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_RESOURCE_FINALIZE)),
     INTERNAL_SNAPSHOT_PUBLISH(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}/journal-snapshots:publish",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_SNAPSHOT_PUBLISH)),
@@ -765,6 +848,10 @@ public enum SurfaceRegistry {
      * carries both {@link #TURN_SUBMIT} and {@link #TURN_CANCEL}.
      */
     public enum Capability {
+        SIDE_QUERY_CREATE, SIDE_QUERY_LIST, SIDE_QUERY_CONTEXT, SIDE_QUERY_GET, SIDE_QUERY_CANCEL, SIDE_QUERY_STREAM,
+        STORE_SIDE_QUERY,
+        CLIENT_FILES_REGISTER, CLIENT_FILES_UNREGISTER, CLIENT_FILES_STATUS, CLIENT_FILES_STREAM, CLIENT_FILES_RESPOND,
+        INTERNAL_CLIENT_FILES_MCP,
         MEMORY_STORE_CREATE, MEMORY_STORE_LIST, STORE_MEMORY_QUERY,
         SESSION_CONTEXT_USAGE, SESSION_MODEL_STATISTICS, SESSION_RESOURCES, SESSION_AGENT_TRACE,
         SESSION_ACTIVITY_STATS, SESSION_ACTIVITY,
@@ -863,6 +950,9 @@ public enum SurfaceRegistry {
         STORE_SNAPSHOT_GET,
         STORE_SNAPSHOT_PAGES,
         STORE_RESOURCE_GET,
+        STORE_RESOURCE_ALLOCATE,
+        STORE_RESOURCE_UPLOAD,
+        STORE_RESOURCE_FINALIZE,
         PUB_GRANT,
         PUB_SEGMENT,
         PUB_RESOURCE,
@@ -884,6 +974,39 @@ public enum SurfaceRegistry {
      * acceptance suite walks these classes to build its probe matrix.
      */
     public enum RuleClass {
+        /** Current execution authority; busy Turns and Runtime placement do not apply. */
+        SIDE_QUERY_OPERATOR,
+        /** Current Session visibility and exact actor-private query ownership. */
+        SIDE_QUERY_ACTOR,
+        /** Query-scoped claim, boot and generation; never a Session writer grant. */
+        INTERNAL_SIDE_QUERY,
+        /**
+         * Client files registration and teardown: the read grant ({@code 404
+         * session_not_found} below it) plus current execution authority on the
+         * bound ACTIVE Workspace ({@code 403 client_files_execution_forbidden}
+         * below it). The {@code 503 client_files_disabled} refusal while the
+         * deployment opt-in is off is a service-layer flag check
+         * ({@code requireEnabled}), not an admission arm of this rule class, so
+         * the anonymous admission probes never reach it.
+         */
+        CLIENT_FILES_OPERATOR,
+        /**
+         * Client files reads and browser uplink: the read grant, then the
+         * registering actor's own active binding ({@code 404
+         * client_files_not_found} for any other actor or a closed binding,
+         * {@code 409 client_files_generation_conflict} for a stale
+         * generation). The status read answers an absent binding with an
+         * empty 200.
+         */
+        CLIENT_FILES_ACTOR,
+        /**
+         * The Runtime-facing MCP leg: no actor; the session relay credential
+         * issued at registration is the only admission ({@code 403
+         * client_files_credential_invalid} without it). On a dedicated
+         * internal listener the routing filter answers a public-connector
+         * caller {@code 404}.
+         */
+        INTERNAL_CLIENT_FILES,
         /** Authenticated tenant actor, restricted to that actor's personal Store. */
         PERSONAL_MEMORY,
         SESSION_WORKTREE,

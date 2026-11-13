@@ -994,6 +994,16 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
     }
 
+    /** Registers or unregisters the Session's client filesystem relay. */
+    public Map<String, Object> clientFilesOperation(HarnessSessionRef session, Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/client-files";
+        HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/client-files",
+                body, ref.getHarnessSessionId(), ref.getHarnessClientId(), operation);
+        DaemonClient.requireStatus(response, 200, operation);
+        return JsonSupport.parseObject(response.getBody(), operation);
+    }
+
     public Map<String, Object> mcpManagementOperation(HarnessSessionRef session, String operationId) {
         HarnessSessionRef ref = requireSessionRef(session);
         String id = requireUuid(operationId, "operationId");
@@ -1096,6 +1106,38 @@ public final class HostedHarnessClient implements AutoCloseable {
         } catch (DaemonProtocolException error) {
             throw new MutationOutcomeUnknownException(operation, error);
         }
+    }
+
+    /** Instance-scoped work: these calls never create or load a Session attachment. */
+    public Map<String, Object> submitSideQuery(Map<String, Object> body) {
+        return sideQueryCall("/side-queries", body, 202, requireBoundedRecoveryText((String) body.get("queryId"), "queryId"));
+    }
+
+    public Map<String, Object> readSideQuery(String queryId, Map<String, Object> claim) {
+        return sideQueryCall("/side-queries/" + java.net.URLEncoder.encode(
+                requireBoundedRecoveryText(queryId, "queryId"), StandardCharsets.UTF_8) + "/status",
+                Map.of("claim", claim), 200, queryId);
+    }
+
+    public Map<String, Object> cancelSideQuery(String queryId, Map<String, Object> claim) {
+        return sideQueryCall("/side-queries/" + java.net.URLEncoder.encode(
+                requireBoundedRecoveryText(queryId, "queryId"), StandardCharsets.UTF_8) + "/cancel",
+                Map.of("claim", claim), 202, queryId);
+    }
+
+    private Map<String, Object> sideQueryCall(String path, Map<String, Object> body, int expectedStatus, String queryId) {
+        if (!capabilities().getFeatures().contains("side-query/1")) {
+            throw new DaemonProtocolException("Hosted side-query capability is required");
+        }
+        String operation = "POST " + path;
+        var response = sendMutation(path, body, capabilities.getBootId(), null, operation);
+        requireMutationStatus(response, expectedStatus, operation);
+        var result = JsonSupport.parseObject(response.getBody(), operation);
+        if (!queryId.equals(result.get("queryId")) || !(result.get("active") instanceof Boolean)
+                || !List.of("accepted", "running", "settled").contains(result.get("state"))) {
+            throw new DaemonProtocolException("Invalid side-query response");
+        }
+        return result;
     }
 
     public Map<String, Object> compressContext(HarnessSessionRef session, Map<String, Object> body) {
@@ -1606,6 +1648,7 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         boolean v2 = version == 2;
         if (v2 && !("hosted-workspace-shell/1".equals(request.get("toolProfile"))
+                || "hosted-workspace-shell/3".equals(request.get("toolProfile"))
                 || "hosted-workspace-mcp/1".equals(request.get("toolProfile")))) {
             throw new DaemonProtocolException("Unsupported Hosted lifecycle profile");
         }

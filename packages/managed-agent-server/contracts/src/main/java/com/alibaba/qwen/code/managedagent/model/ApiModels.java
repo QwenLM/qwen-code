@@ -77,25 +77,6 @@ public final class ApiModels {
             @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree,
             @JsonProperty("model_config") JsonNode modelConfig,
             @JsonProperty("memory_store_id") @Size(min = 1, max = 128) String memoryStoreId) {
-        public CreateSessionRequest(String agentId, String agentRevision, List<InputBlock> input,
-                Map<String, Object> metadata, Boolean stream, JsonNode workspace, List<Map<String, Object>> skills,
-                List<Pin> extensionPins, JsonNode worktree, JsonNode modelConfig) {
-            this(agentId, agentRevision, input, metadata, stream, workspace, skills, extensionPins, worktree, modelConfig, null);
-        }
-        public CreateSessionRequest(String agentId, String agentRevision, List<InputBlock> input,
-                Map<String, Object> metadata, Boolean stream, JsonNode workspace, List<Map<String, Object>> skills,
-                List<Pin> extensionPins, JsonNode worktree) {
-            this(agentId, agentRevision, input, metadata, stream, workspace, skills, extensionPins, worktree, null);
-        }
-        public CreateSessionRequest(String agentId, String agentRevision, List<InputBlock> input,
-                Map<String, Object> metadata, Boolean stream, JsonNode workspace, List<Map<String, Object>> skills,
-                List<Pin> extensionPins) {
-            this(agentId, agentRevision, input, metadata, stream, workspace, skills, extensionPins, null);
-        }
-        public CreateSessionRequest(String agentId, String agentRevision, List<InputBlock> input,
-                Map<String, Object> metadata, Boolean stream, JsonNode workspace, List<Map<String, Object>> skills) {
-            this(agentId, agentRevision, input, metadata, stream, workspace, skills, null);
-        }
     }
 
     public record SessionEventRequest(@NotBlank String type,
@@ -170,21 +151,8 @@ public final class ApiModels {
             @JsonProperty("session_delete") boolean sessionDelete,
             @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("foreground_shell") Boolean foregroundShell,
             @JsonProperty("context_compression") boolean contextCompression,
-            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("child_agents") Boolean childAgents) {
-        public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
-                boolean sessionLifecycle, boolean tasks, boolean actions, boolean sessionClose,
-                boolean sessionArchive, boolean sessionUnarchive, boolean sessionDelete,
-                Boolean foregroundShell, boolean contextCompression) {
-            this(items, snapshots, artifacts, resync, sessionLifecycle, tasks, actions, sessionClose,
-                    sessionArchive, sessionUnarchive, sessionDelete, foregroundShell, contextCompression, null);
-        }
-        public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
-                boolean sessionLifecycle, boolean tasks, boolean actions, boolean sessionClose,
-                boolean sessionArchive, boolean sessionUnarchive, boolean sessionDelete,
-                Boolean foregroundShell) {
-            this(items, snapshots, artifacts, resync, sessionLifecycle, tasks, actions, sessionClose,
-                    sessionArchive, sessionUnarchive, sessionDelete, foregroundShell, false);
-        }
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("child_agents") Boolean childAgents,
+            boolean btw, boolean recap) {
     }
 
     public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
@@ -195,29 +163,11 @@ public final class ApiModels {
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean approvalModeChange,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename, boolean contextCompression,
-            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents) {
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents, boolean btw, boolean recap,
+            boolean clientFiles) {
         @JsonProperty("diagnostics")
         public boolean diagnostics() {
             return tasks;
-        }
-
-        public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
-                boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
-                boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange, Boolean foregroundShell,
-                Boolean modelChange, Boolean approvalModeChange,
-                Boolean inputAttachments, Boolean rename, boolean contextCompression) {
-            this(tasks, artifacts, actions, workspaceTurns, sessionClose, sessionArchive, sessionUnarchive,
-                    sessionDelete, cwdChange, foregroundShell, modelChange, approvalModeChange,
-                    inputAttachments, rename, contextCompression, null);
-        }
-        public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
-                boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
-                boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange, Boolean foregroundShell,
-                Boolean modelChange, Boolean approvalModeChange,
-                Boolean inputAttachments, Boolean rename) {
-            this(tasks, artifacts, actions, workspaceTurns, sessionClose, sessionArchive, sessionUnarchive,
-                    sessionDelete, cwdChange, foregroundShell, modelChange, approvalModeChange,
-                    inputAttachments, rename, false);
         }
     }
 
@@ -243,51 +193,6 @@ public final class ApiModels {
             PublicSessionWorktree worktree,
             @JsonProperty("memory_store_id") String memoryStoreId,
             @JsonProperty("owner_only") Boolean ownerOnly) {
-        public PublicSession(String id, String object, String agentId, String agentRevision,
-                String agentDefinitionDigest, String status, long createdAt, long updatedAt,
-                Map<String, Object> metadata, PublicTurn activeTurn, long lastEventId,
-                long replayFloorSequence, long snapshotThroughSequence, SessionCapabilities capabilities,
-                PublicWorkspace workspace, Long compactionRevision, String contextCompressionOperationId,
-                SessionRecovery recovery, PublicSessionWorktree worktree) {
-            this(id, object, agentId, agentRevision, agentDefinitionDigest, status, createdAt, updatedAt,
-                    metadata, activeTurn, lastEventId, replayFloorSequence, snapshotThroughSequence,
-                    capabilities, workspace, compactionRevision, contextCompressionOperationId, recovery, worktree, null, null);
-        }
-        public PublicSession(String id, String object, String agentId, String agentRevision,
-                String agentDefinitionDigest, String status, long createdAt, long updatedAt,
-                Map<String, Object> metadata, PublicTurn activeTurn, long lastEventId,
-                long replayFloorSequence, long snapshotThroughSequence, SessionCapabilities capabilities,
-                PublicWorkspace workspace, Long compactionRevision, String contextCompressionOperationId,
-                SessionRecovery recovery) {
-            this(id, object, agentId, agentRevision, agentDefinitionDigest, status, createdAt, updatedAt,
-                    metadata, activeTurn, lastEventId, replayFloorSequence, snapshotThroughSequence,
-                    capabilities, workspace, compactionRevision, contextCompressionOperationId, recovery, null);
-        }
-        public PublicSession(String id, String object, String agentId, String agentRevision,
-                String agentDefinitionDigest, String status, long createdAt, long updatedAt,
-                Map<String, Object> metadata, PublicTurn activeTurn, long lastEventId,
-                long replayFloorSequence, long snapshotThroughSequence, SessionCapabilities capabilities,
-                PublicWorkspace workspace) {
-            this(id, object, agentId, agentRevision, agentDefinitionDigest, status, createdAt, updatedAt,
-                    metadata, activeTurn, lastEventId, replayFloorSequence, snapshotThroughSequence,
-                    capabilities, workspace, 0L, null, null);
-        }
-
-        public PublicSession(String id, String object, String agentId,
-                String agentRevision, String agentDefinitionDigest,
-                String status, long createdAt, long updatedAt,
-                Map<String, Object> metadata, PublicTurn activeTurn,
-                long lastEventId, long replayFloorSequence,
-                long snapshotThroughSequence, SessionCapabilities capabilities,
-                PublicWorkspace workspace, Long compactionRevision,
-                String contextCompressionOperationId) {
-            this(id, object, agentId, agentRevision, agentDefinitionDigest,
-                    status, createdAt, updatedAt, metadata, activeTurn,
-                    lastEventId, replayFloorSequence, snapshotThroughSequence,
-                    capabilities, workspace, compactionRevision,
-                    contextCompressionOperationId, null);
-        }
-
         public PublicSession withRecovery(SessionRecovery value) {
             return new PublicSession(id, object, agentId, agentRevision,
                     agentDefinitionDigest, status, createdAt, updatedAt,
@@ -346,28 +251,6 @@ public final class ApiModels {
                 JsonNode actionResolution, String failureCode) {
             this(id, sessionId, type, status, admissionStage, deliveryState,
                     receiptId, replayed, actionResolution, failureCode, null);
-        }
-
-        public PublicCommandOperation(
-                String id,
-                String sessionId,
-                String type,
-                String status,
-                String admissionStage,
-                String deliveryState,
-                String receiptId,
-                boolean replayed) {
-            this(
-                    id,
-                    sessionId,
-                    type,
-                    status,
-                    admissionStage,
-                    deliveryState,
-                    receiptId,
-                    replayed,
-                    null,
-                    null);
         }
     }
 
@@ -884,8 +767,17 @@ public final class ApiModels {
             @JsonProperty("segment_id") String segmentId,
             int ordinal, String state,
             @JsonProperty("provider_receipt") String providerReceipt,
+            List<PublicChannelDeliverySegment> segments,
             @JsonProperty("created_at") long createdAt,
             @JsonProperty("updated_at") long updatedAt) {
+    }
+
+    /** H5: one segment of a channel delivery with its write-once receipt. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicChannelDeliverySegment(
+            @JsonProperty("segment_id") String segmentId,
+            int ordinal,
+            @JsonProperty("provider_receipt") String providerReceipt) {
     }
 
     /** H6b: one occurrence decision of an automation, with its run's state. */

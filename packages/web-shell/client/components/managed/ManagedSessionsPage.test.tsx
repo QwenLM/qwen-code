@@ -8,8 +8,16 @@ import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import { getManagedClientId } from './managed-session-storage';
 import { webcrypto } from 'node:crypto';
 import { pendingQuestion } from './managed-question.test-fixtures';
+import {
+  sideQuery,
+  sideQueryContext,
+} from './managed-side-query.test-fixtures';
 import * as pendingStorage from './managed-pending-storage';
 import { I18nProvider } from '../../i18n';
+import {
+  WebShellCustomizationProvider,
+  type WebShellCustomization,
+} from '../../customization';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
@@ -53,6 +61,14 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: mocks.useWorkspace,
   // The shared approval card asks whether a tool is an agent launch.
   isAgentTool: () => false,
+}));
+const localFilesBridge = vi.hoisted(() => ({
+  status: { phase: 'idle', blocker: null },
+  connect: vi.fn(),
+  disconnect: vi.fn(),
+}));
+vi.mock('../../local-files/useManagedLocalFilesBridge', () => ({
+  useManagedLocalFilesBridge: () => localFilesBridge,
 }));
 vi.mock('../MessageList', () => ({
   MessageList: ({
@@ -306,23 +322,96 @@ describe('ManagedSessionsPage', () => {
     navigationTarget?: HTMLElement | null,
     interactive = true,
     extraProps: Partial<ComponentProps<typeof ManagedSessionsPage>> = {},
+    customization: WebShellCustomization = {},
   ) {
     await act(async () => {
       root.render(
         <I18nProvider language={language}>
-          <ManagedSessionsPage
-            sessionId={sessionId}
-            onSelectSession={onSelect}
-            managedAgentProvider={managedAgentProvider ?? undefined}
-            navigationTarget={navigationTarget}
-            interactive={interactive}
-            {...extraProps}
-          />
+          <WebShellCustomizationProvider value={customization}>
+            <ManagedSessionsPage
+              sessionId={sessionId}
+              onSelectSession={onSelect}
+              managedAgentProvider={managedAgentProvider ?? undefined}
+              navigationTarget={navigationTarget}
+              interactive={interactive}
+              {...extraProps}
+            />
+          </WebShellCustomizationProvider>
         </I18nProvider>,
       );
       await flush();
     });
   }
+
+  it('intercepts BTW and recap before main-task busy and queue admission', async () => {
+    const create = vi.fn().mockImplementation(async (_sessionId, request) => ({
+      ...sideQuery,
+      queryId: request.kind === 'recap' ? 'recap-1' : 'btw-1',
+      kind: request.kind,
+      trigger: request.trigger ?? 'manual',
+      question: request.question ?? null,
+    }));
+    const queue = vi.fn();
+    provider = {
+      ...provider,
+      userMessages: {
+        query: vi.fn().mockResolvedValue({ paused: false, messages: [] }),
+        command: queue,
+      },
+      sideQueries: {
+        context: vi.fn().mockResolvedValue(sideQueryContext),
+        list: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
+        create,
+        get: vi.fn(),
+        stream: vi.fn().mockImplementation(async function* () {}),
+        cancel: vi.fn(),
+      },
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        phase: 'agent_running',
+        capabilities: {
+          canSend: false,
+          canCancel: true,
+          btw: true,
+          recap: true,
+        },
+      }),
+    );
+    await render('s1');
+    await act(async () => {
+      mocks.editorProps!.onSubmit(
+        '/btw private follow-up',
+        undefined,
+        undefined,
+        mocks.commitAccepted,
+      );
+      await flush();
+    });
+    expect(create).toHaveBeenCalledWith(
+      's1',
+      { kind: 'btw', question: 'private follow-up' },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(queue).not.toHaveBeenCalled();
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    await act(async () => {
+      mocks.editorProps!.onSubmit(
+        '/recap',
+        undefined,
+        undefined,
+        mocks.commitAccepted,
+      );
+      await flush();
+    });
+    expect(create).toHaveBeenLastCalledWith(
+      's1',
+      { kind: 'recap', trigger: 'manual' },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(mocks.commitAccepted).toHaveBeenCalledTimes(2);
+    expect(mocks.client.cancel).not.toHaveBeenCalled();
+  });
 
   it.each([false, true])(
     'opens diagnostics in a read-only Session and closes them on owner change (home: %s)',
@@ -395,6 +484,42 @@ describe('ManagedSessionsPage', () => {
     expect(container.textContent).not.toContain('Session diagnostics');
     expect(getContextUsage.mock.calls[0][1].signal.aborted).toBe(true);
   });
+
+  it.each(
+    [true, false].flatMap((enabled) =>
+      [true, false].map((home) => ({ enabled, home })),
+    ),
+  )(
+    'gates the local files entry on the session capability (enabled: $enabled, home: $home)',
+    async ({ enabled, home }) => {
+      provider = {
+        ...provider,
+        clientFiles: {
+          transport: () => ({
+            baseUrl: 'http://managed-test/api/agent/web-shell/v1',
+            fetch: async () => new Response('{}', { status: 200 }),
+          }),
+        },
+      };
+      mocks.client.getSession.mockImplementation(async (id: string) =>
+        summary(id, {
+          capabilities: {
+            canSend: false,
+            canCancel: false,
+            ...(enabled ? { clientFiles: true } : {}),
+          },
+        }),
+      );
+      // The entry is inserted into two different headers (the home
+      // ChatContextHeader and the standalone session header); render both so
+      // neither insertion is unwitnessed.
+      await render('s1', 'en', provider, home ? null : undefined);
+      const button = container.querySelector(
+        'button[aria-label="Local files"]',
+      );
+      expect(button !== null).toBe(enabled);
+    },
+  );
 
   it('opens only the host Session without catalog, creation, cancellation or daemon calls', async () => {
     provider = { ...provider, canCancel: false };
@@ -518,6 +643,31 @@ describe('ManagedSessionsPage', () => {
     );
     expect(mocks.client.listSessions).not.toHaveBeenCalled();
     expect(mocks.client.createSession).not.toHaveBeenCalled();
+  });
+
+  it('clears the send latch when a host session switch aborts an in-flight submit', async () => {
+    // R7-7: the pending key embeds the session id in host mode, so switching
+    // re-runs the restore effect and aborts the controller the in-flight send
+    // captured; that send never reaches its own `setBusy(false)`.
+    mocks.client.submitPrompt.mockReturnValue(new Promise(() => {}));
+    await render('s1', 'en', provider, undefined, true, {
+      hostSessionOnly: true,
+    });
+    await act(async () => {
+      mocks.editorProps!.onSubmit('in flight', undefined, undefined, () => {});
+      await flush();
+    });
+    expect(mocks.editorProps?.disabled).toBe(true);
+
+    // A host switch hands the page a new session id (and so a new pending key).
+    await render('s2', 'en', provider, undefined, true, {
+      hostSessionOnly: true,
+    });
+    await act(async () => {
+      await flush();
+    });
+    // The aborted send can no longer clear its own latch, so the restore must.
+    expect(mocks.editorProps?.disabled).toBe(false);
   });
 
   it('marks the real page wrapper as the composer keydown focus region', async () => {
@@ -1774,7 +1924,19 @@ describe('ManagedSessionsPage', () => {
           { modelId: 'B', label: 'Published B' },
         ],
       })),
-      submit: vi.fn(),
+      submit: vi.fn(
+        async (
+          sessionId: string,
+          request: { modelId: string; expectedRevision: number },
+        ) => ({
+          sessionId,
+          modelSelection: {
+            modelId: request.modelId,
+            revision: request.expectedRevision + 1,
+          },
+          replayed: false,
+        }),
+      ),
     };
     mocks.client.getSession.mockImplementation(async () => current());
   }
@@ -2351,8 +2513,33 @@ describe('ManagedSessionsPage', () => {
     save.mockRestore();
   });
 
-  it('switches only after admission and readback, preserves the draft and blocks a same-frame send', async () => {
-    let session = switchableSession();
+  it('uses the current managed session workspace for model picker content', async () => {
+    const session = switchableSession({
+      workspace: { workspaceId: 'session-workspace', cwdRelative: 'src' },
+    });
+    modelApi(() => session);
+    await render('s1', 'en', provider, undefined, true, {
+      workspaceId: 'selected-workspace',
+    });
+    expect(mocks.editorProps?.modelPickerScope).toEqual({
+      sessionId: 's1',
+      workspaceId: 'session-workspace',
+    });
+    expect(mocks.editorProps?.sessionId).toBeUndefined();
+  });
+
+  it('uses the selected managed draft workspace for model picker content', async () => {
+    await render(undefined, 'en', provider, undefined, true, {
+      workspaceId: 'selected-workspace',
+    });
+    expect(mocks.editorProps?.modelPickerScope).toEqual({
+      sessionId: undefined,
+      workspaceId: 'selected-workspace',
+    });
+  });
+
+  it('switches on the successful receipt despite stale readback, preserving the draft and blocking a same-frame send', async () => {
+    const session = switchableSession();
     modelApi(() => session);
     let acknowledge!: (value: {
       sessionId: string;
@@ -2381,11 +2568,6 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
     expect(mocks.editorProps?.currentModel).toBe('A');
     expect(mocks.editorProps?.modelControlsDisabled).toBe(true);
-    session = {
-      ...session,
-      modelSelection: { modelId: 'B', revision: 1 },
-      modelContext: undefined,
-    };
     await act(async () => {
       acknowledge({
         sessionId: 's1',
@@ -2402,8 +2584,8 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.editorProps?.modelControlsDisabled).toBe(false);
   });
 
-  it.each(['agent_running', 'cancelling'] as const)(
-    'locks model selection during a %s Turn including callback races',
+  it.each(['agent_running', 'tool_running'] as const)(
+    'allows selecting a future model during a %s Turn',
     async (phase) => {
       const session = switchableSession({
         phase,
@@ -2416,15 +2598,20 @@ describe('ManagedSessionsPage', () => {
       });
       modelApi(() => session);
       await render('s1');
-      expect(mocks.editorProps?.modelControlsDisabled).toBe(true);
+      expect(mocks.editorProps?.modelControlsDisabled).toBe(false);
       await act(async () => {
         mocks.editorProps?.onSelectModel?.('B');
       });
-      expect(provider.modelChange!.submit).not.toHaveBeenCalled();
+      expect(provider.modelChange!.submit).toHaveBeenCalledWith(
+        's1',
+        { modelId: 'B', expectedRevision: 0 },
+        expect.anything(),
+      );
+      expect(mocks.editorProps?.currentModel).toBe('B');
     },
   );
 
-  it('blocks a model change when a prompt is admitted in the same frame', async () => {
+  it('accepts a future model selection while a prompt admission is in flight', async () => {
     const session = switchableSession();
     modelApi(() => session);
     let admit!: (value: { sessionId: string; turnId: string }) => void;
@@ -2446,14 +2633,14 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(mocks.client.submitPrompt).toHaveBeenCalledOnce();
-    expect(provider.modelChange!.submit).not.toHaveBeenCalled();
+    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
     await act(async () => {
       admit({ sessionId: 's1', turnId: 'next' });
       await flush();
     });
   });
 
-  it('locks model selection while an approval or prompt admission is unconfirmed', async () => {
+  it('allows a future model selection while an existing tool approval is pending', async () => {
     const session = switchableSession();
     modelApi(() => session);
     provider.actions = {
@@ -2465,32 +2652,22 @@ describe('ManagedSessionsPage', () => {
       capabilities: { ...session.capabilities, actions: true },
     });
     await render('s1');
-    expect(mocks.editorProps?.modelControlsDisabled).toBe(true);
+    expect(mocks.editorProps?.modelControlsDisabled).toBe(false);
     await act(async () => {
       mocks.editorProps?.onSelectModel?.('B');
     });
-    expect(provider.modelChange!.submit).not.toHaveBeenCalled();
+    expect(provider.modelChange!.submit).toHaveBeenCalledOnce();
+    expect(mocks.editorProps?.currentModel).toBe('B');
   });
 
-  it('holds a lost switch response for exact-key confirmation and hides old usage under another selected model', async () => {
+  it('shows the failure message and retires it once a read proves the write landed', async () => {
     let session = switchableSession({
       modelSelection: { modelId: 'B', revision: 1 },
     });
     modelApi(() => session);
-    vi.mocked(provider.modelChange!.submit)
-      .mockRejectedValueOnce(new TypeError('lost ACK'))
-      .mockImplementation(async () => {
-        session = {
-          ...session,
-          modelSelection: { modelId: 'A', revision: 2 },
-          modelContext: undefined,
-        };
-        return {
-          sessionId: 's1',
-          modelSelection: session.modelSelection!,
-          replayed: true,
-        };
-      });
+    vi.mocked(provider.modelChange!.submit).mockRejectedValueOnce(
+      new TypeError('rejected'),
+    );
     await render('s1');
     expect(mocks.editorProps?.currentModel).toBe('B');
     expect(mocks.editorProps?.contextUsageKnown).toBe(false);
@@ -2498,27 +2675,26 @@ describe('ManagedSessionsPage', () => {
       mocks.editorProps?.onSelectModel?.('A');
       await flush();
     });
-    expect(container.textContent).toContain(
-      'The model change is not confirmed',
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Could not change the model. Check the current selection and try again.',
     );
-    expect(mocks.editorProps?.disabled).toBe(true);
-    session = {
-      ...session,
-      capabilities: { ...session.capabilities, modelChange: false },
-    };
-    await act(async () => root.unmount());
-    root = createRoot(container);
-    await render('s1');
-    const confirm = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent === 'Continue confirming',
-    )!;
+    expect(mocks.editorProps?.currentModel).toBe('B');
+    // The server commits A while the response is lost; the refresh proves it,
+    // so the failure alert must not keep contradicting the switched model.
+    vi.mocked(provider.modelChange!.submit).mockImplementationOnce(async () => {
+      session = {
+        ...session,
+        modelSelection: { modelId: 'A', revision: 2 },
+        modelContext: undefined,
+      };
+      throw new TypeError('lost ACK');
+    });
     await act(async () => {
-      confirm.click();
+      mocks.editorProps?.onSelectModel?.('A');
       await flush();
     });
-    const calls = vi.mocked(provider.modelChange!.submit).mock.calls;
-    expect(calls[1][1]).toEqual(calls[0][1]);
-    expect(calls[1][2].idempotencyKey).toBe(calls[0][2].idempotencyKey);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(provider.modelChange!.submit).toHaveBeenCalledTimes(2);
     expect(mocks.editorProps?.currentModel).toBe('A');
     expect(mocks.editorProps?.contextUsageKnown).toBe(false);
     expect(mocks.editorProps?.disabled).toBe(false);
@@ -4559,6 +4735,445 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
+  it('aligns managed composer copy with the host when asked', async () => {
+    const observation = {
+      modelId: 'actual-model',
+      inputTokens: 250,
+      contextWindowSize: 1000,
+      observedAt: 12,
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        agentId: 'agent-a',
+        modelContext: observation,
+        approvalMode: 'default',
+        capabilities: { canSend: false, canCancel: false },
+      }),
+    );
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [],
+      lastEventId: 0,
+    });
+    // Baseline: without the flag the hints render, so the suppression below is
+    // what removes them — not an empty fixture.
+    await render('s1', 'en', provider, null, true, {}, {});
+    const label = container
+      .querySelector('textarea')
+      ?.getAttribute('aria-label');
+    expect(label).toContain('Message the managed agent');
+    expect(container.textContent).toContain('model is fixed');
+    expect(container.textContent).toContain(
+      'does not support changing its approval policy',
+    );
+
+    await act(async () => root.unmount());
+    container.remove();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await render(
+      's1',
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        alignManagedChatWithHost: true,
+      },
+    );
+    // 与普通会话同一个 placeholder（idle 态默认），不再是 managed 专属文案
+    const alignedLabel = container
+      .querySelector('textarea')
+      ?.getAttribute('aria-label');
+    expect(alignedLabel).not.toContain('Message the managed agent');
+    expect(alignedLabel).toContain('Type a message');
+    // 能力解释文案按宿主口径不渲染（控件仍由 capabilities 静默禁用）
+    expect(container.textContent).not.toContain('model is fixed');
+    expect(container.textContent).not.toContain(
+      'does not support changing its approval policy',
+    );
+  });
+
+  it('aligns the running-state placeholder and honors host overrides', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { phase: 'running' }),
+    );
+    // Queue support decides whether a running turn can promise the
+    // "processing" copy; without it the page resolves the idle copy instead.
+    provider.userMessages = {
+      query: vi.fn(async () => ({ paused: false, messages: [] })),
+      command: vi.fn(),
+    } as never;
+    await render(
+      's1',
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        alignManagedChatWithHost: true,
+        composerPlaceholders: {
+          idle: 'Ask about this repo',
+          processing: 'Working on it…',
+        },
+      },
+    );
+    // 宿主 override 优先于默认对齐文案；运行态也走同一解析，不停留在队列提示。
+    expect(
+      container.querySelector('textarea')?.getAttribute('aria-label'),
+    ).toBe('Working on it…');
+
+    await act(async () => root.unmount());
+    container.remove();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await render(
+      's1',
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      { alignManagedChatWithHost: true },
+    );
+    // 无 override 的运行态：与普通会话同一个 processing 文案，而不是托管队列提示。
+    expect(
+      container.querySelector('textarea')?.getAttribute('aria-label'),
+    ).toContain('Processing. New messages will be queued.');
+  });
+
+  it('resolves the host override as processing for a running turn without the queue API', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { phase: 'running' }),
+    );
+    // No userMessages provider: supported stays false while the turn runs.
+    // The override must classify the state exactly like the fallback does.
+    provider.userMessages = undefined as never;
+    await render(
+      's1',
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        alignManagedChatWithHost: true,
+        composerPlaceholders: {
+          idle: 'Ask about this repo',
+          processing: 'Working on it…',
+        },
+      },
+    );
+    expect(
+      container.querySelector('textarea')?.getAttribute('aria-label'),
+    ).toBe('Working on it…');
+  });
+
+  it('does not promise queueing without the queue API when no override is set', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { phase: 'running' }),
+    );
+    // Without the user-messages API submit() sends a fresh prompt, so the
+    // aligned default must not render the queueing copy.
+    provider.userMessages = undefined as never;
+    await render(
+      's1',
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      { alignManagedChatWithHost: true },
+    );
+    expect(
+      container.querySelector('textarea')?.getAttribute('aria-label'),
+    ).toBe('Message the managed agent');
+  });
+
+  it('hides the managed session header when the host already shows identity', async () => {
+    const target = document.createElement('div');
+    // Default: the header row carries the session identity.
+    await render('s1', 'en', provider, target);
+    expect(container.textContent).toContain('Task s1');
+    // Host-provided identity: no second header row.
+    await render(
+      's1',
+      'en',
+      provider,
+      target,
+      true,
+      {},
+      {
+        showManagedSessionHeader: false,
+      },
+    );
+    expect(container.textContent).not.toContain('Task s1');
+    // Hiding the identity must not unmount the header itself: its action
+    // cluster and panel toggles are the only surfaces that carry them.
+    const header = container.querySelector(
+      '[data-testid="chat-context-header"]',
+    );
+    expect(header).not.toBeNull();
+    // The option hides all three identity surfaces, not only the title:
+    // the workspace icon and the phase badge go with it.
+    expect(
+      header?.querySelector('[data-testid="chat-header-workspace"]'),
+    ).toBeNull();
+    expect(header?.textContent).not.toContain('Completed');
+  });
+
+  it('keeps managed copy by default so the standalone page is unchanged', async () => {
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [],
+      lastEventId: 0,
+    });
+    await render('s1', 'en', provider, null, true, {}, {});
+    // placeholder 落在 textarea 的 aria-label（ChatEditor 的可访问性口径）
+    expect(
+      container.querySelector('textarea')?.getAttribute('aria-label'),
+    ).toContain('Message the managed agent');
+  });
+
+  it('renders the host welcome header when customization provides one', async () => {
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [],
+      lastEventId: 0,
+    });
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        approvalMode: 'yolo',
+        workspace: {
+          workspaceId: 'ws-a',
+          cwdRelative: 'services/api',
+          state: 'ready',
+          contextRevision: 1,
+        },
+      }),
+    );
+    const renderWelcomeHeader = vi.fn(() => <div>HOST-WELCOME</div>);
+    const renderWelcomeFooter = vi.fn(() => <div>HOST-WELCOME-FOOTER</div>);
+    await render(
+      's1',
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        renderWelcomeHeader,
+        renderWelcomeFooter,
+      },
+    );
+    expect(renderWelcomeHeader).toHaveBeenCalled();
+    // Host renderers get real session values, not literal placeholders.
+    expect(renderWelcomeHeader).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cwd: 'services/api',
+        currentMode: 'yolo',
+      }),
+    );
+    expect(container.textContent).toContain('HOST-WELCOME');
+    // The footer slot pairs with the header on the empty state, like App.
+    expect(renderWelcomeFooter).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: 'services/api' }),
+    );
+    expect(container.textContent).toContain('HOST-WELCOME-FOOTER');
+    // 宿主接管后不再叠加内置欢迎文案。
+    expect(container.textContent).not.toContain('Welcome to');
+  });
+
+  it('passes host customization through to the workspace-binding creation screen', async () => {
+    provider.workspaceBinding = {
+      agentId: 'agent-a',
+      modelPresets: [{ agentId: 'agent-a', label: 'agent-a' }],
+      list: vi.fn(async () => []),
+      get: vi.fn(),
+      createEmpty: vi.fn(),
+      createSession: vi.fn(async () => ({ sessionId: 's-created' }) as never),
+    };
+    const renderWelcomeHeader = vi.fn(() => <div>HOST-CREATION-WELCOME</div>);
+    await render(
+      undefined,
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        renderWelcomeHeader,
+        alignManagedChatWithHost: true,
+      },
+    );
+    expect(renderWelcomeHeader).toHaveBeenCalled();
+    expect(container.textContent).toContain('HOST-CREATION-WELCOME');
+    expect(container.textContent).not.toContain('Welcome to');
+    // The aligned composer copy reaches the creation screen too: with no host
+    // override it falls back to the ordinary placeholder, same as App.
+    expect(
+      container.querySelector('textarea')?.getAttribute('aria-label'),
+    ).toContain('Type a message');
+    expect(
+      container.querySelector('textarea')?.getAttribute('aria-label'),
+    ).not.toContain('Message the managed agent');
+  });
+
+  it('pairs the host welcome footer with the header on the creation screen', async () => {
+    provider.workspaceBinding = {
+      agentId: 'agent-a',
+      modelPresets: [{ agentId: 'agent-a', label: 'agent-a' }],
+      list: vi.fn(async () => []),
+      get: vi.fn(),
+      createEmpty: vi.fn(),
+      createSession: vi.fn(async () => ({ sessionId: 's-created' }) as never),
+    };
+    const renderWelcomeHeader = vi.fn(() => <div>HOST-CREATION-WELCOME</div>);
+    const renderWelcomeFooter = vi.fn(() => (
+      <div>HOST-CREATION-WELCOME-FOOTER</div>
+    ));
+    await render(
+      undefined,
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        renderWelcomeHeader,
+        renderWelcomeFooter,
+      },
+    );
+    expect(renderWelcomeHeader).toHaveBeenCalled();
+    expect(renderWelcomeFooter).toHaveBeenCalledWith(
+      expect.objectContaining({ currentModel: 'agent-a' }),
+    );
+    expect(container.textContent).toContain('HOST-CREATION-WELCOME');
+    expect(container.textContent).toContain('HOST-CREATION-WELCOME-FOOTER');
+  });
+
+  it('uses the host composerPlaceholders override on the creation screen', async () => {
+    provider.workspaceBinding = {
+      agentId: 'agent-a',
+      modelPresets: [{ agentId: 'agent-a', label: 'agent-a' }],
+      list: vi.fn(async () => []),
+      get: vi.fn(),
+      createEmpty: vi.fn(),
+      createSession: vi.fn(async () => ({ sessionId: 's-created' }) as never),
+    };
+    await render(
+      undefined,
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        alignManagedChatWithHost: true,
+        composerPlaceholders: { idle: 'Ask about this repo' },
+      },
+    );
+    // 创建屏同样走宿主 override，而不是退回内置默认。
+    expect(
+      container.querySelector('textarea')?.getAttribute('aria-label'),
+    ).toBe('Ask about this repo');
+  });
+
+  it('falls back to the ordinary composer placeholder on the aligned creation screen', async () => {
+    provider.workspaceBinding = {
+      agentId: 'agent-a',
+      modelPresets: [{ agentId: 'agent-a', label: 'agent-a' }],
+      list: vi.fn(async () => []),
+      get: vi.fn(),
+      createEmpty: vi.fn(),
+      createSession: vi.fn(async () => ({ sessionId: 's-created' }) as never),
+    };
+    await render(
+      undefined,
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        alignManagedChatWithHost: true,
+      },
+    );
+    // No host override: the aligned creation composer resolves the ordinary
+    // placeholder, not the managed-only copy.
+    expect(
+      container.querySelector('textarea')?.getAttribute('aria-label'),
+    ).toBe('Type a message or @ file path');
+  });
+
+  it('clears the restore busy flag when a pending record cannot be restored', async () => {
+    const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+    sessionStorage.setItem(key, '{');
+    await render(
+      's1',
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      {
+        alignManagedChatWithHost: true,
+      },
+    );
+    expect(container.textContent).toContain('may already have been submitted');
+    // The failed restore must not hold the composer in the processing state.
+    expect(mocks.editorProps?.placeholderText).toBe(
+      'Type a message or @ file path',
+    );
+    // submit() drops every send in this state, so the composer must read
+    // disabled instead of silently discarding input.
+    expect(mocks.editorProps?.disabled).toBe(true);
+  });
+
+  it('renders the host composer footer instead of managed fixed-model hints', async () => {
+    const observation = {
+      modelId: 'actual-model',
+      inputTokens: 250,
+      contextWindowSize: 1000,
+      observedAt: 12,
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        agentId: 'agent-a',
+        modelContext: observation,
+        approvalMode: 'default',
+        capabilities: { canSend: false, canCancel: false },
+      }),
+    );
+    const CustomFooter = vi.fn(() => <div>HOST-FOOTER</div>);
+    await render(
+      's1',
+      'en',
+      provider,
+      null,
+      true,
+      {},
+      { renderComposerFooter: CustomFooter },
+    );
+    expect(CustomFooter).toHaveBeenCalled();
+    expect(container.textContent).toContain('HOST-FOOTER');
+    // 宿主接管该区域后，托管默认「模型已固定 / 审批策略固定」提示不再叠加。
+    expect(container.textContent).not.toContain('model is fixed');
+    expect(container.textContent).not.toContain(
+      'does not support changing its approval policy',
+    );
+  });
+
+  it('falls back to the built-in welcome header without host customization', async () => {
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [],
+      lastEventId: 0,
+    });
+    await render('s1');
+    expect(container.textContent).toContain('Welcome to');
+  });
+
   it('replaces the welcome with the failure banner for an empty failed Session', async () => {
     mocks.client.getTranscript.mockResolvedValue({
       events: [],
@@ -4748,14 +5363,53 @@ describe('ManagedSessionsPage', () => {
       hostSessionOnly: true,
     });
     expect(container.textContent).toContain('may already have been submitted');
-    // The failed restore holds `busy` until Discard, but the pane is still an
-    // empty home — the marker (and the centring/overflow rule it drives) must
-    // not disappear while the banner is up.
+    // The failed restore keeps the composer blocked until Discard, but the
+    // pane is still an empty home — the marker (and the centring/overflow
+    // rule it drives) must not disappear while the banner is up.
     expect(
       container
         .querySelector('[data-managed-home]')
         ?.getAttribute('data-managed-empty'),
     ).toBe('true');
+  });
+
+  it('holds the empty-state marker back until the pending restore settles', async () => {
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [],
+      lastEventId: 0,
+    });
+    let settle!: (value: unknown) => void;
+    const restore = vi
+      .spyOn(pendingStorage, 'readManagedPending')
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            settle = resolve;
+          }),
+      );
+    try {
+      await render('s1', 'en', provider, undefined, true, {
+        hostSessionOnly: true,
+      });
+      // The restore window is not an empty home yet: a pending record may
+      // still land and fill the pane.
+      expect(
+        container
+          .querySelector('[data-managed-home]')
+          ?.getAttribute('data-managed-empty'),
+      ).toBeNull();
+      await act(async () => {
+        settle(undefined);
+        await flush();
+      });
+      expect(
+        container
+          .querySelector('[data-managed-home]')
+          ?.getAttribute('data-managed-empty'),
+      ).toBe('true');
+    } finally {
+      restore.mockRestore();
+    }
   });
 
   it('renders Chinese Managed labels and states without English fallback overriding them', async () => {

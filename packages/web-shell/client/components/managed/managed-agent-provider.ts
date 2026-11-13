@@ -269,6 +269,9 @@ export interface ManagedAgentSessionSummary {
     contextCompression?: boolean;
     approvalModeChange?: boolean;
     inputAttachments?: boolean;
+    btw?: boolean;
+    recap?: boolean;
+    clientFiles?: boolean;
   };
   failure?: { code: string; message: string };
   recovery?: ManagedSessionRecovery;
@@ -411,6 +414,7 @@ export interface ManagedAgentQuestionResponse {
 export type ManagedAgentActionResponse = string | ManagedAgentQuestionResponse;
 
 export interface ManagedAgentProvider {
+  readonly sideQueries?: import('./managed-side-query-types').ManagedSideQueriesProvider;
   readonly diagnostics?: ManagedDiagnosticsProvider;
   readonly userMessages?: {
     query(
@@ -480,6 +484,17 @@ export interface ManagedAgentProvider {
       sessionId: string,
       options: ManagedAgentRequestOptions,
     ): Promise<ManagedSessionMcp>;
+  };
+  /**
+   * The authenticated transport for the client filesystem bridge. The browser
+   * entry is gated on the deployment's client-files capability; this transport
+   * is the pipe the bridge drives once the entry is shown.
+   */
+  readonly clientFiles?: {
+    transport(): {
+      baseUrl: string;
+      fetch: import('../../local-files/managed-client-files-bridge.js').ManagedFetch;
+    };
   };
   readonly extensions?: {
     readonly storageScope?: string;

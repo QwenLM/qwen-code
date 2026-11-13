@@ -4829,6 +4829,51 @@ describe('createBoundSessionsAccessor', () => {
     ]);
   });
 
+  it('projects watching booleans and drops non-boolean values field-only', async () => {
+    const requestRest = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        bindings: [
+          {
+            sessionId: 'session-1',
+            workspaceCwd: '/ws/a',
+            prs: [
+              {
+                number: 1,
+                url: 'https://github.com/o/r/pull/1',
+                watching: true,
+              },
+              {
+                number: 2,
+                url: 'https://github.com/o/r/pull/2',
+                watching: false,
+              },
+              {
+                number: 3,
+                url: 'https://github.com/o/r/pull/3',
+                watching: 'yes',
+              },
+              { number: 4, url: 'https://github.com/o/r/pull/4' },
+            ],
+          },
+        ],
+      }),
+    );
+    const accessor = createBoundSessionsAccessor(makeClient(requestRest));
+
+    const snapshot = await accessor.listPrBindings();
+
+    // A malformed watching is unknown, not an absence: the FIELD drops,
+    // the entry stays, and the answer is not degraded — unknown remains
+    // eligible under the gate (fail-open).
+    expect(snapshot.partial).toBe(false);
+    expect(snapshot.bindings[0]!.prs).toEqual([
+      { number: 1, url: 'https://github.com/o/r/pull/1', watching: true },
+      { number: 2, url: 'https://github.com/o/r/pull/2', watching: false },
+      { number: 3, url: 'https://github.com/o/r/pull/3' },
+      { number: 4, url: 'https://github.com/o/r/pull/4' },
+    ]);
+  });
+
   it('flags a partially malformed PR projection as partial (R4-B2)', async () => {
     const requestRest = vi.fn().mockResolvedValue(
       jsonResponse(200, {

@@ -26,6 +26,12 @@ import type {
   ManagedArtifactResponse,
   ManagedToolResultResponse,
 } from './managed-tool-result-types';
+import type {
+  ManagedSideQuery,
+  ManagedSideQueryContext,
+  ManagedSideQueryCreate,
+  ManagedSideQueryPage,
+} from './managed-side-query-types';
 
 type Schemas = components['schemas'];
 
@@ -552,6 +558,40 @@ export class JavaManagedAgentClient {
       { sessionId },
       signal,
     );
+  }
+
+  /**
+   * The transport the client filesystem bridge drives: the WebShell API base
+   * plus a fetch that attaches the provider's auth headers (resolved per call
+   * so token refresh is honoured) and credentials. The bridge owns the
+   * register/SSE/response exchange; this only supplies the authenticated pipe.
+   */
+  clientFilesTransport(): {
+    baseUrl: string;
+    fetch: import('../../local-files/managed-client-files-bridge.js').ManagedFetch;
+  } {
+    return {
+      baseUrl: `${this.baseUrl}${API_PREFIX}`,
+      fetch: async (url, init) => {
+        const supplied = await this.options.getHeaders?.();
+        const headers = new Headers(supplied);
+        if (init?.headers) {
+          for (const [key, value] of Object.entries(init.headers)) {
+            headers.set(key, value);
+          }
+        }
+        if (!headers.has('content-type')) {
+          headers.set('content-type', 'application/json');
+        }
+        return this.fetchImpl(url, {
+          method: init?.method,
+          headers,
+          body: init?.body,
+          signal: init?.signal,
+          credentials: this.credentials,
+        });
+      },
+    };
   }
 
   listExtensionPackages(workspaceId: string, signal?: AbortSignal) {
@@ -1182,6 +1222,100 @@ export class JavaManagedAgentClient {
           `[web-shell] resyncing a Managed Agent stream that delivered only corrupt frames (${skippedTotal} skipped)`,
         );
         yield resyncFrame();
+      }
+    } finally {
+      await reader.cancel().catch(() => undefined);
+    }
+  }
+
+  sideQueryContext(sessionId: string, signal?: AbortSignal) {
+    return this.post<ManagedSideQueryContext>(
+      '/session-side-queries/context',
+      { sessionId },
+      signal,
+    );
+  }
+
+  createSideQuery(
+    sessionId: string,
+    request: ManagedSideQueryCreate,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedSideQuery>(
+      '/session-side-queries/create',
+      { sessionId, ...request, idempotencyKey },
+      signal,
+    );
+  }
+
+  listSideQueries(
+    request: { sessionId: string; cursor?: string; limit?: number },
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedSideQueryPage>(
+      '/session-side-queries/list',
+      request,
+      signal,
+    );
+  }
+
+  getSideQuery(sessionId: string, queryId: string, signal?: AbortSignal) {
+    return this.post<ManagedSideQuery>(
+      '/session-side-queries/get',
+      { sessionId, queryId },
+      signal,
+    );
+  }
+
+  cancelSideQuery(sessionId: string, queryId: string, signal?: AbortSignal) {
+    return this.post<ManagedSideQuery>(
+      '/session-side-queries/cancel',
+      { sessionId, queryId },
+      signal,
+    );
+  }
+
+  async *streamSideQuery(
+    request: { sessionId: string; queryId: string; afterRevision?: number },
+    signal?: AbortSignal,
+  ): AsyncGenerator<ManagedSideQuery> {
+    const response = await this.request(
+      '/session-side-queries/stream',
+      request,
+      signal,
+      true,
+    );
+    if (!response.body) throw new Error('Side query stream is unavailable');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let revision = request.afterRevision ?? -1;
+    try {
+      while (true) {
+        const result = await reader.read();
+        buffer += decoder.decode(result.value, { stream: !result.done });
+        let boundary = nextFrameBoundary(buffer);
+        while (boundary) {
+          const frame = buffer.slice(0, boundary.index);
+          buffer = buffer.slice(boundary.index + boundary.length);
+          const { data } = parseEventFrameFields(frame);
+          if (data.length) {
+            const value = JSON.parse(data.join('\n')) as ManagedSideQuery;
+            if (
+              value.sessionId !== request.sessionId ||
+              value.queryId !== request.queryId ||
+              !Number.isSafeInteger(value.resultRevision)
+            )
+              throw new Error('Side query stream identity mismatch');
+            if (value.resultRevision > revision) {
+              revision = value.resultRevision;
+              yield value;
+            }
+          }
+          boundary = nextFrameBoundary(buffer);
+        }
+        if (result.done) break;
       }
     } finally {
       await reader.cancel().catch(() => undefined);

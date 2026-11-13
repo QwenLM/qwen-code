@@ -22,9 +22,14 @@ import type {
 import { parseToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { LocalShellReceipt } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
+import {
+  parseManagedToolMeasurements,
+  type ManagedToolMeasurements,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-measurements.js';
 import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
 import {
   WORKSPACE_CAPABILITY_DIGEST,
+  MEASURED_WORKSPACE_CAPABILITY_DIGEST,
   RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
 } from './managed-workspace-activation.js';
 import type {
@@ -167,6 +172,43 @@ export class HostedWorkspaceBroker {
   private readonly baseUrl: URL;
   private leaseAcquired = false;
   private capability?: string;
+  private readonly measuredResults = new Map<
+    string,
+    { measurements: ManagedToolMeasurements | null; resultDigest: string }
+  >();
+
+  releaseToolMeasurements(id: string): void {
+    this.measuredResults.delete(id);
+  }
+
+  toolMeasurements(id: string) {
+    return this.measuredResults.get(id);
+  }
+
+  private readToolResult(id: string, value: unknown): Record<string, unknown> {
+    const result = object(value);
+    const { diagnostics, ...base } = result;
+    if (diagnostics !== undefined) {
+      const metadata = object(diagnostics);
+      if (
+        metadata['protocolVersion'] !== 4 ||
+        ![2, 3].includes(metadata['executionProtocol'] as number) ||
+        Object.keys(metadata).sort().join(',') !==
+          'executionProtocol,measurements,protocolVersion,resultDigest' ||
+        typeof metadata['resultDigest'] !== 'string' ||
+        !/^[0-9a-f]{64}$/.test(metadata['resultDigest'])
+      )
+        throw new Error('Invalid measured tool result.');
+      this.measuredResults.set(id, {
+        measurements:
+          metadata['measurements'] === null
+            ? null
+            : parseManagedToolMeasurements(metadata['measurements']),
+        resultDigest: metadata['resultDigest'],
+      });
+    }
+    return base;
+  }
   private capabilityResolution?: Promise<void>;
   provisionerKind?: string;
   private readonly identity: {
@@ -367,6 +409,7 @@ export class HostedWorkspaceBroker {
       scope['tenantId'] !== this.key.tenantId ||
       scope['workspaceId'] !== this.key.workspaceId ||
       (scope['capabilityDigest'] !== WORKSPACE_CAPABILITY_DIGEST &&
+        scope['capabilityDigest'] !== MEASURED_WORKSPACE_CAPABILITY_DIGEST &&
         scope['capabilityDigest'] !==
           MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST &&
         scope['capabilityDigest'] !==
@@ -444,6 +487,9 @@ export class HostedWorkspaceBroker {
         promptId: turnId,
         callId,
         argsDigest: digest,
+        ...(this.capability === MEASURED_WORKSPACE_CAPABILITY_DIGEST
+          ? { resultProtocol: 4 }
+          : {}),
         ...(inputDigest ? { runtimeProtocol: 3, inputDigest } : {}),
       },
     };
@@ -513,7 +559,13 @@ export class HostedWorkspaceBroker {
     const status = object(response['status']);
     if (status['state'] === 'prepared') return { executionCallId: id };
     if (status['state'] === 'settled') {
-      return { executionCallId: id, settled: settledResult(status) };
+      return {
+        executionCallId: id,
+        settled: settledResult({
+          ...status,
+          result: this.readToolResult(id, status['result']),
+        }),
+      };
     }
     throw new Error(
       'Hosted Workspace Broker answered a reservation that is neither fresh nor settled.',
@@ -548,6 +600,9 @@ export class HostedWorkspaceBroker {
         promptId: turnId,
         callId,
         argsDigest,
+        ...(this.capability === MEASURED_WORKSPACE_CAPABILITY_DIGEST
+          ? { resultProtocol: 4 }
+          : {}),
       },
     });
     const executionCallId = response['executionCallId'];
@@ -608,7 +663,7 @@ export class HostedWorkspaceBroker {
         throw new Error('Tool v3 execution identity changed.');
       const status = object(response['status']);
       if (status['state'] === 'settled') {
-        const result = object(status['result']);
+        const result = this.readToolResult(id, status['result']);
         if (
           !['success', 'error', 'cancelled', 'not_started'].includes(
             String(result['executionStatus']),
@@ -736,7 +791,7 @@ export class HostedWorkspaceBroker {
         throw new Error('Runtime execution identity changed.');
       const status = object(response['status']);
       if (status['state'] === 'settled') {
-        const result = object(status['result']);
+        const result = this.readToolResult(id, status['result']);
         if (
           !['success', 'error', 'cancelled', 'not_started'].includes(
             String(result['executionStatus']),
@@ -786,7 +841,13 @@ export class HostedWorkspaceBroker {
     const status = object(response['status']);
     const state = String(status['state']);
     return state === 'settled'
-      ? { state, settled: settledResult(status) }
+      ? {
+          state,
+          settled: settledResult({
+            ...status,
+            result: this.readToolResult(id, status['result']),
+          }),
+        }
       : { state };
   }
 
@@ -997,6 +1058,14 @@ export class HostedWorkspaceBroker {
     )
       throw new Error('Runtime execution outcome is unknown.');
     const result = status['result'];
+    if (
+      state === 'settled' &&
+      result &&
+      typeof result === 'object' &&
+      !Array.isArray(result)
+    ) {
+      this.readToolResult(id, result);
+    }
     const executionStatus =
       state === 'settled' &&
       typeof result === 'object' &&
@@ -1046,7 +1115,7 @@ export class HostedWorkspaceBroker {
         'Original Shell result is not settled under its binding.',
       );
     }
-    const result = object(status['result']);
+    const result = this.readToolResult(id, status['result']);
     if (!('capture' in result)) {
       const error = 'error' in result ? object(result['error']) : undefined;
       if (
