@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.catalog;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.ManagedMcpManagementCommand;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.ManagedMcpServerPin;
