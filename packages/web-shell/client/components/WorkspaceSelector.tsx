@@ -28,6 +28,7 @@ import {
   TooltipTrigger,
 } from './ui/tooltip';
 import { HostLabel } from './workspaces/HostLabel';
+import { matchesWorkspaceQuery } from '../utils/workspaceFilter';
 
 export interface WorkspaceSelectorOption {
   id: string;
@@ -95,6 +96,7 @@ export function WorkspaceSelector({
   const { t } = useI18n();
   const [menuOpen, setMenuOpen] = useState(false);
   const [tooltipOpen, setTooltipOpen] = useState(false);
+  const [filterQuery, setFilterQuery] = useState('');
   const menuOpenRef = useRef(false);
   const suppressTooltipRef = useRef(false);
   const pointerDismissedRef = useRef(false);
@@ -122,6 +124,7 @@ export function WorkspaceSelector({
     typeof window === 'undefined' ? '' : window.location.origin;
   const groups: { hostOrigin: string; items: WorkspaceSelectorOption[] }[] = [];
   for (const workspace of workspaces) {
+    if (!matchesWorkspaceQuery([workspace.label], filterQuery)) continue;
     const hostOrigin = workspace.hostOrigin ?? pageOrigin;
     const group = groups.find((entry) => entry.hostOrigin === hostOrigin);
     if (group) {
@@ -131,6 +134,7 @@ export function WorkspaceSelector({
     }
   }
   const groupedByHost = groups.length > 1;
+  const noWorkspaceMatches = filterQuery.trim() !== '' && groups.length === 0;
   const triggerLabel = selectedStandalone
     ? t('sidebar.noWorkspace')
     : (selected?.label ?? t('sidebar.workspaceSelectLabel'));
@@ -140,7 +144,11 @@ export function WorkspaceSelector({
       <DropdownMenu
         open={menuOpen}
         onOpenChange={(open) => {
-          if (open) pointerDismissedRef.current = false;
+          if (open) {
+            pointerDismissedRef.current = false;
+          } else {
+            setFilterQuery('');
+          }
           menuOpenRef.current = open;
           setMenuOpen(open);
           suppressTooltipRef.current = true;
@@ -206,6 +214,47 @@ export function WorkspaceSelector({
             pointerDismissedRef.current = false;
           }}
         >
+          <div data-web-shell-ws-filter className="p-1.5">
+            <input
+              type="text"
+              value={filterQuery}
+              onChange={(event) => setFilterQuery(event.target.value)}
+              onPointerDown={(event) => event.stopPropagation()}
+              onKeyDown={(event) => {
+                if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                  const content = event.currentTarget.closest(
+                    '[data-radix-menu-content]',
+                  );
+                  const items = content
+                    ? Array.from(
+                        content.querySelectorAll<HTMLElement>(
+                          '[role="menuitem"], [role="menuitemradio"]',
+                        ),
+                      ).filter((item) => !item.hasAttribute('data-disabled'))
+                    : [];
+                  if (items.length > 0) {
+                    event.preventDefault();
+                    const target =
+                      event.key === 'ArrowDown'
+                        ? items[0]
+                        : items[items.length - 1];
+                    target.focus();
+                  }
+                  return;
+                }
+                if (event.key !== 'Escape') event.stopPropagation();
+              }}
+              placeholder={t('sidebar.filterWorkspaces')}
+              aria-label={t('sidebar.filterWorkspaces')}
+              autoFocus
+              className="w-full rounded-md border border-input bg-transparent px-2 py-1 text-sm outline-none"
+            />
+          </div>
+          {noWorkspaceMatches && (
+            <div className="px-2 py-1.5 text-xs text-muted-foreground">
+              {t('sidebar.noWorkspacesMatch')}
+            </div>
+          )}
           <DropdownMenuRadioGroup
             value={selectedStandalone ? STANDALONE_OPTION_ID : selected?.id}
             onValueChange={(id) => {
