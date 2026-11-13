@@ -605,7 +605,7 @@ export class PermissionManager {
         DECISION_PRIORITY[opDecision] < DECISION_PRIORITY.ask
       ) {
         debugLogger.info(
-          `PermissionManager: undecodable path escalation to 'ask' for virtualTool=${op.virtualTool}`,
+          `PermissionManager: unresolved path escalation to 'ask' for virtualTool=${op.virtualTool}`,
         );
         opDecision = 'ask';
       }

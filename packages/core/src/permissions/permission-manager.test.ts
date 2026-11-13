@@ -3543,6 +3543,36 @@ describe('PermissionManager — compound shell write attribution', () => {
     expect(await pm.evaluate(ctx)).toBe('deny');
   });
 
+  it.each([
+    [
+      String.raw`D=sub; sh -c "printf {} > \"$D\"/../.qwen/settings.json"`,
+      'deny',
+    ],
+    [String.raw`sh -c 'printf {} > "$OUTPUT"'`, 'ask'],
+  ])(
+    'does not allow an unresolved wrapper redirect: %s',
+    async (command, restrictiveDecision) => {
+      const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe(restrictiveDecision);
+      const broadPm = repoPm({
+        permissionsAllow: ['Bash(*)', 'WriteFileTool(*)'],
+      });
+      expect(await broadPm.evaluate(sh(command, '/repo'))).toBe('ask');
+    },
+  );
+
+  it('keeps a known deny beside an unresolved redirect', async () => {
+    const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+    const command = 'printf ok > "$OUT"; printf {} > .qwen/settings.json';
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+  });
+
+  it('matches a known literal redirect after quote removal', async () => {
+    const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+    const command = String.raw`printf ok > '$OUT'/../.qwen/settings.json`;
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+  });
+
   it('keeps a protected write visible beside an undecodable wrapper argument', async () => {
     const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
     const ctx = sh(

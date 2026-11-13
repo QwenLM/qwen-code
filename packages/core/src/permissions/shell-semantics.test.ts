@@ -564,8 +564,10 @@ describe('extractShellOperations', () => {
     expect(ops(command)).toEqual([write(`${CWD}/${file}`)]);
   });
 
-  it('>&$VAR keeps the literal write: it may name a file', () => {
-    expect(ops('printf TXT >&$OUT')).toEqual([write(`${CWD}/&$OUT`)]);
+  it('>&$VAR keeps an unresolved write: it may name a file', () => {
+    expect(ops('printf TXT >&$OUT')).toEqual([
+      { ...write(`${CWD}/&$OUT`), pathUnknown: true },
+    ]);
   });
 
   // Only a whole number or `-` is a descriptor; anything else names a file.
@@ -613,7 +615,10 @@ describe('extractShellOperations', () => {
     ['tee >&-2', [write(`${CWD}/&-2`)]],
     ['tee 2>&-2', [write(`${CWD}/&-2`)]],
     ['cat <&-2', [read(`${CWD}/&-2`)]],
-    ['tee >&-$HOME/.bashrc', [write(`${CWD}/&-$HOME/.bashrc`)]],
+    [
+      'tee >&-$HOME/.bashrc',
+      [{ ...write(`${CWD}/&-$HOME/.bashrc`), pathUnknown: true }],
+    ],
     ['tee >&-{a,b}', [write(`${CWD}/&-{a,b}`)]],
     ['my-tool >&-notes.txt', [write(`${CWD}/&-notes.txt`)]],
     ['rm -- >&--x', [write(`${CWD}/&--x`)]],
@@ -1210,6 +1215,64 @@ describe('ANSI-C wrapper payloads', () => {
       write('/tmp/t'),
     ]);
   });
+});
+
+describe('unresolved redirect targets', () => {
+  it.each([
+    String.raw`D=sub; sh -c "printf {} > \"$D\"/../.qwen/settings.json"`,
+    String.raw`sh -c 'printf {} > "$OUTPUT"'`,
+    String.raw`printf ok > "😀$OUT"/../.qwen/settings.json`,
+    String.raw`printf ok > dir/"$OUT"`,
+    String.raw`printf ok > "$(pwd)/out"`,
+    'printf ok > `pwd`/out',
+    String.raw`printf '>'>"$OUT"`,
+    String.raw`cd sub > "$OUT"`,
+  ])('keeps an expanding redirect visible: %s', (command) => {
+    const operations = across(command);
+    expect(operations).toHaveLength(1);
+    expect(operations[0]).toMatchObject({
+      virtualTool: 'write_file',
+      pathUnknown: true,
+    });
+  });
+
+  it.each(['>', '1>', '>>', '2>', '2>>', '&>', '&>>', '>|', '2>|', '<'])(
+    'keeps an unresolved %s target in both token layouts',
+    (operator) => {
+      for (const space of ['', ' ']) {
+        expect(across(`unknown-command ${operator}${space}"$OUT"`)).toEqual([
+          {
+            virtualTool: operator === '<' ? 'read_file' : 'write_file',
+            filePath: '/repo/$OUT',
+            pathUnknown: true,
+          },
+        ]);
+      }
+    },
+  );
+
+  it.each([
+    [String.raw`'$OUT'`, '$OUT'],
+    [String.raw`\$OUT`, '$OUT'],
+    [String.raw`"\$OUT"`, '$OUT'],
+    [String.raw`$'\x24OUT'`, '$OUT'],
+    [String.raw`$'\x60OUT'`, '`OUT'],
+    [String.raw`dir/'$OUT'`, 'dir/$OUT'],
+    [String.raw`😀'$OUT'`, '😀$OUT'],
+    [String.raw`'$OUT'/../.qwen/settings.json`, '.qwen/settings.json'],
+  ])('keeps a literal target known: %s', (target, file) => {
+    expect(across(`printf ok > ${target}`)).toEqual([write(`/repo/${file}`)]);
+  });
+
+  it.each([
+    String.raw`printf "$VALUE" > .qwen/settings.json`,
+    String.raw`printf "$VALUE>">.qwen/settings.json`,
+  ])(
+    'does not attribute argument expansion to a static redirect: %s',
+    (command) => {
+      expect(across(command)).toEqual([write(REPO_SETTINGS)]);
+    },
+  );
 });
 
 describe('quoted and decoded tilde targets', () => {

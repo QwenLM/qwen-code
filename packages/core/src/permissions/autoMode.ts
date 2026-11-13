@@ -929,9 +929,9 @@ export async function evaluateAutoMode(
     return { via: 'fallback', reason: 'ask_rule' };
   }
 
-  // L5.2.6: a path containing undecodable bytes cannot be matched or explained
-  // to the classifier losslessly. Keep the manual-approval floor deterministic
-  // instead of letting an LLM approve the raw spelling.
+  // L5.2.6: unresolved expansion or undecodable bytes prevent lossless path
+  // matching. Keep the manual-approval floor deterministic instead of letting
+  // an LLM approve the raw spelling.
   if (SHELL_LIKE_TOOL_NAMES.has(input.ctx.toolName) && input.ctx.command) {
     const command =
       input.ctx.toolName === ToolNames.MONITOR

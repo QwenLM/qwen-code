@@ -835,6 +835,31 @@ describe('evaluateAutoMode — fast-path gating', () => {
     expect(classifyAction).not.toHaveBeenCalled();
   });
 
+  it.each([ToolNames.SHELL, ToolNames.MONITOR])(
+    'routes an unresolved %s redirect to manual fallback without the classifier',
+    async (toolName) => {
+      vi.mocked(classifyAction).mockClear();
+      const decision = await evaluate({
+        toolName,
+        command: String.raw`sh -c 'printf {} > "$OUTPUT"'`,
+        cwd,
+      });
+      expect(decision).toEqual({ via: 'fallback', reason: 'safety_check' });
+      expect(classifyAction).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not treat a literal dollar in a redirect as unresolved', async () => {
+    vi.mocked(classifyAction).mockClear();
+    const decision = await evaluate({
+      toolName: ToolNames.SHELL,
+      command: String.raw`printf ok > '$OUT'`,
+      cwd,
+    });
+    expect(decision.via).toBe('classifier');
+    expect(classifyAction).toHaveBeenCalledOnce();
+  });
+
   // ─── New tests for external write fallback ───
   it('routes external EDIT to manual fallback before classifier', async () => {
     const decision = await evaluate(

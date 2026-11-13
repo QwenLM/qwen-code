@@ -81,7 +81,7 @@ export interface ShellOperation {
    * do not depend on cwd; relative redirect/path arguments do.
    */
   pathMayDependOnCwd?: boolean;
-  /** True when the path contains bytes the JS path API cannot represent losslessly. */
+  /** True when expansion or undecodable bytes prevent a statically known path. */
   pathUnknown?: boolean;
 }
 
@@ -109,12 +109,12 @@ function tokenize(
   command: string,
   fdRedirects?: Set<number>,
   fdCloses?: Set<number>,
-  /** Parallel bare marks per pushed token; '1' = typed unquoted and unescaped. */
+  /** Parallel marks: '1' = bare, '0' = quoted/escaped, '2' = expansion syntax. */
   bares?: string[],
 ): string[] {
   const tokens: string[] = [];
   let current = '';
-  // One char per char of `current`: '1' if typed unquoted and unescaped.
+  // One mark per UTF-16 code unit; expansion marks survive quote removal.
   let bare = '';
   let wordStarted = false;
   let tildeQuoted = false;
@@ -267,7 +267,13 @@ function tokenize(
     const literal = String.fromCodePoint(command.codePointAt(i)!);
     current = concatAnsiCText(current, literal);
     wordStarted = true;
-    bare += (inSingle || inDouble ? '0' : '1').repeat(literal.length);
+    const mark =
+      !inSingle && (ch === '$' || ch === '`')
+        ? '2'
+        : inSingle || inDouble
+          ? '0'
+          : '1';
+    bare += mark.repeat(literal.length);
     i += literal.length - 1;
   }
   flushAnsiC();
@@ -428,8 +434,8 @@ function looksLikePath(s: string): boolean {
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface RedirectResult {
-  readFiles: string[];
-  writeFiles: string[];
+  readFiles: ShellOperation[];
+  writeFiles: ShellOperation[];
 }
 
 /**
@@ -495,7 +501,7 @@ function fdRedirectFile(word: string): string | undefined {
  * Extract I/O redirections from a token array.
  *
  * Modifies `tokens` in-place to remove redirect operators and their targets.
- * Returns the absolute paths of redirect targets as read / write operations.
+ * Retains redirect operations and their path uncertainty before normalization.
  *
  * Handles:
  *   `> file`   `>> file`  `< file`   (with or without space)
@@ -514,9 +520,24 @@ function extractRedirects(
   fdCloses: ReadonlySet<number> = new Set(),
   bares?: string[],
 ): RedirectResult {
-  const readFiles: string[] = [];
-  const writeFiles: string[] = [];
+  const readFiles: ShellOperation[] = [];
+  const writeFiles: ShellOperation[] = [];
   const toRemove = new Set<number>();
+  const pushRedirect = (
+    virtualTool: 'read_file' | 'write_file',
+    target: string,
+    bare?: string,
+  ): void => {
+    const operation: ShellOperation = {
+      virtualTool,
+      filePath: resolvePath(target, cwd, bare),
+    };
+    // Keep uncertainty before `..` normalization can remove its source word.
+    if (bare?.includes('2') || hasUnpairedSurrogate(target)) {
+      operation.pathUnknown = true;
+    }
+    (virtualTool === 'read_file' ? readFiles : writeFiles).push(operation);
+  };
 
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i]!;
@@ -557,8 +578,10 @@ function extractRedirects(
         ? `&${tok.slice(fdOp.length)}`
         : fdRedirectFile(tok.slice(fdOp.length));
       if (file !== undefined) {
-        (fdOp === '<&' ? readFiles : writeFiles).push(
-          resolvePath(file, cwd, tokBare?.slice(fdOp.length)),
+        pushRedirect(
+          fdOp === '<&' ? 'read_file' : 'write_file',
+          file,
+          tokBare?.slice(fdOp.length),
         );
       }
       continue;
@@ -575,9 +598,9 @@ function extractRedirects(
       syntax === '1>|'
     ) {
       const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
+      if (target) {
         if (!isNetworkPseudoDevice(target)) {
-          writeFiles.push(resolvePath(target, cwd, targetBare(i + 1)));
+          pushRedirect('write_file', target, targetBare(i + 1));
         }
         toRemove.add(i);
         toRemove.add(i + 1);
@@ -585,9 +608,9 @@ function extractRedirects(
       }
     } else if (syntax === '>>' || syntax === '1>>') {
       const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
+      if (target) {
         if (!isNetworkPseudoDevice(target)) {
-          writeFiles.push(resolvePath(target, cwd, targetBare(i + 1)));
+          pushRedirect('write_file', target, targetBare(i + 1));
         }
         toRemove.add(i);
         toRemove.add(i + 1);
@@ -601,9 +624,9 @@ function extractRedirects(
       }
     } else if (syntax === '<') {
       const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
+      if (target) {
         if (!isNetworkPseudoDevice(target)) {
-          readFiles.push(resolvePath(target, cwd, targetBare(i + 1)));
+          pushRedirect('read_file', target, targetBare(i + 1));
         }
         toRemove.add(i);
         toRemove.add(i + 1);
@@ -619,12 +642,8 @@ function extractRedirects(
       // stderr / combined redirect — consume target
       const target = tokens[i + 1];
       if (target) {
-        if (
-          target !== '/dev/null' &&
-          looksLikePath(target) &&
-          !isNetworkPseudoDevice(target)
-        ) {
-          writeFiles.push(resolvePath(target, cwd, targetBare(i + 1)));
+        if (target !== '/dev/null' && !isNetworkPseudoDevice(target)) {
+          pushRedirect('write_file', target, targetBare(i + 1));
         }
         toRemove.add(i);
         toRemove.add(i + 1);
@@ -640,8 +659,10 @@ function extractRedirects(
       if (fdOp) {
         const file = fdRedirectFile(redirectText.slice(fdOp.length));
         if (file !== undefined) {
-          (fdOp === '<&' ? readFiles : writeFiles).push(
-            resolvePath(file, cwd, redirectBare?.slice(fdOp.length)),
+          pushRedirect(
+            fdOp === '<&' ? 'read_file' : 'write_file',
+            file,
+            redirectBare?.slice(fdOp.length),
           );
         }
         tokens[i] = tok.slice(0, split);
@@ -669,17 +690,12 @@ function extractRedirects(
           }
           continue;
         }
-        if (
-          target !== '/dev/null' &&
-          looksLikePath(target) &&
-          !isNetworkPseudoDevice(target)
-        ) {
-          const file = resolvePath(target, cwd, tokBare?.slice(targetStart));
-          if (op === '<') {
-            readFiles.push(file);
-          } else {
-            writeFiles.push(file);
-          }
+        if (target !== '/dev/null' && !isNetworkPseudoDevice(target)) {
+          pushRedirect(
+            op === '<' ? 'read_file' : 'write_file',
+            target,
+            tokBare?.slice(targetStart),
+          );
         }
         if (split > 0) {
           tokens[i] = tok.slice(0, split);
@@ -2506,16 +2522,7 @@ function toRedirectOperations({
   readFiles,
   writeFiles,
 }: RedirectResult): ShellOperation[] {
-  return [
-    ...readFiles.map((filePath) => ({
-      virtualTool: 'read_file' as const,
-      filePath,
-    })),
-    ...writeFiles.map((filePath) => ({
-      virtualTool: 'write_file' as const,
-      filePath,
-    })),
-  ];
+  return [...readFiles, ...writeFiles];
 }
 
 function markUndecodablePathOps(ops: ShellOperation[]): ShellOperation[] {
