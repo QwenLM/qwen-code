@@ -44,6 +44,7 @@ import { gitOpt } from './lib/git.js';
 import { EFFORT_LEVELS, parseReviewArgs } from './parse-args.js';
 import {
   DEADLINE_ENV,
+  DEFAULT_ROUND_SECONDS,
   RESERVE_ENV,
   planReserveSeconds,
   resolveReviewDeadline,
@@ -565,7 +566,13 @@ function childEnv(
       inheritedDeadline ?? deadlineEpoch,
     );
     env[DEADLINE_ENV] = String(effectiveDeadline);
-    if (env[RESERVE_ENV] === undefined) {
+    const reserve = env[RESERVE_ENV];
+    if (
+      reserve === undefined ||
+      reserve.trim() === '' ||
+      !Number.isFinite(Number(reserve)) ||
+      Number(reserve) < 0
+    ) {
       env[RESERVE_ENV] = String(
         planReserveSeconds(effectiveDeadline - deadline.startMs / 1000, env),
       );
@@ -606,6 +613,16 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   const startMs = Date.now();
   const timeoutAtMs = startMs + args.timeoutMinutes * 60_000;
   const prompt = buildReviewPrompt(args);
+
+  if (args.timeoutExplicit) {
+    const timeoutSeconds = args.timeoutMinutes * 60;
+    const reserveSeconds = planReserveSeconds(timeoutSeconds);
+    if (timeoutSeconds < reserveSeconds + DEFAULT_ROUND_SECONDS) {
+      writeStderrLineSafe(
+        `review run: under the default budget estimates, the ${args.timeoutMinutes}-minute timeout cannot fit the ${reserveSeconds / 60}-minute reserve plus a ${DEFAULT_ROUND_SECONDS / 60}-minute audit round. Reverse audit may be skipped and an otherwise-Approve verdict capped at Comment; environment overrides can change admission. The hard timeout is unchanged.`,
+      );
+    }
+  }
 
   // The verdict cutoff carries slack: a coarse filesystem clock can stamp a
   // file a moment BEFORE the Date.now() captured at run start, and a review's
@@ -934,7 +951,7 @@ export const runCommand: CommandModule = {
         type: 'number',
         defaultDescription: '120',
         describe:
-          'Terminate the review after this long without a verdict (exit 1). An explicit value also sets the soft deadline and tail reserve; huge reviews use at most 3 audit rounds, and budget stops cap the verdict at Comment.',
+          'Terminate the review after this long without a verdict (exit 1). An explicit value also sets the soft deadline and tail reserve; huge reviews use at most 3 audit rounds, and a budget-stopped audit caps an otherwise-Approve verdict at Comment.',
       })
       .option('approval-mode', {
         type: 'string',

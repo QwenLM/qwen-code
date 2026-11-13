@@ -510,7 +510,7 @@ describe('review run (handler)', () => {
       ).toBeNull();
     });
 
-    it.each(['0', '1800', 'invalid'])(
+    it.each(['0', ' 0 ', '1800'])(
       'preserves the inherited reserve %s',
       async (reserve) => {
         vi.useFakeTimers();
@@ -525,6 +525,123 @@ describe('review run (handler)', () => {
         await done;
 
         expect(env[RESERVE_ENV]).toBe(reserve);
+      },
+    );
+
+    it.each(['', ' \t ', 'invalid', 'NaN', 'Infinity', '-1'])(
+      'replaces the invalid inherited reserve %j',
+      async (reserve) => {
+        vi.useFakeTimers();
+        vi.setSystemTime(start);
+        vi.stubEnv(DEADLINE_ENV, undefined);
+        vi.stubEnv(RESERVE_ENV, reserve);
+        vi.stubEnv(COMPOSE_FLOOR_ENV, undefined);
+        const child = new FakeChild();
+        spawnMock.mockReturnValue(child);
+
+        const done = runHandler({ 'timeout-minutes': 120 });
+        const env = spawnMock.mock.calls[0][2].env;
+        child.emit('close', 0, null);
+        await done;
+
+        expect(env[RESERVE_ENV]).toBe('2400');
+        expect(process.env[RESERVE_ENV]).toBe(reserve);
+        expect(
+          reverseAuditBudgetExhausted(
+            env,
+            DEFAULT_ROUND_SECONDS,
+            start + 11 * 60_000,
+          ),
+        ).toBeNull();
+      },
+    );
+
+    it.each([
+      {
+        name: 'short default budget',
+        minutes: 45,
+        reserve: undefined,
+        floor: undefined,
+        warns: true,
+      },
+      {
+        name: 'exact one-round boundary',
+        minutes: 50,
+        reserve: undefined,
+        floor: undefined,
+        warns: false,
+      },
+      {
+        name: 'sufficient default budget',
+        minutes: 120,
+        reserve: undefined,
+        floor: undefined,
+        warns: false,
+      },
+      {
+        name: 'zero reserve override',
+        minutes: 45,
+        reserve: '0',
+        floor: '0',
+        warns: true,
+      },
+      {
+        name: 'raised reserve and floor overrides',
+        minutes: 120,
+        reserve: '9999',
+        floor: '9999',
+        warns: false,
+      },
+    ])(
+      'uses environment-free budget estimates for $name',
+      async ({ minutes, reserve, floor, warns }) => {
+        vi.useFakeTimers();
+        vi.setSystemTime(start);
+        vi.stubEnv(DEADLINE_ENV, undefined);
+        vi.stubEnv(RESERVE_ENV, reserve);
+        vi.stubEnv(COMPOSE_FLOOR_ENV, floor);
+        const child = new FakeChild();
+        let stderrAtSpawn = '';
+        spawnMock.mockImplementation(() => {
+          stderrAtSpawn = errs.join('');
+          return child;
+        });
+
+        const done = runHandler({ 'timeout-minutes': minutes, quiet: true });
+        const env = spawnMock.mock.calls[0][2].env;
+        try {
+          if (warns) {
+            expect(stderrAtSpawn).toContain(
+              'under the default budget estimates',
+            );
+            expect(stderrAtSpawn).toContain(
+              '20-minute reserve plus a 30-minute audit round',
+            );
+            expect(stderrAtSpawn).toContain('may be skipped');
+            expect(stderrAtSpawn).toContain('otherwise-Approve verdict');
+            expect(stderrAtSpawn).toContain(
+              'environment overrides can change admission',
+            );
+            expect(stderrAtSpawn).toContain('The hard timeout is unchanged');
+          } else {
+            expect(stderrAtSpawn).toBe('');
+          }
+          if (reserve === '0') {
+            expect(env[RESERVE_ENV]).toBe('0');
+            expect(
+              reverseAuditBudgetExhausted(env, DEFAULT_ROUND_SECONDS, start),
+            ).toBeNull();
+          }
+          if (minutes === 45 && reserve === undefined) {
+            await vi.advanceTimersByTimeAsync(45 * 60_000 - 1);
+            expect(processKill).not.toHaveBeenCalled();
+            await vi.advanceTimersByTimeAsync(1);
+            expect(processKill).toHaveBeenCalledWith(-12345, 'SIGTERM');
+          }
+        } finally {
+          child.emit('close', 0, null);
+          await done;
+        }
       },
     );
 
@@ -634,8 +751,17 @@ describe('review run (handler)', () => {
           'timeout-minutes': argv['timeout-minutes'],
         });
         const env = spawnMock.mock.calls[0][2].env;
-        child.emit('close', 0, null);
-        await done;
+        try {
+          if (minutes === undefined) {
+            await vi.advanceTimersByTimeAsync(120 * 60_000 - 1);
+            expect(processKill).not.toHaveBeenCalled();
+            await vi.advanceTimersByTimeAsync(1);
+            expect(processKill).toHaveBeenCalledWith(-12345, 'SIGTERM');
+          }
+        } finally {
+          child.emit('close', 0, null);
+          await done;
+        }
 
         expect(env[DEADLINE_ENV]).toBe(
           minutes === undefined
