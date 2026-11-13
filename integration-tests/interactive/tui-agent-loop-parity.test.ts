@@ -661,12 +661,21 @@ describeTui(SUITE, () => {
       async () => !(await session!.viewport()).includes('Initializing...'),
       'initialization completes',
     );
-    // Ink loads slash commands and skills asynchronously after the prompt
-    // renders; probing `/` ensures both CommandService and input focus are
-    // ready before the first prompt is typed (#16787, #17131).
+    // Both renderers load slash commands and skills asynchronously after the
+    // prompt renders; probing `/` ensures both CommandService and input focus
+    // are ready before the first prompt is typed (#16787, #17131). The signal
+    // is the completion list's own `(<n>/<total>)` counter, which cannot show
+    // early: the command list starts empty and is filled only once
+    // CommandService.create resolves, and the counter is printed only while
+    // that list holds more than MAX_SUGGESTIONS_TO_SHOW entries. Suggestion
+    // labels carry no leading `/` (they read `status (about)`), so a command
+    // name cannot be awaited as a literal.
     session.pressKey('/');
     await until(
-      async () => (await session!.viewport()).includes('/about'),
+      async () =>
+        (await session!.viewport())
+          .split('\n')
+          .some((line) => /^\(\d+\/\d+\)$/.test(line.trim())),
       'slash commands load',
       30_000,
       () => session!.viewport(),
