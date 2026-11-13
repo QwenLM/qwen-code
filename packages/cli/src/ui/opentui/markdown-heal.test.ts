@@ -26,6 +26,21 @@ describe('healStreamingMarkdown', () => {
     expect(healStreamingMarkdown('1. **聚合')).toBe('1. **聚合**');
   });
 
+  it('does not append a close for a C++ pointer asterisk', () => {
+    expect(healStreamingMarkdown('const char*; fine.')).toBe(
+      'const char*; fine.',
+    );
+  });
+
+  it('does not append a close for a C++ underscore identifier', () => {
+    const text = 'scan_recipes 和 devtool_* 並沒有。我要修正這句說明。';
+    expect(healStreamingMarkdown(text)).toBe(text);
+  });
+
+  it('still closes a real emphasis opener', () => {
+    expect(healStreamingMarkdown('*italic')).toBe('*italic*');
+  });
+
   it('renders an incomplete link as plain text (text-only mode)', () => {
     expect(healStreamingMarkdown('看 [这个链接](https://exampl')).toBe(
       '看 这个链接',

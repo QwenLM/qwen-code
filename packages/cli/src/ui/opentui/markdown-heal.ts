@@ -798,14 +798,36 @@ function normalizeLineEndings(text: string): string {
   return text.replace(/\r\n/g, '\n').replace(/\r/g, '');
 }
 
+/**
+ * remend closes an unmatched `*` by appending one at the paragraph tail. In
+ * C++ prose that `*` is a pointer (`const char*`), not emphasis, so the
+ * preview grows one character the settled raw text never had. Remove only
+ * that appended close; a real emphasis opener starts at a boundary and keeps
+ * its healed close.
+ */
+function stripFalseEmphasisClose(source: string, healed: string): string {
+  for (const marker of ['*', '_']) {
+    if (!healed.endsWith(marker) || healed.endsWith(marker + marker)) continue;
+    if (source.endsWith(marker)) continue;
+    const last = source.lastIndexOf(marker);
+    if (last === -1) continue;
+    if (!/[A-Za-z0-9_>)\]]/.test(source[last - 1] ?? '')) continue;
+    return healed.slice(0, -1);
+  }
+  return healed;
+}
+
 export function healStreamingMarkdown(text: string): string {
   // Keep C++ templates: remend's htmlTags handler strips `<int, ...`
   // while the angle bracket is still streaming.
   const prepared = maskLoneTildes(normalizeLineEndings(text));
-  const healed = remend(prepared, {
-    linkMode: 'text-only',
-    htmlTags: false,
-  });
+  const healed = stripFalseEmphasisClose(
+    prepared,
+    remend(prepared, {
+      linkMode: 'text-only',
+      htmlTags: false,
+    }),
+  );
   return maskStreamingText(healed);
 }
 
