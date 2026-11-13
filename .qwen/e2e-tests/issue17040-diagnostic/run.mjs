@@ -22,7 +22,8 @@ const openssl = process.env.QWEN17040_OPENSSL ?? (process.platform === 'win32' &
 const generated = spawnSync(openssl, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=raw.githubusercontent.com', '-addext', 'subjectAltName=DNS:raw.githubusercontent.com'], { stdio: 'ignore', timeout: 15000 });
 if (generated.status !== 0) throw new Error('Cannot generate test certificate; set QWEN17040_OPENSSL to an OpenSSL executable.');
 
-const summary = { node: process.version, platform: process.platform, arch: process.arch, out, started: new Date().toISOString(), downloadComplete: false, shellExitCode: null, shellSucceeded: false, turnComplete: false, sessionDied: false, statsFailures: 0, permissionFallbacks: 0, shellProgress: [], signals: [] };
+const promptDelayMs = Number(process.env.QWEN17040_FIRST_PROMPT_DELAY_MS ?? 0);
+const summary = { node: process.version, platform: process.platform, arch: process.arch, osRelease: os.release(), firstPromptDelayMs: promptDelayMs, out, started: new Date().toISOString(), downloadComplete: false, shellExitCode: null, shellSucceeded: false, turnComplete: false, sessionDied: false, statsFailures: 0, permissionFallbacks: 0, shellProgress: [], signals: [] };
 const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 const tlsServer = https.createServer({ key: fs.readFileSync(key), cert: fs.readFileSync(cert) }, (_req, res) => {
   res.writeHead(200, { 'content-length': 831741, 'content-type': 'application/json' });
@@ -97,9 +98,11 @@ try {
     }
   }).catch(error => { if (error.name !== 'AbortError') summary.eventError = error.name; });
   interval = setInterval(async () => { try { const response = await fetch(root + '/stats', { headers, signal: AbortSignal.timeout(12000) }); if (response.status !== 200) summary.statsFailures++; } catch { summary.statsFailures++; } }, 2000);
+  await new Promise(resolve => setTimeout(resolve, promptDelayMs));
+  summary.promptSentAt = new Date().toISOString();
   const response = await fetch(root + '/prompt', { method: 'POST', headers, body: JSON.stringify({ prompt: [{ type: 'text', text: 'Run the single controlled download shell command.' }] }), signal: AbortSignal.timeout(10000) });
   assert.equal(response.status, 202, 'prompt must be admitted');
-  const end = Date.now() + 70000;
+  const end = Date.now() + 150000;
   while (!summary.turnComplete && !summary.sessionDied && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 200));
   clearInterval(interval); abort.abort(); await eventTask;
   assert.equal(summary.sessionDied, false, 'session must remain alive');

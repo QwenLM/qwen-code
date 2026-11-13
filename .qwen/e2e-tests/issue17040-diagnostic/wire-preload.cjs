@@ -89,6 +89,26 @@ if (acp) {
   record({ event: 'preload', role: 'acp-child' });
   observeReads(process.stdin, 'child_receive');
   observeWrites(process.stdout, 'child_write');
+  let sampleNs = process.hrtime.bigint(), sampleCpu = process.cpuUsage(), syncSeq = 0;
+  setInterval(() => {
+    const now = process.hrtime.bigint(), cpu = process.cpuUsage();
+    const elapsedMs = Number(now - sampleNs) / 1e6;
+    record({ event: 'event_loop_sample', elapsedMs, lateMs: Math.max(0, elapsedMs - 250), userCpuMs: (cpu.user - sampleCpu.user) / 1000, systemCpuMs: (cpu.system - sampleCpu.system) / 1000, stdinPaused: process.stdin.isPaused(), stdinFlowing: process.stdin.readableFlowing, stdinQueuedBytes: process.stdin.readableLength });
+    sampleNs = now; sampleCpu = cpu;
+  }, 250).unref();
+  for (const api of ['spawnSync', 'execSync', 'execFileSync']) {
+    const original = cp[api];
+    cp[api] = function (...args) {
+      const call = ++syncSeq;
+      const name = api !== 'execSync' && typeof args[0] === 'string' ? args[0].split(/[\\/]/).at(-1).toLowerCase() : '';
+      const executable = /^(?:(?:powershell|pwsh|cmd|where|wmic|node|git|reg)(?:\.exe)?|chcp(?:\.com)?|sh|sleep)$/.test(name) ? name : undefined;
+      record({ event: 'sync_process_start', api, call, executable });
+      const started = process.hrtime.bigint(), cpu = process.cpuUsage();
+      let threw = true;
+      try { const result = original.apply(this, args); threw = false; return result; }
+      finally { const used = process.cpuUsage(cpu); record({ event: 'sync_process_end', api, call, durationMs: Number(process.hrtime.bigint() - started) / 1e6, userCpuMs: used.user / 1000, systemCpuMs: used.system / 1000, threw }); }
+    };
+  }
   const load = Module._load, observed = new WeakSet();
   Module._load = function (request, ...args) {
     const target = typeof request === 'string' && (request.startsWith('@lydell/node-pty') || request === 'node-pty');

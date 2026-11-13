@@ -8,6 +8,8 @@ The output includes isolated configuration/runtime files, a test certificate/key
 
 Use Node 22.23.4 (`node --version`). Install the release into a temporary directory; do not replace an existing global installation:
 
+Set `QWEN17040_FIRST_PROMPT_DELAY_MS=12000` for the phase comparison; the default sends the first prompt immediately. This changes only the test's wait before sending a prompt, not channel liveness or shell timeouts. The outer harness waits up to 150 seconds after admission so cold startup plus the slow download is not cut off by the fixture.
+
 ```powershell
 $release = Join-Path $env:TEMP 'qwen17040-release'
 npm install --prefix $release --no-audit --no-fund '@qwen-code/qwen-code@0.27.2'
