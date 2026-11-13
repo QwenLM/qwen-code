@@ -612,17 +612,70 @@ export async function acceptSpeculation(
     : Math.max(0, Date.now() - state.startTime);
 
   try {
-    // Copy overlay files to real filesystem
-    const filesApplied = state.overlayFs
-      ? await state.overlayFs.applyToReal()
-      : [];
+    let filesApplied: string[] = [];
+    if (state.overlayFs) {
+      try {
+        // Copy overlay files to real filesystem
+        filesApplied = await state.overlayFs.applyToReal();
+      } catch (err) {
+        // When only some copies failed, the rest are on the user's disk. Record
+        // the turn before rethrowing so the conversation, --resume replay and
+        // the next suggestion do not reason from a history that omits edits
+        // already in the working tree. The caller reports the applied and failed
+        // paths and does not resubmit. This stays best-effort so the apply error
+        // remains the one the caller sees.
+        if (getErrorStringArray(err, 'applied').length > 0) {
+          try {
+            const injected = ensureToolResultPairing(state.messages);
+            const notLanded = [
+              ...new Set([
+                ...getErrorStringArray(err, 'failed'),
+                ...getErrorStringArray(err, 'damaged'),
+              ]),
+            ];
+            if (notLanded.length > 0) {
+              // The tool results in the turn above still claim success for these
+              // paths. Tell the model explicitly that they are not on disk;
+              // otherwise its next turn (and the next suggestion, generated from
+              // the history tail) reads a false success as fact.
+              injected.push({
+                role: 'user',
+                parts: [
+                  {
+                    text:
+                      'Speculation note: the following file(s) could not be ' +
+                      'written, so their tool results above are not on disk: ' +
+                      `${notLanded.join(', ')}. Do not treat those edits as applied.`,
+                  },
+                ],
+              });
+            }
+            for (const msg of injected) {
+              await llmClient.addHistory(msg);
+            }
+            llmClient.markToolResultsInjected(injected);
+            attachErrorValue(err, 'messages', injected);
+          } catch {
+            // Keep the apply error as the failure the caller reports.
+          }
+        }
+        throw err;
+      }
+    }
 
     // Ensure tool result pairing is complete before injection
     const cleanMessages = ensureToolResultPairing(state.messages);
 
     // Inject into main conversation
-    for (const msg of cleanMessages) {
-      await llmClient.addHistory(msg);
+    try {
+      for (const msg of cleanMessages) {
+        await llmClient.addHistory(msg);
+      }
+    } catch (err) {
+      // The files already landed. Carry the list so the caller does not resubmit
+      // over a tree whose edits are already in place.
+      attachErrorStringArray(err, 'applied', filesApplied);
+      throw err;
     }
     // The fork chat already reported these results; mark the replay so this
     // chat does not re-emit their injection events.
@@ -642,6 +695,50 @@ export async function acceptSpeculation(
     if (state.overlayFs) {
       await state.overlayFs.cleanup();
     }
+  }
+}
+
+/**
+ * Read a string array attached to an error by `OverlayFs.applyToReal`, if any.
+ * The properties are attached at the throw site rather than declared on a
+ * shared error type so callers in other packages can use them without a
+ * cross-package class import.
+ */
+function getErrorStringArray(value: unknown, key: string): string[] {
+  if (!value || typeof value !== 'object') {
+    return [];
+  }
+  const candidate = (value as Record<string, unknown>)[key];
+  return Array.isArray(candidate)
+    ? candidate.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+}
+
+function attachErrorValue(value: unknown, key: string, entry: unknown): void {
+  if (!value || typeof value !== 'object') {
+    return;
+  }
+  try {
+    (value as Record<string, unknown>)[key] = entry;
+  } catch {
+    // Frozen or otherwise non-extensible error: the caller still gets the
+    // original failure, it just cannot see the injected messages.
+  }
+}
+
+function attachErrorStringArray(
+  value: unknown,
+  key: string,
+  entries: string[],
+): void {
+  if (entries.length === 0 || !value || typeof value !== 'object') {
+    return;
+  }
+  try {
+    (value as Record<string, unknown>)[key] = entries;
+  } catch {
+    // Frozen or otherwise non-extensible error: the caller still gets the
+    // original failure, it just cannot see which files landed.
   }
 }
 
