@@ -28,6 +28,7 @@ import {
   CONTAINER_SANDBOX_NO_PROXY,
   fakeServerHostOptions,
   IS_CONTAINER_SANDBOX,
+  sharedLoopRoundCount,
   TestRig,
 } from '../test-helper.js';
 import {
@@ -105,6 +106,8 @@ interface Run {
   goalTurnEnds: unknown[];
   /** The stop reason of each background-notification turn, in order. */
   backgroundTurnEnds: unknown[];
+  /** Shared-loop round markers in this run's debug log (arm identity). */
+  sharedRounds: number;
 }
 
 const PROMPT_TIMEOUT_MS = 60_000;
@@ -303,6 +306,7 @@ const allowOnce = () => ({
         ? CONTAINER_SANDBOX_NO_PROXY
         : '127.0.0.1,localhost';
       const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
+      let sharedRounds = 0;
       // Project hooks need both authorities available: enable the trust
       // feature (the inherited rig trust store grants the workspace; no
       // trust-store file here because the request snapshot encodes this
@@ -327,6 +331,9 @@ const allowOnce = () => ({
         // each run's request snapshot encodes, so give each run its own
         // scratch runtime outside the workspace.
         QWEN_RUNTIME_DIR: qwenHome,
+        // Arm identity: the shared-loop round marker lands in this run's debug
+        // log so the arms are verified to run different loops, not assumed to.
+        QWEN_DEBUG_LOG_FILE: '1',
       };
       env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = shared ? '1' : '0';
       delete env[PRIVATE_ACP_CAPABILITY_ENV];
@@ -520,6 +527,8 @@ const allowOnce = () => ({
           if (agent.exitCode !== null || agent.signalCode) resolve(undefined);
           else agent.once('exit', resolve);
         });
+        // Read the arm-identity marker before the scratch runtime is removed.
+        sharedRounds = sharedLoopRoundCount(qwenHome);
         // Keep the runtime state for post-mortem whenever TestRig.cleanup()
         // keeps the test directory, which it decides by truthiness.
         if (!process.env['KEEP_OUTPUT']) {
@@ -550,6 +559,7 @@ const allowOnce = () => ({
         permissionsAt,
         goalTurnEnds,
         backgroundTurnEnds,
+        sharedRounds,
       };
     }
 
@@ -876,6 +886,13 @@ const allowOnce = () => ({
       async (_name, scenario) => {
         const { current, shared } = await both(scenario);
 
+        // Arm identity: the shared arm must actually run the shared loop and
+        // the current arm the legacy one — two arms that resolve identically
+        // would otherwise pass every cross-arm assertion below. Both arms
+        // force every surface together (whole-value env), so the process-wide
+        // marker count is a valid per-arm identity here.
+        expect(shared.sharedRounds).toBeGreaterThan(0);
+        expect(current.sharedRounds).toBe(0);
         expect(shared.stopReasons).toEqual(current.stopReasons);
         expect(shared.requests).toEqual(current.requests);
         expect(shared.goalTurnEnds).toEqual(current.goalTurnEnds);

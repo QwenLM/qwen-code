@@ -1126,6 +1126,12 @@ export const SHARED_LOOP_ROUND_MARKER =
  * child with `QWEN_DEBUG_LOG_FILE=1` and `QWEN_RUNTIME_DIR` pointing at the
  * returned dir, then assert the count is > 0 for a shared arm and 0 for a
  * legacy arm — so an arm label is verified, not assumed.
+ *
+ * The count is process-wide: it sums the markers of every surface in the run
+ * (a subagent on the shared loop counts too). It is a valid per-arm identity
+ * only when the arms force every surface together (whole-value `1`/`0` env).
+ * Under a per-surface force-off, a surface that stayed on the shared loop
+ * would keep the count non-zero even though the forced-off surface ran legacy.
  */
 export function sharedLoopRoundCount(runtimeDir: string): number {
   const debugDir = join(runtimeDir, 'debug');

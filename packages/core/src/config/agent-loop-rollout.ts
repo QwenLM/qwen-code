@@ -78,10 +78,13 @@ function warnOnce(entry: string, message: string): void {
  * `<surface>[=0|=1]` tokens forces the named surfaces and leaves the rest
  * to the setting and the built-in default. Unknown or malformed tokens are
  * ignored, so a list written for a newer CLI cannot break an older one.
+ * `variable` names the env var so an ignored token is attributed to the
+ * switch it was written into, even when both switches share a typo.
  */
 export function resolveAgentLoopEnvOverride(
   value: string | undefined,
   surface: AgentLoopSurface,
+  variable: string,
 ): boolean | undefined {
   if (value === undefined) return undefined;
   const trimmed = value.trim();
@@ -95,7 +98,10 @@ export function resolveAgentLoopEnvOverride(
     const name = eq === -1 ? entry : entry.slice(0, eq).trim();
     const flag = eq === -1 ? '1' : entry.slice(eq + 1).trim();
     if (!isSurface(name)) {
-      warnOnce(entry, `ignoring unknown agent-loop surface token: ${entry}`);
+      warnOnce(
+        `${variable}\u0000${entry}`,
+        `ignoring unknown agent-loop surface token "${entry}" in ${variable}`,
+      );
       continue;
     }
     if (name !== surface) continue;
@@ -104,7 +110,10 @@ export function resolveAgentLoopEnvOverride(
     // Skip only the unparseable token; a later well-formed token for the same
     // surface still applies, and a lone malformed token leaves the surface to
     // the setting/default. The first well-formed token wins.
-    warnOnce(entry, `ignoring malformed agent-loop token: ${entry}`);
+    warnOnce(
+      `${variable}\u0000${entry}`,
+      `ignoring malformed agent-loop token "${entry}" in ${variable}`,
+    );
     continue;
   }
   return undefined;
@@ -121,8 +130,13 @@ export function resolveAgentLoopSwitch(options: {
   setting: boolean | undefined;
   surface: AgentLoopSurface;
   surfaceDefault: boolean;
+  variable: string;
 }): boolean {
-  const override = resolveAgentLoopEnvOverride(options.env, options.surface);
+  const override = resolveAgentLoopEnvOverride(
+    options.env,
+    options.surface,
+    options.variable,
+  );
   if (override !== undefined) return override;
   if (options.setting !== undefined) return options.setting;
   return options.surfaceDefault;

@@ -1056,13 +1056,28 @@ describe('e2e workflow', () => {
     };
     const arms = ['current', 'unified', 'kernel'];
     const stripExpression = (raw) => String(raw).trim().slice(3, -2).trim();
+    // Like the macOS shard guard below: an unmodeled term must throw, not
+    // evaluate as undefined — a leg that wires an unmodeled github.* / matrix
+    // term would otherwise pass these pins while running the wrong switch.
+    const strict = (value) =>
+      value && typeof value === 'object'
+        ? new Proxy(value, {
+            get(target, prop) {
+              if (typeof prop === 'symbol' || prop in target)
+                return strict(target[prop]);
+              throw new Error(
+                `agent-loop expression carries an unmodeled term: ${String(prop)}`,
+              );
+            },
+          })
+        : value;
     const evalExpression = (expression, context) =>
       new Function(
         ...Object.keys(context),
         // GitHub expressions allow hyphenated property names
         // (matrix.agent-loop); JavaScript reads that as subtraction.
         `return (${expression.replace(/(\w+)\.([\w-]*-[\w-]*)/g, "$1['$2']")});`,
-      )(...Object.values(context));
+      )(...Object.values(context).map(strict));
     const agentLoopValues = (job, eventName) =>
       evalExpression(
         stripExpression(yml.jobs[job].strategy.matrix['agent-loop']),

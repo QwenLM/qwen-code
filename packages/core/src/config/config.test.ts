@@ -7470,25 +7470,30 @@ describe('Server Config (config.ts)', () => {
     });
 
     describe('loop-switch default tables are independent', () => {
+      // Snapshot the tables as found so cleanup restores them rather than a
+      // hardcoded false — the first rollout flip must not be erased here.
+      const savedUnified = { ...UNIFIED_SURFACE_DEFAULTS };
+      const savedEventBus = { ...EVENT_BUS_SURFACE_DEFAULTS };
       afterEach(() => {
-        // Restore the all-false defaults the rollout starts from.
         for (const surface of AGENT_LOOP_SURFACES) {
-          UNIFIED_SURFACE_DEFAULTS[surface] = false;
-          EVENT_BUS_SURFACE_DEFAULTS[surface] = false;
+          UNIFIED_SURFACE_DEFAULTS[surface] = savedUnified[surface];
+          EVENT_BUS_SURFACE_DEFAULTS[surface] = savedEventBus[surface];
         }
         vi.unstubAllEnvs();
       });
 
       it('flipping a unified surface default does not flip the event-bus default', () => {
         // The next rollout step flips one surface's unified default. The kernel
-        // must stay off for that surface unless its own table is flipped —
-        // re-merging the two tables reds this case.
+        // must stay at its own table's value for that surface unless its own
+        // table is flipped — re-merging the two tables reds this case.
         vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
         vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
         UNIFIED_SURFACE_DEFAULTS.headless = true;
         const config = makeConfig();
         expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(true);
-        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(false);
+        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(
+          savedEventBus.headless,
+        );
       });
 
       it('flipping an event-bus surface default does not flip the unified default', () => {
@@ -7497,7 +7502,9 @@ describe('Server Config (config.ts)', () => {
         EVENT_BUS_SURFACE_DEFAULTS.headless = true;
         const config = makeConfig();
         expect(config.isEventBusAgentLoopEnabled('headless')).toBe(true);
-        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(false);
+        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(
+          savedUnified.headless,
+        );
       });
     });
 

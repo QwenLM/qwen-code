@@ -86,12 +86,18 @@ describe('InteractiveSession.start source pins (#13552)', () => {
     // The nightly loop legs export the two switches; deleting the forwarding
     // block (or narrowing it to one switch) leaves the inheritEnv:false
     // suites on the default loop on every arm, and only a nightly run would
-    // notice. Both keys and the forwarding assignment must be present inside
-    // the inheritEnv:false guard; keeping the keys while dropping the
-    // assignment is the no-op this pin exists to redden.
+    // notice. The guard must forward exactly the two switches, the assignment
+    // must be live code, and it must run before the child env is built from
+    // baseEnv — otherwise the forwarded values never reach the child.
     expect(source).toMatch(
-      /if \(options\?\.inheritEnv === false\) \{[\s\S]*?'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'[\s\S]*?'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'[\s\S]*?baseEnv\[key\]\s*=\s*process\.env\[key\];/,
+      /if \(options\?\.inheritEnv === false\) \{[\s\S]*?for \(const key of \[\s*'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',\s*'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',?\s*\]\)/,
     );
+    const forwardAt = source.search(
+      /^\s*if \(process\.env\[key\] !== undefined\)\s*baseEnv\[key\]\s*=\s*process\.env\[key\];$/m,
+    );
+    const envBuiltAt = source.indexOf('const env = {');
+    expect(forwardAt).toBeGreaterThan(-1);
+    expect(envBuiltAt).toBeGreaterThan(forwardAt);
   });
 
   it('pins that a test own env overrides the forwarded switches', () => {

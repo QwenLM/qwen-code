@@ -10846,6 +10846,7 @@ export class Config {
       setting: this.unifiedAgentLoopEnabled,
       surface,
       surfaceDefault: UNIFIED_SURFACE_DEFAULTS[surface],
+      variable: 'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
     });
   }
 
@@ -10855,6 +10856,7 @@ export class Config {
       setting: this.eventBusAgentLoopEnabled,
       surface,
       surfaceDefault: EVENT_BUS_SURFACE_DEFAULTS[surface],
+      variable: 'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
     });
   }
 
