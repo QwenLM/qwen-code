@@ -861,13 +861,52 @@ test('a base ref containing a hash is URI-encoded in the tree path', async () =>
     calls.some((c) => c.includes('/git/trees/fix%231?recursive=1')),
     `expected an encoded tree ref, got ${JSON.stringify(calls)}`,
   );
+  // On this path the base ref reaches three URLs, not just the tree one: the
+  // root `.prettierignore` contents `?ref=` read and the commits `&sha=` lookup
+  // interpolate it too. (A fourth encoder exists in fetchGateFilePair, but the
+  // eslint path feeds it hex SHAs, never a branch name.) The fixture decodes
+  // every recorded path before matching, so deleting either of the other two
+  // encoders would otherwise stay green. A raw '#' there is worse than a wrong
+  // tree: the commits lookup has no try of its own, so its throw reaches
+  // main()'s fail-open, which reports the whole branch as fresh.
+  assert.deepEqual(
+    calls.filter((c) => c.includes('fix#1')),
+    [],
+    'every URL embedding the base ref must encode it',
+  );
+});
+
+test('a base ref containing a percent is URI-encoded in the tree path', async () => {
+  // The hash case's comment names '%' alongside '#', so '%' needs its own
+  // witness: an encoder narrowed to '#' and '/' alone stays green without it.
+  // 'fix%201' is a legal ref; unencoded it is requested verbatim and decodes
+  // server-side to the DIFFERENT ref 'fix 1'. The fixture keys trees by the
+  // raw ref, so the case must pass 'fix%201', never the decoded 'fix 1'.
+  const calls = [];
+  const stale = await findStaleGateFiles({
+    ...PRETTIER_OPTS,
+    baseRef: 'fix%201',
+    ...prettierFetch(
+      {
+        basePi: ['node_modules', 'packages/live-host/'],
+        headPi: ['node_modules'],
+        baseRef: 'fix%201',
+      },
+      calls,
+    ),
+  });
+  assert.deepEqual(stale, []);
+  assert.ok(
+    calls.some((c) => c.includes('/git/trees/fix%25201?recursive=1')),
+    `expected an encoded tree ref, got ${JSON.stringify(calls)}`,
+  );
 });
 
 test('a base ref containing a slash is URI-encoded in the tree path', async () => {
   // A slash survives an unencoded path: measured against the live API,
   // git/trees/agent/agent-view-commands?recursive=1 answers 200 with the same
   // tree sha as the encoded form. So this case pins the encoded STRING; the
-  // shape that actually misbehaves without the encoder is '#' below.
+  // shape that actually misbehaves without the encoder is the '#' case above.
   const calls = [];
   const stale = await findStaleGateFiles({
     ...PRETTIER_OPTS,
