@@ -448,7 +448,7 @@ export interface WebShellSidebarSessionActionsOptions {
   items?: readonly WebShellSidebarSessionActionItem[];
   /**
    * Which items appear as inline buttons on standard session rows (on hover).
-   * Defaults to ['pin'];
+   * Defaults to ['pin', 'rename'];
    * archive stays in the dropdown so a stray click on the hover slot cannot
    * archive a session.
    * Only items that also pass their built-in visibility condition are rendered.
@@ -475,7 +475,7 @@ export const DEFAULT_SESSION_ACTION_ITEMS: readonly WebShellSidebarSessionAction
   ];
 
 const DEFAULT_INLINE_ACTION_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
-  ['pin'];
+  ['pin', 'rename'];
 
 /**
  * Palette order for the quick color-grouping buckets. Mirrors core's
@@ -5460,12 +5460,52 @@ export function WebShellSidebar({
       ? t('sidebar.groupCreate')
       : t('sidebar.groupRename');
 
+  // The Pinned section is not rendered in Live or Channels, nor while the
+  // Activity view or `sessionContent` replaces the default session list; a
+  // host check that ignored that would let an unmounted Pinned row disable
+  // the only editor that is actually on screen.
+  const pinnedSectionVisible = useMemo(
+    () =>
+      sessionContent === undefined &&
+      !(activityOpen && activityEnabled) &&
+      !liveView &&
+      selectedSessionSource !== 'channel' &&
+      pinnedSessions.length > 0,
+    [
+      activityEnabled,
+      activityOpen,
+      liveView,
+      pinnedSessions,
+      selectedSessionSource,
+      sessionContent,
+    ],
+  );
+  // When the Pinned section hosts the editor, the row is already mounted
+  // there and every other copy of it stays read-only; expanding a catalog
+  // would only add rows nobody is editing. Shared with renderSessionRow and
+  // the WorkspaceSection prop below so the host and reveal rules agree.
+  const pinnedSectionHostsEditing = useMemo(
+    () =>
+      pinnedSectionVisible &&
+      editingSessionIdentity !== null &&
+      pinnedExpanded &&
+      pinnedSessions.some(
+        (session) => getIdentityForSession(session) === editingSessionIdentity,
+      ),
+    [
+      editingSessionIdentity,
+      getIdentityForSession,
+      pinnedExpanded,
+      pinnedSectionVisible,
+      pinnedSessions,
+    ],
+  );
   const renderSessionRow = useCallback(
     (
       session: DaemonSessionSummary,
       options: {
         isArchived?: boolean;
-        renameFormDisabled?: boolean;
+        pinnedSectionRow?: boolean;
         searchSnippet?: string | undefined;
         standalone?: StandaloneSessionRowAdapter;
         tree?: SessionTreeRenderOptions;
@@ -5479,7 +5519,7 @@ export function WebShellSidebar({
     ) => {
       const {
         isArchived = false,
-        renameFormDisabled = false,
+        pinnedSectionRow = false,
         searchSnippet = searchQuery.trim()
           ? contentSearchHits.get(session.sessionId)?.snippet
           : undefined,
@@ -5502,15 +5542,16 @@ export function WebShellSidebar({
         standalone?.busy || exportingSessionIds.has(sessionIdentity);
       const completedUnread =
         !isCurrentSession(session) && completedUnreadIds.has(sessionIdentity);
-      // Pinned group members also render in the Pinned section; callers
-      // suppress the rename form on the duplicate row so only one input can
-      // mount — a rival input's autofocus would blur this one and its blur
-      // handler would cancel the rename.
+      // A pinned session can also render in a group or workspace list, and
+      // that copy may come from a page that lacks `isPinned`. Keying the host
+      // on identity keeps the rename form on the Pinned row alone while that
+      // section carries it — a rival input's autofocus would blur this one
+      // and its blur handler would cancel the rename.
       const isEditing =
         !standalone &&
         !recent &&
-        !renameFormDisabled &&
-        editingSessionIdentity === sessionIdentity;
+        editingSessionIdentity === sessionIdentity &&
+        (pinnedSectionRow || !pinnedSectionHostsEditing);
       const gitIcon = session.worktree ? (
         <GitForkIcon aria-label={t('sidebar.newWorktreeTask')} />
       ) : session.branch ? (
@@ -5918,6 +5959,19 @@ export function WebShellSidebar({
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
               openRow();
+            } else if (
+              event.key === 'F2' &&
+              !event.ctrlKey &&
+              !event.metaKey &&
+              !event.altKey &&
+              event.target === event.currentTarget &&
+              !recent &&
+              showRename &&
+              !busy
+            ) {
+              event.preventDefault();
+              if (standalone) standalone.onRename();
+              else startRename(session);
             }
           }}
         >
@@ -6365,42 +6419,13 @@ export function WebShellSidebar({
       sessionActionItems,
       inlineActionItems,
       livePresence,
+      pinnedSectionHostsEditing,
       startRename,
       splitSessionIds,
       t,
     ],
   );
 
-  // The Pinned section is not rendered in Live or Channels; a host check
-  // that ignored that would let an off-screen Pinned row disable the reveal
-  // guard for a row that is actually truncated.
-  const pinnedSectionVisible = useMemo(
-    () =>
-      !liveView &&
-      selectedSessionSource !== 'channel' &&
-      pinnedSessions.length > 0,
-    [liveView, pinnedSessions, selectedSessionSource],
-  );
-  // When the Pinned section hosts the editor, the row is already mounted
-  // there and a catalog's copy is `renameFormDisabled`; expanding that
-  // catalog would only add rows nobody is editing. Shared with the
-  // WorkspaceSection prop below so both reveal paths use one rule.
-  const pinnedSectionHostsEditing = useMemo(
-    () =>
-      pinnedSectionVisible &&
-      editingSessionIdentity !== null &&
-      pinnedExpanded &&
-      pinnedSessions.some(
-        (session) => getIdentityForSession(session) === editingSessionIdentity,
-      ),
-    [
-      editingSessionIdentity,
-      getIdentityForSession,
-      pinnedExpanded,
-      pinnedSectionVisible,
-      pinnedSessions,
-    ],
-  );
   const editingSessionIdForSections = pinnedSectionHostsEditing
     ? undefined
     : editingSession?.sessionId;
@@ -6586,21 +6611,6 @@ export function WebShellSidebar({
             <Fragment key={row.session.sessionId}>
               {renderSessionRow(row.session, {
                 tree: sessionTree.renderOptions(row),
-                // Pinned members also render in the Pinned section; while that
-                // section is expanded its row hosts the rename form, so this
-                // duplicate row must not mount a second autofocused input.
-                // Gate on the Pinned section actually carrying the row —
-                // content-search ghosts never appear there, so without the
-                // membership check no row would host the form at all and
-                // rename would be silently inoperable for them.
-                renameFormDisabled:
-                  Boolean(row.session.isPinned) &&
-                  pinnedExpanded &&
-                  pinnedSessions.some(
-                    (candidate) =>
-                      getIdentityForSession(candidate) ===
-                      getIdentityForSession(row.session),
-                  ),
               })}
             </Fragment>
           ))}
@@ -6620,8 +6630,6 @@ export function WebShellSidebar({
     handleRenameGroup,
     loading,
     organizationEnabled,
-    pinnedExpanded,
-    pinnedSessions,
     pinnedSectionHostsEditing,
     buildSessionTreeRows,
     reload,
@@ -8328,7 +8336,7 @@ export function WebShellSidebar({
                   {pinnedExpanded && (
                     <div className={styles.pinnedSessionList}>
                       {pinnedSessions.map((session) =>
-                        renderSessionRow(session),
+                        renderSessionRow(session, { pinnedSectionRow: true }),
                       )}
                     </div>
                   )}
@@ -8670,34 +8678,7 @@ export function WebShellSidebar({
                                   ...session,
                                   workspaceCwd: ws.cwd,
                                 },
-                                {
-                                  ...renderOptions,
-                                  // Pinned members also render in the
-                                  // sidebar-level Pinned section; while that
-                                  // section is expanded its row hosts the
-                                  // rename form, so this duplicate row must
-                                  // not mount a second autofocused input.
-                                  // Channel mode has no Pinned section, so
-                                  // the workspace row is the only copy and
-                                  // must stay editable. The suppression also
-                                  // requires the Pinned section to actually
-                                  // carry the member: `pinnedSessions` merges
-                                  // only the pinned catalog pages and the
-                                  // primary sessions page, never this
-                                  // workspace's own page, so before the
-                                  // pinned page settles (or while it errors)
-                                  // this row is the only copy and must host
-                                  // the form itself.
-                                  renameFormDisabled:
-                                    selectedSessionSource !== 'channel' &&
-                                    Boolean(session.isPinned) &&
-                                    pinnedExpanded &&
-                                    pinnedSessions.some(
-                                      (candidate) =>
-                                        getIdentityForSession(candidate) ===
-                                        getIdentityForSession(session),
-                                    ),
-                                },
+                                renderOptions,
                               )
                             }
                             showSessionDetails={sessionActionItems.has(
