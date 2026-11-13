@@ -10,9 +10,9 @@
  * `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` unset and set, and the two runs must
  * send the model the same requests and record the same session. Each
  * scenario runs a third time with `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` set
- * as well, which must match the run on the shared loop. The screen is not
- * compared: it repaints on timers, and what it shows comes from the same
- * events the session records.
+ * as well, which must match the run on the shared loop. Scenarios with an
+ * expected screen message check for it in each run. Full screens repaint on
+ * timers and are not compared.
  */
 
 import {
@@ -1225,6 +1225,7 @@ describeTui(SUITE, () => {
   it.each(scenarios)('$name', PARITY_CASE_OPTIONS, async (scenario) => {
     const current = await run(scenario, false);
     const shared = await run(scenario, true);
+    const kernel = await run(scenario, true, true);
     // Only the run with the setting on sends its rounds on the shared loop.
     expect(current.sharedRounds).toBe(0);
     expect(shared.sharedRounds).toBe(scenario.rounds);
@@ -1236,16 +1237,13 @@ describeTui(SUITE, () => {
     expect(shared.kernelRounds).toBe(0);
     // Each round also runs on the event-bus kernel, which must send and
     // record what the shared loop does.
-    {
-      const kernel = await run(scenario, true, true);
-      expect(kernel.kernelRounds).toBe(scenario.rounds);
-      expect(kernel.sharedRounds).toBe(shared.sharedRounds);
-      expect(kernel.sharedBatches).toBe(shared.sharedBatches);
-      expect(kernel.requests).toEqual(shared.requests);
-      expect(kernel.sideRequests).toEqual(shared.sideRequests);
-      expect(kernel.records).toEqual(shared.records);
-    }
-    for (const run of [current, shared]) {
+    expect(kernel.kernelRounds).toBe(scenario.rounds);
+    expect(kernel.sharedRounds).toBe(shared.sharedRounds);
+    expect(kernel.sharedBatches).toBe(shared.sharedBatches);
+    expect(kernel.requests).toEqual(shared.requests);
+    expect(kernel.sideRequests).toEqual(shared.sideRequests);
+    expect(kernel.records).toEqual(shared.records);
+    for (const run of [current, shared, kernel]) {
       expect(run.requests).toHaveLength(scenario.requests);
       if (scenario.sideRequests !== undefined)
         expect(run.sideRequests).toHaveLength(scenario.sideRequests);

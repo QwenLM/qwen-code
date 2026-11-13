@@ -99,7 +99,6 @@ describe.each([false, true])('startSharedLoopRound (kernel=%s)', (kernel) => {
       config,
       signal: new AbortController().signal,
       toolSignal: new AbortController().signal,
-      responded: new Set(),
       useEventBus: kernel,
       onModelEvent: () => {},
       ...extra,
@@ -119,6 +118,7 @@ describe.each([false, true])('startSharedLoopRound (kernel=%s)', (kernel) => {
     const batch = await shared.runBatch({
       executor,
       handled: new Map([['replayed', getToolCallFingerprint('read_file', {})]]),
+      responded: new Set(),
       onToolResult: ({ request, origin }) => {
         results.push(`${request.callId}:${origin}`);
       },
@@ -139,13 +139,18 @@ describe.each([false, true])('startSharedLoopRound (kernel=%s)', (kernel) => {
   it('skips the batch, replays included, when the turn closes the round', async () => {
     const responded = new Set<string>();
     const onToolResult = vi.fn();
-    const shared = start(clientYielding([call('c1')]), { responded });
+    const shared = start(clientYielding([call('c1')]));
     await shared.model;
     await shared.close();
     // A batch handed over after the close finds the run already ended.
     const executor = okExecutor();
     await expect(
-      shared.runBatch({ executor, handled: new Map(), onToolResult }),
+      shared.runBatch({
+        executor,
+        handled: new Map(),
+        responded,
+        onToolResult,
+      }),
     ).resolves.toEqual({ parts: [], stop: 'surface_ended' });
     expect(executor.run).not.toHaveBeenCalled();
     expect(onToolResult).not.toHaveBeenCalled();
@@ -167,6 +172,7 @@ describe.each([false, true])('startSharedLoopRound (kernel=%s)', (kernel) => {
       shared.runBatch({
         executor: okExecutor(),
         handled: new Map(),
+        responded: new Set(),
         onToolResult: () => {},
       }),
     ).resolves.toEqual({ parts: [] });

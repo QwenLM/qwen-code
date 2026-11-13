@@ -6,6 +6,10 @@
 // @vitest-environment jsdom
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import type {
+  AgentLoopOptions,
+  AgentLoopResult,
+} from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { Mock, MockInstance } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -25544,6 +25548,55 @@ describe('useLlmStream', () => {
           (part) => part.functionResponse?.id,
         );
 
+      it('shows the replay stop when concurrent main and ?btw rounds finish together', async () => {
+        const { replayed, client } = replayedCall();
+        let finishBoth!: () => void;
+        const bothHeld = new Promise<void>((resolve) => {
+          finishBoth = resolve;
+        });
+        for (const name of ['main', 'side']) {
+          mockSendMessageStream.mockReturnValueOnce(
+            (async function* () {
+              yield {
+                ...replayed,
+                value: { ...replayed.value, callId: `replay-${name}` },
+              };
+              yield toolRequest(name);
+              await bothHeld;
+            })(),
+          );
+        }
+        rounds([{ type: ServerLlmEventType.Content, value: 'Read the file.' }]);
+        completeBatches();
+        const { result } = renderTestHook([], client);
+        let main!: Promise<void>;
+        let side!: Promise<void>;
+
+        await act(async () => {
+          main = result.current.submitQuery('Read the main file.');
+        });
+        await waitFor(() => {
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+        });
+        await act(async () => {
+          side = result.current.submitQuery('?btw Read the side file.');
+        });
+        await waitFor(() =>
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
+        );
+
+        await act(async () => {
+          finishBoth();
+          await Promise.all([main, side]);
+        });
+
+        expect(mockScheduleToolCalls).toHaveBeenCalledTimes(1);
+        expect(result.current.loopDetectionConfirmationRequest?.cause).toBe(
+          'the provider replayed a tool call id that had already run',
+        );
+      });
+
       it('runs the calls as one batch of the shared loop and sends their results as the next round', async () => {
         completeBatches();
         rounds(
@@ -26672,6 +26725,115 @@ describe('useLlmStream', () => {
         expect(after).not.toHaveBeenCalled();
         expect(mockScheduleToolCalls).not.toHaveBeenCalled();
       });
+
+      it.skipIf(!kernel)(
+        'ends the submission when the kernel cancels before the model round ends',
+        async () => {
+          mockRunAgentLoop.mockImplementationOnce(
+            ({ signal }: AgentLoopOptions) =>
+              new Promise<AgentLoopResult>((resolve) => {
+                signal.addEventListener(
+                  'abort',
+                  () => resolve({ reason: 'cancelled', rounds: 1 }),
+                  { once: true },
+                );
+              }),
+          );
+          const { result } = renderTestHook();
+          const submitted = vi.fn();
+          const onDelivered = vi.fn();
+          const onDeliveryFailed = vi.fn();
+
+          await act(async () => {
+            void result.current
+              .submitQuery(
+                'Read the file.',
+                SendMessageType.UserQuery,
+                undefined,
+                {
+                  onDelivered,
+                  onDeliveryFailed,
+                },
+              )
+              .then(submitted);
+          });
+          await waitFor(() => expect(mockRunAgentLoop).toHaveBeenCalledOnce());
+          act(() => {
+            expect(result.current.cancelOngoingRequest()).toBe(true);
+          });
+
+          await waitFor(() => expect(submitted).toHaveBeenCalledOnce());
+          expect(onDeliveryFailed).toHaveBeenCalledOnce();
+          expect(onDelivered).not.toHaveBeenCalled();
+          expect(mockScheduleToolCalls).not.toHaveBeenCalled();
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+        },
+      );
+
+      it.skipIf(!kernel)(
+        'ignores a scheduler callback after the kernel cancels a running batch',
+        async () => {
+          const runAgentLoop = mockRunAgentLoop.getMockImplementation()!;
+          mockRunAgentLoop.mockImplementationOnce(
+            (options: AgentLoopOptions) => {
+              const cancelled = new Promise<AgentLoopResult>((resolve) => {
+                options.signal.addEventListener(
+                  'abort',
+                  () => resolve({ reason: 'cancelled', rounds: 1 }),
+                  { once: true },
+                );
+              });
+              // End the kernel run before the scheduler reports its last result.
+              return Promise.race([runAgentLoop(options), cancelled]);
+            },
+          );
+          const pending = holdBatches();
+          const recorded = recordedCallIds();
+          const request = toolRequest('read_a');
+          rounds(
+            [request],
+            [{ type: ServerLlmEventType.Content, value: 'Another reply.' }],
+          );
+          const { result, client, rerenderWithToolCalls } = renderTestHook();
+          const submitted = vi.fn();
+
+          await act(async () => {
+            void result.current.submitQuery('Read the file.').then(submitted);
+          });
+          await waitFor(() => expect(pending).toHaveLength(1));
+          rerenderWithToolCalls([
+            {
+              request: request.value,
+              status: 'executing',
+              tool: { displayName: 'Read File' },
+              invocation: { getDescription: () => 'Read the file' },
+            } as TrackedExecutingToolCall,
+          ]);
+          act(() => {
+            expect(result.current.cancelOngoingRequest()).toBe(true);
+          });
+          await waitFor(() => expect(submitted).toHaveBeenCalledOnce());
+
+          await act(async () => {
+            rerenderWithToolCalls([]);
+            pending[0]();
+          });
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+          expect(mockAddItem).not.toHaveBeenCalledWith(
+            expect.objectContaining({ type: 'tool_group' }),
+            expect.any(Number),
+          );
+          expect(recorded()).toEqual([]);
+          expect(client.addHistory).not.toHaveBeenCalled();
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+          await act(async () => {
+            await result.current.submitQuery('Another question.');
+          });
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+        },
+      );
     },
   );
 });

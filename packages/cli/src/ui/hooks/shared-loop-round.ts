@@ -25,8 +25,6 @@ export interface SharedLoopRoundOptions {
   signal: AbortSignal;
   /** The signal the batch's tools run under. */
   toolSignal: AbortSignal;
-  /** The provider ids already answered, which the batch adds to. */
-  responded: Set<string>;
   /** Run the round on the event-bus kernel. */
   useEventBus: boolean;
   onModelEvent: NonNullable<AgentLoopHost['onModelEvent']>;
@@ -37,6 +35,8 @@ export interface SharedLoopBatch {
   executor: AgentLoopToolExecutor;
   /** The provider calls history and the turn already answered. */
   handled: Map<string, string>;
+  /** The provider ids already answered, which the batch adds to. */
+  responded: Set<string>;
   onToolResult: NonNullable<AgentLoopHost['onToolResult']>;
 }
 
@@ -69,7 +69,7 @@ export function startSharedLoopRound(
   let taken: SharedLoopBatch | undefined;
   const duplicates = {
     handled: new Map<string, string>(),
-    responded: options.responded,
+    responded: new Set<string>(),
   };
   let endRound!: (model: {
     calls: ToolCallRequestInfo[];
@@ -108,14 +108,16 @@ export function startSharedLoopRound(
         taken = await handedOff;
         if (!taken) return 'surface_ended';
         duplicates.handled = taken.handled;
+        duplicates.responded = taken.responded;
         return undefined;
       },
       onToolResult: (result) => taken?.onToolResult(result),
     },
   });
-  // A failure before the round ended is the round's; one after it reaches
-  // the batch's caller.
-  void run.catch(failRound);
+  // The kernel can cancel before onRoundEnd if the model stream stalls.
+  void run.then(({ reason }) => {
+    if (reason === 'cancelled') endRound({ calls: [], stop: reason });
+  }, failRound);
   return {
     model,
     runBatch: (batch) => {
