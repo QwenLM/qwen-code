@@ -139,9 +139,9 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 
 handler 按今天的方式读取 run 的 `signal` 与 `toolSignal` 并传给 `runModelRound`/`runToolBatch`；Tool 通过执行器 signal 取消在飞批次，Conversation 在 Llm 与 Tool 安静后收尾一次。run 在 `loop.finished` 到达时结算。
 
-signal 中止时，适配器发布一次 `loop.cancelled`，Conversation 开始 10 秒的收尾上限（与 preview 相同）。在上限之内，取消不改变任何判断：运行的结束方式与过程式循环完全相同，包括被中止打断的工具批保留其结果。到上限仍未结算的运行在此以 `cancelled` 结束，不带结果；卡住的 handler 之后仍可能结算，但它对状态的写入会被丢弃，宿主也收不到它的任何回调，每个回调都按已结束的运行作答（模型事件结束这一轮，不选择也不启动任何调用）。运行结算时，适配器移除它的 abort 监听和上限计时器。取消本身不启动任何宿主工作，因此不会有代码在中止方的 async 上下文中运行。过程式路径没有上限：卡住的模型轮或工具批仍会让它一直等待。
+signal 中止时，适配器发布一次 `loop.cancelled`。Conversation 在独立的投递队列中启动 10 秒收尾计时器，因此等待轮次结束回调时也能启动计时。上限内按过程式循环处理取消，入口要求保留被打断批次的结果时仍会保留。到上限仍未结算时以 `cancelled` 结束，不带工具结果。挂起的 handler 恢复时会停止读取模型流、拒绝后续工具启动，并在循环边界丢弃工具进度和结果。已经开始的工具或回调仍可能执行完毕。运行结算后，适配器移除 abort 监听并清除计时器。过程式路径会等待模型轮或工具批结束。
 
-preview 还把两种情况转成取消：消费方关闭它的流，以及 Conversation 失败。`runAgentLoop` 返回的是 promise，没有流，所以调用方只有两种方式不再等待：中止 signal，即上面的取消；或在宿主回调中抛错，这会像过程式路径一样立即 reject 这次运行。回调是在调用它的模型轮或工具批内部抛错的，因此这次运行没有其他工作仍在进行。Conversation 失败也是同样的 reject。
+`runAgentLoop` 返回 promise。暴露事件流的入口可以在消费方停止读取时中止对应运行。OpenTUI 在消费方提前关闭模型流时中止本轮的 signal，父轮次的 signal 保持有效。提供方关闭流时卡住也受上限约束。handler 在上限内结算并失败时，仍以原始错误拒绝。
 
 ### 为什么不复用现有总线
 

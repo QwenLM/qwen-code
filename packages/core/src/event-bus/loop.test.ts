@@ -913,6 +913,50 @@ describe('runAgentLoop on the event bus when its signal aborts', () => {
     }
   });
 
+  it('bounds cancellation while onRoundEnd is waiting', async () => {
+    vi.useFakeTimers();
+    try {
+      const abort = new AbortController();
+      let enterRoundEnd!: () => void;
+      const roundEnded = new Promise<void>(
+        (resolve) => (enterRoundEnd = resolve),
+      );
+      let release!: () => void;
+      const waiting = new Promise<void>((resolve) => (release = resolve));
+      const executor = { run: vi.fn(makeExecutor().run) };
+      const running = runAgentLoop({
+        ...options(
+          [[toolCall]],
+          {
+            onRoundEnd: () => {
+              enterRoundEnd();
+              return waiting;
+            },
+          },
+          { signal: abort.signal, executor },
+        ),
+        useEventBus: true,
+      });
+      await roundEnded;
+      abort.abort();
+      const settled = vi.fn();
+      void running.then(settled);
+      await vi.advanceTimersByTimeAsync(CANCEL_SETTLEMENT_CAP_MS - 1);
+      expect(settled).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toHaveBeenCalledWith({
+        reason: 'cancelled',
+        rounds: 1,
+        turn: {},
+      });
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(executor.run).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('ends a run whose batch does not settle within the cap, and its host hears nothing after', async () => {
     vi.useFakeTimers();
     try {
@@ -946,47 +990,123 @@ describe('runAgentLoop on the event bus when its signal aborts', () => {
     }
   });
 
-  it('ends a run whose model stream ignores the abort, and closes the stream once it yields', async () => {
+  it.each([true, false])(
+    'closes the late model stream (with host: %s)',
+    async (withHost) => {
+      vi.useFakeTimers();
+      try {
+        const abort = new AbortController();
+        let release!: () => void;
+        const progress = { closed: false, pulled: 0 };
+        const client = {
+          async *sendMessageStream() {
+            try {
+              yield content;
+              await new Promise<void>((resolve) => (release = resolve));
+              // A stream that keeps going for as long as it is read.
+              for (let i = 0; i < 50; i++) {
+                progress.pulled++;
+                yield content;
+              }
+            } finally {
+              progress.closed = true;
+            }
+          },
+          getHistoryToolCallFingerprints: () => [],
+          recordCompletedToolCall: () => {},
+        } as unknown as LlmClient;
+        const { host, log } = makeHost();
+        const running = runAgentLoop({
+          ...options([], host, {
+            client,
+            host: withHost ? host : undefined,
+            signal: abort.signal,
+          }),
+          useEventBus: true,
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        abort.abort();
+        await vi.advanceTimersByTimeAsync(CANCEL_SETTLEMENT_CAP_MS);
+        expect(await running).toEqual({ reason: 'cancelled', rounds: 1 });
+        const heard = [...log];
+        release();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(log).toEqual(heard);
+        // The first event after the close stops the round.
+        expect(progress.pulled).toBe(1);
+        expect(progress.closed).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('drops late progress and results of tools already launched', async () => {
     vi.useFakeTimers();
     try {
       const abort = new AbortController();
+      let start!: () => void;
+      const started = new Promise<void>((resolve) => (start = resolve));
       let release!: () => void;
-      const progress = { closed: false, pulled: 0 };
-      const client = {
-        async *sendMessageStream() {
-          try {
-            yield content;
-            await new Promise<void>((resolve) => (release = resolve));
-            // A stream that keeps going for as long as it is read.
-            for (let i = 0; i < 50; i++) {
-              progress.pulled++;
-              yield content;
-            }
-          } finally {
-            progress.closed = true;
-          }
-        },
-        getHistoryToolCallFingerprints: () => [],
-        recordCompletedToolCall: () => {},
-      } as unknown as LlmClient;
-      const { host, log } = makeHost();
+      const waiting = new Promise<void>((resolve) => (release = resolve));
+      const onProgress = vi.fn();
+      const recordToolResult = vi.fn();
+      const client = makeClient([[toolCall]]);
+      client.recordCompletedToolCall = vi.fn();
+      const nextLaunch = vi.fn();
       const running = runAgentLoop({
-        ...options([], host, { client, signal: abort.signal }),
+        ...options(
+          [],
+          { outputHandler: () => onProgress },
+          {
+            client,
+            config: {
+              getChatRecordingService: () => ({ recordToolResult }),
+            } as unknown as Config,
+            signal: abort.signal,
+            keepCancelledResults: true,
+            executor: {
+              run: async ([request], _signal, hooks) => {
+                expect(hooks.beforeLaunch(request, [])).toBe(true);
+                hooks.output(request.callId, 'live');
+                start();
+                await waiting;
+                nextLaunch(hooks.beforeLaunch(request, []));
+                hooks.output(request.callId, 'late');
+                return [
+                  { request, response: response(request), status: 'success' },
+                ];
+              },
+            },
+          },
+        ),
         useEventBus: true,
       });
-      await vi.advanceTimersByTimeAsync(0);
+      await started;
       abort.abort();
       await vi.advanceTimersByTimeAsync(CANCEL_SETTLEMENT_CAP_MS);
-      expect(await running).toEqual({ reason: 'cancelled', rounds: 1 });
-      const heard = [...log];
+      expect((await running).reason).toBe('cancelled');
       release();
       await vi.advanceTimersByTimeAsync(0);
-      expect(log).toEqual(heard);
-      // The first event after the close stops the round.
-      expect(progress.pulled).toBe(1);
-      expect(progress.closed).toBe(true);
+      expect(nextLaunch).toHaveBeenCalledWith(false);
+      expect(onProgress.mock.calls).toEqual([['c1', 'live']]);
+      expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+      expect(recordToolResult).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('accepts a frozen host and preserves its receiver', async () => {
+    const onModelEvent = vi.fn(function (this: AgentLoopHost) {
+      expect(this).toBe(host);
+    });
+    const host = Object.freeze({ onModelEvent });
+    const result = await runAgentLoop({
+      ...options([[content]], host),
+      useEventBus: true,
+    });
+    expect(result.reason).toBe('completed');
+    expect(onModelEvent).toHaveBeenCalledOnce();
   });
 });

@@ -248,6 +248,8 @@ export interface AgentLoopToolExecutor {
         settled: readonly AgentLoopSettledCall[],
       ): boolean;
       output(callId: string, chunk: ToolResultDisplay): void;
+      /** Whether the owning loop has already settled. */
+      isFinished?(): boolean;
     },
   ): Promise<AgentLoopSettledCall[]>;
 }
@@ -398,6 +400,7 @@ export async function runModelRound(
   round: AgentLoopRound,
   signal: AbortSignal,
   host: Pick<AgentLoopHost, 'onModelEvent'>,
+  isFinished?: () => boolean,
 ): Promise<{
   turn?: Turn;
   calls: ToolCallRequestInfo[];
@@ -422,6 +425,7 @@ export async function runModelRound(
         finished = true;
         return { turn: next.value, calls, stop };
       }
+      if (isFinished?.()) return { calls: [], stop: 'cancelled' };
       const event = next.value;
       let discardedCalls: ToolCallRequestInfo[] = [];
       if (
@@ -435,6 +439,7 @@ export async function runModelRound(
         stop ??= stopReasonOf(event.type);
       }
       const surfaceStop = await host.onModelEvent?.(event, discardedCalls);
+      if (isFinished?.()) return { calls: [], stop: 'cancelled' };
       if (surfaceStop) return { calls, stop: stop ?? surfaceStop };
     }
   } finally {
@@ -460,6 +465,8 @@ export interface ToolBatchOptions {
   /** Keeps distinct classes of calls from claiming each other's provider IDs. */
   duplicateStateForCall?(request: ToolCallRequestInfo): AgentLoopDuplicateState;
   executor: AgentLoopToolExecutor;
+  /** Whether the owning loop has already settled. */
+  isFinished?(): boolean;
   /**
    * Finish and record a batch `signal` cancelled and return its results,
    * with the stop reason `cancelled`, for a surface that keeps them.
@@ -497,7 +504,7 @@ export async function runToolBatch(
   calls: ToolCallRequestInfo[],
   options: ToolBatchOptions,
 ): Promise<ToolBatchResult> {
-  const { config, client, signal, duplicates, executor } = options;
+  const { config, client, signal, duplicates, executor, isFinished } = options;
   const host = options.host ?? {};
   const toolSignal = options.toolSignal ?? signal;
   const duplicateStateFor = (request: ToolCallRequestInfo) =>
@@ -620,15 +627,19 @@ export async function runToolBatch(
       ? []
       : await executor.run(toRun, toolSignal, {
           beforeLaunch: (request, settled) => {
+            if (isFinished?.()) return false;
             offerUntil(
               toRun.findIndex(({ callId }) => callId === request.callId) + 1,
               settled,
             );
             return launches.get(request.callId) === true;
           },
-          output: (callId, chunk) =>
-            outputHandlers.get(callId)?.(callId, chunk),
+          output: (callId, chunk) => {
+            if (!isFinished?.()) outputHandlers.get(callId)?.(callId, chunk);
+          },
+          ...(isFinished && { isFinished }),
         });
+  if (isFinished?.()) return { parts: [], stop: 'cancelled' };
   offerUntil(toRun.length, completed);
   const completedByCallId = new Map(
     completed.map((call) => [call.request.callId, call]),
@@ -697,6 +708,7 @@ export async function runToolBatch(
     })),
     new Map(ordered.map(({ request }) => [request.callId, request.prompt_id])),
   );
+  if (isFinished?.()) return { parts: [], stop: 'cancelled' };
   const parts: Part[] = [];
   const responses: NonNullable<ToolBatchResult['responses']> = [];
   ordered.forEach(({ request, executionRequest, response, status }, index) => {
@@ -781,6 +793,7 @@ export function createSchedulerExecutor(
   options: Partial<SchedulerOptions> = {},
   runtimeView?: RuntimeContentGeneratorView,
 ): AgentLoopToolExecutor {
+  const { onToolResultFullTurnModel } = options;
   return {
     run: (requests, signal, hooks) =>
       new Promise<CompletedToolCall[]>((resolve, reject) => {
@@ -794,11 +807,19 @@ export function createSchedulerExecutor(
           onEditorClose: () => {},
           ...options,
           config,
+          ...(hooks.isFinished &&
+            onToolResultFullTurnModel && {
+              onToolResultFullTurnModel: (model) =>
+                !hooks.isFinished?.() &&
+                onToolResultFullTurnModel.call(options, model),
+            }),
           outputUpdateHandler: (callId, chunk) => {
+            if (hooks.isFinished?.()) return;
             options.outputUpdateHandler?.(callId, chunk);
             hooks.output(parents.get(callId) ?? callId, chunk);
           },
           onToolCallsUpdate: (toolCalls) => {
+            if (hooks.isFinished?.()) return;
             for (const call of toolCalls) {
               const { callId, parentCallId } = call.request;
               if (!batch.has(callId)) {
@@ -816,7 +837,9 @@ export function createSchedulerExecutor(
           beforeToolLaunch: (call: ScheduledToolCall) =>
             hooks.beforeLaunch(call.request, [...settled.values()]),
           onAllToolCallsComplete: async (completedCalls) => {
-            await options.onAllToolCallsComplete?.(completedCalls);
+            if (!hooks.isFinished?.()) {
+              await options.onAllToolCallsComplete?.(completedCalls);
+            }
             resolve(completedCalls);
           },
         });

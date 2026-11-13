@@ -14,7 +14,6 @@ import { randomUUID } from 'node:crypto';
 import {
   createSchedulerExecutor,
   defaultDuplicates,
-  type AgentLoopHost,
   type AgentLoopOptions,
   type AgentLoopResult,
 } from '../core/agent-loop.js';
@@ -49,13 +48,10 @@ export async function runAgentLoopOnBus(
     `(prompt ${options.first.promptId})`,
   );
   const runtime = createLoopEventRuntime();
-  // Read only once the run is under way, after `state` exists.
-  const host =
-    options.host && untilFinished(options.host, () => !!state.finished);
   const state = runtime.store.create({
     runId,
     promptId: options.first.promptId,
-    input: { ...options, ...(host ? { host } : {}) },
+    input: options,
     duplicates,
     executor,
     current: options.first,
@@ -102,33 +98,4 @@ export async function runAgentLoopOnBus(
     runtime.store.delete(runId);
     runtime.dispose();
   }
-}
-
-/** What a hook answers once the run finished, so it starts nothing more. */
-const FINISHED_ANSWERS: Partial<Record<keyof AgentLoopHost, unknown>> = {
-  onModelEvent: 'cancelled',
-  selectCalls: [],
-  beforeToolLaunch: false,
-  skippedOutput: '',
-  endsOnTerminateTurn: false,
-};
-
-/**
- * `host`, silent once the run finished: a handler a bounded close left
- * behind can still settle, but the host hears nothing of it.
- */
-function untilFinished(
-  host: AgentLoopHost,
-  finished: () => boolean,
-): AgentLoopHost {
-  return new Proxy(host, {
-    get(target, key, receiver) {
-      const hook: unknown = Reflect.get(target, key, receiver);
-      if (typeof hook !== 'function') return hook;
-      return (...args: unknown[]) =>
-        finished()
-          ? FINISHED_ANSWERS[key as keyof AgentLoopHost]
-          : hook.apply(target, args);
-    },
-  });
 }

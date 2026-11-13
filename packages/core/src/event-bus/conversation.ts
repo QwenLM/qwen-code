@@ -33,11 +33,22 @@ export class ConversationHandler {
   ) {}
 
   register(): () => void {
-    return this.bus.subscribe(
+    const off = this.bus.subscribe(
       'conversation',
-      ['loop.started', 'loop.cancelled', 'llm.settled', 'tool.settled'],
+      ['loop.started', 'llm.settled', 'tool.settled'],
       (event) => this.handle(event),
     );
+    // An awaited round-end hook must not delay the cancellation deadline.
+    const offCancellation = this.bus.subscribe(
+      'conversation',
+      ['loop.cancelled'],
+      (event) => this.handle(event),
+      { name: 'conversation-cancellation' },
+    );
+    return () => {
+      off();
+      offCancellation();
+    };
   }
 
   private async handle(event: AnyBusEvent): Promise<void> {
@@ -68,7 +79,6 @@ export class ConversationHandler {
             ...(state.model?.turn ? { turn: state.model.turn } : {}),
           });
         }, CANCEL_SETTLEMENT_CAP_MS);
-        state.settleTimer.unref?.();
         return;
       }
       case 'llm.settled': {
@@ -79,6 +89,7 @@ export class ConversationHandler {
           calls: model.calls,
           ...(model.stop ? { stop: model.stop } : {}),
         });
+        if (state.finished) return;
         const stop = model.stop ?? hostStop;
         const rounds = round + 1;
         if (stop) {
