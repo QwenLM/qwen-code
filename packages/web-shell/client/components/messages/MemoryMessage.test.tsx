@@ -203,11 +203,17 @@ describe('MemoryMessage', () => {
     expect(container.textContent).toContain(
       'The complete memory file text is unavailable. Editing is disabled.',
     );
+    expect(container.textContent).not.toContain('No memory files found.');
     expect(button('Edit').disabled).toBe(true);
     act(() => button('Edit').click());
     await flush();
     expect(container.querySelector('textarea')).toBeNull();
     expect(memory.writeMemory).not.toHaveBeenCalled();
+
+    act(() => button('User').click());
+    await flush();
+    expect(container.textContent).toContain('No memory files found.');
+    expect(button('Edit').disabled).toBe(false);
   });
 
   // #13100's destructive step: an outstanding status load makes `files`

@@ -503,11 +503,10 @@ export interface CollectWorkspaceMemoryStatusOptions {
    * Read each discovered file's text, capped at the write route's
    * byte limit. A file that fails to read keeps its entry without
    * `content` and adds a cell to `errors[]`. `content` is also
-   * omitted (without an error cell) when the on-disk bytes are not
-   * valid BOM-free UTF-8 — a lossy decode is never served as
-   * replaceable text — and a read whose byte count differs from the
-   * earlier `stat` is flagged `truncated` with no `content` (torn
-   * read racing a concurrent write).
+   * omitted, without an error cell and with `truncated: true`, when the
+   * on-disk bytes are not valid BOM-free UTF-8 or a concurrent write
+   * invalidates the read snapshot. Retrying unchanged bytes cannot repair
+   * an encoding issue; a lossy decode is never served as replaceable text.
    */
   includeContent?: boolean;
 }
