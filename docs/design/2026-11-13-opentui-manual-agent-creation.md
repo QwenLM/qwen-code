@@ -1,0 +1,37 @@
+# OpenTUI manual agent creation and details
+
+[English](2026-11-13-opentui-manual-agent-creation.md) | [简体中文](2026-11-13-opentui-manual-agent-creation.zh-CN.md)
+
+## Problem and current state
+
+On the base candidate `e6d36a90`, `/agents create` reaches an OpenTUI placeholder with only an Escape action. Its mount does not pass the actual configuration. Ink instead mounts the existing agent creation wizard, which can save through the public subagent manager. OpenTUI `/agents manage` lists names and descriptions but has no selection or details. The new global0.23 Ink baseline completed location/manual navigation, cancellation without store changes, HTTP0 and natural exit. The separate current-U strict OpenTUI baseline failed at its real placeholder location screen, with stores unchanged and HTTP0; its failure cleanup was not a natural-exit success. The manual implementation has passed affected unit tests and three public runtime profiles. The later guided increment and combined validation are described in the [guided creation design](2026-11-13-opentui-guided-agent-creation.md).
+
+## Proposed behavior
+
+Restore the manual path: project or user location, Manual Creation, name, system prompt, description, tool category, color, and confirmation. Reuse the existing wizard reducer, validation, tool registry categories, color options, native line editor, and dialog selection primitives. The manual path sends no model request. This manual-stage scope excludes guided generation; the subsequent guided increment adds that path while preserving manual creation.
+
+Pass the actual dialog configuration into the native component. Save only through `getSubagentManager().createSubagent`, with the chosen level, `overwrite: true`, and the existing `assertCanCommit` callback. The manager owns validation, target paths, serialization, writes, and cache refresh. No direct file writes or Core changes are needed. Hold one pending save, retain errors, and reject duplicate submissions. Closing, unmounting, or changing the configuration revokes a pending owner before the manager's existing commit checks; it cannot undo an already-started write.
+
+A generation counter makes owner revocation permanent: configuration cleanup, close and unmount invalidate the captured save generation. Returning to the same configuration object cannot reactivate an old commit callback. Commit authorization and success, error and finally continuations share that check. A revoked pending save remains latched until the dialog is closed; it is not automatically transferred or restarted. The initial identity-only implementation missed this A → B → A case; Root reproduced its failing guard assertion before applying this correction. That original failure is retained. The corrected save guard passed unit and public-flow verification on the combined candidate.
+
+Name-conflict checking must finish before save. Show the existing same-level overwrite or cross-level precedence warning. A failed check blocks save until the user goes back. Escape goes back with the draft preserved, or cancels at the first step without creating agent directories. Fields use existing editing, paste and Ctrl+C clear semantics; stale same-read input must not advance a later field. Persist canonical color ids such as `blue`, not translated display labels.
+
+The existing Ink color selector must emit the same canonical ids on selection and highlight. Its previous display-name output (`Blue`) violated the existing lowercase manager/parser contract; the focused regression reproduced that output before this correction. Preview accepts an id or a legacy in-memory display-name prop, but this does not make invalid `color: Blue` files valid to Core. Existing Ink creation and color-edit consumers receive the corrected id; no new native editing action is introduced. The earlier failed Node/Ink full case did not retain its actual Markdown, so its exact mismatch remains unknown rather than being relabelled as a captured Blue-file failure. A separate native full case passed canonical-blue persistence and hot/cold details before this Ink-only correction; the combined candidate has now passed all six guided/manual public profile cases with exact canonical-blue persistence.
+
+Add only list → actions → read-only detail navigation to the manager. It loads the actual manager's current agents, shows meaningful errors, and presents the selected agent's name, description, system prompt and color. Escape returns through the owning pages. Displayed data is terminal-sanitized, and the detail body scrolls within the existing bounded dialog layout. Listing or viewing must not change either agent store.
+
+## Reuse and affected files
+
+Use the earlier local manual wizard and read-only manager at `8a98af44`/`66ca2f5d` as reviewed implementation material, not as an automatic patch replay. Bring forward only the later canonical-color correction. The shared line editor, dialog primitives, reducer, types and generator API already match the current foundation. Retain current Core hook trust semantics; the old worktree has an older trust implementation that must not be copied.
+
+Affected production files are the two native dialog components, their re-exports in `dialogs-misc.tsx`, the create mount, the existing Ink color selector, and the existing color-display helper for canonical-id support. Add collocated component tests and the focused public manual-creation case to the interactive suite. Keep both design languages synchronized.
+
+## Validation and acceptance
+
+First run an isolated global `qwen` + Ink baseline through the location and manual-method screens, cancel back to the composer, verify no project/user agent writes, and quit naturally. Run the same public inputs against the frozen strict Bun/OpenTUI candidate to record the placeholder gap. Root alone executes both under one heavy lease; tests use owned homes, workspaces and temporary directories, with no external model traffic.
+
+After implementation, run affected whole CLI test files, normal build, typecheck, lint, formatting and bundle. Reuse the complete `manually-creates-project-subagent-without-model` public case with its assertions intact: cancellation changes neither store; no file exists before explicit save; one exact canonical-blue Markdown file is created at project scope; user agents remain unchanged; hot and cold detail views agree; both sessions exit naturally with zero signals; model HTTP stays zero. Run Node/Ink, Bun/Ink and strict Bun/OpenTUI against one candidate bundle. Unit coverage must also exercise user-level payloads, empty fields, backward navigation, duplicate Enter, pending cancellation/config replacement, conflict checking and save errors. Unit mocks do not prove native behavior or disk persistence.
+
+## Scope, risks and open work
+
+Guided generation is covered by the subsequent linked design. External save-and-edit, manager editing/deletion, agent execution, tool permission enforcement, other platforms, installed distributions and final merged-main migration acceptance remain separate. Existing timer/quit contracts and runtime versions are unchanged. User-level disk creation and real overwrite are not proved by the focused project case and must remain explicit gaps. Native layout can differ from mocked unit rendering; reuse existing layout rules and inspect actual frames. No open product decision blocks this bounded implementation; baseline observations may require correcting only the test setup before implementation.
