@@ -9,7 +9,7 @@
   - the earlier proposal #8775, which starts with AgentCore and headless; this design extends its goal to all seven loops, and its AgentCore step is PR 5;
   - defects found while comparing the loops: #15324, #15325, #15326;
   - [loop protection setting](2026-10-21-loop-protection-setting.md);
-  - [Event-bus agent loop](2026-11-11-event-bus-agent-loop.md) — the shared loop's opt-in event-driven internal architecture, enabled on headless via `experimental.eventBusAgentLoop`.
+  - [Event-bus agent loop](2026-11-11-event-bus-agent-loop.md) — the shared loop's event-driven implementation, available to headless, AgentCore and OpenTUI when both experimental loop settings are enabled.
 
 ## Problem
 
@@ -476,6 +476,8 @@ PR 4c covers the rest of the turn. The live turn already sends the round its bat
 
 The turn's code therefore does not change. PR 4c adds unit tests for these cases on the shared path; the fresh-turn and retry cases compare both paths, while the remaining cases check the shared path only. The parity suite already runs its retry scenarios and the scenario for input queued while a tool runs on OpenTUI.
 
+Step 3 of #17045 runs each OpenTUI model request and tool batch in one `runAgentLoop` call. With `experimental.eventBusAgentLoop` also enabled, the call uses the event-bus kernel. The turn reads events one at a time and drives the next round. Both loop implementations pass the round's calls and stop reason to `onRoundEnd` and await it. OpenTUI reports the end of the stream, then waits for the turn to hand off its scheduler. The batch starts after the handoff, including replay handling and result finalization. Closing the round before the handoff skips the batch. A retried continuation adds the results it paired to replay bookkeeping before the batch starts. The TUI parity suite compares both loop implementations and verifies OpenTUI rounds using the event-bus adapter's log and their prompt IDs.
+
 ### AgentCore on the shared loop (PR 5)
 
 AgentCore's reasoning loop, `runReasoningLoop` in `agent-core.ts`, runs every subagent, background and forked agent, workflow agent and in-process teammate, under every surface. It sends each round on the agent's own `LlmChat` and parses the stream's chunks itself, runs the round's calls on a new `CoreToolScheduler`, adds the parent's messages after the results, waits for messages or asks for a final answer when a round calls no tools, and maps its stops to `terminateMode`. It moves in these steps:
@@ -510,7 +512,7 @@ PR 5b runs a round's calls as one batch of the loop's `runToolBatch` on the agen
 
 The scheduler, with its events, approvals and hooks, stays the agent's own, so a deferred approval restores the agent's four async-local frames as it does today. The batch leaves the results unrecorded, since they go to the agent's chat and not to the session's transcript. It keeps the results of an aborted batch, so the run ends at the next round's abort check as it does today. A call id the stream repeats still runs and is answered once. The headless suite counts each subagent batch on the shared loop in the debug log, and the TUI suite answers a subagent's approval in the TUI.
 
-PR 5c runs each round, its model request and its tool batch, in one `runAgentLoop` call that returns after the batch, as headless runs each round of its main turn. Under `experimental.eventBusAgentLoop` that call runs on the event-bus kernel, so AgentCore is the second surface the kernel reaches. The agent keeps its driver between rounds: the parent's messages after the results, the loop reminder and the result-aware loop guard, the wait and the request for a final answer, and the mapping of the stops to `terminateMode`. Handing the whole run to the loop, with no driver of its own, is left to the follow-up issue of #17045. The loop's options change as follows, on the procedural and the event-bus path:
+PR 5c runs each round, its model request and its tool batch, in one `runAgentLoop` call that returns after the batch, as headless runs each round of its main turn. With `experimental.eventBusAgentLoop` enabled, AgentCore uses the event-bus kernel. OpenTUI is the third entry point to use it, after headless and AgentCore. The agent keeps its driver between rounds: the parent's messages after the results, the loop reminder and the result-aware loop guard, the wait and the request for a final answer, and the mapping of the stops to `terminateMode`. Handing the whole run to the loop, with no driver of its own, is left to the follow-up issue of #17045. The loop's options change as follows, on the procedural and the event-bus path:
 
 - `runAgentLoop` takes the batch options `keepCancelledResults`, `deferRecording` and `duplicateStateForCall`, and returns the batch's results by call;
 - it takes a `ModelRoundSource` in place of the client; the calls of a loop on a round source do not count toward the session's tool calls;
@@ -607,7 +609,7 @@ A difference fails the scenario unless it is listed with a linked issue.
 - a subagent's call of a tool it may not use beside a read, in one response (PR 5b);
 - a subagent whose model fails.
 
-From PR 5c each subagent scenario also runs with `experimental.eventBusAgentLoop` on and must match the run on the shared loop.
+From PR 5c each subagent scenario also runs with `experimental.eventBusAgentLoop` on and must match the run on the shared loop. Every headless scenario now does: the run with both settings on must match the run on the shared loop, and the event-bus adapter's debug marker must count one `runAgentLoop` call per main-session round; the two runs without the kernel must log none.
 
 **ACP scenarios** (`integration-tests/cli/acp-agent-loop-parity.test.ts`):
 
