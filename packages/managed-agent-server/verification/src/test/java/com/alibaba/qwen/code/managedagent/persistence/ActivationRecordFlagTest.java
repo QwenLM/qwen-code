@@ -17,10 +17,10 @@ import java.util.regex.Pattern;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * The database generates is_activation_record from the journal operation, and
- * the CSI application image computes the journal row a cut adds in Java. A cut
- * only ever reaches the image with releaseActivation, so a drift on any other
- * operation would stay latent at run time; these cases keep the two equal.
+ * The database generates is_activation_record from the journal operation. These
+ * cases pin the declared CASE to nothing but its marked branches and ELSE 0, and
+ * exercise the stored generated value for every operation the Session Store
+ * commits, so a collation or case-folding drift cannot stay latent at run time.
  */
 class ActivationRecordFlagTest {
     private static final Pattern TABLE = Pattern.compile("(?s)CREATE TABLE ma_session_journal_tx \\((.*?)\\n\\) ENGINE");
@@ -30,21 +30,16 @@ class ActivationRecordFlagTest {
     private static final Pattern LITERAL = Pattern.compile("'([^']*)'");
 
     @Test
-    void theCsiImageMarksExactlyTheOperationsTheSchemaMarks() {
+    void theGeneratedColumnMarksOnlyItsDeclaredBranches() {
         String expression = generatedExpression();
-        Set<String> marked = new LinkedHashSet<>();
-        Matcher when = MARKED.matcher(expression);
-        while (when.find()) {
-            marked.add(when.group(1));
-        }
         // Nothing but the marked branches and ELSE 0.
         String rest = MARKED.matcher(expression).replaceAll(" ").replaceAll("\\s+", " ").trim();
         assertThat(rest.toUpperCase(Locale.ROOT)).isEqualTo("CASE OPERATION ELSE 0 END");
-        assertThat(marked).isEqualTo(WorkspaceCsiApplicationImage.ACTIVATION_OPERATIONS);
+        assertThat(markedOperations(expression)).containsExactlyInAnyOrder("installActivation", "renewActivation");
     }
 
     @Test
-    void theGeneratedFlagMatchesTheMirrorForStoredOperations() {
+    void theGeneratedFlagMatchesTheDeclaredBranchesForStoredOperations() {
         var source = new DriverManagerDataSource("jdbc:h2:mem:activation-flag-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
         ManagedSchema.initialize(source);
@@ -58,6 +53,7 @@ class ActivationRecordFlagTest {
         }
         operations.addAll(List.of("session.create", "releaseActivation", "commitMessage", "commitCheckpoint",
                 "commitFileHistory", "hostedModelAttempt", "settleTurn", "InstallActivation"));
+        Set<String> marked = markedOperations(generatedExpression());
         long revision = 0;
         for (String operation : operations) {
             revision++;
@@ -72,8 +68,17 @@ class ActivationRecordFlagTest {
                     JournalStoreRows.sha256(bytes));
             Integer generated = jdbc.queryForObject("SELECT is_activation_record FROM ma_session_journal_tx"
                     + " WHERE journal_revision = ?", Integer.class, revision);
-            assertThat(generated).as(operation).isEqualTo(WorkspaceCsiApplicationImage.activationRecord(operation) ? 1 : 0);
+            assertThat(generated).as(operation).isEqualTo(marked.contains(operation) ? 1 : 0);
         }
+    }
+
+    private static Set<String> markedOperations(String expression) {
+        Set<String> marked = new LinkedHashSet<>();
+        Matcher when = MARKED.matcher(expression);
+        while (when.find()) {
+            marked.add(when.group(1));
+        }
+        return marked;
     }
 
     /** The CASE of the journal table's generated column, comments removed; exactly one. */

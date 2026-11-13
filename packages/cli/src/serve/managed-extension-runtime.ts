@@ -30,6 +30,12 @@ import {
   type ManagedRuntimeRequestIdentity,
 } from './managed-runtime-attestation-contract.js';
 import { ManagedExtensionCache } from './managed-extension-cache.js';
+import {
+  ManagedRuntimeSkillSources,
+  parseManagedRuntimeSkillControl,
+  type ManagedRuntimeSkillSource,
+  type ManagedRuntimeSkillControl,
+} from './managed-runtime-skill-source.js';
 
 export const MANAGED_EXTENSION_RUNTIME_ROUTE = Object.freeze({
   key: 'extensions',
@@ -80,6 +86,9 @@ export interface ManagedExtensionRuntimeDependencies {
   ) => Promise<void>;
   readonly admitted: (sessionId: string) => Promise<boolean>;
   readonly idle: (sessionId: string) => boolean;
+  readonly skillSource?: (
+    sessionId: string,
+  ) => Promise<ManagedRuntimeSkillSource>;
   readonly compile: (
     directory: string,
     pin: ManagedExtensionPin,
@@ -121,6 +130,7 @@ export interface ManagedExtensionRuntimeDependencies {
 
 export class ManagedExtensionRuntime {
   readonly cache: ManagedExtensionCache;
+  private readonly skillSources?: ManagedRuntimeSkillSources;
   private readonly prepared = new Map<string, Prepared>();
   private readonly active = new Map<string, Prepared>();
   private readonly busy = new Set<string>();
@@ -139,6 +149,29 @@ export class ManagedExtensionRuntime {
     this.cache = new ManagedExtensionCache(
       path.join(dependencies.directory, 'packages'),
     );
+    if (dependencies.skillSource)
+      this.skillSources = new ManagedRuntimeSkillSources(
+        path.join(dependencies.directory, 'skill-snapshots'),
+        dependencies.skillSource,
+      );
+  }
+
+  async skillControl(sessionId: string, operation: ManagedRuntimeSkillControl) {
+    await this.requireSession(sessionId);
+    if (!this.skillSources || this.isChanging(sessionId))
+      throw new Error('skill_source_unavailable');
+    if (
+      operation.kind === 'extension-skill-snapshot' &&
+      !this.dependencies.idle(sessionId)
+    )
+      throw new Error('skill_source_busy');
+    const result = await this.skillSources.control(sessionId, operation);
+    await this.requireSession(sessionId);
+    return result;
+  }
+
+  async closeSkillSnapshots(): Promise<void> {
+    await this.skillSources?.close();
   }
 
   async status(sessionId: string): Promise<ManagedExtensionRuntimeState> {
@@ -879,6 +912,14 @@ export function registerManagedExtensionRuntimeRoutes(
               : undefined,
           );
         } else if (
+          typeof operation['kind'] === 'string' &&
+          operation['kind'].startsWith('extension-skill-')
+        ) {
+          result = await runtime.skillControl(
+            sessionId,
+            parseManagedRuntimeSkillControl(operation),
+          );
+        } else if (
           (operation['kind'] === 'activate' ||
             operation['kind'] === 'extension-activate') &&
           typeof operation['operationId'] === 'string'
@@ -947,10 +988,24 @@ export function registerManagedExtensionRuntimeRoutes(
           ...(runtimeSessionId ? { runtimeSessionId } : {}),
           result,
         });
-      } catch {
-        res
-          .status(409)
-          .json({ code: 'managed_extension_configuration_unavailable' });
+      } catch (error) {
+        res.status(409).json({
+          code:
+            error instanceof Error &&
+            [
+              'source_changed',
+              'skill_source_unavailable',
+              'skill_source_busy',
+              'skill_snapshot_unavailable',
+              'skill_snapshot_capacity',
+              'skill_snapshot_pending',
+              'skill_snapshot_conflict',
+              'skill_source_limit',
+              'skill_candidate_limit',
+            ].includes(error.message)
+              ? error.message
+              : 'managed_extension_configuration_unavailable',
+        });
       }
     },
   );
@@ -963,6 +1018,7 @@ function validateExtensionToolProfile(
   if (profile === undefined) return;
   const shell =
     profile === 'hosted-workspace-shell/1' ||
+    profile === 'hosted-workspace-shell/3' ||
     profile === 'hosted-workspace-team-lead/1';
   const mcp = shell || profile === 'hosted-workspace-mcp/1';
   if (!mcp && Object.keys(value.mcpServers).length)
