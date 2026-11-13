@@ -6,15 +6,17 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationRetentionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
@@ -94,7 +96,7 @@ class WorkspaceCsiSessionMainTest {
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
         jdbc.update(
                 "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
     }
 
     @Test
@@ -110,13 +112,13 @@ class WorkspaceCsiSessionMainTest {
         assertThat(first.replayed()).isFalse();
         assertThat(UUID.fromString(first.sessionId()).toString()).isEqualTo(first.sessionId());
         var row = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.SESSION.columns() + " FROM ma_session");
-        assertThat(row.get("tool_profile")).isEqualTo(CsiFilesRetirementProfile.PROFILE);
+        assertThat(row.get("tool_profile")).isEqualTo(CsiFilesRetirementProfile.ACTIVITY_PROFILE);
         assertThat(row.get("runtime_request_key")).isEqualTo(first.runtimeRequestKey());
         assertThat(row.get("workspace_generation")).isEqualTo(3L);
         assertThat(row.get("workspace_storage_id")).isEqualTo("storage");
         assertThat(row.get("context_config_ref")).isEqualTo(com.alibaba.qwen.code.managedagent.persistence.PersistenceTestAccess.descriptorRef(
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF));
-        assertThat(row.get("creator_actor_key")).isEqualTo(com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+        assertThat(row.get("creator_actor_key")).isEqualTo(ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
         assertThat(row.get("owner_actor_key")).isEqualTo(row.get("creator_actor_key"));
         var sessions = store();
         var original = new TransactionTemplate(manager).execute(status -> com.alibaba.qwen.code.managedagent.persistence.PersistenceTestAccess.requireCsiRequest(sessions, registration,
@@ -191,7 +193,7 @@ class WorkspaceCsiSessionMainTest {
         var service = new ManagedAgentService(childStore,
                 new RequestDigests(),
                 mock(HarnessCoordinator.class),
-                harness, new ManagedWorkspaceRegistry(jdbc), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                harness, new JdbcManagedWorkspaceRegistry(jdbc), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         assertThatThrownBy(() -> service.createChildSession("tenant", original.sessionId(), "child-run",
                 "audit", "inspect"))
                 .isInstanceOf(ManagedAgentException.class)
@@ -266,7 +268,7 @@ class WorkspaceCsiSessionMainTest {
                             + " ?, state = 'ACTIVE'", CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
             jdbc.update(
                     "UPDATE ma_workspace_access SET role = 'OPERATOR', actor_id = ?",
-                    com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+                    ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
             jdbc.update("UPDATE ma_storage SET registration_revision = 7");
         }
         var wrongRevision = new com.alibaba.qwen.code.managedagent.contracts.workspace.PrivateCsiSession.Request(registration, "actor", "rejected", "unsupported", null,
@@ -325,8 +327,14 @@ class WorkspaceCsiSessionMainTest {
         var owner = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns()
                 + " FROM ma_storage_owner");
         assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> store()
-                .insertWorkspaceSessionCommand("tenant", "actor", "old", "sha256:" + "b".repeat(64),
-                        "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", "."))))
+                .insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId("tenant")
+                        .actorId("actor")
+                        .idempotencyKey("old")
+                        .requestDigest("sha256:" + "b".repeat(64))
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build())))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
                     assertThat(error.getStatusCode()).isEqualTo(409);
                     assertThat(error.getCode()).isEqualTo("workspace_unavailable");
@@ -345,10 +353,15 @@ class WorkspaceCsiSessionMainTest {
                 WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                 + " VALUES ('tenant', 'local-workspace', ?, 'OPERATOR')",
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
-        var legacy = new TransactionTemplate(manager).execute(status -> store().insertWorkspaceSessionCommand("tenant",
-                "actor", "old", "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
-                new WorkspaceSelection("local-workspace", ".")));
+                ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+        var legacy = new TransactionTemplate(manager).execute(status -> store().insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId("tenant")
+                .actorId("actor")
+                .idempotencyKey("old")
+                .requestDigest("sha256:" + "b".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("local-workspace", "."))
+                .build()));
         assertThat(legacy).isNotNull();
         assertThat(jdbc.queryForObject("SELECT tool_profile FROM ma_session", String.class))
                 .isEqualTo("hosted-workspace-files/1");
@@ -410,7 +423,7 @@ class WorkspaceCsiSessionMainTest {
                 "recordAdmission", "recordRecoveryAdmission", "retractContinuationOutput", "retractHarnessTurnOutput",
                 "recordHarnessEvents", "cancelBeforeAdmission", "failTurn", "appendPublicEventIfAbsent",
                 "appendLiveSessionEventIfAbsent", "beginTaskCancelOperation", "deferMaterializationTarget",
-                "beginSessionRename", "completeSessionRename", "abandonSessionRename");
+                "settleRenameSync");
         assertThat(Arrays.stream(ManagedAgentStore.class.getMethods()).map(Method::getName).distinct()
                 .filter(names::contains).sorted().toList())
                 .containsExactlyElementsOf(names.stream().sorted().toList());
@@ -441,7 +454,7 @@ class WorkspaceCsiSessionMainTest {
         var original = create(request("agent-instructions"));
         var before = allTables();
         assertPrivateRefusal(() -> new TransactionTemplate(manager).executeWithoutResult(status ->
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).publishAgentInstructions("tenant", "workspace", original.sessionId(), "instructions")));
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).publishAgentInstructions("tenant", "workspace", original.sessionId(), "instructions")));
         assertThat(allTables()).isEqualTo(before);
     }
 
@@ -449,7 +462,7 @@ class WorkspaceCsiSessionMainTest {
     void retainedRequestPinStillRefusesAfterAConflictingProfileChange() {
         var original = create(request("retained-pin"));
         jdbc.update("UPDATE ma_session SET tool_profile = 'hosted-workspace-files/1'");
-        assertThat(jdbc.queryForObject("SELECT csi_guard FROM ma_session", Boolean.class)).isTrue();
+        assertThat(jdbc.queryForObject("SELECT is_csi_guard FROM ma_session", Boolean.class)).isTrue();
         var before = allTables();
         assertPrivateRefusal(() -> new TransactionTemplate(manager).executeWithoutResult(status ->
                 store().appendPublicEventIfAbsent("tenant", original.sessionId(), null, "session.environment",
@@ -466,10 +479,12 @@ class WorkspaceCsiSessionMainTest {
         var original = create(request("direct-retained-pin"));
         jdbc.update("UPDATE ma_session SET tool_profile = 'workspace-files/1'");
         var before = allTables();
-        assertThatThrownBy(() -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)).acquireWriter("tenant", original.sessionId(),
+        assertThatThrownBy(() -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).acquireWriter("tenant", original.sessionId(),
                 "a".repeat(32), new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 60000L)))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessage("CSI mutation requires its original transaction connection");
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, refusal -> {
+                    assertThat(refusal.getStatusCode()).isEqualTo(409);
+                    assertThat(refusal.getCode()).isEqualTo("csi_original_binding_unavailable");
+                });
         assertThat(allTables()).isEqualTo(before);
     }
 
@@ -505,7 +520,7 @@ class WorkspaceCsiSessionMainTest {
         var privateTurn = new java.util.LinkedHashMap<>(ordinaryTurn);
         privateTurn.put("session_id", jdbc.queryForObject(
                         "SELECT session_id FROM ma_session"
-                                + " WHERE csi_guard = TRUE ORDER BY session_id LIMIT 1", String.class));
+                                + " WHERE is_csi_guard = TRUE ORDER BY session_id LIMIT 1", String.class));
         privateTurn.put("turn_id", "private-legacy-turn");
         privateTurn.put("prompt_id", UUID.randomUUID().toString());
         privateTurn.put("gmt_modified", 0L);
@@ -566,10 +581,6 @@ class WorkspaceCsiSessionMainTest {
             if (type == Map.class) {
                 return Map.of();
             }
-            if (type == StoreModels.RenameDelivery.class) {
-                return new StoreModels.RenameDelivery(
-                                                "tenant", sessionId, "unused", "title", 1, 0);
-            }
             throw new IllegalStateException("Unsupported mutation parameter " + type);
         }).toArray();
         if (method.getParameterTypes()[0] == String.class) {
@@ -577,8 +588,7 @@ class WorkspaceCsiSessionMainTest {
         }
         int sessionIndex = switch (method.getName()) {
             case "insertTurnCommand", "insertCancelCommand", "beginSessionMutation" -> 4;
-            case "completeSessionMutation", "abandonSessionMutation", "beginSessionRename" -> 3;
-            case "completeSessionRename", "abandonSessionRename" -> 2;
+            case "completeSessionMutation", "abandonSessionMutation", "settleRenameSync" -> 3;
             default -> 1;
         };
         if (method.getParameterTypes()[0] == String.class) {
@@ -598,7 +608,7 @@ class WorkspaceCsiSessionMainTest {
 
     private void insertLegacyOperation(String session) {
         String id = count("ma_operation") == 0 ? "unused" : UUID.randomUUID().toString();
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", session);
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", session);
         String target =
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(session);
         jdbc.update(
@@ -633,7 +643,7 @@ class WorkspaceCsiSessionMainTest {
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, json.valueToTree(rows));
         }
-        assertThat(result).hasSize(39);
+        assertThat(result).hasSize(47);
         return result;
     }
 
@@ -655,7 +665,7 @@ class WorkspaceCsiSessionMainTest {
     }
 
     private ManagedAgentStore store() {
-        return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     private void assertEmpty(String... tables) {

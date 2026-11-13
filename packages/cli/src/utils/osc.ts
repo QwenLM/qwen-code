@@ -27,6 +27,8 @@ export const OSC = {
   KITTY: 99,
   /** Ghostty / cmux notification */
   GHOSTTY: 777,
+  /** Program status protocol (idle / working / blocked / done / error) */
+  PROGRAM_STATUS: 7501,
 } as const;
 
 // ── Terminal type detection ─────────────────────────────────────────
@@ -173,6 +175,74 @@ export function oscKittyNotify(
  */
 export function oscGhosttyNotify(title: string, message: string): string {
   return osc(OSC.GHOSTTY, 'notify', title, message);
+}
+
+// ── Program status (OSC 7501) ───────────────────────────────────────
+
+/**
+ * States a program may report. `clear` is not a state: it deletes the
+ * record instead.
+ * @see https://www.superlogical.com/rex/docs/build/program-status
+ */
+export type ProgramState = 'idle' | 'working' | 'blocked' | 'done' | 'error';
+export type ProgramBlockedKind = 'permission' | 'question' | 'auth';
+
+export interface ProgramStatus {
+  state: ProgramState;
+  /** Only meaningful for `blocked`. */
+  kind?: ProgramBlockedKind;
+  /** One line of human-readable text, base64-encoded on the wire. */
+  msg?: string;
+}
+
+/** Stable machine identifier terminals use to group and pick an icon. */
+export const PROGRAM_STATUS_APP = 'qwen-code';
+
+/**
+ * Spec limit for the decoded `msg` value. Its base64 form is at most 2732
+ * bytes, the spec limit for the encoded value, so this bounds both.
+ */
+const PROGRAM_STATUS_MAX_MSG_BYTES = 2048;
+
+/**
+ * Encode a `msg` value: control characters (including newlines, which the
+ * spec forbids after decoding) are replaced with spaces, and the text is shortened by
+ * whole code points until it fits the spec limit.
+ */
+function encodeProgramStatusMsg(msg: string): string {
+  // eslint-disable-next-line no-control-regex
+  let text = msg.replace(/[\x00-\x1f\x7f\x80-\x9f\u2028\u2029]/g, ' ').trim();
+  while (Buffer.byteLength(text, 'utf8') > PROGRAM_STATUS_MAX_MSG_BYTES) {
+    text = Array.from(text).slice(0, -16).join('');
+  }
+  return Buffer.from(text, 'utf8').toString('base64');
+}
+
+/**
+ * Build an OSC 7501 report for the root record.
+ *
+ * Every report replaces the whole record, so `app` is always included.
+ * Values use only `[A-Za-z0-9_.,+/=-]`, which needs no escaping, so the
+ * sequence is assembled directly rather than through `osc()`. It is never
+ * wrapped for tmux passthrough: the outer terminal cannot tell which pane
+ * a passed-through report came from, so tmux has to support it natively.
+ */
+export function oscProgramStatus(status: ProgramStatus): string {
+  const pairs = [`state=${status.state}`];
+  if (status.state === 'blocked' && status.kind) {
+    pairs.push(`kind=${status.kind}`);
+  }
+  pairs.push(`app=${PROGRAM_STATUS_APP}`);
+  if (status.msg) {
+    const encoded = encodeProgramStatusMsg(status.msg);
+    if (encoded) pairs.push(`msg=${encoded}`);
+  }
+  return `${OSC_PREFIX}${OSC.PROGRAM_STATUS}${SEP}${pairs.join(':')}${ST}`;
+}
+
+/** Delete the root record (and, per the spec, any child records). */
+export function oscProgramStatusClear(): string {
+  return `${OSC_PREFIX}${OSC.PROGRAM_STATUS}${SEP}state=clear${ST}`;
 }
 
 /**

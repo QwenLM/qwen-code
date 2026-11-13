@@ -18,9 +18,17 @@ export default defineConfig({
     testTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
       ? 60_000
       : 15_000,
+    // ECS hosts run several jobs at once; leave capacity for neighboring jobs.
+    maxWorkers: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? '25%'
+      : undefined,
     globals: true,
     environment: 'node',
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx', 'scripts/**/*.test.js'],
+    reporters: ['default', 'junit'],
+    outputFile: {
+      junit: 'junit.xml',
+    },
     // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
     dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
     coverage: {

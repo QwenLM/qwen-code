@@ -5,6 +5,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -69,15 +71,15 @@ class ManagedAgentCsiMutationMySqlIT {
                     CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
             jdbc.update(
                     "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                            + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+                            + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
             String ordinary = "!ordinary-retired";
-            String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", ordinary);
+            String scope = ManagedSessionStore.sessionScopeKey("tenant", ordinary);
             jdbc.update(
                     "INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified) VALUES ('tenant', ?, 'qwen-code', 'DELETED', 1, 1)", ordinary);
             jdbc.update(
                     "UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ?,"
                         + " retirement_operation_id = 'delete', retirement_generation = 1,"
-                        + " retired_at = 1, recovery_protected = FALSE WHERE tenant_id = 'tenant'"
+                        + " retired_at = 1, is_recovery_protected = FALSE WHERE tenant_id = 'tenant'"
                         + " AND session_id = ?",
                     ToolPublicationRetentionStore.hash("tenant"), ToolPublicationRetentionStore.hash(ordinary),
                     scope,
@@ -143,7 +145,7 @@ class ManagedAgentCsiMutationMySqlIT {
                     var created = creation.get(5, TimeUnit.SECONDS);
                     var collected = collection.get(5, TimeUnit.SECONDS);
                     assertThat(jdbc.queryForObject(
-                                            "SELECT csi_guard FROM ma_session WHERE session_id = ?",
+                                            "SELECT is_csi_guard FROM ma_session WHERE session_id = ?",
                             Boolean.class, created.sessionId())).isTrue();
                     if (page) {
                         assertThat(collected).isEqualTo(Boolean.TRUE);
@@ -194,9 +196,9 @@ class ManagedAgentCsiMutationMySqlIT {
                     CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
             jdbc.update(
                     "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                            + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
-            var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
-                    new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                            + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+            var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
+                    new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             var transaction = new TransactionTemplate(manager);
             transaction.setIsolationLevel(isolation);
             transaction.setTimeout(15);
@@ -227,9 +229,9 @@ class ManagedAgentCsiMutationMySqlIT {
                     var before = allTables(jdbc, json);
                     originalLock.setAutoCommit(false);
                     try (var query = originalLock.prepareStatement(
-                                    "SELECT csi_guard FROM ma_session FORCE INDEX"
-                                        + " (ma_session_csi_guard_idx) WHERE tenant_id = 'tenant'"
-                                        + " AND session_id = ? AND csi_guard = TRUE FOR UPDATE")) {
+                                    "SELECT is_csi_guard FROM ma_session FORCE INDEX"
+                                        + " (idx_ma_session_csi_guard) WHERE tenant_id = 'tenant'"
+                                        + " AND session_id = ? AND is_csi_guard = TRUE FOR UPDATE")) {
                         query.setQueryTimeout(5);
                         query.setString(1, original.sessionId());
                         try (var rows = query.executeQuery()) {
@@ -296,8 +298,8 @@ class ManagedAgentCsiMutationMySqlIT {
                     CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
             jdbc.update(
                     "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                            + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
-            var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+                            + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+            var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
             var transaction = new TransactionTemplate(manager);
             transaction.setIsolationLevel(isolation);
             transaction.setTimeout(15);
@@ -381,16 +383,16 @@ class ManagedAgentCsiMutationMySqlIT {
                     CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
             jdbc.update(
                     "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                            + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+                            + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
             String session = com.alibaba.qwen.code.managedagent.persistence.PrivateCsiFixture.create(jdbc, manager, json, properties,
                     new com.alibaba.qwen.code.managedagent.contracts.workspace.PrivateCsiSession.Request(registration, "actor", "original", null, null,
                             new WorkspaceSelection("workspace", "."))).sessionId();
-            var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+            var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
             var transaction = new TransactionTemplate(manager);
             var hold = manager.getTransaction(new DefaultTransactionDefinition());
             try {
                 if ("runtime_placement".equals(domain)) {
-                    WorkspaceLifecycleStore.lockPlacement(jdbc, "tenant");
+                    JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, "tenant");
                 } else {
                     ToolPublicationRetentionStore.lockTenant(jdbc, "tenant");
                 }

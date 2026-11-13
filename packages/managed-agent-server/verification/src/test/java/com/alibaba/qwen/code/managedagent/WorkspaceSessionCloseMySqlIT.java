@@ -4,14 +4,15 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.RenewWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.SealWriterRequest;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -77,7 +78,7 @@ class WorkspaceSessionCloseMySqlIT {
     }
 
     private void seedAction(String tenant, String session, String action, String state, String options) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,record_kind,"
                         + "domain,record_id,action_id,revision,action_version,state,options_json,gmt_create,first_sequence)"
                         + " VALUES (?,?,?,?,'ACTION','action',?,?,1,1,?,?,0,1)",
@@ -110,7 +111,7 @@ class WorkspaceSessionCloseMySqlIT {
     void closeSerializesNewWriterAndPreservesAnAlreadyAcquiredWriter() throws Exception {
         var first = store(Clock.systemUTC());
         var second = store(Clock.systemUTC());
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         var tenant = "mysql-close-writer-" + UUID.randomUUID();
         var session = create(first, tenant);
         try (var pool = Executors.newSingleThreadExecutor()) {
@@ -148,7 +149,7 @@ class WorkspaceSessionCloseMySqlIT {
     void closeCommitsBeforeQueuedTurnAndActionAdmissionsCanInspectTheSession() throws Exception {
         var first = store(Clock.systemUTC());
         var second = store(Clock.systemUTC());
-        var actions = new ManagedActionStore(jdbc, second);
+        var actions = new JdbcManagedActionStore(jdbc, second);
         var tenant = "mysql-close-admission-" + UUID.randomUUID();
         var session = create(first, tenant);
         String action = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
@@ -211,8 +212,8 @@ class WorkspaceSessionCloseMySqlIT {
     @Test
     void closeWriterCheckWaitsForAnUncommittedRenewalBeforeEvaluatingExpiry() throws Exception {
         var first = store(Clock.systemUTC());
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
-        var otherJournal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(new ManagedSchemaJdbcTemplate(source)));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
+        var otherJournal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(new ManagedSchemaJdbcTemplate(source));
         var tenant = "mysql-close-renew-" + UUID.randomUUID();
         var session = create(first, tenant);
         long generation = transaction(() -> journal.acquireWriter(tenant, session, TOKEN,
@@ -271,7 +272,7 @@ class WorkspaceSessionCloseMySqlIT {
         ManagedSchema.initialize(source);
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, clock, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, clock, ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     private String create(ManagedAgentStore store, String tenant) {
@@ -282,8 +283,14 @@ class WorkspaceSessionCloseMySqlIT {
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, OWNER.getBytes(StandardCharsets.UTF_8));
         }
-        return transaction(() -> store.insertWorkspaceSessionCommand(tenant, OWNER, UUID.randomUUID().toString(),
-                "create", "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", "."))).sessionId();
+        return transaction(() -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId(OWNER)
+                .idempotencyKey(UUID.randomUUID().toString())
+                .requestDigest("create")
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace", "."))
+                .build())).sessionId();
     }
 
     private static void awaitBlocked(CountDownLatch started, Future<Object> queued) {

@@ -4,11 +4,12 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.AcceptanceEvidence;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskTarget;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -53,11 +54,9 @@ class OperationReconcilerTest {
             TENANT, SESSION, CANCEL, "TASK_CANCEL");
     private static final ParkedOperation PARKED_INPUT = new ParkedOperation(
             TENANT, SESSION, INPUT, "SUBMIT_INPUT");
-    private static final ParkedOperation PARKED_TITLE = new ParkedOperation(
-            TENANT, SESSION, "rename:3", "RENAME");
 
     private AgentStateStore store;
-    private ManagedExtensionRecordStore records;
+    private JdbcManagedExtensionRecordStore records;
     private HarnessConnector harness;
     private RuntimeBrokerService broker;
     private OperationReconciler reconciler;
@@ -66,7 +65,7 @@ class OperationReconcilerTest {
     @BeforeEach
     void setUp() {
         store = mock(AgentStateStore.class);
-        records = mock(ManagedExtensionRecordStore.class);
+        records = mock(JdbcManagedExtensionRecordStore.class);
         harness = mock(HarnessConnector.class);
         broker = mock(RuntimeBrokerService.class);
         when(records.findTaskTarget(TENANT, SESSION, TASK))
@@ -84,8 +83,7 @@ class OperationReconcilerTest {
                 Executors.newVirtualThreadPerTaskExecutor(), clock,
                 new ManagedAgentProperties());
         reconciler = new OperationReconciler(store,
-                List.of(cancels, new TurnInputEvidence(store),
-                        new RenameEvidence(store)), DIRECT,
+                List.of(cancels, new TurnInputEvidence(store)), DIRECT,
                 clock);
     }
 
@@ -151,30 +149,6 @@ class OperationReconcilerTest {
         assertNothingSent();
     }
 
-    // A parked title keeps its claim for its own late reply, so the generic
-    // settle, which only takes unclaimed rows, would never match it: the
-    // title settles through its own store call, from the journal only.
-    @Test
-    void aParkedTitleSettlesThroughItsOwnSettle() {
-        when(store.findParkedOperations(anyInt()))
-                .thenReturn(List.of(PARKED_TITLE));
-        when(store.renameAcceptance(PARKED_TITLE)).thenReturn(
-                Optional.of(AcceptanceVerdict.unknown()),
-                Optional.of(AcceptanceVerdict.committed()), Optional.empty());
-        reconciler.reconcile();
-        verify(store).settleParkedRename(PARKED_TITLE,
-                AcceptanceVerdict.unknown(), RECHECK_AT);
-        reconciler.reconcile();
-        verify(store).settleParkedRename(PARKED_TITLE,
-                AcceptanceVerdict.committed(), RECHECK_AT);
-        // Settled since the scan: nothing is recorded.
-        reconciler.reconcile();
-        verify(store, never()).settleParkedOperation(any(), any(), anyLong());
-        verify(store, never()).deliverableRenames(anyLong());
-        verify(store, never()).claimRename(any(), any(), any());
-        assertNothingSent();
-    }
-
     // The settle's own guard keeps a row that left the parked state, but
     // the reconciler does not even read evidence for one.
     @Test
@@ -215,7 +189,7 @@ class OperationReconcilerTest {
             }
 
             @Override
-            public boolean settle(AgentStateStore ignored,
+            public boolean settle(SessionLifecycleStore ignored,
                     ParkedOperation parked, AcceptanceVerdict verdict,
                     long retryAt) {
                 settled.add(parked.operationId() + ":"
@@ -274,7 +248,7 @@ class OperationReconcilerTest {
             }
 
             @Override
-            public boolean settle(AgentStateStore ignored,
+            public boolean settle(SessionLifecycleStore ignored,
                     ParkedOperation parked, AcceptanceVerdict verdict,
                     long retryAt) {
                 settled.countDown();

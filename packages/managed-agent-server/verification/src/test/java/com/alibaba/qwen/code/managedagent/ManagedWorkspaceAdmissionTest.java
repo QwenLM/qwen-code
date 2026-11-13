@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.Attachment;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -14,15 +15,18 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedUserMessageStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -41,6 +45,7 @@ import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Clock;
@@ -91,7 +96,7 @@ class ManagedWorkspaceAdmissionTest {
     private ManagedAgentService service;
 
     @Autowired
-    private ManagedWorkspaceRegistry registry;
+    private JdbcManagedWorkspaceRegistry registry;
 
     @Autowired
     @Qualifier("managedAgentTransactionManager")
@@ -108,14 +113,29 @@ class ManagedWorkspaceAdmissionTest {
         properties.getHarness().setWorkspaceShellEnabled(true);
         assertThat(properties.getHarness().isWorkspaceChildAgentsEnabled()).isTrue();
         properties.getHarness().setApprovalMode("default");
-        var enabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var enabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var tx = new TransactionTemplate(transactionManager);
         var selection = new WorkspaceSelection("ws-public-child", ".");
-        var old = tx.execute(status -> enabled.insertWorkspaceSessionCommand(tenant, "actor-a", "old", "old-digest",
-                "qwen-code", null, null, List.of(), null, selection));
+        var old = tx.execute(status -> enabled.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("old")
+                .requestDigest("old-digest")
+                .agentId("qwen-code")
+                .selection(selection)
+                .build()));
         assertThat(enabled.requireSession(tenant, old.sessionId()).publicChildAgentsVersion()).isZero();
-        var parent = tx.execute(status -> enabled.insertWorkspaceSessionCommand(tenant, "actor-a", "public", "public-digest",
-                "qwen-code", null, null, List.of(), null, selection, null, true, null, true, List.of(), true));
+        var parent = tx.execute(status -> enabled.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("public")
+                .requestDigest("public-digest")
+                .agentId("qwen-code")
+                .selection(selection)
+                .approvalSelectionSupported(true)
+                .planModeSupported(true)
+                .publicChildrenSupported(true)
+                .build()));
         assertThat(enabled.requireSession(tenant, parent.sessionId()).publicChildAgentsVersion()).isEqualTo(1);
         var snapshot = mapper.readTree("""
                 {"version":1,"sourcePromptId":"source-1","approvalMode":"auto-edit","approvalRevision":2,
@@ -128,7 +148,7 @@ class ManagedWorkspaceAdmissionTest {
         jdbc.update("UPDATE ma_session SET selected_approval_mode = 'auto', approval_revision = 3 WHERE tenant_id = ? AND session_id = ?",
                 tenant, parent.sessionId());
         properties.getHarness().setWorkspaceChildAgentsEnabled(false);
-        var disabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var disabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var lineage = new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(parent.sessionId(), parent.sessionId(), "run-public", 1);
         var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "write a file"));
         var autoSnapshot = ((com.fasterxml.jackson.databind.node.ObjectNode) snapshot.deepCopy()).put("approvalMode", "auto");
@@ -146,8 +166,17 @@ class ManagedWorkspaceAdmissionTest {
                 "child", input, "payload", lineage, snapshot)).sessionId()).isEqualTo(child.sessionId());
         assertThatThrownBy(() -> tx.execute(status -> disabled.insertTurnCommand(tenant, "actor-a", "new-child-turn", "digest",
                 child.sessionId(), input, "payload"))).isInstanceOf(ManagedAgentException.class);
-        var fresh = tx.execute(status -> disabled.insertWorkspaceSessionCommand(tenant, "actor-a", "disabled", "disabled-digest",
-                "qwen-code", null, null, List.of(), null, selection, null, true, null, true, List.of(), true));
+        var fresh = tx.execute(status -> disabled.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("disabled")
+                .requestDigest("disabled-digest")
+                .agentId("qwen-code")
+                .selection(selection)
+                .approvalSelectionSupported(true)
+                .planModeSupported(true)
+                .publicChildrenSupported(true)
+                .build()));
         assertThat(disabled.requireSession(tenant, fresh.sessionId()).publicChildAgentsVersion()).isZero();
     }
 
@@ -165,7 +194,7 @@ class ManagedWorkspaceAdmissionTest {
         properties.getHarness().setApprovalMode(mode);
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, "storage-lead", "/workspace")));
-        var admitted = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var admitted = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var transaction = new TransactionTemplate(transactionManager);
         var selection = new WorkspaceSelection("ws-lead", ".");
         var first = transaction.execute(status -> admitted.insertInternalTeamLeadSessionCommand(
@@ -186,7 +215,7 @@ class ManagedWorkspaceAdmissionTest {
         properties.getHarness().setApprovalMode("default");
         properties.getHarness().setWorkspaceShellEnabled(!shellEnabled);
         properties.getHarness().setWorkspaceFilesEnabled(false);
-        var changed = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var changed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var replay = transaction.execute(status -> changed.insertInternalTeamLeadSessionCommand(
                 tenant, "actor-a", "internal", "digest", "ignored", selection));
         assertThat(replay.replayed()).isTrue();
@@ -196,12 +225,24 @@ class ManagedWorkspaceAdmissionTest {
                 tenant, "actor-a", "fresh-disabled", "digest", null, selection)), "workspace_unavailable");
         assertRefused(() -> transaction.execute(status -> changed.insertInternalTeamLeadSessionCommand(
                 tenant, "actor-a", "internal", "different", null, selection)), "idempotency_conflict");
-        assertRefused(() -> transaction.execute(status -> admitted.insertWorkspaceSessionCommand(tenant, "actor-a",
-                "internal", "digest", "qwen-code", null, null, List.of(), null, selection)), "idempotency_conflict");
+        assertRefused(() -> transaction.execute(status -> admitted.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("internal")
+                .requestDigest("digest")
+                .agentId("qwen-code")
+                .selection(selection)
+                .build())), "idempotency_conflict");
         assertRefused(() -> admitted.replayWorkspaceSessionCommand(tenant, "actor-a", "internal", "digest"),
                 "idempotency_conflict");
-        var publicSession = transaction.execute(status -> admitted.insertWorkspaceSessionCommand(tenant, "actor-a",
-                "public", "digest", "qwen-code", null, null, List.of(), null, selection));
+        var publicSession = transaction.execute(status -> admitted.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("public")
+                .requestDigest("digest")
+                .agentId("qwen-code")
+                .selection(selection)
+                .build()));
         assertThat(admitted.requireSession(tenant, publicSession.sessionId()).toolProfile())
                 .isEqualTo(shellEnabled ? WorkspaceToolProfiles.SHELL : WorkspaceToolProfiles.FILES);
         assertRefused(() -> transaction.execute(status -> admitted.insertInternalTeamLeadSessionCommand(
@@ -252,7 +293,7 @@ class ManagedWorkspaceAdmissionTest {
         if ("migration".equals(refusal)) {
             fenceStorage(tenant, "storage-lead");
         }
-        var defensive = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var defensive = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         assertThatThrownBy(() -> new TransactionTemplate(transactionManager).execute(status ->
                 defensive.insertInternalTeamLeadSessionCommand(tenant, "actor-a", "internal", "digest", null,
                         new WorkspaceSelection("ws-lead", "."))))
@@ -274,13 +315,19 @@ class ManagedWorkspaceAdmissionTest {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setWorkspaceShellEnabled(true);
         properties.getHarness().setApprovalMode("default");
-        var enabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var enabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String session = new TransactionTemplate(transactionManager).execute(status ->
-                enabled.insertWorkspaceSessionCommand(tenant, "actor-a", "create", "digest", "qwen-code",
-                        null, null, List.of(), null, new WorkspaceSelection("ws-shell", ".")).sessionId());
+                enabled.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(tenant)
+                        .actorId("actor-a")
+                        .idempotencyKey("create")
+                        .requestDigest("digest")
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("ws-shell", "."))
+                        .build()).sessionId());
         jdbc.update("UPDATE ma_session SET approval_mode = ? WHERE tenant_id = ? AND session_id = ?", mode, tenant, session);
         properties.getHarness().setWorkspaceFilesEnabled(filesEnabled);
-        var defensive = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var defensive = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var projection = new ManagedAgentService(defensive, new RequestDigests(), mock(HarnessCoordinator.class),
                 new UnavailableHarnessConnector(), registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         assertThat(projection.getPublicSession(tenant, "actor-a", session).capabilities().foregroundShell()).isFalse();
@@ -340,15 +387,28 @@ class ManagedWorkspaceAdmissionTest {
         properties.getHarness().setApprovalMode(mode);
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, "storage-shell", "/workspace")));
-        ManagedAgentStore enabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore enabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var transaction = new TransactionTemplate(transactionManager);
         String digest = "sha256:" + "a".repeat(64);
         var selection = new WorkspaceSelection("ws-shell", ".");
-        String session = transaction.execute(status -> enabled.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create-shell", digest, "qwen-code", null, null, List.of(), null, selection)).sessionId();
-        var initial = transaction.execute(status -> enabled.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "initial-shell", digest, "qwen-code", null, null,
-                List.of(Map.of("type", "text", "text", "initial")), digest, selection));
+        String session = transaction.execute(status -> enabled.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create-shell")
+                .requestDigest(digest)
+                .agentId("qwen-code")
+                .selection(selection)
+                .build())).sessionId();
+        var initial = transaction.execute(status -> enabled.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("initial-shell")
+                .requestDigest(digest)
+                .agentId("qwen-code")
+                .input(List.of(Map.of("type", "text", "text", "initial")))
+                .payloadDigest(digest)
+                .selection(selection)
+                .build()));
         byte[] actorKey = "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         for (String id : List.of(session, initial.sessionId())) {
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND session_id = ?"
@@ -369,10 +429,16 @@ class ManagedWorkspaceAdmissionTest {
         var original = transaction.execute(status -> admitted.submitTurn(tenant, "actor-a", "original", session, input));
         assertThat(admitted.getPublicSession(tenant, "actor-a", session).capabilities().foregroundShell()).isTrue();
         properties.getHarness().setWorkspaceShellEnabled(false);
-        ManagedAgentStore disabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore disabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         ManagedAgentService stopped = new ManagedAgentService(disabled, new RequestDigests(), coordinator, harness, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        assertThat(transaction.execute(status -> disabled.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create-shell", digest, "qwen-code", null, null, List.of(), null, selection)).sessionId())
+        assertThat(transaction.execute(status -> disabled.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create-shell")
+                .requestDigest(digest)
+                .agentId("qwen-code")
+                .selection(selection)
+                .build())).sessionId())
                 .isEqualTo(session);
         assertThat(transaction.execute(status -> stopped.submitTurn(tenant, "actor-a", "original", session, input)).turnId())
                 .isEqualTo(original.turnId());
@@ -412,8 +478,14 @@ class ManagedWorkspaceAdmissionTest {
                 + " AND operation_kind IN ('SUBMIT_INPUT', 'CANCEL')", Integer.class, tenant, session)).isEqualTo(2);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ? AND session_id = ?",
                 Integer.class, tenant, session)).isEqualTo(2);
-        String files = transaction.execute(status -> disabled.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create-files", digest, "qwen-code", null, null, List.of(), null, selection)).sessionId();
+        String files = transaction.execute(status -> disabled.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create-files")
+                .requestDigest(digest)
+                .agentId("qwen-code")
+                .selection(selection)
+                .build())).sessionId();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND session_id = ?"
                 + " AND creator_actor_key = ? AND owner_actor_key = ?", Integer.class,
                 tenant, files, actorKey, actorKey)).isEqualTo(1);
@@ -431,12 +503,17 @@ class ManagedWorkspaceAdmissionTest {
         grant(tenant, "ws-migration", "actor-a", true);
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        ManagedAgentStore enabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore enabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var transaction = new TransactionTemplate(transactionManager);
         String digest = "sha256:" + "a".repeat(64);
-        String session = transaction.execute(status -> enabled.insertWorkspaceSessionCommand(
-                tenant, "actor-a", "create-migration", digest, "qwen-code", null, null,
-                List.of(), null, new WorkspaceSelection("ws-migration", "."))).sessionId();
+        String session = transaction.execute(status -> enabled.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create-migration")
+                .requestDigest(digest)
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-migration", "."))
+                .build())).sessionId();
         var original = transaction.execute(status -> enabled.insertTurnCommand(tenant, "SUBMIT_TURN",
                 "original-turn", digest, session, List.of(Map.of("type", "text", "text", "go")), digest));
         jdbc.update("UPDATE ma_turn SET status = 'SUCCEEDED' WHERE tenant_id = ? AND session_id = ?",
@@ -839,15 +916,20 @@ class ManagedWorkspaceAdmissionTest {
                 WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-a", "actor-a", true);
         grant(tenant, "ws-a", "actor-b", true);
-        String sessionId = store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create", "sha256:" + "a".repeat(64), "qwen-code",
-                null, null, List.of(), null, new WorkspaceSelection("ws-a",
+        String sessionId = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a",
                         "."))
+                .build())
                 .sessionId();
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
-        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         UnavailableHarnessConnector harness =
                 new UnavailableHarnessConnector() {
                     @Override
@@ -908,15 +990,20 @@ class ManagedWorkspaceAdmissionTest {
                 WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-a", "actor-a", true);
         grant(tenant, "ws-a", "actor-b", true);
-        String sessionId = store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create", "sha256:" + "a".repeat(64), "qwen-code",
-                null, null, List.of(), null, new WorkspaceSelection("ws-a",
+        String sessionId = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a",
                         "."))
+                .build())
                 .sessionId();
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
-        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         UnavailableHarnessConnector harness =
                 new UnavailableHarnessConnector() {
                     @Override
@@ -987,6 +1074,122 @@ class ManagedWorkspaceAdmissionTest {
                                         .isEqualTo("session_not_found")));
     }
 
+    // The settle arm answers a recorded outcome through the same TOCTOU
+    // window as the COMPLETED read-back below it: a non-creator OPERATOR
+    // whose pre-read missed the recorder's row must meet the same creator
+    // gate there, never a 200 the COMPLETED arm refuses with 409.
+    @Test
+    void theSettleArmKeepsTheCreatorGateForANonCreatorOperator() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        grant(tenant, "ws-a", "actor-b", true);
+        String sessionId = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a",
+                        "."))
+                .build())
+                .sessionId();
+        ManagedAgentProperties enabled = new ManagedAgentProperties();
+        enabled.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        UnavailableHarnessConnector harness =
+                new UnavailableHarnessConnector() {
+                    @Override
+                    public boolean isAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public boolean isWorkspaceFilesAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public Attachment createOrLoad(String tenantId,
+                            String sessionId, boolean loadExisting) {
+                        return new Attachment("boot");
+                    }
+
+                    @Override
+                    public boolean supportsFencedTitles() {
+                        return true;
+                    }
+
+                    @Override
+                    public void rename(String tenantId, String sessionId,
+                            String title) {
+                    }
+                };
+        // actor-a settles the rename synchronously; the receipt is COMPLETED
+        // before actor-b's raced call below.
+        ManagedAgentService recorder = new ManagedAgentService(gated,
+                new RequestDigests(), mock(HarnessCoordinator.class), harness,
+                registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        transaction.executeWithoutResult(status -> assertThat(
+                recorder.renameSession(tenant, "actor-a", "rename", sessionId,
+                        "new title").replayed()).isFalse());
+        com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore racing =
+                mock(com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore.class,
+                        org.mockito.AdditionalAnswers.delegatesTo(gated));
+        // actor-b's pre-read misses the row the recorder committed after
+        // it in the raced timeline; every later read sees the row.
+        java.util.concurrent.atomic.AtomicBoolean preRead =
+                new java.util.concurrent.atomic.AtomicBoolean(true);
+        org.mockito.Mockito.doAnswer(call -> {
+            if (preRead.compareAndSet(true, false)) {
+                return java.util.Optional.empty();
+            }
+            return gated.findCommand(call.getArgument(0),
+                    call.getArgument(1), call.getArgument(2));
+        }).when(racing).findCommand(
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyString());
+        ManagedAgentService settleService = new ManagedAgentService(racing,
+                new RequestDigests(), mock(HarnessCoordinator.class), harness,
+                registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        // Through the settle arm: the live-Session creator refusal, not a
+        // 200 carrying the recorder's outcome. The pre-read missed the row,
+        // so the settlement's own replay-owner gate must refuse actor-b.
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> settleService.renameSession(tenant,
+                        "actor-b", "rename", sessionId, "new title"))
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                            assertThat(error.getStatus()).isEqualTo(409);
+                            assertThat(error.getCode())
+                                    .isEqualTo("workspace_unavailable");
+                        }));
+        assertThat(store.findCommand(tenant, "RENAME_SESSION", "rename")
+                .orElseThrow().status()).isEqualTo("COMPLETED");
+        // The COMPLETED arm answers the identical request identically.
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> settleService.renameSession(tenant,
+                        "actor-b", "rename", sessionId, "new title"))
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                            assertThat(error.getStatus()).isEqualTo(409);
+                            assertThat(error.getCode())
+                                    .isEqualTo("workspace_unavailable");
+                        }));
+        // The recorder still replays its own completed outcome.
+        transaction.executeWithoutResult(status -> {
+            var replay = settleService.renameSession(tenant, "actor-a",
+                    "rename", sessionId, "new title");
+            assertThat(replay.replayed()).isTrue();
+            assertThat(replay.body().metadata().get("title"))
+                    .isEqualTo("new title");
+        });
+    }
+
     // The grant-less arm of the rename replay gate: with the key recorded
     // as a completed rename of the Session, every title shape — over-long,
     // blank, control-bearing — must answer the same 404 a fresh key
@@ -999,15 +1202,20 @@ class ManagedWorkspaceAdmissionTest {
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-a", "actor-a", true);
-        String sessionId = store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create", "sha256:" + "a".repeat(64), "qwen-code",
-                null, null, List.of(), null, new WorkspaceSelection("ws-a",
+        String sessionId = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a",
                         "."))
+                .build())
                 .sessionId();
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
-        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         UnavailableHarnessConnector harness =
                 new UnavailableHarnessConnector() {
                     @Override
@@ -1089,14 +1297,22 @@ class ManagedWorkspaceAdmissionTest {
                 WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-a", "actor-a", true);
         grant(tenant, "ws-b", "actor-b", true);
-        String sessionX = store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create-x", "sha256:" + "a".repeat(64),
-                "qwen-code", null, null, List.of(), null,
-                new WorkspaceSelection("ws-a", ".")).sessionId();
-        String sessionY = store.insertWorkspaceSessionCommand(tenant,
-                "actor-b", "create-y", "sha256:" + "b".repeat(64),
-                "qwen-code", null, null, List.of(), null,
-                new WorkspaceSelection("ws-b", ".")).sessionId();
+        String sessionX = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create-x")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a", "."))
+                .build()).sessionId();
+        String sessionY = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-b")
+                .idempotencyKey("create-y")
+                .requestDigest("sha256:" + "b".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-b", "."))
+                .build()).sessionId();
         ManagedAgentService service = boundServiceWithWorkingHarness();
         TransactionTemplate transaction = new TransactionTemplate(
                 transactionManager);
@@ -1122,12 +1338,11 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     // The recorded rename's actor gate covers the UNFINISHED row too, not
-    // only the completed outcome: beginSessionRename compares key, Session
-    // and digest, never the actor, so without the gate a non-recorder
-    // OPERATOR replaying the key while the row is PENDING claims the
-    // recorder's delivery, drives harness.rename, flips the row to
-    // COMPLETED and answers 200 replayed — the recorded outcome the
-    // contract reserves for the actor who recorded it.
+    // only the completed outcome: the settlement compares key, Session and
+    // digest, never the actor, so without the gate a non-recorder OPERATOR
+    // replaying the key while the row is PENDING would settle the recorder's
+    // command to COMPLETED and answer 200 replayed — the recorded outcome
+    // the contract reserves for the actor who recorded it.
     @Test
     void aPendingRenameReplayKeepsTheRecorderGate() {
         String tenant = "tenant-" + UUID.randomUUID();
@@ -1136,10 +1351,15 @@ class ManagedWorkspaceAdmissionTest {
                 WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-a", "actor-a", true);
         grant(tenant, "ws-a", "actor-b", true);
-        String sessionId = store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create", "sha256:" + "a".repeat(64), "qwen-code",
-                null, null, List.of(), null, new WorkspaceSelection("ws-a",
+        String sessionId = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a",
                         "."))
+                .build())
                 .sessionId();
         ManagedAgentService service = boundServiceWithWorkingHarness();
         TransactionTemplate transaction = new TransactionTemplate(
@@ -1150,16 +1370,17 @@ class ManagedWorkspaceAdmissionTest {
         // refuses, so the row is written through an enabled one.
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
-        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String digest = new RequestDigests().digest(Map.of("sessionId",
                 sessionId, "title", "new title"));
-        transaction.executeWithoutResult(status -> gated.beginSessionRename(
-                tenant, "rename", digest, sessionId, "new title", "actor-a"));
+        transaction.executeWithoutResult(status -> gated.beginSessionMutation(
+                tenant, "RENAME_SESSION", "rename", digest, sessionId,
+                SessionMutationKind.RENAME, "actor-a"));
 
         // The non-recorder OPERATOR's same-title replay meets the same
         // refusal the completed outcome answers, and the recorder's row
-        // and delivery stay untouched.
+        // stays untouched.
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.renameSession(tenant,
                         "actor-b", "rename", sessionId, "new title"))
@@ -1175,12 +1396,12 @@ class ManagedWorkspaceAdmissionTest {
                         + " AND operation = 'RENAME_SESSION'"
                         + " AND idempotency_key = ?", String.class,
                 tenant, "rename")).isEqualTo("PENDING");
-        assertThat(jdbc.queryForObject("SELECT attempt_count FROM"
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " ma_operation WHERE operation_kind = 'RENAME'"
                         + " AND tenant_id = ? AND session_id = ?",
                 Integer.class, tenant, sessionId)).isZero();
 
-        // The recorder's own retry resumes the delivery to completion.
+        // The recorder's own retry resumes the settlement to completion.
         transaction.executeWithoutResult(status -> assertThat(
                 service.renameSession(tenant, "actor-a", "rename", sessionId,
                         "new title").replayed()).isTrue());
@@ -1201,22 +1422,28 @@ class ManagedWorkspaceAdmissionTest {
                 WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-a", "actor-a", true);
         grant(tenant, "ws-a", "actor-b", true);
-        String sessionId = store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create", "sha256:" + "a".repeat(64), "qwen-code",
-                null, null, List.of(), null, new WorkspaceSelection("ws-a",
+        String sessionId = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a",
                         "."))
+                .build())
                 .sessionId();
         ManagedAgentService service = boundServiceWithWorkingHarness();
         TransactionTemplate transaction = new TransactionTemplate(
                 transactionManager);
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
-        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String digest = new RequestDigests().digest(Map.of("sessionId",
                 sessionId, "title", "new title"));
-        transaction.executeWithoutResult(status -> gated.beginSessionRename(
-                tenant, "rename", digest, sessionId, "new title", "actor-a"));
+        transaction.executeWithoutResult(status -> gated.beginSessionMutation(
+                tenant, "RENAME_SESSION", "rename", digest, sessionId,
+                SessionMutationKind.RENAME, "actor-a"));
 
         transaction.executeWithoutResult(status ->
                 assertThatThrownBy(() -> service.renameSession(tenant,
@@ -1237,18 +1464,26 @@ class ManagedWorkspaceAdmissionTest {
         grant(tenant, "ws-a", "actor-a", true);
         grant(tenant, "ws-b", "actor-a", true);
         setDefaultWorkspace(tenant, "ws-a");
-        var first = store.insertWorkspaceSessionCommand(tenant, "actor-a",
-                "key", "sha256:" + "a".repeat(64), "qwen-code", null, null,
-                List.of(), null, null);
+        var first = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("key")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .build());
         setDefaultWorkspace(tenant, "ws-b");
         var retry = store.replayWorkspaceSessionCommand(tenant, "actor-a",
                 "key", "sha256:" + "a".repeat(64));
         assertThat(retry.sessionId()).isEqualTo(first.sessionId());
         assertThat(store.requireSession(tenant, first.sessionId())
                 .workspace().getWorkspaceId()).isEqualTo("ws-a");
-        var second = store.insertWorkspaceSessionCommand(tenant, "actor-a",
-                "new-key", "sha256:" + "a".repeat(64), "qwen-code", null,
-                null, List.of(), null, null);
+        var second = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("new-key")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .build());
         assertThat(store.requireSession(tenant, second.sessionId())
                 .workspace().getWorkspaceId()).isEqualTo("ws-b");
         assertThatThrownBy(() -> store.replayWorkspaceSessionCommand(tenant,
@@ -1265,20 +1500,38 @@ class ManagedWorkspaceAdmissionTest {
         grant(tenant, "ws-a", "actor-a", true);
         WorkspaceSelection selection = new WorkspaceSelection("ws-a", ".");
         String digest = "sha256:" + "a".repeat(64);
-        var first = store.insertWorkspaceSessionCommand(tenant, "actor-a",
-                "key", digest, "qwen-code", "1", null, List.of(), null,
-                selection);
+        var first = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("key")
+                .requestDigest(digest)
+                .agentId("qwen-code")
+                .requestedRevision("1")
+                .selection(selection)
+                .build());
         ManagedAgentProperties changed = new ManagedAgentProperties();
         changed.setAgentRevision("2");
-        ManagedAgentStore upgraded = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {}, registry, changed, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore upgraded = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, changed, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
 
-        assertThat(upgraded.insertWorkspaceSessionCommand(tenant, "actor-a",
-                "key", digest, "qwen-code", "1", null, List.of(), null,
-                selection).sessionId()).isEqualTo(first.sessionId());
-        assertThatThrownBy(() -> upgraded.insertWorkspaceSessionCommand(
-                tenant, "actor-a", "new-key", digest, "qwen-code", "1", null,
-                List.of(), null, selection))
+        assertThat(upgraded.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("key")
+                .requestDigest(digest)
+                .agentId("qwen-code")
+                .requestedRevision("1")
+                .selection(selection)
+                .build()).sessionId()).isEqualTo(first.sessionId());
+        assertThatThrownBy(() -> upgraded.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("new-key")
+                .requestDigest(digest)
+                .agentId("qwen-code")
+                .requestedRevision("1")
+                .selection(selection)
+                .build()))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("unsupported_feature"));
@@ -1292,15 +1545,27 @@ class ManagedWorkspaceAdmissionTest {
         var selection = new WorkspaceSelection("ws-a", ".");
         List<Map<String, Object>> input = List.of(
                 Map.of("type", "text", "text", "go"));
-        assertThatThrownBy(() -> store.insertWorkspaceSessionCommand(
-                tenant, "actor-a", "nonempty", "digest", "qwen-code", null,
-                null, input, "payload", selection))
+        assertThatThrownBy(() -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("nonempty")
+                .requestDigest("digest")
+                .agentId("qwen-code")
+                .input(input)
+                .payloadDigest("payload")
+                .selection(selection)
+                .build()))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("workspace_unavailable"));
-        var created = store.insertWorkspaceSessionCommand(tenant, "actor-a",
-                "empty", "digest", "qwen-code", null, null, List.of(), null,
-                selection);
+        var created = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("empty")
+                .requestDigest("digest")
+                .agentId("qwen-code")
+                .selection(selection)
+                .build());
         String sessionId = created.sessionId();
         assertThatThrownBy(() -> store.insertTurnCommand(tenant, "SUBMIT",
                 "turn", "digest", sessionId, input, "payload"))
@@ -1342,9 +1607,14 @@ class ManagedWorkspaceAdmissionTest {
         register(tenant, "ws-a", "storage-a");
         grant(tenant, "ws-a", "actor-a", true);
         String digest = "sha256:" + "a".repeat(64);
-        store.insertWorkspaceSessionCommand(tenant, "actor-a", "create",
-                digest, "qwen-code", null, null, List.of(), null,
-                new WorkspaceSelection("ws-a", "."));
+        store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest(digest)
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a", "."))
+                .build());
         jdbc.update("ALTER TABLE ma_workspace_access DROP CONSTRAINT ck_ma_access_role");
         try {
             jdbc.update("UPDATE ma_workspace_access SET role = 'BROKEN'"
@@ -1353,9 +1623,14 @@ class ManagedWorkspaceAdmissionTest {
             assertThat(registry.accessOf(tenant, "actor-a", "ws-a"))
                     .isEqualTo(com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess.NONE);
             assertThat(registry.canRead(tenant, "actor-a", "ws-a")).isFalse();
-            assertRefused(() -> store.insertWorkspaceSessionCommand(tenant,
-                            "actor-a", "create-2", digest, "qwen-code", null, null,
-                            List.of(), null, new WorkspaceSelection("ws-a", ".")),
+            assertRefused(() -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId(tenant)
+                    .actorId("actor-a")
+                    .idempotencyKey("create-2")
+                    .requestDigest(digest)
+                    .agentId("qwen-code")
+                    .selection(new WorkspaceSelection("ws-a", "."))
+                    .build()),
                     "workspace_not_found");
         } finally {
             jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'"
@@ -1375,9 +1650,14 @@ class ManagedWorkspaceAdmissionTest {
         grant(tenant, "ws-a", "actor-a", true);
         grant(tenant, "ws-a", "actor-b", true);
         String digest = "sha256:" + "a".repeat(64);
-        String sessionId = store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create", digest, "qwen-code", null, null,
-                List.of(), null, new WorkspaceSelection("ws-a", "."))
+        String sessionId = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest(digest)
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a", "."))
+                .build())
                 .sessionId();
         jdbc.update("UPDATE ma_session SET owner_actor_key ="
                 + " NULL, creator_actor_key = NULL WHERE tenant_id = ?"
@@ -1395,9 +1675,14 @@ class ManagedWorkspaceAdmissionTest {
         grant(tenant, "ws-a", "actor-a", true);
         grant(tenant, "ws-a", "actor-b", true);
         String digest = "sha256:" + "a".repeat(64);
-        String sessionId = store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create", digest, "qwen-code", null, null,
-                List.of(), null, new WorkspaceSelection("ws-a", "."))
+        String sessionId = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest(digest)
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a", "."))
+                .build())
                 .sessionId();
         List<Map<String, Object>> input = List.of(
                 Map.of("type", "text", "text", "again"));
@@ -1412,17 +1697,22 @@ class ManagedWorkspaceAdmissionTest {
         // The lookup pins this Session, not any bound Session the actor
         // created in the tenant: actor-b's own Session does not admit
         // actor-a, and vice versa.
-        String otherSession = store.insertWorkspaceSessionCommand(tenant,
-                "actor-b", "create-b", digest, "qwen-code", null, null,
-                List.of(), null, new WorkspaceSelection("ws-a", "."))
+        String otherSession = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-b")
+                .idempotencyKey("create-b")
+                .requestDigest(digest)
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a", "."))
+                .build())
                 .sessionId();
         assertThat(registry.createdSession(tenant, "actor-a", otherSession))
                 .isFalse();
 
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
-        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         TransactionTemplate transaction = new TransactionTemplate(
                 transactionManager);
         var admission = transaction.execute(status ->
@@ -1474,27 +1764,42 @@ class ManagedWorkspaceAdmissionTest {
         // A Session pinned to a compiled stored definition (D8c-1) passes
         // the later-Turn gate exactly like qwen-code.
         String agentId = "agent_" + "b".repeat(32);
-        new ManagedAgentDefinitionStore(jdbc, new RequestDigests()).create(tenant, "def",
+        new JdbcManagedAgentDefinitionStore(jdbc, new RequestDigests()).create(tenant, "def",
                 "def-digest", agentId, "c".repeat(64),
                 "{\"model\":{},\"instructions\":\"\","
                         + "\"tools\":[{\"type\":\"hosted_profile\","
                         + "\"profile\":\"hosted-workspace-files/1\"}],"
                         + "\"permission_policy\":{}}", 1L);
-        String pinnedId = store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create", digest, agentId, null, null,
-                List.of(), null, new WorkspaceSelection("ws-a", "."))
+        String pinnedId = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest(digest)
+                .agentId(agentId)
+                .selection(new WorkspaceSelection("ws-a", "."))
+                .build())
                 .sessionId();
         // A Session whose snapshotted profile refs are not the frozen pair
         // is refused too, even with the qwen-code agent.
         register(tenant, "ws-drift", "storage-drift");
         grant(tenant, "ws-drift", "actor-a", true);
-        String driftedId = store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create-drift", digest, "qwen-code", null, null,
-                List.of(), null, new WorkspaceSelection("ws-drift", "."))
+        String driftedId = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create-drift")
+                .requestDigest(digest)
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-drift", "."))
+                .build())
                 .sessionId();
-        String controlId = store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create-control", digest, "qwen-code", null, null,
-                List.of(), null, new WorkspaceSelection("ws-a", "."))
+        String controlId = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create-control")
+                .requestDigest(digest)
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a", "."))
+                .build())
                 .sessionId();
         UnavailableHarnessConnector enabledHarness =
                 new UnavailableHarnessConnector() {
@@ -1527,139 +1832,29 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     @Test
-    void refusedRenameRetiresItsCommandAndAdmitsTheNextOne() {
+    void aFailedTitleNotificationStillCompletesTheRenameAndAdmitsTheNextOne() {
         String tenant = "tenant-" + UUID.randomUUID();
         register(tenant, "ws-a", "storage-a",
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-a", "actor-a", true);
         String digest = "sha256:" + "a".repeat(64);
-        String sessionId = store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create", digest, "qwen-code", null, null,
-                List.of(), null, new WorkspaceSelection("ws-a", "."))
+        String sessionId = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest(digest)
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a", "."))
+                .build())
                 .sessionId();
         ManagedAgentProperties enabled = new ManagedAgentProperties();
         enabled.getHarness().setWorkspaceFilesEnabled(true);
-        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
-        // The Workspace authority refuses the first attach and admits the
-        // second, so a rename after the refused one is observable.
-        UnavailableHarnessConnector harness =
-                new UnavailableHarnessConnector() {
-                    private int attaches;
-
-                    @Override
-                    public boolean isAvailable() {
-                        return true;
-                    }
-
-                    @Override
-                    public boolean isWorkspaceFilesAvailable() {
-                        return true;
-                    }
-
-                    @Override
-                    public Attachment createOrLoad(String tenantId,
-                            String sessionId, boolean loadExisting) {
-                        if (attaches++ == 0) {
-                            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-                        }
-                        return new Attachment("boot");
-                    }
-
-                    @Override
-                    public boolean supportsFencedTitles() {
-                        return true;
-                    }
-
-                    @Override
-                    public void rename(String tenantId, String sessionId,
-                            String title) {
-                    }
-                };
-        ManagedAgentService service = new ManagedAgentService(gated,
-                new RequestDigests(), null, harness, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-        TransactionTemplate transaction = new TransactionTemplate(
-                transactionManager);
-
-        // The refusal answers its own permanent status, and the command row
-        // it wrote must not survive to wedge every later rename.
-        transaction.executeWithoutResult(status ->
-                assertThatThrownBy(() -> service.renameSession(tenant,
-                        "actor-a", "rename-1", sessionId, "first"))
-                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
-                            assertThat(error.getStatus())
-                                    .isEqualTo(HttpStatus.CONFLICT.value());
-                            assertThat(error.getCode())
-                                    .isEqualTo("workspace_unavailable");
-                        }));
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ?"
-                        + " AND session_id = ? AND state = 'PENDING'",
-                Integer.class, tenant, sessionId)).isZero();
-
-        transaction.executeWithoutResult(status ->
-                assertThatThrownBy(() -> gated.beginWorkspaceClose(tenant, sessionId, "actor-a",
-                        "actor-digest", "close-while-rename-pending", digest, true))
-                        .isInstanceOfSatisfying(ManagedAgentException.class, error ->
-                                assertThat(error.getCode()).isEqualTo("session_operation_active")));
-        assertThat(jdbc.queryForObject("SELECT state FROM ma_request_receipt WHERE namespace = 'SESSION_COMMAND'"
-                        + " AND tenant_id = ? AND operation = 'RENAME_SESSION' AND idempotency_key = ?",
-                String.class, tenant, "rename-1")).isEqualTo("FAILED");
-
-        // The freed key stays re-usable: a same-key retry re-attempts the
-        // mutation instead of colliding on the requested event the refused
-        // attempt already published.
-        transaction.executeWithoutResult(status -> service.renameSession(
-                tenant, "actor-a", "rename-1", sessionId, "first"));
-        assertThat(jdbc.queryForObject("SELECT title FROM"
-                        + " ma_session WHERE tenant_id = ?"
-                        + " AND session_id = ?", String.class, tenant,
-                sessionId)).isEqualTo("first");
-
-        var blocker = transaction.execute(status -> gated.beginWorkspaceClose(tenant, sessionId,
-                "actor-a", "actor-digest", "close-blocker", digest, true)).operation();
-        transaction.executeWithoutResult(status ->
-                assertThatThrownBy(() -> service.renameSession(tenant,
-                        "actor-a", "rename-2", sessionId, "second"))
-                        .isInstanceOfSatisfying(ManagedAgentException.class, error ->
-                                assertThat(error.getCode()).isEqualTo("workspace_unavailable")));
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE namespace = 'SESSION_COMMAND'"
-                        + " AND tenant_id = ? AND operation = 'RENAME_SESSION' AND idempotency_key = ?",
-                Integer.class, tenant, "rename-2")).isZero();
-        transaction.executeWithoutResult(status -> {
-            jdbc.update("DELETE FROM ma_operation WHERE tenant_id = ? AND session_id = ?"
-                    + " AND operation_kind = 'CLOSE' AND operation_id = ?", tenant, sessionId, blocker.operationId());
-            jdbc.update("UPDATE ma_session SET status = 'ACTIVE' WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
-        });
-
-        transaction.executeWithoutResult(status -> service.renameSession(
-                tenant, "actor-a", "rename-2", sessionId, "second"));
-        assertThat(jdbc.queryForObject("SELECT title FROM"
-                        + " ma_session WHERE tenant_id = ?"
-                        + " AND session_id = ?", String.class, tenant,
-                sessionId)).isEqualTo("second");
-    }
-
-    @Test
-    void aRenameFailureThatIsNotABrokerRefusalStillRetiresItsCommand() {
-        String tenant = "tenant-" + UUID.randomUUID();
-        register(tenant, "ws-a", "storage-a",
-                WorkspaceExecutionProfile.CONFIG_REF,
-                WorkspaceExecutionProfile.POLICY_REF);
-        grant(tenant, "ws-a", "actor-a", true);
-        String digest = "sha256:" + "a".repeat(64);
-        String sessionId = store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "create", digest, "qwen-code", null, null,
-                List.of(), null, new WorkspaceSelection("ws-a", "."))
-                .sessionId();
-        ManagedAgentProperties enabled = new ManagedAgentProperties();
-        enabled.getHarness().setWorkspaceFilesEnabled(true);
-        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
-        // A Harness that lost the Session answers the rename with a 4xx,
-        // which the client surfaces as a HarnessHttpFailure — a permanent
-        // failure, but not a broker refusal.
+        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        // A Harness that lost the Session answers the notification with a
+        // 4xx (a HarnessHttpFailure). The notification is best-effort, so the
+        // rename still completes synchronously.
         HarnessHttpFailure lost = mock(HarnessHttpFailure.class);
         UnavailableHarnessConnector harness =
                 new UnavailableHarnessConnector() {
@@ -1699,17 +1894,19 @@ class ManagedWorkspaceAdmissionTest {
         TransactionTemplate transaction = new TransactionTemplate(
                 transactionManager);
 
-        transaction.executeWithoutResult(status ->
-                assertThatThrownBy(() -> service.renameSession(tenant,
-                        "actor-a", "rename-1", sessionId, "first"))
-                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
-                            assertThat(error.getStatus())
-                                    .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE.value());
-                            assertThat(error.getCode())
-                                    .isEqualTo("hosted_harness_unavailable");
-                        }));
-        // The answered mutation retired its command row too, so a fresh key
-        // is admitted instead of wedging on session_operation_active.
+        // The lost notification never fails the request: the SQL title is
+        // already durable, so the rename answers 200 and its receipt completes.
+        transaction.executeWithoutResult(status -> assertThat(
+                service.renameSession(tenant, "actor-a", "rename-1", sessionId,
+                        "first").replayed()).isFalse());
+        assertThat(jdbc.queryForObject("SELECT title FROM"
+                        + " ma_session WHERE tenant_id = ?"
+                        + " AND session_id = ?", String.class, tenant,
+                sessionId)).isEqualTo("first");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_request_receipt WHERE namespace = 'SESSION_COMMAND'"
+                        + " AND tenant_id = ? AND operation = 'RENAME_SESSION' AND idempotency_key = ?",
+                String.class, tenant, "rename-1")).isEqualTo("COMPLETED");
+        // No pending row survives to wedge a fresh key on session_operation_active.
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ?"
                         + " AND session_id = ? AND state = 'PENDING'",
@@ -1749,8 +1946,8 @@ class ManagedWorkspaceAdmissionTest {
                         tenant, "storage-policy", "/unused/policy"),
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
                         otherTenant, "storage-shared", "/unused/shared")));
-        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, enabled, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         // An unproxied store has no @Transactional; creation resolves the
         // Workspace only inside a transaction, as the Spring bean provides.
         TransactionTemplate transaction = new TransactionTemplate(
@@ -1762,9 +1959,16 @@ class ManagedWorkspaceAdmissionTest {
         for (String workspace : List.of("ws-policy", "ws-tenant")) {
             // Captured first so the label survives when nothing is thrown.
             Throwable thrown = catchThrowable(() -> transaction.execute(status ->
-                    gated.insertWorkspaceSessionCommand(tenant, "actor-a",
-                            workspace, digest, "qwen-code", null, null, input,
-                            digest, new WorkspaceSelection(workspace, "."))));
+                    gated.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                            .tenantId(tenant)
+                            .actorId("actor-a")
+                            .idempotencyKey(workspace)
+                            .requestDigest(digest)
+                            .agentId("qwen-code")
+                            .input(input)
+                            .payloadDigest(digest)
+                            .selection(new WorkspaceSelection(workspace, "."))
+                            .build())));
             assertThat(thrown).as(workspace)
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                         // The store's message, not the registry's "Workspace is
@@ -1787,9 +1991,16 @@ class ManagedWorkspaceAdmissionTest {
         // The same store admits the Workspace that passes every guard, so the
         // refusals above come from the policy and mount-tenant checks alone.
         assertThat(transaction.execute(status ->
-                gated.insertWorkspaceSessionCommand(tenant, "actor-a",
-                        "ws-valid", digest, "qwen-code", null, null, input,
-                        digest, new WorkspaceSelection("ws-valid", ".")))
+                gated.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(tenant)
+                        .actorId("actor-a")
+                        .idempotencyKey("ws-valid")
+                        .requestDigest(digest)
+                        .agentId("qwen-code")
+                        .input(input)
+                        .payloadDigest(digest)
+                        .selection(new WorkspaceSelection("ws-valid", "."))
+                        .build()))
                 .sessionId()).isNotBlank();
     }
 
@@ -1891,9 +2102,14 @@ class ManagedWorkspaceAdmissionTest {
                 start.await();
                 try {
                     if (bound) {
-                        store.insertWorkspaceSessionCommand(tenant, "actor-a", "key",
-                                "bound-digest", "qwen-code", null, null, List.of(), null,
-                                new WorkspaceSelection("ws-a", "."));
+                        store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                                .tenantId(tenant)
+                                .actorId("actor-a")
+                                .idempotencyKey("key")
+                                .requestDigest("bound-digest")
+                                .agentId("qwen-code")
+                                .selection(new WorkspaceSelection("ws-a", "."))
+                                .build());
                     } else {
                         store.insertSessionCommand(tenant, "CREATE_SESSION", "key",
                                 "legacy-digest", "qwen-code", null, null, List.of(), null);
@@ -2389,24 +2605,24 @@ class ManagedWorkspaceAdmissionTest {
         when(harness.supportsFencedTitles()).thenReturn(true);
         when(harness.supportsUserMessageQueue()).thenReturn(true);
         var enabled = boundServiceWith(harness);
-        var messages = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedUserMessageStore(jdbc, mapper, new RequestDigests(), enabled));
+        var messages = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcManagedUserMessageStore(jdbc, mapper, new RequestDigests(), enabled));
         var transaction = new TransactionTemplate(transactionManager);
         var input = List.of(new InputBlock("text", "queued"));
         var first = transaction.execute(status -> messages.command(tenant, "actor-a", session, "seed",
-                new ManagedUserMessageStore.Command("submit", null, null, input))).messages().getFirst();
+                new JdbcManagedUserMessageStore.Command("submit", null, null, input))).messages().getFirst();
         persistWorktree(tenant, session, state);
 
         assertThat(transaction.execute(status -> messages.queryMessages(tenant, "operator2", session)).messages()).hasSize(1);
         var edited = transaction.execute(status -> messages.command(tenant, "operator2", session, "edit",
-                new ManagedUserMessageStore.Command("edit", first.id(), 1L, List.of(new InputBlock("text", "edited")))));
+                new JdbcManagedUserMessageStore.Command("edit", first.id(), 1L, List.of(new InputBlock("text", "edited")))));
         assertThat(edited.messages().getFirst().revision()).isEqualTo(2);
         assertThat(edited.messages().getFirst().input().getFirst().get("text")).isEqualTo("edited");
         assertRefused(() -> transaction.execute(status -> messages.command(tenant, "operator2", session, "new",
-                new ManagedUserMessageStore.Command("submit", null, null, input))), "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
+                new JdbcManagedUserMessageStore.Command("submit", null, null, input))), "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
         assertRefused(() -> transaction.execute(status -> messages.command(tenant, "operator2", session, "resume",
-                new ManagedUserMessageStore.Command("resume", null, null, null))), "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
+                new JdbcManagedUserMessageStore.Command("resume", null, null, null))), "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
         assertThat(transaction.execute(status -> messages.command(tenant, "operator2", session, "withdraw",
-                new ManagedUserMessageStore.Command("withdraw", first.id(), 2L, null))).messages()).isEmpty();
+                new JdbcManagedUserMessageStore.Command("withdraw", first.id(), 2L, null))).messages()).isEmpty();
         assertRefused(() -> enabled.submitTurn(tenant, "operator2", "submit", session, input),
                 "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
         assertRefused(() -> enabled.renameSession(tenant, "operator2", "rename", session, "renamed"),
@@ -2417,7 +2633,7 @@ class ManagedWorkspaceAdmissionTest {
                 org.mockito.ArgumentMatchers.anyBoolean(), org.mockito.ArgumentMatchers.anyBoolean());
         assertRefused(() -> enabled.authorizeUserMessages(tenant, "reader", session), "session_operation_forbidden");
         jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
-                tenant, "ws-a", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, "actor-a"));
+                tenant, "ws-a", ManagedWorkspaceRegistry.actorKey(tenant, "actor-a"));
         assertRefused(() -> enabled.authorizeUserMessages(tenant, "operator2", session), "workspace_unavailable");
     }
 
@@ -2464,6 +2680,7 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     @Test
+    @Transactional("managedAgentTransactionManager")
     void failedAndBlockedWorktreesStillAllowCancellation() throws Exception {
         for (String state : List.of("FAILED", "BLOCKED")) {
             String tenant = "tenant-" + UUID.randomUUID();
@@ -2494,7 +2711,7 @@ class ManagedWorkspaceAdmissionTest {
         String id = UUID.randomUUID().toString().replace("-", "");
         String cwd = ".qwen-managed-worktrees/" + id;
         var binding = store.requireSession(tenant, session).workspace();
-        var plan = new SessionWorktreeStore.Plan(tenant, "ws-a", 1, "storage-a", ".",
+        var plan = new JdbcSessionWorktreeStore.Plan(tenant, "ws-a", 1, "storage-a", ".",
                 binding.getContextConfigRef(), 1, "/workspace", "root-identity", ".", ".",
                 "/workspace/.git", "common-identity", "main", "a".repeat(40), id, cwd, cwd, "qwen/" + id);
         jdbc.update("UPDATE ma_session SET cwd_relative = ? WHERE tenant_id = ? AND session_id = ?", cwd, tenant, session);
@@ -2506,7 +2723,7 @@ class ManagedWorkspaceAdmissionTest {
         jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_key,"
                 + " worktree_id, owner_actor_key, state, revision, plan_json, operation_id, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'ws-a', 'storage-a', ?, ?, ?, ?, 1, ?, ?, 1, 1)", tenant, session,
-                "a".repeat(64), id, com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, "actor-a"), state, mapper.writeValueAsString(plan), id);
+                "a".repeat(64), id, ManagedWorkspaceRegistry.actorKey(tenant, "actor-a"), state, mapper.writeValueAsString(plan), id);
     }
 
     private ManagedAgentService workspaceFilesService(String tenant,
@@ -2516,8 +2733,8 @@ class ManagedWorkspaceAdmissionTest {
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant,
                         "storage-a", "/workspace")));
-        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         return new ManagedAgentService(gated, new RequestDigests(), coordinator,
                 new UnavailableHarnessConnector() {
                     @Override
@@ -2560,8 +2777,8 @@ class ManagedWorkspaceAdmissionTest {
     private ManagedAgentService boundServiceWith(HarnessConnector harness) {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         HarnessCoordinator noopCoordinator = new HarnessCoordinator(null,
                 null, null, null, null, Clock.systemUTC(),
                 new ManagedAgentProperties()) {
@@ -2584,17 +2801,22 @@ class ManagedWorkspaceAdmissionTest {
                 WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         grant(tenant, "ws-a", "actor-a", true);
-        return store.insertWorkspaceSessionCommand(tenant, "actor-a",
-                "create", "sha256:" + "a".repeat(64), "qwen-code", null, null,
-                List.of(), null, new WorkspaceSelection("ws-a", "."))
+        return store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a", "."))
+                .build())
                 .sessionId();
     }
 
     private ManagedAgentService boundService(boolean workspaceFiles) {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(workspaceFiles);
-        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper,
-                Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore gated = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         return new ManagedAgentService(gated, new RequestDigests(), null,
                 new UnavailableHarnessConnector() {
                     @Override
@@ -2611,9 +2833,14 @@ class ManagedWorkspaceAdmissionTest {
 
     private void assertCreateError(String tenant, WorkspaceSelection selection,
             String expected) {
-        assertThatThrownBy(() -> store.insertWorkspaceSessionCommand(tenant,
-                "actor-a", "key", "digest", "qwen-code", null, null, List.of(), null,
-                selection)).isInstanceOfSatisfying(ManagedAgentException.class, error ->
+        assertThatThrownBy(() -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("key")
+                .requestDigest("digest")
+                .agentId("qwen-code")
+                .selection(selection)
+                .build())).isInstanceOfSatisfying(ManagedAgentException.class, error ->
                         assertThat(error.getCode()).isEqualTo(expected));
     }
 
@@ -2622,9 +2849,14 @@ class ManagedWorkspaceAdmissionTest {
         String tenant = "tenant-" + UUID.randomUUID();
         register(tenant, "ws-a", "storage-a");
         grant(tenant, "ws-a", "actor-a", true);
-        String session = store.insertWorkspaceSessionCommand(tenant, "actor-a",
-                "key", "digest", "qwen-code", null, null, List.of(), null,
-                new WorkspaceSelection("ws-a", ".")).sessionId();
+        String session = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("key")
+                .requestDigest("digest")
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a", "."))
+                .build()).sessionId();
         for (String column : List.of("workspace_generation", "context_revision")) {
             assertThatThrownBy(() -> jdbc.update("UPDATE ma_session SET "
                     + column + " = NULL WHERE session_id = ?", session))
@@ -2664,9 +2896,9 @@ class ManagedWorkspaceAdmissionTest {
         jdbc.update("INSERT INTO ma_storage"
                         + " (alias_key,tenant_key,storage_key,tenant_id,storage_id,fence_operation_id)"
                         + " VALUES (?,?,?,?,?,?)",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storageId),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageFenceKey(storageId),
+                RuntimeAdmissionFences.storageAliasKey(tenant, storageId),
+                RuntimeAdmissionFences.storageFenceKey(tenant),
+                RuntimeAdmissionFences.storageFenceKey(storageId),
                 tenant, storageId, UUID.randomUUID().toString());
     }
 
@@ -2726,7 +2958,7 @@ class ManagedWorkspaceAdmissionTest {
     // then the Session row as a tombstone.
     private void recordDelete(String tenant, String sessionId,
             String statusBefore) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
         String target = ManagedSchemaKeys.key(sessionId);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key,"
                         + " session_scope_key, operation_id, operation_kind,"

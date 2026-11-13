@@ -68,6 +68,14 @@ import {
   resolveSessionRestoreTimeouts,
 } from './actions.js';
 import {
+  beginSessionConfigRead,
+  getSessionConfigSync,
+  observeSessionConfig,
+  queueSessionConfigRefresh,
+  resetSessionConfigSync,
+  type SessionConfigSync,
+} from './session-config-sync.js';
+import {
   eventPromptId,
   findLiveJournalRepairSuffix,
   findLiveJournalRepairTarget,
@@ -108,6 +116,10 @@ import {
 import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider.js';
 import { loadReadyWorkspaceSkills } from '../workspace/load-ready-skills.js';
 import {
+  applyConfigOptions,
+  applySessionConfigContext,
+  getConfigOptionsUpdate,
+  mapWorkflowMode,
   getCurrentMode,
   getPlanExecutionMode,
   getSessionDisplayName,
@@ -131,6 +143,7 @@ import {
   delay,
   getReconnectDelayMs,
   schedulePassiveAssistantDone,
+  withActionTimeout,
   type TimerRef,
 } from '../timing.js';
 import {
@@ -1014,7 +1027,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
   const sessionRef = useRef<DaemonSessionClient | undefined>(undefined);
   const sessionConfigGenerationRef = useRef(
-    new WeakMap<DaemonSessionClient, number>(),
+    new WeakMap<DaemonSessionClient, SessionConfigSync>(),
+  );
+  const workflowModeSessionRef = useRef<DaemonSessionClient | undefined>(
+    undefined,
   );
   const sessionRecoveryGenerationRef = useRef(
     new WeakMap<DaemonSessionClient, number>(),
@@ -1315,6 +1331,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const repairReloadRef = useRef<
     DaemonSessionActions['reloadSession'] | undefined
   >(undefined);
+  const refreshModelsRef = useRef<
+    DaemonSessionActions['refreshModels'] | undefined
+  >(undefined);
   const tryLiveJournalRepairRef = useRef<(() => void) | undefined>(undefined);
   const passiveAssistantDoneTimerRef = useRef<
     ReturnType<typeof setTimeout> | undefined
@@ -1362,6 +1381,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const createSessionRequestRef = useRef(createSessionRequest);
   createSessionRequestRef.current = createSessionRequest;
   const [promptStatus, setPromptStatus] = useState<DaemonPromptStatus>('idle');
+  const promptStatusRef = useRef(promptStatus);
+  promptStatusRef.current = promptStatus;
   const [restoreSessionId, setRestoreSessionId] = useState<string | undefined>(
     initialRestoreSessionId,
   );
@@ -1958,6 +1979,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         newSessionNonce > 0;
       let reconnectAttempt = 0;
       let nextSseConnectReason: DaemonSseConnectReason | undefined;
+      let resyncSnapshotPending = false;
       let skipMetadataRefresh = false;
       let standaloneCreateAttempted = false;
       let productContextFailure = false;
@@ -1983,6 +2005,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const maySettleToIdle = (
         target = session ?? sessionRef.current ?? connectionRef.current,
       ) => {
+        const pendingLoad = pendingSessionLoadRef.current;
+        if (
+          pendingLoad?.reconcilePromptActivity &&
+          pendingLoad.sessionId === target?.sessionId &&
+          (pendingLoad.sessionContext?.kind !== 'workspace' ||
+            pendingLoad.sessionContext.cwd === target?.workspaceCwd)
+        ) {
+          return false;
+        }
         if (
           hasCurrentSessionActivePrompt() ||
           connectionRef.current.backgroundTurn
@@ -2042,10 +2073,24 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
           | undefined;
         let removeProviderAbortListener: (() => void) | undefined;
+        let configStreamOwner: DaemonSessionClient | undefined;
         const clearEventStream = () => {
           removeProviderAbortListener?.();
           removeProviderAbortListener = undefined;
-          if (eventStreamRef.current === eventStream) {
+          if (eventStream && eventStreamRef.current === eventStream) {
+            const owner = configStreamOwner;
+            if (owner && sessionRef.current === owner) {
+              resetSessionConfigSync(sessionConfigGenerationRef.current, owner);
+              setConnection((current) =>
+                sessionRef.current === owner
+                  ? {
+                      ...current,
+                      workflowModeStatus: 'syncing',
+                      workflowModePending: false,
+                    }
+                  : current,
+              );
+            }
             eventStreamRef.current = undefined;
           }
         };
@@ -2631,6 +2676,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               }
               return;
             }
+            if (
+              attemptedLoad?.reconcilePromptActivity &&
+              getDaemonActivePrompt(nextSession) !== false
+            ) {
+              daemonActivePromptRef.current = undefined;
+            }
             if (attemptedLoad?.replaySource === 'memory') {
               const episode = liveJournalRepairRef.current;
               const freshReplayEvents = [
@@ -2713,7 +2764,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               const replaySnapshotEventCount =
                 nextSession.replaySnapshot.compactedReplay.length +
                 nextSession.replaySnapshot.liveJournal.length;
-              if (replaySnapshotEventCount > 0) {
+              if (replaySnapshotEventCount > 0 || resyncSnapshotPending) {
                 // Rebuilding the transcript store is not a turn boundary. The
                 // episode-start updater below can only preserve a state this
                 // reset has not already flattened, so an observer pane whose
@@ -2732,6 +2783,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 }
               }
             }
+            resyncSnapshotPending = false;
             isSameSessionReconnect =
               previousSessionId !== undefined &&
               previousSessionId === nextSession.sessionId;
@@ -3396,8 +3448,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               locallyBoundPromptIdsRef.current.delete(activeSession.sessionId);
             }
           }
+          const reuseWorkflowMode =
+            workflowModeSessionRef.current === activeSession;
+          workflowModeSessionRef.current = activeSession;
           setConnection((current) => ({
             ...current,
+            workflowMode: reuseWorkflowMode ? current.workflowMode : undefined,
+            workflowModeStatus: 'syncing',
+            workflowModePending: false,
             status: 'connected',
             sessionId: activeSession.sessionId,
             sessionContext: activeProductSessionContext,
@@ -3444,6 +3502,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 activeSession.lastEventId != null ||
                 undefined,
           }));
+          // The config-sync domain belongs to the attachment, so establish it
+          // here rather than at SSE setup below: resolving the pending load
+          // lets first-prompt config writes start immediately, while the
+          // metadata await can still be outstanding. Recreating the domain
+          // after that await invalidated their ownership tokens mid-write and
+          // silently dropped daemon-confirmed values (#16065).
+          resetSessionConfigSync(
+            sessionConfigGenerationRef.current,
+            activeSession,
+          );
           if (pendingLoadToResolve) {
             lastHandledSessionIdRef.current = activeSession.sessionId;
             lastHandledSessionContextRef.current = activeProductSessionContext;
@@ -3465,8 +3533,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               connectionRef.current.skills !== undefined &&
               connectionRef.current.supportedCommands !== undefined &&
               connectionRef.current.context !== undefined);
-          const configGeneration =
-            sessionConfigGenerationRef.current.get(activeSession) ?? 0;
+          const configCurrent = beginSessionConfigRead(
+            sessionConfigGenerationRef.current,
+            activeSession,
+          );
           const goalStateAtLoadStart =
             connectionRef.current.sessionId === activeSession.sessionId
               ? connectionRef.current.goalState
@@ -3587,8 +3657,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           ].filter((warning): warning is string => Boolean(warning));
           const providerModelStatus = mapProviderStatus(providers);
           const contextModelStatus = mapSessionContextModels(context);
+          const contextModelState = context?.state.models;
+          const hasContextModelCatalog =
+            isRecord(contextModelState) &&
+            Array.isArray(contextModelState['availableModels']);
           const sessionModels =
-            contextModelStatus && contextModelStatus.models.length > 0
+            contextModelStatus &&
+            (contextModelStatus.models.length > 0 || hasContextModelCatalog)
               ? contextModelStatus.models
               : providerModelStatus.models;
           const sessionCurrentModel =
@@ -3607,6 +3682,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             providerContextWindow;
           const { commands, skills } = mapSupportedCommands(supportedCommands);
           const currentMode = getCurrentMode(context);
+          const configSnapshotCurrent = configCurrent();
 
           setConnection((current) => {
             if (
@@ -3617,10 +3693,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ) {
               return current;
             }
-            const configSnapshotCurrent =
-              configGeneration % 2 === 0 &&
-              (sessionConfigGenerationRef.current.get(activeSession) ?? 0) ===
-                configGeneration;
             const recoverySnapshotCurrent =
               context?.sessionId === activeSession.sessionId &&
               recoveryGeneration !== undefined &&
@@ -3666,7 +3738,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 supportedCommands !== undefined ? commands : current.commands,
               skills: supportedCommands !== undefined ? skills : current.skills,
               models:
-                configSnapshotCurrent && sessionModels.length > 0
+                configSnapshotCurrent &&
+                (sessionModels.length > 0 || hasContextModelCatalog)
                   ? sessionModels
                   : current.models,
               currentModel: configSnapshotCurrent
@@ -3681,6 +3754,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 configSnapshotCurrent && currentMode !== undefined
                   ? getPlanExecutionMode(context)
                   : current.planExecutionMode,
+              ...(configSnapshotCurrent && context !== undefined
+                ? {
+                    ...mapWorkflowMode(context.state.configOptions ?? []),
+                    workflowModeStatus: 'syncing' as const,
+                  }
+                : {}),
               reasoning:
                 configSnapshotCurrent && context !== undefined
                   ? mapSessionContextReasoning(context)
@@ -3781,6 +3860,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           let sawEvent = false;
           let resyncRequested = false;
           const requestEpochResetReload = () => {
+            console.warn(
+              '[DaemonSessionProvider] event stream resync (sessionId=%s, reason=epoch_reset)',
+              activeSession.sessionId,
+            );
             invalidateGeneratedUi(activeSession, 'epoch', null);
             // An epoch reset means the daemon/EventBus timeline was rebuilt.
             // The current SSE cursor and any restored/local prompt activity may
@@ -3800,7 +3883,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
             setPromptStatus('idle');
             clearPendingTranscriptEvents();
-            store.reset();
+            // Keep the visible transcript until the replacement snapshot loads.
+            resyncSnapshotPending = true;
             activeSession.setLastEventId(0);
             reconnectSessionId = activeSession.sessionId;
             resyncRequested = true;
@@ -3826,6 +3910,67 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             restartRequested: false,
           };
           eventStreamRef.current = eventStream;
+          configStreamOwner = activeSession;
+          const configState = getSessionConfigSync(
+            sessionConfigGenerationRef.current,
+            activeSession,
+          );
+          const isConfigOwner = () =>
+            !disposed &&
+            !abort.signal.aborted &&
+            !eventStreamController.signal.aborted &&
+            sessionRef.current === activeSession &&
+            eventStreamRef.current === eventStream &&
+            sessionConfigGenerationRef.current.get(activeSession) ===
+              configState;
+          let acceptingConfig = activeSession.lastEventId === undefined;
+          let initialConfigReadRequested = false;
+          const refreshConfig = () => {
+            if (!isConfigOwner()) return;
+            queueSessionConfigRefresh(
+              sessionConfigGenerationRef.current,
+              activeSession,
+              () => {
+                if (!isConfigOwner()) return;
+                const readCurrent = beginSessionConfigRead(
+                  sessionConfigGenerationRef.current,
+                  activeSession,
+                );
+                void withActionTimeout(
+                  activeSession.context(),
+                  'Refresh session configuration timed out',
+                ).then(
+                  (updated) => {
+                    setConnectionSynchronous((current) =>
+                      isConfigOwner() &&
+                      readCurrent() &&
+                      current.sessionId === activeSession.sessionId
+                        ? updated.sessionId === activeSession.sessionId
+                          ? applySessionConfigContext(current, updated)
+                          : { ...current, workflowModeStatus: 'unknown' }
+                        : current,
+                    );
+                  },
+                  () =>
+                    setConnectionSynchronous((current) =>
+                      isConfigOwner() && readCurrent()
+                        ? { ...current, workflowModeStatus: 'unknown' }
+                        : current,
+                    ),
+                );
+              },
+            );
+          };
+          const requestInitialConfigRead = () => {
+            if (
+              initialConfigReadRequested ||
+              !acceptingConfig ||
+              !isConfigOwner()
+            )
+              return;
+            initialConfigReadRequested = true;
+            refreshConfig();
+          };
           const abortEventStream = () =>
             eventStreamController.abort(abort.signal.reason);
           abort.signal.addEventListener('abort', abortEventStream, {
@@ -3843,10 +3988,30 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           for await (const event of activeSession.events({
             signal: eventStreamController.signal,
             maxQueued,
+            onEpoch: () => requestInitialConfigRead(),
             ...(sseConnectReason ? { sseConnectReason } : {}),
           })) {
             if (sessionRef.current !== activeSession) {
               break;
+            }
+            if (event.type === 'replay_complete') acceptingConfig = true;
+            requestInitialConfigRead();
+            const configUpdate = getConfigOptionsUpdate(event);
+            if (configUpdate && acceptingConfig && isConfigOwner()) {
+              observeSessionConfig(
+                sessionConfigGenerationRef.current,
+                activeSession,
+              );
+              setConnectionSynchronous((current) =>
+                isConfigOwner() && current.sessionId === activeSession.sessionId
+                  ? applyConfigOptions(current, configUpdate.configOptions)
+                  : current,
+              );
+              if (
+                mapWorkflowMode(configUpdate.configOptions)
+                  .workflowModeStatus === 'unknown'
+              )
+                refreshConfig();
             }
             trajectoryLiveStore.ingest(
               activeSession,
@@ -3970,6 +4135,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 addNotice,
                 dismissNotice,
               );
+              if (
+                event.type === 'model_switched' &&
+                isRecord(event.data) &&
+                event.data['subscriptionSignedOut'] === true &&
+                activeWorkspaceScoped &&
+                sessionRef.current === activeSession
+              ) {
+                void refreshModelsRef
+                  .current?.(undefined, { reloadProviders: false })
+                  .catch((error: unknown) =>
+                    console.warn(
+                      'Unable to read models after a model switch',
+                      error,
+                    ),
+                  );
+              }
               const recoveryEventCurrent =
                 (context?.recovery ||
                   connectionRef.current.context?.recovery) &&
@@ -4028,8 +4209,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   sessionRecoveryGenerationRef.current,
                   activeSession,
                 );
+                const policyConfigCurrent = generatedUiPolicyChanged
+                  ? beginSessionConfigRead(
+                      sessionConfigGenerationRef.current,
+                      activeSession,
+                    )
+                  : undefined;
                 const publishContext = (
                   updated?: DaemonSessionContextStatus,
+                  configReadSettled = false,
                 ) => {
                   // Publish receipt invalidation even when the read fails or
                   // the response owner is wrong.
@@ -4039,35 +4227,53 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     eventStreamController.signal.aborted
                   )
                     return;
-                  setConnection((current) =>
-                    current.sessionId === activeSession.sessionId &&
-                    eventStreamRef.current === eventStream &&
-                    sessionRef.current === activeSession &&
-                    generation ===
-                      sessionRecoveryGenerationRef.current.get(activeSession)
-                      ? {
-                          ...current,
-                          ...(current.context &&
-                          updated?.sessionId === activeSession.sessionId
+                  setConnection((current) => {
+                    if (
+                      current.sessionId !== activeSession.sessionId ||
+                      eventStreamRef.current !== eventStream ||
+                      sessionRef.current !== activeSession
+                    )
+                      return current;
+                    const next =
+                      policyConfigCurrent?.() && isConfigOwner()
+                        ? updated?.sessionId === activeSession.sessionId
+                          ? applyConfigOptions(
+                              current,
+                              updated.state.configOptions ?? [],
+                            )
+                          : configReadSettled
                             ? {
-                                context: {
-                                  ...current.context,
-                                  recovery: updated.recovery,
-                                },
+                                ...current,
+                                workflowModeStatus: 'unknown' as const,
                               }
-                            : {}),
+                            : current
+                        : current;
+                    return next.context &&
+                      updated?.sessionId === activeSession.sessionId &&
+                      generation ===
+                        sessionRecoveryGenerationRef.current.get(activeSession)
+                      ? {
+                          ...next,
+                          context: {
+                            ...next.context,
+                            recovery: updated.recovery,
+                          },
                         }
-                      : current,
-                  );
+                      : { ...next };
+                  });
                 };
                 if (generatedUiPolicyChanged) {
                   invalidateGeneratedUi(activeSession, 'policy', null);
                   activeSession.session.generatedUi = undefined;
                   publishContext();
                 }
-                void activeSession.context().then(publishContext, () => {
-                  publishContext();
-                });
+                void withActionTimeout(
+                  activeSession.context(),
+                  'Refresh session context timed out',
+                ).then(
+                  (updated) => publishContext(updated, true),
+                  () => publishContext(undefined, true),
+                );
               }
               const transcriptUiEvents =
                 subagentTranscriptModeRef.current === 'summary'
@@ -4359,15 +4565,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     );
                   }
                   clearPendingTranscriptEvents();
-                  store.reset();
-                  // Ring eviction means the SSE replay window has a real gap.
-                  // Resetting and continuing on the same stream can only replay
-                  // the surviving tail; reload the session snapshot instead so
-                  // compactedReplay/liveJournal rebuild the bounded replay
-                  // window.
+                  resyncSnapshotPending = true;
+                  // The transport cannot guarantee incremental replay. Reload
+                  // the snapshot so compactedReplay/liveJournal rebuild the window.
                   console.warn(
-                    '[DaemonSessionProvider] ring eviction detected, reloading session (sessionId=%s)',
+                    '[DaemonSessionProvider] event stream resync (sessionId=%s, reason=%s)',
                     activeSession.sessionId,
+                    typeof reason === 'string' ? reason : 'unknown',
                   );
                   resyncRequested = true;
                   nextSseConnectReason = 'state_resync';
@@ -4501,6 +4705,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               status: 'disconnected',
               sessionId: undefined,
               context: undefined,
+              workflowMode: undefined,
+              workflowModeStatus: 'unknown',
+              workflowModePending: false,
               reasoning: undefined,
               models: getWorkspaceModelsAfterSessionClear(current),
               backgroundTurn: undefined,
@@ -4804,6 +5011,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 status: 'error',
                 sessionId: undefined,
                 context: undefined,
+                workflowMode: undefined,
+                workflowModeStatus: 'unknown',
+                workflowModePending: false,
                 reasoning: undefined,
                 models: getWorkspaceModelsAfterSessionClear(current),
                 backgroundTurn: undefined,
@@ -4836,6 +5046,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               status: 'disconnected',
               sessionId: undefined,
               context: undefined,
+              workflowMode: undefined,
+              workflowModeStatus: 'unknown',
+              workflowModePending: false,
               reasoning: undefined,
               models: getWorkspaceModelsAfterSessionClear(current),
               backgroundTurn: undefined,
@@ -5222,6 +5435,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     ? {
                         sessionId: undefined,
                         context: undefined,
+                        workflowMode: undefined,
+                        workflowModeStatus: 'unknown',
+                        workflowModePending: false,
                         reasoning: undefined,
                         models: getWorkspaceModelsAfterSessionClear(current),
                         backgroundTurn: undefined,
@@ -5278,6 +5494,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     () =>
       createDaemonSessionActions({
         getClient: () => workspaceClientRef.current,
+        getPromptStatus: () => promptStatusRef.current,
         store,
         sessionRef,
         activePromptsRef,
@@ -5327,7 +5544,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           workspaceCwd?: string,
           overrides?: Pick<
             CreateSessionRequest,
-            'approvalMode' | 'sourceType' | 'worktree' | 'branch'
+            | 'approvalMode'
+            | 'sourceType'
+            | 'worktree'
+            | 'branch'
+            | 'startupConfig'
           >,
         ) => {
           const client =
@@ -5354,6 +5575,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               : {}),
             ...(overrides?.branch !== undefined
               ? { branch: overrides.branch }
+              : {}),
+            ...(overrides?.startupConfig
+              ? { startupConfig: overrides.startupConfig }
               : {}),
           };
           const requestClientId = clientId
@@ -5480,6 +5704,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     ],
   );
   repairReloadRef.current = actions.reloadSession;
+  refreshModelsRef.current = actions.refreshModels;
   useEffect(() => {
     if (promptStatus !== 'idle') return;
     queueMicrotask(() => tryLiveJournalRepairRef.current?.());

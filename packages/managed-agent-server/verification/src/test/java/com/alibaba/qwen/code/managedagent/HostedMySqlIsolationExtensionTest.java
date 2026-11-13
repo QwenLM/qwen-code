@@ -11,6 +11,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -86,12 +87,19 @@ class HostedMySqlIsolationExtensionTest {
             throws Throwable {
         var connection = mock(Connection.class);
         var metadata = mock(DatabaseMetaData.class);
+        var modeQuery = mock(PreparedStatement.class);
+        var modes = mock(ResultSet.class);
         var tables = mock(Statement.class);
         var cleanup = mock(Statement.class);
         var rows = mock(ResultSet.class);
         when(connection.getMetaData()).thenReturn(metadata);
         when(metadata.getDatabaseProductName()).thenReturn("MySQL");
         when(connection.getCatalog()).thenReturn("hosted_isolation_test");
+        when(connection.prepareStatement("SELECT @@SESSION.sql_mode"))
+                .thenReturn(modeQuery);
+        when(modeQuery.executeQuery()).thenReturn(modes);
+        when(modes.next()).thenReturn(true, false);
+        when(modes.getString(1)).thenReturn("STRICT_TRANS_TABLES");
         when(connection.createStatement()).thenReturn(tables, cleanup);
         when(tables.executeQuery(anyString())).thenReturn(rows);
         when(rows.next()).thenReturn(true, true, false);
@@ -130,7 +138,9 @@ class HostedMySqlIsolationExtensionTest {
             }
         });
 
-        var order = inOrder(rows, tables, cleanup, connection);
+        var order = inOrder(modes, modeQuery, rows, tables, cleanup, connection);
+        order.verify(modes).close();
+        order.verify(modeQuery).close();
         order.verify(rows).close();
         order.verify(tables).close();
         order.verify(cleanup).execute("SET FOREIGN_KEY_CHECKS = 0");

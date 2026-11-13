@@ -20,6 +20,8 @@ import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
 
+import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.statement;
+
 /** Reads the existing immutable authorization ceiling, not physical retirement evidence. */
 final class JdbcCsiRetirementSeal {
     private static final ObjectMapper JSON = new ObjectMapper(JsonFactory.builder()
@@ -155,7 +157,7 @@ final class JdbcCsiRetirementSeal {
                 && row.getLong("target_revision") == original.generation() && !row.wasNull()
                 && com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant).equals(row.getString("scope_key"))
                 && com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("CSI_RETIREMENT", tenant, operation).equals(row.getString("operation_key"))
-                && JdbcRuntimeBindingRepository.storageAliasKey(tenant, original.request().getStorageId()).equals(row.getString("storage_key"))
+                && RuntimeAdmissionFences.storageAliasKey(tenant, original.request().getStorageId()).equals(row.getString("storage_key"))
                 && com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(encoded).equals(row.getString("request_digest")));
         return encoded;
     }
@@ -235,12 +237,6 @@ final class JdbcCsiRetirementSeal {
                 require(!row.next());
             }
         }
-    }
-
-    private static PreparedStatement statement(Connection connection, String sql) throws SQLException {
-        PreparedStatement statement = connection.prepareStatement(sql);
-        statement.setQueryTimeout(10);
-        return statement;
     }
 
     private static void require(boolean condition) {

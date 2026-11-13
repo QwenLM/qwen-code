@@ -10,22 +10,37 @@ import org.apache.rocketmq.client.apis.ClientServiceProvider;
 import org.apache.rocketmq.client.apis.consumer.ConsumeResult;
 import org.apache.rocketmq.client.apis.consumer.LitePushConsumer;
 import org.apache.rocketmq.client.apis.producer.Producer;
+import org.apache.rocketmq.client.java.exception.ForbiddenException;
+import org.apache.rocketmq.client.java.exception.InternalErrorException;
+import org.apache.rocketmq.client.java.exception.LiteSubscriptionQuotaExceededException;
+import org.apache.rocketmq.client.java.exception.LiteTopicQuotaExceededException;
+import org.apache.rocketmq.client.java.exception.ProxyTimeoutException;
+import org.apache.rocketmq.client.java.exception.TooManyRequestsException;
+import org.apache.rocketmq.client.java.exception.UnauthorizedException;
+
+import java.io.Closeable;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.Optional;
+import java.util.function.BiFunction;
+import java.util.function.Consumer;
 public final class RocketMqEventClients {
     public static final String CAPABILITY_PROBE_LITE = "capability-probe";
     private final ClientServiceProvider provider;
     public RocketMqEventClients() { this(ClientServiceProvider.loadService()); }
     public RocketMqEventClients(ClientServiceProvider provider) { this.provider = provider; }
-    public static final class Publisher implements java.io.Closeable {
+    public static final class Publisher implements Closeable {
         private final Producer producer;
         private Publisher(Producer producer) { this.producer = producer; }
-        public void close() throws java.io.IOException { producer.close(); }
+        @Override
+        public void close() throws IOException { producer.close(); }
     }
     public LiteTopicEventTransport journal(Publisher publisher, ManagedAgentSettings properties) {
         var config = properties.getEventTransport();
         return new LiteTopicEventTransport(publisher.producer, provider, config.getTopic(), config.getWakeBootstrapLiteTopic());
     }
     public LiteTopicPublicEventTransport publicEvents(Publisher publisher, ManagedAgentSettings properties,
-            ObjectMapper json, java.util.function.BiFunction<String, String, java.util.Optional<String>> workspaceOf) {
+            ObjectMapper json, BiFunction<String, String, Optional<String>> workspaceOf) {
         return new LiteTopicPublicEventTransport(publisher.producer, provider, properties.getEventTransport().getTopic(), json, workspaceOf);
     }
     public Publisher producer(ManagedAgentSettings properties) throws ClientException {
@@ -50,16 +65,16 @@ public final class RocketMqEventClients {
     public EventSubscriptions owner(
             ManagedAgentSettings properties,
             EventMessageListener listener,
-            java.util.function.Consumer<EventSubscriptions> bind)
+            Consumer<EventSubscriptions> bind)
             throws ClientException {
         var config = properties.getEventTransport();
         LitePushConsumer consumer = provider.newLitePushConsumerBuilder()
                 .setClientConfiguration(clientConfiguration(config))
                 .setConsumerGroup(config.getOwnerGroup())
                 .bindTopic(config.getTopic())
-                .setMessageListener(message -> com.alibaba.qwen.code.managedagent.adapters.event.RocketMqMessages.consume(listener, message))
+                .setMessageListener(message -> RocketMqMessages.consume(listener, message))
                 .build();
-        bind.accept(com.alibaba.qwen.code.managedagent.adapters.event.RocketMqMessages.subscriptions(consumer));
+        bind.accept(RocketMqMessages.subscriptions(consumer));
         return RocketMqMessages.subscriptions(consumer);
     }
 
@@ -70,7 +85,7 @@ public final class RocketMqEventClients {
                 .setClientConfiguration(clientConfiguration(config))
                 .setConsumerGroup(config.getWakeBootstrapGroup())
                 .bindTopic(config.getTopic())
-                .setMessageListener(message -> com.alibaba.qwen.code.managedagent.adapters.event.RocketMqMessages.consume(listener, message))
+                .setMessageListener(message -> RocketMqMessages.consume(listener, message))
                 .build();
         try {
             consumer.subscribeLite(config.getWakeBootstrapLiteTopic());
@@ -95,7 +110,7 @@ public final class RocketMqEventClients {
                 .build();
     }
 
-    private static void closeQuietly(java.io.Closeable closeable,
+    private static void closeQuietly(Closeable closeable,
             Throwable failure) {
         try {
             closeable.close();
@@ -134,8 +149,33 @@ public final class RocketMqEventClients {
                     .setTopic(topic)
                     .setLiteTopic(CAPABILITY_PROBE_LITE)
                     .setKeys(CAPABILITY_PROBE_LITE)
-                    .setBody("{}".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                    .setBody("{}".getBytes(StandardCharsets.UTF_8))
                     .build());
+        } catch (InternalErrorException | ProxyTimeoutException unavailable) {
+            // The write failed below the topic's message type — a full disk,
+            // a stopped or timed-out store, an HA failover, or a proxy that
+            // never got an answer. 50400 proves only that the proxy answered,
+            // so this must not claim the broker is reachable. These types are
+            // siblings under ClientException, not parent and child, so naming
+            // one leaves the others on the topic remedy. A type conflict
+            // arrives as a BadRequestException instead; naming mqadmin here
+            // would send an operator to reconfigure a correct topic.
+            throw new IllegalStateException("the event-transport broker"
+                    + " could not write the probe message to topic " + topic
+                    + ": check the broker's disk space, message store and HA"
+                    + " state, and the proxy-to-broker path, not the topic's"
+                    + " message type", unavailable);
+        } catch (TooManyRequestsException | LiteTopicQuotaExceededException
+                | LiteSubscriptionQuotaExceededException
+                | UnauthorizedException | ForbiddenException refused) {
+            // Flow control, lite-topic quota and ACL refusals are the broker
+            // saying no for its own reasons, so mqadmin updateTopic would be
+            // a no-op. 42901 is the sharpest case: the probe's lite topic
+            // already exists, and an exhausted quota is not a missing one.
+            throw new IllegalStateException("the event-transport broker"
+                    + " answered and refused the probe message to topic "
+                    + topic + ": check the broker's quota, flow control and"
+                    + " ACL state, not the topic's message type", refused);
         } catch (ClientException | RuntimeException failure) {
             throw new IllegalStateException("the event-transport topic "
                     + topic + " refused a LiteTopic message: create it as a"

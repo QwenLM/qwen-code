@@ -2,7 +2,7 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore.CwdChangeOutcome;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.CwdChangeOutcome;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessCapabilityFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessGenerationFailure;
@@ -14,7 +14,10 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.managedagent.workspace.ChildLifecycleAdmissions;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -104,11 +107,16 @@ public class SessionLifecycleCoordinator {
     private static final Set<String> SELF_CLEARING_DAEMON_REFUSALS =
             Set.of("hosted_lifecycle_recovery_required", "hosted_turn_active");
     private final AgentStateStore store;
-    private com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore lifecycle;
+    private WorkspaceLifecycleStore lifecycle;
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
-    public void setWorkspaceLifecycleStore(com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore lifecycle) {
+    public void setWorkspaceLifecycleStore(WorkspaceLifecycleStore lifecycle) {
         this.lifecycle = lifecycle;
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setClientFilesRelay(ObjectProvider<ClientFilesRelayService> clientFilesRelay) {
+        this.clientFilesRelay = clientFilesRelay;
     }
 
     public boolean supportsWorkspaceLifecycle() {
@@ -131,8 +139,14 @@ public class SessionLifecycleCoordinator {
     private final ObjectMapper objectMapper;
     private final ChildLifecycleAdmissions childCloses;
     private final ManagedAgentService sessions;
-    private final com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore childWorkspaces;
+    private final ChildWorkspaceStore childWorkspaces;
     private final ObjectProvider<RuntimeBrokerOperations> brokerProviders;
+    // Lazy provider: the relay service depends on ManagedAgentService, so a
+    // constructor parameter here could form a cycle. Used to close the
+    // client-files binding when the harness detaches or the Session closes.
+    // Setter-injected (like setWorkspaceLifecycleStore) so tests can install a
+    // fake; unset means the teardown is a no-op rather than a swallowed NPE.
+    private ObjectProvider<ClientFilesRelayService> clientFilesRelay;
     private final ExecutorService executor;
     private final Clock clock;
     private final Duration leaseDuration;
@@ -150,6 +164,25 @@ public class SessionLifecycleCoordinator {
     @jakarta.annotation.PreDestroy
     void stopRenewals() {
         renewals.shutdownNow();
+    }
+
+    // The harness-local client-files catalog is gone once the harness detaches
+    // or the Session closes; close the control-plane binding so the panel stops
+    // reporting a registration the model can no longer use. Best-effort: a
+    // relay failure must not wedge the lifecycle.
+    private void closeClientFilesBinding(OperationRecord operation) {
+        if (clientFilesRelay == null) {
+            return;
+        }
+        try {
+            clientFilesRelay.ifAvailable(relay ->
+                    relay.closeForSession(operation.tenantId(), operation.sessionId()));
+        } catch (RuntimeException failure) {
+            // Best-effort: a relay failure must not wedge the lifecycle, but it
+            // must be diagnosable — the binding then lingers until binding-ttl.
+            LOG.warn("Client files binding teardown failed tenant={} session={}",
+                    operation.tenantId(), operation.sessionId(), failure);
+        }
     }
 
     private final Set<String> active = ConcurrentHashMap.newKeySet();
@@ -180,7 +213,7 @@ public class SessionLifecycleCoordinator {
             ObjectProvider<RuntimeBrokerOperations> brokerProviders,
             @Qualifier("managedAgentExecutor") ExecutorService executor,
             @Qualifier("managedAgentClock") Clock clock, ManagedAgentSettings properties,
-            com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore childWorkspaces) {
+            ChildWorkspaceStore childWorkspaces) {
         this.childWorkspaces = childWorkspaces;
         this.store = store;
         this.sessionStore = sessionStore;
@@ -648,7 +681,7 @@ public class SessionLifecycleCoordinator {
         var session = store.requireSession(tenantId, sessionId);
         try {
             if (session.workspace() == null) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             runtimeWarmer.verifyWorkspaceCwdTarget(session.workspace(),
                     operation.targetCwdRelative());
@@ -713,7 +746,7 @@ public class SessionLifecycleCoordinator {
     private boolean settle(OperationRecord operation,
             java.util.concurrent.atomic.AtomicBoolean harnessSettled) {
         if (operation.lifecycleProtocolVersion() < 0 || operation.lifecycleProtocolVersion() > 2) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
         }
         boolean harnessConfirmed = false;
         var session = store.requireSession(operation.tenantId(), operation.sessionId());
@@ -727,13 +760,13 @@ public class SessionLifecycleCoordinator {
         }
         if (bound && operationIsLifecycle(operation)) {
             if (lifecycle == null || !RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
+                throw WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
             }
             lifecycle.requireSettledExecutions(operation);
             JsonNode effects = lifecycle.recoverEffects(operation);
             if (effects == null) {
                 if (!harness.supportsLifecycle(session.toolProfile())) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
+                    throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
                 }
                 try {
                     effects = harness.settleLifecycle(operation);
@@ -770,8 +803,8 @@ public class SessionLifecycleCoordinator {
                 String profile = session.toolProfile();
                 try {
                     harness.prepareLifecycleResources(operation);
-                    if (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.SHELL.equals(profile)) {
-                        var authority = com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation);
+                    if (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isPublicShell(profile)) {
+                        var authority = WorkspaceLifecycleStore.authority(operation);
                         if (store.hasMcpServers(session)) {
                             runtimeWarmer.prepareWorkspaceResources(operation.tenantId(), operation.sessionId(), authority)
                                     .toCompletableFuture().join();
@@ -782,7 +815,7 @@ public class SessionLifecycleCoordinator {
                     }
                     harness.settleLifecycleResources(operation);
                     runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(),
-                            com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation))
+                            WorkspaceLifecycleStore.authority(operation))
                             .toCompletableFuture().join();
                 } catch (RuntimeException unsettled) {
                     if (!(unsettled instanceof com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure)
@@ -800,10 +833,10 @@ public class SessionLifecycleCoordinator {
                     }
                     if (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.MCP.equals(profile)) {
                         runtimeWarmer.recoverStoppedWorkspaceResources(operation.tenantId(), operation.sessionId(),
-                                com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation))
+                                WorkspaceLifecycleStore.authority(operation))
                                 .toCompletableFuture().join();
                     } else {
-                        throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
+                        throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
                     }
                 }
             }
@@ -813,8 +846,12 @@ public class SessionLifecycleCoordinator {
             }
             harness.detachLifecycle(operation);
             if (sessionStore.hasLiveWriter(operation.tenantId(), operation.sessionId())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
             }
+            // Only tear the binding down once the detach is actually proceeding:
+            // a live writer means the Session was not detached, and closing the
+            // registration here would destroy a live client-files binding.
+            closeClientFilesBinding(operation);
             runtimeWarmer.closeWorkspace(operation.tenantId(), operation.sessionId()).toCompletableFuture().join();
             return true;
         }
@@ -848,6 +885,11 @@ public class SessionLifecycleCoordinator {
                 throw new IllegalStateException(
                         "A Harness still holds the Session's journal writer");
             }
+            // A harness that merely answered the close (possibly another
+            // server's) does not prove the Session closed; only tear the binding
+            // down once the live-writer gate confirms the close is proceeding,
+            // so a refused close cannot destroy a live client-files registration.
+            closeClientFilesBinding(operation);
         }
         if (bound) {
             runtimeWarmer.closeWorkspace(operation.tenantId(), operation.sessionId()).toCompletableFuture().join();
@@ -883,7 +925,7 @@ public class SessionLifecycleCoordinator {
                 return true;
             }
             childWorkspaces.requestFinish(tenantId, sessionId, childRunId,
-                    com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore.DISCARD,
+                    ChildWorkspaceStore.DISCARD,
                     clock.millis());
             return true;
         } catch (com.alibaba.qwen.code.managedagent.exception.ManagedAgentException refused) {

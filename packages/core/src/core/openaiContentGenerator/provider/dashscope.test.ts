@@ -919,27 +919,31 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(wire(tier('high'))['enable_thinking']).toBe(true);
     });
 
-    describe.each(['qwen3.8-max', 'qwen3.8-max-preview'])(
-      '%s reasoning effort',
-      (model) => {
-        it.each(['low', 'medium', 'high', 'xhigh'] as const)(
-          'passes %s through as reasoning_effort',
-          (effort) => {
-            expectWire(wireM(model, tier(effort), tier(effort)), {
-              reasoning_effort: effort,
-              enable_thinking: undefined,
-              reasoning: undefined,
-            });
-          },
-        );
-      },
-    );
+    describe.each([
+      'qwen3.8-max',
+      'qwen3.8-max-preview',
+      'qwen-latest-series-invite-202610-m6',
+      'qwen4-plus',
+    ])('%s reasoning effort', (model) => {
+      it.each(['low', 'medium', 'high', 'xhigh'] as const)(
+        'passes %s through as reasoning_effort',
+        (effort) => {
+          expectWire(wireM(model, tier(effort), tier(effort)), {
+            reasoning_effort: effort,
+            enable_thinking: undefined,
+            reasoning: undefined,
+          });
+        },
+      );
+    });
 
     describe.each([
       'qwen3.8-max',
       'qwen3.8-max-preview',
       'qwen3.8-max-latest',
       'qwen3.8-max-2026-01-15',
+      'qwen-latest-series-invite-202610-m6',
+      'qwen4-plus',
     ])('%s reasoning effort ceiling', (model) => {
       it('warns once however many requests the same provider builds', () => {
         const generator = gen({ model, ...tier('max') });
@@ -1610,6 +1614,22 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result.messages[0].content).toBe('You are a helpful assistant.');
       expect(result.messages[1].content).toBe('Hello!');
     });
+
+    it.each([true, false])(
+      'uses the isolated route cache control setting (%s)',
+      (enableCacheControl) => {
+        vi.mocked(mockCliConfig.getContentGeneratorConfig).mockReturnValue({
+          model: 'qwen-max',
+          enableCacheControl: !enableCacheControl,
+        });
+        const isolated = gen({ isolatedRoute: true, enableCacheControl });
+        const system = 'You are a helpful assistant.';
+        const result = isolated.buildRequest(baseRequest, 'test-prompt-id');
+        expect(result.messages[0].content).toEqual(
+          enableCacheControl ? [cachedText(system)] : system,
+        );
+      },
+    );
 
     it('should handle messages with array content for streaming requests', () => {
       // stream: true triggers cache control on the last message.

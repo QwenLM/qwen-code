@@ -1,33 +1,43 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-import org.springframework.jdbc.core.ConnectionCallback;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.sql.Connection;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -37,6 +47,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WorkspaceMigrationMySqlIT {
+    @TempDir Path temp;
     private JdbcTemplate admin;
     private JdbcTemplate jdbc;
     private DriverManagerDataSource data;
@@ -114,6 +125,54 @@ class WorkspaceMigrationMySqlIT {
         admissionWaitingForMigrationSeesCommittedFenceAndPreservesReplay(true);
     }
 
+    @Test
+    @Timeout(30)
+    void migrationSeesSessionCommittedAfterItsRepeatableReadSnapshot() throws Exception {
+        ManagedSchema.initialize(data);
+        temp = temp.toRealPath();
+        var source = Files.createDirectory(temp.resolve("source")).toRealPath();
+        var target = Files.createDirectory(temp.resolve("target"));
+        var history = Files.createDirectory(temp.resolve("history"));
+        var runtime = Files.createDirectory(temp.resolve("runtime"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+        var properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount("tenant", "storage", source.toString())));
+        var manager = new DataSourceTransactionManager(data);
+        var guard = new WorkspaceStorageGuard(jdbc, manager, properties, path ->
+                new StorageIdentityReader.Identity(path.toRealPath().toString(), "test-host", "device",
+                        path.getFileName().toString(), "2026-10-02T00:00:00Z"));
+        guard.register("tenant", "storage", UUID.randomUUID().toString());
+        var request = new ObjectMapper().createObjectNode().put("version", 1)
+                .put("migrationOperationId", UUID.randomUUID().toString()).put("tenantId", "tenant").put("storageId", "storage")
+                .put("fenceOperationId", UUID.randomUUID().toString()).put("captureOperationId", UUID.randomUUID().toString())
+                .put("mountRevision", 1).put("sourceRoot", source.toString()).put("targetRoot", target.toString())
+                .put("bundleRoot", temp.resolve("bundle").toString()).put("fileHistoryRoot", history.toString())
+                .put("stateDirectory", runtime.toString()).put("nodeExecutable", "/test/node").put("cliEntry", "/test/cli.js");
+        var transaction = new TransactionTemplate(manager);
+        transaction.setIsolationLevel(Connection.TRANSACTION_REPEATABLE_READ);
+        transaction.setTimeout(15);
+        assertThatThrownBy(() -> transaction.executeWithoutResult(status -> {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Long.class)).isZero();
+            try (var creation = data.getConnection()) {
+                creation.setAutoCommit(false);
+                seed(new ManagedSchemaJdbcTemplate(new org.springframework.jdbc.datasource.SingleConnectionDataSource(creation, true)),
+                        "tenant", "late-session", "ACTIVE");
+                creation.commit();
+            } catch (SQLException error) {
+                throw new IllegalStateException(error);
+            }
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Long.class)).isZero();
+            new WorkspaceMigrationStore(jdbc, manager, guard, new JdbcRuntimeBindingRepository(data,
+                    new AesGcmSecretProtector("test", new byte[32])),
+                    request.toString().getBytes(StandardCharsets.UTF_8), true,
+                    new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker());
+        })).hasMessageContaining("migration_member_uninitialized");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Long.class)).isOne();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE fence_operation_id IS NOT NULL", Long.class)).isZero();
+    }
+
     private void admissionWaitingForMigrationSeesCommittedFenceAndPreservesReplay(boolean cwd) throws Exception {
         ManagedSchema.initialize(data);
         for (String tenant : List.of("migrating", "unrelated")) {
@@ -129,8 +188,8 @@ class WorkspaceMigrationMySqlIT {
         transaction.setTimeout(15);
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var original = create(store, transaction, "migrating", "original");
         var other = cwd ? create(store, transaction, "unrelated", "other") : null;
         var originalCwd = cwd ? com.alibaba.qwen.code.managedagent.LegacyCwdOperations.seed(jdbc, store,
@@ -141,28 +200,29 @@ class WorkspaceMigrationMySqlIT {
                 "unrelated", other.sessionId(), "actor", "actor-digest", "other", "digest", ".", 1) : null;
         var otherClaim = cwd ? transaction.execute(status -> store.claimOperation("unrelated", other.sessionId(),
                 otherCwd.operation().operationId(), "owner", Duration.ofSeconds(60)).orElseThrow()) : null;
+        // Keep the unrelated probe outside the uncommitted fence insert's index gap.
+        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id)"
+                        + " VALUES (?, ?, ?, 'unrelated', 'storage')",
+                RuntimeAdmissionFences.storageAliasKey("unrelated", "storage"),
+                RuntimeAdmissionFences.storageFenceKey("unrelated"),
+                RuntimeAdmissionFences.storageFenceKey("storage"));
         var binding = store.findSession("migrating", original.sessionId()).orElseThrow().workspace();
-        var attemptingLock = new CountDownLatch(1);
-        var waitingJdbc = new ManagedSchemaJdbcTemplate(data) {
-            @Override
-            public <T> T execute(ConnectionCallback<T> action) {
-                return super.execute((ConnectionCallback<T>) connection -> {
-                    attemptingLock.countDown();
-                    return action.doInConnection(connection);
-                });
-            }
-        };
-        var waitingStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(waitingJdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(waitingJdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
         try (var migration = data.getConnection(); var pool = Executors.newFixedThreadPool(2)) {
             migration.setAutoCommit(false);
             JdbcRuntimeBindingRepository.lockPlacementDomain(migration, "migrating");
+            installMigrationFence(migration);
             var creation = pool.submit(() -> cwd
-                    ? transaction.execute(status -> waitingStore.completeCwdChangeOperation("migrating", original.sessionId(),
+                    ? transaction.execute(status -> store.completeCwdChangeOperation("migrating", original.sessionId(),
                             originalClaim.operationId(), "owner", originalClaim.claimGeneration()))
-                    : create(waitingStore, transaction, "migrating", "racing"));
+                    : create(store, transaction, "migrating", "racing"));
             try {
-                assertThat(attemptingLock.await(5, TimeUnit.SECONDS)).isTrue();
+                MySqlLockProbe.awaitLockWaits(jdbc, schema, 1, "Workspace admission behind the storage fence");
+                assertThat(jdbc.queryForObject(
+                        "SELECT COUNT(*) FROM performance_schema.data_lock_waits waits"
+                                + " JOIN performance_schema.data_locks requested ON requested.ENGINE = waits.ENGINE"
+                                + " AND requested.ENGINE_LOCK_ID = waits.REQUESTING_ENGINE_LOCK_ID"
+                                + " WHERE requested.OBJECT_SCHEMA = ? AND requested.OBJECT_NAME = 'ma_storage'",
+                        Integer.class, schema)).isPositive();
                 assertThatThrownBy(() -> creation.get(100, TimeUnit.MILLISECONDS)).isInstanceOf(TimeoutException.class);
                 assertThat(pool.submit(() -> cwd
                         ? transaction.execute(status -> store.completeCwdChangeOperation("unrelated", other.sessionId(),
@@ -170,16 +230,6 @@ class WorkspaceMigrationMySqlIT {
                         : create(store, transaction, "unrelated", "other"))
                         .get(5, TimeUnit.SECONDS)).isNotNull();
                 assertThat(creation.isDone()).isFalse();
-                try (var fence = migration.prepareStatement(
-                                "INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
-                                    + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?,"
-                                    + " 'migrating', 'storage', ?)")) {
-                    fence.setString(1, JdbcRuntimeBindingRepository.storageAliasKey("migrating", "storage"));
-                    fence.setString(2, JdbcRuntimeBindingRepository.storageFenceKey("migrating"));
-                    fence.setString(3, JdbcRuntimeBindingRepository.storageFenceKey("storage"));
-                    fence.setBytes(4, UUID.randomUUID().toString().getBytes(StandardCharsets.UTF_8));
-                    fence.executeUpdate();
-                }
                 migration.commit();
                 if (cwd) {
                     var outcome = (com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore.CwdChangeOutcome)
@@ -197,6 +247,9 @@ class WorkspaceMigrationMySqlIT {
                                 assertThat(refusal.isRetryable()).isFalse();
                             });
                 }
+            } catch (TimeoutException | AssertionError error) {
+                error.addSuppressed(new IllegalStateException(MySqlLockProbe.describeLockWaits(jdbc, schema)));
+                throw error;
             } finally {
                 migration.rollback();
             }
@@ -223,22 +276,41 @@ class WorkspaceMigrationMySqlIT {
         }
     }
 
+    private void installMigrationFence(Connection migration) throws SQLException {
+        try (var fence = migration.prepareStatement(
+                "INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
+                        + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?,"
+                        + " 'migrating', 'storage', ?)")) {
+            fence.setString(1, RuntimeAdmissionFences.storageAliasKey("migrating", "storage"));
+            fence.setString(2, RuntimeAdmissionFences.storageFenceKey("migrating"));
+            fence.setString(3, RuntimeAdmissionFences.storageFenceKey("storage"));
+            fence.setBytes(4, UUID.randomUUID().toString().getBytes(StandardCharsets.UTF_8));
+            fence.executeUpdate();
+        }
+    }
+
     private StoreModels.Admission create(ManagedAgentStore store, TransactionTemplate transaction, String tenant, String key) {
-        return transaction.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor", key, "sha256:" + "a".repeat(64),
-                "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", ".")));
+        return transaction.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor")
+                .idempotencyKey(key)
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace", "."))
+                .build()));
     }
 
     @Test
     @Timeout(30)
     void headlessRetirementDoesNotBlockAnotherTenantsWriter() throws Exception {
         ManagedSchema.initialize(data);
-        seed("tenant-a", "headless", "DELETED");
-        seed("tenant-b", "m-successor", "ACTIVE");
-        seed("tenant-b", "a-new", "ACTIVE");
+        seed(jdbc, "tenant-a", "headless", "DELETED");
+        seed(jdbc, "tenant-b", "m-successor", "ACTIVE");
+        seed(jdbc, "tenant-b", "a-new", "ACTIVE");
         jdbc.update(
                 "UPDATE ma_session SET retirement_operation_id = ?, retirement_generation = 1,"
                         + " retired_at = 1 WHERE tenant_id = ? AND session_id = ?", "delete", "tenant-a", "headless");
-        String scopeKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant-a", "headless");
+        String scopeKey = ManagedSessionStore.sessionScopeKey("tenant-a", "headless");
         String targetKey = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("headless");
         String operationKey = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.operationKey(
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.DELETE, scopeKey, targetKey, "delete");
@@ -248,7 +320,7 @@ class WorkspaceMigrationMySqlIT {
         var manager = new DataSourceTransactionManager(data);
         var transaction = new TransactionTemplate(manager);
         transaction.setIsolationLevel(Connection.TRANSACTION_REPEATABLE_READ);
-        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         String token = "a".repeat(64);
         transaction.execute(status -> sessions.acquireWriter("tenant-b", "m-successor", token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 30000L)));
@@ -287,15 +359,15 @@ class WorkspaceMigrationMySqlIT {
                                         + " = ?", Integer.class, schema)).isOne();
     }
 
-    private void seed(String tenant, String session, String state) {
-        jdbc.update(
+    private void seed(JdbcTemplate writer, String tenant, String session, String state) {
+        writer.update(
                 "INSERT INTO ma_session (tenant_key, session_key, session_scope_key, tenant_id, session_id, agent_id, status, gmt_create, gmt_modified, workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref, deleted_at) VALUES (?, ?, ?, ?, ?, 'qwen-code', ?, 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?, ?)",
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant),
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(session),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session, state, WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
+                ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session, state, WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF, "DELETED".equals(state) ? 1L : null);
-        ManagedReceipts.insertCreation(jdbc, tenant, new byte[]{1}, session, "digest", session, null, 1);
-        jdbc.update(
+        ManagedReceipts.insertCreation(writer, tenant, new byte[]{1}, session, "digest", session, null, 1);
+        writer.update(
                 "INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, gmt_modified) VALUES (?, ?, 'SESSION', ?, 1)",
                 tenant, session, new byte[0]);
     }

@@ -307,3 +307,102 @@ describe('MCP guidance', () => {
     expect(prompt).toMatch(/never evidence of safety/);
   });
 });
+
+// The classifier decides whether the user authorized an action, not whether
+// the action fits the user's goal. Without these rules it reads "clean up my
+// branch" as permission to delete branches and "can we fix this?" as an order.
+describe('user intent', () => {
+  it('does not equate fitting the latest message with user intent', () => {
+    expect(promptFor()).not.toMatch(
+      /consistent with the user.s most recent message reflect user intent/,
+    );
+  });
+
+  it('renders a User intent section before the decision principles', () => {
+    const prompt = promptFor();
+    expect(prompt).toContain('## User intent');
+    expect(prompt.indexOf('## User intent')).toBeLessThan(
+      prompt.indexOf('## Decision principles'),
+    );
+  });
+
+  it('separates authorization from relevance to the goal', () => {
+    expectContainsAll(promptFor(), [
+      'Relevance to the user’s goal is not authorization',
+    ]);
+  });
+
+  it('treats an action the agent chose on its own as unauthorized', () => {
+    expectContainsAll(promptFor(), [
+      'An action the agent chose on its own',
+      'unauthorized until the user explicitly asks for it',
+    ]);
+  });
+
+  it('does not let a broad request authorize its destructive or bulk form', () => {
+    expectContainsAll(promptFor(), [
+      'does not authorize its destructive or bulk form',
+      '"clean up my branch"',
+    ]);
+  });
+
+  it('reads a question as a question, not an instruction', () => {
+    expectContainsAll(promptFor(), [
+      'A question is not an instruction',
+      '"can we fix this?"',
+    ]);
+  });
+
+  it('keeps a polite request that names the action an instruction', () => {
+    expectContainsAll(promptFor(), ['"could you run the linter?"']);
+  });
+
+  it('requires consent to cover the blast radius of the action', () => {
+    expectContainsAll(promptFor(), ['Consent must cover the blast radius']);
+  });
+
+  it('does not treat one approval as standing permission', () => {
+    expectContainsAll(promptFor(), ['One approval is not a pattern']);
+  });
+
+  it('fills the section even when a user hint contains its placeholder', () => {
+    const prompt = promptFor({
+      environment: ['{{USER_INTENT}}'],
+      hints: { allow: ['{{USER_INTENT}}'] },
+    });
+    const section = prompt.slice(
+      prompt.indexOf('## User intent'),
+      prompt.indexOf('## Decision principles'),
+    );
+    expect(section).toContain(
+      'Relevance to the user’s goal is not authorization',
+    );
+    expect(section).not.toContain('{{USER_INTENT}}');
+  });
+
+  it('leaves a placeholder a user hint quotes as text', () => {
+    // Replacing one placeholder at a time rescans text already spliced in, so
+    // a hint quoting a placeholder that is filled later captured its value.
+    const prompt = promptFor({ hints: { allow: ['{{ENVIRONMENT}}'] } });
+    const environment = prompt.slice(
+      prompt.indexOf('## Environment'),
+      prompt.indexOf('## User intent'),
+    );
+
+    expect(environment).toContain(
+      'The user runs the agent in their development environment.',
+    );
+    expect(environment).not.toContain('{{ENVIRONMENT}}');
+    expect(prompt).toContain('{{ENVIRONMENT}}');
+  });
+
+  it('does not expand a replacement pattern a user hint contains', () => {
+    const prompt = promptFor({
+      environment: ['costs $& per call'],
+      hints: { allow: ['run $` first'] },
+    });
+
+    expect(prompt).toContain('costs $& per call');
+    expect(prompt).toContain('run $` first');
+  });
+});

@@ -1324,7 +1324,12 @@ describe('BridgeClient — mode promotion fallback', () => {
       const client = new BridgeClient(
         (() => entry) as never,
         vi.fn(),
-        { request: vi.fn(), cancelForPrompt: vi.fn() },
+        {
+          request: vi.fn(),
+          cancelForPrompt: vi.fn(),
+          cancelWorkflowApproval: vi.fn(),
+          policy: 'first-responder',
+        },
         0,
         Infinity,
       );
@@ -3160,6 +3165,38 @@ describe('BridgeClient — artifact ingress', () => {
     } finally {
       now.mockRestore();
     }
+  });
+
+  it('forwards a generation reset event', async () => {
+    const sessionId = 'sess:generation-reset';
+    const onGenerationEvent = vi.fn();
+    const client = new BridgeClient(
+      (() => ({ events: { publish: vi.fn() } })) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => true,
+      undefined,
+      undefined,
+      onGenerationEvent,
+    );
+
+    await client.extNotification('qwen/notify/session/generation/event', {
+      v: 1,
+      sessionId,
+      requestId: 'btw-request',
+      event: { type: 'reset' },
+    });
+
+    expect(onGenerationEvent).toHaveBeenCalledWith(sessionId, {
+      type: 'reset',
+      requestId: 'btw-request',
+    });
   });
 
   it('allows artifact events during an in-flight restore on this channel', async () => {
@@ -5446,7 +5483,12 @@ describe('background execution ownership', () => {
       const client = new BridgeClient(
         (() => entry) as never,
         vi.fn(),
-        { request: vi.fn(), cancelForPrompt: vi.fn() },
+        {
+          request: vi.fn(),
+          cancelForPrompt: vi.fn(),
+          cancelWorkflowApproval: vi.fn(),
+          policy: 'first-responder',
+        },
         0,
         Infinity,
       );
@@ -5665,5 +5707,93 @@ describe('MCP reload capability invalidation', () => {
     });
     await missing.extNotification(method, { sessionId: 'owner' });
     expect(publish).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('persisted last user prompt metadata', () => {
+  const sessionId = 'prompt-time-session';
+  const timestamp = '2026-11-07T02:03:04.000Z';
+  const entry = {
+    sessionId,
+    workspaceCwd: '/workspace',
+  } as BridgeClientSessionEntry;
+
+  function client(owned = true) {
+    const changed = vi.fn();
+    const recorded = vi.fn().mockResolvedValue(undefined);
+    const args: ConstructorParameters<typeof BridgeClient> = [
+      (id) => (id === sessionId ? entry : undefined),
+      () => undefined,
+      {
+        request: vi.fn(),
+        cancelForPrompt: vi.fn(),
+        cancelWorkflowApproval: vi.fn(),
+        policy: 'first-responder',
+      },
+      0,
+      Infinity,
+    ];
+    args[9] = () => owned;
+    args[21] = changed;
+    args[27] = recorded;
+    return { bridge: new BridgeClient(...args), changed, recorded };
+  }
+
+  it('updates owner-scoped hot metadata before advancing the catalog version', async () => {
+    const { bridge, changed, recorded } = client();
+    recorded.mockImplementationOnce(async () => {
+      expect(changed).not.toHaveBeenCalled();
+    });
+    await bridge.extNotification('qwen/notify/session/last-user-prompt', {
+      v: 1,
+      sessionId,
+      timestamp,
+    });
+    expect(recorded).toHaveBeenCalledExactlyOnceWith(entry, timestamp);
+    expect(changed).toHaveBeenCalledTimes(1);
+    await bridge.extNotification('qwen/notify/session/last-user-prompt', {
+      v: 1,
+      sessionId,
+      timestamp: null,
+    });
+    expect(recorded).toHaveBeenLastCalledWith(entry, undefined);
+  });
+
+  it('advances the catalog version for recovery when a hot update fails', async () => {
+    const { bridge, recorded, changed } = client();
+    recorded.mockRejectedValueOnce(new Error('stat failed'));
+    await expect(
+      bridge.extNotification('qwen/notify/session/last-user-prompt', {
+        v: 1,
+        sessionId,
+        timestamp,
+      }),
+    ).rejects.toThrow('stat failed');
+    expect(changed).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects foreign owners and malformed timestamps', async () => {
+    const { bridge, recorded, changed } = client(false);
+    await bridge.extNotification('qwen/notify/session/last-user-prompt', {
+      v: 1,
+      sessionId,
+      timestamp,
+    });
+    expect(recorded).not.toHaveBeenCalled();
+    expect(changed).not.toHaveBeenCalled();
+    const local = client();
+    for (const invalid of [
+      undefined,
+      'invalid',
+      '2026-02-30T00:00:00.000Z',
+      123,
+    ]) {
+      await local.bridge.extNotification(
+        'qwen/notify/session/last-user-prompt',
+        { v: 1, sessionId, timestamp: invalid },
+      );
+    }
+    expect(local.recorded).not.toHaveBeenCalled();
+    expect(local.changed).not.toHaveBeenCalled();
   });
 });

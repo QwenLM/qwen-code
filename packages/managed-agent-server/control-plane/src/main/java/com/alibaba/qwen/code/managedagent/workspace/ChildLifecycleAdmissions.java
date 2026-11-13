@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent.workspace;
 
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
@@ -19,11 +19,11 @@ import java.util.Map;
  */
 @Component
 public class ChildLifecycleAdmissions {
-    private final AgentStateStore store;
+    private final SessionLifecycleStore store;
     private final RequestDigests digests;
     private final RuntimeWarmer runtimeWarmer;
 
-    public ChildLifecycleAdmissions(AgentStateStore store,
+    public ChildLifecycleAdmissions(SessionLifecycleStore store,
             RequestDigests digests, RuntimeWarmer runtimeWarmer) {
         this.store = store;
         this.digests = digests;

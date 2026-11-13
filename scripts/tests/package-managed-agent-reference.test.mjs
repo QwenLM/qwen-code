@@ -58,8 +58,6 @@ async function fixture(root) {
     `,
     'packages/managed-agent-server/server/target/qwen-managed-agent-server-0.4.0-alpha-exec.jar':
       'server',
-    'packages/managed-agent-server/server/target/qwen-managed-agent-server-0.4.0-alpha-operator-recovery.jar':
-      'recovery',
     'packages/managed-agent-server/server/src/main/resources/application.yml':
       "workspace-shell-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED:false}'\n",
     'packages/managed-agent-server/distribution/config/application.example.yml':
@@ -146,7 +144,7 @@ test('packages an independently verifiable reference distribution', async () => 
     });
     assert.deepEqual(
       result.manifest.components.map(({ name }) => name),
-      ['qwen-managed-agent-server', 'qwen-managed-agent-operator-recovery'],
+      ['qwen-managed-agent-server'],
     );
     assert.deepEqual(result.manifest.defaults, {
       publicShellEnabled: false,
@@ -289,10 +287,6 @@ test('launchers load the distribution config only when it exists', async () => {
     delete baseEnv.SPRING_CONFIG_ADDITIONAL_LOCATION;
     const env = { ...baseEnv, PATH: `${fakeBin}:${process.env.PATH}` };
     const launcherPath = path.join(bundle, 'bin/qwen-managed-agent-server');
-    const recoveryPath = path.join(
-      bundle,
-      'bin/qwen-managed-agent-operator-recovery',
-    );
     const run = (script, args, overrides = {}) =>
       execFileSync('sh', [script, ...args], {
         env: { ...env, ...overrides },
@@ -359,14 +353,6 @@ test('launchers load the distribution config only when it exists', async () => {
         error.status === 2 &&
         String(error.stderr).includes('unknown command: no-such-command'),
     );
-
-    const recovery = run(recoveryPath, ['inspect', 'binding-1', '7']);
-    assert.ok(recovery.includes(`ENV=file:${config}`));
-    assert.ok(recovery.includes('ARG=-jar'));
-    assert.ok(recovery.includes('ARG=inspect'));
-    assert.ok(recovery.includes('ARG=binding-1'));
-    assert.ok(recovery.includes('ARG=7'));
-    assert.ok(!recovery.includes('ARG=--spring.config.additional-location'));
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -1156,6 +1142,94 @@ test('rejects stale or ambiguous safety defaults', async (context) => {
         await rm(temporary, { recursive: true, force: true });
       }
     });
+  }
+});
+
+test('verifies archives in fresh directories on a reused runner', async () => {
+  const workflow = await readFile(
+    new URL(
+      '../../.github/workflows/release-managed-agent-reference.yml',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+  const stepStart = workflow.indexOf(
+    "      - name: 'Verify and boot the exact archive'",
+  );
+  const runMarker = '        run: |-\n';
+  const runStart = workflow.indexOf(runMarker, stepStart);
+  const boundary = workflow.indexOf('          server_port=', runStart);
+  assert.ok(stepStart >= 0);
+  assert.ok(runStart > stepStart);
+  assert.ok(boundary > runStart);
+  const script = workflow
+    .slice(runStart + runMarker.length, boundary)
+    .replace(/^ {10}/gm, '');
+  const temporary = await mkdtemp(
+    path.join(os.tmpdir(), 'qwen-reference pool-'),
+  );
+  try {
+    const root = path.join(temporary, 'repo');
+    const output = path.join(temporary, 'managed-agent-reference');
+    const version = '0.1.0-alpha.1';
+    const name = `qwen-managed-agent-reference-${version}`;
+    await fixture(root);
+    // The archive probe reads migrations before Java starts.
+    const serverJar = Buffer.from(
+      'UEsDBBQAAAAAAAAAIQA5b9fWCQAAAAkAAAAzAAAAQk9PVC1JTkYvY2xhc3Nlcy9kYi9tYW5hZ2Vk' +
+        'LXNjaGVtYS9WMV9fYmFzZWxpbmUuc3Fsc2VsZWN0IDE7UEsBAhQDFAAAAAAAAAAhADlv19YJAAAA' +
+        'CQAAADMAAAAAAAAAAAAAAIABAAAAAEJPT1QtSU5GL2NsYXNzZXMvZGIvbWFuYWdlZC1zY2hlbWEv' +
+        'VjFfX2Jhc2VsaW5lLnNxbFBLBQYAAAAAAQABAGEAAABaAAAAAAA=',
+      'base64',
+    );
+    await writeFile(
+      path.join(
+        root,
+        'packages/managed-agent-server/server/target/qwen-managed-agent-server-0.4.0-alpha-exec.jar',
+      ),
+      serverJar,
+    );
+    const upgradeModule =
+      'packages/managed-agent-server/distribution/bin/qwen-managed-agent-upgrade.mjs';
+    await writeFile(
+      path.join(root, upgradeModule),
+      await readFile(new URL(`../../${upgradeModule}`, import.meta.url)),
+    );
+    await createReferenceDistribution({
+      repoRoot: root,
+      outputDirectory: output,
+      version,
+      sourceRevision: 'a'.repeat(40),
+    });
+    const legacy = path.join(output, 'extracted', name, 'stale.txt');
+    await mkdir(path.dirname(legacy), { recursive: true });
+    await writeFile(legacy, 'previous job');
+    const bundles = [];
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = execFileSync(
+        'bash',
+        ['-c', `${script}\nprintf '%s\\n' "$PWD"`],
+        {
+          env: {
+            ...process.env,
+            RUNNER_TEMP: temporary,
+            RELEASE_VERSION: version,
+          },
+          encoding: 'utf8',
+        },
+      );
+      const bundle = result.trim().split('\n').at(-1);
+      assert.equal(path.basename(bundle), name);
+      assert.ok(!bundles.includes(bundle));
+      await assert.rejects(readFile(path.join(bundle, 'stale.txt')), {
+        code: 'ENOENT',
+      });
+      await writeFile(path.join(bundle, 'stale.txt'), 'current job');
+      bundles.push(bundle);
+    }
+    assert.equal(await readFile(legacy, 'utf8'), 'previous job');
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
   }
 });
 

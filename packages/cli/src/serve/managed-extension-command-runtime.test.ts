@@ -14,6 +14,18 @@ import {
   type ManagedExtensionCommand,
   type ManagedExtensionCommandDependencies,
 } from './managed-extension-command-runtime.js';
+import { atomicWriteJSON } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
+
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/atomicFileWrite.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/atomicFileWrite.js')
+      >();
+    return { ...actual, atomicWriteJSON: vi.fn(actual.atomicWriteJSON) };
+  },
+);
 
 let directory: string;
 beforeEach(async () => {
@@ -73,6 +85,7 @@ function dependencies(): ManagedExtensionCommandDependencies {
         responseParts: [{ text: 'hello' }],
       }),
     ),
+    acknowledge: vi.fn(),
     cancel: vi.fn(),
   };
 }
@@ -107,6 +120,63 @@ describe('Managed extension command durable execution', () => {
         input: { command: 'touch other' },
       }),
     ).rejects.toThrow('identity');
+  });
+
+  it('acknowledges the native invocation only after its durable receipt settles', async () => {
+    const deps = dependencies();
+    let finish!: (value: ManagedToolResultPayload) => void;
+    vi.mocked(deps.execute).mockImplementation(
+      async () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const runtime = new ManagedExtensionCommandRuntime(deps);
+    const command = operation();
+    await runtime.control('runtime-session', command);
+    await vi.waitFor(() => expect(deps.execute).toHaveBeenCalledTimes(1));
+    expect(deps.acknowledge).not.toHaveBeenCalled();
+    finish({ executionStatus: 'success', responseParts: [{ text: 'hello' }] });
+    await vi.waitFor(async () =>
+      expect(
+        await runtime.control('runtime-session', {
+          ...command,
+          action: 'status',
+        }),
+      ).toMatchObject({ state: 'settled' }),
+    );
+    expect(deps.acknowledge).toHaveBeenCalledTimes(1);
+    expect(deps.acknowledge).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'runtime-session',
+        callId: command.operationId,
+        promptId: `extension-command:${command.operationId}`,
+      }),
+    );
+  });
+
+  it('never acknowledges a native entry whose durable receipt write is lost (R2-6)', async () => {
+    const deps = dependencies();
+    const writeMock = vi.mocked(atomicWriteJSON);
+    writeMock.mockClear();
+    // The running receipt lands, but the settled receipt write is lost. The
+    // native entry must stay unacknowledged: acknowledging it would free the
+    // journal entry while no durable receipt owns the outcome.
+    writeMock.mockImplementation(async (file, data) => {
+      if ((data as { state?: string }).state === 'settled')
+        throw new Error('receipt write lost');
+      await fs.writeFile(file, JSON.stringify(data));
+    });
+    try {
+      const runtime = new ManagedExtensionCommandRuntime(deps);
+      const command = operation();
+      await runtime.control('runtime-session', command);
+      await vi.waitFor(() => expect(deps.execute).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(writeMock).toHaveBeenCalledTimes(2));
+      expect(deps.acknowledge).not.toHaveBeenCalled();
+    } finally {
+      writeMock.mockRestore();
+    }
   });
 
   it('holds a surviving intent on restart and refuses to redispatch it', async () => {

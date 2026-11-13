@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
@@ -8,7 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.provisioning.KubernetesHttpRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.provisioning.kubernetes.KubernetesHttpRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -136,7 +137,7 @@ class ResidentWorkspaceRetirementStoreTest {
         assertThatThrownBy(() -> fixture.store().begin(request("tenant", "workspace", 1, "owner", UUID.randomUUID().toString())))
                 .isInstanceOf(RuntimeBrokerException.class);
         fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                + " VALUES ('tenant', 'workspace', ?, 'OWNER')", com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "other-owner"));
+                + " VALUES ('tenant', 'workspace', ?, 'OWNER')", ManagedWorkspaceRegistry.actorKey("tenant", "other-owner"));
         assertThatThrownBy(() -> fixture.store().inspect(request("tenant", "workspace", 1, "other-owner", fixture.request.retirementId())))
                 .isInstanceOf(RuntimeBrokerException.class);
         assertThat(fixture.store().inspect(fixture.request)).isEqualTo(status);

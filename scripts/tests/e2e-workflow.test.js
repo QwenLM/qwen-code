@@ -172,6 +172,7 @@ describe('TUI product evidence', () => {
     ['packages/core/src/core/coreToolScheduler.ts', lanes.slice(0, -1)],
     ['packages/core/src/core/client.ts', lanes.slice(0, -1)],
     ['packages/cli/src/ui/opentui/live-turn.ts', lanes.slice(0, -1)],
+    ['packages/cli/src/ui/opentui/shared-model-round.ts', lanes.slice(0, -1)],
     ['packages/cli/src/ui/opentui/opentui-runtime.ts', lanes],
     ['pnpm-lock.yaml', lanes],
     ['packages/cli/package.json', lanes],
@@ -179,6 +180,20 @@ describe('TUI product evidence', () => {
     ['integration-tests/test-helper.ts', lanes],
     ['.github/workflows/tui-parity.yml', lanes],
     ['docs/design/unrelated.md', []],
+    ['packages/web-shell/client/App.tsx', []],
+    ['packages/chrome-extension/package.json', []],
+    ['packages/mobile-mcp/package.json', []],
+    ['packages/qwen-live/build.mjs', []],
+    ['integrations/external-context/package.json', []],
+    ['integrations/external-context-mem0/package.json', []],
+    ['integrations/test-failure-explorer/package.json', []],
+    ['packages/desktop/package.json', []],
+    ['packages/live-host/electron-builder.yml', []],
+    ['packages/mobile-shell/build.gradle.kts', []],
+    ['packages/sdk-java/client/pom.xml', []],
+    ['packages/sdk-python/pyproject.toml', []],
+    ['packages/zed-extension/extension.toml', []],
+    ['packages/cua-driver/typescript/src/native-assets.ts', []],
     ['scripts/unrelated-maintenance.js', ['component']],
   ])(
     'selects mechanisms rather than blanket full acceptance for %s',
@@ -216,6 +231,8 @@ describe('TUI product evidence', () => {
           selected.includes('recovery'),
         );
       }
+      if (selected.length === 0)
+        expect(outputs.reason).toBe('Outside the TUI build/test closure');
       if (selected.length === 1)
         expect(outputs.reason).toContain(
           'maintainers should consider manual full',
@@ -593,6 +610,73 @@ describe('TUI product evidence', () => {
     ).toBe(false);
   });
 
+  it('skips Web Shell-only changes but runs when CLI source rides along', async () => {
+    expect(
+      await required([
+        { filename: 'packages/web-shell/client/App.tsx' },
+        {
+          filename: 'packages/web-shell/client/completions/slashCompletion.ts',
+        },
+      ]),
+    ).toBe(false);
+    expect(
+      await required([
+        { filename: 'packages/web-shell/client/App.tsx' },
+        { filename: 'packages/cli/src/ui/App.tsx' },
+      ]),
+    ).toBe(true);
+  });
+
+  it('reports a policy exclusion instead of the no-impact default', async () => {
+    const { outputs } = await impact([
+      { filename: 'packages/cua-driver/typescript/src/native-assets.ts' },
+    ]);
+    expect(outputs.component).toBe('false');
+    expect(outputs.reason).toBe('Outside the TUI build/test closure');
+  });
+
+  // Parse by value, not by literal spelling: a trailing comment or an
+  // `!integrations/...` negation is lint-legal and must still be reconciled.
+  const excludedTrees = (yamlText) =>
+    parse(yamlText)
+      .packages.filter((entry) => entry.startsWith('!'))
+      .map((entry) => entry.slice(1))
+      .filter((tree) => !/[*?[\]{}]/.test(tree));
+
+  it('excludes every tree the pnpm workspace itself leaves out', async () => {
+    const excluded = excludedTrees(readFileSync('pnpm-workspace.yaml', 'utf8'));
+    expect([...excluded].sort()).toEqual([
+      'packages/desktop',
+      'packages/live-host',
+      'packages/mobile-shell',
+    ]);
+    for (const tree of excluded) {
+      const { outputs } = await impact([
+        { filename: `${tree}/placeholder.ts` },
+      ]);
+      expect(outputs.component, tree).toBe('false');
+      expect(outputs.reason, tree).toBe('Outside the TUI build/test closure');
+    }
+  });
+
+  it('reconciles literal negations across YAML spellings and ignores globs', () => {
+    expect(
+      excludedTrees(
+        [
+          'packages:',
+          "  - 'packages/*'",
+          "  - '!packages/desktop' # promoted to its own release later",
+          "  - '!integrations/generated-ui'",
+          "  - '!**/fixtures/**'",
+          "  - '!packages/fixture?'",
+          "  - '!packages/[ab]'",
+          "  - '!packages/{foo,bar}'",
+          '',
+        ].join('\n'),
+      ),
+    ).toEqual(['packages/desktop', 'integrations/generated-ui']);
+  });
+
   it.each([
     'packages/cli/src/ui/App.tsx',
     'packages/vscode-ide-companion/package.json',
@@ -657,6 +741,61 @@ describe('TUI product evidence', () => {
       'both ends under docs/',
       'docs/design/runtime.md',
       'docs/design/old-runtime.md',
+    ],
+    [
+      'both ends in the Web Shell',
+      'packages/web-shell/client/App.tsx',
+      'packages/web-shell/client/OldApp.tsx',
+    ],
+    [
+      'both ends in the Chrome extension',
+      'packages/chrome-extension/package.json',
+      'packages/chrome-extension/old-package.json',
+    ],
+    [
+      'both ends in mobile-mcp',
+      'packages/mobile-mcp/package.json',
+      'packages/mobile-mcp/old-package.json',
+    ],
+    [
+      'both ends in qwen-live',
+      'packages/qwen-live/build.mjs',
+      'packages/qwen-live/old-build.mjs',
+    ],
+    [
+      'both ends in external-context',
+      'integrations/external-context/package.json',
+      'integrations/external-context/old-package.json',
+    ],
+    [
+      'both ends in external-context-mem0',
+      'integrations/external-context-mem0/package.json',
+      'integrations/external-context-mem0/old-package.json',
+    ],
+    [
+      'both ends in test-failure-explorer',
+      'integrations/test-failure-explorer/package.json',
+      'integrations/test-failure-explorer/old-package.json',
+    ],
+    [
+      'both ends in the workspace-excluded desktop tree',
+      'packages/desktop/package.json',
+      'packages/desktop/old-package.json',
+    ],
+    [
+      'both ends in the workspace-excluded live-host tree',
+      'packages/live-host/electron-builder.yml',
+      'packages/live-host/old-electron-builder.yml',
+    ],
+    [
+      'both ends in the workspace-excluded mobile-shell tree',
+      'packages/mobile-shell/build.gradle.kts',
+      'packages/mobile-shell/old-build.gradle.kts',
+    ],
+    [
+      'both ends in the CUA driver tree',
+      'packages/cua-driver/typescript/src/native-assets.ts',
+      'packages/cua-driver/typescript/src/old-native-assets.ts',
     ],
   ])(
     'still skips a rename with %s',
@@ -965,6 +1104,63 @@ describe('e2e workflow', () => {
       expect(e2eRunScript).toContain(
         'export QWEN_SANDBOX_IMAGE="$sandbox_image_id"',
       );
+    });
+
+    it('probes the apt mirror instead of pinning a region', () => {
+      // #16214: deb.debian.org serves this pool at MB/s from Hong Kong and
+      // 11-45 kB/s from the mainland hosts, where the two apt layers then
+      // outlast the job's execution cap. So neither a single mirror nor a
+      // host-name map is correct — the build probes and overrides only on a
+      // clear win, which leaves healthy hosts on the built-in source. The
+      // probe lives in a shared script so the release docker lane (#16271)
+      // selects the same source; the VPC intranet mirror bypasses the capped
+      // public egress (the maven script's rationale) and, unreachable off-VPC,
+      // measures 0 and loses — no host map needed.
+      const aptProbeScript = readFileSync(
+        '.github/scripts/apt-mirror-probe.sh',
+        'utf8',
+      );
+      // Pin the candidate loop itself, not a substring: the mirrors are also
+      // named in the comments, so a toContain would survive removing a
+      // candidate from the actual `for` list.
+      expect(aptProbeScript).toMatch(
+        /for mirror in mirrors\.cloud\.aliyuncs\.com mirrors\.aliyun\.com mirrors\.tuna\.tsinghua\.edu\.cn; do/,
+      );
+      expect(aptProbeScript).toContain('--build-arg APT_MIRROR=');
+      // Both stages need the ARG: a stage cannot inherit an ARG declared
+      // before its own FROM, so one declaration per stage is the contract.
+      // Counting (not toMatch) catches deleting either one — R1-1 witnessed
+      // the runtime-stage removal surviving a single-match assertion.
+      expect(
+        readFileSync('Dockerfile', 'utf8').match(/^ARG APT_MIRROR=$/gm),
+      ).toHaveLength(2);
+
+      // The E2E leg sources the shared probe and applies it before the build
+      // consumes the flag, otherwise the mirror is decided after the layer it
+      // was meant to speed up. Match the source statement, not a substring —
+      // the shellcheck directive above it also names the file.
+      expect(e2eRunScript).toMatch(/^source .*apt-mirror-probe\.sh"$/m);
+      const applyIndex = e2eRunScript.indexOf('apply_apt_mirror');
+      expect(applyIndex).toBeGreaterThan(-1);
+      expect(e2eRunScript.indexOf('if ! build_image;')).toBeGreaterThan(
+        applyIndex,
+      );
+      // Two gates hold the override back, both on the mirror side: an absolute
+      // floor (no "slow vs slower" override) and a 4x factor (a genuinely fast
+      // default — the Hong Kong hosts — keeps its source). The literals are
+      // pinned, not just the names: a 10x mutation of the floor flips the
+      // both-slow shape onto a still-slow mirror. \b, not toContain, so the
+      // 10x-up mutation 'fast_mirror=10000000' cannot satisfy the pin.
+      expect(aptProbeScript).toMatch(/fast_mirror=1000000\b/);
+      expect(aptProbeScript).toMatch(/-gt "\$\{fast_mirror\}" \]/);
+      expect(aptProbeScript).toMatch(/-gt \$\(\(default_rate \* 4\)\)/);
+      // There must be NO "default looks healthy" gate: the mainland paths are
+      // bimodal, so a short probe of the default cannot veto the override
+      // (#16214 recurrence on hz4-2, run 41743539611). Pin its absence.
+      expect(aptProbeScript).not.toContain('slow_default');
+      // The measurements have to reach the log, or the next slow build is
+      // another manual investigation.
+      expect(aptProbeScript).toContain('apt probe:');
     });
 
     it('keeps one bounded retry without pruning the shared daemon', () => {

@@ -2,14 +2,24 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -24,9 +34,11 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.lang.Nullable;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.nio.charset.StandardCharsets;
@@ -52,7 +64,7 @@ class WorkspaceSessionCloseTest {
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper mapper;
     @Autowired ManagedAgentStore store;
-    @Autowired ManagedSessionStore journal;
+    @Autowired JdbcManagedSessionStore journal;
     @Autowired @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired CloseRuntime runtime;
 
@@ -175,7 +187,7 @@ class WorkspaceSessionCloseTest {
 
     private void seedAction(String tenant, String session, String options) {
         String action = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,record_kind,"
                         + "domain,record_id,action_id,revision,action_version,state,options_json,gmt_create,first_sequence)"
                         + " VALUES (?,?,?,?,'ACTION','action',?,?,1,1,'requested',?,0,1)",
@@ -223,10 +235,16 @@ class WorkspaceSessionCloseTest {
         @Bean @Primary CloseRuntime closeRuntime() { return new CloseRuntime(); }
         @Bean @Primary ManagedAgentStore closeStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
                 ObjectMapper mapper,
-                com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry registry) {
+                JdbcManagedWorkspaceRegistry registry,
+                WorktreeFiles worktreeFiles, JdbcManagedSessionSkills skills, ExtensionPackages extensions,
+                @Nullable JdbcWorkspaceLifecycleStore lifecycle, @Nullable JdbcManagedAgentDefinitionStore definitions,
+                @Nullable JdbcSessionWorktreeStore worktrees, @Nullable JournalEventTransport transport,
+                @Lazy @Nullable JdbcManagedExtensionRecordStore records) {
             var properties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
-            return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, java.time.Clock.systemUTC(), ignored -> {}, registry, properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+            return new ManagedAgentStore(jdbc, mapper, java.time.Clock.systemUTC(), ignored -> {}, registry,
+                    properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(), worktreeFiles,
+                    skills, extensions, lifecycle, definitions, worktrees, transport, records);
         }
     }
 

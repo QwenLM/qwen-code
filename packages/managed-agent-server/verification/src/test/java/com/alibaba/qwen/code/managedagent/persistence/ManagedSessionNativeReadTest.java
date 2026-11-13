@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
@@ -49,9 +50,10 @@ class ManagedSessionNativeReadTest {
     private static final String TOKEN = "csi-original-writer-token-for-test";
     private static final byte[] BYTES = "original resource".getBytes(StandardCharsets.UTF_8);
     private FaultSource source;
+    private StoreLockTrace trace;
     private JdbcTemplate jdbc;
     private TransactionTemplate transactions;
-    private ManagedSessionStore store;
+    private JdbcManagedSessionStore store;
     private String session;
     private RuntimeBindingRecord binding;
     private JdbcRuntimeBindingRepository bindings;
@@ -65,16 +67,17 @@ class ManagedSessionNativeReadTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
         Flyway.configure().dataSource(raw).locations("classpath:db/managed-schema").load().migrate();
         source = new FaultSource(raw);
-        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
-        var manager = new DataSourceTransactionManager(source);
+        trace = new StoreLockTrace(source);
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(trace);
+        var manager = new DataSourceTransactionManager(trace);
         transactions = new TransactionTemplate(manager);
         reservations = new WorkspaceCsiReservationStore(jdbc, manager, new ObjectMapper());
         registration = new WorkspaceCsiRegistration("tenant", "storage", "cluster", "ns", "pvc", "pvc-uid",
                 "pv", "pv-uid", "disk.csi.example.com", "volume", "backend", "disk-serial", "/workspace", 7);
         reservations.register(registration);
-        var request = WorkspaceCsiRuntimeConstructionFixture.create(source, registration);
+        var request = WorkspaceCsiRuntimeConstructionFixture.create(trace, registration);
         session = request.getIsolationKey();
-        bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+        bindings = new JdbcRuntimeBindingRepository(trace, new AesGcmSecretProtector("test", new byte[32]));
         binding = bindings.findOrCreate(request);
         binding = bindings.claimOperation(binding.getBindingId(), "operator", Duration.ofSeconds(120));
         reservation = reservations.reserve(registration, bindings, binding, UUID.randomUUID().toString());
@@ -84,14 +87,14 @@ class ManagedSessionNativeReadTest {
         binding = bindings.compareAndSet(binding, binding.withAttestation(lease,
                 new RuntimeResourceHandle("kubernetes-workspace", 3, Map.of("podUid", "fixture-original")),
                 Instant.now(), Instant.now()));
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         transactions.execute(status -> store.acquireWriter("tenant", session, TOKEN,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 300_000L)));
         jdbc.update(
                 "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create, last_verified_at) VALUES (?, ?, 'tenant', 'workspace', ?, 'resource', 'managed-session-context', 1, ?, ?, 'MYSQL_INLINE', ?, 'fixture', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", 946684800000)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", session), "resource"),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", session), session, BYTES.length,
+                ManagedSessionStore.resourceKey(
+                        ManagedSessionStore.sessionScopeKey("tenant", session), "resource"),
+                ManagedSessionStore.sessionScopeKey("tenant", session), session, BYTES.length,
                 ToolPublicationContract.sha256(BYTES), BYTES);
     }
 
@@ -103,9 +106,39 @@ class ManagedSessionNativeReadTest {
     }
 
     @Test
+    void csiRenewAndRejectedCommitReuseOnlyTheirOwnTransactionLocks() {
+        trace.clear();
+        transactions.execute(status -> store.renewWriter("tenant", session, TOKEN,
+                new ManagedSessionStoreModels.RenewWriterRequest("workspace", "writer", 1, 300_000L)));
+        assertRootAndHeadCounts(1, 1);
+        trace.clear();
+        var request = JournalLockContractTest.genesis();
+        assertThatThrownBy(() -> transactions.execute(status -> store.commit("tenant", session, TOKEN, request)))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("csi_original_activation_unavailable"));
+        assertRootAndHeadCounts(1, 1);
+        assertThat(trace.events()).anyMatch(event -> event.phase() == StoreLockTrace.Phase.ROLLBACK);
+    }
+
+    private void assertRootAndHeadCounts(int rootCount, int headCount) {
+        trace.assertRootBeforeHead("tenant", session);
+        trace.assertOneTransaction("tenant", session);
+        assertThat(trace.successful("tenant", session).stream().filter(StoreLockTrace.Event::mappedHead)).hasSize(headCount);
+        assertThat(trace.successful("tenant", session).stream().filter(event -> event.sql()
+                .startsWith("select tenant_id, session_id, is_csi_guard from ma_session "))).hasSize(rootCount);
+    }
+
+    @Test
     void readsBeforeActivationAndRetainsDistinctOriginalHistory() {
+        trace.clear();
         assertThat(read().bytes()).isEqualTo(BYTES);
         assertThat(read().bytes()).isEqualTo(BYTES);
+        trace.assertRootBeforeHead("tenant", session);
+        var heads = trace.successful("tenant", session).stream().filter(StoreLockTrace.Event::mappedHead).toList();
+        assertThat(heads).hasSize(4);
+        assertThat(heads.stream().map(event -> event.connection() + ":" + event.transaction()).distinct()).hasSize(4);
+        assertThat(trace.successful("tenant", session).stream().filter(event -> event.sql()
+                .startsWith("select tenant_id, session_id, is_csi_guard from ma_session "))).hasSize(4);
         var history = readReceipts();
         assertThat(history).hasSize(2);
         assertThat(history).allSatisfy(row -> {
@@ -238,10 +271,10 @@ class ManagedSessionNativeReadTest {
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "ordinary-writer", 60_000L)));
         jdbc.update(
                 "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'tenant', 'workspace', ?, 'ordinary-resource', 'managed-session-context', 1, ?, ?, 'MYSQL_INLINE', ?, 'ordinary-fixture', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", ordinary),
+                ManagedSessionStore.resourceKey(
+                        ManagedSessionStore.sessionScopeKey("tenant", ordinary),
                         "ordinary-resource"),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", ordinary), ordinary, BYTES.length,
+                ManagedSessionStore.sessionScopeKey("tenant", ordinary), ordinary, BYTES.length,
                 ToolPublicationContract.sha256(BYTES), BYTES);
         assertThat(store.readOwnerResource("tenant", "workspace", ordinary, "ordinary-resource", TOKEN).bytes())
                 .isEqualTo(BYTES);
