@@ -143,16 +143,14 @@ export function sharedModelRound(
         },
       },
     });
-    void run.then(
-      () => {},
-      (error: unknown) => {
-        if (!result && !(error instanceof SharedModelRoundClosed))
-          failure = { error };
-      },
-    );
-    void run.finally(() => {
+    const settled = () => {
       done = true;
       wake?.();
+    };
+    void run.then(settled, (error: unknown) => {
+      if (!result && !(error instanceof SharedModelRoundClosed))
+        failure = { error };
+      settled();
     });
     let taking: Offer | undefined;
     try {
