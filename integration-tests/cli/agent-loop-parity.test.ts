@@ -60,6 +60,8 @@ interface Scenario {
    * goes out on the shared loop's round, which the debug log records.
    */
   subagentRounds?: number;
+  /** The tool batches the subagents run on the shared loop with it on. */
+  subagentBatches?: number;
   subagentRecovery?: { requests: number; answer: string };
 }
 
@@ -72,12 +74,24 @@ interface Run {
   approvals: string[];
   /** Subagent model rounds sent on the shared agent loop. */
   sharedSubagentRounds: number;
+  /** Subagent tool batches run on the shared agent loop. */
+  sharedSubagentBatches: number;
+  /** Subagent rounds run on the shared loop's event-bus kernel. */
+  kernelSubagentRounds: number;
   subagentRequests: number;
 }
 
 /** The debug-log line of a subagent round on the shared agent loop. */
 const SHARED_SUBAGENT_ROUND =
   /subagent \S+ round \d+ on the shared agent loop/g;
+
+/** The debug-log line of a subagent round on the event-bus kernel. */
+const KERNEL_SUBAGENT_ROUND =
+  /subagent \S+ round \d+ on the shared agent loop on the event bus/g;
+
+/** The debug-log line of a subagent tool batch on the shared agent loop. */
+const SHARED_SUBAGENT_BATCH =
+  /subagent \S+ round \d+ tool batch on the shared loop/g;
 
 /** The system prompt of the scenarios' subagent. */
 const SUBAGENT_MARKER = 'PARITY_SUBAGENT_PROMPT';
@@ -233,6 +247,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     vi.stubEnv('NO_PROXY', noProxy);
     vi.stubEnv('no_proxy', noProxy);
     vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+    vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
   });
 
   afterEach(async () => {
@@ -242,13 +257,17 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     await rig?.cleanup();
   });
 
-  async function run(scenario: Scenario, shared: boolean): Promise<Run> {
+  async function run(
+    scenario: Scenario,
+    shared: boolean,
+    kernel = false,
+  ): Promise<Run> {
     await server?.close();
     rig = new TestRig();
     await rig.setup(`agent-loop-parity ${scenario.name}`, {
       settings: {
         ...scenario.settings,
-        experimental: { unifiedAgentLoop: shared },
+        experimental: { unifiedAgentLoop: shared, eventBusAgentLoop: kernel },
       },
     });
     const dir = rig.testDir!;
@@ -357,6 +376,10 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       subagentRequests,
       sharedSubagentRounds:
         debugLog(runtimeDir).match(SHARED_SUBAGENT_ROUND)?.length ?? 0,
+      sharedSubagentBatches:
+        debugLog(runtimeDir).match(SHARED_SUBAGENT_BATCH)?.length ?? 0,
+      kernelSubagentRounds:
+        debugLog(runtimeDir).match(KERNEL_SUBAGENT_ROUND)?.length ?? 0,
     };
   }
 
@@ -563,6 +586,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
         r.createFile('notes.txt', 'the notes\n');
       },
       subagentRounds: 2,
+      subagentBatches: 1,
       reply: (messages, dir) =>
         fromSubagent(messages)
           ? toolResults(messages) === 0
@@ -598,9 +622,37 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
         r.createFile('notes.txt', 'the notes\n');
       },
       subagentRounds: 1,
+      subagentBatches: 1,
       reply: (messages, dir) =>
         fromSubagent(messages)
           ? { toolCalls: [read(join(dir, 'notes.txt'), 'call_notes')] }
+          : toolResults(messages) === 0
+            ? { toolCalls: [runSubagent('call_agent')] }
+            : { content: 'Done.' },
+    },
+    {
+      name: 'a subagent call of a tool it may not use, beside one it may',
+      prompt: 'Have the reader read the notes.',
+      prepare: (r) => {
+        createSubagent(r);
+        r.createFile('notes.txt', 'the notes\n');
+      },
+      subagentRounds: 2,
+      subagentBatches: 1,
+      reply: (messages, dir) =>
+        fromSubagent(messages)
+          ? toolResults(messages) === 0
+            ? {
+                toolCalls: [
+                  fakeToolCall(
+                    'write_file',
+                    { file_path: join(dir, 'out.txt'), content: 'x' },
+                    'call_write',
+                  ),
+                  read(join(dir, 'notes.txt'), 'call_notes'),
+                ],
+              }
+            : { content: 'The notes say: the notes.' }
           : toolResults(messages) === 0
             ? { toolCalls: [runSubagent('call_agent')] }
             : { content: 'Done.' },
@@ -632,6 +684,21 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       // shared loop.
       expect(current.sharedSubagentRounds).toBe(0);
       expect(shared.sharedSubagentRounds).toBe(scenario.subagentRounds ?? 0);
+      expect(current.sharedSubagentBatches).toBe(0);
+      expect(shared.sharedSubagentBatches).toBe(scenario.subagentBatches ?? 0);
+      expect(shared.kernelSubagentRounds).toBe(0);
+      // A subagent scenario also runs on the event-bus kernel, which must
+      // send and print what the shared loop does.
+      if (scenario.subagentRounds !== undefined) {
+        const kernel = await run(scenario, true, true);
+        expect(kernel.exitCode).toBe(shared.exitCode);
+        expect(kernel.requests).toEqual(shared.requests);
+        expect(kernel.frames).toEqual(shared.frames);
+        expect(kernel.kernelSubagentRounds).toBe(scenario.subagentRounds);
+        expect(kernel.sharedSubagentBatches).toBe(
+          scenario.subagentBatches ?? 0,
+        );
+      }
       const recovery = scenario.subagentRecovery;
       if (recovery) {
         for (const run of [current, shared]) {

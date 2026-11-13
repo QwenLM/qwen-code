@@ -230,6 +230,7 @@ describe('no-AK integration CI wiring', () => {
       './cli/acp-workflow-mode.test.ts',
       './cli/daemon-workflow-intent.test.ts',
       './cli/daemon-workflow-mode.test.ts',
+      './cli/daemon-workflow-background.test.ts',
       './cli/list_directory.test.ts',
       './cli/tool-hook-context.test.ts',
       './cli/tool-hook-updated-input.test.ts',

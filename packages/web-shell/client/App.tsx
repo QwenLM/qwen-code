@@ -11081,31 +11081,7 @@ export function App({
         if (item === 'workflows') return workflowsEnabled;
         if (item === 'prWatches') return prWatchesAvailable;
         return true;
-      }) ||
-        (sidebarOptions.footer !== false &&
-          sidebarOptions.footer?.items?.some((item) => {
-            if (item === 'collapse') return false;
-            if (item === 'settings') return settingsAvailable;
-            if (item === 'sessionsOverview' || item === 'splitView') {
-              return isSidebarFooterItemAvailable(
-                item,
-                projectFeaturesAvailable,
-                isLargeScreen,
-              );
-            }
-            if (item === 'workspacesOverview') return !lockedWorkspaceCwd;
-            if (item === 'localFiles' || item === 'desktopRelay')
-              return isPageOriginDaemon(workspace.baseUrl);
-            if (item === 'update') {
-              return (
-                !isDesktopShell() &&
-                Boolean(
-                  connection.capabilities?.features?.includes('daemon_update'),
-                )
-              );
-            }
-            return true;
-          })),
+      }),
     );
   const navigationRailVisible =
     sidebarOptions.enabled &&
@@ -24641,7 +24617,10 @@ export function App({
                           configurations: modelConfigurations.models,
                           onUpdateContextWindow: handleModelContextWindowUpdate,
                           currentModelId:
-                            connection.currentModel ?? undefined,
+                            (connection.sessionId
+                              ? connection.currentModel
+                              : currentModel || connection.currentModel) ??
+                            undefined,
                           loading:
                             providersState.loading ||
                             modelConfigurations.loading,
@@ -25815,7 +25794,8 @@ export function App({
                       {/* Workspace-level hooks trust decision uses the same
                           approval slot and card as tool approvals; it is not
                           a session permission request. */}
-                      {!managedMode &&
+                      {workspaceContextActive &&
+                        !managedMode &&
                         !pendingToolApproval &&
                         mainView === 'chat' && (
                           <div className={styles.approvalOverlay}>

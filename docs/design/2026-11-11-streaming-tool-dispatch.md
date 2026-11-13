@@ -2,7 +2,7 @@
 
 [English](2026-11-11-streaming-tool-dispatch.md) | [简体中文](2026-11-11-streaming-tool-dispatch.zh-CN.md)
 
-- **Status**: evaluation complete; recommendation below. This is the third slice of the [event-bus agent loop](2026-11-11-event-bus-agent-loop.md) port (PR 1 #16935 merged, PR 2 #16938 in review). It is the "evaluate and decide" slice that design named; it records the parity differences and the implementation design, and makes the call on whether/when to implement.
+- **Status**: evaluation complete; recommendation below. This is the third slice of the [event-bus agent loop](2026-11-11-event-bus-agent-loop.md) port (PR 1 #16935 merged, PR 2 #16938 merged). It is the "evaluate and decide" slice that design named; it records the parity differences and the implementation design, and makes the call on whether/when to implement.
 - **Date**: 2026-11-11. Line citations verified on `feat/event-bus-handlers` (PR 2 #16938, atop `origin/main` `1fe1f197781c`).
 - **Source of the behavior**: `v1.0.0-preview` `587e3429cabf`, `event-bus/llm/inference-round.ts`, `event-bus/tool-handler.ts`, `tool-executor/`.
 
