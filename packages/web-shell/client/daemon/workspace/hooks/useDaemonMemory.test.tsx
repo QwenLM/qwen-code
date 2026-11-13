@@ -7,7 +7,7 @@
 
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -52,6 +52,8 @@ function statusWith(file: Record<string, unknown>) {
 }
 
 describe('useDaemonMemory.readMemoryFile', () => {
+  beforeEach(() => vi.resetAllMocks());
+
   it('reads through the memory route instead of the sandboxed file API', async () => {
     actions.loadMemoryStatus.mockResolvedValue(
       statusWith({ bytes: 4, content: 'mem\n' }),
@@ -63,6 +65,46 @@ describe('useDaemonMemory.readMemoryFile', () => {
     });
     expect(actions.loadMemoryStatus).toHaveBeenCalledWith({
       includeContent: true,
+    });
+    expect(actions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('keeps explicitly withheld content read-only without using the file API', async () => {
+    actions.loadMemoryStatus.mockResolvedValue(
+      statusWith({ bytes: 4, truncated: true }),
+    );
+    actions.readWorkspaceFile.mockResolvedValue({
+      content: 'decoded without its BOM',
+      truncated: false,
+    });
+
+    await expect(captureReadMemoryFile()(GLOBAL_PATH)).resolves.toEqual({
+      content: '',
+      truncated: true,
+    });
+    expect(actions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('preserves the read-only marker for a partial content prefix', async () => {
+    actions.loadMemoryStatus.mockResolvedValue(
+      statusWith({ bytes: 8, content: 'part', truncated: true }),
+    );
+
+    await expect(captureReadMemoryFile()(GLOBAL_PATH)).resolves.toEqual({
+      content: 'part',
+      truncated: true,
+    });
+    expect(actions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('accepts complete empty content without falling back', async () => {
+    actions.loadMemoryStatus.mockResolvedValue(
+      statusWith({ bytes: 0, content: '', truncated: false }),
+    );
+
+    await expect(captureReadMemoryFile()(GLOBAL_PATH)).resolves.toEqual({
+      content: '',
+      truncated: false,
     });
     expect(actions.readWorkspaceFile).not.toHaveBeenCalled();
   });

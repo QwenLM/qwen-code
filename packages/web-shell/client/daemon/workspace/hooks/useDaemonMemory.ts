@@ -30,6 +30,11 @@ export function useDaemonMemory(options: DaemonResourceOptions = {}) {
       if (typeof file?.content === 'string') {
         return { content: file.content, truncated: file.truncated === true };
       }
+      if (file?.truncated === true) {
+        // The daemon deliberately withheld non-round-trippable content.
+        // A generic file read can decode it without preserving its bytes.
+        return { content: '', truncated: true };
+      }
       return workspaceActions.readWorkspaceFile(filePath);
     },
     [workspaceActions],

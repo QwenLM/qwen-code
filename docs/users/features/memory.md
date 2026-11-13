@@ -233,7 +233,9 @@ Two things to know before enabling it:
 
 ### `/memory`
 
-Opens the Memory panel. From here you can:
+Opens the Memory panel. In Web Shell, files remain read-only when the daemon cannot provide their complete content without losing encoding information.
+
+From here you can:
 
 - Turn auto-memory saving on or off
 - Turn periodic cleanup (dream) on or off
