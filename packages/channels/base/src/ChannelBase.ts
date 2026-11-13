@@ -74,13 +74,20 @@ import type {
   ChannelPromptImage,
   ChannelLoopToolCreateInput,
   ChannelLoopToolResult,
+  ChannelWorkflowOrigin,
   PermissionRequestEvent,
   PermissionResolvedEvent,
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
-import { ChannelPromptCancelledError } from './ChannelAgentBridge.js';
+import {
+  BACKGROUND_WORKFLOW_APPROVAL_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
+  ChannelPromptCancelledError,
+  parseChannelWorkflowOrigin,
+} from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
+import type { BackgroundOutputTarget } from './background-output-coordinator.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
 import {
   buildChannelWebhookPrompt,
@@ -101,11 +108,6 @@ import {
   selectRelevantChannelMemoryFromIndex,
   type ChannelMemoryRecallIndex,
 } from './channel-memory-recall.js';
-
-interface BackgroundResponseDeliveryTarget {
-  target: SessionTarget;
-  sourceLabel?: string;
-}
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -370,6 +372,7 @@ type PendingPermission = {
   sessionId: string;
   runId?: string;
   target: SessionTarget;
+  workflowOrigin?: ChannelWorkflowOrigin;
   request: PermissionRequestEvent['request'];
   sourceLabel?: string;
   taskName?: string;
@@ -601,6 +604,8 @@ export abstract class ChannelBase {
   };
   private readonly pendingPermissions = new Map<string, PendingPermission>();
   private readonly pendingPermissionsByChat = new Map<string, string[]>();
+  // A workflow may settle its approval while the named-task lookup awaits.
+  private readonly preparingWorkflowApprovals = new Set<string>();
   private readonly channelLoopToolHandler = {
     canHandle: (sessionId: string) =>
       this.router.getTarget(sessionId)?.channelName === this.name,
@@ -640,9 +645,20 @@ export abstract class ChannelBase {
   async dispatchBackgroundResponse(
     sessionId: string,
     text: string,
-    _context?: BackgroundResponseContext,
+    context?: BackgroundResponseContext,
   ): Promise<void> {
     if (text.trim().length === 0) return;
+    if (context?.kind === 'workflow') {
+      const origin = context.channelWorkflowOrigin;
+      if (!origin) return;
+      const delivery = await this.resolveBackgroundResponseDelivery(
+        sessionId,
+        origin,
+      );
+      if (!delivery || !this.workflowTarget(sessionId, origin)) return;
+      await this.deliverBackgroundResponseToTarget(sessionId, text, delivery);
+      return;
+    }
     const delivery = await this.resolveBackgroundResponseDelivery(sessionId);
     if (!delivery || this.router.getTarget(sessionId) !== delivery.target) {
       return;
@@ -652,8 +668,11 @@ export abstract class ChannelBase {
 
   protected getBackgroundResponseSourceLabel(
     sessionId: string,
+    workflowOrigin?: ChannelWorkflowOrigin,
   ): string | undefined {
-    const target = this.router.getTarget(sessionId);
+    const target = workflowOrigin
+      ? this.workflowTarget(sessionId, workflowOrigin)
+      : this.router.getTarget(sessionId);
     const presentation = this.namedSessions?.presentation(sessionId);
     if (
       !target ||
@@ -670,14 +689,19 @@ export abstract class ChannelBase {
 
   protected async resolveBackgroundResponseDelivery(
     sessionId: string,
-  ): Promise<BackgroundResponseDeliveryTarget | undefined> {
-    let target = this.router.getTarget(sessionId);
+    workflowOrigin?: ChannelWorkflowOrigin,
+  ): Promise<BackgroundOutputTarget | undefined> {
+    const getTarget = () =>
+      workflowOrigin
+        ? this.workflowTarget(sessionId, workflowOrigin)
+        : this.router.getTarget(sessionId);
+    let target = getTarget();
     if (!target || target.channelName !== this.name) return undefined;
     let sourceLabel: string | undefined;
     if (this.namedSessions) {
       const presentation =
         await this.namedSessions.resolvePresentation(sessionId);
-      const currentTarget = this.router.getTarget(sessionId);
+      const currentTarget = getTarget();
       const currentPresentation = this.namedSessions.presentation(sessionId);
       if (
         !presentation ||
@@ -695,21 +719,38 @@ export abstract class ChannelBase {
       target = currentTarget;
       sourceLabel = this.createSourceLabel(presentation, target);
     }
-    return { target, sourceLabel };
+    return {
+      target,
+      sourceLabel,
+      ...(workflowOrigin ? { workflowOrigin } : {}),
+    };
   }
 
   protected async deliverBackgroundResponseToTarget(
     sessionId: string,
     text: string,
-    delivery: BackgroundResponseDeliveryTarget,
+    delivery: BackgroundOutputTarget,
   ): Promise<void> {
-    const { target, sourceLabel } = delivery;
+    const { target, sourceLabel, workflowOrigin } = delivery;
+    if (workflowOrigin && !workflowOrigin.userInitiated) {
+      await this.pushProactive(target, text, sourceLabel);
+      return;
+    }
     if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
       if (sourceLabel) {
         await this.pushProactive(target, text, sourceLabel);
       } else {
         await this.pushProactive(target, text);
       }
+      return;
+    }
+    if (workflowOrigin) {
+      await this.sendThreadMessage(
+        target.chatId,
+        target.threadId,
+        text,
+        sourceLabel,
+      );
       return;
     }
     if (sourceLabel) {
@@ -910,7 +951,22 @@ export abstract class ChannelBase {
   async dispatchPermissionRequest(
     event: PermissionRequestEvent,
   ): Promise<void> {
-    const target = this.permissionTargetForEvent(event);
+    const backgroundWorkflow =
+      event.request.toolCall._meta?.[BACKGROUND_WORKFLOW_APPROVAL_META_KEY] ===
+      true;
+    const workflowOrigin = backgroundWorkflow
+      ? parseChannelWorkflowOrigin(
+          event.request.toolCall._meta?.[CHANNEL_WORKFLOW_ORIGIN_META_KEY],
+        )
+      : undefined;
+    if (backgroundWorkflow && workflowOrigin?.channelName !== this.name) {
+      return;
+    }
+    const getTarget = () =>
+      workflowOrigin
+        ? this.workflowTarget(event.sessionId, workflowOrigin)
+        : this.permissionTargetForEvent(event.sessionId);
+    const target = getTarget();
     if (!target) {
       try {
         await this.bridge.respondToPermission?.(event.requestId, {
@@ -927,11 +983,15 @@ export abstract class ChannelBase {
     let taskName: string | undefined;
     if (this.namedSessions) {
       let presentation: NamedSessionTaskReference | undefined;
+      if (backgroundWorkflow) {
+        this.preparingWorkflowApprovals.add(event.requestId);
+      }
       try {
         presentation = await this.namedSessions.resolvePresentation(
           event.sessionId,
         );
       } catch (err) {
+        this.preparingWorkflowApprovals.delete(event.requestId);
         try {
           await this.bridge.respondToPermission?.(event.requestId, {
             outcome: { outcome: 'cancelled' },
@@ -943,7 +1003,13 @@ export abstract class ChannelBase {
         }
         throw err;
       }
-      const currentTarget = this.permissionTargetForEvent(event);
+      if (
+        backgroundWorkflow &&
+        !this.preparingWorkflowApprovals.delete(event.requestId)
+      ) {
+        return;
+      }
+      const currentTarget = getTarget();
       const currentPresentation = this.namedSessions.presentation(
         event.sessionId,
       );
@@ -969,7 +1035,9 @@ export abstract class ChannelBase {
         }
         return;
       }
-      const active = this.activePrompts.get(event.sessionId);
+      const active = backgroundWorkflow
+        ? undefined
+        : this.activePrompts.get(event.sessionId);
       sourceLabel = active
         ? active.sourceLabel
         : this.createSourceLabel(presentation, target);
@@ -991,8 +1059,11 @@ export abstract class ChannelBase {
     const pending: PendingPermission = {
       requestId: event.requestId,
       sessionId: event.sessionId,
-      runId: this.activePrompts.get(event.sessionId)?.runId,
+      runId: backgroundWorkflow
+        ? undefined
+        : this.activePrompts.get(event.sessionId)?.runId,
       target,
+      ...(workflowOrigin ? { workflowOrigin } : {}),
       request: event.request,
       ...(sourceLabel ? { sourceLabel } : {}),
       ...(taskName ? { taskName } : {}),
@@ -1004,13 +1075,15 @@ export abstract class ChannelBase {
     requestIds.push(event.requestId);
     this.pendingPermissionsByChat.set(chatKey, requestIds);
     try {
-      const presentation = this.tryPresentUserInput(pending);
-      if (presentation && (await presentation)) {
-        return;
-      }
-      const permissionPresentation = this.tryPresentPermission(pending);
-      if (permissionPresentation && (await permissionPresentation)) {
-        return;
+      if (!backgroundWorkflow) {
+        const presentation = this.tryPresentUserInput(pending);
+        if (presentation && (await presentation)) {
+          return;
+        }
+        const permissionPresentation = this.tryPresentPermission(pending);
+        if (permissionPresentation && (await permissionPresentation)) {
+          return;
+        }
       }
       const text = this.formatPermissionRequest(pending);
       if (
@@ -1380,14 +1453,55 @@ export abstract class ChannelBase {
     return pending.responsePromise;
   }
 
-  private permissionTargetForEvent(
-    event: PermissionRequestEvent,
+  protected workflowTarget(
+    sessionId: string,
+    origin: ChannelWorkflowOrigin,
   ): SessionTarget | undefined {
-    const routeTarget = this.router.getTarget(event.sessionId);
+    const routed = this.router.getTarget(sessionId);
+    if (
+      origin.channelName !== this.name ||
+      routed?.channelName !== this.name ||
+      (origin.messageRoute !== undefined &&
+        !this.messageRoutes.has(origin.messageRoute)) ||
+      !this.router.isSessionLive(sessionId)
+    ) {
+      return undefined;
+    }
+    if (this.namedSessions) {
+      return this.sameTaskOwner(origin, routed) ? origin : undefined;
+    }
+    if (
+      this.router.getSession(
+        this.name,
+        origin.senderId,
+        origin.chatId,
+        origin.threadId,
+        origin.messageRoute,
+      ) === sessionId
+    ) {
+      return origin;
+    }
+    // Webhook sessions can have a synthetic routing key while retaining the
+    // actual delivery target.
+    if (
+      !origin.userInitiated &&
+      this.sameTaskOwner(origin, routed) &&
+      origin.threadId === routed.threadId &&
+      origin.messageRoute === routed.messageRoute
+    ) {
+      return origin;
+    }
+    return undefined;
+  }
+
+  private permissionTargetForEvent(
+    sessionId: string,
+  ): SessionTarget | undefined {
+    const routeTarget = this.router.getTarget(sessionId);
     if (!routeTarget || routeTarget.channelName !== this.name) {
       return undefined;
     }
-    const active = this.activePrompts.get(event.sessionId);
+    const active = this.activePrompts.get(sessionId);
     if (!active) {
       return routeTarget;
     }
@@ -1408,6 +1522,7 @@ export abstract class ChannelBase {
   }
 
   dispatchPermissionResolved(event: PermissionResolvedEvent): void {
+    this.preparingWorkflowApprovals.delete(event.requestId);
     const pending = this.pendingPermissions.get(event.requestId);
     if (!pending) {
       return;
@@ -1879,6 +1994,10 @@ export abstract class ChannelBase {
 
   protected supportsProactiveWebhookTarget(target: SessionTarget): boolean {
     return this.supportsProactiveTarget(target);
+  }
+
+  protected canDeliverBackgroundWorkflow(_target: SessionTarget): boolean {
+    return true;
   }
 
   protected async pushProactive(
@@ -2385,6 +2504,7 @@ export abstract class ChannelBase {
           sessionId,
           promptToSend,
           promptState,
+          job.target,
           job.id,
           options.timeoutMs,
         );
@@ -2685,6 +2805,7 @@ export abstract class ChannelBase {
           sessionId,
           promptToSend,
           promptState,
+          target,
           taskId,
           options.timeoutMs,
         );
@@ -2790,11 +2911,13 @@ export abstract class ChannelBase {
     sessionId: string,
     promptText: string,
     promptState: ActivePrompt,
+    workflowOrigin: SessionTarget,
     jobId: string,
     timeoutMs: number | undefined,
   ): Promise<string> {
     const prompt = promptBridge.prompt(sessionId, promptText, {
       displayText: sanitizeDisplayText(promptText),
+      workflowOrigin,
     });
     prompt.catch(() => {});
     if (timeoutMs === undefined) {
@@ -2937,7 +3060,9 @@ export abstract class ChannelBase {
         }
         active.cancelled = true;
         this.dropCollectBuffer(sessionId);
-        this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
+        this.removePendingPermissionsForSession(sessionId, 'run_cancelled', {
+          preserveBackgroundWorkflows: reason !== 'clear',
+        });
         this.emitTaskCancellation(active, sessionId, reason);
         return true;
       });
@@ -3326,9 +3451,17 @@ export abstract class ChannelBase {
   private removePendingPermissionsForSession(
     sessionId: string,
     reason: UserInputSettlementReason = 'cancelled',
+    options?: { preserveBackgroundWorkflows: boolean },
   ): void {
     const requestIds = Array.from(this.pendingPermissions)
-      .filter(([, pending]) => pending.sessionId === sessionId)
+      .filter(
+        ([, pending]) =>
+          pending.sessionId === sessionId &&
+          (!options?.preserveBackgroundWorkflows ||
+            pending.request.toolCall._meta?.[
+              BACKGROUND_WORKFLOW_APPROVAL_META_KEY
+            ] !== true),
+      )
       .map(([requestId]) => requestId);
     for (const requestId of requestIds) {
       this.removePendingPermission(requestId, reason);
@@ -3336,6 +3469,7 @@ export abstract class ChannelBase {
   }
 
   private clearPendingPermissions(): void {
+    this.preparingWorkflowApprovals.clear();
     for (const requestId of Array.from(this.pendingPermissions.keys())) {
       this.removePendingPermission(requestId, 'cancelled');
     }
@@ -3441,7 +3575,16 @@ export abstract class ChannelBase {
     pending: PendingPermission,
     requireOwner: boolean,
   ): boolean {
-    if (requireOwner) {
+    const origin = pending.workflowOrigin;
+    if (origin) {
+      if (
+        !this.workflowTarget(pending.sessionId, origin) ||
+        (requireOwner &&
+          (!origin.userInitiated || origin.senderId !== envelope.senderId))
+      ) {
+        return false;
+      }
+    } else if (requireOwner) {
       const active = this.activePrompts.get(pending.sessionId);
       if (
         !active ||
@@ -7392,6 +7535,7 @@ export abstract class ChannelBase {
               this.removePendingPermissionsForSession(
                 sessionId,
                 'run_cancelled',
+                { preserveBackgroundWorkflows: true },
               );
             }
             // Diagnostic watchdog: if the predecessor turn is STILL the active prompt
@@ -7662,7 +7806,22 @@ export abstract class ChannelBase {
           if (!this.canStartInboundTurn()) {
             throw new ChannelPromptCancelledError();
           }
+          const workflowTarget: SessionTarget = {
+            channelName: this.name,
+            chatId: envelope.chatId,
+            threadId: envelope.threadId,
+            senderId: envelope.senderId,
+            isGroup: envelope.isGroup,
+            messageRoute: envelope.messageRoute,
+          };
           let response = await promptBridge.prompt(sessionId, promptToSend, {
+            workflowOrigin: {
+              ...workflowTarget,
+              userInitiated: true,
+              ...(!this.canDeliverBackgroundWorkflow(workflowTarget)
+                ? { backgroundWorkflowBlocked: true }
+                : {}),
+            },
             ...(this.config.outputMode === 'per_task'
               ? {
                   outputMode: 'per_task' as const,

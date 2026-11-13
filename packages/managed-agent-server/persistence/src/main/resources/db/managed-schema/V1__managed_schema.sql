@@ -1248,6 +1248,7 @@ CREATE TABLE ma_delivery (
     source_revision BIGINT UNSIGNED COMMENT 'Source record revision captured by the delivery.',
     segment_id VARBINARY(512) COMMENT 'Identity of an external channel message segment.',
     segment_ordinal BIGINT UNSIGNED COMMENT 'Ordering position of a segment within the delivery.',
+    segment_count INT UNSIGNED COMMENT 'Immutable number of segments in the channel delivery plan, used by the reconcile gate to prove the segment ledger complete.',
     creation_key VARBINARY(2048) COMMENT 'Original child-Session creation identity for child-result recovery.',
     provider_id VARBINARY(2048) COMMENT 'External provider identity associated with the delivery.',
     provider_receipt_json LONGTEXT COMMENT 'Receipt returned by the external delivery provider.',
@@ -1519,3 +1520,50 @@ CREATE INDEX idx_ma_extension_source_import_workspace ON ma_extension_source_imp
 CREATE INDEX idx_ma_extension_settings_workspace ON ma_extension_settings (tenant_id, workspace_id);
 
 CREATE INDEX idx_ma_extension_operation_workspace ON ma_extension_operation (tenant_id, workspace_id);
+
+CREATE TABLE ma_client_files_binding (
+    session_scope_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and Session identity.',
+    tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARBINARY(512) NOT NULL COMMENT 'Managed Session identity.',
+    actor_id VARBINARY(2048) NOT NULL COMMENT 'Authenticated actor that registered the client directory.',
+    generation BIGINT UNSIGNED NOT NULL COMMENT 'Monotonic registration generation fencing stale connections.',
+    state VARCHAR(16) NOT NULL COMMENT 'Binding lifecycle state: active or closed.',
+    server_id VARCHAR(128) NOT NULL COMMENT 'Client-hosted MCP server name exposed to the Session.',
+    token_hash CHAR(64) NOT NULL COMMENT 'Hash of the session relay credential, never the plaintext.',
+    connection_id VARCHAR(64) COMMENT 'Browser registration identity correlating the downlink with its own register.',
+    expires_at BIGINT UNSIGNED NOT NULL COMMENT 'Binding deadline in Unix epoch milliseconds.',
+    gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
+    gmt_modified BIGINT UNSIGNED NOT NULL COMMENT 'Last record update time in Unix epoch milliseconds.',
+    CONSTRAINT uk_ma_client_files_binding_business_key UNIQUE (session_scope_key),
+    CONSTRAINT ck_ma_client_files_binding_state CHECK ((CASE state WHEN 'active' THEN 6 WHEN 'closed' THEN 6 ELSE -1 END = CHAR_LENGTH(state))),
+    CONSTRAINT ck_ma_client_files_binding_generation CHECK (generation > 0),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_client_files_binding_id PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Ephemeral client filesystem registrations, no file content persisted.';
+
+CREATE INDEX idx_ma_client_files_binding_expiry ON ma_client_files_binding (state, expires_at);
+CREATE INDEX idx_ma_client_files_binding_session ON ma_client_files_binding (session_id);
+
+CREATE TABLE ma_client_files_request (
+    request_key CHAR(64) NOT NULL COMMENT 'Hashed Session and JSON-RPC request identity.',
+    session_scope_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and Session identity.',
+    tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARBINARY(512) NOT NULL COMMENT 'Managed Session identity.',
+    binding_generation BIGINT UNSIGNED NOT NULL COMMENT 'Registration generation this request belongs to.',
+    request_id VARCHAR(128) NOT NULL COMMENT 'JSON-RPC request identity as text.',
+    payload_json LONGTEXT NOT NULL COMMENT 'Opaque JSON-RPC request forwarded to the browser, size-bounded by the service.',
+    state VARCHAR(16) NOT NULL COMMENT 'Request lifecycle state: queued, answered, failed, or expired.',
+    response_json LONGTEXT COMMENT 'Opaque JSON-RPC response returned by the browser, size-bounded by the service.',
+    error_code VARCHAR(128) COMMENT 'Safe machine-readable failure reason.',
+    expires_at BIGINT UNSIGNED NOT NULL COMMENT 'Request deadline in Unix epoch milliseconds.',
+    gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
+    gmt_modified BIGINT UNSIGNED NOT NULL COMMENT 'Last record update time in Unix epoch milliseconds.',
+    CONSTRAINT uk_ma_client_files_request_business_key UNIQUE (request_key),
+    CONSTRAINT ck_ma_client_files_request_state CHECK ((CASE state WHEN 'queued' THEN 6 WHEN 'answered' THEN 8 WHEN 'failed' THEN 6 WHEN 'expired' THEN 7 ELSE -1 END = CHAR_LENGTH(state))),
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
+    CONSTRAINT pk_ma_client_files_request_id PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Bounded TTL queue of client filesystem MCP requests, never journaled.';
+
+CREATE INDEX idx_ma_client_files_request_drain ON ma_client_files_request (session_scope_key, state, id);
+CREATE INDEX idx_ma_client_files_request_expiry ON ma_client_files_request (state, expires_at);
+CREATE INDEX idx_ma_client_files_request_session ON ma_client_files_request (session_scope_key);

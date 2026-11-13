@@ -494,6 +494,11 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     ).toBe(true);
   });
 
+  it('reviews an amend even when an allow rule already matched', () => {
+    expect(forcesReview('git commit --amend --no-edit')).toBe(true);
+    expect(forcesReview('git status')).toBe(false);
+  });
+
   it('returns true for nested wrappers writing protected paths after `cd`', () => {
     // Regression guard: without `extractShellOperationsAcrossCommand` doing
     // cross-segment cd tracking AND recursive wrapper unwrapping, this payload
@@ -1578,6 +1583,28 @@ describe('applyAutoModeDecision — blocked:destructive-command escalation', () 
       if (result.kind === 'fallback') {
         expect(result.requiresHumanDecision).toBe(true);
       }
+    }
+  });
+
+  it('marks the amend approval as one a PermissionRequest hook cannot waive', async () => {
+    // The marker has to travel on the decision, or a hook `allow` rewrites a
+    // human-authored commit with nobody in the loop.
+    const decision = await evaluate({
+      toolName: ToolNames.SHELL,
+      command: 'git commit --amend --no-edit',
+    });
+    expect(decision.via).toBe('fallback');
+    if (decision.via === 'fallback') {
+      expect(decision.reason).toBe('safety_check');
+      expect(decision.requiresHumanDecision).toBe(true);
+      // The message is what makes the scheduler hide "always allow".
+      expect(decision.message).toContain('requires manual approval');
+    }
+    const { result } = apply(decision, counters(0, 0, 0, 0));
+    expect(result.kind).toBe('fallback');
+    if (result.kind === 'fallback') {
+      expect(result.requiresHumanDecision).toBe(true);
+      expect(result.message).toContain('requires manual approval');
     }
   });
 
