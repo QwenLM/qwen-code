@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.managedagent.contracts.automation;
 
 import com.alibaba.qwen.code.managedagent.model.ApiModels.AutomationDefinitionRequest;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
@@ -24,23 +23,23 @@ public final class AutomationSessionModels {
     }
 
     public record Create(
-            @JsonProperty("workspace_id") @NotBlank @Size(max = 512) String workspaceId,
-            @JsonProperty("writer_id") @NotBlank @Size(max = 512) String writerId,
-            @JsonProperty("writer_generation") @Min(1) @Max(9007199254740991L) long writerGeneration,
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(9007199254740991L) long writerGeneration,
             AutomationDefinitionRequest definition) {
     }
 
     public record ListRequest(
-            @JsonProperty("workspace_id") @NotBlank @Size(max = 512) String workspaceId,
-            @JsonProperty("writer_id") @NotBlank @Size(max = 512) String writerId,
-            @JsonProperty("writer_generation") @Min(1) @Max(9007199254740991L) long writerGeneration,
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(9007199254740991L) long writerGeneration,
             String cursor, Integer limit) {
     }
 
     public record Retire(
-            @JsonProperty("workspace_id") @NotBlank @Size(max = 512) String workspaceId,
-            @JsonProperty("writer_id") @NotBlank @Size(max = 512) String writerId,
-            @JsonProperty("writer_generation") @Min(1) @Max(9007199254740991L) long writerGeneration,
-            @JsonProperty("automation_id") @NotBlank String automationId) {
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(9007199254740991L) long writerGeneration,
+            @NotBlank String automationId) {
     }
 }
