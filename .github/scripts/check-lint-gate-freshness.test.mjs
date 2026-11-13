@@ -819,10 +819,40 @@ test('a truncated tree never narrows, and says so', async () => {
   );
 });
 
+test('a base ref containing a hash is URI-encoded in the tree path', async () => {
+  // This is the shape the encoder is actually for. '#' and '%' are legal in a
+  // git branch name, and an unencoded '#' starts the fragment and swallows
+  // '?recursive=1' with it, so the request answers for a DIFFERENT ref instead
+  // of failing. Measured live: git/trees/main#frag?recursive=1 -> 200 with 42
+  // top-level entries, git/trees/main%23frag?recursive=1 -> 404, and
+  // git/trees/main?recursive=1 -> 200 with 16226. Silent wrong-tree read, not a
+  // fail-closed refusal. BASE_REF is github.event.pull_request.base.ref, so a
+  // 'fix#1'-style base branch reaches this path verbatim.
+  const calls = [];
+  const stale = await findStaleGateFiles({
+    ...PRETTIER_OPTS,
+    baseRef: 'fix#1',
+    ...prettierFetch(
+      {
+        basePi: ['node_modules', 'packages/live-host/'],
+        headPi: ['node_modules'],
+        baseRef: 'fix#1',
+      },
+      calls,
+    ),
+  });
+  assert.deepEqual(stale, []);
+  assert.ok(
+    calls.some((c) => c.includes('/git/trees/fix%231?recursive=1')),
+    `expected an encoded tree ref, got ${JSON.stringify(calls)}`,
+  );
+});
+
 test('a base ref containing a slash is URI-encoded in the tree path', async () => {
-  // Without encodeURIComponent the request 404s for e.g. release/1.0, the
-  // narrowing throws into the fail-closed catch and the verdict is kept — a
-  // false red rather than a false green, but silent. Pin the encoded shape.
+  // A slash survives an unencoded path: measured against the live API,
+  // git/trees/agent/agent-view-commands?recursive=1 answers 200 with the same
+  // tree sha as the encoded form. So this case pins the encoded STRING; the
+  // shape that actually misbehaves without the encoder is '#' below.
   const calls = [];
   const stale = await findStaleGateFiles({
     ...PRETTIER_OPTS,
