@@ -609,7 +609,7 @@ A difference fails the scenario unless it is listed with a linked issue.
 - a subagent's call of a tool it may not use beside a read, in one response (PR 5b);
 - a subagent whose model fails.
 
-From PR 5c each subagent scenario also runs with `experimental.eventBusAgentLoop` on and must match the run on the shared loop.
+From PR 5c each subagent scenario also runs with `experimental.eventBusAgentLoop` on and must match the run on the shared loop. Every headless scenario now does: the run with both settings on must match the run on the shared loop, and the event-bus adapter's debug marker must count one `runAgentLoop` call per main-session round; the two runs without the kernel must log none.
 
 **ACP scenarios** (`integration-tests/cli/acp-agent-loop-parity.test.ts`):
 
