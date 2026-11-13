@@ -571,6 +571,123 @@ describe('WorkspaceSelector', () => {
     expect(document.querySelector('[role="menu"]')).toBeNull();
   });
 
+  it('returns focus to the filter from the first enabled item on ArrowUp', async () => {
+    const element = renderSelector({
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/primary',
+          label: 'primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'second',
+          cwd: '/second',
+          label: 'second',
+          primary: false,
+          trusted: true,
+        },
+      ],
+      scratchSupported: false,
+      existingFolderSupported: false,
+    });
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.focus();
+    });
+    act(() => {
+      filter.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    const items = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ];
+    const first = items.find((entry) =>
+      entry.textContent?.includes('primary'),
+    )!;
+    expect(document.activeElement).toBe(first);
+    // There is no item above the first one, so ArrowUp goes back to the
+    // filter field instead of roving nowhere.
+    act(() => {
+      first.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowUp',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(document.activeElement).toBe(filter);
+  });
+
+  it('does not return to the filter on ArrowUp from a non-first item', async () => {
+    const element = renderSelector({
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/primary',
+          label: 'primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'second',
+          cwd: '/second',
+          label: 'second',
+          primary: false,
+          trusted: true,
+        },
+      ],
+      scratchSupported: false,
+      existingFolderSupported: false,
+    });
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.focus();
+    });
+    act(() => {
+      filter.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowUp',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    const items = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ];
+    const second = items.find((entry) =>
+      entry.textContent?.includes('second'),
+    )!;
+    expect(document.activeElement).toBe(second);
+    // ArrowUp from a non-first item stays inside the list (roving focus
+    // moves to the previous item) and must not hand focus to the filter.
+    await act(async () => {
+      second.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowUp',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    expect(document.activeElement).not.toBe(filter);
+  });
+
   it('keeps matching host groups and drops empty ones while filtering', async () => {
     const element = renderSelector({
       workspaces: [
