@@ -75,8 +75,16 @@ bare 浏览器读取及 inline-string 流往返也通过。
 
 同期全工作区 audit 本批前后保持 94 项（low 14、moderate 40、high 33、critical 7），
 不能据此宣称 audit 数减少，源码依赖图移除单独评估。独立本地评审未发现可行动
-缺陷，并单独复跑三项新增回归通过。最终包消费端检查仍待完成。在 #17149 父 PR
-合并并可 retarget 前，保持 stacked 草稿。
+缺陷，并单独复跑三项新增回归通过。实际 ExcelJS 父包的普通 glob/directory ZIP
+生成也通过，七个输出文件内容均符合预期。
+
+Web Shell 发布前 verifier 通过。实际 tarball 含 874 个文件、解包 7,497,577
+字节；新消费端与同树 SDK 候选 tarball 一起安装，不带 overrides 或 workspace
+链接，无 DOM 导入根入口/transcript 和 Vite 5.4.21 生产构建均通过。
+SpreadsheetPreview 仍为动态 chunk，包内与消费端输出的 inline worker 字节一致，
+受控 Node worker_threads 的 load/sheet 消息能正确解析普通工作簿。该资产/协议
+控制与仓库 11 项真实浏览器测试分开，不代表所有浏览器 Blob Worker 生命周期或
+发布完成。在 #17149 父 PR 合并并可 retarget 前，保持 stacked 草稿。
 
 ## 剩余工作
 

@@ -92,9 +92,19 @@ The same-time whole-workspace audit remains 94 reported findings before and
 after this batch (14 low, 40 moderate, 33 high, 7 critical). This does not
 demonstrate an audit reduction; source graph removal is assessed separately.
 Independent local review found no actionable defect and separately reran the
-three new regressions successfully. Final package-consumer checks are still
-pending. Keep this batch a draft stacked on #17149 until the parent merges and
-it can be retargeted.
+three new regressions successfully. The actual ExcelJS parent also creates
+ordinary glob/directory ZIPs whose seven file contents match expectations.
+
+The Web Shell publish verifier passes. Its actual tarball contains 874 files
+(7,497,577 bytes unpacked); a fresh consumer installs it with the same-tree SDK
+candidate tarball without overrides or workspace links, imports the root and
+transcript without a DOM, and completes a Vite 5.4.21 production build. The
+SpreadsheetPreview chunk is still dynamic. The package and consumer output
+retain identical inline-worker bytes, and controlled Node worker-thread
+load/sheet messages correctly parse a normal workbook. This asset/protocol
+control is separate from the 11 real-browser repository tests; it does not
+certify every browser Blob Worker lifecycle or publication. Keep this batch a
+draft stacked on #17149 until the parent merges and it can be retargeted.
 
 ## Remaining work
 
