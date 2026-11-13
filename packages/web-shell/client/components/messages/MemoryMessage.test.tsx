@@ -211,6 +211,80 @@ describe('MemoryMessage', () => {
     expect(memory.reload).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps editing when a refresh completes without cancellation', async () => {
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'existing memory\n',
+      truncated: false,
+    });
+    await mountOnUserTab();
+    act(() => button('Edit').click());
+    await flush();
+    memory.reload.mockResolvedValue(memory.status);
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'refreshed memory\n',
+      truncated: false,
+    });
+
+    await refreshMemory();
+
+    expect(container.querySelector('textarea')?.value).toBe(
+      'refreshed memory\n',
+    );
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+  });
+
+  it.each(['before', 'after'] as const)(
+    'keeps view mode when editing is cancelled %s the refreshed list arrives',
+    async (cancelWhen) => {
+      memory.readMemoryFile.mockResolvedValue({
+        content: 'existing memory\n',
+        truncated: false,
+      });
+      await mountOnUserTab();
+      act(() => button('Edit').click());
+      await flush();
+      type(container.querySelector('textarea')!, 'unsaved draft\n');
+
+      let finishRefresh!: (status: DaemonWorkspaceMemoryStatus) => void;
+      memory.reload.mockImplementation(
+        () => new Promise((resolve) => (finishRefresh = resolve)),
+      );
+      let finishRead!: (result: {
+        content: string;
+        truncated: boolean;
+      }) => void;
+      memory.readMemoryFile.mockImplementation(
+        () => new Promise((resolve) => (finishRead = resolve)),
+      );
+      const readsBeforeRefresh = memory.readMemoryFile.mock.calls.length;
+      await refreshMemory();
+      if (cancelWhen === 'after') {
+        await act(async () => finishRefresh(memory.status!));
+      }
+
+      act(() => button('cancel').click());
+      await flush();
+      expect(container.querySelector('textarea')).toBeNull();
+      if (cancelWhen === 'before') {
+        await act(async () => finishRefresh(memory.status!));
+      }
+      await act(async () =>
+        finishRead({ content: 'refreshed memory\n', truncated: false }),
+      );
+
+      expect(container.querySelector('textarea')).toBeNull();
+      expect(container.textContent).toContain('refreshed memory');
+      expect(container.textContent).not.toContain('unsaved draft');
+      expect(container.textContent).not.toContain('Loading file');
+      expect(button('Edit').disabled).toBe(false);
+      expect(memory.readMemoryFile).toHaveBeenCalledTimes(
+        readsBeforeRefresh + 1,
+      );
+      expect(memory.reload).toHaveBeenCalledTimes(1);
+      expect(memory.writeMemory).not.toHaveBeenCalled();
+    },
+  );
+
   it('keeps the User tab read-only when its file cannot be read', async () => {
     memory.readMemoryFile.mockRejectedValue(
       new Error(`GET /file: path escapes workspace: ${GLOBAL_PATH}`),

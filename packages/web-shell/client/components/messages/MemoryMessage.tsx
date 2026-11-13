@@ -99,9 +99,9 @@ export function MemoryMessage({
   const canReplace = editable && status !== undefined;
 
   const loadContent = useCallback(
-    (entry: MemoryEntry | undefined, nextMode: MemoryMode) => {
+    (entry: MemoryEntry | undefined, nextMode?: MemoryMode) => {
       const loadSeq = ++loadSeqRef.current;
-      setMode(nextMode);
+      if (nextMode !== undefined) setMode(nextMode);
       setMessage(null);
       setContent('');
       setDraft('');
@@ -167,13 +167,10 @@ export function MemoryMessage({
     reload()
       .then((nextStatus) => {
         if (!nextStatus || loadSeq !== loadSeqRef.current) return;
-        loadContent(
-          {
-            ...selectedEntry,
-            file: fileForScope(nextStatus.files, selectedEntry.scope),
-          },
-          mode,
-        );
+        loadContent({
+          ...selectedEntry,
+          file: fileForScope(nextStatus.files, selectedEntry.scope),
+        });
         setMessage(t('memory.refreshed'));
       })
       .catch((refreshError: unknown) => {
@@ -184,7 +181,7 @@ export function MemoryMessage({
         setMessage(text);
         onMessage?.(text, 'error');
       });
-  }, [loadContent, mode, onMessage, refreshSignal, reload, selectedEntry, t]);
+  }, [loadContent, onMessage, refreshSignal, reload, selectedEntry, t]);
 
   useEffect(() => {
     if (addSignal <= 0) return;
