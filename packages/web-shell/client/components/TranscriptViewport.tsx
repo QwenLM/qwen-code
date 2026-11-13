@@ -230,8 +230,25 @@ export const TranscriptViewport = forwardRef<
     }
     return map;
   }, [blockOrdinal, messages]);
+  // The pill's label source: each user message's text (mid-turn insertions
+  // included) by its source block id. A turn's later user message supersedes
+  // its opening prompt as the label.
+  const userTextByBlock = useMemo(() => {
+    if (!(pinnedPrompt && turnNavigation)) return undefined;
+    const map = new Map<string, string>();
+    for (const message of messages) {
+      if (message.role === 'user' && message.content)
+        for (const id of message.sourceBlockIds ?? [])
+          map.set(id, message.content);
+    }
+    return map;
+  }, [pinnedPrompt, turnNavigation, messages]);
   const [follow, setFollow] = useState<
-    (TurnFollowRange & { promptInView: boolean }) | undefined
+    | (TurnFollowRange & {
+        promptInView: boolean;
+        lastUserText?: string;
+      })
+    | undefined
   >(undefined);
   const followFrame = useRef<number | undefined>(undefined);
   const updateFollow = useCallback(() => {
@@ -263,17 +280,35 @@ export const TranscriptViewport = forwardRef<
         prompts: row.dataset.messageRowKey?.startsWith('msg:')
           ? ids.map((id) => blockOrdinal.get(id))
           : [],
+        userText:
+          row.dataset.messageRowKey?.startsWith('msg:') && userTextByBlock
+            ? ids
+                .map((id) => userTextByBlock.get(id))
+                .find((text) => text !== undefined)
+            : undefined,
       };
     });
     const range = followRangeFromRows(measured, rect.top, rect.bottom);
+    // The label is the last user message (mid-turn insertions included) whose
+    // row starts at or above the reading line — the same anchor a third down
+    // the viewport that followRangeFromRows uses for the current turn.
+    const line = rect.top + (rect.bottom - rect.top) / 3;
+    const lastUser = measured
+      .filter((row) => row.userText !== undefined && row.top <= line)
+      .pop();
     const next = range && {
       ...range,
-      promptInView: measured.some(
-        (row) =>
-          row.prompts.includes(range.current) &&
-          row.bottom > rect.top &&
-          row.top < rect.bottom,
-      ),
+      promptInView:
+        measured.some(
+          (row) =>
+            row.prompts.includes(range.current) &&
+            row.bottom > rect.top &&
+            row.top < rect.bottom,
+        ) ||
+        (lastUser
+          ? lastUser.bottom > rect.top && lastUser.top < rect.bottom
+          : false),
+      lastUserText: lastUser?.userText,
     };
     setFollow((previous) =>
       previous &&
@@ -281,7 +316,8 @@ export const TranscriptViewport = forwardRef<
       previous.start === next.start &&
       previous.end === next.end &&
       previous.current === next.current &&
-      previous.promptInView === next.promptInView
+      previous.promptInView === next.promptInView &&
+      previous.lastUserText === next.lastUserText
         ? previous
         : next,
     );
@@ -290,6 +326,7 @@ export const TranscriptViewport = forwardRef<
     rows,
     blockOrdinal,
     turnOrdinal,
+    userTextByBlock,
     navigationVisible,
     pinnedPrompt,
   ]);
@@ -429,7 +466,8 @@ export const TranscriptViewport = forwardRef<
 
   const pinnedLabel =
     pinnedPrompt && follow && !follow.promptInView
-      ? ([...viewport.navigation.indexPages.values()]
+      ? (follow.lastUserText ??
+        [...viewport.navigation.indexPages.values()]
           .flatMap((page) => page.turns)
           .find((entry) => entry.ordinal === follow.current)?.label ??
         viewport.navigation.provisionalTurns[

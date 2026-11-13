@@ -71,8 +71,10 @@ const { TranscriptViewport } = await import('./TranscriptViewport');
 const message = (id: string): Message =>
   ({
     id,
-    role: id.startsWith('prompt') ? 'user' : 'assistant',
-    content: id,
+    role:
+      id.startsWith('prompt') || id.startsWith('mid') ? 'user' : 'assistant',
+    content:
+      id.startsWith('prompt') || id.startsWith('mid') ? `${id} text` : id,
     timestamp: 1,
     sourceBlockIds: [id],
   }) as Message;
@@ -81,6 +83,7 @@ const messages = [
   'output-0a',
   'output-0b',
   'prompt-1',
+  'mid-1',
   'output-1a',
   'output-1b',
 ].map(message);
@@ -159,13 +162,13 @@ const pinnedText = () =>
   undefined;
 
 describe('TranscriptViewport pinned prompt', () => {
-  it('shows the current turn label when its prompt row is above the viewport', () => {
+  it('shows the last user message text when its row is above the viewport', () => {
     observed.rows = [
       { id: 'prompt-1', top: -50, bottom: -10 },
       { id: 'output-1a', top: -10, bottom: 300 },
     ];
     renderViewport();
-    expect(pinnedText()).toBe('Second prompt');
+    expect(pinnedText()).toBe('prompt-1 text');
     expect(
       container!.querySelector('[data-pinned-turn-prompt]')?.closest('header'),
     ).toBeNull();
@@ -199,7 +202,37 @@ describe('TranscriptViewport pinned prompt', () => {
       { id: 'output-1b', top: 30, bottom: 300 },
     ];
     renderViewport();
-    expect(pinnedText()).toBe('Second prompt');
+    expect(pinnedText()).toBe('prompt-1 text');
+  });
+
+  it('labels the pill with the last user message above the reading line, not the turn prompt', () => {
+    observed.rows = [
+      { id: 'prompt-1', top: -90, bottom: -60 },
+      { id: 'mid-1', top: -60, bottom: -20 },
+      { id: 'output-1a', top: -20, bottom: 300 },
+    ];
+    renderViewport();
+    expect(pinnedText()).toBe('mid-1 text');
+  });
+
+  it('hides the pill when the mid-turn user message row is in view', () => {
+    observed.rows = [
+      { id: 'prompt-1', top: -60, bottom: -30 },
+      { id: 'mid-1', top: -30, bottom: 20 },
+      { id: 'output-1a', top: 20, bottom: 300 },
+    ];
+    renderViewport();
+    expect(pinnedText()).toBeUndefined();
+  });
+
+  it('keeps the earlier user message label when the later one is below the reading line', () => {
+    observed.rows = [
+      { id: 'prompt-1', top: -50, bottom: -10 },
+      { id: 'mid-1', top: 200, bottom: 240 },
+      { id: 'output-1a', top: 240, bottom: 300 },
+    ];
+    renderViewport();
+    expect(pinnedText()).toBe('prompt-1 text');
   });
 
   it('follows the reading line, not the first visible row', () => {

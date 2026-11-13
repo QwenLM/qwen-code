@@ -128,7 +128,9 @@ test('pins the prompt of the turn being read when the rail is hidden @smoke', as
   await expect(page.locator('[data-global-turn-navigation]')).toBeHidden();
 
   await scrollToRow(page, `ANSWER 5.${OUTPUTS}`, 200);
-  await expect(pinned(page)).toHaveText('Prompt of turn 5');
+  // The collapsed turn keeps its question row mounted above the reading
+  // line, so the label is the user message text, not the turn index label.
+  await expect(pinned(page)).toHaveText('QUESTION 5');
   await expect(pinned(page)).toHaveAttribute('data-pinned-turn-prompt', '5');
 
   // The overlay sits at the viewport edge and stays there during a scroll.
@@ -143,7 +145,7 @@ test('pins the prompt of the turn being read when the rail is hidden @smoke', as
 
   // The next turn switches the label, and its prompt row in view hides it.
   await scrollToRow(page, `ANSWER 6.${OUTPUTS}`, 200);
-  await expect(pinned(page)).toHaveText('Prompt of turn 6');
+  await expect(pinned(page)).toHaveText('QUESTION 6');
   await scrollToRow(page, 'QUESTION 6');
   await expect(pinned(page)).toHaveCount(0);
 });
@@ -171,6 +173,8 @@ test('keeps the label after the prompt row leaves the virtualizer window', async
     })
     .toBe(0);
   await expect(rowWith(page, 'ANSWER 5.')).not.toHaveCount(0);
+  // Every user row above the reading line is unmounted here, so the label
+  // falls back to the turn index label.
   await expect(pinned(page)).toHaveText('Prompt of turn 5');
 });
 
