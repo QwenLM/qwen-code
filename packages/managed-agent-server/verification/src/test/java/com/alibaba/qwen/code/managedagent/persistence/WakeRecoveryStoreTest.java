@@ -527,6 +527,12 @@ public class WakeRecoveryStoreTest {
         ObjectNode future = event("input.accepted", "loop-future", "loop");
         ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
         appendBatch(future);
+        // Production arms the hint in the same commit as the wake input
+        // (JournalCommit writes is_wake_pending beside the revision). With the
+        // hint set, only the hinted pass can return the row — the unhinted
+        // fallback filters is_wake_pending = FALSE — so the assertions below
+        // exercise the path a real armed Session is discovered through.
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = TRUE");
         var deferred = candidate();
         var answer = store.hasPendingInput(deferred);
         assertThat(answer).isEmpty();
@@ -549,29 +555,84 @@ public class WakeRecoveryStoreTest {
         ObjectNode future = event("input.accepted", "loop-future", "loop");
         ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
         appendBatch(future);
-        // Push the journal well past the 32-revision per-call proof bound so the
-        // deferred input and the head land in different proof pages and the
-        // re-proof must span several calls (a small fixture never exercises the
-        // "a deferred partial proof must not be cached" branch).
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = TRUE");
+        // Push the journal well past the 32-revision per-call proof bound so
+        // the deferred input and the head land in different proof pages.
         for (int i = 0; i < 200; i++) {
             append("turn.settled", "settled-" + i, null);
         }
+        var reads = new CountingJdbcTemplate(jdbc.getDataSource());
+        store = new JdbcWakeRecoveryStore(reads);
+        store.setNowMillis(() -> 1_000_000L);
         // The first scan pages past the deferred input and certifies nothing.
         assertThat(store.hasPendingInput(candidate())).isEmpty();
-        // Once due, the re-proof must still discover the wakeup across the page
-        // boundary. A cached proof that skipped the input would resume past it
-        // and certify "nothing pending", dropping the wakeup a second way.
-        store.setNowMillis(() -> 3_000_000L);
+        assertThat(reads.revisions).hasSize(32);
+        // The next scan resumes at the page boundary instead of restarting:
+        // a deferred proof refuses the answer, not the progress. Throwing the
+        // partial proof away would restart every scan at revision 0 and stop
+        // in the same window forever.
+        assertThat(store.hasPendingInput(candidate())).isEmpty();
+        assertThat(reads.revisions).hasSize(64);
+        assertThat(reads.revisions.get(32)).isEqualTo(32L);
+        // Drain to the head; the deferred-only journal keeps the hint (empty).
         var answer = store.hasPendingInput(candidate());
-        // The bound is tight on purpose: because the deferred partial proof is
-        // not cached, the due wakeup is re-discovered within one fresh proof
-        // span. A cached deferred proof would resume past the input, only
-        // re-discovering it after reaching the head and restarting, which takes
-        // more calls than this bound allows.
-        for (int i = 0; i < 9 && answer.isEmpty(); i++) {
+        for (int i = 0; i < 5 && answer.isEmpty(); i++) {
             answer = store.hasPendingInput(candidate());
         }
-        assertThat(answer).contains(true);
+        assertThat(answer).isEmpty();
+        int readsAtHead = reads.revisions.size();
+        assertThat(readsAtHead).isEqualTo(201);
+        // The head-reached deferred proof is cached: the next scan re-reads
+        // nothing and still keeps the hint.
+        assertThat(store.hasPendingInput(candidate())).isEmpty();
+        assertThat(reads.revisions).hasSize(readsAtHead);
+        // Once due, the cached deferred proof expires and a fresh proof span
+        // counts the input; it attaches at that span's head. A proof that kept
+        // skipping the input as deferred would never answer true.
+        store.setNowMillis(() -> 3_000_000L);
+        var due = store.hasPendingInput(candidate());
+        for (int i = 0; i < 9 && due.isEmpty(); i++) {
+            due = store.hasPendingInput(candidate());
+        }
+        assertThat(due).contains(true);
+    }
+
+    @Test
+    void aWakeInputPastTheProofWindowIsReachedByResumedDeferredProofs() {
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode future = event("input.accepted", "loop-future", "loop");
+        ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
+        appendBatch(future);
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = TRUE");
+        for (int i = 0; i < 40; i++) {
+            append("turn.settled", "settled-" + i, null);
+        }
+        // A crashed turn's monitor input lands at the head, past the 32-page
+        // window the first call can read.
+        append("input.accepted", "monitor-turn", "monitor");
+        assertThat(store.hasPendingInput(candidate())).isEmpty();
+        // The resumed proof reaches the monitor input and attaches. A proof
+        // that restarted at zero every scan would never read past revision 32
+        // and would strand the crashed turn for the whole deferral window.
+        assertThat(store.hasPendingInput(candidate())).contains(true);
+    }
+
+    @Test
+    void aSettledDeferredWakeupReleasesTheHintBeforeItsFireTime() {
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode future = event("input.accepted", "loop-future", "loop");
+        ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
+        appendBatch(future);
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = TRUE");
+        assertThat(store.hasPendingInput(candidate())).isEmpty();
+        // The wakeup is cancelled (its turn settles) while still unfired: the
+        // deferred latch must clear so the hint can be retired instead of
+        // staying armed until the fire time.
+        append("turn.settled", "loop-future", null);
+        var settled = candidate();
+        assertThat(store.hasPendingInput(settled)).contains(false);
+        assertThat(store.recordPending(settled, false)).isTrue();
+        assertThat(store.findPending("workspace", 8)).isEmpty();
     }
 
     private void append(String kind, String turn, String source) {

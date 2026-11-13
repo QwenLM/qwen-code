@@ -377,12 +377,18 @@ separate change:
    `input.accepted` whose source is in `SOURCES` (which already includes
    `loop`), regardless of `notBefore`. A Session whose only pending input
    is a not-yet-due loop wakeup is therefore re-attached prematurely on
-   every recovery scan. The fix: when the pending input is a `loop`
-   `input.accepted` carrying a future `notBefore`, do not count it as
-   pending (it is deferred, not parked); a due or immediate loop input
-   still counts. The exemption needs a clock reference in the store and
-   a `WakeRecoveryTest` pair (future-only loop input → no attach; due
-   loop input → attach).
+   every recovery scan. The fix: when the only unsettled wake inputs are
+   `loop` `input.accepted` entries carrying a future `notBefore`, answer
+   `Optional.empty()` (they are deferred, not parked; an empty answer
+   keeps the durable hint, where `false` would clear it and drop the
+   armed wakeup); a due or immediate loop input still answers `true`.
+   The proof's progress stays cached — refusing the answer, not the
+   pages read — so a wake input committed past the 32-revision proof
+   window is still reached; the cached deferred proof expires at the
+   earliest deferred fire time, and a settlement drops the input from
+   the deferred latch. The exemption needs a clock reference in the
+   store and a `WakeRecoveryTest` pair (future-only loop input →
+   `isEmpty()`, no attach; due loop input → `contains(true)`, attach).
 2. **Fire-time sentinel Java fixture replay parity.** The journal-replay
    proof in `JdbcWakeRecoveryStore` must recognize the loop sentinel
    inputs the wakeup slice writes, with a fixture test replaying a

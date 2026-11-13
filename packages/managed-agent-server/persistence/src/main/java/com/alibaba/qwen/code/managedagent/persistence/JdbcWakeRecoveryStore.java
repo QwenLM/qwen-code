@@ -62,12 +62,19 @@ public class JdbcWakeRecoveryStore
     private static final class Proof {
         private final Set<String> pending = new HashSet<>();
         private final Set<String> settled = new HashSet<>();
+        /** The unsettled deferred loop inputs this proof has skipped so far. */
+        private final Set<String> deferredTurns = new HashSet<>();
         private long revision;
         private long sequence;
         private boolean complete;
-        /** A deferred loop input was skipped; this proof must not be cached,
-         * because resuming it would page past the input and forget it. */
+        /** A deferred loop input was skipped: the proof may answer "nothing
+         * pending" only once every deferred input is settled or due. The
+         * progress itself is cacheable — refusing the answer, not the pages
+         * read, is what keeps a wake input past the page window reachable. */
         private boolean deferred;
+        /** The earliest deferred notBefore. At or past it the cached proof is
+         * discarded so the input is re-read as due (counted), not skipped. */
+        private long deferredUntil = Long.MAX_VALUE;
     }
 
     public List<Candidate> findPending(String defaultWorkspace, int limit) {
@@ -136,6 +143,12 @@ public class JdbcWakeRecoveryStore
             pendingProofs.put(candidate, proof);
             return Optional.of(true);
         }
+        // A cached deferred proof expires at the earliest deferred fire time:
+        // past it the input is due and must be counted, not skipped again.
+        if (proof != null && proof.deferred
+                && nowMillis.getAsLong() >= proof.deferredUntil) {
+            proof = null;
+        }
         if (proof == null) {
             proof = new Proof();
         }
@@ -200,6 +213,13 @@ public class JdbcWakeRecoveryStore
                         }
                         settled.add(turnId);
                         pending.remove(turnId);
+                        // A cancelled (settled) unfired wakeup no longer arms
+                        // the hint: drop it from the deferred latch.
+                        if (proof.deferredTurns.remove(turnId)
+                                && proof.deferredTurns.isEmpty()) {
+                            proof.deferred = false;
+                            proof.deferredUntil = Long.MAX_VALUE;
+                        }
                     } else if (isWakeInput(event)) {
                         if (turnId == null || turnId.isEmpty()) {
                             throw corrupt();
@@ -207,6 +227,9 @@ public class JdbcWakeRecoveryStore
                         if (!settled.contains(turnId)) {
                             if (isDeferredLoopInput(event)) {
                                 proof.deferred = true;
+                                proof.deferredTurns.add(turnId);
+                                proof.deferredUntil = Math.min(proof.deferredUntil,
+                                        event.path("payload").path("notBefore").longValue());
                             } else {
                                 pending.add(turnId);
                             }
@@ -225,22 +248,25 @@ public class JdbcWakeRecoveryStore
                 throw corrupt();
             }
             if (pending.isEmpty()) {
-                // A journal whose only unsettled wake input is a deferred loop
-                // wakeup certifies nothing: keep the hint so recovery re-proves
-                // and attaches once the wakeup is due. Answering false here would
-                // clear the durable hint and silently drop the armed wakeup.
-                return proof.deferred ? Optional.empty() : Optional.of(false);
+                // A journal whose only unsettled wake inputs are deferred loop
+                // wakeups certifies nothing: keep the hint so recovery attaches
+                // once a wakeup is due. Answering false here would clear the
+                // durable hint and silently drop the armed wakeup. The proven
+                // prefix is still cached below — the empty answer, not the
+                // progress, is what a deferred proof refuses.
+                if (!proof.deferred) {
+                    return Optional.of(false);
+                }
+            } else {
+                proof.complete = true;
+                pending.clear();
+                settled.clear();
             }
-            proof.complete = true;
-            pending.clear();
-            settled.clear();
         }
-        // A proof that skipped a deferred loop input must not be cached: a
-        // resumed proof would page past the input and later certify "nothing
-        // pending", dropping the wakeup a second way. Re-prove from the start
-        // each scan until the input is due (counted) or settled.
-        if (proof.deferred) {
-            return proof.complete ? Optional.of(true) : Optional.empty();
+        // A complete proof attaches even beside a deferred wakeup: its pending
+        // input needs recovery now, regardless of the wakeup's fire time.
+        if (proof.deferred && proof.complete) {
+            return Optional.of(true);
         }
         // The complete Candidate fences every continuation to the same immutable
         // prefix. Losing it restarts proof at zero; it never clears a durable hint.
@@ -300,8 +326,9 @@ public class JdbcWakeRecoveryStore
      * A loop wakeup whose fire time is still in the future is deferred, not
      * parked: it must not make wake recovery attach the Harness. A due or
      * immediate loop input (no notBefore, or one already past) still counts.
-     * The proof is only cached complete when something is pending, so a
-     * future-only loop Session is re-proven each scan and attaches once due.
+     * A deferred proof keeps its progress cached but never answers false; the
+     * cache expires at the earliest deferred fire time so the input is
+     * re-read as due, and a settlement drops it from the deferred latch.
      */
     private boolean isDeferredLoopInput(JsonNode event) {
         JsonNode payload = event.path("payload");

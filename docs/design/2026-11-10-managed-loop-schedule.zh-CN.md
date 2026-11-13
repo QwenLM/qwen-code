@@ -307,11 +307,16 @@ Session 内部的模型没有任何创建途径。
    （`recoverForWake`）。`JdbcWakeRecoveryStore.hasPendingInput` 把每个
    未 settle、source 在 `SOURCES`（已含 `loop`）中的 `input.accepted`
    都计为 pending，不看 `notBefore`。于是唯一 pending input 是未到期
-   loop wakeup 的 Session 会在每次恢复扫描时被提前重挂。修法：当
-   pending input 是携带未来 `notBefore` 的 `loop` `input.accepted` 时不
-   计为 pending（它是延迟而非停泊）；到期或立即的 loop input 仍计入。
-   豁免需要 store 内的时钟引用，以及一对 `WakeRecoveryTest`（仅未来
-   loop input → 不挂载；到期 loop input → 挂载）。
+   loop wakeup 的 Session 会在每次恢复扫描时被提前重挂。修法：当唯一
+   未 settle 的 wake input 是携带未来 `notBefore` 的 `loop`
+   `input.accepted` 时，回答 `Optional.empty()`（它是延迟而非停泊；空
+   回答保留 durable hint，而 `false` 会清掉 hint 并丢弃已武装的
+   wakeup）；到期或立即的 loop input 仍回答 `true`。证明的进度保持缓
+   存——拒绝的是结论而非已读的页——因此提交在 32 修订证明窗口之外的
+   wake input 仍能被读到；缓存的延迟证明在最早的延迟触发时刻失效，
+   settle 则把该 input 从延迟闩锁中移除。豁免需要 store 内的时钟引
+   用，以及一对 `WakeRecoveryTest`（仅未来 loop input → `isEmpty()`，
+   不挂载；到期 loop input → `contains(true)`，挂载）。
 2. **fire-time sentinel 的 Java fixture 重放对等。**
    `JdbcWakeRecoveryStore` 的 journal 重放证明必须识别唤醒切片写入的
    loop sentinel input，用一个重放携带 sentinel loop input（及其
