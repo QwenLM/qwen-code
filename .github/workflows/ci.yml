@@ -124,8 +124,8 @@ jobs:
     name: 'Classify PR'
     if: "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' }}"
     # Gate runs on ECS for trusted events — in-repo PRs (head repo == base
-    # repo), fork PRs whose author has write access (OWNER/MEMBER/COLLABORATOR
-    # association), the merge queue, pushes to main, and dispatch — unless the
+    # repo), fork PRs with a trusted association (OWNER/MEMBER/COLLABORATOR),
+    # the merge queue, pushes to main, and dispatch — unless the
     # kill-switch forces hosted. A pull_request run executes the PR's own YAML,
     # so an untrusted fork can rewrite this runs-on expression away; the
     # association clause is therefore THROUGHPUT POLICY, not an enforceable

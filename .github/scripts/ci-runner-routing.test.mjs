@@ -202,13 +202,9 @@ const ASSOCIATIONS = [
 
 describe('ci.yml classify_pr runner routing', () => {
   it('the gate routes trusted authors and same-repo to ECS; untrusted forks stay hosted', () => {
-    // A pull_request run executes the PR's own YAML, so an untrusted fork can
-    // rewrite runs-on away. What this matrix pins is the DEFAULT routing — that
-    // trusted associations and same-repo PRs land on ECS and everything else
-    // stays hosted — not a boundary a fork cannot cross: the gate is throughput
-    // policy plus one defence-in-depth layer, as
-    // docs/design/2026-10-31-lint-static-ecs-routing.md states. The kill-switch
-    // still wins for everyone.
+    // Pins the DEFAULT routing (the header carries the threat model): trusted
+    // associations and same-repo PRs land on ECS, everything else stays hosted
+    // — not a boundary a fork cannot cross. The kill-switch wins for everyone.
     for (const sameRepo of [true, false]) {
       for (const assoc of ASSOCIATIONS) {
         const isTrusted = sameRepo || TRUSTED.includes(assoc);
@@ -234,11 +230,11 @@ describe('ci.yml classify_pr runner routing', () => {
         );
       }
     }
-    // dispatch reaches ECS as well. The comment above the job says so — "the
-    // merge queue, pushes to main, and dispatch" — and the expression used to
-    // disagree: `github.event.pull_request` is empty on a dispatch, so every
-    // PR clause was false and the run fell to ubuntu-latest. Only a maintainer
-    // can trigger a dispatch, so admitting it adds no reachability.
+    // dispatch reaches ECS too ("the merge queue, pushes to main, and dispatch"
+    // above). An earlier revision of this PR gated on the PR clauses alone, so
+    // dispatch — whose github.event.pull_request is empty — fell to hosted.
+    // Only users with write access can dispatch, and they already reach ECS via
+    // same-repo PRs and push, so this adds no reachability (unchanged vs base).
     for (const assoc of ['', 'NONE', 'OWNER']) {
       assert.deepEqual(
         evalRunsOn(classifyRunsOn, {
@@ -249,6 +245,32 @@ describe('ci.yml classify_pr runner routing', () => {
         }),
         JSON.parse(ECS),
         `dispatch (assoc='${assoc}') must reach ECS`,
+      );
+    }
+    assert.deepEqual(
+      evalRunsOn(classifyRunsOn, {
+        ecsDisabled: true,
+        eventName: 'workflow_dispatch',
+        sameRepo: false,
+        assoc: 'OWNER',
+      }),
+      JSON.parse(HOSTED),
+      'dispatch kill-switch must revert to hosted',
+    );
+    // merge_group has an empty PR context too. Pin it against the gate's own
+    // runs-on — the pick_runner shell tests below cover the downstream lanes,
+    // not this expression. Without these rows, deleting the merge_group clause
+    // silently demotes the queue to hosted with every test still green.
+    for (const ecsDisabled of [false, true]) {
+      assert.deepEqual(
+        evalRunsOn(classifyRunsOn, {
+          ecsDisabled,
+          eventName: 'merge_group',
+          sameRepo: false,
+          assoc: '',
+        }),
+        JSON.parse(ecsDisabled ? HOSTED : ECS),
+        `merge_group (ecsDisabled=${ecsDisabled})`,
       );
     }
   });
@@ -330,9 +352,10 @@ describe('ci.yml classify_pr runner routing', () => {
   });
 
   it('the gate expression requires trusted author or same-repo for self-hosted', () => {
-    // Structural pins: the gate must check author association and head repo
-    // so that untrusted fork PRs cannot rewrite runs-on to reach the
-    // persistent pool. The kill-switch must stay as an escape hatch.
+    // Structural pins for the DEFAULT routing: the gate keeps the association
+    // and head-repo clauses so unreviewed forks stay off the pool by default —
+    // throughput policy, not a fence (a fork can rewrite this whole YAML in the
+    // same diff; see the header). The kill-switch must stay as an escape hatch.
     assert.match(classifyRunsOn, /author_association/);
     assert.match(classifyRunsOn, /head\.repo\.full_name/);
     assert.match(

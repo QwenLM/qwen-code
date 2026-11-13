@@ -18,12 +18,16 @@
 | `ubuntu_runner` | 同仓库 head、`OWNER` / `MEMBER` / `COLLABORATOR` 作者、`merge_group`、`push`，其余走 hosted | `integration_cli`、`web_shell_e2e_smoke`（`test` 已改读 `pr_test_runner`；本文被 [2026-11-07-ephemeral-container-runners](2026-11-07-ephemeral-container-runners.zh-CN.md) 取代） |
 | `lint_runner`   | 每一个 `pull_request`，未受信 fork 也算；其余情况与 `ubuntu_runner` 相同                    | `lint_and_static`、`integration_no_ak`（2026-11-02 加入）                                                                                                                         |
 
-`classify_pr` 自身的 runner 对其接纳的所有事件一律走 ECS（kill-switch 除外）。
-门禁 job 只执行可信 base-SHA 的代码、拿只读 token——暴露面严格小于 lint
-车道；而把它对不可信 fork 留在 hosted，会让整条 fork CI 链（classify 是所有
-Linux 车道的 `needs` 前置）排在稀缺的 hosted 池后面。association 门禁保留在
-它真正约束重 PR 代码执行的地方：`ubuntu_runner`（test 车道与仅 merge-queue
-的 CLI 集成车道读取）。
+`classify_pr` 自身的 runner 走 association 门禁的 ECS（kill-switch 除外）：
+同仓库 head、`OWNER` / `MEMBER` / `COLLABORATOR` 的 fork 作者、`merge_group`、
+`push` 与 `workflow_dispatch` 进池；不可信 fork PR 退回 `ubuntu-latest`。
+门禁 job 只执行可信 base-SHA 的代码、拿只读 token——暴露面严格小于 lint 车道。
+
+2026-11-14（PR #17178）反转了 2026-10-31 把门禁扩到无条件 ECS 的决定：门禁
+很轻量，不可信 fork 排 hosted 队的延迟可以接受，而默认把未评审 fork 挡在持久
+池外是值得的。这是吞吐策略，不是围栏——fork 能改写这条 `runs-on`（见下方
+残余面说明）。association 门禁仍在真正约束重 PR 代码执行的地方生效：
+`ubuntu_runner`（test 车道与仅 merge-queue 的 CLI 集成车道读取）。
 
 2026-11-02：`integration_no_ak` 加入 `lint_runner`。与 lint 同信任类——该车
 道从 checkout 与 install 步骤起就执行 fork 代码（生命周期脚本加
@@ -121,8 +125,10 @@ smoke 60、no-AK 集成 30。
 ## 测试
 
 `.github/scripts/ci-runner-routing.test.mjs`（在 `HELPER_TESTS` 里，因此门禁
-每个 full-profile PR）钉住：门禁 job 在全 association 矩阵下无条件走 ECS
-（kill-switch 可退回、association 子句不得回潮）、生产者绑定
+每个 full-profile PR）钉住：门禁 job 在全 association 矩阵下的 association
+门禁默认路由（可信/同仓库 → ECS、不可信 fork → hosted、kill-switch 对所有人
+退回，且 merge_group/push/dispatch 进 ECS）、把 association 与 head-repo 子句
+作为防漂移保留的结构断言（不是围栏——fork 会改写整份 YAML）、生产者绑定
 （`classify_pr.outputs.lint_runner` ← `pick_runner`）、真实选择器 shell 在全
 association/事件矩阵下的行为、`lint_runner` 的两车道范围（超集必须更新本记录）、
 首步发布的 run 唯一 HOME（先清后建、共享可校验缓存）、清理步骤先于收集器、
@@ -145,6 +151,13 @@ lane。
   并注明 association 门禁对改写 workflow YAML 的 fork 不可强制，因此接受范围
   覆盖上述残余暴露面，而不是一道单车道围栏。欢迎第二位维护者确认（triage
   stage-3 正是因此暂缓）；这是人的决定，不是代码变更。
+- 2026-11-14 修订（PR #17178）：classify_pr 门禁回到 association 门禁的默认
+  路由（不可信 fork → hosted），反转上面同日扩到无条件 ECS 的决定。门禁足够
+  轻量，hosted 排队延迟可以接受，且默认路由应把未评审 fork 挡在持久池外。
+  风险接受不变——池已在 lint 与 no-AK 车道执行 fork 代码，association 门禁
+  仍是吞吐策略、不是可强制边界（fork 会改写 workflow YAML）。dispatch 路由
+  相对无条件门禁不变（ECS → ECS）；只有不可信 fork 的 classify 从 ECS 移到
+  hosted。
 - PR 自身 CI 在池上验证路由管道（作者是 collaborator，该运行中两个输出一致）；
   fork 分歧由路由回归矩阵证明，其首个线上端到端见证是下一个不可信 fork PR。
 - 另行拥有的后续：per-run HOME 下恢复热共享 pnpm store（no-AK 车道现在与 lint 同付已接受的冷装成本）（如通过 `XDG_DATA_HOME`
