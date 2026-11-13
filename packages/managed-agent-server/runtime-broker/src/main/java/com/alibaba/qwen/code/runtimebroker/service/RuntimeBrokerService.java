@@ -907,6 +907,12 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         return terminalHolds.abandon(harnessSessionId, terminalId, executionCallId);
     }
 
+    @Override
+    public CompletionStage<Void> markTerminalPtyEstablished(
+            String harnessSessionId, String terminalId) {
+        return terminalHolds.markPtyEstablished(harnessSessionId, terminalId);
+    }
+
     public CompletionStage<ToolExecutionRecord> prepareCsiExecution(String harnessSessionId, String runtimeSessionId,
             String idempotencyKey, Map<String, Object> reference, byte[] inputBytes, byte[] definitionBytes) {
         requireOpen(closed);

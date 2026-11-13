@@ -53,11 +53,14 @@ final class TerminalHolds {
     private final ToolExecutionRepository executionRepository;
     private final Clock clock;
     private final AtomicBoolean closed;
-    // Holds that a second attach has reused. Once a hold is handed to more
-    // than one attach, a failed attempt must not settle it: another relay's
-    // live PTY still depends on it. Monotonic — a re-admit re-marks the hold,
-    // so the guard survives a broker restart (old relay connections drop on
-    // restart, and any later abandon requires a re-admit that re-marks here).
+    // Holds whose reusing attach actually established a live PTY. Only then
+    // does a failed concurrent attach have to spare the hold: another relay's
+    // running PTY depends on it. Marked when the reusing attach's worker
+    // terminal connects (markPtyEstablished), NOT merely when a second attach
+    // re-admits — a double attach whose worker connects both fail must leave
+    // the hold dischargeable, or the Session close wedges permanently. The
+    // mark is re-established whenever a reusing attach reconnects, so it
+    // survives a broker restart (old relay connections drop on restart).
     private final Set<String> reusedHolds = ConcurrentHashMap.newKeySet();
 
     TerminalHolds(RuntimeBrokerService broker,
@@ -117,10 +120,12 @@ final class TerminalHolds {
                             }
                             ToolExecutionRecord active = activeTerminalHold(context);
                             if (active != null) {
-                                // A second attach now depends on this hold; a
-                                // failed attempt must not settle it out from
-                                // under the live PTY.
-                                reusedHolds.add(active.getExecutionCallId());
+                                // A second attach reuses the hold. Whether it
+                                // protects a live PTY is only known once this
+                                // attach's worker terminal connects; the relay
+                                // records that via markPtyEstablished. Marking
+                                // here would wedge the hold when both attaches
+                                // fail to connect (D9-1).
                                 return new TerminalHoldAdmission(active, false);
                             }
                             // The first attach keeps the deterministic identity;
@@ -194,6 +199,37 @@ final class TerminalHolds {
         return rows.isEmpty() ? null : rows.get(0);
     }
 
+    /**
+     * Records that a reusing attach's worker terminal established a PTY on the
+     * active hold. The relay calls this only when a reused (created=false)
+     * attach's worker connection succeeds, so the hold is spared from a failed
+     * concurrent attach's abandon exactly while a live PTY depends on it.
+     */
+    CompletionStage<Void> markPtyEstablished(String harnessSessionId, String terminalId) {
+        requireOpen(closed);
+        String harness = BrokerValues.requirePathSafe(
+                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
+                "harnessSessionId");
+        String terminal = BrokerValues.requirePathSafe(
+                BrokerValues.requireId(terminalId, "terminalId"), "terminalId");
+        String runtime = "terminal-" + DigestUtils.sha256Hex(harness + ":" + terminal);
+        return mapStoreFailure(safeStage(() -> broker.acquire(harness, runtime, TERMINAL_TURN_KIND, null, null)
+                .thenCompose(ignored -> bindingRegistry.requireReadySession(harness, runtime))
+                .thenAccept(context -> {
+                    context.lock();
+                    try {
+                        bindingRegistry.requireReadySessionRecord(context);
+                        ToolExecutionRecord active = activeTerminalHold(context);
+                        if (active != null) {
+                            requireTerminalHoldOwner(active, harness, runtime);
+                            reusedHolds.add(active.getExecutionCallId());
+                        }
+                    } finally {
+                        context.unlock();
+                    }
+                })));
+    }
+
     CompletionStage<ToolExecutionRecord> abandon(
             String harnessSessionId, String terminalId, String executionCallId) {
         requireOpen(closed);
@@ -213,10 +249,14 @@ final class TerminalHolds {
                         bindingRegistry.requireReadySessionRecord(context);
                         ToolExecutionRecord active = activeTerminalHold(context);
                         // Only the hold this attach newly admitted may be
-                        // discharged, and only while no other attach has reused
-                        // it: a reconnect hands the same live row to a second
-                        // relay, so a failed attempt must not settle the hold
-                        // out from under that relay's running PTY.
+                        // discharged, and only while no reusing attach has
+                        // established a live PTY on it: a reconnect hands the
+                        // same row to a second relay, and once that relay's
+                        // worker terminal connects a failed attempt must not
+                        // settle the hold out from under the running PTY. A
+                        // reuse that never connected leaves the hold
+                        // dischargeable so a double failed attach cannot wedge
+                        // the Session close (D9-1).
                         if (active == null
                                 || !active.getExecutionCallId().equals(callId)
                                 || reusedHolds.contains(callId)) {

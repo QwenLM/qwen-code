@@ -76,6 +76,7 @@ import java.util.function.Supplier;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -2221,6 +2222,9 @@ class RuntimeBrokerServiceTest {
                     "harness", "term-1"));
             assertFalse(b.created());
             assertEquals(a.hold().getExecutionCallId(), b.hold().getExecutionCallId());
+            // B's worker terminal connects and establishes the PTY; the relay
+            // records that on the hold.
+            join(fixture.service.markTerminalPtyEstablished("harness", "term-1"));
             // A's worker connect then fails. Its abandon must not settle the
             // hold B's running PTY still depends on.
             assertNull(join(fixture.service.abandonTerminalHold(
@@ -2230,6 +2234,32 @@ class RuntimeBrokerServiceTest {
                             a.hold().getExecutionCallId()).getState());
             assertEquals("runtime_session_held",
                     failure(fixture.service.release("harness", "terminal-" + TERMINAL_KEY)).getCode());
+        }
+    }
+
+    @Test
+    void terminalHoldAbandonDischargesWhenNoReuseEstablishedAPty() throws Exception {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            // D9-1: relay A creates the hold, relay B re-admits it, but BOTH
+            // worker connects fail — no PTY is ever established. The reuse
+            // alone must not latch the hold, or A's abandon is refused, B never
+            // abandons (created=false), and the row wedges PREPARED forever,
+            // refusing the Runtime Session release and the Session close.
+            TerminalHoldAdmission a = join(fixture.service.admitTerminalHold(
+                    "harness", "term-1"));
+            assertTrue(a.created());
+            TerminalHoldAdmission b = join(fixture.service.admitTerminalHold(
+                    "harness", "term-1"));
+            assertFalse(b.created());
+            // Neither attach calls markTerminalPtyEstablished: both connects
+            // failed. A's abandon must discharge the hold.
+            ToolExecutionRecord settled = join(fixture.service.abandonTerminalHold(
+                    "harness", "term-1", a.hold().getExecutionCallId()));
+            assertNotNull(settled);
+            assertEquals(ToolExecutionRecord.State.SETTLED,
+                    fixture.executionRepository.findByExecutionCallId(
+                            a.hold().getExecutionCallId()).getState());
+            assertTrue(join(fixture.service.release("harness", "terminal-" + TERMINAL_KEY)));
         }
     }
 

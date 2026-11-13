@@ -74,6 +74,14 @@ public interface RuntimeBrokerOperations {
     public CompletionStage<ToolExecutionRecord> abandonTerminalHold(
             String harnessSessionId, String terminalId, String executionCallId);
 
+    /** Records that a reusing attach's worker terminal actually established a
+     * PTY on the active hold. Only then does the hold protect a live PTY that
+     * a failed concurrent attach must not discharge; a reuse whose worker
+     * attach never produced a PTY leaves the hold dischargeable, so a double
+     * attach that both fail cannot wedge the Session close. */
+    public CompletionStage<Void> markTerminalPtyEstablished(
+            String harnessSessionId, String terminalId);
+
     public CompletionStage<ToolExecutionRecord> prepareCsiExecution(String harnessSessionId, String runtimeSessionId,
             String idempotencyKey, Map<String, Object> reference, byte[] inputBytes, byte[] definitionBytes);
 

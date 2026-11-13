@@ -207,6 +207,35 @@ class TerminalRelayHandlerTest {
         verify(session).close(new CloseStatus(4003));
     }
 
+    @Test
+    void successfulReconnectMarksTheReusedHoldPtyEstablished() throws Exception {
+        RuntimeBrokerOperations broker = mock(RuntimeBrokerOperations.class);
+        HttpClient client = mock(HttpClient.class);
+        WebSocket.Builder builder = mock(WebSocket.Builder.class);
+        when(client.newWebSocketBuilder()).thenReturn(builder);
+        when(builder.header(anyString(), anyString())).thenReturn(builder);
+        when(builder.connectTimeout(any())).thenReturn(builder);
+        WebSocket worker = mock(WebSocket.class);
+        when(builder.buildAsync(any(URI.class), any(WebSocket.Listener.class)))
+                .thenReturn(CompletableFuture.completedFuture(worker));
+        // A reconnect reuses the hold (created=false) and its worker terminal
+        // connects: the relay must record the established PTY so a failed
+        // concurrent attach spares the hold. A reuse that never connects must
+        // NOT mark it, or a double failed attach wedges the hold (D9-1).
+        when(broker.admitTerminalHold("session-a", "term-1"))
+                .thenReturn(CompletableFuture.completedFuture(
+                        new TerminalHoldAdmission(hold("terminal-attach:term-1:process"), false)));
+        when(broker.markTerminalPtyEstablished("session-a", "term-1"))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        TerminalRelayHandler handler = new TerminalRelayHandler(broker, client);
+        WebSocketSession session = session();
+
+        handler.afterConnectionEstablished(session);
+
+        verify(broker).markTerminalPtyEstablished("session-a", "term-1");
+        verify(broker, never()).abandonTerminalHold(anyString(), anyString(), anyString());
+    }
+
     private static ToolExecutionRecord hold(String executionCallId) {
         // A real record: getExecutionCallId is final and cannot be stubbed.
         return new ToolExecutionRecord(executionCallId, "idem-1", "binding-1", 1,

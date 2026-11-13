@@ -141,6 +141,19 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
                             relay.fail();
                             abandonHold(sessionId, terminalId, createdHold, holdCallId);
                             closeQuietly(session, new CloseStatus(TERMINAL_LOST_CLOSE_CODE));
+                            return;
+                        }
+                        // A reused hold only protects a live PTY once this
+                        // attach's worker terminal actually connected. Record
+                        // that so a failed concurrent attach spares the hold;
+                        // a reuse that never connects must leave it
+                        // dischargeable (D9-1). Best-effort: the drain backstops.
+                        if (!createdHold) {
+                            try {
+                                broker.markTerminalPtyEstablished(sessionId, terminalId);
+                            } catch (RuntimeException ignored) {
+                                // The drain remains the backstop.
+                            }
                         }
                     });
         } catch (RuntimeException error) {
