@@ -139,11 +139,13 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     CoreToolScheduler: class FakeScheduler {
       private readonly opts: {
         onAllToolCallsComplete: (calls: unknown[]) => unknown;
+        onNativeAttempt?: (call: unknown) => unknown;
         onToolCallsUpdate?: (calls: unknown[]) => unknown;
         outputUpdateHandler?: (callId: string, chunk: unknown) => unknown;
       };
       constructor(opts: {
         onAllToolCallsComplete: (calls: unknown[]) => unknown;
+        onNativeAttempt?: (call: unknown) => unknown;
         onToolCallsUpdate?: (calls: unknown[]) => unknown;
         outputUpdateHandler?: (callId: string, chunk: unknown) => unknown;
       }) {
@@ -237,6 +239,20 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         ) {
           schedulerControl.finish = () =>
             this.schedule(calls.map((c) => ({ ...c, args: {} })));
+          return;
+        }
+        if (calls.some((c) => (c.args as { __heldMod?: boolean })?.__heldMod)) {
+          schedulerControl.finish = async () => {
+            const request = calls[0];
+            const completed = {
+              status: 'success',
+              request,
+              response: { executionStatus: 'success', responseParts: [] },
+              nativeAttemptsObserved: true,
+            };
+            await this.opts.onNativeAttempt?.(completed);
+            await this.opts.onAllToolCallsComplete([completed]);
+          };
           return;
         }
         const bounce = calls.some(
@@ -4818,6 +4834,35 @@ describe.each([false, true])(
       expect(recordCompletedToolCall).not.toHaveBeenCalled();
       expect(send).toHaveBeenCalledOnce();
     });
+
+    it.skipIf(!kernel)(
+      'drops native observations after the cancellation cap',
+      async () => {
+        vi.useFakeTimers();
+        try {
+          schedulerControl.finish = null;
+          const abort = new AbortController();
+          const send = batchStream([
+            { callId: 't1', name: 'test_tool', args: { __heldMod: true } },
+          ]);
+          const config = shared(createFakeConfig(send));
+          const recordCompletedToolCall = vi.fn();
+          const client = config.getGeminiClient();
+          Object.assign(config, { getLlmClient: () => client });
+          Object.assign(client, { recordCompletedToolCall });
+          const turn = drain(livePromptEvents(config, 'start', abort.signal));
+          await vi.advanceTimersByTimeAsync(0);
+          expect(schedulerControl.finish).not.toBeNull();
+          abort.abort();
+          await vi.advanceTimersByTimeAsync(10_000);
+          await turn;
+          await schedulerControl.finish!();
+          expect(recordCompletedToolCall).not.toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
 
     /** The calls made to the fake sidecar, by method. */
     const calls: Record<string, ReturnType<typeof vi.fn>> = {};

@@ -1569,6 +1569,8 @@ interface CoreToolSchedulerOptions {
    * as `not_started`.
    */
   beforeToolLaunch?: (call: ScheduledToolCall) => boolean | Promise<boolean>;
+  /** Whether the owning agent loop has already settled. */
+  isFinished?: () => boolean;
   /** Lets an outer owner suppress a scheduler result it already emitted. */
   shouldObserveProducer?: (callId: string) => boolean;
   /**
@@ -7494,7 +7496,8 @@ export class CoreToolScheduler {
           canonicalName !== ToolNames.EXEC &&
           errorMessage.length > errorGateThreshold &&
           !errorBodyAlreadyBounded &&
-          !isAlreadyTruncated(errorMessage)
+          !isAlreadyTruncated(errorMessage) &&
+          !this.schedulerOptions.isFinished?.()
         ) {
           const persistResult = await persistAndTruncateToolResult(
             callId,
@@ -7876,7 +7879,7 @@ export class CoreToolScheduler {
           completedCalls = await this.applyBatchOutputBudget(completedCalls);
         }
 
-        if (messageBus) {
+        if (messageBus && !this.schedulerOptions.isFinished?.()) {
           const batchToolCalls = completedCalls.map(toPostToolBatchToolCall);
           const permissionMode = this.config.getApprovalMode();
           const fireBatchHook = () =>
@@ -8047,7 +8050,9 @@ export class CoreToolScheduler {
           }
         }
 
-        this.recordToolResults(completedCalls);
+        if (!this.schedulerOptions.isFinished?.()) {
+          this.recordToolResults(completedCalls);
+        }
 
         // Notify observers that the display list is empty before awaiting the
         // completion callback: the TUI commits the finalized tool_group to
@@ -8097,7 +8102,9 @@ export class CoreToolScheduler {
     // The producer already sized this body. This gate sits below some per-tool
     // budgets, so applying it too would decide that window under a second
     // policy.
-    if (outputBudgetApplied) return { content };
+    if (outputBudgetApplied || this.schedulerOptions.isFinished?.()) {
+      return { content };
+    }
     if (GATE_EXEMPT_TOOLS.has(canonicalToolName(toolName))) return { content };
 
     const text = extractTextFromPartListUnion(content);
@@ -8220,6 +8227,8 @@ export class CoreToolScheduler {
   private async applyBatchOutputBudget(
     completedCalls: CompletedToolCall[],
   ): Promise<CompletedToolCall[]> {
+    const { isFinished } = this.schedulerOptions;
+    if (isFinished?.()) return completedCalls;
     const budget =
       this.config.getToolOutputBatchBudget?.() ?? Number.POSITIVE_INFINITY;
     const observeFinalizerBoundary = isToolResultBoundaryDiagnosticsEnabled();
@@ -8246,7 +8255,13 @@ export class CoreToolScheduler {
       ),
       observeFinalizerBoundary,
       observeFinalizerBoundary,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      isFinished,
     );
+    if (isFinished?.()) return completedCalls;
 
     return completedCalls.map((call, index) => ({
       ...call,

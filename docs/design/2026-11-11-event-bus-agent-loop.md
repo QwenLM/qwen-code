@@ -141,7 +141,9 @@ The handlers read the run's `signal` and `toolSignal` and pass them to `runModel
 
 When the signal aborts, the adapter publishes `loop.cancelled` once. Conversation arms a 10 s settlement cap on a separate delivery queue so an awaited round-end hook cannot delay it. Inside the cap, cancellation follows the procedural loop, including keeping the results of an interrupted batch when the surface requests them. A run still pending at the cap ends as `cancelled` with no tool results. If a suspended handler resumes, it stops reading the model stream, refuses further tool launches, and drops tool progress and results at the loop boundary. A tool or callback already running can still finish. The adapter removes the abort listener and clears the timer when the run settles. The procedural path waits for the round or batch to settle.
 
-`runAgentLoop` returns a promise. A surface that exposes an event stream can abort its own run when the consumer stops reading. OpenTUI does this when its consumer closes the model stream early, using a round-local signal so the parent turn's signal stays live. The deadline also covers a provider that stalls while closing its stream. A handler failure still rejects with the original error when the handler settles before the deadline.
+`runAgentLoop` returns a promise. A surface that exposes an event stream can abort its own run when the consumer stops reading. OpenTUI uses a round-local signal for the model stream and keeps the parent turn's signal for tool batches, so their per-turn resource budgets span multiple rounds. The deadline also covers a provider that stalls while closing its stream. A handler failure still rejects with the original error when the handler settles before the deadline.
+
+After the deadline, the default and surface-owned schedulers stop forwarding tool progress and results, while scheduler cleanup can finish. Batch finalization checks the run before starting persistence and again after each write.
 
 ### Why not reuse an existing bus
 

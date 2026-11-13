@@ -327,13 +327,15 @@ describe.each([false, true])('sharedModelRound (kernel=%s)', (kernel) => {
     const loop = vi.mocked(runAgentLoop);
     loop.mockClear();
     const { client } = fakeClient([call('c1')]);
-    const shared = open(client);
+    const signal = new AbortController().signal;
+    const shared = open(client, signal);
     for await (const _ of shared.events) {
       // drain
     }
     const executor = okExecutor();
     const batch = await shared.runBatch(executor);
     expect(executor.run).toHaveBeenCalledOnce();
+    expect(executor.run.mock.calls[0][1]).toBe(signal);
     expect(batch.stop).toBeUndefined();
     expect(batch.responses?.map(({ callId }) => callId)).toEqual(['c1']);
     expect(loop).toHaveBeenCalledOnce();

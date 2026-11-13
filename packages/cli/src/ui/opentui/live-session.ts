@@ -1398,22 +1398,33 @@ export async function* livePromptEvents(
         response: createNotStartedToolErrorResponse(request, message),
       }));
     let shellOwnerOpen = true;
+    const closeShellOwner = () => {
+      if (!shellOwnerOpen) return;
+      shellOwnerOpen = false;
+      options?.onExecutingShells?.([]);
+    };
+    let isBatchFinished: (() => boolean) | undefined;
     // Settles the shared batch once the scheduler completed it.
     let settleBatch: (() => void) | undefined;
     const scheduler = new InteractiveModToolScheduler({
       config,
-      onNativeAttempt: (call) =>
-        observeInteractiveModTool(
+      isFinished: () => isBatchFinished?.() === true,
+      onNativeAttempt: async (call) => {
+        if (isBatchFinished?.()) return;
+        return observeInteractiveModTool(
           config,
           call,
           options?.refreshContextFilesOnWrite === true,
-        ),
+        );
+      },
       getPreferredEditor: () => undefined,
       onEditorClose: () => {},
       outputUpdateHandler: (callId, chunk) => {
+        if (isBatchFinished?.()) return;
         for (const ev of mapOutputChunk(callId, chunk)) live.push(ev);
       },
       onToolCallsUpdate: (calls) => {
+        if (isBatchFinished?.()) return;
         if (shellOwnerOpen)
           options?.onExecutingShells?.(
             current() && !abort.aborted
@@ -1527,10 +1538,11 @@ export async function* livePromptEvents(
         }
       },
       onAllToolCallsComplete: async (calls) => {
-        if (shellOwnerOpen) {
-          shellOwnerOpen = false;
-          options?.onExecutingShells?.([]);
+        if (isBatchFinished?.()) {
+          settleBatch?.();
+          return;
         }
+        closeShellOwner();
         publishToolHistory(calls);
         emitPermissionTransitions(calls);
         completed = calls.filter(
@@ -1544,10 +1556,8 @@ export async function* livePromptEvents(
       },
     });
     const onScheduleFailed = (error: unknown) => {
-      if (shellOwnerOpen) {
-        shellOwnerOpen = false;
-        options?.onExecutingShells?.([]);
-      }
+      if (isBatchFinished?.()) return;
+      closeShellOwner();
       const cancelled =
         abort.aborted ||
         (error instanceof Error && error.name === 'AbortError');
@@ -1580,6 +1590,7 @@ export async function* livePromptEvents(
       );
       batch = sharedRound.runBatch({
         run: (requests, signal, hooks) => {
+          isBatchFinished = hooks.isFinished;
           const launched = requests.filter((request) =>
             hooks.beforeLaunch(request, []),
           );
@@ -1616,12 +1627,27 @@ export async function* livePromptEvents(
           });
         },
       });
-      scheduled = batch;
       // A batch that runs no call never completes the scheduler.
-      void batch.then(
-        () => live.close(),
-        () => live.close(),
-      );
+      const closeBatch = () => {
+        try {
+          if (isBatchFinished?.()) {
+            closeShellOwner();
+            if (current() && dualOutput?.isConnected) {
+              for (const requestId of permissionRequests.values()) {
+                dualOutput.emitControlResponse(requestId, false);
+              }
+            }
+            permissionRequests.clear();
+          }
+        } finally {
+          live.close();
+        }
+      };
+      scheduled = batch.then(closeBatch, (error: unknown) => {
+        closeBatch();
+        throw error;
+      });
+      void scheduled.catch(() => {});
     } else {
       publishToolHistory(
         pending.map((request) => ({ status: 'scheduled', request })),

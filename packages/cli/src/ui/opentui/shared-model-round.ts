@@ -113,6 +113,7 @@ export function sharedModelRound(
       client,
       config: options.config,
       signal: runSignal,
+      toolSignal: signal,
       first: round,
       maxRounds: 1,
       duplicates: options.duplicates,

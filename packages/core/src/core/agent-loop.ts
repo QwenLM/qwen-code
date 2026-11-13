@@ -707,6 +707,13 @@ export async function runToolBatch(
       artifacts: response.artifacts,
     })),
     new Map(ordered.map(({ request }) => [request.callId, request.prompt_id])),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    isFinished,
   );
   if (isFinished?.()) return { parts: [], stop: 'cancelled' };
   const parts: Part[] = [];
@@ -807,6 +814,7 @@ export function createSchedulerExecutor(
           onEditorClose: () => {},
           ...options,
           config,
+          isFinished: hooks.isFinished,
           ...(hooks.isFinished &&
             onToolResultFullTurnModel && {
               onToolResultFullTurnModel: (model) =>

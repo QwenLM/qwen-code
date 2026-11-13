@@ -2808,6 +2808,7 @@ export async function runNonInteractive(
               let call: CompletedToolCall | undefined;
               const response = await executeToolCall(config, request, signal, {
                 recordToolResult: false,
+                isFinished: hooks.isFinished,
                 modToolCall: modSession?.toolCall(() =>
                   budgetEnforcer.tickToolCall(),
                 ),

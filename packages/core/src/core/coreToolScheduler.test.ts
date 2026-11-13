@@ -16007,9 +16007,11 @@ describe('persistence size attribution', () => {
       getTruncateToolOutputThreshold: () => 25000,
       getChatCompression: () => ({ imageTokenEstimate: 800 }),
     } as Config;
-    const owner = Object.assign(Object.create(CoreToolScheduler.prototype), {
+    const owner = new CoreToolScheduler({
       config: cfg,
-    }) as {
+      getPreferredEditor: () => undefined,
+      onEditorClose: () => {},
+    }) as unknown as {
       maybePersistLargeToolResult(
         callId: string,
         toolName: string,
