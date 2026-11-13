@@ -9,7 +9,7 @@
   - 早先的提案 #8775，它从 AgentCore 和 headless 入手；本设计把它的目标扩展到全部七份 loop，其中 AgentCore 这一步是 PR 5；
   - 对比各 loop 时发现的缺陷：#15324、#15325、#15326；
   - [loop protection 设置](2026-10-21-loop-protection-setting.zh-CN.md)；
-  - [事件总线 agent 循环](2026-11-11-event-bus-agent-loop.zh-CN.md) —— 共享 loop 的 opt-in 事件驱动内部架构，经 `experimental.eventBusAgentLoop` 在 headless 启用。
+  - [事件总线 agent 循环](2026-11-11-event-bus-agent-loop.zh-CN.md) —— 共享 loop 的事件驱动实现，同时开启两个实验开关时可用于 headless、AgentCore 和 OpenTUI。
 
 ## 问题
 
@@ -476,6 +476,8 @@ PR 4c 覆盖轮次的其余部分。实时轮次已经会发出工具批接着�
 
 因此轮次的代码不变。PR 4c 在共享路径上为这些情况加入单测；新轮次和重试用例对照两条路径，其余用例只检查共享路径。对拍套件已经在 OpenTUI 上运行它的重试场景和工具运行期间排队输入的场景。
 
+#17045 的第 3 步让 OpenTUI 的每次模型请求和工具批在一次 `runAgentLoop` 调用中运行。同时开启 `experimental.eventBusAgentLoop` 时，调用走事件总线内核。轮次逐个读取事件，并自行驱动下一轮。两种循环实现都会把本轮的调用和停止原因传给 `onRoundEnd`，并等待它返回。OpenTUI 通知调用方模型流已结束，再等待交接调度器。交接后才开始处理工具批，包括重放和结果收尾。交接前关闭轮次会跳过整个工具批。重试续发在工具批开始前把已配对的结果加入重放记账。TUI 对拍套件比较两种循环，并根据事件总线适配器的日志和 prompt ID 验证 OpenTUI 轮次。
+
 ### AgentCore 迁到共享 loop（PR 5）
 
 AgentCore 的推理循环（`agent-core.ts` 中的 `runReasoningLoop`）在每个入口下运行所有子代理、后台和 fork agent、workflow agent 以及进程内 teammate。它在 agent 自己的 `LlmChat` 上发出每一轮并自己解析流的 chunk，在新的 `CoreToolScheduler` 上运行这一轮的调用，把父 agent 的消息加在结果之后，一轮没有调用工具时等待消息或要求给出最终结果，并把各种停止映射到 `terminateMode`。它分以下几步迁移：
@@ -510,7 +512,7 @@ PR 5b 把一轮的调用作为 loop 的 `runToolBatch` 的一个工具批，在 
 
 scheduler 及其事件、审批和 hook 仍是 agent 自己的，因此延后审批照旧恢复 agent 的四个 async-local 上下文帧。工具批不记录结果，因为结果进入 agent 的 chat，而不是会话记录。它保留被中止的工具批的结果，让运行像现在一样在下一轮的中止检查处结束。流中重复的调用 ID 仍只运行并应答一次。headless 套件在调试日志中统计共享 loop 上的子代理工具批，TUI 套件在 TUI 中应答子代理的审批。
 
-PR 5c 让每一轮，即它的模型请求和工具批，在一次 `runAgentLoop` 调用中运行，调用在工具批之后返回，与 headless 主轮次逐轮运行的方式相同。开启 `experimental.eventBusAgentLoop` 时，这次调用跑在事件总线内核上，因此 AgentCore 是内核到达的第二个入口。轮与轮之间仍由 agent 自己驱动：在结果之后加入父 agent 的消息、循环提醒和按结果判断的循环守卫、等待和要求最终结果，以及把停止映射到 `terminateMode`。把整个运行交给 loop、不再自己驱动，留给 #17045 的后续 issue。loop 的选项有如下变化，过程式路径和事件总线路径都支持：
+PR 5c 让每一轮，即它的模型请求和工具批，在一次 `runAgentLoop` 调用中运行，调用在工具批之后返回，与 headless 主轮次逐轮运行的方式相同。开启 `experimental.eventBusAgentLoop` 时，AgentCore 使用事件总线内核。OpenTUI 是继 headless 和 AgentCore 后的第三个入口。轮与轮之间仍由 agent 自己驱动：在结果之后加入父 agent 的消息、循环提醒和按结果判断的循环守卫、等待和要求最终结果，以及把停止映射到 `terminateMode`。把整个运行交给 loop、不再自己驱动，留给 #17045 的后续 issue。loop 的选项有如下变化，过程式路径和事件总线路径都支持：
 
 - `runAgentLoop` 接收工具批选项 `keepCancelledResults`、`deferRecording` 和 `duplicateStateForCall`，并按调用返回工具批的结果；
 - 它可以用 `ModelRoundSource` 代替 client；在轮次来源上运行的 loop，其调用不计入会话的工具调用数；
