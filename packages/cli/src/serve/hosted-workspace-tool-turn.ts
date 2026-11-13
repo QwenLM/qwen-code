@@ -25,8 +25,8 @@ import {
 } from './hosted-question-wait.js';
 import { probeNeverStarted } from './hosted-never-started-reconcile.js';
 import {
-  MEASURED_WORKSPACE_CAPABILITY_DIGEST,
   RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+  isMeasuredWorkspaceCapability,
 } from './managed-workspace-activation.js';
 import {
   MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
@@ -9365,7 +9365,7 @@ export class HostedWorkspaceToolTurn {
     executionCallId: string,
     outcomeRef: ManagedSessionDurableRef,
   ): Promise<void> {
-    if (this.broker.capabilityDigest !== MEASURED_WORKSPACE_CAPABILITY_DIGEST)
+    if (!isMeasuredWorkspaceCapability(this.broker.capabilityDigest ?? ''))
       return;
     await recordManagedToolMeasurements(
       this.session,
