@@ -518,7 +518,7 @@ The value must be a finite, non-negative integer (validated at construction). In
 - **`fetchTimeoutMs` is per-call, not connection-level.** Long body reads share the timer. A daemon that streams responses must override per-call or set the timeout to `0`.
 - **SSE bypasses the fetch timeout** — long-lived SSE connections are not killed by `fetchTimeoutMs`. Use `AbortSignal` for caller-controlled cancellation.
 - **`parseSseStream` buffer cap is 16 MiB** as a defensive bound. A single frame larger than this aborts the iterator (the daemon never legitimately emits such frames).
-- **WebSocket negotiation releases its deadline.** A settled WebSocket probe clears its timeout, so disposing the returned transport does not leave a probe timer keeping a short-lived Node process open.
+- **WebSocket negotiation releases its deadline.** A settled WebSocket probe clears its timeout, so a short-lived Node process is not held open by a probe timer.
 - **`asKnownDaemonEvent` returns `undefined` for unrecognized event types.** SDK consumers must handle this branch rather than assuming the union is exhaustive; that is the forward-compatibility contract. Unrecognized events increment `DaemonSessionViewState.unrecognizedKnownEventCount`.
 - **`client_evicted`, `slow_client_warning`, `stream_error` are not in the replay ring.** Reconnecting after eviction picks up from the daemon's ring; you will not see the eviction frame again.
 - **`DaemonClient` does not auto-retry.** Network failures surface as rejections; reconnect / replay strategy is the caller's responsibility (`DaemonSessionClient.events()` makes replay easy but reconnect is still per-call).
