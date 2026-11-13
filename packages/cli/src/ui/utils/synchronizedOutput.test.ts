@@ -12,7 +12,6 @@ import {
   installSynchronizedOutput,
   resetSynchronizedOutputStats,
   terminalSupportsSynchronizedOutput,
-  windowsBuildNumber,
 } from './synchronizedOutput.js';
 import { installTerminalRedrawOptimizer } from './terminalRedrawOptimizer.js';
 
@@ -62,120 +61,44 @@ describe('terminalSupportsSynchronizedOutput', () => {
     expect(terminalSupportsSynchronizedOutput(env)).toBe(expected);
   });
 
-  it.each([
-    ['10.0.26100', true],
-    ['10.0.22631', false],
-    ['10.0.19045', false],
-  ])(
-    'reads the build from the native Windows release %s',
-    (osRelease, expected) => {
-      expect(
-        terminalSupportsSynchronizedOutput(
-          { WT_SESSION: 'abc' },
-          osRelease,
-          'win32',
-        ),
-      ).toBe(expected);
-    },
-  );
-
-  it('does not infer a terminal version from the Windows OS build', () => {
-    // #11929: Windows Terminal 1.12 on Windows 11 build 22631 flickers, and
-    // the same host upgraded to 1.24 implements the mode. The OS build says
-    // nothing about which terminal is painting, so it can neither grant nor
-    // withhold the wrappers — the override is the way to claim support.
-    expect(
-      terminalSupportsSynchronizedOutput(
-        { WT_SESSION: 'abc' },
-        '10.0.22631',
-        'win32',
-      ),
-    ).toBe(false);
-    expect(
-      terminalSupportsSynchronizedOutput(
-        {
-          WT_SESSION: 'abc',
-          QWEN_CODE_FORCE_SYNCHRONIZED_OUTPUT: '1',
-        },
-        '10.0.22631',
-        'win32',
-      ),
-    ).toBe(true);
+  it('does not consult the Windows build for a native Windows Terminal', () => {
+    // #11929 was filed from build 22631 with Windows Terminal 1.24, which
+    // implements DECSET 2026. Gating on the build withheld the wrappers from
+    // exactly that host, and the same host upgraded to a newer terminal is
+    // indistinguishable by build. A terminal without the mode ignores the
+    // sequences, so there is nothing to withhold.
+    expect(terminalSupportsSynchronizedOutput({ WT_SESSION: 'abc' })).toBe(
+      true,
+    );
   });
 
   it('does not gate WSL sessions on WT_SESSION', () => {
     // WT_SESSION is set on the Windows side and does not reach a stock WSL
     // shell, so a WSL session carries WSL_DISTRO_NAME and no WT_SESSION.
     expect(
-      terminalSupportsSynchronizedOutput(
-        { WSL_DISTRO_NAME: 'Ubuntu' },
-        '5.15.167.4-microsoft-standard-WSL2',
-        'linux',
-      ),
+      terminalSupportsSynchronizedOutput({ WSL_DISTRO_NAME: 'Ubuntu' }),
     ).toBe(false);
-  });
-
-  it('keeps a WSL kernel release from producing a Windows build', () => {
-    // WSL2 runs a real Linux kernel; neither its shape nor the WSL1 synthetic
-    // one carries a Windows build, so no kernel release may yield a number.
-    for (const release of [
-      '4.4.0-26100-Microsoft',
-      '4.19.104-microsoft-standard',
-      '5.15.167.4-microsoft-standard-WSL2',
-    ]) {
-      expect(windowsBuildNumber(release, 'linux')).toBeUndefined();
-    }
-    expect(windowsBuildNumber('10.0.26100', 'win32')).toBe(26100);
   });
 
   it('keeps a non-Windows-Terminal host when WT_SESSION is inherited', () => {
     // A WezTerm tab launched from Windows Terminal inherits WT_SESSION; the
-    // allow-list below must still decide, or an old build would switch the
-    // wrappers off for a terminal that supports them.
-    expect(
-      terminalSupportsSynchronizedOutput(
-        { TERM_PROGRAM: 'WezTerm', WT_SESSION: 'abc' },
-        '10.0.19045',
-        'win32',
-      ),
-    ).toBe(true);
-  });
-
-  it('keeps a non-Windows-Terminal host with no build at all', () => {
+    // allow-list below must still decide, since TERM_PROGRAM names the
+    // terminal actually painting the frames.
     expect(
       terminalSupportsSynchronizedOutput({
-        TERM_PROGRAM: 'ghostty',
+        TERM_PROGRAM: 'WezTerm',
         WT_SESSION: 'abc',
-      }),
-    ).toBe(true);
-  });
-
-  it('requires an explicit override for Windows Terminal when the build is unknown', () => {
-    // Without a native release there is no way to learn the host build, so the
-    // wrappers stay off rather than risk old Windows Terminal dropping them.
-    expect(terminalSupportsSynchronizedOutput({ WT_SESSION: 'abc' })).toBe(
-      false,
-    );
-    expect(
-      terminalSupportsSynchronizedOutput({
-        WT_SESSION: 'abc',
-        QWEN_CODE_FORCE_SYNCHRONIZED_OUTPUT: '1',
       }),
     ).toBe(true);
   });
 
   it('keeps the wrappers off when Windows Terminal is behind tmux', () => {
-    // The multiplexer in between decides whether DECSET 2026 reaches the host,
-    // so the host build alone is not enough.
+    // The multiplexer in between decides whether DECSET 2026 reaches the host.
     expect(
-      terminalSupportsSynchronizedOutput(
-        {
-          WT_SESSION: 'abc',
-          TMUX: '/tmp/tmux-1000/default,123,0',
-        },
-        '10.0.26100',
-        'win32',
-      ),
+      terminalSupportsSynchronizedOutput({
+        WT_SESSION: 'abc',
+        TMUX: '/tmp/tmux-1000/default,123,0',
+      }),
     ).toBe(false);
   });
 
@@ -186,53 +109,30 @@ describe('terminalSupportsSynchronizedOutput', () => {
           WT_SESSION: 'abc',
           QWEN_CODE_SYNCHRONIZED_OUTPUT: '0',
         },
-        '10.0.26100',
-        'win32',
       ),
     ).toBe(false);
-    // Positive control: the same host without the switch is granted, so the
-    // case above fails for the switch and not for a stale platform default.
-    expect(
-      terminalSupportsSynchronizedOutput(
-        { WT_SESSION: 'abc' },
-        '10.0.26100',
-        'win32',
-      ),
-    ).toBe(true);
+    expect(terminalSupportsSynchronizedOutput({ WT_SESSION: 'abc' })).toBe(
+      true,
+    );
   });
 
   it('detects a stock Windows Terminal session by WT_SESSION alone', () => {
     // Windows Terminal sets WT_SESSION and no TERM_PROGRAM, so a gate keyed on
     // TERM_PROGRAM is unreachable on the host #11929 was filed from.
-    expect(
-      terminalSupportsSynchronizedOutput(
-        { WT_SESSION: 'abc' },
-        '10.0.26100',
-        'win32',
-      ),
-    ).toBe(true);
-    expect(
-      terminalSupportsSynchronizedOutput(
-        { WT_SESSION: 'abc' },
-        '10.0.22631',
-        'win32',
-      ),
-    ).toBe(false);
+    expect(terminalSupportsSynchronizedOutput({ WT_SESSION: 'abc' })).toBe(
+      true,
+    );
   });
 
   it('does not take an inherited WT_SESSION inside WSL for Windows Terminal', () => {
-    // A WSL shell on a Windows Terminal tab inherits WT_SESSION but runs a
-    // Linux kernel, so the build gate cannot be satisfied either way.
+    // A WSL shell on a Windows Terminal tab inherits WT_SESSION, and the tab's
+    // terminal is the one painting the frames, so it takes the same branch.
     expect(
-      terminalSupportsSynchronizedOutput(
-        {
-          WT_SESSION: 'abc',
-          WSL_DISTRO_NAME: 'Ubuntu',
-        },
-        '5.15.167.4-microsoft-standard-WSL2',
-        'linux',
-      ),
-    ).toBe(false);
+      terminalSupportsSynchronizedOutput({
+        WT_SESSION: 'abc',
+        WSL_DISTRO_NAME: 'Ubuntu',
+      }),
+    ).toBe(true);
   });
 });
 
