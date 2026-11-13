@@ -271,8 +271,21 @@ const EMAIL_AT_INDEX_REGEX = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/y;
 const EMAIL_LOCAL_CHAR_REGEX = /[A-Za-z0-9._%+-]/;
 // ASCII sentence punctuation stays inside the span (the existing URL tests
 // pin it), but emphasis delimiters, underscores and CJK punctuation end it so
-// the surrounding markup is not swallowed.
-const URL_END_REGEX = /[\s<>"'`)\]},;*~_。，、；：！？）】」』》]/;
+// the surrounding markup is not swallowed. Tildes are handled by findUrlEnd:
+// a single one is a URL character, a `~~` run is a delimiter.
+const URL_END_REGEX = /[\s<>"'`)\]},;*_。，、；：！？）】」』》]/;
+
+function findUrlEnd(line: string, start: number): number {
+  let end = start;
+  while (end < line.length) {
+    // A run of two tildes is a strikethrough delimiter; a single tilde is a
+    // legal URL character (`/~user`).
+    if (line[end] === '~' && line[end + 1] === '~') break;
+    if (URL_END_REGEX.test(line[end])) break;
+    end += 1;
+  }
+  return end;
+}
 
 function matchAt(regex: RegExp, line: string, index: number) {
   regex.lastIndex = index;
@@ -420,8 +433,7 @@ function maskAutolinksInProse(
       // Wrapping the URL in an inline code span keeps the preview and the
       // settled text identical (same characters, code styling until settle).
       // Angle autolinks and URLs touching a backtick keep the old break.
-      let end = i + scheme[1].length + 3;
-      while (end < line.length && !URL_END_REGEX.test(line[end])) end++;
+      const end = findUrlEnd(line, i + scheme[1].length + 3);
       const url = line.slice(i, end);
       const inAngle = line[i - 1] === '<' || line[end] === '>';
       const nearBacktick =
@@ -497,6 +509,166 @@ function maskAutolinksInProse(
     i += 1;
   }
   return { text: out, carry: null };
+}
+
+interface TildeResult {
+  text: string;
+  carry: number | null;
+}
+
+/**
+ * Replaces a lone `~` in prose with U+223C TILDE OPERATOR. OpenTUI's preview
+ * and settled pass pair ASCII tildes as strikethrough delimiters differently,
+ * so a line with several approximations (`~1, ~2, ~3`) loses different tildes
+ * in each state; the operator character has no Markdown meaning and renders
+ * the same approximation glyph. `~~` is left alone, and code spans,
+ * fenced/indented code, link destinations and bare URLs are copied unchanged.
+ */
+const TILDE_OPERATOR = '\u223C';
+
+function maskTildesOnLine(
+  line: string,
+  carriedCodeSpan: number | null = null,
+): TildeResult {
+  const destinations = linkDestinationRanges(line);
+  let destinationIndex = 0;
+  let out = '';
+  let i = 0;
+  let openCodeSpan = carriedCodeSpan;
+
+  if (openCodeSpan !== null) {
+    const close = closingBackticks(line, 0, openCodeSpan);
+    if (close === null) return { text: line, carry: openCodeSpan };
+    out += line.slice(0, close);
+    i = close;
+    openCodeSpan = null;
+  }
+
+  const inDestination = (index: number) => {
+    while (
+      destinationIndex < destinations.length &&
+      destinations[destinationIndex][1] <= index
+    ) {
+      destinationIndex += 1;
+    }
+    return (
+      destinationIndex < destinations.length &&
+      destinations[destinationIndex][0] <= index
+    );
+  };
+
+  while (i < line.length) {
+    const char = line[i];
+
+    if (char === '`' && !isEscaped(line, i)) {
+      let end = i;
+      while (end < line.length && line[end] === '`') end++;
+      const runLength = end - i;
+      const close = closingBackticks(line, end, runLength);
+      if (close === null) {
+        return { text: out + line.slice(i), carry: runLength };
+      }
+      out += line.slice(i, close);
+      i = close;
+      continue;
+    }
+
+    if (inDestination(i)) {
+      out += char;
+      i += 1;
+      continue;
+    }
+
+    const scheme = matchAt(SCHEME_AT_INDEX_REGEX, line, i);
+    if (scheme) {
+      const end = findUrlEnd(line, i + scheme[1].length + 3);
+      out += line.slice(i, end);
+      i = end;
+      continue;
+    }
+
+    if (
+      char === '~' &&
+      !isEscaped(line, i) &&
+      line[i - 1] !== '~' &&
+      line[i + 1] !== '~'
+    ) {
+      out += TILDE_OPERATOR;
+      i += 1;
+      continue;
+    }
+
+    out += char;
+    i += 1;
+  }
+  return { text: out, carry: null };
+}
+
+function maskLoneTildes(text: string): string {
+  const lines = text.split('\n');
+  const escaped: string[] = [];
+  let fence: Fence | null = null;
+  let indentedCode = false;
+  let previousBlank = true;
+  let carriedCodeSpan: number | null = null;
+  let listColumn: number | null = null;
+
+  for (const line of lines) {
+    if (fence) {
+      const kind = fenceCloseKind(line, fence);
+      if (kind !== null) fence = null;
+      escaped.push(line);
+      if (kind === 'close') previousBlank = true;
+      else if (kind === null) previousBlank = false;
+      continue;
+    }
+
+    const rest = containerOf(line).rest;
+    const blank = rest.trim() === '';
+    const indent = indentationWidth(rest);
+
+    if (!blank) {
+      const list = /^([ \t]*)([-+*]|\d{1,9}[.)])([ \t]+)/.exec(rest);
+      if (list) {
+        const markerIndent = indentationWidth(list[1]);
+        const markerSpaces = Math.max(1, list[3].replace(/\t/g, '    ').length);
+        listColumn = markerIndent + list[2].length + markerSpaces;
+      } else if (listColumn !== null && indent < listColumn) {
+        listColumn = null;
+      }
+    }
+
+    const codeIndent = (listColumn ?? 0) + 4;
+    if (indentedCode) {
+      if (!blank && indent < codeIndent) {
+        indentedCode = false;
+      } else {
+        previousBlank = blank;
+        escaped.push(line);
+        continue;
+      }
+    } else if (!blank && indent >= codeIndent && previousBlank) {
+      indentedCode = true;
+      previousBlank = false;
+      escaped.push(line);
+      continue;
+    }
+
+    const next = fenceAtLineStart(line);
+    if (next) {
+      fence = next;
+      carriedCodeSpan = null;
+      previousBlank = false;
+      escaped.push(line);
+      continue;
+    }
+
+    const result = maskTildesOnLine(line, carriedCodeSpan);
+    carriedCodeSpan = result.carry;
+    previousBlank = blank;
+    escaped.push(result.text);
+  }
+  return escaped.join('\n');
 }
 
 function maskStreamingText(text: string): string {
@@ -629,7 +801,8 @@ function normalizeLineEndings(text: string): string {
 export function healStreamingMarkdown(text: string): string {
   // Keep C++ templates: remend's htmlTags handler strips `<int, ...`
   // while the angle bracket is still streaming.
-  const healed = remend(normalizeLineEndings(text), {
+  const prepared = maskLoneTildes(normalizeLineEndings(text));
+  const healed = remend(prepared, {
     linkMode: 'text-only',
     htmlTags: false,
   });
@@ -642,13 +815,16 @@ export function healStreamingMarkdown(text: string): string {
  * literal markers and rendered styles frame to frame; the tail's bare
  * autolinks and ATX markers are masked so OpenTUI's preview and highlight
  * agree); once settled, the message on disk is the truth and the raw text
- * renders as-is, apart from rendering-only line-ending normalization that
- * keeps both frames identical.
+ * renders as-is, apart from rendering-only line-ending normalization and
+ * replacing a lone `~` with the non-delimiter tilde operator so the two
+ * states agree on the same visible approximation marker.
  */
 export function streamingMarkdownForRender(
   text: string,
   streaming: boolean,
 ): string {
   const normalized = normalizeLineEndings(text);
-  return streaming ? healStreamingMarkdown(normalized) : normalized;
+  return streaming
+    ? healStreamingMarkdown(normalized)
+    : maskLoneTildes(normalized);
 }

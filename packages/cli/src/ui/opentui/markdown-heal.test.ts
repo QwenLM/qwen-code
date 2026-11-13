@@ -19,6 +19,7 @@ import {
 } from './markdown-heal.js';
 
 const ZWSP = '\u200B';
+const TILDE_OPERATOR = '\u223C';
 
 describe('healStreamingMarkdown', () => {
   it('closes an unclosed bold marker', () => {
@@ -88,6 +89,27 @@ describe('healStreamingMarkdown', () => {
   it('masks ftp URLs', () => {
     expect(healStreamingMarkdown('see ftp://ftp.gnu.org/gnu/emacs')).toBe(
       'see `ftp://ftp.gnu.org/gnu/emacs`',
+    );
+  });
+
+  it('replaces lone approximation tildes with the non-delimiter operator', () => {
+    expect(healStreamingMarkdown('~3,000, ~3,300, ~3,600')).toBe(
+      `${TILDE_OPERATOR}3,000, ${TILDE_OPERATOR}3,300, ${TILDE_OPERATOR}3,600`,
+    );
+    expect(healStreamingMarkdown('- Fuel: Q4 ~$92 (+12%), ~20% of cost')).toBe(
+      `- Fuel: Q4 ${TILDE_OPERATOR}$92 (+12%), ${TILDE_OPERATOR}20% of cost`,
+    );
+    expect(healStreamingMarkdown('~~strike~~')).toBe('~~strike~~');
+    expect(healStreamingMarkdown('code `~1`')).toBe('code `~1`');
+    expect(healStreamingMarkdown('```\n~2\n```')).toBe('```\n~2\n```');
+    expect(healStreamingMarkdown('see https://x.dev/~user')).toBe(
+      'see `https://x.dev/~user`',
+    );
+  });
+
+  it('applies the tilde replacement to settled rendering too', () => {
+    expect(streamingMarkdownForRender('~3,000', false)).toBe(
+      `${TILDE_OPERATOR}3,000`,
     );
   });
 
