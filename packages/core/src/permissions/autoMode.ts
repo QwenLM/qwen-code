@@ -511,7 +511,7 @@ export type AutoModeDecision =
       shouldBlock: boolean;
       reason: string;
       unavailable: boolean;
-      stage: 'fast' | 'thinking';
+      stage: ClassifierResult['stage'];
       durationMs: number;
     }
   | {
