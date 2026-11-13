@@ -126,7 +126,22 @@ listen」。该签名目前只覆盖 base-URL 列表。
 `:335-401`）中新增 `serve.sessionPrWatch` 对象：`events`（四种跃迁类型的数组）、
 `wakeDormant`（布尔，默认 true）与 `actions`（字符串映射，仅设置）。默认：无事件。
 
-`ServeFastPathSettings.serve` 与其 picker 都加上该键，使 fast path 与完整 boot 一致。
+**该键是 operator-only**，与 `serve.maxSessions` 同类：它花费 daemon 全局的 `gh` 预算，
+并向跨 workspace 的会话注入提示词，因此一个仓库不得为整个 daemon 打开它。别名（§5）是
+被认可的按 workspace 路径，且受信任门控。
+
+由此共有**四个**声明站点，而不是两个，漏掉任何一个都是静默死开关：
+
+1. 摘要类型 `ServeFastPathSettings.serve`
+   （`packages/cli/src/serve/fast-path-settings.ts:56`）；
+2. picker（`:697-721`），走 `includeOperatorServe` 而**不是** `includeServe`；
+3. 合并器 `mergeFastPathSettings`（`:781-790`），它今天只携带 `tokenQr` 与
+   `maxSessions`，因此只加 picker 的键会在各作用域合并时被丢掉；
+4. `WORKSPACE_RESTRICTED_SETTINGS`
+   （`packages/cli/src/config/settingsUtils.ts:292-293`），其消费方是 workspace 剥离、
+   「ignored」告警，以及拒绝写入的 daemon 路由。fast-path 读取器自己的 `ignoredKeys`
+   上报（`fast-path-settings.ts:470-483`）会在 stderr 点名被丢弃的键。
+
 daemon 读完整 boot 设置，它在 timer 创建前已完成合并。
 
 `QWEN_SESSION_PR_WATCH_EVENTS` 与 `QWEN_SESSION_PR_WATCH_WAKE_DORMANT` 在 boot 期
@@ -137,8 +152,8 @@ daemon 读完整 boot 设置，它在 timer 创建前已完成合并。
 
 非法 `events` 值告警并回退默认，与 `maxSessionsFromSettings`
 （`run-qwen-serve.ts:1901-1918`）一致。非法 `actions` 映射拒绝启动，与
-`validatePolicyConfig`（`:715-756`）一致：一个静默关掉投递的模板笔误比一次响亮失败
-更糟，而渠道对同样三条规则本来就抛错。
+`validatePolicyConfig`（`:692`，在 `:722` 与 `:734` 抛 `InvalidPolicyConfigError`）
+一致：一个静默关掉投递的模板笔误比一次响亮失败更糟，而渠道对同样三条规则本来就抛错。
 
 ### 2. 启用由有效事件集推导
 
@@ -227,7 +242,8 @@ host 按 watch identity 的口径归并（裸 hostname、不带端口），因�
 | 层           | 文件                                                                                                                                         | 改动                                                         |
 | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
 | config       | `packages/cli/src/config/settingsSchema.ts`                                                                                                  | `serve.sessionPrWatch`（`events`、`wakeDormant`、`actions`） |
-| config       | `packages/cli/src/serve/fast-path-settings.ts`                                                                                               | 摘要类型与 picker 加上该键                                   |
+| config       | `packages/cli/src/serve/fast-path-settings.ts`                                                                                               | 摘要类型、picker 与合并器加上该键；`ignoredKeys` 点名它      |
+| config       | `packages/cli/src/config/settingsUtils.ts`                                                                                                   | `WORKSPACE_RESTRICTED_SETTINGS` 加上该 operator-only 键      |
 | daemon       | `packages/cli/src/serve/run-qwen-serve.ts`                                                                                                   | boot 读取、env 覆盖、别名解析、扩展签名                      |
 | daemon       | `packages/cli/src/serve/server/session-pr-refresh.ts`                                                                                        | 启用由有效事件集推导；listing 扫描决策                       |
 | daemon       | `packages/cli/src/serve/server/pr-watch-observation.ts`                                                                                      | 事件集进入探测器与 tick                                      |
@@ -260,6 +276,10 @@ host 按 watch identity 的口径归并（裸 hostname、不带端口），因�
    会在其中一些上触发 `ci_failure`。保留单一定义正是 PR A 已发布的形状，而排除它们
    需要枚举 rollup contexts 而不是读 `rollup.state`。这份反复出现的噪声已在下方
    **决策与待定问题**里被明确接受。
+9. **该设置是 operator-only。** 它花费 daemon 全局的 `gh` 预算并向跨 workspace 的会话
+   注入提示词，因此一个仓库不得为整个 daemon 打开它；受信任门控的别名才是按 workspace
+   的路径。这使它位列 `WORKSPACE_RESTRICTED_SETTINGS` 中 `serve.maxSessions` 之侧，
+   并使声明站点是四个而不是两个（§1）。
 
 ## 约束与风险
 

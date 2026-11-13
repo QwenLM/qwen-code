@@ -156,9 +156,28 @@ A `serve.sessionPrWatch` object in the settings schema
 `events` (array of the four transition types), `wakeDormant` (boolean, default
 true) and `actions` (a string map, settings-only). Default: no events.
 
-Both `ServeFastPathSettings.serve` and its picker gain the key, so the fast path
-and the full boot agree. The daemon reads the full boot settings, which are
-already merged before the timer is created.
+**The key is operator-only**, like `serve.maxSessions`: it spends daemon-wide
+`gh` budget and injects prompts into sessions across workspaces, so a repository
+must not switch it on for the whole daemon. The alias (§5) is the sanctioned
+per-workspace path, and it is trust-gated.
+
+That makes **four** declaration sites, not two, and missing any one of them is a
+silent dead switch:
+
+1. the summary type `ServeFastPathSettings.serve`
+   (`packages/cli/src/serve/fast-path-settings.ts:56`);
+2. the picker (`:697-721`), under `includeOperatorServe` — not `includeServe`;
+3. the merger `mergeFastPathSettings` (`:781-790`), which today carries only
+   `tokenQr` and `maxSessions`, so a key added to the picker alone is dropped
+   when the scopes merge;
+4. `WORKSPACE_RESTRICTED_SETTINGS`
+   (`packages/cli/src/config/settingsUtils.ts:292-293`), whose consumers are the
+   workspace strip, the "ignored" warning and the daemon route that refuses the
+   write. The fast-path reader's own `ignoredKeys` reporting
+   (`fast-path-settings.ts:470-483`) names the dropped key on stderr.
+
+The daemon reads the full boot settings, which are already merged before the
+timer is created.
 
 `QWEN_SESSION_PR_WATCH_EVENTS` and `QWEN_SESSION_PR_WATCH_WAKE_DORMANT` override
 the settings at boot, following `advanced.runtimeOutputDir`'s env-first shape.
@@ -170,9 +189,10 @@ same change.
 
 An invalid `events` value falls back to the default with a warning, matching
 `maxSessionsFromSettings` (`run-qwen-serve.ts:1901-1918`). An invalid `actions`
-map refuses the boot, matching `validatePolicyConfig` (`:715-756`): a template
-typo that silently disables delivery is worse than a loud failure, and the
-channel already throws for the same three rules.
+map refuses the boot, matching `validatePolicyConfig` (`:692`, which throws
+`InvalidPolicyConfigError` at `:722` and `:734`): a template typo that silently
+disables delivery is worse than a loud failure, and the channel already throws
+for the same three rules.
 
 ### 2. Enablement derived from the effective event set
 
@@ -282,20 +302,21 @@ this increment removes both premises, so it cannot inherit the deferral.
 
 ## Files affected
 
-| Layer        | File                                                                                                                                             | Change                                                         |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
-| config       | `packages/cli/src/config/settingsSchema.ts`                                                                                                      | `serve.sessionPrWatch` (`events`, `wakeDormant`, `actions`)    |
-| config       | `packages/cli/src/serve/fast-path-settings.ts`                                                                                                   | the summary type and picker gain the key                       |
-| daemon       | `packages/cli/src/serve/run-qwen-serve.ts`                                                                                                       | boot read, env overrides, alias resolution, extended signature |
-| daemon       | `packages/cli/src/serve/server/session-pr-refresh.ts`                                                                                            | enablement from the effective event set; listing scan decision |
-| daemon       | `packages/cli/src/serve/server/pr-watch-observation.ts`                                                                                          | event set into the detector and the tick                       |
-| daemon       | `packages/cli/src/serve/server/pr-watch-deps.ts`                                                                                                 | `actions` / `wakeDormant` threaded; alias hosts                |
-| channel      | `packages/channels/github/src/GithubAdapter.ts`                                                                                                  | split the pass, retire state and tasks, deprecate keys         |
-| channel      | `packages/channels/github/src/index.ts`                                                                                                          | descriptor descriptions and options                            |
-| channel-base | `packages/channels/base/src/types.ts`                                                                                                            | `@deprecated` on the two config fields                         |
-| web-shell    | `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx`                                                                          | deprecation hints                                              |
-| docs         | `docs/users/features/channels/github.md`, `docs/users/configuration/settings.md`, `docs/developers/daemon/17-configuration.md`, both design docs | the move, the setting, the title change                        |
-| tests        | collocated `.test.ts` for each changed file                                                                                                      | see validation                                                 |
+| Layer        | File                                                                                                                                             | Change                                                                   |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| config       | `packages/cli/src/config/settingsSchema.ts`                                                                                                      | `serve.sessionPrWatch` (`events`, `wakeDormant`, `actions`)              |
+| config       | `packages/cli/src/serve/fast-path-settings.ts`                                                                                                   | the summary type, picker and merger gain the key; `ignoredKeys` names it |
+| config       | `packages/cli/src/config/settingsUtils.ts`                                                                                                       | `WORKSPACE_RESTRICTED_SETTINGS` gains the operator-only key              |
+| daemon       | `packages/cli/src/serve/run-qwen-serve.ts`                                                                                                       | boot read, env overrides, alias resolution, extended signature           |
+| daemon       | `packages/cli/src/serve/server/session-pr-refresh.ts`                                                                                            | enablement from the effective event set; listing scan decision           |
+| daemon       | `packages/cli/src/serve/server/pr-watch-observation.ts`                                                                                          | event set into the detector and the tick                                 |
+| daemon       | `packages/cli/src/serve/server/pr-watch-deps.ts`                                                                                                 | `actions` / `wakeDormant` threaded; alias hosts                          |
+| channel      | `packages/channels/github/src/GithubAdapter.ts`                                                                                                  | split the pass, retire state and tasks, deprecate keys                   |
+| channel      | `packages/channels/github/src/index.ts`                                                                                                          | descriptor descriptions and options                                      |
+| channel-base | `packages/channels/base/src/types.ts`                                                                                                            | `@deprecated` on the two config fields                                   |
+| web-shell    | `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx`                                                                          | deprecation hints                                                        |
+| docs         | `docs/users/features/channels/github.md`, `docs/users/configuration/settings.md`, `docs/developers/daemon/17-configuration.md`, both design docs | the move, the setting, the title change                                  |
+| tests        | collocated `.test.ts` for each changed file                                                                                                      | see validation                                                           |
 
 ## Key design decisions
 
@@ -324,6 +345,11 @@ this increment removes both premises, so it cannot inherit the deferral.
    would require enumerating rollup contexts instead of reading `rollup.state`.
    The recurring noise is accepted explicitly under **Decisions and open
    questions** below.
+9. **The setting is operator-only.** It spends daemon-wide `gh` budget and
+   injects prompts across workspaces, so a repository must not enable it for the
+   whole daemon; the trust-gated alias is the per-workspace path. That places it
+   beside `serve.maxSessions` in `WORKSPACE_RESTRICTED_SETTINGS` and makes four
+   declaration sites rather than two (§1).
 
 ## Constraints and risks
 
