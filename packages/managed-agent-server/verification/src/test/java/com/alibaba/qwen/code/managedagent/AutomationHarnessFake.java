@@ -1,7 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
-import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcAutomationLedgerStore;
+import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -53,7 +54,7 @@ public final class AutomationHarnessFake {
         String workspaceId = jdbc.queryForObject("SELECT workspace_id FROM ma_session"
                 + " WHERE tenant_id = ? AND session_id = ?", String.class, tenantId, sessionId);
         new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()))
-                .executeWithoutResult(status -> new AutomationLedgerStore(jdbc).projectSchedule(
+                .executeWithoutResult(status -> new JdbcAutomationLedgerStore(jdbc).projectSchedule(
                         tenantId, workspaceId, sessionId,
                         ((Number) schedule.get("revision")).longValue(), record, now));
     }
@@ -93,6 +94,8 @@ public final class AutomationHarnessFake {
     public final Set<String> crashedRuns = new HashSet<>();
     /** A test seam: thrown once by the next reconcile_run, then cleared. */
     public volatile RuntimeException failNextReconcile;
+    /** Runs once as the next reconcile_run arrives: a Session ending then. */
+    public Runnable beforeReconcile;
     /**
      * A test seam: the next define_schedule commits (its operation, too)
      * and then has its answer lost once.
@@ -245,7 +248,7 @@ public final class AutomationHarnessFake {
                     throw failure;
                 }
                 String occurrenceKey = String.valueOf(body.get("occurrenceKey"));
-                String runId = com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.automationRunId(scheduleId,
+                String runId = AutomationLedgerStore.automationRunId(scheduleId,
                         occurrenceKey);
                 // The order the funnel keeps: a committed run answers
                 // first — whatever the definition did since.
@@ -257,7 +260,7 @@ public final class AutomationHarnessFake {
                     // delivery again.
                     boolean gated = Boolean.TRUE.equals(answered.remove("gated"));
                     result.put("run", answered);
-                    result.put("inputId", com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.automationInputId(runId));
+                    result.put("inputId", AutomationLedgerStore.automationInputId(runId));
                     result.put("replayed", true);
                     if (gated) {
                         result.put("gate", Map.of("outcome", "delivered"));
@@ -324,20 +327,25 @@ public final class AutomationHarnessFake {
                 Map<String, Object> answered = new LinkedHashMap<>(run);
                 answered.remove("gated");
                 result.put("run", answered);
-                result.put("inputId", com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.automationInputId(runId));
+                result.put("inputId", AutomationLedgerStore.automationInputId(runId));
                 result.put("replayed", false);
                 if (gate != null) {
                     result.put("gate", gate);
                 }
             }
             case "reconcile_run" -> {
+                Runnable arrival = beforeReconcile;
+                if (arrival != null) {
+                    beforeReconcile = null;
+                    arrival.run();
+                }
                 RuntimeException failure = failNextReconcile;
                 if (failure != null) {
                     failNextReconcile = null;
                     throw failure;
                 }
                 String occurrenceKey = String.valueOf(body.get("occurrenceKey"));
-                String runId = com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.automationRunId(scheduleId,
+                String runId = AutomationLedgerStore.automationRunId(scheduleId,
                         occurrenceKey);
                 Map<String, Object> run = runs.get(sessionId + "|" + runId);
                 boolean repaired = false;

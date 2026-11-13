@@ -3,7 +3,9 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCreationRoots.Details;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.WorkspaceSummary;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -18,6 +20,7 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.IOException;
@@ -35,8 +38,9 @@ import java.util.UUID;
 public class WorkspaceCreationStore {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
+    private final TransactionTemplate readTransaction;
     private final WorkspaceStorageGuard guard;
-    private final ManagedWorkspaceRegistry registry;
+    private final JdbcManagedWorkspaceRegistry registry;
     private final WorkspaceCreationRoots roots;
     private final WorkspaceLocalDirectories localDirectories;
     private final boolean localDirectoryImport;
@@ -44,10 +48,12 @@ public class WorkspaceCreationStore {
     private final Clock clock;
 
     public WorkspaceCreationStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
-            WorkspaceStorageGuard guard, ManagedWorkspaceRegistry registry,
+            WorkspaceStorageGuard guard, JdbcManagedWorkspaceRegistry registry,
             ManagedAgentSettings properties, @Qualifier("managedAgentObjectMapper") ObjectMapper json, @Qualifier("managedAgentClock") Clock clock) {
         this.jdbc = jdbc;
         transaction = new TransactionTemplate(manager);
+        readTransaction = new TransactionTemplate(manager);
+        readTransaction.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
         this.guard = guard;
         this.registry = registry;
         roots = new WorkspaceCreationRoots(jdbc, properties);
@@ -107,7 +113,7 @@ public class WorkspaceCreationStore {
                     "Idempotency-Key must contain 1-128 visible characters.");
         }
         WorkspaceStorageKindGuard.requireFreshTransaction();
-        byte[] actorKey = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor);
+        byte[] actorKey = ManagedWorkspaceRegistry.actorKey(tenant, actor);
         String scope = ManagedReceipts.actorScope(actorKey);
         String receiptKey = ManagedSchemaKeys.receiptKey(ReceiptNamespace.WORKSPACE_CREATE,
                 tenant, ReceiptScope.ACTOR, scope, key);
@@ -157,7 +163,7 @@ public class WorkspaceCreationStore {
             return replay(tenant, actor, details);
         }
         if (!"PENDING".equals(receipt.state())) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         if (details.localRoot() != null) {
             details = reuseImportedRoot(tenant, actor, scope, key, details, digest);
@@ -190,7 +196,7 @@ public class WorkspaceCreationStore {
                 return;
             }
             if (!"PENDING".equals(current.state())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             long now = clock.millis();
             Details completed = WorkspaceCreationRoots.details(current.resultJson(), receiptKey);
@@ -198,7 +204,7 @@ public class WorkspaceCreationStore {
             if (completed.localRoot() != null) {
                 Path root = Path.of(completed.localRoot().root());
                 if (!completed.localRoot().equals(guard.identity(root))) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                    throw WorkspaceExecutionStore.unavailable();
                 }
                 localDirectories.project(root.resolve(completed.cwdRelative()).toString());
             }
@@ -225,12 +231,13 @@ public class WorkspaceCreationStore {
     }
 
     public DirectoryPage directories(String tenant, String actor, String workspace, String cwd) {
+        WorkspaceStorageKindGuard.requireFreshTransaction();
         if (!directorySelectionEnabled()) {
             throw new ManagedAgentException(409, "workspace_creation_unavailable",
                     "Directory selection is not enabled.");
         }
         WorkspaceSelection selected = new WorkspaceSelection(workspace, cwd);
-        var source = transaction.execute(status -> ownedSource(tenant, actor, selected));
+        var source = readTransaction.execute(status -> ownedSource(tenant, actor, selected, false));
         ContextBinding binding = Objects.requireNonNull(source).binding();
         Path root = guard.verifiedRoot(binding);
         Path directory = root.resolve(selected.cwdRelative()).normalize();
@@ -255,9 +262,13 @@ public class WorkspaceCreationStore {
                 }
             }
         } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable(error);
+            throw WorkspaceExecutionStore.unavailable(error);
         }
         guard.verify(binding);
+        var after = readTransaction.execute(status -> ownedSource(tenant, actor, selected, false));
+        if (!binding.equals(Objects.requireNonNull(after).binding())) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
         children.sort(Comparator.comparing(Directory::name));
         return new DirectoryPage(root.toString(), selected.cwdRelative(), children, truncated);
     }
@@ -275,7 +286,7 @@ public class WorkspaceCreationStore {
                         + " JOIN ma_storage s ON s.tenant_id = w.tenant_id AND s.storage_id = w.storage_id"
                         + " WHERE w.tenant_id = ? AND a.actor_id = ? AND a.role = 'OWNER'"
                         + " AND w.state = 'ACTIVE' AND w.workspace_kind = 'ROOT' AND s.storage_kind = 'LOCAL'"
-                        + " ORDER BY w.workspace_id", String.class, tenant, com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor));
+                        + " ORDER BY w.workspace_id", String.class, tenant, ManagedWorkspaceRegistry.actorKey(tenant, actor));
         for (String workspace : candidates) {
             String storage = jdbc.queryForObject("SELECT storage_id FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?",
                     String.class, tenant, workspace);
@@ -299,7 +310,7 @@ public class WorkspaceCreationStore {
         Path root = Path.of(details.localRoot().root());
         localDirectories.requireStorageRoot(root);
         if (!details.localRoot().equals(guard.identity(root))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return transaction.execute(status -> {
             var receipt = find(tenant, scope, key, true);
@@ -318,28 +329,35 @@ public class WorkspaceCreationStore {
         });
     }
 
-    private ManagedWorkspaceRegistry.ResolvedBinding ownedSource(String tenant, String actor,
+    private JdbcManagedWorkspaceRegistry.ResolvedBinding ownedSource(String tenant, String actor,
             WorkspaceSelection selected) {
+        return ownedSource(tenant, actor, selected, true);
+    }
+
+    private JdbcManagedWorkspaceRegistry.ResolvedBinding ownedSource(String tenant, String actor,
+            WorkspaceSelection selected, boolean lock) {
         for (String segment : selected.cwdRelative().split("/")) {
             if (reserved(segment)) {
                 throw new ManagedAgentException(400, "invalid_cwd", "Select a project directory.");
             }
         }
-        var source = registry.resolveOwnedDirectory(tenant, actor, selected.workspaceId(), selected.cwdRelative());
+        var source = lock
+                ? registry.resolveOwnedDirectory(tenant, actor, selected.workspaceId(), selected.cwdRelative())
+                : registry.resolveOwnedDirectoryForRead(tenant, actor, selected.workspaceId(), selected.cwdRelative());
         Path root = guard.verifiedRoot(source.binding());
         Path directory = root.resolve(selected.cwdRelative()).normalize();
         if (!Files.isReadable(directory) || !Files.isExecutable(directory)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return source;
     }
 
-    private ManagedWorkspaceRegistry.ResolvedBinding verifySource(String tenant, String actor, Details details) {
+    private JdbcManagedWorkspaceRegistry.ResolvedBinding verifySource(String tenant, String actor, Details details) {
         var source = ownedSource(tenant, actor,
                 new WorkspaceSelection(details.sourceWorkspaceId(), details.cwdRelative()));
         if (source.binding().getWorkspaceGeneration() != details.sourceGeneration()
                 || !source.binding().getStorageId().equals(details.storageId())) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return source;
     }

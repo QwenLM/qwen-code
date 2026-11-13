@@ -54,9 +54,9 @@ class ManagedAgentEventSequenceConcurrencyTest {
         jdbc = new ManagedSchemaJdbcTemplate(source);
         transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(source));
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(),
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(),
                 Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     @ParameterizedTest

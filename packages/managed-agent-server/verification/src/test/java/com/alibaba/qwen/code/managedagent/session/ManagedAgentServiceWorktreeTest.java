@@ -6,8 +6,8 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -17,13 +17,9 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -37,20 +33,24 @@ class ManagedAgentServiceWorktreeTest {
     private final WorkspaceSelection selection = new WorkspaceSelection("workspace", ".");
     private final SessionWorktreeService.Request request = new SessionWorktreeService.Request("main");
     private final ManagedAgentService service = new ManagedAgentService(store, new RequestDigests(),
-            coordinator, harness, mock(ManagedWorkspaceRegistry.class), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+            coordinator, harness, mock(JdbcManagedWorkspaceRegistry.class), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void creationDoesNotWarmOrDispatchBeforeTheWorktreeIsReady(boolean prompted) {
         service.setSessionWorktrees(worktrees);
-        var plan = mock(SessionWorktreeStore.Plan.class);
+        var plan = mock(JdbcSessionWorktreeStore.Plan.class);
         when(worktrees.preflight("tenant", "actor", selection, request)).thenReturn(plan);
         when(harness.isAvailable()).thenReturn(true);
         when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
         when(store.findSessionWorktree("tenant", "session")).thenReturn(descriptor());
-        when(store.insertWorkspaceSessionCommand(eq("tenant"), eq("actor"), eq("key"), anyString(),
-                eq("qwen-code"), isNull(), eq("title"), anyList(), any(), eq(selection), isNull(), anyBoolean(),
-                isNull(), anyBoolean(), anyList(), anyBoolean(), isNull(), isNull(), anySet(), eq(plan)))
+        when(store.insertWorkspaceSessionCommand(argThat(command -> command != null
+                && "tenant".equals(command.tenantId()) && "actor".equals(command.actorId())
+                && "key".equals(command.idempotencyKey()) && "qwen-code".equals(command.agentId())
+                && command.requestedRevision() == null && "title".equals(command.title())
+                && selection.equals(command.selection()) && command.requestedApprovalMode() == null
+                && command.requestedPlanMode() == null && command.modelId() == null
+                && command.extensionPins() == null && plan.equals(command.worktree()))))
                 .thenReturn(new Admission("session", prompted ? "turn" : null, false, true));
 
         var result = service.createWorkspaceSession("tenant", "actor", "key", "qwen-code", null,
@@ -80,8 +80,8 @@ class ManagedAgentServiceWorktreeTest {
         verifyNoInteractions(worktrees, coordinator);
     }
 
-    private static SessionWorktreeStore.Descriptor descriptor() {
-        return new SessionWorktreeStore.Descriptor("worktree", "session", "workspace", "preparing",
+    private static JdbcSessionWorktreeStore.Descriptor descriptor() {
+        return new JdbcSessionWorktreeStore.Descriptor("worktree", "session", "workspace", "preparing",
                 "qwen/session", "a".repeat(40), ".qwen-managed-worktrees/worktree", "operation", 1, null);
     }
 }

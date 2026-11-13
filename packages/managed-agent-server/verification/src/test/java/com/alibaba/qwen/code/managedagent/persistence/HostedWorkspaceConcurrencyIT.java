@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -18,7 +19,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.local.LocalProcessRuntimeProvisioner;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.tools.Server;
@@ -96,12 +97,22 @@ class HostedWorkspaceConcurrencyIT {
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
             var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
-            String firstSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor",
-                    "first", "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
-                    new WorkspaceSelection("workspace", ".")).sessionId());
-            String secondSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor",
-                    "second", "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
-                    new WorkspaceSelection("workspace", ".")).sessionId());
+            String firstSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId(tenant)
+                    .actorId("actor")
+                    .idempotencyKey("first")
+                    .requestDigest("sha256:" + "a".repeat(64))
+                    .agentId("qwen-code")
+                    .selection(new WorkspaceSelection("workspace", "."))
+                    .build()).sessionId());
+            String secondSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId(tenant)
+                    .actorId("actor")
+                    .idempotencyKey("second")
+                    .requestDigest("sha256:" + "b".repeat(64))
+                    .agentId("qwen-code")
+                    .selection(new WorkspaceSelection("workspace", "."))
+                    .build()).sessionId());
             guard(source, properties).register(tenant, "storage", UUID.randomUUID().toString());
             Map<String, Object> config = Map.of("url", url, "user", user, "password", password,
                     "tenant", tenant, "root", root.toString());
@@ -250,12 +261,22 @@ class HostedWorkspaceConcurrencyIT {
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
             var transaction = new TransactionTemplate(new DataSourceTransactionManager(source));
-            String firstSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor",
-                    "first", "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
-                    new WorkspaceSelection("workspace", ".")).sessionId());
-            String secondSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor",
-                    "second", "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null,
-                    new WorkspaceSelection("workspace", ".")).sessionId());
+            String firstSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId(tenant)
+                    .actorId("actor")
+                    .idempotencyKey("first")
+                    .requestDigest("sha256:" + "a".repeat(64))
+                    .agentId("qwen-code")
+                    .selection(new WorkspaceSelection("workspace", "."))
+                    .build()).sessionId());
+            String secondSession = transaction.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId(tenant)
+                    .actorId("actor")
+                    .idempotencyKey("second")
+                    .requestDigest("sha256:" + "b".repeat(64))
+                    .agentId("qwen-code")
+                    .selection(new WorkspaceSelection("workspace", "."))
+                    .build()).sessionId());
             guard(source, properties).register(tenant, "storage", UUID.randomUUID().toString());
             Map<String, Object> config = Map.of("url", url, "user", user, "password", password,
                     "tenant", tenant, "root", root.toString());
@@ -268,6 +289,8 @@ class HostedWorkspaceConcurrencyIT {
                 String rival = UUID.randomUUID().toString();
                 assertOk(broker.acquire(secondSession, rival).get(20, TimeUnit.SECONDS));
                 assertThat(member(jdbc, rival)).isEqualTo(held.get("storage_key"));
+                held = row(jdbc, tenant);
+                assertThat(held).containsEntry("member_count", 2L);
 
                 // #13800: unfinished work keeps the mount honestly — the
                 // narrow release refuses while anything is unproven, never
@@ -312,6 +335,7 @@ class HostedWorkspaceConcurrencyIT {
                 assertThat(mount.body()).contains("\"mountReleased\":true");
 
                 var freed = row(jdbc, tenant);
+                assertThat(freed).containsEntry("member_count", 1L);
                 for (String field : List.of("holder_key", "binding_id", "runtime_generation", "runtime_session_id")) {
                     assertThat(freed.get(field)).as("%s", field).isNull();
                 }
@@ -332,7 +356,7 @@ class HostedWorkspaceConcurrencyIT {
                 assertThat(member(jdbc, holderRuntime)).isEqualTo(held.get("storage_key"));
                 assertOk(broker.postAsync("/tool-sessions/" + holderRuntime + ":release",
                         Map.of("harnessSessionId", firstSession)).get(20, TimeUnit.SECONDS));
-                assertThat(row(jdbc, tenant).get("holder_key")).isNull();
+                assertThat(row(jdbc, tenant)).containsEntry("holder_key", null).containsEntry("member_count", 0L);
                 assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session"
                         + " WHERE runtime_session_id = ?", String.class, holderRuntime)).isEqualTo("RELEASED");
                 // An unreconciled original identity keeps its member without excluding unrelated work.
@@ -425,8 +449,8 @@ class HostedWorkspaceConcurrencyIT {
 
     private static ManagedAgentStore store(DriverManagerDataSource source, ManagedAgentProperties properties) {
         var jdbc = new ManagedSchemaJdbcTemplate(source);
-        return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     private static ManagedAgentProperties properties(String tenant, Path root, Path state) {
@@ -644,7 +668,7 @@ class HostedWorkspaceConcurrencyIT {
             var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
             var sessions = new JdbcRuntimeSessionRepository(source);
             var executions = new JdbcToolExecutionRepository(source);
-            var authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(new ManagedSchemaJdbcTemplate(source), new DataSourceTransactionManager(source), guard) {
+            var authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(new ManagedSchemaJdbcTemplate(source), new DataSourceTransactionManager(source), guard) {
                 private void pause(String stage) {
                     try {
                         Path armed = directory.resolve("armed");

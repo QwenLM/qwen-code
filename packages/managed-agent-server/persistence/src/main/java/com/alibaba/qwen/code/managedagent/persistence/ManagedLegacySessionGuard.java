@@ -11,7 +11,7 @@ final class ManagedLegacySessionGuard {
         // A locking read of the root: behind a tenant guard it can close a
         // cycle with a pinned CSI Session's continuation, so a deadlock
         // victim here is named like the guard side (#13800 R1-1).
-        return ManagedSessionStore.namedRootDeadlock(() -> Boolean.TRUE.equals(
+        return JdbcManagedSessionStore.namedRootDeadlock(() -> Boolean.TRUE.equals(
                 jdbc.execute(
                         (ConnectionCallback<Boolean>)
                                 connection -> {
@@ -19,14 +19,14 @@ final class ManagedLegacySessionGuard {
                                             connection.getMetaData().getDatabaseProductName();
                                     String index =
                                             "MySQL".equals(product) || "MariaDB".equals(product)
-                                                    ? " FORCE INDEX (ma_session_csi_guard_idx)"
+                                                    ? " FORCE INDEX (idx_ma_session_csi_guard)"
                                                     : "";
                                     try (var statement =
                                             connection.prepareStatement(
-                                                    "SELECT csi_guard FROM ma_session"
+                                                    "SELECT is_csi_guard FROM ma_session"
                                                             + index
                                                             + " WHERE tenant_id = ? AND session_id"
-                                                            + " = ? AND csi_guard = TRUE FOR"
+                                                            + " = ? AND is_csi_guard = TRUE FOR"
                                                             + " UPDATE")) {
                                         statement.setQueryTimeout(10);
                                         statement.setBytes(

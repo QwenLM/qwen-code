@@ -75,6 +75,13 @@ export function prepareBundledGeneratedUi(
       // Declared up front: the model should see the view as an option when it
       // decides how to answer, not only after searching for deferred tools.
       alwaysLoadTools: true,
+      // When the CLI itself is the Electron binary launched by an IDE
+      // companion, the ACP launch scrubs ELECTRON_RUN_AS_NODE from the
+      // inherited environment (#16063): without it this child starts the
+      // VS Code GUI, which opens the entry file in an editor.
+      ...(process.versions['electron']
+        ? { env: { ELECTRON_RUN_AS_NODE: '1' } }
+        : {}),
     },
   };
 }

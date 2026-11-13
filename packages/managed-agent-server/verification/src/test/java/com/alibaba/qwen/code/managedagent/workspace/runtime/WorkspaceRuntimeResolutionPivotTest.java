@@ -1,12 +1,13 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -60,10 +61,10 @@ class WorkspaceRuntimeResolutionPivotTest {
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(
                 new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(
                         TENANT, STORAGE, root.toString())));
-        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc,
-                new ObjectMapper(), Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        ManagedAgentStore store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc,
+                new ObjectMapper(), Clock.systemUTC(), ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         WorkspaceRuntimeResolver resolver = new WorkspaceRuntimeResolver(
-                store, com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc,
+                store, com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc,
                         new DataSourceTransactionManager(dataSource))),
                 properties);
 
@@ -83,10 +84,14 @@ class WorkspaceRuntimeResolutionPivotTest {
                             + " VALUES (?, ?, ?, 'OPERATOR')", TENANT, WS,
                             ACTOR.getBytes(java.nio.charset
                                     .StandardCharsets.UTF_8));
-                    return store.insertWorkspaceSessionCommand(TENANT, ACTOR,
-                            "create", "digest", "qwen-code", null, null,
-                            List.of(), null,
-                            new WorkspaceSelection(WS, "services/api"))
+                    return store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                            .tenantId(TENANT)
+                            .actorId(ACTOR)
+                            .idempotencyKey("create")
+                            .requestDigest("digest")
+                            .agentId("qwen-code")
+                            .selection(new WorkspaceSelection(WS, "services/api"))
+                            .build())
                             .sessionId();
                 });
 

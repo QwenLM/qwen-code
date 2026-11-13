@@ -63,6 +63,9 @@ import {
   type TranscriptWindow,
 } from './transcript-window.js';
 import { assistantMarkdownForRender } from './markdown-heal.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { ModAssistantMessageInput } from '@qwen-code/qwen-code-core/mods/render-tree.js';
+import { useModRow } from '../hooks/use-mod-row.js';
 import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { formatInlineToolArgsJson } from '../components/messages/ToolMessage.js';
 import {
@@ -137,6 +140,12 @@ export interface TranscriptViewProps {
    * that reads from the first turn down.
    */
   initialAnchor?: 'top' | 'bottom';
+  /**
+   * The main transcript's Mod rows: the config whose Mods may rewrite a
+   * complete reply block, and the session the items belong to. Left out by
+   * the session preview and the quit screen.
+   */
+  modRows?: { config: Config; sessionId: string };
 }
 
 /** ink HistoryItemDisplay getHistoryItemMarginTop: conversation turns and the
@@ -554,6 +563,7 @@ export function OpenTuiTranscriptView({
   activeShellCallId,
   focusedShellCallId,
   initialAnchor = 'bottom',
+  modRows,
 }: TranscriptViewProps) {
   const visibleItems = useMemo(
     () =>
@@ -621,6 +631,7 @@ export function OpenTuiTranscriptView({
                 showToolCallDetails={showToolCallDetails}
                 mouseTracking={mouseTracking}
                 awaitingApproval={item === awaitingItem}
+                modRows={modRows}
                 shellFocus={
                   item.kind === 'tool' &&
                   !item.done &&
@@ -652,6 +663,7 @@ function TranscriptItem({
   mouseTracking,
   awaitingApproval,
   shellFocus,
+  modRows,
 }: {
   item: LiveHistoryItem;
   maxRows: number;
@@ -664,6 +676,7 @@ function TranscriptItem({
   mouseTracking: boolean;
   awaitingApproval: boolean;
   shellFocus?: 'available' | 'focused';
+  modRows?: TranscriptViewProps['modRows'];
 }) {
   switch (item.kind) {
     case 'user':
@@ -671,9 +684,12 @@ function TranscriptItem({
     case 'assistant':
       return (
         <AssistantRow
+          id={item.id}
           text={item.text}
           streaming={item.streaming}
           timestamp={showTimestamps ? item.timestamp : undefined}
+          isFirstOfReply={item.canonicalHistoryItem?.type !== 'gemini_content'}
+          modRows={modRows}
         />
       );
     case 'thinking':
@@ -710,6 +726,30 @@ function TranscriptItem({
     case 'compaction':
       return <CompactionRow compression={item.compression} />;
     case 'info':
+      if (item.presentation === 'subscription-success') {
+        return (
+          <box flexDirection="column">
+            {item.text.split('\n').map((line, index) =>
+              index < 2 ? (
+                <box key={index} flexDirection="row">
+                  <text fg={C.green} flexShrink={0}>
+                    {'✓ '}
+                  </text>
+                  <text fg={C.text} {...selectionProps()}>
+                    {sanitizeTerminalText(line.slice(2))}
+                  </text>
+                </box>
+              ) : (
+                <box key={index} paddingLeft={2}>
+                  <text fg={C.dim} {...selectionProps()}>
+                    {sanitizeTerminalText(line.trimStart())}
+                  </text>
+                </box>
+              ),
+            )}
+          </box>
+        );
+      }
       return (
         <box flexDirection="row">
           {/* A wrapped message would otherwise shrink the prefix and drop its
@@ -721,7 +761,17 @@ function TranscriptItem({
         </box>
       );
     case 'error':
-      return <ErrorRow text={item.text} hint={item.hint} />;
+      return (
+        <ErrorRow
+          text={
+            item.text ===
+            'Your login credentials are no longer valid. Run /auth to sign in again.'
+              ? t(item.text)
+              : item.text
+          }
+          hint={item.hint}
+        />
+      );
     case 'warning':
       return (
         <box flexDirection="row">
@@ -779,17 +829,38 @@ function UserRow({ text }: { text: string }) {
 }
 
 function AssistantRow({
+  id,
   text,
   streaming,
   timestamp,
+  isFirstOfReply,
+  modRows,
 }: {
+  id: string;
   text: string;
   streaming: boolean;
   timestamp?: number;
+  isFirstOfReply: boolean;
+  modRows?: TranscriptViewProps['modRows'];
 }) {
   const meta = assistantMessageMeta();
+  // The Mods can rewrite how a complete, nonblank block is drawn. The item
+  // keeps its original text.
+  const modInput = useMemo<ModAssistantMessageInput | undefined>(
+    () =>
+      modRows && !streaming && text.trim().length > 0
+        ? {
+            surface: 'terminal',
+            component: 'AssistantMessage',
+            requestId: id,
+            props: { text, isFirstOfReply },
+          }
+        : undefined,
+    [modRows, streaming, id, text, isFirstOfReply],
+  );
+  const modProps = useModRow(modRows?.config, modRows?.sessionId, modInput);
   const content = sanitizeTerminalText(
-    assistantMarkdownForRender(text, streaming),
+    assistantMarkdownForRender(modProps?.text ?? text, streaming),
   );
   // The two shapes differ, and `output.showTimestamps` is a setting the dialog
   // can flip mid-session: without keys the stamped branch's second child would

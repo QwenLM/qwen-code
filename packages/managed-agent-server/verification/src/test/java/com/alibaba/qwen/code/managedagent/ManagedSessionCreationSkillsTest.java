@@ -6,8 +6,8 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionSkills;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -49,7 +49,7 @@ class ManagedSessionCreationSkillsTest {
     @Autowired private JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
     @Autowired private ManagedAgentStore store;
-    @Autowired private ManagedSessionSkills snapshots;
+    @Autowired private JdbcManagedSessionSkills snapshots;
     @Autowired private ManagedAgentProperties properties;
     @Autowired private ManagedExtensionPackageService extensionPackages;
     @Qualifier("managedAgentTransactionManager")
@@ -91,6 +91,54 @@ class ManagedSessionCreationSkillsTest {
                 + " display_name, config_ref, policy_ref, state) VALUES (?, 'ws', 1, 'storage', 'Test', 'config', 'policy', 'ACTIVE')", tenant);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'ws', ?, 'OPERATOR')",
                 tenant, "actor".getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void sourceImportFreezesAdmissionAndReplaysCreationAfterRevocation() throws Exception {
+        enableBuiltinShell();
+        properties.getExtensions().setEnabled(true);
+        properties.getExtensions().setSelfServiceEnabled(true);
+        properties.getExtensions().setArtifactDirectory(archiveDirectory.toString());
+        properties.getExtensions().setAllowedActors(List.of("actor"));
+        var source = mock(com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionSource.class);
+        org.mockito.Mockito.when(source.id()).thenReturn("business");
+        org.mockito.Mockito.when(source.resolve(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any())).thenAnswer(call -> {
+            assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            return new com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionSource.Resolved(call.getArgument(1), "private/archive", null);
+        });
+        org.mockito.Mockito.when(source.open(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+                .thenAnswer(call -> new java.io.ByteArrayInputStream("skill ZIP".getBytes(StandardCharsets.UTF_8)));
+        var preparation = mock(HarnessConnector.class);
+        org.mockito.Mockito.when(preparation.supportsPackagePreparation()).thenReturn(true);
+        byte[] archive = "compiled bytes".getBytes(StandardCharsets.UTF_8);
+        var manifest = new ManagedExtensionPackages.Manifest(1, 1, "source-skill", "1", new ManagedExtensionPackages.Target("linux", "any"), List.of("skills"));
+        org.mockito.Mockito.when(preparation.preparePackage(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+                .thenAnswer(call -> new HarnessConnector.PreparedPackage(Map.of("manifest", manifest,
+                        "packageDigest", org.apache.commons.codec.digest.DigestUtils.sha256Hex(archive)), new java.io.ByteArrayInputStream(archive)));
+        extensionPackages.configureSources(List.of(source));
+        extensionPackages.configurePreparation(preparation);
+        try {
+            var command = new ManagedExtensionPackages.SourceImport(
+                    new com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionSource.Reference("business", "skill", "skill_1", "1"), manifest.target());
+            var response = mvc.perform(post("/v1/agents/workspaces/ws/extensions/source-imports").principal(actor("actor"))
+                            .header(TenantContextFilter.HEADER, tenant).header("Idempotency-Key", "source-import")
+                            .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(command)))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.state").value("settled")).andReturn();
+            var pin = json.readTree(response.getResponse().getContentAsString()).required("pin");
+            var body = request("qwen-code", List.of());
+            body.putArray("extensionPins").add(pin);
+            String session = create(body, "source-session", true).required("sessionId").asText();
+            org.mockito.Mockito.doThrow(new com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionSource.Failure(
+                    com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionSource.Failure.Reason.NOT_FOUND, null))
+                    .when(source).resolve(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+            assertThat(create(body, "source-session", true).required("sessionId").asText()).isEqualTo(session);
+            submit(body, "new-source-session", true).andExpect(status().isNotFound());
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id=?", Long.class, tenant)).isEqualTo(1);
+        } finally {
+            extensionPackages.configureSources(List.of());
+            extensionPackages.configurePreparation(harness);
+            properties.getExtensions().setSelfServiceEnabled(false);
+        }
     }
 
     @Test
@@ -179,8 +227,8 @@ class ManagedSessionCreationSkillsTest {
         properties.getExtensions().setArtifactDirectory(archiveDirectory.toString());
         properties.getExtensions().setAllowedActors(List.of("actor"));
         Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
-        Object profiles = org.springframework.test.util.ReflectionTestUtils.getField(target, "definitionToolProfiles");
-        org.springframework.test.util.ReflectionTestUtils.setField(target, "definitionToolProfiles", List.of("hosted-workspace-mcp/1"));
+        Object profiles = com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "definitionToolProfiles");
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", List.of("hosted-workspace-mcp/1"));
         try {
             var definition = json.createObjectNode();
             definition.putObject("model");
@@ -206,7 +254,7 @@ class ManagedSessionCreationSkillsTest {
             assertThat(store.requireSession(tenant, session).toolProfile()).isEqualTo("hosted-workspace-mcp/1");
             assertThat(snapshots.initialSelection(tenant, session).get("extensions")).isEqualTo(List.of());
         } finally {
-            org.springframework.test.util.ReflectionTestUtils.setField(target, "definitionToolProfiles", profiles);
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", profiles);
         }
     }
 
@@ -218,8 +266,8 @@ class ManagedSessionCreationSkillsTest {
                 "definitionToolProfiles", List.of("hosted-workspace-files/1", "hosted-workspace-shell/1"));
         Map<String, Object> previous = new java.util.LinkedHashMap<>();
         for (var entry : values.entrySet()) {
-            previous.put(entry.getKey(), org.springframework.test.util.ReflectionTestUtils.getField(target, entry.getKey()));
-            org.springframework.test.util.ReflectionTestUtils.setField(target, entry.getKey(), entry.getValue());
+            previous.put(entry.getKey(), com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, entry.getKey()));
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, entry.getKey(), entry.getValue());
         }
         boolean previousManaged = properties.getManagedExtensions().isEnabled();
         try {
@@ -240,7 +288,7 @@ class ManagedSessionCreationSkillsTest {
             properties.getManagedExtensions().setEnabled(true);
             properties.getExtensions().setArtifactDirectory(archiveDirectory.toString());
             properties.getExtensions().setAllowedActors(List.of("actor"));
-            org.springframework.test.util.ReflectionTestUtils.setField(target, "managedExtensionExecutionEnabled", true);
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "managedExtensionExecutionEnabled", true);
             var selection = request(agent, List.of());
             selection.putArray("extensionPins");
             String selected = create(selection, "extension-shell", false).required("id").asText();
@@ -257,7 +305,7 @@ class ManagedSessionCreationSkillsTest {
             assertThat(store.requireSession(tenant, filesSession).publicChildAgentsVersion()).isZero();
         } finally {
             for (var entry : previous.entrySet()) {
-                org.springframework.test.util.ReflectionTestUtils.setField(target, entry.getKey(), entry.getValue());
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, entry.getKey(), entry.getValue());
             }
             properties.getManagedExtensions().setEnabled(previousManaged);
             properties.getExtensions().setEnabled(false);
@@ -284,7 +332,9 @@ class ManagedSessionCreationSkillsTest {
         jdbc.update("UPDATE ma_request_receipt SET result_json = REPLACE(result_json, 'ORIGINAL_INSTRUCTIONS', 'TAMPERED')"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
         assertThatThrownBy(() -> snapshots.effective(store.requireSession(tenant, session)))
-                .hasMessageContaining("snapshot is invalid");
+                .hasMessageContaining("snapshot is invalid")
+                .extracting(error -> ((com.alibaba.qwen.code.managedagent.exception.ManagedAgentException) error).getCode())
+                .isEqualTo("session_skills_conflict");
     }
 
     @Test
@@ -355,15 +405,15 @@ class ManagedSessionCreationSkillsTest {
 
     private void enableBuiltinShell() {
         Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
-        previousShellEnabled = (Boolean) org.springframework.test.util.ReflectionTestUtils.getField(target, "workspaceShellEnabled");
-        org.springframework.test.util.ReflectionTestUtils.setField(target, "workspaceShellEnabled", true);
+        previousShellEnabled = (Boolean) com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "workspaceShellEnabled");
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "workspaceShellEnabled", true);
     }
 
     @AfterEach
     void restoreBuiltinShell() {
         if (previousShellEnabled != null) {
             Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
-            org.springframework.test.util.ReflectionTestUtils.setField(target, "workspaceShellEnabled", previousShellEnabled);
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "workspaceShellEnabled", previousShellEnabled);
             previousShellEnabled = null;
         }
     }

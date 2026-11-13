@@ -4,7 +4,7 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
-import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -186,7 +186,7 @@ class CsiApplicationProgressTest {
     private static JdbcDataSource source() throws Exception {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:application-" + UUID.randomUUID() + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        JdbcRuntimeBrokerSchema.initialize(source);
+        ManagedSchema.initialize(source);
         try (var connection = source.getConnection()) {
             sql(connection, "INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id,"
                     + " storage_kind, registration_state, physical_key, registration_revision, registration_json) VALUES ('"
@@ -198,7 +198,7 @@ class CsiApplicationProgressTest {
                     + " 1, '" + RESERVATION + "', '" + ALIAS + "', 1, '" + BINDING + "', 1, 'provision')");
             sql(connection, "INSERT INTO ma_runtime_binding (binding_id, request_key, scope_key, tenant_id, workspace_id,"
                     + " workspace_generation, canonical_cwd, capability_digest, isolation_class, isolation_key, storage_id,"
-                    + " runtime_generation, binding_state, drain_requested, operation_generation, record_version, last_active_at,"
+                    + " runtime_generation, binding_state, is_drain_requested, operation_generation, record_version, last_active_at,"
                     + " provisioner_kind, provision_request_id, resource_handle_version, resource_handle_json, runtime_instance_id,"
                     + " runtime_lease_id, runtime_epoch, attestation_generation) VALUES ('" + BINDING + "', '"
                     + original(false).request().requestKey() + "', '" + JdbcRepositorySupport.scopeKey(original(false).request().getScope())

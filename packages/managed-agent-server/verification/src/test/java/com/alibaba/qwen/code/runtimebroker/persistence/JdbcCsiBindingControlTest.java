@@ -6,10 +6,12 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.sql.Connection;
 import java.time.Duration;
@@ -18,9 +20,11 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcCsiBindingControlTest {
     private static final String SESSION = "2815c6b8-468c-449a-869a-8794b0d52fca";
@@ -29,14 +33,19 @@ class JdbcCsiBindingControlTest {
     private static final String RESERVATION = "cfd417c7-f9dc-450d-b880-5667c7a5b029";
     private static final Duration LEASE = Duration.ofSeconds(30);
 
+    // The decoy is load-bearing: the recorder must be live, no recorded statement
+    // or catalog probe may name the other schema, and no probe may span schemas
+    // with a wildcard/null schemaPattern (the shape that would enumerate the
+    // decoy without naming it). A re-introduced cross-schema read reds this test.
     @Test
-    void ordinarySessionControlsUseOnlyTheConfiguredBareSchema() throws Exception {
+    void ordinarySessionControlsIgnoreADecoySessionTableInAnotherSchema() throws Exception {
         var source = source();
         try (var connection = source.getConnection()) {
             sql(connection, "CREATE SCHEMA other");
-            sql(connection, "CREATE TABLE other.ma_session (csi_guard BOOLEAN)");
+            sql(connection, "CREATE TABLE other.ma_session (is_csi_guard BOOLEAN)");
         }
-        var bindings = bindings(source);
+        var calls = new java.util.ArrayList<String>();
+        var bindings = bindings(recording(source, calls));
         var request = new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1", "/workspace",
                 "sha256:" + "b".repeat(64), "session"), SESSION, "test-supervisor", "storage");
         var created = bindings.findOrCreate(request);
@@ -49,6 +58,26 @@ class JdbcCsiBindingControlTest {
         var updated = bindings.compareAndSet(renewed, renewed.withLastHealthAt(Instant.now(), Instant.now()));
         assertNotNull(updated);
         assertNotNull(bindings.releaseOperation(created.getBindingId(), "owner", updated.getOperationGeneration()));
+        assertFalse(calls.isEmpty(), calls.toString());
+        assertEquals(List.of(), calls.stream().filter(call -> call.contains("other")).toList(), calls.toString());
+        assertTrue(calls.stream().filter(call -> call.startsWith("getTables"))
+                .noneMatch(call -> call.startsWith("getTables %.") || call.startsWith("getTables null.")),
+                calls.toString());
+    }
+
+    @Test
+    void pinnedProfileControlLocksTheRootOnceOnTheReadPinPath() throws Exception {
+        // readPin derives the pin from one full locking read; restoring the narrow
+        // pre-gate probe would make lockManagedSession/requireProvisionPin lock the
+        // same root twice. The renewal case never reaches readPin, so pin it here.
+        var fixture = fixture();
+        var calls = new java.util.ArrayList<String>();
+        var traced = new JdbcRuntimeBindingRepository(recording(fixture.source(), calls),
+                new AesGcmSecretProtector("test", new byte[32]));
+        traced.findOrCreate(request());
+        assertEquals(1, calls.stream()
+                .filter(call -> call.contains(" FROM ma_session WHERE") && call.endsWith(" FOR UPDATE"))
+                .count(), calls.toString());
     }
 
     @Test
@@ -101,7 +130,7 @@ class JdbcCsiBindingControlTest {
         var fixture = fixture();
         try (var connection = fixture.source().getConnection()) {
             sql(connection,
-                    "INSERT INTO ma_tenant_guard VALUES ('"
+                    "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES ('"
                             + com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys
                                     .key("tenant")
                             + "', 'other', 'output_publication')");
@@ -135,8 +164,9 @@ class JdbcCsiBindingControlTest {
         assertNotNull(fixture.bindings().releaseOperation(original.getBindingId(), "owner", claimed.getOperationGeneration()));
     }
 
-    @Test
-    void aRetainedCurrentPinCannotBeSkippedWhenTheBindingCapabilityLooksGeneric() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"csi-files-retirement/1", "csi-files-retirement/2"})
+    void aRetainedCurrentPinCannotBeSkippedWhenTheBindingCapabilityLooksGeneric(String profile) throws Exception {
         var fixture = fixture();
         var original = fixture.bindings().findOrCreate(request());
         var ordinary = new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1", "/workspace",
@@ -153,6 +183,11 @@ class JdbcCsiBindingControlTest {
                     + "', request_key = '" + ordinary.requestKey() + "'");
             sql(connection,
                     "DELETE FROM ma_tenant_guard WHERE guard_domain = 'output_publication'");
+            sql(connection, "UPDATE ma_session SET tool_profile = '" + profile + "', runtime_request_key = NULL");
+            connection.setAutoCommit(false);
+            assertThrows(RuntimeBrokerException.class,
+                    () -> JdbcCsiFilesRetirementGuard.lockExecutionControl(connection, original.getBindingId()));
+            connection.rollback();
         }
         assertEquals(ordinary, fixture.bindings().findById(original.getBindingId()).getRequest());
         assertThrows(RuntimeBrokerException.class,
@@ -266,12 +301,42 @@ class JdbcCsiBindingControlTest {
     private static JdbcDataSource source() {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:binding-control-" + UUID.randomUUID() + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        JdbcRuntimeBrokerSchema.initialize(source);
+        ManagedSchema.initialize(source);
         return source;
     }
 
-    private static JdbcRuntimeBindingRepository bindings(JdbcDataSource source) {
+    private static JdbcRuntimeBindingRepository bindings(javax.sql.DataSource source) {
         return new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+    }
+
+    /** Records prepared SQL and catalog probes (schema-qualified) without changing either. */
+    private static javax.sql.DataSource recording(javax.sql.DataSource source, List<String> calls) {
+        return new org.springframework.jdbc.datasource.DelegatingDataSource(source) {
+            @Override
+            public Connection getConnection() throws java.sql.SQLException {
+                return record(Connection.class, super.getConnection(), calls);
+            }
+        };
+    }
+
+    private static <T> T record(Class<T> type, T target, List<String> calls) {
+        return type.cast(java.lang.reflect.Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[] {type},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("prepareStatement")) {
+                        calls.add((String) args[0]);
+                    } else if (method.getName().equals("getTables")) {
+                        calls.add("getTables " + args[1] + "." + args[2]);
+                    }
+                    Object result;
+                    try {
+                        result = method.invoke(target, args);
+                    } catch (java.lang.reflect.InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                    return method.getName().equals("getMetaData")
+                            ? record(java.sql.DatabaseMetaData.class, (java.sql.DatabaseMetaData) result, calls)
+                            : result;
+                }));
     }
 
     private static int count(Connection connection, String table) throws Exception {

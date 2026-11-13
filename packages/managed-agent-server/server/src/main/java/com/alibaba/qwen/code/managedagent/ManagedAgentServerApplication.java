@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.druid.pool.DruidDataSource;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentConfiguration;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentWebConfiguration;
+import com.alibaba.qwen.code.managedagent.config.ManagedDataSourceDefaults;
 import com.alibaba.qwen.code.managedagent.config.ManagedLocalConfiguration;
 import com.alibaba.qwen.code.managedagent.preflight.ManagedAgentPreflight;
 import org.springframework.boot.SpringApplication;
@@ -10,7 +11,6 @@ import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.autoconfigure.flyway.FlywayMigrationStrategy;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
-import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Profile;
@@ -30,14 +30,18 @@ public class ManagedAgentServerApplication {
 
     @Bean(name = "managedAgentDataSource", destroyMethod = "close")
     @Profile("!managed-local")
-    @ConfigurationProperties("spring.datasource.druid")
     DruidDataSource standaloneDataSource(org.springframework.core.env.Environment environment) {
         var source = new DruidDataSource();
         source.setMaxActive(20);
         source.setMaxWait(30_000);
         source.setValidationQuery("SELECT 1");
-        org.springframework.boot.context.properties.bind.Binder.get(environment).bind(
-                "spring.datasource", org.springframework.boot.context.properties.bind.Bindable.ofInstance(source));
+        var binder = org.springframework.boot.context.properties.bind.Binder.get(environment);
+        binder.bind("spring.datasource", org.springframework.boot.context.properties.bind.Bindable.ofInstance(source));
+        // Bound here, not through @ConfigurationProperties, which binds only after
+        // this method returns: the statement cache defaults must see the final URL
+        // and connection properties.
+        binder.bind("spring.datasource.druid", org.springframework.boot.context.properties.bind.Bindable.ofInstance(source));
+        ManagedDataSourceDefaults.applyMySqlDefaults(source);
         return source;
     }
 

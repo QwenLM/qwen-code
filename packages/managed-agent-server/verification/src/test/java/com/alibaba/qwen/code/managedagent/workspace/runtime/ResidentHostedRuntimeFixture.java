@@ -2,11 +2,11 @@ package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaces;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
@@ -22,7 +22,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.local.LocalProcessRuntimeProvisioner;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.support.AbstractBeanDefinition;
 import org.springframework.boot.autoconfigure.flyway.FlywayMigrationInitializer;
@@ -137,7 +137,7 @@ public final class ResidentHostedRuntimeFixture implements RuntimeProvisioner {
                 factory.registerSingleton("residentHostedFixture", fixture);
                 return com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedBrokerFixture.create(factory.getBean(AgentStateStore.class), properties, bindings,
                         factory.getBean(RuntimeSessionRepository.class), factory.getBean(ToolExecutionRepository.class),
-                        factory.getBean(WorkspaceExecutionStore.class), factory.getBeanProvider(ToolPublicationStore.class).getIfAvailable(),
+                        factory.getBean(JdbcWorkspaceExecutionStore.class), factory.getBeanProvider(ToolPublicationStore.class).getIfAvailable(),
                         factory.getBeanProvider(ToolPublicationDataStore.class).getIfAvailable(), jdbc, manager, fixture);
             });
         });

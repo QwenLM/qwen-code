@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -20,6 +20,29 @@ function runGate({ dirs = [], env = {} } = {}) {
       ...env,
     },
   });
+}
+
+const HEADER = 'Filesystem 1024-blocks Used Available Capacity Mounted on';
+
+// The ratio arm has no deterministic real-filesystem trigger, so pin a canned
+// df line through PATH. Both the block and inode invocations return it.
+function runGateWithDf({ mountLine, env = {} }) {
+  const bin = mkdtempSync(join(tmpdir(), 'disk-floor-bin-'));
+  const dir = mkdtempSync(join(tmpdir(), 'disk-floor-dir-'));
+  writeFileSync(
+    join(bin, 'df'),
+    `#!/usr/bin/env bash\nprintf '%s\\n' '${HEADER}' '${mountLine}'\n`,
+    { mode: 0o755 },
+  );
+  try {
+    return runGate({
+      dirs: [dir],
+      env: { ...env, PATH: `${bin}:${process.env.PATH}` },
+    });
+  } finally {
+    rmSync(bin, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 describe('check-disk-floor', () => {
@@ -122,6 +145,230 @@ describe('check-disk-floor', () => {
     } finally {
       rmSync(workspace, { recursive: true, force: true });
       rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
+  it('always checks the OS temp directory, deduplicated', () => {
+    // The 2026-10-31 hz incident: /tmp hit 100% inodes while the workspace
+    // and RUNNER_TEMP sat on a data disk, so caller directories alone were
+    // green while every mkdtemp died mid-suite. The gate must add the OS
+    // temp directory on its own — and not duplicate it when a caller
+    // already passed it.
+    const dir = mkdtempSync(join(tmpdir(), 'disk-floor-os-'));
+    const osTmp = mkdtempSync(join(tmpdir(), 'disk-floor-ostmp-'));
+    try {
+      // Explicit dirs: the OS temp dir is still checked (huge inode floor
+      // forces the breach on it deterministically).
+      const breached = runGate({
+        dirs: [dir],
+        env: {
+          TMPDIR: osTmp,
+          DISK_FLOOR_MIN_FREE_KB: '1',
+          DISK_FLOOR_MIN_FREE_INODES: '999999999999',
+        },
+      });
+      assert.equal(breached.status, 1);
+      assert.ok(breached.stdout.includes(`dir[${osTmp}]`));
+      assert.ok(breached.stdout.includes('free inodes'));
+
+      // Deduplication: passing the OS temp dir explicitly checks it once,
+      // and the sample set is exactly the caller's dirs (an appended-then-
+      // deduped path and a silently-dropped path differ only in set shape).
+      const counted = runGate({
+        dirs: [dir, osTmp],
+        env: {
+          TMPDIR: osTmp,
+          DISK_FLOOR_MIN_FREE_KB: '1',
+          DISK_FLOOR_MIN_FREE_INODES: '1',
+        },
+      });
+      assert.equal(counted.status, 0, counted.stderr);
+      const samples = counted.stdout
+        .split('\n')
+        .filter((line) => line.startsWith('DISKFLOOR '));
+      assert.equal(samples.length, 2);
+      const sampledDirs = samples
+        .map((line) => /dir\[([^\]]+)\]/.exec(line)?.[1])
+        .sort();
+      assert.deepEqual(sampledDirs, [dir, osTmp].sort());
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(osTmp, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to /tmp when TMPDIR is unset', () => {
+    // The incident fleet's os.tmpdir() is /tmp with TMPDIR unset; the
+    // script's `${TMPDIR:-/tmp}` default must keep gating that path. A
+    // regression to plain `${TMPDIR}` appends nothing and the incident
+    // class returns with the suite green. An empty-string TMPDIR is the
+    // bash-equivalent of unset for `:-` (but not for a bare expansion),
+    // which is exactly the distinction under test. RUNNER_TEMP is pinned
+    // to a distinct directory so a dir[/tmp] sample can only come from the
+    // OS-temp append, not the RUNNER_TEMP default (mutation-verified).
+    const ws = mkdtempSync(join(tmpdir(), 'disk-floor-ws-'));
+    const temp = mkdtempSync(join(tmpdir(), 'disk-floor-tmp-'));
+    try {
+      const result = runGate({
+        env: {
+          GITHUB_WORKSPACE: ws,
+          RUNNER_TEMP: temp,
+          TMPDIR: '',
+          DISK_FLOOR_MIN_FREE_KB: '1',
+          DISK_FLOOR_MIN_FREE_INODES: '1',
+        },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.ok(result.stdout.includes(`dir[${ws}]`));
+      assert.ok(result.stdout.includes(`dir[${temp}]`));
+      assert.ok(
+        result.stdout
+          .split('\n')
+          .some(
+            (line) =>
+              line.startsWith('DISKFLOOR ') && line.includes('dir[/tmp]'),
+          ),
+        `expected the /tmp fallback sample, got: ${result.stdout}`,
+      );
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
+  it('fails at the used-percent ceiling even with free bytes to spare', () => {
+    // The #16003 incident: the volume had tens of GiB free, the broker refused
+    // writes because its own used ratio was 0.94.
+    const result = runGateWithDf({
+      mountLine: '/dev/sda1 1000000000 940000000 60000000 94% /',
+      env: { DISK_FLOOR_MIN_FREE_KB: '1', DISK_FLOOR_MAX_USED_PCT: '90' },
+    });
+
+    assert.equal(result.status, 1);
+    assert.ok(result.stdout.includes('94% used'));
+    assert.ok(result.stdout.includes('ceiling'));
+    assert.ok(result.stdout.includes('used_pct[94]'));
+  });
+
+  it('clears the used-percent ceiling below the threshold', () => {
+    const result = runGateWithDf({
+      mountLine: '/dev/sda1 1000000000 940000000 60000000 94% /',
+      env: { DISK_FLOOR_MIN_FREE_KB: '1', DISK_FLOOR_MAX_USED_PCT: '95' },
+    });
+
+    assert.equal(result.status, 0, result.stdout);
+    assert.ok(!result.stdout.includes('::error::'));
+  });
+
+  it('leaves the ratio arm disabled unless a job opts in', () => {
+    const result = runGateWithDf({
+      mountLine: '/dev/sda1 1000000000 940000000 60000000 94% /',
+      env: { DISK_FLOOR_MIN_FREE_KB: '1' },
+    });
+
+    assert.equal(result.status, 0, result.stdout);
+    assert.ok(result.stdout.includes('max_used_pct[unset]'));
+  });
+
+  it('rejects a used-percent ceiling outside 1-100', () => {
+    const result = runGateWithDf({
+      mountLine: '/dev/sda1 1000000000 940000000 60000000 94% /',
+      env: { DISK_FLOOR_MIN_FREE_KB: '1', DISK_FLOOR_MAX_USED_PCT: '0' },
+    });
+
+    assert.equal(result.status, 1);
+    assert.ok(result.stdout.includes('between 1 and 100'));
+  });
+
+  it("emits breaches the infrastructure classifiers recognise, and config errors they don't", () => {
+    // The sibling gate (check-host-load) has pinned this since #16987; this
+    // one had no such test, and its phrase was in NEITHER list. Measured
+    // 2026-11-12: /tmp on the host behind ecs-qwen-hz3-10/hz3-12 sat at
+    // 10,3xx free inodes against the 100,000 floor, so `web-shell E2E Smoke
+    // (shard 1/2)` died HERE on #17022 and #17011 with every later step
+    // skipped — and the scan had no signature for it, so a re-run that
+    // could have landed on a healthy host was spent on an agent round
+    // instead. The inode arm is why the existing ENOSPC tokens don't cover
+    // it: the volume still had 105 GiB free at 15% used.
+    //
+    // Read the lists from the workflows, and compare what the gate PRINTS:
+    // a literal copied here would pass while the gate's wording drifted.
+    const readEnv = (file, key) => {
+      const text = readFileSync(
+        fileURLToPath(new URL(`../workflows/${file}`, import.meta.url)),
+        'utf8',
+      );
+      const line = text
+        .split('\n')
+        .find((l) => new RegExp(`^\\s*${key}:`).test(l));
+      assert.ok(line, `${file}: ${key} not found`);
+      const value = line.slice(line.indexOf(':') + 1).trim();
+      const quote = value[0];
+      assert.ok(
+        quote === '"' || quote === "'",
+        `${file}: ${key} is not a quoted scalar this reader can take`,
+      );
+      assert.ok(value.endsWith(quote), `${file}: ${key} is not one line`);
+      return quote === '"' ? JSON.parse(value) : value.slice(1, -1);
+    };
+    const autofix = readEnv('qwen-autofix.yml', 'INFRA_FAILURE_SIGNATURES');
+    const issue = readEnv(
+      'main-ci-failure-issue.yml',
+      'INFRA_FAILURE_SIGNATURES',
+    );
+    const config = readEnv('qwen-autofix.yml', 'CONFIG_FAILURE_SIGNATURES');
+    // main-ci-failure-issue promises the two infra strings stay equal.
+    assert.equal(issue, autofix);
+
+    // All three breach arms, from the gate itself rather than from prose.
+    const breaches = [
+      runGateWithDf({
+        mountLine: '/dev/sda1 1000000000 999999000 1000 100% /',
+        env: { DISK_FLOOR_MIN_FREE_KB: '2097152' },
+      }),
+      runGateWithDf({
+        mountLine: '/dev/sda1 1000000000 100000000 900000000 10% /',
+        env: {
+          DISK_FLOOR_MIN_FREE_KB: '1',
+          DISK_FLOOR_MIN_FREE_INODES: '999999999999',
+        },
+      }),
+      runGateWithDf({
+        mountLine: '/dev/sda1 1000000000 950000000 50000000 95% /',
+        env: { DISK_FLOOR_MIN_FREE_KB: '1', DISK_FLOOR_MAX_USED_PCT: '94' },
+      }),
+    ];
+    for (const result of breaches) {
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(result.stdout, /::error::Disk floor breached/);
+      assert.ok(
+        new RegExp(autofix, 'i').test(result.stdout),
+        `qwen-autofix must classify this as infrastructure: ${result.stdout}`,
+      );
+      assert.ok(
+        !new RegExp(config, 'i').test(result.stdout),
+        `a breach is not a configuration error: ${result.stdout}`,
+      );
+    }
+
+    // Every knob's own refusal, printed by the gate: deterministic, so
+    // qwen-autofix must claim it as config (skip the PR for a human) and
+    // NEITHER infra list may claim it — a re-run cannot change a variable.
+    for (const env of [
+      { DISK_FLOOR_MIN_FREE_KB: '2G' },
+      { DISK_FLOOR_MIN_FREE_INODES: '9223372036854775808' },
+      { DISK_FLOOR_MAX_USED_PCT: '0' },
+    ]) {
+      const result = runGate({ env });
+      assert.equal(result.status, 1, result.stdout);
+      assert.ok(
+        new RegExp(config, 'i').test(result.stdout),
+        `qwen-autofix CONFIG_FAILURE_SIGNATURES must claim: ${result.stdout}`,
+      );
+      assert.ok(
+        !new RegExp(autofix, 'i').test(result.stdout),
+        `a malformed floor must not be rerun as infrastructure: ${result.stdout}`,
+      );
     }
   });
 });
