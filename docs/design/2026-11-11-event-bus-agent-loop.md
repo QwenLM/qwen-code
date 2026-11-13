@@ -145,6 +145,8 @@ When the signal aborts, the adapter publishes `loop.cancelled` once. Conversatio
 
 After the deadline, the default and surface-owned schedulers stop forwarding tool progress and results, while scheduler cleanup can finish. Batch finalization checks the run before starting persistence and again after each write.
 
+The shared `LlmChat` also stops waiting for provider stream creation, reads, and close when the caller's signal aborts, even if the provider ignores it. Its response processor saves already delivered partial output and unwinds before releasing the chat's send lock, so a subsequent prompt can use the same chat. Late provider results are discarded before reaching history or token accounting, and provider cleanup is attempted without blocking cancellation. This provider boundary applies to both loop paths; the procedural loop still has no settlement cap for other stuck work.
+
 ### Why not reuse an existing bus
 
 - `MessageBus` (confirmation-bus): synchronous `EventEmitter`, request/response correlation, no per-run serialization, no failure events; today it carries hooks only. Its purpose is policy messaging, not loop control.

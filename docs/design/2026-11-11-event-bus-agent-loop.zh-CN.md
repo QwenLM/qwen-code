@@ -145,6 +145,8 @@ signal 中止时，适配器发布一次 `loop.cancelled`。Conversation 在独�
 
 达到上限后，默认调度器和各入口自己的调度器停止转发工具进度和结果，调度器仍可完成清理。批量结果整理在开始持久化前和每次写入后检查运行状态。
 
+共用的 `LlmChat` 还会在调用方 signal 中止时停止等待 provider 流的创建、读取和关闭，即使 provider 不响应中止。响应处理器先保存已经交付的部分输出并退出，再释放 chat 的发送锁，让下一条提示可以继续使用同一个 chat。迟到的 provider 结果在进入历史或 token 记账之前被丢弃；仍会尝试清理 provider，但不会因此阻塞取消。这个 provider 边界对两条 loop 路径都生效；过程式 loop 对其他卡住的工作仍没有收尾上限。
+
 ### 为什么不复用现有总线
 
 - `MessageBus`（confirmation-bus）：同步 `EventEmitter`、请求/响应关联、无按 run 串行、无失败事件；今天只承载 hooks。其用途是策略消息，不是循环控制。
