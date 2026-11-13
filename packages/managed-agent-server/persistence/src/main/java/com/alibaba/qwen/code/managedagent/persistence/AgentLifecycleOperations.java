@@ -14,7 +14,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -378,10 +378,6 @@ final class AgentLifecycleOperations {
                                 || !sessionQueries.hasCompletedWorkspaceClose(tenantId, sessionId)))) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
-        if (sessionPolicies.hasPendingRenameDelivery(tenantId, sessionId)) {
-            throw new ManagedAgentException(409, "session_operation_active",
-                    "The Session has a title delivery awaiting completion.");
-        }
         if (session.workspace() != null) {
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         }
@@ -498,8 +494,8 @@ final class AgentLifecycleOperations {
                             + " 'LIFECYCLE_ONLY' AND operation_id IS NULL OR"
                             + " phase = 'DRAINING' AND operation_id = ?)",
                     operationId,
-                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
                     tenantId, sessionId, failedBefore.get().operationId());
             // The effects the failed operation validated stay valid for its
             // resume: the receipt moves to the new operation with them, and
@@ -520,7 +516,7 @@ final class AgentLifecycleOperations {
             }
         } else if (WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
             jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, tenantId, sessionId, operationId);
+                RuntimeAdmissionFences.beginHarnessLifecycle(connection, tenantId, sessionId, operationId);
                 return null;
             });
             if (protocolVersion == 2) {
@@ -531,8 +527,8 @@ final class AgentLifecycleOperations {
                                 + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ?"
                                 + " AND head_kind = 'MANAGED_SESSION' AND phase = 'LIFECYCLE_ONLY' AND operation_id = ? AND state = 'ACTIVE'"
                                 + " AND writer_lease_until > (" + ManagedSchemaTime.SQL_NOW + ")",
-                        lifecycleHandoffMillis, JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId, operationId);
+                        lifecycleHandoffMillis, RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                        RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId, sessionId, operationId);
             }
         }
         jdbc.update("UPDATE ma_session SET status = ?,"
@@ -768,8 +764,8 @@ final class AgentLifecycleOperations {
                             + " WHERE tenant_key = ? AND harness_key = ? AND"
                             + " tenant_id = ? AND harness_session_id = ? AND"
                             + " operation_id = ? AND phase = 'LIFECYCLE_ONLY'",
-                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
                     tenantId, sessionId, operationId);
         }
         return updated == 1;
@@ -818,8 +814,8 @@ final class AgentLifecycleOperations {
                     "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_generation = ?, claim_lease_until = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND operation_id = ? AND (phase = 'LIFECYCLE_ONLY' OR ? = 2 AND phase = 'DRAINING')",
                     row.get("claim_generation"),
                     row.get("claim_lease_until"),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
                     tenantId,
                     sessionId,
                     operationId, version.intValue());
@@ -861,8 +857,8 @@ final class AgentLifecycleOperations {
         if (updated == 1) {
             jdbc.update(
                     "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_lease_until = NULL WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND operation_id = ? AND claim_generation = ?",
-                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
                     tenantId,
                     sessionId,
                     operationId,
@@ -904,8 +900,8 @@ final class AgentLifecycleOperations {
         if (updated == 1) {
             jdbc.update(
                     "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_lease_until = NULL WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND operation_id = ? AND claim_generation = ?",
-                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
                     tenantId,
                     sessionId,
                     operationId,
@@ -948,8 +944,8 @@ final class AgentLifecycleOperations {
                 claimGeneration);
     }
 
-    // One lifecycle change at a time: a pending rename or unarchive command
-    // blocks an operation, and an open operation blocks both commands.
+    // One lifecycle change at a time: a pending unarchive command blocks an
+    // operation, and an open operation blocks the command.
     /** The latest terminally failed lifecycle operation of the kind: the
      * status the Session carried when it began and the protocol it ran
      * under — both re-pinned by a resumed admission. */

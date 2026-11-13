@@ -1925,6 +1925,7 @@ describe('verifyRecoverySession', () => {
     { toolProfile: 'hosted-workspace-files/3' },
     { toolProfile: 'hosted-workspace-external-files/1' },
     { toolProfile: 'hosted-workspace-shell/1', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-shell/3', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-team-lead/1', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-read/1' },
   ])('recovers every saved Workspace profile (%j)', async (definition) => {

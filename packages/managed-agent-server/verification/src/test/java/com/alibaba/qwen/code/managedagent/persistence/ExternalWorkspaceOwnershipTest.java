@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalWorkspaceProvisioner;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import org.junit.jupiter.api.BeforeEach;
@@ -394,7 +395,7 @@ class ExternalWorkspaceOwnershipTest {
         var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
         new org.springframework.transaction.support.TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()))
                 .executeWithoutResult(status -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
-                    JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, "tenant", "harness", "lifecycle");
+                    RuntimeAdmissionFences.beginHarnessLifecycle(connection, "tenant", "harness", "lifecycle");
                     return null;
                 }));
         jdbc.update("UPDATE ma_session SET status = 'CLOSING'");

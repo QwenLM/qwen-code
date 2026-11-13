@@ -49,7 +49,7 @@ public final class JdbcExternalWorkspaceOwnership {
         JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant);
         RegisteredExternalStorage registration;
         try (var statement = connection.prepareStatement("SELECT * FROM ma_storage WHERE alias_key = ? FOR UPDATE")) {
-            statement.setString(1, JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
+            statement.setString(1, RuntimeAdmissionFences.storageAliasKey(tenant, storage));
             try (var row = statement.executeQuery()) {
                 if (!row.next() || !tenant.equals(row.getString("tenant_id")) || !storage.equals(row.getString("storage_id"))
                         || !"EXTERNAL".equals(row.getString("storage_kind"))
@@ -367,10 +367,10 @@ public final class JdbcExternalWorkspaceOwnership {
                 || !request.getScope().equals(scope)) {
             throw JdbcRepositorySupport.unverifiedWorkspaceHolder();
         }
-        JdbcRuntimeBindingRepository.requireHarnessAdmission(connection, scope, request.getIsolationKey(),
+        RuntimeAdmissionFences.requireHarnessAdmission(connection, scope, request.getIsolationKey(),
                 scope.getLifecycleAuthority(), cleanup
-                        ? JdbcRuntimeBindingRepository.fence(false, JdbcRuntimeBindingRepository.HarnessFence.CLEANUP, JdbcRuntimeBindingRepository.HarnessFence.RETIREMENT)
-                        : JdbcRuntimeBindingRepository.fence(false));
+                        ? RuntimeAdmissionFences.fence(false, RuntimeAdmissionFences.HarnessFence.CLEANUP, RuntimeAdmissionFences.HarnessFence.RETIREMENT)
+                        : RuntimeAdmissionFences.fence(false));
     }
 
     /**
@@ -380,7 +380,7 @@ public final class JdbcExternalWorkspaceOwnership {
     public static boolean externalStorage(org.springframework.jdbc.core.JdbcTemplate jdbc,
             com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding binding) {
         return binding != null && jdbc.queryForList("SELECT storage_kind FROM ma_storage WHERE alias_key = ?",
-                String.class, JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId())).contains("EXTERNAL");
+                String.class, RuntimeAdmissionFences.storageAliasKey(binding.getTenantId(), binding.getStorageId())).contains("EXTERNAL");
     }
 
     private static void requireStopped(Connection connection, RuntimeBindingRecord current,
