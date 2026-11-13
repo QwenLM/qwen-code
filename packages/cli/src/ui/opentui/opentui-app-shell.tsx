@@ -146,7 +146,7 @@ import {
 } from './dialogs-confirm.js';
 import { useMcpApproval } from '../hooks/useMcpApproval.js';
 import { useProjectHooksApproval } from '../hooks/use-project-hooks-approval.js';
-import { dialogAreaWidth } from './dialogs-shared.js';
+import { dialogAreaWidth, dialogContentWidth } from './dialogs-shared.js';
 import { sanitizeTerminalText } from '../utils/textUtils.js';
 import { C } from './theme.js';
 import {
@@ -1873,14 +1873,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               <ExtensionPluginChoice
                 key={`choice-${activeModal.id}`}
                 permission={activeModal}
-                width={Math.max(0, terminalWidth - 4)}
+                width={dialogContentWidth(terminalWidth)}
                 height={dialogRegionHeight}
               />
             ) : activeModal.kind === 'setting' ? (
               <ExtensionSettingInput
                 key={`setting-${activeModal.id}`}
                 permission={activeModal}
-                width={Math.max(0, terminalWidth - 4)}
+                width={dialogContentWidth(terminalWidth)}
                 height={dialogRegionHeight}
               />
             ) : activeModal.kind === 'shell' ? (
