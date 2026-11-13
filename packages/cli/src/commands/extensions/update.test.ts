@@ -45,7 +45,20 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   clearScreen: vi.fn(),
 }));
 
+// A failed update must leave a non-zero exit status, and the command calls
+// process.exit(1) in both catch paths. Spy once for the whole file so a handler
+// executed by yargs (parser.parse(...) runs it) cannot kill the worker.
+const exitSpy = vi
+  .spyOn(process, 'exit')
+  .mockImplementation((() => undefined) as never);
+
 describe('extensions update command', () => {
+  beforeEach(() => {
+    mockGetLoadedExtensions.mockReturnValue([]);
+    mockCheckForAllExtensionUpdates.mockResolvedValue(undefined);
+    mockUpdateAllUpdatableExtensions.mockResolvedValue([]);
+  });
+
   it('should fail if neither name nor --all is provided', () => {
     const validationParser = yargs([])
       .command(updateCommand)
@@ -212,6 +225,8 @@ describe('handleUpdate', () => {
       await handleUpdate({ name: 'test-extension' });
 
       expect(mockWriteStderrLine).toHaveBeenCalledWith('Update check failed');
+      // A failed update must not look like a successful one to a script.
+      expect(exitSpy).toHaveBeenCalledWith(1);
     });
   });
 
@@ -280,6 +295,7 @@ describe('handleUpdate', () => {
       await handleUpdate({ all: true });
 
       expect(mockWriteStderrLine).toHaveBeenCalledWith('Update all failed');
+      expect(exitSpy).toHaveBeenCalledWith(1);
     });
   });
 });
