@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.daemon;
 
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -14,11 +13,13 @@ public final class HarnessTranscriptPage {
 
     HarnessTranscriptPage(String harnessSessionId, List<Object> events,
             String nextCursor, boolean more, Map<String, Object> raw) {
+        // getTranscript supplies a deeply immutable parsed response and its
+        // events view. Retain them together instead of copying the event graph.
         this.harnessSessionId = harnessSessionId;
-        this.events = Collections.unmodifiableList(events);
+        this.events = events;
         this.nextCursor = nextCursor;
         this.more = more;
-        this.raw = JsonSupport.immutableObject(raw);
+        this.raw = raw;
     }
 
     public String getHarnessSessionId() {

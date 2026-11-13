@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -1304,6 +1305,41 @@ class HostedHarnessClientTest {
             assertThrows(DaemonHttpException.class, () -> client.cancelTurn(session, PROMPT_ID));
         }
         assertEquals(1, requests.get());
+    }
+
+    @Test
+    void sharesOneDeeplyImmutableTranscriptSnapshot() {
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID + "/transcript",
+                exchange -> sendSessionJson(exchange, 200,
+                        "{\"v\":1,\"sessionId\":\"" + SESSION_ID
+                                + "\",\"events\":[{\"type\":\"user\","
+                                + "\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}],"
+                                + "\"nextCursor\":\"next\",\"hasMore\":true}"));
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessTranscriptPage page = client.getTranscript(
+                    GetHarnessTranscript.builder().session(createSession(client)).build());
+            List<?> rawEvents = (List<?>) page.getRaw().get("events");
+            Map<?, ?> event = (Map<?, ?>) page.getEvents().get(0);
+            List<?> content = (List<?>) event.get("content");
+            Map<?, ?> part = (Map<?, ?>) content.get(0);
+
+            assertSame(page.getEvents(), rawEvents,
+                    "A transcript page must not retain two copies of its event graph");
+            assertSame(event, rawEvents.get(0));
+            assertEquals("hello", part.get("text"));
+            assertEquals(SESSION_ID, page.getHarnessSessionId());
+            assertEquals("next", page.getNextCursor());
+            assertTrue(page.hasMore());
+
+            assertThrows(UnsupportedOperationException.class, () -> page.getRaw().put("hasMore", false));
+            assertThrows(UnsupportedOperationException.class, () -> page.getEvents().add(Map.of()));
+            assertThrows(UnsupportedOperationException.class, rawEvents::clear);
+            assertThrows(UnsupportedOperationException.class, event::clear);
+            assertThrows(UnsupportedOperationException.class, content::clear);
+            assertThrows(UnsupportedOperationException.class, part::clear);
+        }
     }
 
     @Test
