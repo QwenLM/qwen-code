@@ -20,9 +20,6 @@ import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
-import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -196,23 +193,6 @@ public final class KubernetesHttpRuntimeClient implements KubernetesMaintenanceC
         return result;
     }
 
-    @Override
-    public CompletionStage<String> readCsiPodLog(String podName) {
-        dnsSubdomain(podName);
-        return exchangeBytes("/api/v1/namespaces/kube-system/pods/" + podName
-                + "/log?container=csi-plugin&timestamps=true&previous=false&follow=false", null).thenApply(bytes -> {
-                    if (bytes == null) {
-                        throw failure(404, false);
-                    }
-                    try {
-                        return StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
-                                .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString();
-                    } catch (CharacterCodingException invalid) {
-                        throw failure(502, false);
-                    }
-                });
-    }
-
     private CompletionStage<Map<String, Object>> exchange(String path, Map<String, Object> body) {
         return exchange(path, body, RESPONSE_LIMIT);
     }
@@ -228,10 +208,6 @@ public final class KubernetesHttpRuntimeClient implements KubernetesMaintenanceC
                 throw failure(502, false);
             }
         });
-    }
-
-    private CompletionStage<byte[]> exchangeBytes(String path, Map<String, Object> body) {
-        return exchangeBytes(path, body, RESPONSE_LIMIT);
     }
 
     private CompletionStage<byte[]> exchangeBytes(String path, Map<String, Object> body, int responseLimit) {

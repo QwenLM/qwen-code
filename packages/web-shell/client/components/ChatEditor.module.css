@@ -1815,6 +1815,19 @@
   gap: 2px;
 }
 
+.dropdownItem.modelPickerRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  gap: 10px;
+  align-items: center;
+}
+
+.modelPickerContent {
+  min-width: 0;
+  width: 100%;
+  white-space: normal;
+}
+
 .dropdownItemLabel {
   overflow: hidden;
   color: var(--foreground);
@@ -1939,6 +1952,20 @@
 .toolBtn:not(:disabled):not([data-disabled]):hover {
   background: var(--chat-editor-bg-tertiary);
   color: var(--chat-editor-text-primary);
+}
+
+/* The trigger names the active mode, so Full Access stays dangerous after it
+   is selected, not only inside the picker. Hover tiles the generic rule above
+   on specificity and would otherwise drop the warning color. */
+.toolBtn.modeToolBtnDanger,
+.toolBtn.modeToolBtnDanger .toolBtnText {
+  color: var(--destructive);
+}
+
+.toolBtn.modeToolBtnDanger:not(:disabled):not([data-disabled]):hover,
+.toolBtn.modeToolBtnDanger:not(:disabled):not([data-disabled]):hover
+  .toolBtnText {
+  color: var(--destructive);
 }
 
 .planControl {

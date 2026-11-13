@@ -4,33 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  AgentLoopResult,
-  AgentLoopRound,
-  AgentLoopSettledCall,
-  AgentLoopStopReason,
-} from '../core/agent-loop.js';
-import type {
-  ServerLlmStreamEvent,
-  ToolCallRequestInfo,
-} from '../core/turn.js';
+import type { AgentLoopResult, AgentLoopRound } from '../core/agent-loop.js';
+import type { ToolCallRequestInfo } from '../core/turn.js';
 
 /** The handlers that publish and consume loop events. */
 export type HandlerName = 'conversation' | 'llm' | 'tool' | 'loop';
 
 export interface LlmSettledData {
   round: number;
-  /** Tool calls the round collected, in request order. */
-  calls: ToolCallRequestInfo[];
-  /** Calls dropped by a Retry/ModelFallback during the round. */
-  discardedCalls: ToolCallRequestInfo[];
-  /** Present only when the round ended the loop with a terminal reason. */
-  terminal?: AgentLoopStopReason;
 }
 
 export interface ToolSettledData {
   round: number;
-  results: AgentLoopSettledCall[];
 }
 
 /**
@@ -40,15 +25,16 @@ export interface ToolSettledData {
  */
 export interface LoopBusEventMap {
   'loop.started': { promptId: string };
-  'loop.output': { event: ServerLlmStreamEvent };
-  'loop.cancelled': { reason: string };
+  /** The caller aborted the run's signal. */
+  'loop.cancelled': { reason: 'abort' };
   'loop.finished': { result: AgentLoopResult };
   'llm.request': { round: number; send: AgentLoopRound };
   'llm.tool_call': { call: ToolCallRequestInfo };
   'llm.settled': LlmSettledData;
+  'tool.request': { round: number; calls: ToolCallRequestInfo[] };
   'tool.cancel': { reason: string };
   'tool.settled': ToolSettledData;
-  /** The only event carrying a native Error; serialize before crossing processes. */
+  /** Dedicated failure channel for a listener's thrown value; serialize it before crossing processes. */
   'handler.failed': {
     source: HandlerName;
     eventType: LoopBusEventType;
