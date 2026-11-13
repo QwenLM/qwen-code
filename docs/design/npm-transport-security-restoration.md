@@ -40,7 +40,8 @@ by #17099, not proof that previously released packages have been replaced.
 
 Undici reaches Core downloads, proxy/fetch utilities, IDE/image transport,
 CLI preconnect and setup/update paths, channel transports and provider proxy
-dispatch. Axios reaches the Feishu, WeCom and DingTalk SDK parents. grpc-js
+dispatch. The same override also covers dotenvx, Cheerio and shadcn tooling
+parents. Axios reaches the Feishu, WeCom and DingTalk SDK parents. grpc-js
 reaches OTLP gRPC exporters and the optional A2A SDK peer. The CUA example is
 outside the workspace and needs its own clean install and typecheck.
 

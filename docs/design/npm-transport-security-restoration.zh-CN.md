@@ -18,7 +18,7 @@ PR #13169 升级了有漏洞的传输依赖，但早于当前工作区布局，�
 
 ## 消费者与约束
 
-Undici 覆盖 Core 下载、代理/fetch 工具、IDE/图像传输、CLI 预连接和安装/更新路径、channel 传输及 provider 代理分发。Axios 经飞书、企业微信和钉钉 SDK 引入。grpc-js 经 OTLP gRPC exporter 和 A2A SDK 的可选 peer 引入。CUA 示例位于工作区之外，需要独立干净安装及类型检查。
+Undici 覆盖 Core 下载、代理/fetch 工具、IDE/图像传输、CLI 预连接和安装/更新路径、channel 传输及 provider 代理分发。同一 override 也覆盖 dotenvx、Cheerio 和 shadcn 工具链父包。Axios 经飞书、企业微信和钉钉 SDK 引入。grpc-js 经 OTLP gRPC exporter 和 A2A SDK 的可选 peer 引入。CUA 示例位于工作区之外，需要独立干净安装及类型检查。
 
 依赖升级不扩展成产品重构。保留 main 的 CI 门禁和 Java 布局，不为过期失败臆造 CI 绕过。不得放宽包龄检查。模型凭据、原生 GUI 操作及其他操作系统属于独立验证边界。
 
