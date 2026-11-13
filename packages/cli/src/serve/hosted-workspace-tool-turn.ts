@@ -73,6 +73,8 @@ import {
   HOSTED_WORKSPACE_SHELL_PROFILE_V3,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
   HOSTED_WORKSPACE_FILE_PROFILE_V3,
+  HOSTED_WORKSPACE_FILE_PROFILE_V4,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V4,
   HOSTED_WORKSPACE_READ_PROFILE,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
@@ -2233,6 +2235,7 @@ export class HostedWorkspaceToolTurn {
           'hosted-workspace-files/1',
           'hosted-workspace-shell/1',
           'hosted-workspace-shell/3',
+          'hosted-workspace-shell/4',
         ].includes(this.profile ?? ''))
     )
       throw new Error('Public Plan mode is unavailable for this Session.');
@@ -2283,24 +2286,33 @@ export class HostedWorkspaceToolTurn {
     return (
       !this.mcp ||
       this.profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
-      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3 ||
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V4
     );
   }
 
   private declaresTodoTool(): boolean {
     return (
       this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
+      this.profile === HOSTED_WORKSPACE_FILE_PROFILE_V4 ||
       this.profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
-      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3 ||
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V4
     );
   }
 
   private declaresLoopTool(): boolean {
-    return this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3;
+    return (
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3 ||
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V4
+    );
   }
 
   private declaresCronTools(): boolean {
-    return this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3;
+    return (
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3 ||
+      this.profile === HOSTED_WORKSPACE_SHELL_PROFILE_V4
+    );
   }
 
   private questionsAdmitted(): boolean {
@@ -2319,8 +2331,10 @@ export class HostedWorkspaceToolTurn {
         HOSTED_WORKSPACE_FILE_PROFILE,
         HOSTED_WORKSPACE_FILE_PROFILE_V2,
         HOSTED_WORKSPACE_FILE_PROFILE_V3,
+        HOSTED_WORKSPACE_FILE_PROFILE_V4,
         HOSTED_WORKSPACE_SHELL_PROFILE,
         HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+        HOSTED_WORKSPACE_SHELL_PROFILE_V4,
       ].includes(this.profile ?? HOSTED_WORKSPACE_FILE_PROFILE)
     );
   }

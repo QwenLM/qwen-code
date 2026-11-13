@@ -937,7 +937,9 @@ async function hostedApprovalForTurn(
       'hosted-workspace-files/1',
       'hosted-workspace-shell/1',
       'hosted-workspace-shell/3',
+      'hosted-workspace-shell/4',
       'hosted-workspace-files/3',
+      'hosted-workspace-files/4',
     ].includes(session.toolProfile ?? '');
   const admission = await readHostedTurnApprovalSelection(
     session.managed,
@@ -5097,7 +5099,8 @@ export function registerHostedHarnessSessionRoutes(
       (contract.lifecycleV2Profiles?.includes('hosted-workspace-shell/1') ||
         contract.lifecycleV2Profiles?.includes(
           HOSTED_WORKSPACE_SHELL_PROFILE_V3,
-        ));
+        ) ||
+        contract.lifecycleV2Profiles?.includes('hosted-workspace-shell/4'));
     if (
       publicChildAgentsVersion === 1 &&
       (!isHostedWorkspacePublicShellProfile(toolProfile) ||
@@ -5358,6 +5361,7 @@ export function registerHostedHarnessSessionRoutes(
         ![
           'hosted-workspace-shell/1',
           HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+          'hosted-workspace-shell/4',
           HOSTED_MCP_PROFILE,
         ].includes(toolProfile as string) ||
         resident.foregroundOnly ||
@@ -6584,6 +6588,7 @@ export function registerHostedHarnessSessionRoutes(
           ![
             'hosted-workspace-shell/1',
             HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+            'hosted-workspace-shell/4',
             HOSTED_MCP_PROFILE,
           ].includes(toolProfile ?? '') ||
           (session.childDepth ?? 0) !== 0)
@@ -8891,14 +8896,18 @@ export function registerHostedHarnessSessionRoutes(
                   'hosted-workspace-files/1',
                   'hosted-workspace-shell/1',
                   'hosted-workspace-shell/3',
+                  'hosted-workspace-shell/4',
                   'hosted-workspace-files/3',
+                  'hosted-workspace-files/4',
                 ]
               : [
                   'hosted-workspace-files/1',
                   'hosted-workspace-shell/1',
                   'hosted-workspace-shell/3',
+                  'hosted-workspace-shell/4',
                   'hosted-workspace-files/2',
                   'hosted-workspace-files/3',
+                  'hosted-workspace-files/4',
                 ]
           ).includes(session.toolProfile ?? '') ||
           (approvalSelection.revision === 0 &&
@@ -8915,6 +8924,7 @@ export function registerHostedHarnessSessionRoutes(
           'hosted-workspace-files/1',
           'hosted-workspace-shell/1',
           'hosted-workspace-shell/3',
+          'hosted-workspace-shell/4',
         ].includes(session.toolProfile ?? '') ||
           (session.childDepth ?? 0) !== 0 ||
           session.mcp ||
@@ -9633,6 +9643,7 @@ export function registerHostedHarnessSessionRoutes(
       ![
         'hosted-workspace-shell/1',
         HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+        'hosted-workspace-shell/4',
         HOSTED_MCP_PROFILE,
       ].includes(session.toolProfile ?? '') ||
       !contract.lifecycleV2Profiles?.some(
@@ -9662,6 +9673,7 @@ export function registerHostedHarnessSessionRoutes(
       ![
         'hosted-workspace-shell/1',
         HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+        'hosted-workspace-shell/4',
         HOSTED_MCP_PROFILE,
       ].includes(session.toolProfile ?? '') ||
       !contract.lifecycleV2Profiles?.includes(session.toolProfile!)
@@ -9845,6 +9857,7 @@ export function registerHostedHarnessSessionRoutes(
       ![
         'hosted-workspace-shell/1',
         HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+        'hosted-workspace-shell/4',
         HOSTED_MCP_PROFILE,
       ].includes(session.toolProfile ?? '') ||
       !contract.lifecycleV2Profiles?.includes(session.toolProfile!)
