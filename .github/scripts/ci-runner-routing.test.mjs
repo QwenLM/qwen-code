@@ -4,8 +4,15 @@
 //
 // classify_pr's own runner is association-gated ECS (kill-switch excepted):
 // a pull_request run executes the PR's own YAML, so an untrusted fork can
-// rewrite runs-on; the association check ensures only trusted authors reach
-// the persistent pool. Untrusted fork PRs fall back to ubuntu-latest.
+// rewrite runs-on away. The association clause is therefore THROUGHPUT POLICY,
+// not an enforceable trust boundary: it keeps unreviewed forks off the scarce
+// persistent pool, and it is one layer of defence in depth. The repository
+// records the same fact in
+// docs/design/2026-10-31-lint-static-ecs-routing.md ("The association gate is
+// throughput policy, not an enforceable trust boundary") — a fork can put any
+// lane on the pool in the same diff that rewrites the gate, and GitHub's
+// first-timer workflow approval is the outer gate. Untrusted fork PRs fall
+// back to ubuntu-latest.
 // The association routing for DOWNSTREAM lanes lives in the `pick_runner`
 // shell step, which publishes `ubuntu_runner` (association-gated) and
 // `lint_runner` (untrusted forks use the disposable ARM64 pool). The matrix below
@@ -69,6 +76,10 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       String(eventName === 'merge_group'),
     ],
     [/github\.event_name == 'push'/, String(eventName === 'push')],
+    [
+      /github\.event_name == 'workflow_dispatch'/,
+      String(eventName === 'workflow_dispatch'),
+    ],
     // Longest term first as a convention; both patterns are quote-anchored
     // (the closing quote is part of each regex), so neither can match
     // inside the other and the substitution order is behaviorally inert.
@@ -192,9 +203,12 @@ const ASSOCIATIONS = [
 describe('ci.yml classify_pr runner routing', () => {
   it('the gate routes trusted authors and same-repo to ECS; untrusted forks stay hosted', () => {
     // A pull_request run executes the PR's own YAML, so an untrusted fork can
-    // rewrite runs-on. The association check ensures only trusted authors and
-    // same-repo PRs reach the persistent pool; untrusted forks fall back to
-    // ubuntu-latest. The kill-switch still wins for everyone.
+    // rewrite runs-on away. What this matrix pins is the DEFAULT routing — that
+    // trusted associations and same-repo PRs land on ECS and everything else
+    // stays hosted — not a boundary a fork cannot cross: the gate is throughput
+    // policy plus one defence-in-depth layer, as
+    // docs/design/2026-10-31-lint-static-ecs-routing.md states. The kill-switch
+    // still wins for everyone.
     for (const sameRepo of [true, false]) {
       for (const assoc of ASSOCIATIONS) {
         const isTrusted = sameRepo || TRUSTED.includes(assoc);
@@ -219,6 +233,23 @@ describe('ci.yml classify_pr runner routing', () => {
           `kill-switch must revert the gate (assoc='${assoc}')`,
         );
       }
+    }
+    // dispatch reaches ECS as well. The comment above the job says so — "the
+    // merge queue, pushes to main, and dispatch" — and the expression used to
+    // disagree: `github.event.pull_request` is empty on a dispatch, so every
+    // PR clause was false and the run fell to ubuntu-latest. Only a maintainer
+    // can trigger a dispatch, so admitting it adds no reachability.
+    for (const assoc of ['', 'NONE', 'OWNER']) {
+      assert.deepEqual(
+        evalRunsOn(classifyRunsOn, {
+          ecsDisabled: false,
+          eventName: 'workflow_dispatch',
+          sameRepo: false,
+          assoc,
+        }),
+        JSON.parse(ECS),
+        `dispatch (assoc='${assoc}') must reach ECS`,
+      );
     }
   });
 

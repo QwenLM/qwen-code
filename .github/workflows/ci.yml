@@ -127,8 +127,15 @@ jobs:
     # repo), fork PRs whose author has write access (OWNER/MEMBER/COLLABORATOR
     # association), the merge queue, pushes to main, and dispatch — unless the
     # kill-switch forces hosted. A pull_request run executes the PR's own YAML,
-    # so an untrusted fork can rewrite this runs-on expression; the association
-    # check ensures only trusted authors reach the persistent pool. Untrusted
+    # so an untrusted fork can rewrite this runs-on expression away; the
+    # association clause is therefore THROUGHPUT POLICY, not an enforceable
+    # trust boundary: it keeps unreviewed forks off the scarce self-hosted pool,
+    # and it is one layer of defence in depth, nothing more. The same fact is
+    # recorded in
+    # docs/design/2026-10-31-lint-static-ecs-routing.md ("The association gate
+    # is throughput policy, not an enforceable trust boundary"): a fork can put
+    # any lane on the pool in the same diff that rewrites the gate, and
+    # GitHub's first-timer workflow approval is the outer gate. Untrusted
     # fork PRs fall back to ubuntu-latest (the gate is lightweight enough that
     # the hosted queue delay is acceptable). The association routing for the
     # downstream lanes lives in pick_runner (ubuntu_runner) below; sdk-java.yml
@@ -136,7 +143,7 @@ jobs:
     # it). test_windows deliberately does not: a pull_request run executes the
     # PR's own YAML, so no runs-on trust clause is enforceable there and its
     # lane never admits pull requests to the pool.
-    runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association) || github.event_name == ''merge_group'' || github.event_name == ''push'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association) || github.event_name == ''merge_group'' || github.event_name == ''push'' || github.event_name == ''workflow_dispatch'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     continue-on-error: true
     permissions:
       contents: 'read'
