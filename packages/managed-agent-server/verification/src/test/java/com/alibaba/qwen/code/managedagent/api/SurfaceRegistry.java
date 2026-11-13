@@ -47,6 +47,18 @@ public enum SurfaceRegistry {
             Surface.PUBLIC, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_STREAM)),
     WEBSHELL_SIDE_QUERY_STREAM(Method.POST, "/api/agent/web-shell/v1/session-side-queries/stream",
             Surface.WEBSHELL, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_STREAM)),
+    WEBSHELL_CLIENT_FILES_REGISTER(Method.POST, "/api/agent/web-shell/v1/client-files/register",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_OPERATOR, EnumSet.of(Capability.CLIENT_FILES_REGISTER)),
+    WEBSHELL_CLIENT_FILES_UNREGISTER(Method.POST, "/api/agent/web-shell/v1/client-files/unregister",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_OPERATOR, EnumSet.of(Capability.CLIENT_FILES_UNREGISTER)),
+    WEBSHELL_CLIENT_FILES_STATUS(Method.POST, "/api/agent/web-shell/v1/client-files/status",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_ACTOR, EnumSet.of(Capability.CLIENT_FILES_STATUS)),
+    WEBSHELL_CLIENT_FILES_STREAM(Method.POST, "/api/agent/web-shell/v1/client-files/requests/stream",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_ACTOR, EnumSet.of(Capability.CLIENT_FILES_STREAM)),
+    WEBSHELL_CLIENT_FILES_RESPOND(Method.POST, "/api/agent/web-shell/v1/client-files/responses",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_ACTOR, EnumSet.of(Capability.CLIENT_FILES_RESPOND)),
+    INTERNAL_CLIENT_FILES_MCP(Method.POST, "/internal/managed-client-files/v1/sessions/{sessionId}/mcp",
+            Surface.INTERNAL, RuleClass.INTERNAL_CLIENT_FILES, EnumSet.of(Capability.INTERNAL_CLIENT_FILES_MCP)),
     INTERNAL_SIDE_QUERY_INPUT(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/input",
             Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
@@ -838,6 +850,8 @@ public enum SurfaceRegistry {
     public enum Capability {
         SIDE_QUERY_CREATE, SIDE_QUERY_LIST, SIDE_QUERY_CONTEXT, SIDE_QUERY_GET, SIDE_QUERY_CANCEL, SIDE_QUERY_STREAM,
         STORE_SIDE_QUERY,
+        CLIENT_FILES_REGISTER, CLIENT_FILES_UNREGISTER, CLIENT_FILES_STATUS, CLIENT_FILES_STREAM, CLIENT_FILES_RESPOND,
+        INTERNAL_CLIENT_FILES_MCP,
         MEMORY_STORE_CREATE, MEMORY_STORE_LIST, STORE_MEMORY_QUERY,
         SESSION_CONTEXT_USAGE, SESSION_MODEL_STATISTICS, SESSION_RESOURCES, SESSION_AGENT_TRACE,
         SESSION_ACTIVITY_STATS, SESSION_ACTIVITY,
@@ -966,6 +980,33 @@ public enum SurfaceRegistry {
         SIDE_QUERY_ACTOR,
         /** Query-scoped claim, boot and generation; never a Session writer grant. */
         INTERNAL_SIDE_QUERY,
+        /**
+         * Client files registration and teardown: the read grant ({@code 404
+         * session_not_found} below it) plus current execution authority on the
+         * bound ACTIVE Workspace ({@code 403 client_files_execution_forbidden}
+         * below it). The {@code 503 client_files_disabled} refusal while the
+         * deployment opt-in is off is a service-layer flag check
+         * ({@code requireEnabled}), not an admission arm of this rule class, so
+         * the anonymous admission probes never reach it.
+         */
+        CLIENT_FILES_OPERATOR,
+        /**
+         * Client files reads and browser uplink: the read grant, then the
+         * registering actor's own active binding ({@code 404
+         * client_files_not_found} for any other actor or a closed binding,
+         * {@code 409 client_files_generation_conflict} for a stale
+         * generation). The status read answers an absent binding with an
+         * empty 200.
+         */
+        CLIENT_FILES_ACTOR,
+        /**
+         * The Runtime-facing MCP leg: no actor; the session relay credential
+         * issued at registration is the only admission ({@code 403
+         * client_files_credential_invalid} without it). On a dedicated
+         * internal listener the routing filter answers a public-connector
+         * caller {@code 404}.
+         */
+        INTERNAL_CLIENT_FILES,
         /** Authenticated tenant actor, restricted to that actor's personal Store. */
         PERSONAL_MEMORY,
         SESSION_WORKTREE,
