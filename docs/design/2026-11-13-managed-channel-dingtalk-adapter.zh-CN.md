@@ -119,10 +119,14 @@ wake）；回复经适配器拉取的带回执 outbox 返回。每段的发送�
 - 真实 provider 腿（stream 入站 + sessionWebhook 出站）在 deps 里对假 DingTalk 端点
   演练，仿 email 适配器的假传输测试；真实租户冒烟是后续、非合并门禁。
 
-## 未决问题
+## 决策（已落地）
 
-1. DingTalk 回复仅用 session webhook，还是在 webhook 过期时回退机器人
-   `groupMessages/send` / `oToMessages/batchSend` API，实现时按 provider 的 webhook
-   生命周期定；设计把发送置于 deps 之后，两者都是局部改动。
-2. 群 @ 提及门控与发送者白名单复用 email 适配器的 `senderPolicy` 形状；DingTalk 的确切
-   身份空间（staffId vs senderId）在实现时钉住。
+1. 回复仅用会话的 `sessionWebhook`，不回退机器人 `groupMessages/send` /
+   `oToMessages/batchSend` API。webhook 过期或被拒即确定性 `rejected` 回执。发送仍置于
+   deps 之后，若需 webhook 生命周期回退，属局部后续改动。
+2. 发送者身份为 `senderStaffId`、以 `senderId` 兜底，由 email 形状的 `senderPolicy`
+   （allowlist / open / disabled）门控。群消息（`conversationType '2'`）被丢弃：managed
+   路径服务私聊，在私聊策略下回复群会把回复发进群里、让每个成员读到。显式群策略
+   （Legacy GroupGate 语义）属后续，不在本切片。
+3. 超过 DingTalk 单条消息上限的出站分段，在 deps 内拆成有序的 provider 尺寸分块；
+   一条回执仍覆盖整个台账分段。

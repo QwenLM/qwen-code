@@ -7,7 +7,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   ManagedChannelControlPlane,
   ManagedClaimedDelivery,
@@ -32,7 +32,7 @@ function messageData(overrides: Record<string, unknown> = {}): string {
     msgId: 'msg-1',
     msgtype: 'text',
     conversationId: 'conv-1',
-    conversationType: '2',
+    conversationType: '1',
     sessionWebhook: 'https://oapi.dingtalk.com/robot/sendBySession?session=abc',
     senderStaffId: 'staff-1',
     senderNick: 'Alice',
@@ -49,6 +49,11 @@ function fakeControlPlane() {
   let queue: ManagedClaimedDelivery[] = [];
   let submitError: (Error & { status?: number; code?: string }) | undefined;
   let refuseSubmit: { status: number; code?: string } | undefined;
+  let submitErrorFor:
+    | ((
+        eventId: string,
+      ) => (Error & { status?: number; code?: string }) | undefined)
+    | undefined;
   let submitAttempts = 0;
   let receiptError:
     | ((
@@ -62,6 +67,8 @@ function fakeControlPlane() {
     disconnect: async () => {},
     submitInbound: async (event) => {
       submitAttempts += 1;
+      const perEvent = submitErrorFor?.(event.platformEventId);
+      if (perEvent) throw perEvent;
       if (refuseSubmit) {
         throw Object.assign(new Error(`HTTP ${refuseSubmit.status}`), {
           status: refuseSubmit.status,
@@ -102,6 +109,15 @@ function fakeControlPlane() {
     submitAttempts: () => submitAttempts,
     setRefuseSubmit: (value: { status: number; code?: string } | undefined) => {
       refuseSubmit = value;
+    },
+    setSubmitErrorFor: (
+      fn:
+        | ((
+            eventId: string,
+          ) => (Error & { status?: number; code?: string }) | undefined)
+        | undefined,
+    ) => {
+      submitErrorFor = fn;
     },
     setReceiptError: (
       fn:
@@ -175,7 +191,14 @@ function tempCwd(): string {
   tempDirs.push(dir);
   return dir;
 }
+// The state store lives under getGlobalQwenDir(), not the workspace cwd; keep
+// it inside the sandbox so a run never writes channel state (with live
+// sessionWebhook URLs) into the real global Qwen directory.
+beforeEach(() => {
+  vi.stubEnv('QWEN_HOME', tempCwd());
+});
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const dir of tempDirs.splice(0))
     rmSync(dir, { recursive: true, force: true });
 });
@@ -630,6 +653,115 @@ describe('managed DingTalk adapter outbox', () => {
     expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
       'rejected',
     );
+    await adapter.disconnect();
+  });
+});
+
+describe('managed DingTalk adapter review fixes', () => {
+  it('drops a group frame under the private-chat policy (R1-7)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    fake.push(
+      'msg-group',
+      messageData({ msgId: 'msg-group', conversationType: '2' }),
+    );
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('re-registers after a 409 channel_disconnected refusal, keeping the event (R1-1)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    plane.failNextSubmit(
+      Object.assign(new Error('disconnected'), {
+        status: 409,
+        code: 'channel_disconnected',
+      }),
+    );
+    fake.push('msg-409', messageData({ msgId: 'msg-409' }));
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(0);
+    const registersBefore = plane.register.length;
+    await adapter.tick();
+    expect(plane.register.length).toBeGreaterThan(registersBefore);
+    expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+      'dingtalk:msg-409',
+    ]);
+    await adapter.disconnect();
+  });
+
+  it('persists acked-but-unadmitted inbox messages on disconnect (R1-5)', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    first.fake.push('msg-shutdown', messageData({ msgId: 'msg-shutdown' }));
+    // No tick: the message is acked and parked in the in-memory inbox.
+    await first.adapter.disconnect();
+    const second = await connectedAdapter(cwd);
+    await second.adapter.tick();
+    expect(second.plane.submit.map((event) => event.platformEventId)).toEqual([
+      'dingtalk:msg-shutdown',
+    ]);
+    await second.adapter.disconnect();
+  });
+
+  it('drops a persisted claim whose sender the restarted policy revoked (R1-8)', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    first.plane.failNextSubmit(
+      Object.assign(new Error('answer lost'), { status: 503 }),
+    );
+    first.fake.push('msg-rev', messageData({ msgId: 'msg-rev' }));
+    await first.adapter.tick();
+    expect(first.plane.submit).toHaveLength(0);
+    await first.adapter.disconnect();
+
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    const second = new ManagedDingtalkAdapter({
+      name: 'ding-1',
+      cwd,
+      config: { ...CONFIG, allowedUsers: [] },
+      controlPlane: plane.controlPlane,
+      deps: fake.deps,
+      pollLoop: false,
+    });
+    await second.connect();
+    await second.tick();
+    expect(plane.submit).toHaveLength(0);
+    await second.disconnect();
+  });
+
+  it('lifts the stall when the held claim drops on a per-message verdict (R1-2)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('h1', messageData({ msgId: 'h1' }));
+    fake.push('h2', messageData({ msgId: 'h2' }));
+    await adapter.tick(); // h1 sacrificed, h2 held, admission stalled
+    plane.setRefuseSubmit({ status: 400 });
+    await adapter.tick(); // h2 drops on the per-message verdict, stall lifts
+    plane.setRefuseSubmit(undefined);
+    fake.push('h3', messageData({ msgId: 'h3' }));
+    await adapter.tick();
+    expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+      'dingtalk:h3',
+    ]);
+    await adapter.disconnect();
+  });
+
+  it('probes the held claim before an unheld claim that never settles (R1-3)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    const lost = () => Object.assign(new Error('answer lost'), { status: 503 });
+    plane.setSubmitErrorFor((id) => (id === 'dingtalk:X' ? lost() : undefined));
+    fake.push('X', messageData({ msgId: 'X' }));
+    await adapter.tick(); // X stays pending, unheld
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('A', messageData({ msgId: 'A' }));
+    fake.push('H', messageData({ msgId: 'H' }));
+    await adapter.tick(); // A sacrificed, H held, stalled; pending = [X, H]
+    plane.setRefuseSubmit(undefined);
+    await adapter.tick(); // held-first probes H, whose success lifts the stall
+    expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+      'dingtalk:H',
+    ]);
     await adapter.disconnect();
   });
 });

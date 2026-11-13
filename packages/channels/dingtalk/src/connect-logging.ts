@@ -34,4 +34,23 @@ export async function withConnectLoggingSuppressed<T>(
     }
   }
 }
+
+// The SDK's onDownStream() console.log()s every raw frame (user text, sender
+// id, the sessionWebhook capability). Suppress it through the SAME depth
+// counter as connect: a synchronous save/restore here would race an in-flight
+// connect's suppression and could restore logging mid-getEndpoint.
+export function withConsoleLogSuppressedSync<T>(fn: () => T): T {
+  if (connectLogDepth++ === 0) {
+    unsuppressedConsoleLog = console.log;
+    console.log = () => {};
+  }
+  try {
+    return fn();
+  } finally {
+    if (--connectLogDepth === 0 && unsuppressedConsoleLog) {
+      console.log = unsuppressedConsoleLog;
+      unsuppressedConsoleLog = undefined;
+    }
+  }
+}
 /* eslint-enable no-console */

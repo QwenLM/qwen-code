@@ -106,19 +106,28 @@ export function dingtalkSettings(
 ): DingtalkSettings {
   const clientId = config['clientId'];
   const clientSecret = config['clientSecret'];
-  if (typeof clientId !== 'string' || !clientId.trim())
+  if (!validCredential(clientId))
     throw new Error('DingTalk channel requires a clientId.');
-  if (typeof clientSecret !== 'string' || !clientSecret.trim())
+  if (!validCredential(clientSecret))
     throw new Error('DingTalk channel requires a clientSecret.');
   const pollInterval = Number(config['pollInterval'] ?? 2_000);
   return {
-    clientId: clientId.trim(),
-    clientSecret,
+    clientId: (clientId as string).trim(),
+    clientSecret: (clientSecret as string).trim(),
     pollInterval:
-      Number.isSafeInteger(pollInterval) && pollInterval >= 250
+      Number.isSafeInteger(pollInterval) &&
+      pollInterval >= 250 &&
+      pollInterval <= 2_147_483_647
         ? pollInterval
         : 2_000,
   };
+}
+
+// Mirror the email credential rule: a copy-paste trailing newline or an
+// embedded CR/LF/NUL must be rejected, not passed through to the token
+// exchange where it surfaces as an auth error pointing at the credential.
+function validCredential(value: unknown): value is string {
+  return typeof value === 'string' && !!value.trim() && !/[\r\n\0]/.test(value);
 }
 
 export class ManagedDingtalkAdapter {
@@ -142,6 +151,13 @@ export class ManagedDingtalkAdapter {
   constructor(options: ManagedDingtalkAdapterOptions) {
     this.settings = dingtalkSettings(options.config);
     const senderPolicy = resolvePrivatePolicy(options.config);
+    if (senderPolicy === 'pairing') {
+      // The managed policy shape has no pairing arm; silently coercing it to
+      // an empty allowlist would skip every message while reporting running.
+      throw new Error(
+        'The managed DingTalk path does not support privatePolicy "pairing"; use allowedUsers, open, or disabled.',
+      );
+    }
     const allowed = options.config['allowedUsers'];
     this.policy = {
       adapter: 'dingtalk',
@@ -230,6 +246,13 @@ export class ManagedDingtalkAdapter {
   async disconnect(): Promise<void> {
     this.stop();
     await this.loop;
+    // The stream acked these messages and will never redeliver them; persist
+    // them as claims before releasing the lock so a graceful restart re-drives
+    // them instead of losing them. They are not submitted here — the next
+    // process owns the admission.
+    while (this.inbox.length > 0) {
+      await this.admit(this.inbox.shift()!, false);
+    }
     await this.controlPlane.disconnect().catch(() => undefined);
     await this.release();
   }
@@ -298,7 +321,7 @@ export class ManagedDingtalkAdapter {
     }
   }
 
-  private async admit(item: InboxItem): Promise<void> {
+  private async admit(item: InboxItem, driveSubmit = true): Promise<void> {
     const state = this.state!;
     let parsed: Record<string, unknown>;
     try {
@@ -314,6 +337,7 @@ export class ManagedDingtalkAdapter {
     const senderId =
       str(parsed['senderStaffId']) ?? str(parsed['senderId']) ?? '';
     const msgId = str(parsed['msgId']) ?? item.messageId;
+    const conversationType = str(parsed['conversationType']);
     const rawText = extractText(parsed);
     const text = rawText ? fitInboundText(rawText) : rawText;
     // Remember the newest webhook for the conversation before anything else:
@@ -329,6 +353,17 @@ export class ManagedDingtalkAdapter {
       state.recent = [...state.recent, eventId].slice(-256);
       this.persist();
     };
+    // The managed path serves private chats under the private-chat policy.
+    // A group frame would be answered into the group webhook for every member
+    // to read, so drop it until an explicit group policy exists (Legacy's
+    // GroupGate defaults to disabled for the same reason).
+    if (conversationType === '2') {
+      this.log(
+        `Managed DingTalk group message ${item.messageId} is skipped; the managed path serves private chats only.`,
+      );
+      skip();
+      return;
+    }
     if (!conversationId || !senderId || !text) {
       skip();
       return;
@@ -370,7 +405,7 @@ export class ManagedDingtalkAdapter {
       -MANAGED_DINGTALK_PENDING_LIMIT,
     );
     this.persist();
-    await this.submit(eventId, event);
+    if (driveSubmit) await this.submit(eventId, event);
   }
 
   private async submit(
@@ -390,6 +425,8 @@ export class ManagedDingtalkAdapter {
       if (!admitted.replayed && wasHeld) {
         state.instanceRefusals = 0;
         this.instanceStalled = false;
+      } else {
+        this.liftStallWhenNothingHeld();
       }
       this.persist();
     } catch (error) {
@@ -431,6 +468,7 @@ export class ManagedDingtalkAdapter {
         );
         state.pending = state.pending.filter((p) => p.eventId !== eventId);
         state.recent = [...state.recent, eventId].slice(-256);
+        this.liftStallWhenNothingHeld();
         this.persist();
         return;
       }
@@ -440,11 +478,51 @@ export class ManagedDingtalkAdapter {
     }
   }
 
+  /**
+   * The stall exists to be lifted by the held claim's probe: when the last
+   * held claim leaves without proving the binding — dropped on a per-message
+   * verdict or settled by a replayed answer — no probe remains, and a flag
+   * kept armed would gate every later tick. The refusal streak is NOT reset
+   * here: only the held claim's fresh admission proves the binding, so the
+   * next instance-scoped refusal re-holds without a new first-occurrence drop.
+   */
+  private liftStallWhenNothingHeld(): void {
+    if (
+      this.instanceStalled &&
+      !this.state!.pending.some((entry) => entry.held === true)
+    ) {
+      this.instanceStalled = false;
+      this.log(
+        'Managed DingTalk admission resumed; no claim remains held, and the refusal streak still stands for the next instance-scoped refusal.',
+      );
+    }
+  }
+
   private async resubmitPending(): Promise<void> {
     const state = this.state;
     if (!state) return;
-    for (const entry of [...state.pending]) {
+    // Probe held claims first: the stall lifts only on a held claim's fresh
+    // admission, and push order lets an earlier claim whose answer never
+    // comes shadow the one probe per tick — wedging admission across
+    // restarts. The sort is stable: unheld claims keep their push order.
+    const ordered = [...state.pending].sort(
+      (a, b) => Number(b.held === true) - Number(a.held === true),
+    );
+    for (const entry of ordered) {
       if (!this.running) return;
+      if (!this.senderAllowed(entry.event.senderId)) {
+        // The policy moved on since the claim: the persisted event drops
+        // visibly rather than drive a Session the current policy forbids.
+        this.log(
+          `Managed DingTalk event ${entry.eventId} is refused by the current sender policy; its claim drops.`,
+        );
+        state.pending = state.pending.filter(
+          (p) => p.eventId !== entry.eventId,
+        );
+        this.liftStallWhenNothingHeld();
+        this.persist();
+        continue;
+      }
       await this.submit(entry.eventId, entry.event);
       if (this.registeredGeneration === 0 || this.instanceStalled) return;
     }
@@ -453,7 +531,12 @@ export class ManagedDingtalkAdapter {
   private isRegistrationRefusal(error: unknown): boolean {
     const status = (error as { status?: unknown }).status;
     const code = (error as { code?: unknown }).code;
-    return status === 404 && String(code) === CHANNEL_NOT_FOUND;
+    return (
+      (status === 404 && String(code) === CHANNEL_NOT_FOUND) ||
+      (status === 409 &&
+        (code === 'channel_generation_unregistered' ||
+          code === 'channel_disconnected'))
+    );
   }
 
   private async ensureRegistered(state: ManagedDingtalkState): Promise<void> {

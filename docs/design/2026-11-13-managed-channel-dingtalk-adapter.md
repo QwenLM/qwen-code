@@ -150,13 +150,18 @@ is new relative to Legacy and is the price of the ack-once re-drive.
   against a fake DingTalk endpoint in the deps, mirroring the email adapter's
   fake-transport tests; a live-tenant smoke is a follow-up, not a merge gate.
 
-## Open questions
+## Decisions (as shipped)
 
-1. Whether the DingTalk reply should use the session webhook only, or fall back
-   to the robot `groupMessages/send` / `oToMessages/batchSend` API when the
-   webhook expires, is decided during implementation against the provider's
-   webhook lifetime; the design keeps the send behind the deps so either is a
-   localized change.
-2. Group @-mention gating and the sender allowlist reuse the email adapter's
-   `senderPolicy` shape; the exact DingTalk identity space (staffId vs senderId)
-   is pinned during implementation.
+1. Replies use the conversation's `sessionWebhook` only; there is no fallback to
+   the robot `groupMessages/send` / `oToMessages/batchSend` API. An expired or
+   refused webhook is a definitive `rejected` receipt. The send stays behind the
+   deps, so a webhook-lifetime fallback is a localized follow-up if needed.
+2. The sender identity is `senderStaffId` with a `senderId` fallback, gated by
+   the email-shaped `senderPolicy` (allowlist / open / disabled). Group frames
+   (`conversationType '2'`) are dropped: the managed path serves private chats,
+   and answering a group under the private policy would post the reply into the
+   group for every member to read. An explicit group policy (Legacy's GroupGate
+   semantics) is a follow-up, not part of this slice.
+3. Outbound segments larger than DingTalk's per-message cap are split into
+   ordered provider-sized chunks inside the deps; one receipt still covers the
+   whole ledger segment.
