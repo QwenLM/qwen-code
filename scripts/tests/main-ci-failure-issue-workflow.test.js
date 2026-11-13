@@ -23,6 +23,35 @@ import {
   testKey,
 } from '../../.github/scripts/ci/main-failure-signature.mjs';
 
+// Placeholder values for the shell variables inside an emitted annotation. Only
+// the message text decides the signature match, so these just have to be
+// plausible.
+const ANNOTATION_SAMPLES = { value: '0', RPC_RETRY: 'false' };
+
+/**
+ * Every `::error::` annotation a shell script can emit, with its `${...}`
+ * placeholders filled in.
+ *
+ * The gate's own suite runs `check-host-load.sh` and matches what it prints, so
+ * that file needs no help here. The unit-lane script is not executable from
+ * this suite — it needs the workspace tree, a pnpm install and Linux — so its
+ * configuration error is read from the script instead of copied into this file:
+ * a copy keeps matching its own signature after the message is reworded, which
+ * leaves both workflows claiming a string no run can emit, and the repository
+ * variable typo these entries exist for is classified as a code failure again.
+ */
+function emittedErrorAnnotations(script) {
+  const fill = (template) =>
+    template.replace(
+      /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g,
+      (_, variable, fallback) =>
+        ANNOTATION_SAMPLES[variable] ?? fallback ?? 'x',
+    );
+  return [...script.matchAll(/::error::([^"\n]*)/g)].map((match) =>
+    fill(match[1]),
+  );
+}
+
 describe('main CI failure issue workflow', () => {
   const workflow = readFileSync(
     '.github/workflows/main-ci-failure-issue.yml',
@@ -43,6 +72,22 @@ describe('main CI failure issue workflow', () => {
   const linuxAggregateStep = ciYml.jobs.test_ubuntu.steps.find((step) =>
     String(step.run ?? '').includes('BUILD_RESULT'),
   )?.name;
+  // The same join for the built-tree handoff: the signature admits those steps
+  // by NAME, so a rename in ci.yml leaves it matching no annotation while a
+  // hand-typed copy here keeps passing. Every job that fetches the tree uses
+  // the same two step names, so the dedupe is what turns six steps into two.
+  const handoffSteps = [
+    ...new Set(
+      Object.values(ciYml.jobs)
+        .flatMap((job) => job.steps ?? [])
+        .filter(
+          (step) =>
+            String(step.uses ?? '').startsWith('actions/download-artifact') &&
+            /built tree/i.test(String(step.name ?? '')),
+        )
+        .map((step) => step.name),
+    ),
+  ];
 
   it('watches main failures and Managed Agent PR failures', () => {
     expect(workflow).toContain('workflow_run:');
@@ -2611,6 +2656,204 @@ printf '%s\\n' '{"jobs":[]}'
       expect(infraStep.env.INFRA_FAILURE_SIGNATURES).toContain(
         'lock not acquired within',
       );
+    });
+
+    it('reruns on a host load refusal but files on a deterministic configuration error', () => {
+      // A refusal is the one failure whose whole purpose is "re-run me": a
+      // re-run can land the job on another host, so both classifiers must see
+      // it as infrastructure. A mistyped threshold is the opposite — the
+      // repository variable cannot change between attempts, so a re-run fails
+      // identically and this workflow must file the record instead. These are
+      // the strings the gate actually emits; its own suite pins the breach
+      // against both lists.
+      const breach =
+        '::error::Host load gate breached on ecs-qwen-hk1-4: five-minute load 145.00 on 64 CPUs';
+      expect(
+        new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(breach),
+        breach,
+      ).toBe(true);
+      for (const annotation of [
+        "::error::HOST_LOAD_MAX_RATIO must be a positive number or 'off', got '0'",
+        "::error::HOST_LOAD_MAX_WAIT_TRIES must be a positive integer, got '0'",
+        "::error::HOST_LOAD_WAIT_SECONDS must be a positive integer, got 'many'",
+      ]) {
+        expect(
+          new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(
+            annotation,
+          ),
+          annotation,
+        ).toBe(false);
+      }
+      // The equality pin above still holds: qwen-autofix keeps the same rerun
+      // class and routes these three through its own CONFIG_FAILURE_SIGNATURES
+      // (no rerun, no agent round, PR skipped for a human).
+      const autofix = parse(
+        readFileSync('.github/workflows/qwen-autofix.yml', 'utf8'),
+      );
+      expect(autofix.env.CONFIG_FAILURE_SIGNATURES).toContain(
+        'HOST_LOAD_MAX_RATIO must be a positive number',
+      );
+      expect(autofix.env.INFRA_FAILURE_SIGNATURES).not.toContain(
+        'HOST_LOAD_MAX_RATIO must be a positive number',
+      );
+    });
+
+    it('reruns on a disk floor refusal but files on its own malformed floor', () => {
+      // The disk floor gate is the same "re-run me" class as the host load
+      // gate, and it was missing from both lists while its sibling was
+      // present. Measured 2026-11-12: /tmp on the host behind
+      // ecs-qwen-hz3-10/hz3-12 held 10,3xx free inodes against a 100,000
+      // floor, so `web-shell E2E Smoke (shard 1/2)` failed at the gate on
+      // two PRs (#17022, #17011) before installing anything — every step
+      // after it skipped. A re-run lands on a host with headroom; an agent
+      // round cannot fix another machine's inode count.
+      //
+      // The inode arm is the one that reads as a code failure: the volume
+      // still reports 105 GiB free at 15% used, so neither `ENOSPC` nor
+      // `No space left on device` appears anywhere in the annotation.
+      for (const breach of [
+        '::error::Disk floor breached on ecs-qwen-hz3-12: /tmp has 10300 free inodes, below the 100000 floor. Failing before the heavy step instead of dying on ENOSPC mid-run — re-run the job to land on a host with headroom.',
+        '::error::Disk floor breached on ecs-qwen-hz3-10: /tmp has 1048576 KiB free, below the 2097152 KiB floor. Failing before the heavy step instead of dying on ENOSPC mid-run — re-run the job to land on a host with headroom.',
+        '::error::Disk floor breached on ecs-qwen-hk1-4: /data is 95% used, at or above the 94% ceiling.',
+      ]) {
+        expect(
+          new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(breach),
+          breach,
+        ).toBe(true);
+      }
+      // A malformed floor is the opposite: the repository variable cannot
+      // change between attempts, so a re-run fails identically and the
+      // record belongs in an issue. These are check-disk-floor.sh's own
+      // messages, and none may contain the breach phrase.
+      const autofix = parse(
+        readFileSync('.github/workflows/qwen-autofix.yml', 'utf8'),
+      );
+      for (const annotation of [
+        '::error::DISK_FLOOR_MIN_FREE_KB must be a non-negative integer of at most 18 digits',
+        '::error::DISK_FLOOR_MIN_FREE_INODES must be a non-negative integer of at most 18 digits',
+        '::error::DISK_FLOOR_MAX_USED_PCT must be a percentage between 1 and 100',
+      ]) {
+        expect(
+          new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(
+            annotation,
+          ),
+          annotation,
+        ).toBe(false);
+        expect(
+          new RegExp(autofix.env.CONFIG_FAILURE_SIGNATURES, 'i').test(
+            annotation,
+          ),
+          annotation,
+        ).toBe(true);
+      }
+    });
+
+    it('recognises the CI configuration errors as infrastructure', () => {
+      // A mistyped repository variable fails before any suite runs. Both
+      // classifiers must see it as infrastructure, or a variable typo files a
+      // code-failure issue and sends autofix after the wrong thing. The lanes
+      // script also reports ordinary runtime failures, so this checks the
+      // configuration-error shape — an all-caps variable name followed by
+      // "must be" — and reads the wording from the script, so a reworded
+      // message reddens here instead of silently leaving both workflows with a
+      // signature no run can emit.
+      const annotations = emittedErrorAnnotations(
+        readFileSync('.github/scripts/ci/run-unit-test-lanes.sh', 'utf8'),
+      ).filter((annotation) => /^[A-Z][A-Z0-9_]+ must be\b/.test(annotation));
+      expect(annotations.length).toBeGreaterThanOrEqual(1);
+      for (const annotation of annotations) {
+        expect(
+          new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(
+            annotation,
+          ),
+          annotation,
+        ).toBe(true);
+      }
+    });
+
+    it('recognises the built-tree handoff expiring as infrastructure', () => {
+      // #16927: the artifact fetch can expire at its 15-minute cap, so the job
+      // reddens the required check having executed no test at all, and on main
+      // the unclassified annotation files a code-failure issue for a commit
+      // that never ran. That is infrastructure by the same rule as a lost
+      // runner — it clears when the re-run lands elsewhere. What makes the
+      // transfer stall is OPEN: #16927's 09:26:51Z measurements retract the
+      // earlier proxy theory (the download redirects to
+      // `productionresultssa<N>.blob.core.windows.net`; direct and proxied
+      // transfers both swung between ~2.3 MB/s and near-stall; `hk5`, which has
+      // no proxy at all, also fell to 451 KB/s), so this classifies the failure
+      // without diagnosing it, and a fix belongs to its own change.
+      //
+      // The wording of the annotation was captured from job 131012882515; the
+      // step names come from ci.yml, so a rename there reddens here instead of
+      // leaving the signature anchored to a name no run reports. The length pin
+      // is the fail-closed half: an empty derivation would make the loop below
+      // assert nothing at all.
+      expect(handoffSteps, 'built-tree handoff steps missing').toHaveLength(2);
+      const retryStep = handoffSteps.find((step) => /^Retry\b/i.test(step));
+      expect(retryStep, 'no retry step among the handoff steps').toBeTruthy();
+      // Only the retry is admitted. The first download runs with
+      // `continue-on-error: true`, so its timeout cannot end the job and its
+      // annotation survives on the check run even when the retry recovers.
+      expect(
+        new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(
+          `The action '${retryStep}' has timed out after 15 minutes.`,
+        ),
+        retryStep,
+      ).toBe(true);
+    });
+
+    it('files a recovered first download instead of calling the run infrastructure', () => {
+      // The retry-only narrowing, as a blob: check run 131031419699 reports
+      // both handoff steps `success`, and its nine annotations are six
+      // AssertionErrors, one `Process completed with exit code 1.`, one warning
+      // about a 502 while creating the deflake issue, and one stale `Download
+      // the built tree` timeout from the attempt the retry recovered. The base
+      // list carried no handoff branch at all, so that blob matched none of its
+      // signatures and was never infrastructure there — and on that event this
+      // workflow did not run: the run is a pull request, which its `analyze`
+      // gate excludes, so nothing was filed or suppressed. Two annotation lines
+      // stand in for the blob; the run must stay a code failure, which here is
+      // "does not match" — this workflow files instead of rerunning.
+      // Derived, not typed: renaming the first download's step in ci.yml has
+      // to move this blob with it, or the case would keep asserting a name no
+      // run reports.
+      const firstDownloadStep = handoffSteps.find(
+        (step) => !/^Retry\b/i.test(step),
+      );
+      expect(
+        firstDownloadStep,
+        'no first-download step in ci.yml',
+      ).toBeTruthy();
+      const blob = [
+        `The action '${firstDownloadStep}' has timed out after 15 minutes.`,
+        "The action 'Run tests and generate reports' has timed out after 15 minutes.",
+      ].join('\n');
+      expect(
+        new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(blob),
+      ).toBe(false);
+    });
+
+    it('does not let the handoff signature swallow a hung test or install step', () => {
+      // The signature is anchored to the retry's step name, not to
+      // 'has timed out after'. Widening it to the bare phrase would reclassify
+      // every step timeout as infrastructure: a test that genuinely hangs
+      // would be re-run instead of reported, and on a PR autofix would chase a
+      // rerun that can never go green. These must stay code failures.
+      for (const annotation of [
+        "The action 'Run tests and generate reports' has timed out after 45 minutes.",
+        "The action 'Run required no-AK integration gate' has timed out after 20 minutes.",
+        "The action 'Run web-shell browser smoke' has timed out after 30 minutes.",
+        "The action 'Install Dependencies' has timed out after 30 minutes.",
+        'Error: The operation was canceled.',
+      ]) {
+        expect(
+          new RegExp(infraStep.env.INFRA_FAILURE_SIGNATURES, 'i').test(
+            annotation,
+          ),
+          annotation,
+        ).toBe(false);
+      }
     });
 
     it('classifies per failed job and only when EVERY one is infrastructure', () => {

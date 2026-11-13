@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
@@ -60,7 +61,7 @@ class WorkspaceFileUploadStoreTest {
     Path temp;
     JdbcTemplate jdbc;
     ManagedAgentProperties properties;
-    ManagedWorkspaceRegistry registry;
+    JdbcManagedWorkspaceRegistry registry;
     WorkspaceStorageGuard guard;
     SshWorkspaceService ssh;
     WorkspaceFileStore files;
@@ -87,7 +88,7 @@ class WorkspaceFileUploadStoreTest {
         properties.getRuntimeBroker().setNodeExecutable("node");
         properties.getRuntimeBroker().setWorkerEntry("/original/cli.js");
         manager = new DataSourceTransactionManager(source);
-        registry = new ManagedWorkspaceRegistry(jdbc);
+        registry = new JdbcManagedWorkspaceRegistry(jdbc);
         guard = new WorkspaceStorageGuard(jdbc, manager, properties,
                 path -> new StorageIdentityReader.Identity(path.toString(), "test-host", "1", "2", "2026-10-15T00:00:00.123456789Z"));
         mapper = new ObjectMapper();
@@ -119,7 +120,7 @@ class WorkspaceFileUploadStoreTest {
                 + " workspace_storage_id, cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref, owner_actor_key)"
                 + " SELECT tenant_id, ?, ?, 0, 0, workspace_id, workspace_generation, storage_id, 'src', ?, 7, config_ref, policy_ref, ?"
                 + " FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?", "session", "agent", binding.getContextConfigRef(),
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "other"), "tenant", workspace);
+                ManagedWorkspaceRegistry.actorKey("tenant", "other"), "tenant", workspace);
         var locator = new WorkspaceFileStore.Locator("session", null, null);
         String revision = files.scope("tenant", "actor", locator).revision();
         String id = UUID.randomUUID().toString();
@@ -434,7 +435,7 @@ class WorkspaceFileUploadStoreTest {
     @ValueSource(booleans = {true, false})
     void runtimeAndUploadShareInEitherAdmissionOrderAndReleaseIndependently(boolean runtimeFirst) {
         var binding = files.scope("tenant", "actor", workspace, ".").binding();
-        var authority = new WorkspaceExecutionStore(jdbc, manager, guard);
+        var authority = new JdbcWorkspaceExecutionStore(jdbc, manager, guard);
         var runtime = runtime();
         String revision = revision();
         String id = UUID.randomUUID().toString();
@@ -481,8 +482,8 @@ class WorkspaceFileUploadStoreTest {
     @Test
     void maintenanceAndFencingWaitForPendingUploadsAndRejectNewUploads() {
         var binding = files.scope("tenant", "actor", workspace, ".").binding();
-        var authority = new WorkspaceExecutionStore(jdbc, manager, guard);
-        var children = new ChildWorkspaceStore(jdbc, manager);
+        var authority = new JdbcWorkspaceExecutionStore(jdbc, manager, guard);
+        var children = new JdbcChildWorkspaceStore(jdbc, manager);
         var child = children.admit("tenant", "parent", UUID.randomUUID().toString(), binding, System.currentTimeMillis());
         var maintenance = children.claim(child, "maintenance", System.currentTimeMillis(), 60_000);
         String id = UUID.randomUUID().toString();
@@ -516,7 +517,7 @@ class WorkspaceFileUploadStoreTest {
     @ValueSource(booleans = {true, false})
     void worktreePreparationSharesRuntimeAndPendingUploadsInEitherOrder(boolean prepareFirst) {
         var binding = files.scope("tenant", "actor", workspace, ".").binding();
-        var authority = new WorkspaceExecutionStore(jdbc, manager, guard);
+        var authority = new JdbcWorkspaceExecutionStore(jdbc, manager, guard);
         var runtime = runtime();
         String maintenance = worktreeOperation(binding, true);
         String step = prepareFirst ? authority.holdForMaintenance(binding, maintenance, 1) : null;
@@ -565,7 +566,7 @@ class WorkspaceFileUploadStoreTest {
     @Test
     void mismatchedRuntimeMemberRemainsUnavailableDuringPreparation() {
         var binding = files.scope("tenant", "actor", workspace, ".").binding();
-        var authority = new WorkspaceExecutionStore(jdbc, manager, guard);
+        var authority = new JdbcWorkspaceExecutionStore(jdbc, manager, guard);
         var runtime = runtime();
         authority.holdForMaintenance(binding, worktreeOperation(binding, true), 1);
         authority.claim(binding, runtime);
@@ -578,7 +579,7 @@ class WorkspaceFileUploadStoreTest {
     @Test
     void mismatchedPreparationGenerationNeverAdmitsAMember() {
         var binding = files.scope("tenant", "actor", workspace, ".").binding();
-        var authority = new WorkspaceExecutionStore(jdbc, manager, guard);
+        var authority = new JdbcWorkspaceExecutionStore(jdbc, manager, guard);
         var runtime = runtime();
         String maintenance = worktreeOperation(binding, true);
         String step = authority.holdForMaintenance(binding, maintenance, 1);
@@ -597,7 +598,7 @@ class WorkspaceFileUploadStoreTest {
             jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_key,"
                             + " worktree_id, owner_actor_key, state, revision, plan_json, operation_id, gmt_create, gmt_modified)"
                             + " VALUES ('tenant', ?, ?, ?, ?, ?, 'actor', ?, 1, '{}', ?, 1, 1)",
-                    worktree, workspace, binding.getStorageId(), WorkspaceExecutionStore.storageKey(jdbc, binding), worktree, state, operation);
+                    worktree, workspace, binding.getStorageId(), JdbcWorkspaceExecutionStore.storageKey(jdbc, binding), worktree, state, operation);
             new WorkspaceOperations(jdbc, "tenant").create(WorkspaceOperations.Kind.SESSION_WORKTREE, operation,
                     WorkspaceOperations.values("session_id", worktree, "storage_id", binding.getStorageId(), "state", state));
             jdbc.update("UPDATE ma_operation SET claim_owner = 'maintenance', claim_generation = 1, claim_until = "

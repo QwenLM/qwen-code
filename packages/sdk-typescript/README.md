@@ -553,6 +553,11 @@ The handler must return a `CallToolResult` object with the following structure:
 
 Creates an SDK-embedded MCP server instance.
 
+SDK-embedded servers reject tool calls with more than 100,000 combined object
+members and array elements in their arguments before schema parsing or handler
+execution. This limit applies to both the main SDK and daemon SDK factories;
+it does not limit string lengths or configure externally supplied MCP servers.
+
 | Option    | Type                     | Default   | Description                          |
 | --------- | ------------------------ | --------- | ------------------------------------ |
 | `name`    | `string`                 | Required  | Unique name for the MCP server       |

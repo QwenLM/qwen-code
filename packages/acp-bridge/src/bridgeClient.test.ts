@@ -1324,7 +1324,12 @@ describe('BridgeClient — mode promotion fallback', () => {
       const client = new BridgeClient(
         (() => entry) as never,
         vi.fn(),
-        { request: vi.fn(), cancelForPrompt: vi.fn() },
+        {
+          request: vi.fn(),
+          cancelForPrompt: vi.fn(),
+          cancelWorkflowApproval: vi.fn(),
+          policy: 'first-responder',
+        },
         0,
         Infinity,
       );
@@ -3160,6 +3165,38 @@ describe('BridgeClient — artifact ingress', () => {
     } finally {
       now.mockRestore();
     }
+  });
+
+  it('forwards a generation reset event', async () => {
+    const sessionId = 'sess:generation-reset';
+    const onGenerationEvent = vi.fn();
+    const client = new BridgeClient(
+      (() => ({ events: { publish: vi.fn() } })) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => true,
+      undefined,
+      undefined,
+      onGenerationEvent,
+    );
+
+    await client.extNotification('qwen/notify/session/generation/event', {
+      v: 1,
+      sessionId,
+      requestId: 'btw-request',
+      event: { type: 'reset' },
+    });
+
+    expect(onGenerationEvent).toHaveBeenCalledWith(sessionId, {
+      type: 'reset',
+      requestId: 'btw-request',
+    });
   });
 
   it('allows artifact events during an in-flight restore on this channel', async () => {
@@ -5446,7 +5483,12 @@ describe('background execution ownership', () => {
       const client = new BridgeClient(
         (() => entry) as never,
         vi.fn(),
-        { request: vi.fn(), cancelForPrompt: vi.fn() },
+        {
+          request: vi.fn(),
+          cancelForPrompt: vi.fn(),
+          cancelWorkflowApproval: vi.fn(),
+          policy: 'first-responder',
+        },
         0,
         Infinity,
       );
@@ -5682,7 +5724,12 @@ describe('persisted last user prompt metadata', () => {
     const args: ConstructorParameters<typeof BridgeClient> = [
       (id) => (id === sessionId ? entry : undefined),
       () => undefined,
-      { request: vi.fn(), cancelForPrompt: vi.fn() },
+      {
+        request: vi.fn(),
+        cancelForPrompt: vi.fn(),
+        cancelWorkflowApproval: vi.fn(),
+        policy: 'first-responder',
+      },
       0,
       Infinity,
     ];

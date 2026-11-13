@@ -1,14 +1,17 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.time.Duration;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
@@ -90,9 +93,14 @@ class MaintenanceProbeWaiterTest {
                 return CompletableFuture.completedFuture(true);
             }
         };
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:maintenance-probe-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         try (var service = new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(scope), provisioner,
-                transport, new InMemoryRuntimeBindingRepository(), new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "broker", Duration.ofSeconds(5), Duration.ofSeconds(5))) {
+                transport, new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])),
+                new JdbcRuntimeSessionRepository(source),
+                new JdbcToolExecutionRepository(source), "broker", Duration.ofSeconds(5), Duration.ofSeconds(5))) {
             var ready = service.warm("harness").toCompletableFuture().get(2, TimeUnit.SECONDS);
             int before = attestations.get();
             var parked = new CompletableFuture<Void>();
