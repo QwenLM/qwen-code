@@ -3322,6 +3322,26 @@ describe('ChatEditor Plan toolbar switch fallback', () => {
     ).toBe('true');
   });
 
+  it('marks the selected Full Access trigger as dangerous', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      currentMode: 'yolo',
+    });
+    expect(
+      container.querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.className,
+    ).toContain('modeToolBtnDanger');
+
+    rerenderChatEditor(container, {
+      visibleToolbarActions: ['approvalMode'],
+      currentMode: 'default',
+    });
+    expect(
+      container.querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.className,
+    ).not.toContain('modeToolBtnDanger');
+  });
+
   it('renders only the supplied mode choices and retains the actual current mode', () => {
     const container = renderChatEditor({
       visibleToolbarActions: ['approvalMode'],
