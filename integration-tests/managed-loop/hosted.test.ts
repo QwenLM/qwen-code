@@ -154,13 +154,21 @@ it(`Hosted workflow_launch executes agent() on the ${mode} loop`, async () => {
   const visible = transcript.events.filter(
     (event) => event.promptId === promptId,
   );
+  // The turn-scoped spine here is two events, not three. A `workflow_launch`
+  // run result is committed as one message that never streamed as deltas, so
+  // it projects as a single `session_update` chunk rather than as the
+  // `managed_journal_event` a streamed message produces. The transcript's
+  // other entries are the projector's `managed_journal_event` fallback for
+  // journal kinds with no dedicated projection (activation.changed,
+  // input.accepted, wake.requested, both checkpoints and the user-message
+  // commit); that fallback returns `{ sessionId }` only — by design it carries
+  // no `promptId` — so filtering on `promptId` cannot see them.
   expect(visible.map((event) => event.type)).toEqual([
     'session_update',
-    'managed_journal_event',
     'turn_complete',
   ]);
   expect(visible[0]?.data?.update?.content?.text).toContain(sentinel);
-  expect(visible[2]?.data?.stopReason).toBe('end_turn');
+  expect(visible[1]?.data?.stopReason).toBe('end_turn');
 
   const committed = (await store.scan()).events;
   const settled = committed.find(
@@ -183,8 +191,22 @@ it(`Hosted workflow_launch executes agent() on the ${mode} loop`, async () => {
     settled?.payload['resultRef'],
     'turn.settled resultRef',
   );
-  expect(resultRef).toBeTruthy();
-  durableResult = Buffer.from(await store.readResource(resultRef)).toString(
+  // `turn.settled` carries the turn *record* (`managed-session-record-sink`'s
+  // `commitTurnSettled` publishes the `turn_result` record: promptId, state,
+  // stopReason, endedAt), not the answer text. The answer's durable home is
+  // the assistant message commit, so read the text from there and keep the
+  // turn record as the settlement witness it is.
+  expect(resultRef.kind).toBe('managed-turn-result');
+  const assistantMessage = committed.find(
+    (event) =>
+      event.kind === 'message.committed' &&
+      event.payload['role'] === 'assistant',
+  );
+  const answerRef = assertManagedSessionDurableRef(
+    assistantMessage?.payload['contentRef'],
+    'message.committed contentRef',
+  );
+  durableResult = Buffer.from(await store.readResource(answerRef)).toString(
     'utf8',
   );
   expect(durableResult).toContain(sentinel);

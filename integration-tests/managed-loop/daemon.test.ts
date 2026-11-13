@@ -120,11 +120,37 @@ it(`ordinary daemon runs a Managed ACP tool turn (${mode})`, async () => {
       NODE_OPTIONS: '',
     },
   });
-  const session = await daemon.client.createOrAttachSession({
-    workspaceCwd: workspace,
-    sessionScope: 'thread',
-    approvalMode: 'yolo',
-  });
+  // `spawnDaemon` resolves on the listening line, which the daemon prints
+  // before the full runtime is mounted; during that window non-status runtime
+  // routes answer 503 `daemon_runtime_starting`, and the protocol documents
+  // that code as retryable (docs/developers/qwen-serve-protocol.md). Creating
+  // the session here therefore races the mount, so wait for it instead of
+  // treating the cold window as a failure. The envelope's human text does not
+  // contain the code, so classify on the parsed body.
+  const session = await (async () => {
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      try {
+        return await daemon.client.createOrAttachSession({
+          workspaceCwd: workspace,
+          sessionScope: 'thread',
+          approvalMode: 'yolo',
+        });
+      } catch (error) {
+        const envelope = error as {
+          status?: unknown;
+          body?: { code?: unknown } | null;
+        } | null;
+        const starting =
+          envelope?.status === 503 &&
+          typeof envelope.body === 'object' &&
+          envelope.body !== null &&
+          envelope.body.code === 'daemon_runtime_starting';
+        if (!starting || Date.now() >= deadline) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+  })();
   const transcript = new SessionService(workspace, {
     runtimeBaseDir: runtimeDir,
   }).getSessionTranscriptPath(session.sessionId);
@@ -158,7 +184,10 @@ it(`ordinary daemon runs a Managed ACP tool turn (${mode})`, async () => {
     expect.objectContaining({
       role: 'tool',
       tool_call_id: 'managed-read',
-      content: expect.stringContaining(sentinel),
+      // ACP tool results travel as structured parts, not a bare string.
+      content: expect.arrayContaining([
+        expect.objectContaining({ text: expect.stringContaining(sentinel) }),
+      ]),
     }),
   );
   transcriptEvidence = await daemon.client.getSessionTranscriptPage(
