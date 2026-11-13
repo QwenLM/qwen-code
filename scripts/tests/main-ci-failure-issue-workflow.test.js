@@ -139,7 +139,7 @@ describe('main CI failure issue workflow', () => {
         "((github.event.workflow_run.head_branch == 'main' && " +
         "(github.event.workflow_run.event == 'push' || " +
         "(github.event.workflow_run.event == 'schedule' && " +
-        'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]\'), github.event.workflow.name)))) || ' +
+        'contains(fromJSON(\'["E2E Tests","Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]\'), github.event.workflow.name)))) || ' +
         "(github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') || " +
         "(github.event.workflow.name == 'Managed Agent gate' && " +
         'contains(fromJSON(\'["pull_request","pull_request_review"]\'), github.event.workflow_run.event))) }}',
@@ -171,6 +171,9 @@ describe('main CI failure issue workflow', () => {
     ['tui-parity', 'schedule', 'main', 'success', false],
     ['tui-parity', 'schedule', 'main', 'cancelled', true],
     ['E2E Tests', 'push', 'main', 'cancelled', true],
+    // `e2e.yml` has held a nightly cron since #5859 and the push arm no longer
+    // covers it, so the schedule arm is its only main-side report.
+    ['E2E Tests', 'schedule', 'main', 'failure', true],
     ['tui-parity', 'schedule', 'main', 'skipped', false],
     ['tui-parity', 'schedule', 'main', 'timed_out', false],
     ['tui-parity', 'schedule', 'feature', 'failure', false],

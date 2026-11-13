@@ -227,8 +227,13 @@ it(`Hosted workflow_launch executes agent() on the ${mode} loop`, async () => {
     'Complete the managed loop probe.',
   );
 
+  // Same shape the parity suites pin (`agent-loop-parity.test.ts`):
+  // `core/agents/runtime/agent-core.ts` emits `subagent ${id} round ${round}`,
+  // so `.*` would also accept an empty id or a non-numeric round — the exact
+  // drift this lane exists to catch, while the parity suites stay the ones that
+  // fail.
   const loopMarker =
-    /\[AgentCore\] subagent .* round .* on the shared agent loop[^\n]*/;
+    /\[AgentCore\] subagent \S+ round \d+ on the shared agent loop[^\n]*/;
   let executedLoop = '';
   await waitUntil(async () => {
     const debug = await debugLog(path.join(cli!.root, 'runtime'));

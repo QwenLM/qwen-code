@@ -57,7 +57,7 @@ jobs:
       ((github.event.workflow_run.head_branch == 'main' &&
       (github.event.workflow_run.event == 'push' ||
       (github.event.workflow_run.event == 'schedule' &&
-      contains(fromJSON('["Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]'), github.event.workflow.name)))) ||
+      contains(fromJSON('["E2E Tests","Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]'), github.event.workflow.name)))) ||
       (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') ||
       (github.event.workflow.name == 'Managed Agent gate' &&
       contains(fromJSON('["pull_request","pull_request_review"]'), github.event.workflow_run.event))) }}
