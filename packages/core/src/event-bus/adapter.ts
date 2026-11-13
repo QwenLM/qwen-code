@@ -14,12 +14,14 @@ import { randomUUID } from 'node:crypto';
 import {
   createSchedulerExecutor,
   defaultDuplicates,
+  type AgentLoopHost,
   type AgentLoopOptions,
   type AgentLoopResult,
 } from '../core/agent-loop.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { createBusEvent } from './bus.js';
 import { createLoopEventRuntime } from './runtime.js';
+import type { LoopRunState } from './state.js';
 
 const debugLogger = createDebugLogger('EVENT_BUS');
 
@@ -48,10 +50,13 @@ export async function runAgentLoopOnBus(
     `(prompt ${options.first.promptId})`,
   );
   const runtime = createLoopEventRuntime();
-  const state = runtime.store.create({
+  let state!: LoopRunState;
+  const host =
+    options.host && untilFinished(options.host, () => !!state.finished);
+  state = runtime.store.create({
     runId,
     promptId: options.first.promptId,
-    input: options,
+    input: { ...options, ...(host ? { host } : {}) },
     duplicates,
     executor,
     current: options.first,
@@ -79,14 +84,52 @@ export async function runAgentLoopOnBus(
     { runId },
   );
 
+  const { signal } = options;
+  const onAbort = () =>
+    runtime.bus.publish(
+      createBusEvent('loop.cancelled', state, { reason: 'abort' }),
+    );
   try {
     runtime.bus.publish(
       createBusEvent('loop.started', state, { promptId: state.promptId }),
     );
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
     return await result;
   } finally {
+    signal.removeEventListener('abort', onAbort);
+    clearTimeout(state.settleTimer);
     off();
     runtime.store.delete(runId);
     runtime.dispose();
   }
+}
+
+/** What a hook answers once the run finished, so it starts nothing more. */
+const FINISHED_ANSWERS: Partial<Record<keyof AgentLoopHost, unknown>> = {
+  onModelEvent: 'cancelled',
+  selectCalls: [],
+  beforeToolLaunch: false,
+  skippedOutput: '',
+  endsOnTerminateTurn: false,
+};
+
+/**
+ * `host`, silent once the run finished: a handler a bounded close left
+ * behind can still settle, but the host hears nothing of it.
+ */
+function untilFinished(
+  host: AgentLoopHost,
+  finished: () => boolean,
+): AgentLoopHost {
+  return new Proxy(host, {
+    get(target, key, receiver) {
+      const hook: unknown = Reflect.get(target, key, receiver);
+      if (typeof hook !== 'function') return hook;
+      return (...args: unknown[]) =>
+        finished()
+          ? FINISHED_ANSWERS[key as keyof AgentLoopHost]
+          : hook.apply(target, args);
+    },
+  });
 }

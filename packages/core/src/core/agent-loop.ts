@@ -279,7 +279,9 @@ export interface AgentLoopOptions {
   deferRecording?: boolean;
   /**
    * Run the loop on the event-bus implementation instead of the procedural
-   * one. Opt-in; the two are behaviorally equivalent. See
+   * one. Opt-in; the two are behaviorally equivalent, except that a run
+   * whose signal aborted ends as `cancelled` once it has not settled within
+   * a cap, and its host hears nothing after that. See
    * docs/design/2026-11-11-event-bus-agent-loop.md.
    */
   useEventBus?: boolean;

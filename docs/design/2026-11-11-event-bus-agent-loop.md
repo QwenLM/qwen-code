@@ -104,8 +104,7 @@ Preview routes by `queryId` and scopes rounds by a UUID `roundId`. Main's loop r
 | Bus event        | Payload (main types)                   | Published by                     |
 | ---------------- | -------------------------------------- | -------------------------------- |
 | `loop.started`   | `{ promptId }`                         | adapter, after state creation    |
-| `loop.output`    | `{ event: ServerLlmStreamEvent }`      | planned (streaming slice)        |
-| `loop.cancelled` | `{ reason }`                           | planned (streaming slice)        |
+| `loop.cancelled` | `{ reason: 'abort' }`                  | adapter, when the signal aborts  |
 | `loop.finished`  | `{ result: AgentLoopResult }`          | Conversation                     |
 | `llm.request`    | `{ round, send: AgentLoopRound }`      | Conversation                     |
 | `llm.tool_call`  | `{ call: ToolCallRequestInfo }`        | planned (streaming slice)        |
@@ -115,7 +114,7 @@ Preview routes by `queryId` and scopes rounds by a UUID `roundId`. Main's loop r
 | `tool.settled`   | `{ round }`                            | Tool, at batch end               |
 | `handler.failed` | `{ source, eventType, round?, error }` | bus, on listener failure         |
 
-Events marked _planned_ are in the vocabulary but not emitted by this slice; they arrive with streaming dispatch. Cancellation today flows through the signal into `runModelRound`/`runToolBatch`, not through a bus event.
+Events marked _planned_ are in the vocabulary but not emitted yet; they arrive with streaming dispatch (#17045 block S). Preview's `query.output` has no counterpart: main's surfaces hear the round through their host callbacks, so `loop.output` was removed from the vocabulary until a consumer needs it.
 
 `llm.settled` is the round-end signal; the terminal classification (the `STOP_EVENTS` mapping that `runModelRound` does today) lives in run state (`state.model.stop`), and Conversation is the only place that turns that round-end state into the loop result. Duplicate/replay bookkeeping stays in the Tool handler, using the existing `toolCallIdUtils` helpers, exactly where `runToolBatch` does it today. Event payloads carry only routing and decision data; the full model result and tool batch live in the run state under their owner's slot, so the bus never duplicates them.
 
@@ -138,7 +137,11 @@ The bus (`LoopEventBus`) is ported essentially as-is (it depends only on a logge
 
 ### Cancellation
 
-The handlers read the run's `signal` and `toolSignal` and pass them to `runModelRound`/`runToolBatch` exactly as today; Tool cancels the in-flight batch through the executor's signal, and Conversation finalizes once Llm and Tool are quiet. The run settles when `loop.finished` arrives. A published `loop.cancelled` event and a bounded settlement cap (preview's `QueryListener` uses 10 s) belong to the streaming slice, not this one — see the _planned_ note in the event table.
+The handlers read the run's `signal` and `toolSignal` and pass them to `runModelRound`/`runToolBatch` exactly as today; Tool cancels the in-flight batch through the executor's signal, and Conversation finalizes once Llm and Tool are quiet. The run settles when `loop.finished` arrives.
+
+When the signal aborts, the adapter publishes `loop.cancelled`, once, and Conversation arms a settlement cap of 10 s, preview's. Inside the cap the cancellation changes no decision: the run ends exactly as the procedural loop does, including a batch the abort cut off that keeps its results. A run still unsettled at the cap ends there as `cancelled`, with no results; the handler that was stuck may settle later, but its state writes are dropped and the host hears none of its callbacks, each of which answers as a finished run would (a model event stops the round, no call is selected or launched). The adapter removes its abort listener and the cap's timer when the run settles. The cancellation starts no host work, so nothing runs in the aborter's async context. The procedural path has no cap: a stuck round or batch still holds it.
+
+Preview turns two more things into a cancellation: the consumer closing its stream, and Conversation failing. `runAgentLoop` returns a promise and has no stream, so its caller can stop listening only by aborting the signal, which is the cancellation above, or by throwing from a host callback, which rejects the run at once as on the procedural path; a callback throws from inside the round or batch that called it, so no other work of the run is in flight. A Conversation failure is the same rejection.
 
 ### Why not reuse an existing bus
 
@@ -156,7 +159,8 @@ Each slice keeps the parity suites green and changes no surface default.
 2. **PR 2 — handlers behind an opt-in flag.** Re-express `runAgentLoop` internals as Conversation/Llm/Tool handlers plus the host adapter, selected by a new `AgentLoopOptions.useEventBus` flag (default off, so the procedural path stays the default within the unified loop until parity is proven). `runModelRound`/`runToolBatch` keep their exports and signatures (ACP #15509 depends on them) and are reused unchanged by the handlers. An equivalence test runs both paths over scripted scenarios and asserts identical results and host-callback order; the headless parity suite and the ACP round tests are the acceptance gate.
 3. **PR 3 — streaming dispatch evaluation (optional, separate gate).** Preview executes a `tool_use` block while the stream is still running. Main runs the batch after the round ends, and approvals are batch-ordered; streaming dispatch changes approval timing and output interleaving. This slice first writes down the parity differences and gets an explicit decision; it is not required for the architecture port.
 4. **PR 4 — headless opt-in.** The `experimental.eventBusAgentLoop` setting (env override `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1`, read by `Config.isEventBusAgentLoopEnabled()`) first enabled `useEventBus` for headless shared-loop rounds. AgentCore and OpenTUI joined in later slices of the unified loop migration. The setting defaults to off and requires `experimental.unifiedAgentLoop`. With `QWEN_DEBUG_LOG_FILE` enabled, the adapter logs an `[EVENT_BUS]` execution marker with the prompt ID.
-5. **Later — surface convergence** continues under the unified-agent-loop program (TUI, OpenTUI, AgentCore, speculation, Hosted). The bus makes loop-level attachments (hooks, Mods, protection, recording) single-place, which is that program's stated goal; no surface work is scheduled here.
+5. **Cancellation and bounded close** (#17045 block K). `loop.cancelled` and the settlement cap described under _Cancellation_; `loop.output` removed from the vocabulary.
+6. **Later — surface convergence** continues under the unified-agent-loop program (TUI, OpenTUI, AgentCore, speculation, Hosted). The bus makes loop-level attachments (hooks, Mods, protection, recording) single-place, which is that program's stated goal; no surface work is scheduled here.
 
 ## Testing
 
