@@ -2358,6 +2358,77 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBeUndefined();
   });
 
+  it.each([true, false])(
+    'uses legacy folderTrustFeature=%s before loading workspace inputs',
+    async (enabled) => {
+      delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+      vi.stubEnv('MIGRATION_TRUST_SETTINGS_FIXTURE', undefined);
+      try {
+        const qwenHome = useTempQwenHome();
+        tempWorkspace = realpathSync(
+          mkdtempSync(join(os.tmpdir(), 'qws-fast-path-feature-trust-')),
+        );
+        writeFileSync(
+          join(qwenHome, 'settings.json'),
+          JSON.stringify({ folderTrustFeature: enabled }),
+        );
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = join(
+          qwenHome,
+          'trustedFolders.json',
+        );
+        writeFileSync(
+          process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
+          JSON.stringify({ [tempWorkspace]: TrustLevel.DO_NOT_TRUST }),
+        );
+        mkdirSync(join(tempWorkspace, '.qwen'));
+        writeFileSync(
+          join(tempWorkspace, '.qwen', 'settings.json'),
+          JSON.stringify({
+            folderTrustFeature: false,
+            env: { MIGRATION_TRUST_SETTINGS_FIXTURE: 'workspace-setting' },
+            serve: { channels: ['telegram'] },
+          }),
+        );
+        writeFileSync(
+          join(tempWorkspace, '.env'),
+          'FAST_PATH_REFERENCED_TOKEN=workspace-env\n',
+        );
+
+        const settings = await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+        expect(settings?.security?.folderTrust?.enabled).toBe(enabled);
+        expect(settings?.serve?.channels).toEqual(
+          enabled ? undefined : ['telegram'],
+        );
+        expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe(
+          enabled ? undefined : 'workspace-env',
+        );
+        expect(process.env['MIGRATION_TRUST_SETTINGS_FIXTURE']).toBe(
+          enabled ? undefined : 'workspace-setting',
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
+  it.each([
+    { folderTrust: false, folderTrustFeature: true },
+    { security: { folderTrust: { enabled: false } }, folderTrustFeature: true },
+  ])(
+    'keeps explicit folder-trust settings ahead of the feature alias: %j',
+    (settings) => {
+      const qwenHome = useTempQwenHome();
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-trust-precedence-')),
+      );
+      writeFileSync(join(qwenHome, 'settings.json'), JSON.stringify(settings));
+      expect(
+        loadServeFastPathSettings(tempWorkspace).security?.folderTrust?.enabled,
+      ).toBe(false);
+    },
+  );
+
   it('caches trusted folders during a single fast-path bootstrap', () => {
     delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     const qwenHome = useTempQwenHome();

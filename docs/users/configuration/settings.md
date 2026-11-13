@@ -51,7 +51,7 @@ In addition to a project settings file, a project's `.qwen` directory can contai
 
 ### Configuration migration
 
-The legacy `folderTrustFeature` setting migrates to `security.folderTrust.enabled`, preserving whether folder trust was enabled. If the legacy `folderTrust` setting is also present, its value takes precedence.
+For legacy operator settings, a boolean `folderTrustFeature` value migrates to `security.folderTrust.enabled`. The legacy `folderTrust` key takes precedence over that alias, and existing nested `security.folderTrust` settings retain the migration's usual precedence. Project settings cannot establish the trust policy. The `qwen serve` startup reader also honors the legacy alias before loading workspace environment variables or startup channels. Already-migrated files containing the unused `security.folderTrust.featureEnabled` key are not rewritten by this migration.
 
 Qwen Code automatically migrates legacy configuration settings to the new format. Old settings files are backed up before migration. The following settings have been renamed from negative (`disable*`) to positive (`enable*`) naming:
 

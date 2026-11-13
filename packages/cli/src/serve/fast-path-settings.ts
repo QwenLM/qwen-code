@@ -576,18 +576,21 @@ function pickFastPathSettings(
       }
     }
   }
+  const legacyFolderTrustKey = Object.hasOwn(value, 'folderTrust')
+    ? 'folderTrust'
+    : 'folderTrustFeature';
   if (
     useLegacyKeys &&
     out.security === undefined &&
-    Object.hasOwn(value, 'folderTrust')
+    Object.hasOwn(value, legacyFolderTrustKey)
   ) {
-    const legacyFolderTrust = value['folderTrust'];
+    const legacyFolderTrust = value[legacyFolderTrustKey];
     if (
       legacyFolderTrust !== undefined &&
       typeof legacyFolderTrust !== 'boolean'
     ) {
       throw new Error(
-        'Serve fast path settings folderTrust must be a boolean.',
+        `Serve fast path settings ${legacyFolderTrustKey} must be a boolean.`,
       );
     }
     if (legacyFolderTrust !== undefined) {
