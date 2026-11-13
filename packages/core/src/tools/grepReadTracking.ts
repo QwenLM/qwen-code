@@ -13,6 +13,15 @@ const STAT_BATCH_SIZE = 50;
 const NON_CACHEABLE_GREP_EXTENSIONS = new Set(['.ipynb']);
 const debugLogger = createDebugLogger('GREP_READ_TRACKING');
 
+/**
+ * Included in model-facing output so the model can distinguish withheld results
+ * from an empty search and avoid retrying blindly.
+ */
+export function formatPermissionOmissionNote(count: number): string {
+  if (count === 0) return '';
+  return `[${count} ${count === 1 ? 'file' : 'files'} omitted by permission rules]`;
+}
+
 export async function recordGrepResultFileReads(
   config: Config,
   filePaths: string[],

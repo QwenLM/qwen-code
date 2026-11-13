@@ -20,7 +20,10 @@ import type {
   ToolConfirmationPayload,
 } from '../tools/tools.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
-import { buildPermissionRules } from '../permissions/rule-parser.js';
+import {
+  buildPermissionRules,
+  withPathPatternCache,
+} from '../permissions/rule-parser.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Context building
@@ -106,6 +109,48 @@ export function buildPermissionCheckContext(
 // ─────────────────────────────────────────────────────────────────────────────
 // PM evaluation
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Resolve which of `filePaths` a `deny` rule claims, evaluated per file under
+ * `toolName`.
+ *
+ * The input-side check for search tools (grep, glob) evaluates rules against
+ * the search root, so a path-scoped `Read(...)` deny rule that targets an
+ * individual result file can never match it. Search tools call this with the
+ * files they are about to return, reusing permission-rule evaluation. Only
+ * `deny` removes results: `ask` rules do not prompt per file during execute.
+ *
+ * Returns the denied subset; empty when `pm` is absent.
+ */
+export async function selectPathsDeniedByPermissionRules(
+  pm: PermissionManager | null | undefined,
+  toolName: string,
+  targetDir: string,
+  filePaths: readonly string[],
+): Promise<Set<string>> {
+  const denied = new Set<string>();
+  if (!pm || filePaths.length === 0 || !pm.hasDenyRules()) {
+    return denied;
+  }
+  return withPathPatternCache(async () => {
+    for (const filePath of filePaths) {
+      const ctx = buildPermissionCheckContext(
+        toolName,
+        { file_path: filePath },
+        targetDir,
+      );
+      const { finalPermission } = await evaluatePermissionRules(
+        pm,
+        'default',
+        ctx,
+      );
+      if (finalPermission === 'deny') {
+        denied.add(filePath);
+      }
+    }
+    return denied;
+  });
+}
 
 /** Result of {@link evaluatePermissionRules}. */
 export interface PermissionEvalResult {

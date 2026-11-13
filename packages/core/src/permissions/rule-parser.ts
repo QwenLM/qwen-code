@@ -7,6 +7,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -17,6 +18,19 @@ import {
 import { isNodeError } from '../utils/errors.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
+// A search checks every result path against every rule, so within one call
+// each rule pattern is compiled and each path canonicalized only once.
+const pathPatternCache = new AsyncLocalStorage<{
+  matchers: Map<string, picomatch.Matcher[]>;
+  canonicalPaths: Map<string, string[]>;
+}>();
+
+export function withPathPatternCache<T>(callback: () => T): T {
+  return pathPatternCache.run(
+    { matchers: new Map(), canonicalPaths: new Map() },
+    callback,
+  );
+}
 
 /**
  * Normalize a filesystem path to use POSIX-style forward slashes.
@@ -1526,17 +1540,23 @@ export function matchesPathPattern(
   cwd: string,
   matchMode: 'lexical' | 'canonical' = 'lexical',
 ): boolean {
-  const resolvedPattern = resolvePathPattern(specifier, projectRoot, cwd);
-  const patterns =
-    matchMode === 'canonical'
-      ? getCanonicalPatternCandidates(resolvedPattern)
-      : [resolvedPattern];
-  const matchers = patterns.map((pattern) =>
-    picomatch(neutralizeLineTerminators(pattern), {
-      dot: true,
-      nocase: false,
-    }),
-  );
+  const cache = pathPatternCache.getStore()?.matchers;
+  const cacheKey = `${specifier}\0${projectRoot}\0${cwd}\0${matchMode}`;
+  let matchers = cache?.get(cacheKey);
+  if (!matchers) {
+    const resolvedPattern = resolvePathPattern(specifier, projectRoot, cwd);
+    const patterns =
+      matchMode === 'canonical'
+        ? getCanonicalPatternCandidates(resolvedPattern)
+        : [resolvedPattern];
+    matchers = patterns.map((pattern) =>
+      picomatch(neutralizeLineTerminators(pattern), {
+        dot: true,
+        nocase: false,
+      }),
+    );
+    cache?.set(cacheKey, matchers);
+  }
   const paths =
     matchMode === 'canonical'
       ? getCanonicalPathMatchCandidates(filePath, cwd)
@@ -1563,13 +1583,19 @@ function getCanonicalPathMatchCandidates(
   filePath: string,
   cwd: string,
 ): string[] {
+  const cache = pathPatternCache.getStore()?.canonicalPaths;
+  const cacheKey = `${filePath}\0${cwd}`;
+  const cached = cache?.get(cacheKey);
+  if (cached) return cached;
   const candidates = new Set([toPosixPath(filePath)]);
   const absolutePath = resolveWithoutNormalizing(cwd, filePath);
   const canonicalPath = realpathNearestExisting(absolutePath);
   if (canonicalPath !== undefined) {
     candidates.add(toPosixPath(canonicalPath));
   }
-  return [...candidates];
+  const result = [...candidates];
+  cache?.set(cacheKey, result);
+  return result;
 }
 
 function resolveWithoutNormalizing(base: string, filePath: string): string {

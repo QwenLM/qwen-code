@@ -466,6 +466,14 @@ describe('runSkillReviewByAgent limit wiring', () => {
 describe('skill-scoped shim registration-gate delegation (#10075)', () => {
   const pmOver = (basePm: unknown) => scopedPm('/project', basePm);
 
+  it('delegates deny-rule presence to the base manager', () => {
+    expect(pmOver(undefined).hasDenyRules()).toBe(false);
+
+    const hasDenyRules = vi.fn().mockReturnValue(true);
+    expect(pmOver({ hasDenyRules }).hasDenyRules()).toBe(true);
+    expect(hasDenyRules).toHaveBeenCalledOnce();
+  });
+
   it('isToolDisabledByCoreToolsAllowList delegates when present, defaults to false otherwise', () => {
     const gate = vi.fn().mockReturnValue(true);
     const delegated = pmOver({ isToolDisabledByCoreToolsAllowList: gate });
