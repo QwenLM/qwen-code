@@ -13,6 +13,8 @@ import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.ResolvedBinding;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
@@ -36,17 +38,17 @@ final class AgentSessionAdmissions {
     private final AgentSessionCommands sessionCommands;
     private final AgentSessionPolicies sessionPolicies;
     private final AgentStoreRows storeRows;
-    private final ManagedExtensionRecordStore configRecords;
+    private final JdbcManagedExtensionRecordStore configRecords;
     private final ManagedSessionModelConfigs modelConfigs;
     private final JdbcTemplate jdbc;
     private final Clock clock;
     private final String approvalMode;
-    private final ManagedWorkspaceRegistry workspaces;
+    private final JdbcManagedWorkspaceRegistry workspaces;
     private final String agentRevision;
     private final List<WebShellModelOption> modelCatalog;
-    private final ManagedAgentDefinitionStore definitions;
-    private final ManagedSessionSkills creationSkills;
-    private final SessionWorktreeStore sessionWorktrees;
+    private final JdbcManagedAgentDefinitionStore definitions;
+    private final JdbcManagedSessionSkills creationSkills;
+    private final JdbcSessionWorktreeStore sessionWorktrees;
     private final com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages;
     private final boolean workspaceFilesEnabled;
     private final boolean workspaceShellEnabled;
@@ -62,16 +64,16 @@ final class AgentSessionAdmissions {
             AgentSessionCommands sessionCommands,
             AgentSessionPolicies sessionPolicies,
             AgentStoreRows storeRows,
-            ManagedExtensionRecordStore configRecords,
+            JdbcManagedExtensionRecordStore configRecords,
             JdbcTemplate jdbc,
             Clock clock,
             String approvalMode,
-            ManagedWorkspaceRegistry workspaces,
+            JdbcManagedWorkspaceRegistry workspaces,
             String agentRevision,
             List<WebShellModelOption> modelCatalog,
-            ManagedAgentDefinitionStore definitions,
-            ManagedSessionSkills creationSkills,
-            SessionWorktreeStore sessionWorktrees,
+            JdbcManagedAgentDefinitionStore definitions,
+            JdbcManagedSessionSkills creationSkills,
+            JdbcSessionWorktreeStore sessionWorktrees,
             com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
             boolean workspaceFilesEnabled,
             boolean workspaceShellEnabled,
@@ -112,15 +114,7 @@ final class AgentSessionAdmissions {
     Admission insertSessionCommand(String tenantId, String actorId,
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
-            List<Map<String, Object>> input, String payloadDigest) {
-        return insertSessionCommand(tenantId, actorId, operation, idempotencyKey,
-                requestDigest, agentId, requestedRevision, title, input, payloadDigest, null);
-    }
-
-    Admission insertSessionCommand(String tenantId, String actorId,
-            String operation, String idempotencyKey, String requestDigest,
-            String agentId, String requestedRevision, String title,
-            List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig) {
+            List<Map<String, Object>> input, String payloadDigest, SessionModelConfig modelConfig, String memoryStoreId) {
         requireModelConfiguration(modelConfig);
         AgentSessionPolicies.AgentPin pin = sessionPolicies.resolveAgentPin(tenantId, agentId, requestedRevision,
                 false);
@@ -128,6 +122,7 @@ final class AgentSessionAdmissions {
         Admission admission = insertSession(tenantId, operation, idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
                 null, actorId, pin);
+        ManagedMemoryStore.bind(jdbc, tenantId, actorId, admission.sessionId(), memoryStoreId);
         if (modelConfig != null) {
             modelConfigs.save(tenantId, admission.sessionId(), modelConfig);
         }
@@ -155,7 +150,7 @@ final class AgentSessionAdmissions {
         List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> extensionPins =
                 command.extensionPins();
         Set<String> extensionLifecycleProfiles = command.extensionLifecycleProfiles();
-        SessionWorktreeStore.Plan worktree = command.worktree();
+        JdbcSessionWorktreeStore.Plan worktree = command.worktree();
         SessionModelConfig modelConfig = command.modelConfig();
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
@@ -207,12 +202,12 @@ final class AgentSessionAdmissions {
             if (extensionPackages == null) {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();
             }
-            if ((!WorkspaceToolProfiles.SHELL.equals(pin.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(pin.toolProfile()))
+            if ((!WorkspaceToolProfiles.isPublicShell(pin.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(pin.toolProfile()))
                     || !extensionLifecycleProfiles.contains(pin.toolProfile())) {
                 throw new ManagedAgentException(409, "unsupported_feature",
                         "Extension configuration requires a negotiated Shell or MCP Session lifecycle profile.");
             }
-            extensionPackages.requireSelection(tenantId, actorId, workspace.binding().getWorkspaceId(), extensionPins);
+            extensionPackages.requireSelection(tenantId, actorId, workspace.binding().getWorkspaceId(), extensionPins, command.extensionSelection());
         }
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, workspace.binding().getStorageId());
         boolean sshWorkspace = sessionPolicies.isSshWorkspace(workspace.binding());
@@ -251,6 +246,7 @@ final class AgentSessionAdmissions {
         Admission admission = insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
                 target, actorId, pin, null, planMode, modelId);
+        ManagedMemoryStore.bind(jdbc, tenantId, actorId, admission.sessionId(), command.memoryStoreId());
         if (modelConfig != null) {
             modelConfigs.save(tenantId, admission.sessionId(), modelConfig);
         }
@@ -259,7 +255,7 @@ final class AgentSessionAdmissions {
         }
         if (workspaceChildAgentsEnabled && publicChildrenSupported && !resident && (!sshWorkspace || managedExtensionExecutionEnabled)
                 && (managedExtensionExecutionEnabled || "qwen-code".equals(agentId) && pin.digest() == null)
-                && WorkspaceToolProfiles.SHELL.equals(pin.toolProfile())) {
+                && WorkspaceToolProfiles.isPublicShell(pin.toolProfile())) {
             jdbc.update("UPDATE ma_session SET public_child_agents_version=1 WHERE tenant_id=? AND session_id=?",
                     tenantId, admission.sessionId());
         }
@@ -393,7 +389,7 @@ final class AgentSessionAdmissions {
             WorkspaceCsiRegistration registration, String sessionId) {
         requireCsiJournalIsolation();
         SessionRecord session = storeRows.requireSessionForUpdate(registration.tenantId(), sessionId);
-        if (!CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())
+        if (!CsiFilesRetirementProfile.isProfile(session.toolProfile())
                 || session.workspace() == null
                 || !"qwen-code".equals(session.agentId())
                 || !CsiFilesRetirementProfile.CONTEXT_CONFIG_REF.equals(
@@ -403,7 +399,7 @@ final class AgentSessionAdmissions {
         }
         RuntimeProvisionRequest request =
                 CsiFilesRetirementProfile.request(
-                        session.workspace(), registration.mountRoot(), session.sessionId());
+                        session.workspace(), registration.mountRoot(), session.sessionId(), session.toolProfile());
         String saved =
                 jdbc.queryForObject(
                         "SELECT runtime_request_key FROM ma_session"
@@ -415,10 +411,6 @@ final class AgentSessionAdmissions {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         return request;
-    }
-
-    static String childActorOf(String parentSessionId) {
-        return "child:" + parentSessionId;
     }
 
     Admission insertChildSessionCommand(String tenantId,
@@ -456,14 +448,14 @@ final class AgentSessionAdmissions {
             String childCwdRelative, com.fasterxml.jackson.databind.JsonNode snapshot) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
-                childActorOf(parentSessionId), idempotencyKey);
+                ChildSessionCreation.childActorOf(parentSessionId), idempotencyKey);
         if (existing.isEmpty()) {
             WorkspaceMigrationAdmission.requireSessionOpen(jdbc, tenantId, parentSessionId);
         }
         SessionRecord parent = storeRows.requireSessionForUpdate(tenantId,
                 parentSessionId);
         if (parent.workspace() == null || residentWorkspaces.find(parent.workspace()) != null || !"ACTIVE".equals(parent.status())
-                || CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
+                || CsiFilesRetirementProfile.isProfile(parent.toolProfile())) {
             throw new ManagedAgentException(409,
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
@@ -535,7 +527,7 @@ final class AgentSessionAdmissions {
         // is the same key the idempotent admission derives, so the
         // locking read never becomes a cross-tenant table scan under
         // REPEATABLE READ.
-        String fenceScopeKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId,
+        String fenceScopeKey = ManagedSessionStore.sessionScopeKey(tenantId,
                 parentSessionId);
         String fenceRecordKey = ManagedExtensionProjection.recordKey(
                 parentSessionId, "child_run", lineage.parentChildRunId());
@@ -558,7 +550,7 @@ final class AgentSessionAdmissions {
         // a profile that writes. Only the profile differs from the parent.
         String toolProfile = null;
         if (childCwdRelative != null
-                && ChildWorkspaceStore.SNAPSHOT.equals(requireReadyChildWorkspace(
+                && JdbcChildWorkspaceStore.SNAPSHOT.equals(requireReadyChildWorkspace(
                         tenantId, parentSessionId, lineage.parentChildRunId(),
                         parent.workspace(), childCwdRelative))) {
             toolProfile = WorkspaceToolProfiles.READ;
@@ -575,7 +567,7 @@ final class AgentSessionAdmissions {
                         + " cwd_relative, context_config_ref,"
                         + " context_revision, workspace_config_ref,"
                         + " workspace_policy_ref, tool_profile,"
-                        + " creator_actor_key, approval_mode,"
+                        + " creator_actor_key, owner_actor_key, owner_only, approval_mode,"
                         + " parent_session_id, root_session_id,"
                         + " parent_child_run_id, child_depth)"
                         + " SELECT tenant_id, ?, agent_id,"
@@ -587,11 +579,11 @@ final class AgentSessionAdmissions {
                         + ", context_config_ref, context_revision,"
                         + " workspace_config_ref, workspace_policy_ref, "
                         + (toolProfile == null ? "tool_profile" : "?")
-                        + ", creator_actor_key, approval_mode,"
+                        + ", creator_actor_key, COALESCE(owner_actor_key, creator_actor_key), owner_only, approval_mode,"
                         + " ?, ?, ?, ?"
                         + " FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
-                childInsertArgs(sessionId, title, now, childCwdRelative,
+                ChildSessionCreation.childInsertArgs(sessionId, title, now, childCwdRelative,
                         toolProfile, lineage, tenantId, parentSessionId));
         jdbc.update("INSERT INTO ma_event_stream"
                         + " (tenant_id, session_id, stream_kind, stream_id,"
@@ -612,9 +604,10 @@ final class AgentSessionAdmissions {
         if (turnId != null) {
             sessionCommands.insertTurn(tenantId, sessionId, turnId, promptId, input,
                     payloadDigest, now);
+            SideQueryConversation.mainInputAccepted(jdbc, tenantId, sessionId);
         }
         ManagedReceipts.insertCreation(jdbc, tenantId,
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, childActorOf(parentSessionId)),
+                ManagedWorkspaceRegistry.actorKey(tenantId, ChildSessionCreation.childActorOf(parentSessionId)),
                 idempotencyKey, requestDigest, sessionId, turnId, now);
         var inheritedSkills = snapshot == null ? creationSkills.snapshot(tenantId, parentSessionId)
                 : creationSkills.fromLaunchReference(tenantId, parentSessionId, snapshot.path("skillsRef"));
@@ -628,23 +621,6 @@ final class AgentSessionAdmissions {
                     AgentEventJournal.acceptedData(turnId, input), false, null, now);
         }
         return new Admission(sessionId, turnId, false, true);
-    }
-
-    static Object[] childInsertArgs(String sessionId, String title,
-            long now, String childCwdRelative, String toolProfile,
-            StoreModels.SessionLineage lineage, String tenantId,
-            String parentSessionId) {
-        List<Object> args = new ArrayList<>(List.of(sessionId, title, now, now));
-        if (childCwdRelative != null) {
-            args.add(childCwdRelative);
-        }
-        if (toolProfile != null) {
-            args.add(toolProfile);
-        }
-        args.addAll(List.of(lineage.parentSessionId(), lineage.rootSessionId(),
-                lineage.parentChildRunId(), lineage.depth(), tenantId,
-                parentSessionId));
-        return args.toArray();
     }
 
     /**
@@ -692,14 +668,14 @@ final class AgentSessionAdmissions {
             throw new ManagedAgentException(409, "child_workspace_not_ready",
                     "The child run's Workspace is not ready to bind a child Session.");
         }
-        return ChildWorkspaceStore.workspaceMode(requests.getFirst());
+        return JdbcChildWorkspaceStore.workspaceMode(requests.getFirst());
     }
 
     Admission replayChildSessionCommand(String tenantId,
             String parentSessionId, String idempotencyKey,
             String requestDigest) {
         SessionRecord parent = storeRows.requireSessionForUpdate(tenantId, parentSessionId);
-        if (CsiFilesRetirementProfile.PROFILE.equals(parent.toolProfile())) {
+        if (CsiFilesRetirementProfile.isProfile(parent.toolProfile())) {
             throw new ManagedAgentException(
                     409,
                     "child_parent_unavailable",
@@ -707,7 +683,7 @@ final class AgentSessionAdmissions {
         }
         storeRows.requireLegacyMutation(tenantId, parentSessionId);
         List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
-                childActorOf(parentSessionId), idempotencyKey);
+                ChildSessionCreation.childActorOf(parentSessionId), idempotencyKey);
         if (existing.isEmpty()) {
             throw new ManagedAgentException(409,
                     "idempotency_conflict", "The creation command is missing.");
@@ -750,7 +726,7 @@ final class AgentSessionAdmissions {
     List<WorkspaceCommand> findWorkspaceCommand(String tenantId,
             String actorId, String idempotencyKey) {
         ManagedReceipts.Receipt row = ManagedReceipts.creation(jdbc, tenantId,
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId), idempotencyKey);
+                ManagedWorkspaceRegistry.actorKey(tenantId, actorId), idempotencyKey);
         return row == null
                 ? List.of()
                 : List.of(
@@ -838,13 +814,13 @@ final class AgentSessionAdmissions {
                 registration == null
                         ? null
                         : CsiFilesRetirementProfile.request(
-                                        workspace, registration.mountRoot(), sessionId)
+                                        workspace, registration.mountRoot(), sessionId, CsiFilesRetirementProfile.ACTIVITY_PROFILE)
                                 .requestKey();
         String turnId = input.isEmpty() ? null : AgentStoreRows.publicId("turn");
         String promptId = input.isEmpty() ? null
                 : UUID.randomUUID().toString();
         byte[] actorKey = actorId == null ? null
-                : com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+                : ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         jdbc.update("INSERT INTO ma_session (tenant_id,"
                         + " session_id, agent_id, agent_revision,"
                         + " agent_definition_digest, title,"
@@ -868,7 +844,7 @@ final class AgentSessionAdmissions {
                 resolved == null ? null : resolved.configRef(),
                 resolved == null ? null : resolved.policyRef(),
                 registration != null
-                        ? CsiFilesRetirementProfile.PROFILE
+                        ? CsiFilesRetirementProfile.ACTIVITY_PROFILE
                         : workspace == null ? null : pin.toolProfile(),
                 actorKey, actorKey,
                 runtimeRequestKey, workspace != null || pin.digest() != null ? pin.approvalMode() : "yolo",
@@ -881,6 +857,7 @@ final class AgentSessionAdmissions {
         if (turnId != null) {
             sessionCommands.insertTurn(tenantId, sessionId, turnId, promptId, input,
                     payloadDigest, now);
+            SideQueryConversation.mainInputAccepted(jdbc, tenantId, sessionId);
         }
         if (resolved == null) {
             sessionCommands.insertCommand(tenantId, operation, idempotencyKey, requestDigest,

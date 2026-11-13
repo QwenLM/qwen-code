@@ -11,9 +11,10 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -63,9 +64,9 @@ import static org.mockito.Mockito.when;
 class ManagedApprovalChangeTest {
     @Autowired private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
-    @Autowired private ManagedWorkspaceRegistry registry;
+    @Autowired private JdbcManagedWorkspaceRegistry registry;
     @Autowired private PlatformTransactionManager manager;
-    @Autowired private ManagedAgentDefinitionStore definitions;
+    @Autowired private JdbcManagedAgentDefinitionStore definitions;
     private String tenant;
     private String session;
     private ManagedAgentStore store;
@@ -123,7 +124,7 @@ class ManagedApprovalChangeTest {
         jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,"
                 + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
                 + " VALUES (?,?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), "a".repeat(64), tenant, session,
+                ManagedSessionStore.sessionScopeKey(tenant, session), "a".repeat(64), tenant, session,
                 "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
         assertThat(service.queryWebShellSessionApproval(tenant, "actor", session).liveSupported()).isTrue();
         assertThat(change("actor", "live-change", "yolo", 0).approvalRevision()).isEqualTo(1);
@@ -200,7 +201,8 @@ class ManagedApprovalChangeTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1"})
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1",
+            "hosted-workspace-shell/3"})
     void persistsPlanIndependentlyAndFreezesItWithTheTurnPolicy(String profile) throws Exception {
         when(harness.supportsPlanMode()).thenReturn(true);
         session = customSession(profile, "default");
@@ -723,7 +725,7 @@ class ManagedApprovalChangeTest {
             jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,"
                     + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
                     + " VALUES (?,?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)",
-                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), "a".repeat(64), tenant, session,
+                    ManagedSessionStore.sessionScopeKey(tenant, session), "a".repeat(64), tenant, session,
                     "{\"expiresAt\":" + (System.currentTimeMillis() + 100_000) + "}");
         }
         if (shape.equals("recovery")) {
@@ -764,7 +766,8 @@ class ManagedApprovalChangeTest {
     private ManagedAgentStore store() {
         var properties = new ManagedAgentProperties();
         properties.setDefinitionToolProfiles(List.of("hosted-workspace-files/1", "hosted-workspace-shell/1",
-                "hosted-workspace-files/2", "hosted-workspace-files/3", "hosted-workspace-read/1"));
+                "hosted-workspace-shell/3", "hosted-workspace-files/2", "hosted-workspace-files/3",
+                "hosted-workspace-read/1"));
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setWorkspaceShellEnabled(true);
         properties.getHarness().setApprovalMode("default");
@@ -857,7 +860,7 @@ class ManagedApprovalChangeTest {
         assertThat(service.queryWebShellSessionApproval(tenant, "actor", session).approvalMode()).isEqualTo("auto");
     }
 
-    private ManagedAgentDefinitionStore.DefinitionRevision define(String profile, String mode) throws Exception {
+    private JdbcManagedAgentDefinitionStore.DefinitionRevision define(String profile, String mode) throws Exception {
         String agent = "agent_" + UUID.randomUUID().toString().replace("-", "");
         var content = Map.of("model", Map.of(), "instructions", "Review the project",
                 "tools", List.of(Map.of("type", "hosted_profile", "profile", profile)),

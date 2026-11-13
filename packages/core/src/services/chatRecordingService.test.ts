@@ -1501,6 +1501,58 @@ describe('ChatRecordingService', () => {
   });
 
   describe('rewindRecording', () => {
+    it.each(['live', 'full restore', 'selective restore'])(
+      'rewinds hooks recorded before the prompt through %s',
+      async (mode) => {
+        user('keep', undefined, undefined, 'p1');
+        reply('keep reply');
+        const before = (await flushedAll()).at(-1)!;
+        const hook = {
+          'event.name': 'hook_lifecycle' as const,
+          v: 1 as const,
+          kind: 'hook' as const,
+          executionId: 'pre-prompt-hook',
+          runtimeId: 'runtime',
+          sessionId: 'test-session-id',
+          promptId: 'p2',
+          agentId: null,
+          eventName: 'UserPromptExpansion',
+          hookType: 'command' as const,
+          source: 'project' as const,
+          name: 'safe',
+          startedAt: 100,
+          phase: 'started' as const,
+        };
+        svc.recordUiTelemetryEvent(hook);
+        user('remove', undefined, undefined, 'p2');
+        const records = await flushedAll();
+        if (mode === 'full restore') svc.rebuildTurnBoundaries(records);
+        if (mode === 'selective restore') {
+          svc = new ChatRecordingService(mockConfig, undefined, false, {
+            lastCompletedUuid: records.at(-1)!.uuid,
+            ...collectSessionTurnState(records, 'test-session-id'),
+          });
+        }
+        svc.rewindRecording(1, { truncatedCount: 1 });
+        await svc.flush();
+        expect(
+          writes().findLast((r) => r.subtype === 'rewind')?.parentUuid,
+        ).toBe(before.uuid);
+        if (mode !== 'selective restore') {
+          const count = writes().length;
+          svc.recordUiTelemetryEvent({
+            ...hook,
+            phase: 'ended',
+            endedAt: 120,
+            durationMs: 20,
+            outcome: 'success',
+          });
+          await svc.flush();
+          expect(writes()).toHaveLength(count);
+        }
+      },
+    );
+
     it('keeps recorded boundaries aligned after a rejected user message', async () => {
       const displayedTurn = (text: string) => {
         user(text, undefined, { displayText: text, hookContext: '' });
