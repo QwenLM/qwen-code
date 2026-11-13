@@ -31,15 +31,16 @@ export const END_SYNCHRONIZED_UPDATE = '\u001B[?2026l';
 const WINDOWS_BUILD_WITH_INBOX_TERMINAL_1_23 = 26100;
 
 /**
- * `TERM_PROGRAM` is set by whichever Windows cosole host launched the process,
- * and applications started from a Windows Terminal tab inherit that tab's
- * `WT_SESSION`. Only the environment's own host label names the terminal that
- * actually paints the frames, so the build gate applies to that label alone.
+ * Windows Terminal sets `WT_SESSION` on every session it launches and,
+ * unlike the allow-listed terminals below, sets no `TERM_PROGRAM` at all. A
+ * process started from a Windows Terminal tab inherits that tab's
+ * `WT_SESSION`, so a `TERM_PROGRAM` that names a different terminal wins —
+ * that is the host painting the frames. This is the same signal the rest of
+ * the tree uses (`osc8.ts`, `useTerminalProgress.ts`).
  */
-const WINDOWS_TERMINAL_TERM_PROGRAMS = new Set([
-  'Windows Terminal',
-  'WindowsTerminal',
-]);
+function isWindowsTerminal(env: NodeJS.ProcessEnv): boolean {
+  return Boolean(env['WT_SESSION']) && !env['TERM_PROGRAM'];
+}
 
 export interface SynchronizedOutputStatsSnapshot {
   synchronizedOutputFrameCount: number;
@@ -112,11 +113,11 @@ export function terminalSupportsSynchronizedOutput(
 
   const termProgram = env['TERM_PROGRAM'];
 
-  // Windows Terminal is the one host whose support cannot be read from the
-  // environment alone: WT_SESSION is present on every version it ever shipped.
-  // The build number is a lower bound on what that host always has, not a
-  // statement about the terminal version — see the constant's comment.
-  if (WINDOWS_TERMINAL_TERM_PROGRAMS.has(termProgram ?? '')) {
+  // Windows Terminal is identified by `WT_SESSION`, the variable it sets on
+  // every session it launches; it does not set `TERM_PROGRAM` at all. The
+  // build is a lower bound on the inbox terminal, never a statement about the
+  // terminal's own version — see the constant's comment.
+  if (isWindowsTerminal(env)) {
     const build = osRelease
       ? windowsBuildNumber(osRelease, platform)
       : undefined;
@@ -148,11 +149,7 @@ export function installSynchronizedOutput(
 ): () => void {
   // The OS build is only consulted for Windows Terminal; other terminals skip
   // the syscall.
-  const osRelease =
-    WINDOWS_TERMINAL_TERM_PROGRAMS.has(env['TERM_PROGRAM'] ?? '') &&
-    !env['TMUX']
-      ? os.release()
-      : undefined;
+  const osRelease = isWindowsTerminal(env) ? os.release() : undefined;
   if (
     installed ||
     !stdout.isTTY ||
