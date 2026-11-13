@@ -8229,6 +8229,7 @@ export function createSessionControlPlane(
     historyPageSize: number,
     liveReplayMode: 'full' | 'summary',
   ): Promise<ReturnType<typeof replayFieldsFor>> {
+    // Active turns need the live journal; persisted pages cannot replace it.
     // A pending permission/question lives only in the in-memory journal — it
     // is never persisted to the chat transcript — and the turns that park on
     // one without an RPC prompt (Goal and background-notification turns)
@@ -8237,9 +8238,6 @@ export function createSessionControlPlane(
     // would strand the interaction: the session summary still advertises it
     // (input-needed badge) while the re-opening client receives nothing to
     // answer.
-    if (entry.pendingInteractions.size > 0) {
-      return replayFieldsFor(entry, 'load', liveReplayMode);
-    }
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const lastEventId = entry.events.lastEventId;
@@ -8250,6 +8248,15 @@ export function createSessionControlPlane(
         let cursor: string | undefined;
         let page: BridgeSessionTranscriptPage;
         do {
+          // Check before every read, including empty-page traversal and a
+          // retry after activity started while the previous read was pending.
+          if (
+            entry.promptActive ||
+            entry.backgroundTurn ||
+            entry.pendingInteractions.size > 0
+          ) {
+            return replayFieldsFor(entry, 'load', liveReplayMode);
+          }
           page = await requestSessionTranscriptPage({
             sessionId: entry.sessionId,
             ...(cursor ? { cursor } : { direction: 'backward' }),
