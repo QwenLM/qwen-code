@@ -5,12 +5,13 @@
  */
 
 import type {
+  ManagedChannelAdapter,
   ManagedChannelControlPlane,
   ManagedChannelPolicy,
   ManagedClaimedDelivery,
   ManagedInboundEvent,
   ManagedReceipt,
-} from '@qwen-code/channel-email';
+} from '@qwen-code/channel-base';
 
 // H5b/H5c of #12827: the HTTP client of the control plane's trusted channel
 // adapter surface (/internal/managed-channels/v1), reachable on the
@@ -51,7 +52,7 @@ export class HttpManagedChannelControlPlane
   }
 
   async register(request: {
-    platform: 'email';
+    platform: ManagedChannelAdapter;
     accountId: string;
     accountGeneration: number;
     policy: ManagedChannelPolicy;
