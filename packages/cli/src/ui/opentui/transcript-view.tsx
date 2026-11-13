@@ -62,7 +62,10 @@ import {
   itemOffsets,
   type TranscriptWindow,
 } from './transcript-window.js';
-import { streamingMarkdownForRender } from './markdown-heal.js';
+import {
+  maskThinkingEmphasis,
+  streamingMarkdownForRender,
+} from './markdown-heal.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { ModAssistantMessageInput } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { useModRow } from '../hooks/use-mod-row.js';
@@ -909,7 +912,7 @@ function ThinkingRow({
   const meta = thinkingMeta(item.done, expanded, durationMs, mouseTracking);
   const body = item.text.trimEnd();
   const content = sanitizeTerminalText(
-    streamingMarkdownForRender(body, !item.done),
+    streamingMarkdownForRender(maskThinkingEmphasis(body), !item.done),
   );
   return (
     <box

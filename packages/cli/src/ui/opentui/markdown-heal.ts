@@ -15,6 +15,261 @@
  * rendered as-is (the message on disk is the truth).
  */
 import remend from 'remend';
+import remarkGfm from 'remark-gfm';
+import remarkParse from 'remark-parse';
+import { unified } from 'unified';
+
+interface MarkdownNode {
+  type: string;
+  position?: {
+    start: { line: number; offset: number };
+    end: { line: number; offset: number };
+  };
+  children?: MarkdownNode[];
+}
+
+interface MarkdownAnalysis {
+  protectedRows: Set<number>;
+  inlineCodeRanges: Array<[number, number]>;
+  emphasisRanges: Array<[number, number]>;
+}
+
+const INLINE_CONTAINERS = new Set(['paragraph', 'heading', 'tableCell']);
+
+/**
+ * Block-level lines the mask must not touch, plus the exact inline-code
+ * ranges the parser recognized. The real parser decides what is
+ * code/HTML/table, so list-indented fences, one-column tables and HTML
+ * comments no longer depend on hand-rolled approximations. A parse failure
+ * leaves both empty and the mask falls back to its line scanner.
+ */
+function analyzeMarkdown(text: string): MarkdownAnalysis {
+  const protectedRows = new Set<number>();
+  const inlineCodeRanges: Array<[number, number]> = [];
+  const emphasisRanges: Array<[number, number]> = [];
+  try {
+    const tree = unified()
+      .use(remarkParse)
+      .use(remarkGfm)
+      .parse(text) as MarkdownNode;
+    const visit = (node: MarkdownNode, inlineContainer = false): void => {
+      if (node.position && node.type === 'inlineCode') {
+        inlineCodeRanges.push([
+          node.position.start.offset,
+          node.position.end.offset,
+        ]);
+      }
+      if (
+        node.position &&
+        (node.type === 'strong' || node.type === 'emphasis')
+      ) {
+        emphasisRanges.push([
+          node.position.start.offset,
+          node.position.end.offset,
+        ]);
+      }
+      if (
+        node.position &&
+        (node.type === 'code' ||
+          node.type === 'table' ||
+          (node.type === 'html' && !inlineContainer))
+      ) {
+        for (
+          let line = node.position.start.line;
+          line <= node.position.end.line;
+          line += 1
+        ) {
+          protectedRows.add(line - 1);
+        }
+      }
+      const childInInlineContainer =
+        inlineContainer || INLINE_CONTAINERS.has(node.type);
+      for (const child of node.children ?? []) {
+        visit(child, childInInlineContainer);
+      }
+    };
+    visit(tree);
+  } catch {
+    // Streaming markdown may be briefly unparseable; leave it unmasked.
+  }
+  return { protectedRows, inlineCodeRanges, emphasisRanges };
+}
+
+/**
+ * A backtick the parser did not pair into an inline-code span is literal text
+ * (a lone key name, or a fence example quoted in prose). OpenTUI's streaming
+ * preview and settled tree-sitter pass disagree on how to pair such runs, so
+ * both states replace only the unpaired ones with a look-alike grave accent.
+ */
+const LITERAL_BACKTICK = '\u02CB';
+const BACKSLASH_ESCAPABLE = '\\*_{}[]()#+-.!|<>"\'';
+
+function maskProsePunctuation(
+  text: string,
+  protectedRows: Set<number>,
+): string {
+  const lines = text.split('\n');
+  return lines
+    .map((line, index) => {
+      if (protectedRows.has(index)) return line;
+      let out = '';
+      for (let column = 0; column < line.length; column += 1) {
+        const char = line[column];
+        if (
+          char === '\\' &&
+          !isEscaped(line, column) &&
+          BACKSLASH_ESCAPABLE.includes(line[column + 1] ?? '')
+        ) {
+          out += line[column + 1];
+          column += 1;
+          continue;
+        }
+        if (
+          char === '*' &&
+          !isEscaped(line, column) &&
+          line[column - 1] !== '*' &&
+          line[column + 1] !== '*' &&
+          /[A-Za-z0-9]/.test(line[column - 1] ?? '') &&
+          /[A-Za-z0-9]/.test(line[column + 1] ?? '')
+        ) {
+          out += ASTERISK_OPERATOR;
+          continue;
+        }
+        out += char;
+      }
+      return out;
+    })
+    .join('\n');
+}
+
+/**
+ * Thinking text often quotes markdown syntax literally (`**bold, *italic`).
+ * The preview parser treats those unmatched runs as real emphasis, while the
+ * settled pass does not, so thinking masks every asterisk the parser did not
+ * recognize as emphasis or inline code. Assistant output keeps the healer.
+ */
+export function maskThinkingEmphasis(text: string): string {
+  if (!text.includes('*')) return text;
+  const analysis = analyzeMarkdown(text);
+  const ranges = [
+    ...analysis.inlineCodeRanges,
+    ...analysis.emphasisRanges,
+  ].sort((a, b) => a[0] - b[0]);
+  let rangeIndex = 0;
+  let offset = 0;
+  const lines = text.split('\n');
+  let out = '';
+  for (const [index, line] of lines.entries()) {
+    if (analysis.protectedRows.has(index)) {
+      out += line;
+    } else {
+      for (let column = 0; column < line.length; column += 1) {
+        while (
+          rangeIndex < ranges.length &&
+          offset + column >= ranges[rangeIndex][1]
+        ) {
+          rangeIndex += 1;
+        }
+        const inEmphasis =
+          rangeIndex < ranges.length &&
+          offset + column >= ranges[rangeIndex][0] &&
+          offset + column < ranges[rangeIndex][1];
+        out +=
+          line[column] === '*' && !inEmphasis
+            ? ASTERISK_OPERATOR
+            : line[column];
+      }
+    }
+    if (index < lines.length - 1) out += '\n';
+    offset += line.length + 1;
+  }
+  return out;
+}
+
+function maskLiteralBackticks(
+  text: string,
+  analysis: MarkdownAnalysis,
+): string {
+  if (!text.includes('`')) return text;
+  const { protectedRows, inlineCodeRanges } = analysis;
+  const ranges = [...inlineCodeRanges].sort((a, b) => a[0] - b[0]);
+  const lines = text.split('\n');
+  let rangeIndex = 0;
+  let offset = 0;
+  let out = '';
+  for (const [index, line] of lines.entries()) {
+    while (rangeIndex < ranges.length && offset >= ranges[rangeIndex][1]) {
+      rangeIndex += 1;
+    }
+    if (protectedRows.has(index)) {
+      out += line;
+      if (index < lines.length - 1) out += '\n';
+      offset += line.length + 1;
+      continue;
+    }
+
+    let maskAll = false;
+    let run = 0;
+    const literal = new Set<number>();
+    const escaped = new Set<number>();
+    for (let column = 0; column <= line.length; column += 1) {
+      if (
+        line[column] === '\\' &&
+        line[column + 1] === '`' &&
+        !isEscaped(line, column)
+      ) {
+        escaped.add(column + 1);
+        run = 0;
+        continue;
+      }
+      while (
+        rangeIndex < ranges.length &&
+        offset + column >= ranges[rangeIndex][1]
+      ) {
+        rangeIndex += 1;
+      }
+      const inInlineCode =
+        rangeIndex < ranges.length &&
+        offset + column >= ranges[rangeIndex][0] &&
+        offset + column < ranges[rangeIndex][1];
+      if (line[column] === '`' && !escaped.has(column)) {
+        run += 1;
+        if (run > 1) maskAll = true;
+        if (!inInlineCode) {
+          literal.add(column);
+          maskAll = true;
+        }
+      } else {
+        run = 0;
+      }
+    }
+
+    for (let column = 0; column < line.length; column += 1) {
+      if (escaped.has(column + 1) && line[column] === '\\') continue;
+      if (
+        maskAll &&
+        line[column] === '\\' &&
+        line[column + 1] === '~' &&
+        !isEscaped(line, column)
+      ) {
+        continue;
+      }
+      if (escaped.has(column)) {
+        out += LITERAL_BACKTICK;
+      } else if (maskAll && line[column] === '~') {
+        out += TILDE_OPERATOR;
+      } else {
+        out +=
+          line[column] === '`' && (maskAll || literal.has(column))
+            ? LITERAL_BACKTICK
+            : line[column];
+      }
+    }
+    if (index < lines.length - 1) out += '\n';
+    offset += line.length + 1;
+  }
+  return out;
+}
 
 /**
  * TODO: remove the bare-URL/email half of this mask when @opentui/core is
@@ -42,6 +297,8 @@ interface Fence {
   char: string;
   length: number;
   quoteDepth: number;
+  /** List content column stripped before matching this fence. */
+  indent: number;
 }
 
 interface ContainerLine {
@@ -64,12 +321,24 @@ function containerOf(line: string): ContainerLine {
 function fenceParts(
   line: string,
   allowListMarker: boolean,
-): { marker: string; length: number; rest: string; quoteDepth: number } | null {
+  indent = 0,
+): {
+  marker: string;
+  length: number;
+  rest: string;
+  quoteDepth: number;
+  indent: number;
+} | null {
   const { quoteDepth, rest } = containerOf(line);
   let body = rest;
   if (allowListMarker) {
     const list = LIST_MARKER_PREFIX_REGEX.exec(body);
     if (list) body = body.slice(list[0].length);
+  }
+  if (indent > 0) {
+    let stripped = 0;
+    while (stripped < indent && body[stripped] === ' ') stripped += 1;
+    body = body.slice(stripped);
   }
   const match = FENCE_MARKER_REGEX.exec(body);
   if (!match) return null;
@@ -81,18 +350,24 @@ function fenceParts(
     length: match[2].length,
     rest: match[3],
     quoteDepth,
+    indent,
   };
 }
 
-function fenceAtLineStart(line: string): Fence | null {
-  const parts = fenceParts(line, true);
+function fenceAtLineStart(line: string, indent = 0): Fence | null {
+  const parts = fenceParts(line, true, indent);
   return parts
-    ? { char: parts.marker, length: parts.length, quoteDepth: parts.quoteDepth }
+    ? {
+        char: parts.marker,
+        length: parts.length,
+        quoteDepth: parts.quoteDepth,
+        indent,
+      }
     : null;
 }
 
 function isFenceClose(line: string, fence: Fence): boolean {
-  const parts = fenceParts(line, false);
+  const parts = fenceParts(line, false, fence.indent);
   return (
     parts !== null &&
     parts.marker === fence.char &&
@@ -152,12 +427,14 @@ function indentationWidth(rest: string): number {
 function stripHeadingMarkers(line: string): string {
   const { rest } = containerOf(line);
   const prefix = line.slice(0, line.length - rest.length);
-  const list = LIST_MARKER_PREFIX_REGEX.exec(rest);
+  const list = /^([ \t]*)([-+*]|\d{1,9}[.)])([ \t]+)/.exec(rest);
   const marker = list ? list[0] : '';
   const body = list ? rest.slice(marker.length) : rest;
-  const match = /^( {0,3})(#{1,6})[ \t]+(.*?)(?:[ \t]+#+[ \t]*)?$/.exec(body);
+  const match = /^( {0,3})(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/.exec(
+    body,
+  );
   if (!match) return line;
-  return `${prefix}${marker}${match[1]}${match[3]}`;
+  return `${prefix}${marker}${match[1]}${match[3] ?? ''}`;
 }
 
 /** Whether the backtick at `index` is escaped by an odd backslash run. */
@@ -311,6 +588,7 @@ function maskAutolinksInProse(
   let destinationIndex = 0;
   let out = '';
   let i = 0;
+  let carriedLabel: number | null = null;
   let openCodeSpan = carriedCodeSpan;
 
   if (openCodeSpan !== null) {
@@ -356,6 +634,28 @@ function maskAutolinksInProse(
       continue;
     }
 
+    // HTML comments/tags own their contents: a URL inside
+    // `<img src="https://…">` or `<!-- … -->` is literal markup, not prose.
+    if (line.startsWith('<!--', i)) {
+      const close = line.indexOf('-->', i + 4);
+      if (close !== -1) {
+        out += line.slice(i, close + 3);
+        i = close + 3;
+        continue;
+      }
+    }
+    if (
+      char === '<' &&
+      /^<\/?[A-Za-z][A-Za-z0-9-]*(?=[\s/>])/.test(line.slice(i))
+    ) {
+      const close = line.indexOf('>', i + 1);
+      if (close !== -1) {
+        out += line.slice(i, close + 1);
+        i = close + 1;
+        continue;
+      }
+    }
+
     // `<std::string>` is C++ here, but the preview lexer reads it as an
     // autolink and expands it to `std::string (std::string)`, shifting the
     // rest of the line until the tree-sitter pass replaces it. Only a
@@ -397,7 +697,9 @@ function maskAutolinksInProse(
             // The settled renderer conceals both bracket pairs of a
             // reference link (and C-style `arr[i][j]`); keep only the
             // visible label while streaming.
-            out += maskAutolinksInProse(label).text;
+            const inner = maskAutolinksInProse(label);
+            out += inner.text;
+            if (inner.carry !== null) carriedLabel = inner.carry;
             i = secondClose + 1;
             continue;
           }
@@ -419,7 +721,9 @@ function maskAutolinksInProse(
           !label.includes('[') &&
           !label.includes(']')
         ) {
-          out += maskAutolinksInProse(label).text;
+          const inner = maskAutolinksInProse(label);
+          out += inner.text;
+          if (inner.carry !== null) carriedLabel = inner.carry;
           i = close + 1;
           continue;
         }
@@ -437,7 +741,12 @@ function maskAutolinksInProse(
       const url = line.slice(i, end);
       const inAngle = line[i - 1] === '<' || line[end] === '>';
       const nearBacktick =
-        line[i - 1] === '`' || line[end] === '`' || url.includes('`');
+        line[i - 1] === '`' ||
+        line[i - 1] === LITERAL_BACKTICK ||
+        line[end] === '`' ||
+        line[end] === LITERAL_BACKTICK ||
+        url.includes('`') ||
+        url.includes(LITERAL_BACKTICK);
       const inLinkLabel =
         line[i - 1] === '[' && line[end] === ']' && line[end + 1] === '(';
       if (inLinkLabel) {
@@ -508,7 +817,7 @@ function maskAutolinksInProse(
     out += char;
     i += 1;
   }
-  return { text: out, carry: null };
+  return { text: out, carry: carriedLabel };
 }
 
 interface TildeResult {
@@ -525,6 +834,7 @@ interface TildeResult {
  * fenced/indented code, link destinations and bare URLs are copied unchanged.
  */
 const TILDE_OPERATOR = '\u223C';
+const ASTERISK_OPERATOR = '\u2217';
 
 function maskTildesOnLine(
   line: string,
@@ -587,15 +897,28 @@ function maskTildesOnLine(
       continue;
     }
 
+    if (char === '\\' && line[i + 1] === '~' && !isEscaped(line, i)) {
+      out += TILDE_OPERATOR;
+      i += 2;
+      continue;
+    }
+
     if (
       char === '~' &&
       !isEscaped(line, i) &&
       line[i - 1] !== '~' &&
       line[i + 1] !== '~'
     ) {
-      out += TILDE_OPERATOR;
-      i += 1;
-      continue;
+      const next = line[i + 1] ?? '';
+      const previous = line[i - 1] ?? '';
+      const homeOrUncPath = next === '/' || next === '\\';
+      const semver = /\d/.test(next) && line[i + 2] === '.';
+      const urlPath = previous === '/' || previous === '\\';
+      if (!homeOrUncPath && !semver && !urlPath) {
+        out += TILDE_OPERATOR;
+        i += 1;
+        continue;
+      }
     }
 
     out += char;
@@ -604,7 +927,8 @@ function maskTildesOnLine(
   return { text: out, carry: null };
 }
 
-function maskLoneTildes(text: string): string {
+function maskLoneTildes(text: string, protectedRows: Set<number>): string {
+  if (!text.includes('~')) return text;
   const lines = text.split('\n');
   const escaped: string[] = [];
   let fence: Fence | null = null;
@@ -613,7 +937,15 @@ function maskLoneTildes(text: string): string {
   let carriedCodeSpan: number | null = null;
   let listColumn: number | null = null;
 
-  for (const line of lines) {
+  for (const [index, line] of lines.entries()) {
+    if (protectedRows.has(index)) {
+      fence = null;
+      indentedCode = false;
+      carriedCodeSpan = null;
+      previousBlank = true;
+      escaped.push(line);
+      continue;
+    }
     if (fence) {
       const kind = fenceCloseKind(line, fence);
       if (kind !== null) fence = null;
@@ -625,9 +957,10 @@ function maskLoneTildes(text: string): string {
 
     const rest = containerOf(line).rest;
     const blank = rest.trim() === '';
+    if (blank) carriedCodeSpan = null;
     const indent = indentationWidth(rest);
 
-    if (!blank) {
+    if (!blank && !indentedCode) {
       const list = /^([ \t]*)([-+*]|\d{1,9}[.)])([ \t]+)/.exec(rest);
       if (list) {
         const markerIndent = indentationWidth(list[1]);
@@ -671,7 +1004,7 @@ function maskLoneTildes(text: string): string {
   return escaped.join('\n');
 }
 
-function maskStreamingText(text: string): string {
+function maskStreamingText(text: string, protectedRows: Set<number>): string {
   const lines = text.split('\n');
   const masked: string[] = [];
   let fence: Fence | null = null;
@@ -685,6 +1018,16 @@ function maskStreamingText(text: string): string {
 
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
+
+    if (protectedRows.has(index)) {
+      fence = null;
+      indentedCode = false;
+      table = false;
+      carriedCodeSpan = null;
+      previousBlank = true;
+      masked.push(line);
+      continue;
+    }
 
     if (fence) {
       const kind = fenceCloseKind(line, fence);
@@ -705,6 +1048,7 @@ function maskStreamingText(text: string): string {
 
     const rest = containerOf(line).rest;
     const blank = rest.trim() === '';
+    if (blank) carriedCodeSpan = null;
     const indent = indentationWidth(rest);
 
     if (table) {
@@ -720,7 +1064,7 @@ function maskStreamingText(text: string): string {
     // Track a list's content column so a continuation paragraph indented by
     // four columns is prose (and masked), while code indented four columns
     // past the list content is indented code (and skipped).
-    if (!blank) {
+    if (!blank && !indentedCode) {
       const list = /^([ \t]*)([-+*]|\d{1,9}[.)])([ \t]+)/.exec(rest);
       if (list) {
         const markerIndent = indentationWidth(list[1]);
@@ -786,7 +1130,7 @@ function maskStreamingText(text: string): string {
 function isTableDelimiter(line: string): boolean {
   const trimmed = line.trim();
   if (!trimmed.includes('|') || !trimmed.includes('-')) return false;
-  return /^\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)+\|?$/.test(trimmed);
+  return /^\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?$/.test(trimmed);
 }
 
 /**
@@ -806,12 +1150,22 @@ function normalizeLineEndings(text: string): string {
  * its healed close.
  */
 function stripFalseEmphasisClose(source: string, healed: string): string {
+  if (healed.endsWith('__') && !source.endsWith('__')) {
+    const first = source.indexOf('__');
+    if (
+      first !== -1 &&
+      (first === 0 || /\s/.test(source[first - 1])) &&
+      source.indexOf('__', first + 2) === -1
+    ) {
+      return healed.slice(0, -2);
+    }
+  }
   for (const marker of ['*', '_']) {
     if (!healed.endsWith(marker) || healed.endsWith(marker + marker)) continue;
     if (source.endsWith(marker)) continue;
     const last = source.lastIndexOf(marker);
     if (last === -1) continue;
-    if (!/[A-Za-z0-9_>)\]]/.test(source[last - 1] ?? '')) continue;
+    if (!/[A-Za-z0-9_>)\]:`]/.test(source[last - 1] ?? '')) continue;
     return healed.slice(0, -1);
   }
   return healed;
@@ -820,15 +1174,29 @@ function stripFalseEmphasisClose(source: string, healed: string): string {
 export function healStreamingMarkdown(text: string): string {
   // Keep C++ templates: remend's htmlTags handler strips `<int, ...`
   // while the angle bracket is still streaming.
-  const prepared = maskLoneTildes(normalizeLineEndings(text));
+  const normalized = normalizeLineEndings(text);
+  const analysis = analyzeMarkdown(normalized);
+  const prepared = maskLiteralBackticks(
+    maskProsePunctuation(
+      maskLoneTildes(normalized, analysis.protectedRows),
+      analysis.protectedRows,
+    ),
+    analysis,
+  );
   const healed = stripFalseEmphasisClose(
     prepared,
     remend(prepared, {
       linkMode: 'text-only',
       htmlTags: false,
+      // OpenTUI's preview leaves unmatched backticks and strikethrough
+      // markers literal instead of styling the tail; completing them would
+      // hide the markers and style text the settled pass renders literally.
+      inlineCode: false,
+      strikethrough: false,
+      singleTilde: false,
     }),
   );
-  return maskStreamingText(healed);
+  return maskStreamingText(healed, analysis.protectedRows);
 }
 
 /**
@@ -846,7 +1214,23 @@ export function streamingMarkdownForRender(
   streaming: boolean,
 ): string {
   const normalized = normalizeLineEndings(text);
-  return streaming
-    ? healStreamingMarkdown(normalized)
-    : maskLoneTildes(normalized);
+  if (!streaming) {
+    if (
+      !normalized.includes('`') &&
+      !normalized.includes('~') &&
+      !normalized.includes('\\') &&
+      !normalized.includes('*')
+    ) {
+      return normalized;
+    }
+    const analysis = analyzeMarkdown(normalized);
+    return maskLiteralBackticks(
+      maskProsePunctuation(
+        maskLoneTildes(normalized, analysis.protectedRows),
+        analysis.protectedRows,
+      ),
+      analysis,
+    );
+  }
+  return healStreamingMarkdown(normalized);
 }

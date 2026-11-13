@@ -15,6 +15,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   healStreamingMarkdown,
+  maskThinkingEmphasis,
   streamingMarkdownForRender,
 } from './markdown-heal.js';
 
@@ -35,6 +36,40 @@ describe('healStreamingMarkdown', () => {
   it('does not append a close for a C++ underscore identifier', () => {
     const text = 'scan_recipes 和 devtool_* 並沒有。我要修正這句說明。';
     expect(healStreamingMarkdown(text)).toBe(text);
+  });
+
+  it('does not carry an unpaired backtick across a paragraph', () => {
+    const text = 'Press the ` key once.\n\nFees are ~5 and ~10 USD.\n';
+    expect(streamingMarkdownForRender(text, false)).toContain('∼5');
+    expect(streamingMarkdownForRender(text, false)).toContain('∼10');
+  });
+
+  it('leaves home paths and semver tildes untouched', () => {
+    expect(streamingMarkdownForRender('cd ~/.qwen', false)).toBe('cd ~/.qwen');
+    expect(streamingMarkdownForRender('pin to ~1.2.3 please', false)).toBe(
+      'pin to ~1.2.3 please',
+    );
+    expect(streamingMarkdownForRender('see www.example.com/~user', false)).toBe(
+      'see www.example.com/~user',
+    );
+  });
+
+  it('does not treat __cplusplus as bold', () => {
+    const text = 'print intro "C++ standard: " << __cplusplus.';
+    expect(healStreamingMarkdown(text)).toBe(text);
+  });
+
+  it('masks literal emphasis markers in thinking text', () => {
+    expect(
+      maskThinkingEmphasis(
+        '1. Unclosed emphasis markers (**bold, *italic, ~~strike)',
+      ),
+    ).toBe(
+      '1. Unclosed emphasis markers (\u2217\u2217bold, \u2217italic, ~~strike)',
+    );
+    expect(maskThinkingEmphasis('1. **聚合** and *italic*')).toBe(
+      '1. **聚合** and *italic*',
+    );
   });
 
   it('still closes a real emphasis opener', () => {
@@ -133,6 +168,22 @@ describe('healStreamingMarkdown', () => {
     expect(healStreamingMarkdown(table)).toBe(table);
   });
 
+  it('leaves parser-protected single-column tables and HTML blocks alone', () => {
+    const table = '| ~3 |\n| --- |\n| ~4 |';
+    expect(healStreamingMarkdown(table)).toBe(table);
+    const html = '<!-- ~3 https://x.dev -->';
+    expect(healStreamingMarkdown(html)).toBe(html);
+    const indented = '  <!-- ~3 https://x.dev -->';
+    expect(healStreamingMarkdown(indented)).toBe(indented);
+    const quoted = '> <!-- ~3 https://x.dev -->';
+    expect(healStreamingMarkdown(quoted)).toBe(quoted);
+  });
+
+  it('leaves a list-indented fence alone', () => {
+    const text = '1. Run:\n\n   ```\n   ~3 https://x.dev\n   ```';
+    expect(healStreamingMarkdown(text)).toBe(text);
+  });
+
   it('wraps an unfinished trailing URL so the preview cannot append its href', () => {
     expect(healStreamingMarkdown('see https://www.bb')).toBe(
       'see `https://www.bb`',
@@ -206,7 +257,7 @@ describe('healStreamingMarkdown', () => {
 
   it('masks a URL after an escaped backtick instead of treating it as code', () => {
     expect(healStreamingMarkdown('copy \\`https://x.dev\\` now')).toBe(
-      'copy \\`https' + ZWSP + '://x.dev\\` now',
+      `copy \u02CBhttps${ZWSP}://x.dev\u02CB now`,
     );
   });
 
@@ -322,9 +373,20 @@ describe('healStreamingMarkdown', () => {
     );
   });
 
-  it('closes a trailing inline span remend leaves open around angle brackets', () => {
+  it('normalizes a prose line that quotes multi-backtick spans', () => {
+    const line =
+      '9. Lone tildes `~3,000`, `~1.2.3`, `~~strike~~`, code `` `~1` ``.';
+    const live = healStreamingMarkdown(line);
+    const settled = streamingMarkdownForRender(line, false);
+    expect(live).toContain('\u02CB\u223C1.2.3\u02CB');
+    expect(settled).toContain('\u02CB\u223C1.2.3\u02CB');
+    expect(live).toContain('\u223C\u223Cstrike\u223C\u223C');
+    expect(settled).toContain('\u223C\u223Cstrike\u223C\u223C');
+  });
+
+  it('leaves an unmatched inline span literal instead of completing it', () => {
     expect(healStreamingMarkdown('`std::expected<int, std::string>')).toBe(
-      '`std::expected<int, std::string>`',
+      `\u02CBstd::expected<${ZWSP}int, std::string>`,
     );
   });
 
