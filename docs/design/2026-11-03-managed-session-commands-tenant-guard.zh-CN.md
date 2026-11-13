@@ -15,8 +15,8 @@ action 响应，都在同一行上排队，而且没有 Turn 提交那样的五�
 只有同时满足以下条件，命令才能去掉 guard：
 
 1. **迁移。** 迁移空闲检查统计的工作（Turn、`CLOSE`、`ARCHIVE`、`DELETE`、
-   `ACTION_RESPONSE`、`CWD_CHANGE`、`TASK_CANCEL`、待处理的 `SESSION_COMMAND` 回执、
-   未结束的 `RENAME` 投递），要么在通过 `requireOpen` 对 fence 行做锁定读的事务内创建，
+   `ACTION_RESPONSE`、`CWD_CHANGE`、`TASK_CANCEL`、待处理的 `SESSION_COMMAND` 回执），
+   要么在通过 `requireOpen` 对 fence 行做锁定读的事务内创建，
    要么该命令本来就从不检查 fence。对于后者，它原本就可能在 fence 提交之后立即被准入，
    因此在 prepare 执行期间被准入，留下的状态相同。
 2. **之后不再获取 guard。** 事务后续步骤都不获取 guard，因此去掉第一次获取只会删除一条
@@ -49,7 +49,7 @@ action 响应，都在同一行上排队，而且没有 Turn 提交那样的五�
 
 ## 设计
 
-从标记为"去掉"的十五个命令中删除 `WorkspaceMigrationAdmission.lockTenant` 调用。
+从标记为"去掉"的命令中删除 `WorkspaceMigrationAdmission.lockTenant` 调用。
 mutation 准入另有以下修改：
 
 - `beginSessionMutation` 的重放探测对所有类型都改为非锁定读。`UNARCHIVE` 原先使用锁定读；

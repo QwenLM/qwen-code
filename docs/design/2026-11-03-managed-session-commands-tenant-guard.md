@@ -19,11 +19,10 @@ A command can drop the guard only if all of the following hold:
 
 1. **Migration.** Work that migration's idle check counts (Turns, `CLOSE`,
    `ARCHIVE`, `DELETE`, `ACTION_RESPONSE`, `CWD_CHANGE`, `TASK_CANCEL`, pending
-   `SESSION_COMMAND` receipts, open `RENAME` deliveries) is either created in a
-   transaction that takes `requireOpen`'s locking read of the fence row, or the
-   command never checked the fence. In the second case it could already be
-   admitted right after the fence committed, so an admission while prepare runs
-   leaves the same state.
+   `SESSION_COMMAND` receipts) is either created in a transaction that takes
+   `requireOpen`'s locking read of the fence row, or the command never checked
+   the fence. In the second case it could already be admitted right after the
+   fence committed, so an admission while prepare runs leaves the same state.
 2. **No later guard.** Nothing later in the transaction takes the guard, so
    removing the first acquisition only removes a wait edge.
 3. **No reader relies on it.** No other guard holder checks the command's rows
@@ -58,8 +57,8 @@ followed two levels deep; none takes the guard (criterion 2).
 
 ## Design
 
-Delete the `WorkspaceMigrationAdmission.lockTenant` call from the fifteen
-commands marked "Remove". Mutation admission also changes:
+Delete the `WorkspaceMigrationAdmission.lockTenant` call from the commands
+marked "Remove". Mutation admission also changes:
 
 - The replay probe in `beginSessionMutation` becomes a nonlocking read for every
   kind. `UNARCHIVE` used a locking read; on a missing key that gap-locks the

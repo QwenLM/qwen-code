@@ -415,17 +415,22 @@ public class ManagedSchemaSessionStoreTest {
                         tenant, "first", "first-digest", session, "first", "actor");
                 held.countDown();
                 try {
-                    release.await(15, java.util.concurrent.TimeUnit.SECONDS);
+                    // The hold must outlast the second rename's bound below, or a restored
+                    // guard self-releases before that bound expires and the case passes.
+                    release.await(30, java.util.concurrent.TimeUnit.SECONDS);
                 } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
                 }
                 return rename;
             }));
-            assertThat(held.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
-            var second = threads.submit(() -> tx.execute(status -> store.settleRenameSync(
-                    otherTenant, "second", "second-digest", other, "second", "actor")));
             try {
-                assertThat(second.get(3, java.util.concurrent.TimeUnit.SECONDS).revision()).isEqualTo(1);
+                if (!held.await(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                    first.get(1, java.util.concurrent.TimeUnit.SECONDS); // rethrows the settlement's cause
+                    throw new AssertionError("first rename did not reach the held point");
+                }
+                var second = threads.submit(() -> tx.execute(status -> store.settleRenameSync(
+                        otherTenant, "second", "second-digest", other, "second", "actor")));
+                assertThat(second.get(15, java.util.concurrent.TimeUnit.SECONDS).revision()).isEqualTo(1);
             } finally {
                 release.countDown();
             }
