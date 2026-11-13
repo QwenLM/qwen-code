@@ -1711,7 +1711,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
             if (toolPublication.isEnabled()
                     && (WorkspaceToolProfiles.isPublicShell(profile)
-                            || WorkspaceToolProfiles.INTERNAL_TEAM_LEAD.equals(profile))) {
+                            || WorkspaceToolProfiles.isInternalTeamLead(profile))) {
                 builder.captureBytes(toolPublication.getExecutionBytes());
             }
             ManagedSessionStoreConnection store = managedSessionStore(

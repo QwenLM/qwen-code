@@ -38,6 +38,11 @@ public final class WorkspaceToolProfiles {
                 || SHELL_V4.equals(profile);
     }
 
+    /** The internal team-lead lanes, never selectable by a public definition. */
+    public static boolean isInternalTeamLead(String profile) {
+        return INTERNAL_TEAM_LEAD.equals(profile) || INTERNAL_TEAM_LEAD_V2.equals(profile);
+    }
+
     public static boolean isShellOrMcp(String profile) {
         return profile != null && (profile.startsWith("hosted-workspace-shell/")
                 || profile.startsWith("hosted-workspace-mcp/"));
