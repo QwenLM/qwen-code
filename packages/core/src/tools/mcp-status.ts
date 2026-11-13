@@ -82,6 +82,38 @@ export function isMCPServerTeardownIntent(serverName: string): boolean {
 }
 
 /**
+ * Per-connection status, keyed by the SDK `Client` instance that owns the
+ * transport. The name-keyed registry above cannot tell two live connections
+ * for the same server name apart — the pool intentionally keeps one entry per
+ * `serverName + fingerprint` — so an abort repair reading only the name would
+ * attribute a sibling connection's drop to the invocation that armed it.
+ */
+const connectionStatuses: WeakMap<object, MCPServerStatus> = new WeakMap();
+
+/**
+ * Record the status of one connection. Called by the owner of the SDK
+ * `Client` alongside each name-keyed write, so consumers that hold the client
+ * can read their own connection's truth rather than the shared name.
+ */
+export function recordMCPConnectionStatus(
+  connection: object,
+  status: MCPServerStatus,
+): void {
+  connectionStatuses.set(connection, status);
+}
+
+/**
+ * The most recent status recorded for `connection`, or `undefined` when the
+ * connection is not tracked (legacy single-connection paths).
+ */
+export function getMCPConnectionStatus(
+  connection: object | undefined,
+): MCPServerStatus | undefined {
+  if (!connection) return undefined;
+  return connectionStatuses.get(connection);
+}
+
+/**
  * Event listeners for MCP server status changes.
  * `status` is `undefined` when the server has been removed from the registry
  * (e.g. disabled via `/mcp`), so consumers can drop it from their snapshots

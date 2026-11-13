@@ -28,7 +28,10 @@ import {
   removeMCPServerStatus,
   updateMCPServerStatus,
 } from './mcp-client.js';
-import { markMCPServerTeardownIntent } from './mcp-status.js';
+import {
+  recordMCPConnectionStatus,
+  markMCPServerTeardownIntent,
+} from './mcp-status.js';
 import {
   INVOCATION_CONTEXT_META_KEY,
   runWithInvocationContext,
@@ -3159,6 +3162,59 @@ describe('DiscoveredMCPTool', () => {
       await Promise.resolve();
       expect(discoverToolsForServer).not.toHaveBeenCalled();
       expect(client.callTool).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not repair a drop that belongs to a sibling connection sharing the name', async () => {
+      // The pool keeps one entry per `serverName + fingerprint`, so two live
+      // connections can share a name. A sibling's transport error writes
+      // DISCONNECTED for the shared name; this invocation's own connection is
+      // still CONNECTED, so that drop is not its damage and must not restart
+      // a healthy transport other sessions are using.
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const retryClient = okClient();
+      const { config, discoverToolsForServer } = registry({
+        ensured: mkTool({ client: retryClient }),
+      });
+      const abortController = new AbortController();
+      const client: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              abortController.signal.addEventListener(
+                'abort',
+                () => reject(abortError),
+                { once: true },
+              );
+            }),
+        ),
+      };
+      // Both connections are live: this invocation's client and the sibling.
+      recordMCPConnectionStatus(client, MCPServerStatus.CONNECTED);
+      recordMCPConnectionStatus({ id: 'sibling' }, MCPServerStatus.CONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const executePromise = exec(
+        mkTool({ config, client }),
+        'test',
+        abortController.signal,
+      );
+      abortController.abort();
+      await expect(executePromise).rejects.toThrow('Tool call aborted');
+
+      // The sibling reports a transport error for the shared name. This
+      // connection records nothing, so its own status stays CONNECTED.
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      await Promise.resolve();
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+
+      // This invocation's own transport is the one that dies.
+      recordMCPConnectionStatus(client, MCPServerStatus.DISCONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      await vi.waitFor(() => {
+        expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      });
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+      expect(retryClient.callTool).not.toHaveBeenCalled();
     });
 
     it('keeps the listener armed when a teardown it declined precedes its own drop', async () => {
