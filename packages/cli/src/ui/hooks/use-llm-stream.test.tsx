@@ -25492,7 +25492,9 @@ describe('useLlmStream', () => {
             );
           },
         );
-      const holdBatches = () => {
+      const holdBatches = (
+        complete: (request: ToolCallRequestInfo) => unknown = completedCall,
+      ) => {
         const pending: Array<() => void> = [];
         mockScheduleToolCalls.mockImplementation(
           (
@@ -25502,9 +25504,7 @@ describe('useLlmStream', () => {
             onBatchComplete?: (calls: unknown[]) => Promise<void>,
           ) => {
             pending.push(() => {
-              void onBatchComplete?.(
-                requests.map((request) => completedCall(request)),
-              );
+              void onBatchComplete?.(requests.map(complete));
             });
           },
         );
@@ -26832,6 +26832,147 @@ describe('useLlmStream', () => {
           });
           expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
           expect(result.current.streamingState).toBe(StreamingState.Idle);
+        },
+      );
+
+      it.skipIf(!kernel).each([
+        { phase: 'waiting for the side stream', planEntry: false },
+        { phase: 'finalizing', planEntry: false },
+        { phase: 'waiting for the side stream', planEntry: true },
+      ])(
+        'counts a completed tool once when the kernel times out while $phase (plan entry: $planEntry)',
+        async ({ phase, planEntry }) => {
+          const runAgentLoop = mockRunAgentLoop.getMockImplementation()!;
+          let expireKernel!: () => void;
+          const deadline = new Promise<AgentLoopResult>((resolve) => {
+            expireKernel = () => resolve({ reason: 'cancelled', rounds: 1 });
+          });
+          let expired = false;
+          const expire = () => {
+            expired = true;
+            expireKernel();
+          };
+          mockRunAgentLoop.mockImplementationOnce((options: AgentLoopOptions) =>
+            Promise.race([
+              deadline,
+              runAgentLoop({
+                ...options,
+                executor: {
+                  run: async (requests, signal, hooks) => {
+                    const calls = await options.executor!.run(
+                      requests,
+                      signal,
+                      hooks,
+                    );
+                    // The real kernel fences the executor's late results.
+                    return expired ? [] : calls;
+                  },
+                },
+              }),
+            ]),
+          );
+          let endMain!: () => void;
+          let endSide!: () => void;
+          const mainHeld = new Promise<void>((resolve) => (endMain = resolve));
+          const sideHeld = new Promise<void>((resolve) => (endSide = resolve));
+          const read = toolRequest('read_a');
+          const entry = toolRequest('enter');
+          entry.value.name = 'enter_plan_mode';
+          const mainCalls = planEntry ? [read, entry] : [read];
+          mockSendMessageStream
+            .mockReturnValueOnce(
+              (async function* () {
+                yield* mainCalls;
+                await mainHeld;
+              })(),
+            )
+            .mockReturnValueOnce(
+              (async function* () {
+                yield { type: ServerLlmEventType.Content, value: 'Thinking.' };
+                await sideHeld;
+              })(),
+            );
+          if (phase === 'finalizing') {
+            const budget = vi.fn().mockImplementationOnce(() => {
+              expire();
+              return Number.POSITIVE_INFINITY;
+            });
+            mockConfig.getToolOutputBatchBudget = budget.mockReturnValue(
+              Number.POSITIVE_INFINITY,
+            );
+          }
+          const pending = holdBatches((request) => {
+            const completed = completedCall(request);
+            return planEntry && request.callId === read.value.callId
+              ? {
+                  ...completed,
+                  status: 'error' as const,
+                  response: {
+                    ...completed.response,
+                    error: new Error('Skipped for plan-mode entry'),
+                    executionStatus: 'not_started',
+                  },
+                }
+              : completed;
+          });
+          const { result, client } = renderTestHook();
+          const mainFinished = vi.fn();
+          const sideFinished = vi.fn();
+
+          await act(async () => {
+            void result.current
+              .submitQuery('Read the file.')
+              .then(mainFinished);
+          });
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+          );
+          await act(async () => {
+            void result.current
+              .submitQuery('?btw Think for a moment.')
+              .then(sideFinished);
+          });
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
+          );
+          await act(async () => {
+            endMain();
+          });
+          await waitFor(() => expect(pending).toHaveLength(1));
+          await act(async () => {
+            pending[0]();
+          });
+          expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+          act(() => {
+            expect(result.current.cancelOngoingRequest()).toBe(true);
+          });
+
+          if (phase === 'waiting for the side stream') {
+            await act(async () => {
+              expire();
+            });
+          }
+          await act(async () => {
+            endSide();
+          });
+          await waitFor(() => {
+            expect(mainFinished).toHaveBeenCalledOnce();
+            expect(sideFinished).toHaveBeenCalledOnce();
+          });
+
+          await expect(mockRunAgentLoop.mock.results[0].value).resolves.toEqual(
+            {
+              reason: 'cancelled',
+              rounds: 1,
+            },
+          );
+          expect(
+            client.recordCompletedToolCall,
+          ).toHaveBeenCalledExactlyOnceWith(
+            (planEntry ? entry : read).value.name,
+            (planEntry ? entry : read).value.args,
+          );
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
         },
       );
     },

@@ -97,6 +97,7 @@ import type {
   AgentLoopRound,
   AgentLoopStopReason,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
+import { findPlanModeEntryBatchBoundaryIndex } from '@qwen-code/qwen-code-core/core/plan-mode-entry-policy.js';
 import { startSharedLoopRound } from './shared-loop-round.js';
 import type { InteractiveToolCall } from '../../services/interactive-mod-tool-scheduler.js';
 import { createInkToolExecutor } from './ink-tool-executor.js';
@@ -576,19 +577,6 @@ function backgroundSlotsSpent(config: Config): boolean {
   return (
     registry.getMaxConcurrentBackgroundAgents() === 1 &&
     !registry.canStartBackgroundAgent()
-  );
-}
-
-/**
- * The settled calls of a shared batch that it counted: the Ink executor
- * leaves cancelled calls to the TUI, which counts them where the current
- * path does.
- */
-function countedCallIds(calls: readonly InteractiveToolCall[]): Set<string> {
-  return new Set(
-    calls
-      .filter(({ status }) => status !== 'cancelled')
-      .map(({ request }) => request.callId),
   );
 }
 
@@ -7620,6 +7608,8 @@ export const useLlmStream = (
       let owner: SharedToolBatchResults['owner'] | undefined;
       let committedToolGroup: { batchId: string | undefined } | undefined;
       let nextRound: ToolResultRound | undefined;
+      const ranCallIds = new Set<string>();
+      let planModeEntryCallId: string | undefined;
       let batchEnded = false;
       let finishBatch!: () => void;
       const batchFinished = new Promise<void>((resolve) => {
@@ -7638,6 +7628,18 @@ export const useLlmStream = (
         (calls) => {
           if (batchEnded) return;
           settled = calls;
+          // Plan-mode entry skips its siblings. The fallback must also leave
+          // them uncounted if the loop ends before delivering their results.
+          if (planModeEntryCallId !== undefined) {
+            for (const { request, status } of calls) {
+              if (
+                status !== 'cancelled' &&
+                request.callId !== planModeEntryCallId
+              ) {
+                ranCallIds.add(request.callId);
+              }
+            }
+          }
           // As the scheduler's completion does: keep the turn off Idle
           // while the batch is finalized.
           setSubmissionInFlight(true);
@@ -7692,10 +7694,23 @@ export const useLlmStream = (
         // The batch of the round's loop call runs on this scheduler.
         const result = await batch.loop
           .runBatch({
-            executor,
+            executor: {
+              run: (requests, signal, hooks) => {
+                const boundary = findPlanModeEntryBatchBoundaryIndex(
+                  requests.map(({ name }) => name),
+                );
+                if (boundary !== undefined) {
+                  planModeEntryCallId = requests[boundary].callId;
+                }
+                return executor.run(requests, signal, hooks);
+              },
+            },
             handled: batch.handled,
             responded: batch.responded,
-            onToolResult: ({ request, response, origin }) => {
+            onToolResult: ({ request, response, origin, status }) => {
+              if (origin === 'executed' && status !== 'cancelled') {
+                ranCallIds.add(request.callId);
+              }
               if (origin === 'replayed' || origin === 'duplicate') {
                 const id = request.providerCallId ?? request.callId;
                 if (id && !respondedBefore.has(id)) addedReplayIds.add(id);
@@ -7786,7 +7801,7 @@ export const useLlmStream = (
           settled,
           {
             responses: result.responses ?? [],
-            ranCallIds: countedCallIds(settled),
+            ranCallIds,
             promptId: batch.promptId,
             owner,
             backgroundLaunchCallIds,
@@ -7798,7 +7813,7 @@ export const useLlmStream = (
         debugLogger.error('Shared tool batch failed:', error);
         // The scheduler already settled the calls: complete them without
         // the batch's results, as the current path would, so the tool group
-        // is kept and the turn goes on. The batch counted them already.
+        // is kept and the turn goes on.
         if (!committed) clearUnsentReplays();
         if (!committed && settled.length > 0 && owner) {
           try {
@@ -7806,7 +7821,7 @@ export const useLlmStream = (
               settled,
               {
                 responses: [],
-                ranCallIds: countedCallIds(settled),
+                ranCallIds,
                 promptId: batch.promptId,
                 owner,
                 backgroundLaunchCallIds: new Set(),
