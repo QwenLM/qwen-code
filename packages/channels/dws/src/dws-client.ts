@@ -150,6 +150,15 @@ export const DWS_CALLER_HEAD_BUDGET = 200;
 const DWS_ERROR_DETAIL_ELLIPSIS = '…';
 const DWS_ERROR_PREFIX = 'DWS command failed: ';
 
+// The same class as `LOG_LINE_UNSAFE_RE`: C0/C1 controls, DEL, the invisible
+// formatters and the bidi overrides/isolates. A child's stderr carries text the
+// server supplied, so every one of them is a way to repaint, re-split or reorder
+// the single line this message becomes on the operator's terminal.
+/* eslint-disable no-control-regex */
+const DWS_UNSAFE_TERMINAL_TEXT_RE =
+  /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g;
+/* eslint-enable no-control-regex */
+
 /**
  * Compose the text a `DwsCommandError` carries. The exit code alone
  * (`DWS command failed (1)`) is the same for every failure the CLI can hit and
@@ -191,15 +200,16 @@ export function describeDwsCommandFailure(
   // The reason a failing CLI prints is its last meaningful line. A banner or a
   // progress log can be hundreds of code points long, and the whole composed
   // message is head-truncated by every caller, so keeping a tail wider than
-  // that budget would push the reason past the cut. C0/DEL are stripped here
-  // rather than relying on every caller to sanitize: this message also reaches
-  // `writeStderrLine` raw, and a carriage return or escape sequence would
-  // otherwise repaint the operator's terminal.
+  // that budget would push the reason past the cut. The unsafe class is
+  // stripped here rather than relying on every caller to sanitize: this message
+  // also reaches `writeStderrLine` raw, and a carriage return, an escape
+  // sequence or a bidi override would otherwise repaint, reorder or forge the
+  // operator's terminal line. One code point becomes one space, so the
+  // code-point arithmetic below stays exact.
   const reason =
     stderr
       .split(/\r?\n/)
-      // eslint-disable-next-line no-control-regex
-      .map((line) => line.replace(/[\u0000-\u001f\u007f]/g, ' ').trim())
+      .map((line) => line.replace(DWS_UNSAFE_TERMINAL_TEXT_RE, ' ').trim())
       .filter(Boolean)
       .at(-1) ?? '';
   if (!reason) {

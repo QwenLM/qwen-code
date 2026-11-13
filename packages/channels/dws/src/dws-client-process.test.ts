@@ -181,6 +181,32 @@ describe('DWS command process', () => {
     expect(message).toContain('not authenticated');
   });
 
+  it('strips the C1, line- and bidi-separator class from the stderr reason', () => {
+    // Repaint is not the only way to lie about a failure line: C1 controls,
+    // U+2028/U+2029 and the bidi overrides/isolates re-split and reorder the
+    // text after an escape sequence has already been removed.
+    const message = describeDwsCommandFailure(
+      ['version'],
+      1,
+      'error: \u009b2J‮evil‬ second⁦third⁩﻿​ text',
+    );
+
+    for (const unsafe of [
+      '\u009b',
+      '\u202e',
+      '\u202c',
+      '\u2028',
+      '\u2066',
+      '\u2069',
+      '\ufeff',
+      '\u200b',
+    ]) {
+      expect(message).not.toContain(unsafe);
+    }
+    expect(message).toContain('evil');
+    expect(message).toContain('second');
+  });
+
   it('does not leak flag values from a send-shaped argv', () => {
     const message = describeDwsCommandFailure(
       [
