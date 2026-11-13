@@ -11691,7 +11691,7 @@ export class Session implements SessionContext {
       // stopped.
       memoryTasksRanInClient?: boolean;
     },
-  ): Promise<void> | undefined {
+  ): Promise<void> {
     if (result.stopReason !== 'cancelled') {
       responseCapture.agentOutput.writeToSpan(getActiveInteractionSpan());
     }
@@ -11725,7 +11725,8 @@ export class Session implements SessionContext {
     // side keeps `toolCallCount` fed so `qwen serve` produces an auto-skill
     // candidate.
     if (!this.config.getManagedAutoMemoryEnabled()) {
-      return this.#runManagedAutoSkillReview();
+      await this.#runManagedAutoSkillReview();
+      return;
     }
     const llmClient = this.config.getLlmClient();
     llmClient.captureCacheSafeParams();
