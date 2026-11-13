@@ -165,7 +165,11 @@ The client permits only one active prompt identity per Session while allowing di
 
 The existing `com.alibaba.qwen.code.cli` API remains available.
 
-If a custom `SessionEventConsumers.onControlRequest` handler throws, times out, returns no response envelope, returns a missing or mismatched request ID, or returns a success envelope without a response payload, the session sends a correlated `control_response` error to the CLI. The error preserves the original `request_id`, so a request still pending in the CLI can fail when the reply arrives. A callback timeout only produces that reply after its configured SDK timeout; it does not shorten the CLI's independent timeout. The default simple consumer allows 180 seconds and the session fallback allows 60 seconds, while the CLI's default permission timeout is 60 seconds. Configure a shorter callback timeout when the SDK error must arrive first. Valid success responses and error responses without a success payload are forwarded unchanged.
+If a custom `SessionEventConsumers.onControlRequest` handler throws, times out, returns no response envelope, returns a missing or mismatched request ID, returns an unknown response subtype, or returns a success envelope without a response payload, the session sends a correlated `control_response` error to the CLI. The error preserves the original `request_id`, so a request still pending in the CLI can fail when the reply arrives. Timeout errors name the handler's configured budget. Unexpected handler failures include the underlying exception type but keep the host exception's message and full cause chain in the SDK log. Validation errors describe the invalid response, including both IDs for a correlation failure. Valid success responses and error responses without a success payload are forwarded unchanged.
+
+A callback timeout only produces that reply after its configured SDK timeout; it does not shorten the CLI's independent timeout. The default simple consumer allows 180 seconds and the session fallback allows 60 seconds, while the CLI's default permission timeout is 60 seconds. If the SDK error must arrive first, set `onControlRequestTimeout` below the CLI timeout **and** set `onPermissionRequestTimeout` and `onOtherControlRequestTimeout` below that outer SDK timeout. For example, use 30-second inner callback limits, a 45-second control-request limit, and the CLI's 60-second permission limit. Lowering only the outer SDK limit can discard an inner callback's later approval. These settings preserve the timeout hierarchy documented below; this behavior does not change any defaults.
+
+The legacy `ProcessTransport` currently logs callback write failures inside its asynchronous read loop and can return from `sendPrompt` without consuming a result. A successfully constructed error response therefore does not guarantee delivery after the process input stream has closed. The broader asynchronous-wait behavior is tracked separately in [#8835: java-runnable-runandwait-swallows-timeout](https://github.com/QwenLM/qwen-code/issues/8835#issuecomment-5565612693).
 
 ```java
 public static void runSimpleExample() {
@@ -349,6 +353,8 @@ For proper operation, the following timeout relationships should be maintained:
 
 - `onAssistantMessageTimeout` return value should be greater than `onTextTimeout`, `onThinkingTimeout`, `onToolUseTimeout`, `onToolResultTimeout`, and `onOtherContentTimeout` return values
 - `onControlRequestTimeout` return value should be greater than `onPermissionRequestTimeout` and `onOtherControlRequestTimeout` return values
+
+When a control-response error must reach the CLI before its own timeout, maintain `inner callback timeout < onControlRequestTimeout < CLI timeout`; shorten both SDK layers together.
 
 ### Transport Options
 

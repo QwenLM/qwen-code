@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.cli.session;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -13,7 +12,6 @@ import com.alibaba.qwen.code.cli.protocol.message.control.CLIControlRequest;
 import com.alibaba.qwen.code.cli.protocol.message.control.CLIControlResponse;
 import com.alibaba.qwen.code.cli.protocol.message.control.payload.ControlResponsePayload;
 import com.alibaba.qwen.code.cli.session.event.consumers.SessionEventSimpleConsumers;
-import com.alibaba.qwen.code.cli.session.exception.SessionSendPromptException;
 import com.alibaba.qwen.code.cli.transport.Transport;
 import com.alibaba.qwen.code.cli.transport.TransportOptions;
 import com.alibaba.qwen.code.cli.utils.Timeout;
@@ -25,7 +23,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SessionControlRequestTest {
@@ -37,11 +34,13 @@ class SessionControlRequestTest {
         Session session = new Session(transport);
 
         session.sendPrompt("test", consumers(request -> {
-            throw new IllegalStateException("Permission callback failed");
+            throw new IllegalStateException("Permission callback failed with token=host-secret");
         }));
 
         JSONObject response = assertErrorResponse(transport);
-        assertTrue(response.getString("error").contains("Permission callback failed"));
+        assertEquals("Control request handler failed (IllegalStateException); see SDK logs for details",
+                response.getString("error"));
+        assertFalse(response.getString("error").contains("host-secret"));
         assertTrue(transport.resultConsumed);
     }
 
@@ -69,7 +68,22 @@ class SessionControlRequestTest {
         FixtureTransport transport = new FixtureTransport();
         new Session(transport).sendPrompt("test", consumers(request -> success(requestId)));
 
-        assertErrorResponse(transport);
+        assertEquals("Control request handler returned an uncorrelated response: expected request_id="
+                + REQUEST_ID + ", got " + requestId, assertErrorResponse(transport).getString("error"));
+        assertTrue(transport.resultConsumed);
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"", "ok"})
+    void sendsCorrelatedErrorWhenControlHandlerReturnsAnUnknownSubtype(String subtype) throws Exception {
+        FixtureTransport transport = new FixtureTransport();
+        CLIControlResponse<ControlResponsePayload> response = success(REQUEST_ID);
+        response.getResponse().setSubtype(subtype);
+        new Session(transport).sendPrompt("test", consumers(request -> response));
+
+        assertEquals("Control request handler returned an unknown response subtype; expected success or error",
+                assertErrorResponse(transport).getString("error"));
         assertTrue(transport.resultConsumed);
     }
 
@@ -121,7 +135,8 @@ class SessionControlRequestTest {
                 }
             });
 
-            assertErrorResponse(transport);
+            assertEquals("Control request handler timed out after 20 milliseconds",
+                    assertErrorResponse(transport).getString("error"));
             assertTrue(transport.resultConsumed);
         } finally {
             release.countDown();
@@ -143,17 +158,15 @@ class SessionControlRequestTest {
     }
 
     @Test
-    void propagatesFallbackWriteFailureFromASynchronousTransport() throws Exception {
+    void echoesTheDeserializedControlRequestIdInASuccessResponse() throws Exception {
         FixtureTransport transport = new FixtureTransport();
-        transport.writeFailure = new IOException("Pipe closed");
-        Session session = new Session(transport);
+        new Session(transport).sendPrompt("test", consumers(request -> success(request.getRequestId())));
 
-        SessionSendPromptException failure = assertThrows(SessionSendPromptException.class,
-                () -> session.sendPrompt("test", consumers(request -> null)));
-
-        assertEquals("Failed to send control response", failure.getCause().getMessage());
-        assertEquals("Pipe closed", failure.getCause().getCause().getMessage());
-        assertFalse(transport.resultConsumed);
+        assertEquals(1, transport.written.size());
+        JSONObject response = JSON.parseObject(transport.written.get(0)).getJSONObject("response");
+        assertEquals("success", response.getString("subtype"));
+        assertEquals(REQUEST_ID, response.getString("request_id"));
+        assertTrue(transport.resultConsumed);
     }
 
     private static SessionEventSimpleConsumers consumers(
@@ -189,7 +202,6 @@ class SessionControlRequestTest {
     private static class FixtureTransport implements Transport {
         private final List<String> written = new ArrayList<>();
         private boolean resultConsumed;
-        private IOException writeFailure;
 
         @Override
         public TransportOptions getTransportOptions() {
@@ -226,10 +238,7 @@ class SessionControlRequestTest {
         }
 
         @Override
-        public void inputNoWaitResponse(String message) throws IOException {
-            if (writeFailure != null) {
-                throw writeFailure;
-            }
+        public void inputNoWaitResponse(String message) {
             written.add(message);
         }
     }
