@@ -349,6 +349,19 @@ export class LoopTickResolver {
   }
 
   /**
+   * No-op tick for a fire-time classifier outage (D7). The loop.md read itself
+   * SUCCEEDED — it is the re-review that is unavailable — so this must not reuse
+   * buildTransientErrorTick's "could not be read" claim. Withhold the unreviewed
+   * guidance, say the classifier is down, and give the mode's standard re-arm so
+   * the loop survives to retry on the next fire.
+   */
+  buildClassifierOutageTick(mode: LoopMode): LoopTickResult {
+    return this.#noOpTick(
+      `${tickHeading(mode)}\nThe fire-time classifier is temporarily unavailable, so the loop.md guidance was not delivered this tick. Treat this as a no-op tick. ${PACING_SUFFIX[mode]}`,
+    );
+  }
+
+  /**
    * @param allowProjectFileOverride Trust captured once by the caller for this
    * tick (see LoopTickResolverDeps.allowProjectFile). Threaded in — rather than
    * re-reading the getter here — so the caller's error path can name the SAME

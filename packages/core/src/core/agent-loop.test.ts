@@ -14,15 +14,23 @@ import { ExecTool } from '../tools/exec.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { Kind } from '../tools/tools.js';
 import {
+  getRuntimeContentGenerator,
+  type RuntimeContentGeneratorView,
+} from '../agents/runtime/agent-context.js';
+import {
   createSchedulerExecutor,
   runAgentLoop,
+  runModelRound,
   runToolBatch,
+  turnModelRound,
   type AgentLoopDuplicateState,
   type AgentLoopHost,
   type AgentLoopSettledCall,
   type AgentLoopToolExecutor,
   type AgentLoopToolResult,
+  type ModelRoundSource,
 } from './agent-loop.js';
+import type { LlmChat } from './llm-chat.js';
 import { SendMessageType } from './client.js';
 import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from './plan-mode-entry-policy.js';
 import type { LlmClient, SendMessageOptions } from './client.js';
@@ -35,7 +43,7 @@ import {
   type ServerLlmStreamEvent,
   type ToolCallRequestInfo,
   type ToolCallResponseInfo,
-  type Turn,
+  Turn,
 } from './turn.js';
 
 function toolRequest(
@@ -961,4 +969,200 @@ describe('createSchedulerExecutor', () => {
     );
     expect(outputs).toContainEqual(['exec-1', 'probing']);
   }, 20_000);
+
+  it('forwards scheduler options to the CoreToolScheduler', async () => {
+    const config = makeFakeConfig({
+      approvalMode: ApprovalMode.YOLO,
+      chatRecording: false,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.registerTool(
+      new MockTool({
+        name: 'probe',
+        kind: Kind.Read,
+        params: { type: 'object', additionalProperties: false },
+        execute: async () => ({ llmContent: 'ok', returnDisplay: 'ok' }),
+      }),
+    );
+    const onToolCallsUpdate = vi.fn();
+    const onAllToolCallsComplete = vi.fn();
+
+    const completed = await createSchedulerExecutor(config, {
+      onToolCallsUpdate,
+      onAllToolCallsComplete,
+    }).run([toolRequest('c1', 'probe')], new AbortController().signal, {
+      beforeLaunch: () => true,
+      output: () => {},
+    });
+
+    expect(completed.map((call) => call.status)).toEqual(['success']);
+    expect(completed.map((call) => call.request.callId)).toEqual(['c1']);
+    expect(onToolCallsUpdate).toHaveBeenCalled();
+    // The executor resolves with the same calls handed to the callback.
+    expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+  });
+
+  it('runs the batch under the provided runtimeView', async () => {
+    const config = makeFakeConfig({
+      approvalMode: ApprovalMode.YOLO,
+      chatRecording: false,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    let seen: RuntimeContentGeneratorView | undefined;
+    registry.registerTool(
+      new MockTool({
+        name: 'probe',
+        kind: Kind.Read,
+        params: { type: 'object', additionalProperties: false },
+        execute: async () => {
+          seen = getRuntimeContentGenerator();
+          return { llmContent: 'ok', returnDisplay: 'ok' };
+        },
+      }),
+    );
+    const runtimeView = {
+      contentGenerator: { marker: 'runtime-view' },
+      contentGeneratorConfig: {},
+    } as unknown as RuntimeContentGeneratorView;
+
+    await createSchedulerExecutor(config, {}, runtimeView).run(
+      [toolRequest('c1', 'probe')],
+      new AbortController().signal,
+      { beforeLaunch: () => true, output: () => {} },
+    );
+
+    expect(seen).toBe(runtimeView);
+  });
+});
+
+describe('runModelRound on a round source', () => {
+  const round = {
+    parts: [{ text: 'go' }],
+    promptId: 'agent-prompt',
+    options: { type: SendMessageType.UserQuery },
+  };
+
+  it("sends the round on a Turn over the agent's chat, with its request fields", async () => {
+    const call = { id: 'call-1', name: 'read_file', args: { path: 'a' } };
+    const onStreamReady = vi.fn();
+    const onChunk = vi.fn();
+    const chat = {
+      sendMessageStream: vi.fn(async () =>
+        (async function* () {
+          yield {
+            type: 'chunk',
+            value: {
+              functionCalls: [call],
+              responseId: 'response-1',
+              usageMetadata: { totalTokenCount: 3 },
+            },
+          };
+          yield { type: 'retry', maxOutputTokensEscalated: 8_192 };
+          yield { type: 'chunk', value: { functionCalls: [call] } };
+        })(),
+      ),
+    } as unknown as LlmChat;
+    const tools = [{ functionDeclarations: [{ name: 'read_file' }] }];
+    const events: ServerLlmStreamEvent[] = [];
+
+    const result = await runModelRound(
+      turnModelRound(chat, 'agent-model', {
+        requestConfig: { tools, maxOutputTokens: 4_096 },
+        onStreamReady,
+        onChunk,
+      }),
+      round,
+      new AbortController().signal,
+      { onModelEvent: (event) => void events.push(event) },
+    );
+
+    expect(chat.sendMessageStream).toHaveBeenCalledWith(
+      'agent-model',
+      {
+        message: round.parts,
+        config: {
+          abortSignal: expect.any(AbortSignal),
+          tools,
+          maxOutputTokens: 4_096,
+        },
+      },
+      'agent-prompt',
+      undefined,
+      undefined,
+    );
+    expect(result.turn).toBeInstanceOf(Turn);
+    // The attempt the retry replaced is dropped.
+    expect(result.calls.map((request) => request.callId)).toEqual(['call-1']);
+    expect(result.stop).toBeUndefined();
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: LlmEventType.Retry,
+        maxOutputTokensEscalated: 8_192,
+      }),
+    );
+    expect(
+      events.find((event) => event.type === LlmEventType.ToolCallRequest),
+    ).toMatchObject({ functionCall: call });
+    expect(onStreamReady).toHaveBeenCalledOnce();
+    expect(onChunk).toHaveBeenCalledTimes(2);
+    expect(onChunk).toHaveBeenNthCalledWith(1, {
+      text: '',
+      thoughtText: '',
+      responseId: 'response-1',
+      usageMetadata: { totalTokenCount: 3 },
+    });
+  });
+
+  it('throws a failed request as it came when asked to', async () => {
+    const failure = new Error('upstream exploded');
+    const chat = {
+      sendMessageStream: vi.fn(async () => {
+        throw failure;
+      }),
+    } as unknown as LlmChat;
+
+    await expect(
+      runModelRound(
+        turnModelRound(chat, 'agent-model', { throwErrors: true }),
+        round,
+        new AbortController().signal,
+        {},
+      ),
+    ).rejects.toBe(failure);
+  });
+
+  it("ends the round at the surface's stop and closes the source's stream", async () => {
+    let closed = false;
+    let read = 0;
+    const source: ModelRoundSource = {
+      sendRound: () =>
+        (async function* () {
+          try {
+            for (;;) {
+              read++;
+              yield content;
+            }
+          } finally {
+            closed = true;
+          }
+        })(),
+    };
+
+    const result = await runModelRound(
+      source,
+      round,
+      new AbortController().signal,
+      { onModelEvent: () => 'loop_detected' },
+    );
+
+    expect(result).toEqual({ calls: [], stop: 'loop_detected' });
+    expect(read).toBe(1);
+    expect(closed).toBe(true);
+  });
 });

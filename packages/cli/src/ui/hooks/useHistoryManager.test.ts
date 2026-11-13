@@ -45,6 +45,38 @@ describe('useHistoryManager', () => {
     expect(result.current.history).toEqual([]);
   });
 
+  it('keeps the owner of the displayed transcript until it is replaced', () => {
+    const { result, rerender } = renderHook(
+      (sessionId: string) => useHistory(sessionId),
+      { initialProps: 'old' },
+    );
+    act(() => {
+      result.current.loadHistory([{ id: 1, type: 'gemini', text: 'Old' }]);
+    });
+    rerender('incoming');
+    expect(result.current.sessionId).toBe('old');
+    expect(result.current.history).toEqual([
+      { id: 1, type: 'gemini', text: 'Old' },
+    ]);
+
+    act(() => result.current.clearItems());
+    expect(result.current.sessionId).toBe('old');
+    act(() => {
+      result.current.loadHistory(
+        [{ id: 1, type: 'gemini', text: 'Resumed' }],
+        'resumed',
+      );
+    });
+    expect(result.current.sessionId).toBe('resumed');
+    expect(result.current.history).toEqual([
+      { id: 1, type: 'gemini', text: 'Resumed' },
+    ]);
+
+    act(() => result.current.clearItems('cleared'));
+    expect(result.current.sessionId).toBe('cleared');
+    expect(result.current.history).toEqual([]);
+  });
+
   it('should add an item to history with a unique ID', () => {
     const { result } = renderHook(() => useHistory());
     const timestamp = Date.now();

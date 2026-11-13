@@ -29,16 +29,23 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolHoldRow;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.provisioning.staticruntime.StaticRuntimeProvisioner;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+
+import javax.sql.DataSource;
 
 import java.lang.reflect.Proxy;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -51,6 +58,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -92,7 +100,23 @@ class RuntimeBrokerServiceTest {
                         "tenant", "workspace", 1, "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1),
                 "/workspace", PROVIDER_SESSION);
         // Isolate service ordering; this manually installed context is not SQL admission evidence.
-        try (Fixture fixture = new Fixture(request.getScope())) {
+        // The JDBC stores guard CSI writes with the Session pin and native
+        // continuation evidence, so the fixture installs the pinned Session
+        // root and the claimed execution row directly, then authorizes
+        // through the execution-level test-access CAS — deliberately without
+        // the CSI dispatch admission evidence the binding-level path needs.
+        try (FakeClockFixture fixture = new FakeClockFixture(request.getScope())) {
+            try (Connection connection = fixture.dataSource.getConnection();
+                    PreparedStatement statement = connection.prepareStatement(
+                            "INSERT INTO ma_session (tenant_id, session_id, agent_id, tool_profile, runtime_request_key, workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref, gmt_create, gmt_modified) VALUES ('tenant', ?, 'qwen-code', ?, ?, 'workspace', 1, 'storage', '.', ?, 1, ?, ?, 0, 0)")) {
+                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess.setIdentity(statement, 1, PROVIDER_SESSION);
+                statement.setString(2, CsiFilesRetirementProfile.PROFILE);
+                statement.setString(3, request.requestKey());
+                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess.setIdentity(statement, 4, CsiFilesRetirementProfile.CONTEXT_CONFIG_REF);
+                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess.setIdentity(statement, 5, CsiFilesRetirementProfile.CONFIG_REF);
+                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess.setIdentity(statement, 6, CsiFilesRetirementProfile.POLICY_REF);
+                assertEquals(1, statement.executeUpdate());
+            }
             var binding = fixture.bindingRepository.findOrCreate(request);
             binding = fixture.bindingRepository.claimOperation(binding.getBindingId(), "owner", Duration.ofMinutes(1));
             var seed = binding.getProvisionSeed();
@@ -109,20 +133,20 @@ class RuntimeBrokerServiceTest {
                     binding.getGeneration(), PROVIDER_SESSION, PROVIDER_SESSION, "prompt", "call", "sha256:" + "b".repeat(64),
                     Map.of("dispatchMode", "deferred", "sessionId", PROVIDER_SESSION, "promptId", "prompt",
                             "callId", "call", "argsDigest", "sha256:" + "b".repeat(64)));
-            fixture.executionRepository.findOrCreate(candidate);
-            var execution = fixture.executionRepository.claimDispatch("execution", "owner", Duration.ofMinutes(1));
-            execution = com.alibaba.qwen.code.runtimebroker.persistence.InMemoryTestAccess.authorizeDispatch(fixture.executionRepository, execution, "owner", execution.getDispatchGeneration(), binding.getVersion());
+            var execution = com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess.insertExecution(fixture.dataSource,
+                    candidate.withDispatch("owner", START.plus(Duration.ofMinutes(1)), 1, ToolExecutionRecord.State.DISPATCHING));
+            execution = com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess.authorizeDispatch(fixture.dataSource, execution, "owner", execution.getDispatchGeneration(), binding.getVersion());
             assertEquals("csi_execution_cancel_unavailable", failure(fixture.service.cancelExecution(
                     PROVIDER_SESSION, PROVIDER_SESSION, "execution")).getCode());
-            assertSame(execution, fixture.executionRepository.findByExecutionCallId("execution"));
+            assertUnchanged(execution, fixture.executionRepository.findByExecutionCallId("execution"));
             assertFalse(execution.isCancelRequested());
             assertEquals(0, fixture.transport.cancelCalls.get());
-            var completed = fixture.executionRepository.compareAndSet(execution,
+            var completed = com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess.compareAndSet(fixture.dataSource, execution,
                     execution.withResult(Map.of("executionStatus", "success", "responseParts", List.of(Map.of("text", "complete"))),
                             0, START), "owner", execution.getDispatchGeneration());
             assertEquals("success", completed.getExecutionStatus());
             assertFalse(completed.isCancelRequested());
-            assertSame(completed, join(fixture.service.cancelExecution(PROVIDER_SESSION, PROVIDER_SESSION, "execution")));
+            assertUnchanged(completed, join(fixture.service.cancelExecution(PROVIDER_SESSION, PROVIDER_SESSION, "execution")));
         }
     }
 
@@ -222,8 +246,8 @@ class RuntimeBrokerServiceTest {
                 assertEquals("runtime_session_ambiguous", ambiguity.getCode());
                 assertFalse(ambiguity.isRetryable());
             }
-            assertEquals(old, fixture.sessionRepository.findById(WORKSPACE_SCOPE, "runtime"));
-            assertEquals(current, fixture.sessionRepository.findById(target, "runtime"));
+            assertUnchanged(old, fixture.sessionRepository.findById(WORKSPACE_SCOPE, "runtime"));
+            assertUnchanged(current, fixture.sessionRepository.findById(target, "runtime"));
             assertEquals(0, fixture.transport.releaseCalls.get());
             assertEquals(0, fixture.provisioner.calls.get());
         }
@@ -240,7 +264,7 @@ class RuntimeBrokerServiceTest {
             assertEquals(first.getBindingId(), second.getBindingId());
             assertEquals(1, fixture.provisioner.calls.get());
             assertEquals(2, fixture.transport.acquireCalls.get());
-            assertEquals(fixture.provisioner.issuedLease,
+            assertSameLease(fixture.provisioner.issuedLease,
                     fixture.transport.lastLease);
             assertEquals("runtime-b", fixture.transport.lastSession
                     .getRuntimeSessionId());
@@ -266,7 +290,7 @@ class RuntimeBrokerServiceTest {
             RuntimeSessionRecord original = join(fixture.service.acquire("harness-a", "runtime-a", "bootstrap"));
             int acquires = fixture.transport.acquireCalls.get();
             int provisions = fixture.provisioner.calls.get();
-            assertSame(original, join(fixture.service.acquireRecovery("harness-a", "runtime-a",
+            assertUnchanged(original, join(fixture.service.acquireRecovery("harness-a", "runtime-a",
                     original.getBindingId(), original.getRuntimeGeneration())));
             for (CompletionStage<RuntimeSessionRecord> request : List.of(
                     fixture.service.acquireRecovery("harness-b", "runtime-a", original.getBindingId(), original.getRuntimeGeneration()),
@@ -299,7 +323,7 @@ class RuntimeBrokerServiceTest {
                         failure(fixture.service.acquireRecovery("harness-a", "runtime-a",
                                 original.getBindingId(), original.getRuntimeGeneration())).getCode()));
                 assertFalse(ordinary.toCompletableFuture().isDone());
-                assertSame(original, fixture.sessionRepository.findById(SESSION_SCOPE, "runtime-a"));
+                assertUnchanged(original, fixture.sessionRepository.findById(SESSION_SCOPE, "runtime-a"));
                 assertEquals(provisions, fixture.provisioner.calls.get());
                 assertEquals(acquires, fixture.transport.acquireCalls.get());
             } finally {
@@ -324,7 +348,7 @@ class RuntimeBrokerServiceTest {
                 assertEquals("workspace_close_identity_unverified", failure(fixture.service.acquireRecovery(
                         "harness-a", "runtime-a", original.getBindingId(), original.getRuntimeGeneration())).getCode());
             }
-            assertSame(original, fixture.sessionRepository.findById(SESSION_SCOPE, "runtime-a"));
+            assertUnchanged(original, fixture.sessionRepository.findById(SESSION_SCOPE, "runtime-a"));
             assertEquals(provisions, fixture.provisioner.calls.get());
             assertEquals(acquires, fixture.transport.acquireCalls.get());
         }
@@ -345,7 +369,7 @@ class RuntimeBrokerServiceTest {
 
             assertEquals(1, fixture.transport.acquireCalls.get());
             acquire.complete(null);
-            assertSame(join(first), join(second));
+            assertUnchanged(join(first), join(second));
         }
     }
 
@@ -834,11 +858,11 @@ class RuntimeBrokerServiceTest {
             assertEquals("cancelled", cancelled.getExecutionStatus());
             assertEquals(3, fixture.transport.cancelCalls.get());
             assertTrue(join(fixture.service.release("harness", PROVIDER_SESSION)));
-            assertSame(cancelled, join(fixture.service.cancelExecution(
+            assertUnchanged(cancelled, join(fixture.service.cancelExecution(
                     "harness", PROVIDER_SESSION, prepared.getExecutionCallId())));
-            assertSame(cancelled, join(fixture.service.getExecution(
+            assertUnchanged(cancelled, join(fixture.service.getExecution(
                     "harness", PROVIDER_SESSION, prepared.getExecutionCallId())));
-            assertSame(cancelled, join(fixture.service.prepareExecution(
+            assertUnchanged(cancelled, join(fixture.service.prepareExecution(
                     "harness", PROVIDER_SESSION, "key", providerReference())));
             assertEquals(3, fixture.transport.cancelCalls.get());
         }
@@ -846,9 +870,11 @@ class RuntimeBrokerServiceTest {
 
     @Test
     void abandonedProviderReceiptsKeepTheirSavedOwnershipAfterRestartAndRelease() {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions, executions,
                 "provider-terminal", PROVIDER_SESSION);
         String harness = recovery.session.getSession().getHarnessSessionId();
@@ -876,8 +902,8 @@ class RuntimeBrokerServiceTest {
                         harness, PROVIDER_SESSION, prepared.getIdempotencyKey(), reference));
                 assertEquals(ToolExecutionRecord.State.ABANDONED, receipt.getState());
                 assertEquals(reference, receipt.getReference());
-                assertSame(receipt, join(service.getExecution(harness, PROVIDER_SESSION, receipt.getExecutionCallId())));
-                assertSame(receipt, join(service.cancelExecution(harness, PROVIDER_SESSION, receipt.getExecutionCallId())));
+                assertUnchanged(receipt, join(service.getExecution(harness, PROVIDER_SESSION, receipt.getExecutionCallId())));
+                assertUnchanged(receipt, join(service.cancelExecution(harness, PROVIDER_SESSION, receipt.getExecutionCallId())));
                 assertEquals("runtime_execution_conflict", failure(service.prepareExecution(
                         "other-harness", PROVIDER_SESSION, prepared.getIdempotencyKey(), reference)).getCode());
                 var changed = new HashMap<>(reference);
@@ -893,9 +919,11 @@ class RuntimeBrokerServiceTest {
 
     @Test
     void terminalProviderCancellationAnswersFromTheReceiptWhenTheSessionCannotAnswer() {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions, executions,
                 "provider-terminal-cancel", PROVIDER_SESSION);
         String harness = recovery.session.getSession().getHarnessSessionId();
@@ -918,11 +946,11 @@ class RuntimeBrokerServiceTest {
                 ignored -> { throw new AssertionError("Saved ownership must not resolve current scope"); },
                 new StaticRuntimeProvisioner(recovery.binding.getLease()), transport, bindings, sessions, executions,
                 "restarted", Duration.ofSeconds(10), Duration.ofSeconds(10))) {
-            assertSame(settled, join(service.cancelExecution(
+            assertUnchanged(settled, join(service.cancelExecution(
                     harness, PROVIDER_SESSION, settled.getExecutionCallId())));
-            assertSame(settled, join(service.cancelExecution(
+            assertUnchanged(settled, join(service.cancelExecution(
                     harness, PROVIDER_SESSION, settled.getExecutionCallId())));
-            assertSame(settled, join(service.getExecution(
+            assertUnchanged(settled, join(service.getExecution(
                     harness, PROVIDER_SESSION, settled.getExecutionCallId())));
             assertEquals(0, transport.cancelCalls.get());
         }
@@ -930,9 +958,11 @@ class RuntimeBrokerServiceTest {
 
     @Test
     void terminalProviderCancellationAsksForAdoptionUntilItsGenerationCannotAnswer() {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions, executions,
                 "provider-terminal-cancel-restart", PROVIDER_SESSION);
         String harness = recovery.session.getSession().getHarnessSessionId();
@@ -962,11 +992,11 @@ class RuntimeBrokerServiceTest {
             assertEquals(503, adopt.getStatusCode());
             assertEquals("runtime_reconciliation_required", adopt.getCode());
             assertTrue(adopt.isRetryable());
-            assertSame(settled, join(service.getExecution(
+            assertUnchanged(settled, join(service.getExecution(
                     harness, PROVIDER_SESSION, settled.getExecutionCallId())));
             // Once that generation can no longer answer, the receipt stands.
             recovery.lose(false);
-            assertSame(settled, join(service.cancelExecution(
+            assertUnchanged(settled, join(service.cancelExecution(
                     harness, PROVIDER_SESSION, settled.getExecutionCallId())));
             assertEquals(0, transport.cancelCalls.get());
         }
@@ -974,9 +1004,11 @@ class RuntimeBrokerServiceTest {
 
     @Test
     void terminalProviderCancellationRefusesAReceiptWhoseSavedOwnershipDiffers() {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions, executions,
                 "provider-terminal-cancel-foreign", PROVIDER_SESSION);
         String harness = recovery.session.getSession().getHarnessSessionId();
@@ -1028,7 +1060,7 @@ class RuntimeBrokerServiceTest {
             assertEquals(RuntimeSessionRecord.State.READY,
                     fixture.sessionRepository.findById(WORKSPACE_SCOPE, PROVIDER_SESSION).getState());
             for (int attempt = 0; attempt < 2; attempt++) {
-                assertSame(cancelled, join(fixture.service.cancelExecution(
+                assertUnchanged(cancelled, join(fixture.service.cancelExecution(
                         "harness", PROVIDER_SESSION, prepared.getExecutionCallId())));
             }
             assertEquals(1, fixture.transport.cancelCalls.get());
@@ -1037,9 +1069,11 @@ class RuntimeBrokerServiceTest {
 
     @Test
     void terminalProviderCancellationDoesNotWaitOnAnAcquireStillAdopting() {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions, executions,
                 "provider-terminal-cancel-adopting", PROVIDER_SESSION);
         String harness = recovery.session.getSession().getHarnessSessionId();
@@ -1225,7 +1259,7 @@ class RuntimeBrokerServiceTest {
             assertEquals("runtime_execution_cancel_unconfirmed", unconfirmed.getCode());
             assertFalse(unconfirmed.isRetryable());
             assertEquals(2, fixture.transport.cancelCalls.get());
-            assertSame(cancelled, join(fixture.service.getExecution(
+            assertUnchanged(cancelled, join(fixture.service.getExecution(
                     "harness", PROVIDER_SESSION, prepared.getExecutionCallId())));
         }
     }
@@ -1251,7 +1285,7 @@ class RuntimeBrokerServiceTest {
             // The execute answer settled it, so the receipt stands on its
             // own; the worker, which forgets settled calls, is not asked.
             fixture.transport.cancelResult = CompletableFuture.completedFuture(Map.of("state", "unknown"));
-            assertSame(cancelled, join(fixture.service.cancelExecution(
+            assertUnchanged(cancelled, join(fixture.service.cancelExecution(
                     "harness", PROVIDER_SESSION, prepared.getExecutionCallId())));
             assertEquals(cancels, fixture.transport.cancelCalls.get());
         }
@@ -1306,16 +1340,19 @@ class RuntimeBrokerServiceTest {
     @Test
     void dispatcherThatLosesItsClaimDoesNotExecute() {
         MutableClock clock = new MutableClock(START);
-        TakeoverExecutionRepository executions =
-                new TakeoverExecutionRepository(clock);
+        var source = newDataSource("dispatch-takeover");
+        var executions = new JdbcToolExecutionRepository(source);
         FakeTransport transport = new FakeTransport();
         transport.executionRepository = executions;
+        var bindings = new TakeoverBindingRepository(
+                new JdbcRuntimeBindingRepository(source,
+                        new AesGcmSecretProtector("test", new byte[32]),
+                        () -> "binding"),
+                source, executions);
         try (RuntimeBrokerService service = new RuntimeBrokerService(
                 ignored -> CompletableFuture.completedFuture(WORKSPACE_SCOPE),
-                new FakeProvisioner(), transport,
-                new InMemoryRuntimeBindingRepository(clock,
-                        () -> "binding"),
-                new InMemoryRuntimeSessionRepository(), executions,
+                new FakeProvisioner(), transport, bindings,
+                new JdbcRuntimeSessionRepository(source), executions,
                 "broker-a", Duration.ofMinutes(1), Duration.ofSeconds(1),
                 clock, () -> "execution")) {
             join(service.acquire("harness", "runtime", "bootstrap"));
@@ -1496,9 +1533,13 @@ class RuntimeBrokerServiceTest {
 
     @Test
     void dispatchLeaseIsRenewedUntilExecutionCompletes() {
+        // The fake-clock DataSource shim keeps the JDBC dispatch renewals
+        // stamping lease ends from the MutableClock. JDBC rounds lease ends
+        // up to whole seconds, so the lease and step are whole seconds: only
+        // a renewal made after the advance moves the end one step later.
         MutableClock clock = new MutableClock(START);
-        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, clock,
-                Duration.ofMillis(60))) {
+        try (FakeClockFixture fixture = new FakeClockFixture(WORKSPACE_SCOPE, clock,
+                Duration.ofSeconds(2))) {
             CompletableFuture<Map<String, Object>> result =
                     new CompletableFuture<>();
             fixture.transport.executeResult = result;
@@ -1512,7 +1553,7 @@ class RuntimeBrokerServiceTest {
             Supplier<ToolExecutionRecord> current =
                     () -> fixture.executionRepository.findByExecutionCallId(
                             created.getExecutionCallId());
-            Duration step = Duration.ofMillis(40);
+            Duration step = Duration.ofSeconds(1);
 
             await(() -> current.get().getVersion() > initialVersion,
                     () -> "dispatch lease was never renewed");
@@ -1531,9 +1572,13 @@ class RuntimeBrokerServiceTest {
 
     @Test
     void provisioningLeaseIsRenewedUntilProvisionerCompletes() {
+        // The fake-clock DataSource shim keeps the JDBC operation renewals
+        // stamping lease ends from the MutableClock. JDBC rounds lease ends
+        // up to whole seconds, so the lease and step are whole seconds: only
+        // a renewal made after the advance moves the end one step later.
         MutableClock clock = new MutableClock(START);
-        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, clock,
-                Duration.ofMillis(60), Duration.ofMinutes(1))) {
+        try (FakeClockFixture fixture = new FakeClockFixture(WORKSPACE_SCOPE, clock,
+                Duration.ofSeconds(2), Duration.ofMinutes(1))) {
             CompletableFuture<RuntimeLease> lease = new CompletableFuture<>();
             fixture.provisioner.provisionResult = lease;
 
@@ -1543,7 +1588,7 @@ class RuntimeBrokerServiceTest {
                     WORKSPACE_SCOPE, null);
             Supplier<RuntimeBindingRecord> current =
                     () -> fixture.bindingRepository.findActive(request);
-            Duration step = Duration.ofMillis(40);
+            Duration step = Duration.ofSeconds(1);
             await(() -> current.get().getVersion() > 1,
                     () -> "operation lease was never renewed");
             advanceAndAwaitRenewal(clock, step,
@@ -3061,9 +3106,11 @@ class RuntimeBrokerServiceTest {
         // #13533 B1: a natural exit before a Broker restart must still
         // settle from evidence when the Session is re-acquired — the scan
         // otherwise skips PREPARED `:process` rows forever.
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "bg-exit");
         String processId = admitDetachedBackgroundProcess(bindings, sessions,
@@ -3097,9 +3144,11 @@ class RuntimeBrokerServiceTest {
     void reacquireKeepsAnUnprovableBackgroundProcessHold() throws Exception {
         // The same scan arm must never settle what the owner cannot prove:
         // an unknown answer keeps the row and its hold.
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "bg-hold");
         String processId = admitDetachedBackgroundProcess(bindings, sessions,
@@ -3139,9 +3188,11 @@ class RuntimeBrokerServiceTest {
         // #13889 review R1-48: the backfill that reaches a post-restart hold
         // was pinned only on the routine arm. A drain must issue the stop
         // and settle the row, not merely refuse busy.
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "bg-drain");
         String processId = admitDetachedBackgroundProcess(bindings, sessions,
@@ -3182,9 +3233,11 @@ class RuntimeBrokerServiceTest {
         // #13889 review R1-48: an unproven stop keeps the hold and answers
         // busy; a speculative settle would tear the Runtime down under a
         // live run.
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "bg-drain-unknown");
         String processId = admitDetachedBackgroundProcess(bindings, sessions,
@@ -3220,9 +3273,11 @@ class RuntimeBrokerServiceTest {
     void reacquireNeverFailsAnAcquireOnAnObservationFailure() throws Exception {
         // The observation is best-effort maintenance: a broken control
         // channel keeps the row's hold and must not fail the acquire.
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "bg-fault");
         String processId = admitDetachedBackgroundProcess(bindings, sessions,
@@ -3251,9 +3306,11 @@ class RuntimeBrokerServiceTest {
     void reacquireSkipsABackgroundRowWhoseInvocationIsGone() throws Exception {
         // A row whose start invocation is not in the repository is nobody's
         // to observe: the scan skips it without asking the owner anything.
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "bg-orphan");
         bindings.releaseOperation(recovery.binding.getBindingId(), "recovery",
@@ -3291,9 +3348,11 @@ class RuntimeBrokerServiceTest {
     void reacquireNeverWaitsOnABackgroundObservation() throws Exception {
         // The scan's observation is maintenance, not a gate: an acquire
         // must complete while the observation's control is still in flight.
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "bg-async");
         String processId = admitDetachedBackgroundProcess(bindings, sessions,
@@ -3331,9 +3390,11 @@ class RuntimeBrokerServiceTest {
         // A scan observation outstanding at release must not hold
         // activeControls past the sweep's own proof: the sweep settles the
         // row and the release succeeds (#13830 review).
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var recovery = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "bg-overlap");
         String processId = admitDetachedBackgroundProcess(bindings, sessions,
@@ -3755,7 +3816,7 @@ class RuntimeBrokerServiceTest {
             assertEquals("runtime_control_operation_invalid", failure(fixture.service.control("harness", "runtime", foreign)).getCode());
             assertEquals("runtime_session_not_found", failure(fixture.service.control("harness", "new-runtime", foreign)).getCode());
             assertEquals(1, fixture.provisioner.calls.get());
-            assertEquals(session.getSession(), fixture.transport.lastSession);
+            assertSameSession(session.getSession(), fixture.transport.lastSession);
         }
     }
 
@@ -3774,7 +3835,7 @@ class RuntimeBrokerServiceTest {
             assertEquals("runtime_control_operation_invalid", failure(fixture.service.control("harness", "runtime", foreign)).getCode());
             assertEquals("runtime_session_not_found", failure(fixture.service.control("harness", "new-runtime", foreign)).getCode());
             assertEquals(1, fixture.provisioner.calls.get());
-            assertEquals(session.getSession(), fixture.transport.lastSession);
+            assertSameSession(session.getSession(), fixture.transport.lastSession);
         }
     }
 
@@ -3813,7 +3874,7 @@ class RuntimeBrokerServiceTest {
             Map<String, Object> hook = Map.of("kind", "hook-execute", "operationId", "legacy-end",
                     "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"));
             assertEquals("ok", join(fixture.service.control("harness", "runtime", hook)));
-            assertEquals(session.getSession(), fixture.transport.lastSession);
+            assertSameSession(session.getSession(), fixture.transport.lastSession);
             Map<String, Object> ordinary = Map.of("kind", "mcp-configure", "operationId", "ordinary",
                     "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"));
             assertEquals("runtime_admission_closed", failure(fixture.service.control("harness", "runtime", ordinary)).getCode());
@@ -3829,7 +3890,7 @@ class RuntimeBrokerServiceTest {
             RuntimeSessionRecord original = join(fixture.service.acquire("harness", "runtime", "bootstrap"));
             fixture.resolver.result = CompletableFuture.failedFuture(
                     new RuntimeBrokerException(403, "workspace_access_denied", "Access revoked", false));
-            assertEquals(original, join(fixture.service.acquire("harness", "runtime", "bootstrap")));
+            assertUnchanged(original, join(fixture.service.acquire("harness", "runtime", "bootstrap")));
             Map<String, Object> lookup = Map.of("kind", "mcp-status", "operationId", "lookup",
                     "targetOperationId", "original-operation",
                     "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"));
@@ -3858,7 +3919,7 @@ class RuntimeBrokerServiceTest {
             assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
             assertEquals("cancelled", settled.getExecutionStatus());
             assertTrue(settled.isCancelRequested());
-            assertSame(settled, join(fixture.service.cancelExecution("harness", "runtime", "parked")));
+            assertUnchanged(settled, join(fixture.service.cancelExecution("harness", "runtime", "parked")));
             assertEquals("runtime_admission_closed", failure(fixture.service.createExecution("harness", "runtime",
                     "new-key", reference("runtime", "other"))).getCode());
             assertEquals(0, fixture.transport.executeCalls.get());
@@ -3952,14 +4013,15 @@ class RuntimeBrokerServiceTest {
     @Test
     void staleProvisioningReadDoesNotReprovisionAReadyBinding() {
         MutableClock clock = new MutableClock(START);
-        StaleBindingRepository bindings = new StaleBindingRepository(clock);
+        var source = newDataSource("stale-provisioning");
+        StaleBindingRepository bindings = new StaleBindingRepository(source);
         FakeProvisioner provisioner = new FakeProvisioner();
         try (RuntimeBrokerService service = new RuntimeBrokerService(
                 ignored -> CompletableFuture.completedFuture(
                         WORKSPACE_SCOPE),
                 provisioner, new FakeTransport(), bindings,
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(clock), "broker",
+                new JdbcRuntimeSessionRepository(source),
+                new JdbcToolExecutionRepository(source), "broker",
                 Duration.ofMinutes(1), Duration.ofMinutes(1), clock,
                 () -> "execution")) {
             RuntimeProvisionRequest request = new RuntimeProvisionRequest(
@@ -3972,15 +4034,16 @@ class RuntimeBrokerServiceTest {
 
             assertEquals(1, provisioner.calls.get());
             assertEquals(ready.getBindingId(), second.getBindingId());
-            assertEquals(ready.getLease(), bindings.findById(
-                    ready.getBindingId()).getLease());
+            assertTrue(ready.hasSameLease(bindings.findById(
+                    ready.getBindingId()).getLease()));
         }
     }
 
     @Test
     void readyBindingStillFinishingInThisProcessIsJoined() {
         MutableClock clock = new MutableClock(START);
-        StaleBindingRepository bindings = new StaleBindingRepository(clock);
+        var source = newDataSource("ready-joined");
+        StaleBindingRepository bindings = new StaleBindingRepository(source);
         FakeProvisioner provisioner = new FakeProvisioner();
         AtomicReference<CompletionStage<RuntimeBindingRecord>> joined =
                 new AtomicReference<>();
@@ -3988,8 +4051,8 @@ class RuntimeBrokerServiceTest {
                 ignored -> CompletableFuture.completedFuture(
                         WORKSPACE_SCOPE),
                 provisioner, new FakeTransport(), bindings,
-                new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(clock), "broker",
+                new JdbcRuntimeSessionRepository(source),
+                new JdbcToolExecutionRepository(source), "broker",
                 Duration.ofMinutes(1), Duration.ofMinutes(1), clock,
                 () -> "execution")) {
             bindings.afterReady = () -> joined.set(
@@ -4005,12 +4068,16 @@ class RuntimeBrokerServiceTest {
 
     @Test
     void reclaimRenewsItsClaimThroughSlowLostCleanup() {
+        // The fake-clock DataSource shim keeps the JDBC claim renewals
+        // stamping lease ends from the MutableClock that recoverLost
+        // advances, like the slow transactions of a loaded runner.
         MutableClock clock = new MutableClock(START);
+        var source = fakeClockDataSource(newDataSource("slow-cleanup"), clock);
         SlowRecoveryBindingRepository bindings =
-                new SlowRecoveryBindingRepository(clock,
+                new SlowRecoveryBindingRepository(source, clock,
                         Duration.ofMillis(1200));
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository(clock);
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "slow-cleanup");
         RuntimeBindingRecord lost = fixture.lose(false);
@@ -4037,9 +4104,10 @@ class RuntimeBrokerServiceTest {
     @Test
     void reclaimStillFencesWhenTheClaimGenuinelyLapses() {
         MutableClock clock = new MutableClock(START);
-        StaleBindingRepository bindings = new StaleBindingRepository(clock);
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository(clock);
+        var source = newDataSource("lapsed-cleanup");
+        StaleBindingRepository bindings = new StaleBindingRepository(source);
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "lapsed-cleanup");
         RuntimeBindingRecord lost = fixture.lose(false);
@@ -4053,7 +4121,10 @@ class RuntimeBrokerServiceTest {
                     RuntimeLease lease) {
                 // A single step that outlasts the whole operation lease
                 // must still fence rather than march on with a dead claim.
-                clock.advance(Duration.ofSeconds(3));
+                // The stored claim deadline moves into the past so the
+                // repository's own clock judges the lapse.
+                expire(source, "ma_runtime_binding", "operation_lease_until",
+                        "binding_id", lost.getBindingId());
                 return super.reconcile(request, seed,
                         handle, lease);
             }
@@ -4073,12 +4144,16 @@ class RuntimeBrokerServiceTest {
 
     @Test
     void reclaimRenewsItsClaimBeforeASlowReconcile() {
+        // The fake-clock DataSource shim keeps the JDBC claim renewals
+        // stamping lease ends from the MutableClock that the slow
+        // recoverLost/reconcile steps advance.
         MutableClock clock = new MutableClock(START);
+        var source = fakeClockDataSource(newDataSource("slow-reconcile"), clock);
         SlowRecoveryBindingRepository bindings =
-                new SlowRecoveryBindingRepository(clock,
+                new SlowRecoveryBindingRepository(source, clock,
                         Duration.ofMillis(1200));
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository(clock);
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "slow-reconcile");
         RuntimeBindingRecord lost = fixture.lose(false);
@@ -4115,9 +4190,11 @@ class RuntimeBrokerServiceTest {
     @Test
     void reclaimReleasesAnObservationAtThreeQuartersOfTheLease()
             throws Exception {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "three-quarters");
         RuntimeBindingRecord lost = fixture.lose(false);
@@ -4171,9 +4248,11 @@ class RuntimeBrokerServiceTest {
     @Test
     void reclaimKeepsItsClaimAliveAcrossAPastLeaseObservation()
             throws Exception {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "past-lease");
         RuntimeBindingRecord lost = fixture.lose(false);
@@ -4221,9 +4300,11 @@ class RuntimeBrokerServiceTest {
 
     @Test
     void reclaimNamesAStepItCutShort() {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "cut-step");
         RuntimeBindingRecord lost = fixture.lose(false);
@@ -4263,9 +4344,11 @@ class RuntimeBrokerServiceTest {
 
     @Test
     void recoverBindingSettlesAStalledObservation() {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "stalled-observation");
         bindings.releaseOperation(fixture.binding.getBindingId(), "recovery",
@@ -4306,12 +4389,16 @@ class RuntimeBrokerServiceTest {
 
     @Test
     void reclaimRenewsItsClaimBeforeRecoveringResources() {
+        // The fake-clock DataSource shim keeps the JDBC claim renewals
+        // stamping lease ends from the MutableClock that the slow
+        // cleanup/recoverResources steps advance.
         MutableClock clock = new MutableClock(START);
+        var source = fakeClockDataSource(newDataSource("slow-resources"), clock);
         SlowRecoveryBindingRepository bindings =
-                new SlowRecoveryBindingRepository(clock,
+                new SlowRecoveryBindingRepository(source, clock,
                         Duration.ofMillis(1200));
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository(clock);
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         RuntimeBindingRecord lost = managedStoppedLostBinding(bindings,
                 sessions, clock);
         AtomicInteger recoverResourcesCalls = new AtomicInteger();
@@ -4362,10 +4449,12 @@ class RuntimeBrokerServiceTest {
     @Test
     void recoverBindingOutlivesOneLeaseAcrossSlowRepositorySteps()
             throws Exception {
+        var source = newDataSource("slow-wall");
         var bindings = new SlowWallRecoveryBindings(
-                new InMemoryRuntimeBindingRepository(), 1800);
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+                new JdbcRuntimeBindingRepository(source,
+                        new AesGcmSecretProtector("test", new byte[32])), 1800);
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "slow-wall");
         RuntimeBindingRecord lost = fixture.lose(false);
@@ -4418,9 +4507,11 @@ class RuntimeBrokerServiceTest {
 
     @Test
     void recoverBindingNamesAHungAttestation() {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "hung-attest");
         bindings.releaseOperation(fixture.binding.getBindingId(), "recovery",
@@ -4476,9 +4567,11 @@ class RuntimeBrokerServiceTest {
 
     @Test
     void resourceRecoveryPastOneLeaseKeepsItsClaimAlive() throws Exception {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("broker-recovery");
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         RuntimeBindingRecord lost = managedStoppedLostBinding(bindings,
                 sessions, Clock.systemUTC());
         RuntimeProvisioner provisioner = new LostDomainProvisioner() {
@@ -4520,8 +4613,9 @@ class RuntimeBrokerServiceTest {
         final AtomicInteger ticks = new AtomicInteger();
         final AtomicBoolean held = new AtomicBoolean();
 
-        TickWindowRepository() {
-            super(new InMemoryRuntimeBindingRepository());
+        TickWindowRepository(DataSource source) {
+            super(new JdbcRuntimeBindingRepository(source,
+                    new AesGcmSecretProtector("test", new byte[32])));
         }
 
         @Override
@@ -4561,9 +4655,10 @@ class RuntimeBrokerServiceTest {
 
     @Test
     void settledStepStopsItsRenewal() throws Exception {
-        var bindings = new TickWindowRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = newDataSource("settled-step");
+        var bindings = new TickWindowRepository(source);
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions,
                 executions, "settled-step");
         RuntimeBindingRecord ready = fixture.binding;
@@ -4695,7 +4790,9 @@ class RuntimeBrokerServiceTest {
                             "idempotency",
                             reference("runtime", "digest")));
 
-            clock.advance(Duration.ofMinutes(1));
+            expire(fixture.dataSource, "ma_tool_execution",
+                    "dispatch_lease_until", "execution_call_id",
+                    created.getExecutionCallId());
             ToolExecutionRecord unknown = awaitExecution(
                     fixture.executionRepository,
                     created.getExecutionCallId(),
@@ -4726,7 +4823,9 @@ class RuntimeBrokerServiceTest {
             // Renewal first ticks after a third of the lease in wall time,
             // so the lease lapses before renewal notices while this process
             // still serves the invocation.
-            clock.advance(Duration.ofHours(2));
+            expire(fixture.dataSource, "ma_tool_execution",
+                    "dispatch_lease_until", "execution_call_id",
+                    created.getExecutionCallId());
             join(fixture.service.cancelExecution("harness", "runtime",
                     created.getExecutionCallId()));
 
@@ -4751,7 +4850,9 @@ class RuntimeBrokerServiceTest {
                     fixture.service.createExecution("harness", "runtime",
                             "idempotency",
                             reference("runtime", "digest")));
-            clock.advance(Duration.ofMinutes(1));
+            expire(fixture.dataSource, "ma_tool_execution",
+                    "dispatch_lease_until", "execution_call_id",
+                    created.getExecutionCallId());
             awaitExecution(fixture.executionRepository,
                     created.getExecutionCallId(),
                     ToolExecutionRecord.State.UNKNOWN);
@@ -4799,7 +4900,8 @@ class RuntimeBrokerServiceTest {
             fixture.executionRepository.requestCancel("manual",
                     executing.getVersion());
 
-            clock.advance(Duration.ofMinutes(2));
+            expire(fixture.dataSource, "ma_tool_execution",
+                    "dispatch_lease_until", "execution_call_id", "manual");
             ToolExecutionRecord cancelled = join(
                     fixture.service.cancelExecution("harness", "runtime",
                             "manual"));
@@ -4822,15 +4924,19 @@ class RuntimeBrokerServiceTest {
     @Test
     void cancellationDuringAFenceDoesNotReachTheRuntime() {
         MutableClock clock = new MutableClock(START);
+        var source = newDataSource("cancellation-during-fence");
+        var jdbcExecutions = new JdbcToolExecutionRepository(source);
         HookedExecutionRepository executions =
-                new HookedExecutionRepository(clock);
+                new HookedExecutionRepository(jdbcExecutions);
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]), () -> "binding");
+        var sessions = new JdbcRuntimeSessionRepository(source);
         FakeTransport transport = new FakeTransport();
         try (RuntimeBrokerService service = new RuntimeBrokerService(
                 ignored -> CompletableFuture.completedFuture(WORKSPACE_SCOPE),
                 new FakeProvisioner(), transport,
-                new InMemoryRuntimeBindingRepository(clock,
-                        () -> "binding"),
-                new InMemoryRuntimeSessionRepository(), executions,
+                new NativeAdmissionBindings(bindings, sessions, jdbcExecutions),
+                sessions, executions,
                 "broker", Duration.ofMinutes(1), Duration.ofMinutes(1),
                 clock, () -> "execution")) {
             RuntimeSessionRecord session = join(service.acquire("harness",
@@ -4847,7 +4953,8 @@ class RuntimeBrokerServiceTest {
                             ToolExecutionRecord.State.EXECUTING, false),
                     "broker", claimed.getDispatchGeneration());
             executions.requestCancel("manual", executing.getVersion());
-            clock.advance(Duration.ofMinutes(2));
+            expire(source, "ma_tool_execution", "dispatch_lease_until",
+                    "execution_call_id", "manual");
             AtomicReference<ToolExecutionRecord> nested =
                     new AtomicReference<>();
             executions.beforeClaim = () -> nested.set(join(
@@ -4880,7 +4987,9 @@ class RuntimeBrokerServiceTest {
                             "idempotency",
                             reference("runtime", "digest")));
 
-            clock.advance(Duration.ofHours(2));
+            expire(fixture.dataSource, "ma_tool_execution",
+                    "dispatch_lease_until", "execution_call_id",
+                    created.getExecutionCallId());
             result.complete(Map.of("executionStatus", "success"));
 
             assertEquals(ToolExecutionRecord.State.UNKNOWN,
@@ -4904,7 +5013,9 @@ class RuntimeBrokerServiceTest {
                             "idempotency",
                             reference("runtime", "digest")));
 
-            clock.advance(Duration.ofHours(2));
+            expire(fixture.dataSource, "ma_tool_execution",
+                    "dispatch_lease_until", "execution_call_id",
+                    created.getExecutionCallId());
             result.completeExceptionally(
                     new IllegalStateException("connection lost"));
 
@@ -4928,7 +5039,9 @@ class RuntimeBrokerServiceTest {
                     fixture.service.createExecution("harness", "runtime",
                             "idempotency",
                             reference("runtime", "digest")));
-            clock.advance(Duration.ofHours(2));
+            expire(fixture.dataSource, "ma_tool_execution",
+                    "dispatch_lease_until", "execution_call_id",
+                    created.getExecutionCallId());
             ToolExecutionRecord cancelled = join(
                     fixture.service.cancelExecution("harness", "runtime",
                             created.getExecutionCallId()));
@@ -4948,8 +5061,8 @@ class RuntimeBrokerServiceTest {
     void settledCancellationJudgesTheLapseByTheRepositoryClock() {
         MutableClock serviceClock = new MutableClock(START);
         MutableClock repositoryClock = new MutableClock(START);
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository(repositoryClock);
+        var source = fakeClockDataSource(newDataSource("settled-lapse-repo-clock"), repositoryClock);
+        var executions = new JdbcToolExecutionRepository(source);
         FakeTransport transport = new FakeTransport();
         CompletableFuture<Map<String, Object>> result =
                 new CompletableFuture<>();
@@ -4958,7 +5071,7 @@ class RuntimeBrokerServiceTest {
         transport.executeResult = result;
         transport.cancelResult = acknowledgement;
         try (RuntimeBrokerService service = brokerService(serviceClock,
-                executions, transport)) {
+                source, executions, transport)) {
             join(service.acquire("harness", "runtime", "bootstrap"));
             ToolExecutionRecord created = join(service.createExecution(
                     "harness", "runtime", "idempotency",
@@ -4983,8 +5096,9 @@ class RuntimeBrokerServiceTest {
     void settlementConflictJudgesLivenessByTheRepositoryClock() {
         MutableClock serviceClock = new MutableClock(START);
         MutableClock repositoryClock = new MutableClock(START);
+        var source = fakeClockDataSource(newDataSource("settlement-conflict-live"), repositoryClock);
         HookedExecutionRepository executions =
-                new HookedExecutionRepository(repositoryClock);
+                new HookedExecutionRepository(new JdbcToolExecutionRepository(source));
         FakeTransport transport = new FakeTransport();
         CompletableFuture<Map<String, Object>> result =
                 new CompletableFuture<>();
@@ -4993,7 +5107,7 @@ class RuntimeBrokerServiceTest {
         transport.executeResult = result;
         transport.cancelResult = acknowledgement;
         try (RuntimeBrokerService service = brokerService(serviceClock,
-                executions, transport)) {
+                source, executions, transport)) {
             join(service.acquire("harness", "runtime", "bootstrap"));
             ToolExecutionRecord created = join(service.createExecution(
                     "harness", "runtime", "idempotency",
@@ -5019,22 +5133,22 @@ class RuntimeBrokerServiceTest {
     @Test
     void lapsedInvocationThatCompletesUnderClockSkewIsFencedAsUnknown() {
         MutableClock serviceClock = new MutableClock(START);
-        MutableClock repositoryClock = new MutableClock(START);
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository(repositoryClock);
+        var source = newDataSource("lapsed-invocation-skew");
+        var executions = new JdbcToolExecutionRepository(source);
         FakeTransport transport = new FakeTransport();
         CompletableFuture<Map<String, Object>> result =
                 new CompletableFuture<>();
         transport.executeResult = result;
         try (RuntimeBrokerService service = brokerService(serviceClock,
-                executions, transport)) {
+                source, executions, transport)) {
             join(service.acquire("harness", "runtime", "bootstrap"));
             ToolExecutionRecord created = join(service.createExecution(
                     "harness", "runtime", "idempotency",
                     reference("runtime", "digest")));
 
             // Only the repository sees the lease lapse.
-            repositoryClock.advance(Duration.ofHours(2));
+            expire(source, "ma_tool_execution", "dispatch_lease_until",
+                    "execution_call_id", created.getExecutionCallId());
             result.complete(Map.of("executionStatus", "success"));
 
             assertEquals(ToolExecutionRecord.State.UNKNOWN,
@@ -5047,11 +5161,11 @@ class RuntimeBrokerServiceTest {
     void lapsedCancellationJudgesTheLapseByTheRepositoryClock() {
         MutableClock serviceClock = new MutableClock(START);
         MutableClock repositoryClock = new MutableClock(START);
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository(repositoryClock);
+        var source = fakeClockDataSource(newDataSource("lapsed-cancellation-repo-clock"), repositoryClock);
+        var executions = new JdbcToolExecutionRepository(source);
         FakeTransport transport = new FakeTransport();
         try (RuntimeBrokerService service = brokerService(serviceClock,
-                executions, transport)) {
+                source, executions, transport)) {
             RuntimeSessionRecord session = join(service.acquire("harness",
                     "runtime", "bootstrap"));
             ToolExecutionRecord executing = seedExecuting(executions,
@@ -5073,11 +5187,11 @@ class RuntimeBrokerServiceTest {
     void cancellationOfALiveClaimJudgesLivenessByTheRepositoryClock() {
         MutableClock serviceClock = new MutableClock(START);
         MutableClock repositoryClock = new MutableClock(START);
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository(repositoryClock);
+        var source = fakeClockDataSource(newDataSource("live-claim-repo-clock"), repositoryClock);
+        var executions = new JdbcToolExecutionRepository(source);
         FakeTransport transport = new FakeTransport();
         try (RuntimeBrokerService service = brokerService(serviceClock,
-                executions, transport)) {
+                source, executions, transport)) {
             RuntimeSessionRecord session = join(service.acquire("harness",
                     "runtime", "bootstrap"));
             seedExecuting(executions, session, "other", Duration.ofHours(1));
@@ -5098,11 +5212,11 @@ class RuntimeBrokerServiceTest {
     void retriedExecutionJudgesTheLapseByTheRepositoryClock() {
         MutableClock serviceClock = new MutableClock(START);
         MutableClock repositoryClock = new MutableClock(START);
-        InMemoryToolExecutionRepository executions =
-                new InMemoryToolExecutionRepository(repositoryClock);
+        var source = fakeClockDataSource(newDataSource("retried-lapse-repo-clock"), repositoryClock);
+        var executions = new JdbcToolExecutionRepository(source);
         FakeTransport transport = new FakeTransport();
         try (RuntimeBrokerService service = brokerService(serviceClock,
-                executions, transport)) {
+                source, executions, transport)) {
             RuntimeSessionRecord session = join(service.acquire("harness",
                     "runtime", "bootstrap"));
             seedExecuting(executions, session, "other",
@@ -5123,16 +5237,18 @@ class RuntimeBrokerServiceTest {
     @Test
     void cancellationDuringARetryFenceDoesNotReachTheRuntime() {
         MutableClock clock = new MutableClock(START);
+        var source = newDataSource("hooked-execution");
         HookedExecutionRepository executions =
-                new HookedExecutionRepository(clock);
+                new HookedExecutionRepository(new JdbcToolExecutionRepository(source));
         FakeTransport transport = new FakeTransport();
         try (RuntimeBrokerService service = brokerService(clock,
-                executions, transport)) {
+                source, executions, transport)) {
             RuntimeSessionRecord session = join(service.acquire("harness",
                     "runtime", "bootstrap"));
             seedExecuting(executions, session, "other",
                     Duration.ofMinutes(1));
-            clock.advance(Duration.ofMinutes(2));
+            expire(source, "ma_tool_execution", "dispatch_lease_until",
+                    "execution_call_id", "manual");
             AtomicReference<ToolExecutionRecord> nested =
                     new AtomicReference<>();
             // A retry fencing through beginDispatch holds a dispatches
@@ -5157,11 +5273,12 @@ class RuntimeBrokerServiceTest {
     @Test
     void cancellationOfARecordSettledDuringItsFenceSkipsTheRuntime() {
         MutableClock clock = new MutableClock(START);
+        var source = newDataSource("hooked-execution");
         HookedExecutionRepository executions =
-                new HookedExecutionRepository(clock);
+                new HookedExecutionRepository(new JdbcToolExecutionRepository(source));
         FakeTransport transport = new FakeTransport();
         try (RuntimeBrokerService service = brokerService(clock,
-                executions, transport)) {
+                source, executions, transport)) {
             RuntimeSessionRecord session = join(service.acquire("harness",
                     "runtime", "bootstrap"));
             seedExecuting(executions, session, "other", Duration.ofHours(1));
@@ -5188,11 +5305,12 @@ class RuntimeBrokerServiceTest {
     @Test
     void cancellationReportsAFailedFenceAsRetryable() {
         MutableClock clock = new MutableClock(START);
+        var source = newDataSource("hooked-execution");
         HookedExecutionRepository executions =
-                new HookedExecutionRepository(clock);
+                new HookedExecutionRepository(new JdbcToolExecutionRepository(source));
         FakeTransport transport = new FakeTransport();
         try (RuntimeBrokerService service = brokerService(clock,
-                executions, transport)) {
+                source, executions, transport)) {
             RuntimeSessionRecord session = join(service.acquire("harness",
                     "runtime", "bootstrap"));
             seedExecuting(executions, session, "other", Duration.ofHours(1));
@@ -5212,13 +5330,15 @@ class RuntimeBrokerServiceTest {
     @Test
     void claimThatLapsesBeforeExecutionIsLeftForRetry() {
         MutableClock clock = new MutableClock(START);
+        var source = newDataSource("hooked-execution");
         HookedExecutionRepository executions =
-                new HookedExecutionRepository(clock);
+                new HookedExecutionRepository(new JdbcToolExecutionRepository(source));
         FakeTransport transport = new FakeTransport();
         try (RuntimeBrokerService service = brokerService(clock,
-                executions, transport)) {
+                source, executions, transport)) {
             join(service.acquire("harness", "runtime", "bootstrap"));
-            executions.afterClaim = () -> clock.advance(Duration.ofHours(2));
+            executions.afterClaim = () -> expire(source, "ma_tool_execution",
+                    "dispatch_lease_until", "execution_call_id", "execution");
 
             join(service.createExecution("harness", "runtime",
                     "idempotency", reference("runtime", "digest")));
@@ -5245,8 +5365,9 @@ class RuntimeBrokerServiceTest {
     @Test
     void settlementConflictResolvedByAnotherWriterIsNotReported() {
         MutableClock clock = new MutableClock(START);
+        var source = newDataSource("settlement-conflict-resolved");
         HookedExecutionRepository executions =
-                new HookedExecutionRepository(clock);
+                new HookedExecutionRepository(new JdbcToolExecutionRepository(source));
         FakeTransport transport = new FakeTransport();
         CompletableFuture<Map<String, Object>> result =
                 new CompletableFuture<>();
@@ -5255,7 +5376,7 @@ class RuntimeBrokerServiceTest {
         transport.executeResult = result;
         transport.cancelResult = acknowledgement;
         try (RuntimeBrokerService service = brokerService(clock,
-                executions, transport)) {
+                source, executions, transport)) {
             join(service.acquire("harness", "runtime", "bootstrap"));
             ToolExecutionRecord created = join(service.createExecution(
                     "harness", "runtime", "idempotency",
@@ -5290,8 +5411,13 @@ class RuntimeBrokerServiceTest {
     @Test
     void settlementConflictUnderALiveClaimIsReported() {
         MutableClock clock = new MutableClock(START);
+        var source = newDataSource("settlement-conflict-live-claim");
+        var jdbcExecutions = new JdbcToolExecutionRepository(source);
         HookedExecutionRepository executions =
-                new HookedExecutionRepository(clock);
+                new HookedExecutionRepository(jdbcExecutions);
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]), () -> "binding");
+        var sessions = new JdbcRuntimeSessionRepository(source);
         FakeTransport transport = new FakeTransport();
         CompletableFuture<Map<String, Object>> result =
                 new CompletableFuture<>();
@@ -5302,9 +5428,8 @@ class RuntimeBrokerServiceTest {
         try (RuntimeBrokerService service = new RuntimeBrokerService(
                 ignored -> CompletableFuture.completedFuture(WORKSPACE_SCOPE),
                 new FakeProvisioner(), transport,
-                new InMemoryRuntimeBindingRepository(clock,
-                        () -> "binding"),
-                new InMemoryRuntimeSessionRepository(), executions,
+                new NativeAdmissionBindings(bindings, sessions, jdbcExecutions),
+                sessions, executions,
                 "broker", Duration.ofMinutes(1), Duration.ofHours(1),
                 clock, () -> "execution")) {
             join(service.acquire("harness", "runtime", "bootstrap"));
@@ -5334,8 +5459,13 @@ class RuntimeBrokerServiceTest {
     @Test
     void cancellationOfAFinishedInvocationDoesNotReachTheRuntime() {
         MutableClock clock = new MutableClock(START);
+        var source = newDataSource("cancellation-finished-invocation");
+        var jdbcExecutions = new JdbcToolExecutionRepository(source);
         HookedExecutionRepository executions =
-                new HookedExecutionRepository(clock);
+                new HookedExecutionRepository(jdbcExecutions);
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("test", new byte[32]), () -> "binding");
+        var sessions = new JdbcRuntimeSessionRepository(source);
         FakeTransport transport = new FakeTransport();
         CompletableFuture<Map<String, Object>> result =
                 new CompletableFuture<>();
@@ -5343,9 +5473,8 @@ class RuntimeBrokerServiceTest {
         try (RuntimeBrokerService service = new RuntimeBrokerService(
                 ignored -> CompletableFuture.completedFuture(WORKSPACE_SCOPE),
                 new FakeProvisioner(), transport,
-                new InMemoryRuntimeBindingRepository(clock,
-                        () -> "binding"),
-                new InMemoryRuntimeSessionRepository(), executions,
+                new NativeAdmissionBindings(bindings, sessions, jdbcExecutions),
+                sessions, executions,
                 "broker", Duration.ofMinutes(1), Duration.ofHours(1),
                 clock, () -> "execution")) {
             join(service.acquire("harness", "runtime", "bootstrap"));
@@ -5390,7 +5519,9 @@ class RuntimeBrokerServiceTest {
                     fixture.service.cancelExecution("harness", "runtime",
                             created.getExecutionCallId());
 
-            clock.advance(Duration.ofHours(2));
+            expire(fixture.dataSource, "ma_tool_execution",
+                    "dispatch_lease_until", "execution_call_id",
+                    created.getExecutionCallId());
             acknowledgement.complete(Map.of("state", "settled", "result",
                     Map.of("executionStatus", "cancelled")));
 
@@ -5943,15 +6074,31 @@ class RuntimeBrokerServiceTest {
     }
 
     private static RuntimeBrokerService brokerService(Clock serviceClock,
-            ToolExecutionRepository executions, FakeTransport transport) {
+            DataSource source, ToolExecutionRepository executions,
+            FakeTransport transport) {
+        JdbcRuntimeBindingRepository bindings =
+                new JdbcRuntimeBindingRepository(source,
+                        new AesGcmSecretProtector("test", new byte[32]),
+                        () -> "binding");
+        JdbcRuntimeSessionRepository sessions =
+                new JdbcRuntimeSessionRepository(source);
         return new RuntimeBrokerService(
                 ignored -> CompletableFuture.completedFuture(WORKSPACE_SCOPE),
                 new FakeProvisioner(), transport,
-                new InMemoryRuntimeBindingRepository(serviceClock,
-                        () -> "binding"),
-                new InMemoryRuntimeSessionRepository(), executions,
+                new NativeAdmissionBindings(bindings, sessions,
+                        nativeExecutions(executions)),
+                sessions, executions,
                 "broker", Duration.ofMinutes(1), Duration.ofHours(1),
                 serviceClock, () -> "execution");
+    }
+
+    /** The raw JDBC ledger behind an instrumented execution wrapper. */
+    private static ToolExecutionRepository nativeExecutions(
+            ToolExecutionRepository executions) {
+        if (executions instanceof HookedExecutionRepository hooked) {
+            return hooked.delegate;
+        }
+        return executions;
     }
 
     private static ToolExecutionRecord awaitExecution(
@@ -6181,7 +6328,7 @@ class RuntimeBrokerServiceTest {
                     fixture.transport.lastReference);
             assertEquals(unknown.getLastSequence(),
                     fixture.transport.lastAfterSequence);
-            assertEquals(fixture.provisioner.issuedLease,
+            assertSameLease(fixture.provisioner.issuedLease,
                     fixture.transport.lastLease);
             assertEquals("harness", fixture.transport.lastSession
                     .getHarnessSessionId());
@@ -6848,8 +6995,10 @@ class RuntimeBrokerServiceTest {
                 Duration.ofMinutes(1))) {
             ToolExecutionRecord unknown = unknownExecution(fixture);
             // Another owner holds the binding, so retiring the dead lease
-            // here drops the local route but leaves the row READY.
-            clock.advance(Duration.ofMinutes(2));
+            // here drops the local route but leaves the row READY. The stored
+            // operation deadline moves into the past so the claim can be taken.
+            expire(fixture.dataSource, "ma_runtime_binding",
+                    "operation_lease_until", "binding_id", "binding-1");
             assertEquals("other-broker", fixture.bindingRepository
                     .claimOperation("binding-1", "other-broker",
                             Duration.ofMinutes(10))
@@ -6921,13 +7070,14 @@ class RuntimeBrokerServiceTest {
     @Test
     void repositoryFailuresAreRetryableReconcileFailures() {
         MutableClock clock = new MutableClock(START);
+        var source = newDataSource("repository-failures-reconcile");
         HookedExecutionRepository executions =
-                new HookedExecutionRepository(clock);
+                new HookedExecutionRepository(new JdbcToolExecutionRepository(source));
         FakeTransport transport = new FakeTransport();
         transport.executeResult = CompletableFuture.failedFuture(
                 new IllegalStateException("connection lost"));
-        try (RuntimeBrokerService service = brokerService(clock, executions,
-                transport)) {
+        try (RuntimeBrokerService service = brokerService(clock, source,
+                executions, transport)) {
             join(service.acquire("harness", "runtime", "bootstrap"));
             ToolExecutionRecord unknown = join(service.createExecution(
                     "harness", "runtime", "idempotency",
@@ -7125,13 +7275,132 @@ class RuntimeBrokerServiceTest {
         return (RuntimeBrokerException) cause;
     }
 
+    /** One UUID-named H2 database per fixture, kept alive for the JVM. */
+    private static JdbcDataSource newDataSource(String name) {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:" + name + "-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        return source;
+    }
+
+    /**
+     * Serves the repository's database clock from the fake clock: JDBC lease
+     * stamping reads databaseNowPrecise's UNIX_TIMESTAMP() query, so rewriting
+     * exactly that statement to literal fake-clock readings lets renewal loops
+     * and slow-recovery steps drive lease ends from the MutableClock. The
+     * match is exact because SQL_NOW inlines UNIX_TIMESTAMP() into INSERTs,
+     * which must pass through unchanged (their row timestamps stay real time).
+     */
+    private static DataSource fakeClockDataSource(DataSource delegate, Clock clock) {
+        return (DataSource) Proxy.newProxyInstance(
+                DataSource.class.getClassLoader(),
+                new Class<?>[] {DataSource.class}, (proxy, method, args) -> {
+            try {
+                if (!method.getName().startsWith("getConnection")) {
+                    return method.invoke(delegate, args);
+                }
+                Connection connection = (Connection) method.invoke(delegate, args);
+                return Proxy.newProxyInstance(Connection.class.getClassLoader(),
+                        new Class<?>[] {Connection.class}, (cp, cm, ca) -> {
+                    try {
+                        if (cm.getName().equals("prepareStatement")
+                                && ca[0] instanceof String sql
+                                && sql.equals("SELECT UNIX_TIMESTAMP(),"
+                                        + " EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))")) {
+                            Instant now = clock.instant();
+                            Object[] rewritten = ca.clone();
+                            rewritten[0] = "SELECT " + now.getEpochSecond()
+                                    + ", " + now.getNano() / 1000;
+                            return cm.invoke(connection, rewritten);
+                        }
+                        return cm.invoke(connection, ca);
+                    } catch (java.lang.reflect.InvocationTargetException error) {
+                        throw error.getCause();
+                    }
+                });
+            } catch (java.lang.reflect.InvocationTargetException error) {
+                throw error.getCause();
+            }
+        });
+    }
+
+    /**
+     * Moves a stored lease/deadline into the past so the repository's own
+     * (database) clock judges the claim lapsed. The one-shot expiry analogue
+     * of advancing a fake repository clock; continuous renewal loops cannot
+     * use it because the database clock does not follow the fake clock.
+     */
+    private static void expire(DataSource source, String table,
+            String leaseColumn, String idColumn, String id) {
+        String sql = "UPDATE " + table + " SET " + leaseColumn
+                + " = ? WHERE " + idColumn + " = ?";
+        try (Connection connection = source.getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setLong(1,
+                    Instant.parse("2000-01-01T00:00:00Z").toEpochMilli());
+            com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess
+                    .setIdentity(statement, 2, id);
+            assertEquals(1, statement.executeUpdate());
+        } catch (SQLException error) {
+            throw new AssertionError(
+                    "failed to expire " + table + "." + leaseColumn, error);
+        }
+    }
+
+    /** JDBC reads deserialize a fresh record, so "same" is identity+version+state. */
+    private static void assertUnchanged(RuntimeBindingRecord expected,
+            RuntimeBindingRecord actual) {
+        assertTrue(expected.sameIdentity(actual));
+        assertEquals(expected.getVersion(), actual.getVersion());
+        assertEquals(expected.getState(), actual.getState());
+    }
+
+    private static void assertUnchanged(RuntimeSessionRecord expected,
+            RuntimeSessionRecord actual) {
+        assertTrue(expected.sameIdentity(actual));
+        assertEquals(expected.getVersion(), actual.getVersion());
+        assertEquals(expected.getState(), actual.getState());
+    }
+
+    private static void assertUnchanged(ToolExecutionRecord expected,
+            ToolExecutionRecord actual) {
+        assertTrue(expected.sameIdentity(actual));
+        assertEquals(expected.getVersion(), actual.getVersion());
+        assertEquals(expected.getState(), actual.getState());
+    }
+
+    /** JDBC deserializes a fresh lease, so lease equality is field equality. */
+    private static void assertSameLease(RuntimeLease expected,
+            RuntimeLease actual) {
+        assertTrue(actual != null);
+        assertEquals(expected.getRuntimeInstanceId(),
+                actual.getRuntimeInstanceId());
+        assertEquals(expected.getEndpoint(), actual.getEndpoint());
+        assertEquals(expected.getToken(), actual.getToken());
+        assertEquals(expected.getLeaseId(), actual.getLeaseId());
+        assertEquals(expected.getEpoch(), actual.getEpoch());
+    }
+
+    /** JDBC deserializes a fresh Session, so identity is field equality. */
+    private static void assertSameSession(RuntimeSession expected,
+            RuntimeSession actual) {
+        assertTrue(actual != null);
+        assertEquals(expected.getHarnessSessionId(),
+                actual.getHarnessSessionId());
+        assertEquals(expected.getRuntimeSessionId(),
+                actual.getRuntimeSessionId());
+        assertEquals(expected.getTurnKind(), actual.getTurnKind());
+        assertEquals(expected.getScope(), actual.getScope());
+    }
+
     private static final class Fixture implements AutoCloseable {
         final AtomicInteger bindingIds = new AtomicInteger();
         final AtomicInteger executionIds = new AtomicInteger();
-        final InMemoryRuntimeBindingRepository bindingRepository;
-        final CountingSessionRepository sessionRepository =
-                new CountingSessionRepository();
-        final InMemoryToolExecutionRepository executionRepository;
+        final DataSource dataSource;
+        final RuntimeBindingRepository bindingRepository;
+        final CountingSessionRepository sessionRepository;
+        final JdbcToolExecutionRepository executionRepository;
         final FakeResolver resolver;
         final FakeProvisioner provisioner = new FakeProvisioner();
         final FakeTransport transport = new FakeTransport();
@@ -7162,10 +7431,18 @@ class RuntimeBrokerServiceTest {
                 Duration operationLeaseDuration,
                 Duration dispatchLeaseDuration,
                 RuntimePublicationVerifier verifier) {
-            bindingRepository = new InMemoryRuntimeBindingRepository(clock,
-                    () -> "binding-" + bindingIds.incrementAndGet());
+            dataSource = newDataSource("broker-service");
+            JdbcRuntimeBindingRepository bindings =
+                    new JdbcRuntimeBindingRepository(dataSource,
+                            new AesGcmSecretProtector("test", new byte[32]),
+                            () -> "binding-" + bindingIds.incrementAndGet());
+            JdbcRuntimeSessionRepository sessions =
+                    new JdbcRuntimeSessionRepository(dataSource);
             executionRepository =
-                    new InMemoryToolExecutionRepository(clock);
+                    new JdbcToolExecutionRepository(dataSource, bindings);
+            sessionRepository = new CountingSessionRepository(sessions);
+            bindingRepository = new NativeAdmissionBindings(bindings,
+                    sessions, executionRepository);
             resolver = new FakeResolver(scope);
             transport.executionRepository = executionRepository;
             service = verifier == null
@@ -7185,26 +7462,226 @@ class RuntimeBrokerServiceTest {
         }
     }
 
-    private static final class CountingSessionRepository
-            extends InMemoryRuntimeSessionRepository {
-        final AtomicInteger batchReads = new AtomicInteger();
-        final AtomicInteger pointReads = new AtomicInteger();
+    /**
+     * JDBC fixture whose DataSource serves the repository clock from the
+     * test's MutableClock, for the continuous renewal-loop tests (whose lease
+     * stamping must follow the fake clock) and the CSI service-ordering test
+     * that authorizes through the execution-level test-access CAS without CSI
+     * admission evidence.
+     */
+    private static final class FakeClockFixture implements AutoCloseable {
+        final AtomicInteger bindingIds = new AtomicInteger();
+        final AtomicInteger executionIds = new AtomicInteger();
+        final DataSource dataSource;
+        final JdbcRuntimeBindingRepository bindingRepository;
+        final JdbcRuntimeSessionRepository sessionRepository;
+        final JdbcToolExecutionRepository executionRepository;
+        final FakeResolver resolver;
+        final FakeProvisioner provisioner = new FakeProvisioner();
+        final FakeTransport transport = new FakeTransport();
+        final RuntimeBrokerService service;
+
+        FakeClockFixture(RuntimeScope scope) {
+            this(scope, new MutableClock(START), Duration.ofMinutes(1),
+                    Duration.ofMinutes(1));
+        }
+
+        FakeClockFixture(RuntimeScope scope, Clock clock,
+                Duration dispatchLeaseDuration) {
+            this(scope, clock, Duration.ofMinutes(1), dispatchLeaseDuration);
+        }
+
+        FakeClockFixture(RuntimeScope scope, Clock clock,
+                Duration operationLeaseDuration,
+                Duration dispatchLeaseDuration) {
+            dataSource = fakeClockDataSource(
+                    newDataSource("broker-fake-clock"), clock);
+            bindingRepository = new JdbcRuntimeBindingRepository(dataSource,
+                    new AesGcmSecretProtector("test", new byte[32]),
+                    () -> "binding-" + bindingIds.incrementAndGet());
+            sessionRepository = new JdbcRuntimeSessionRepository(dataSource);
+            executionRepository =
+                    new JdbcToolExecutionRepository(dataSource, bindingRepository);
+            resolver = new FakeResolver(scope);
+            transport.executionRepository = executionRepository;
+            service = new RuntimeBrokerService(resolver, provisioner, transport,
+                    bindingRepository, sessionRepository, executionRepository,
+                    "broker", operationLeaseDuration, dispatchLeaseDuration,
+                    clock, () -> "execution-" + executionIds.incrementAndGet());
+        }
 
         @Override
-        public synchronized RuntimeSessionRecord findHistorical(String tenantId,
+        public void close() {
+            service.close();
+        }
+    }
+
+    /**
+     * Presents the raw same-DataSource JDBC repositories to the binding
+     * repository's cross-repository transactions, which require native
+     * repositories, while the service and the tests keep reading and writing
+     * through the instrumented session/execution wrappers.
+     */
+    private static final class NativeAdmissionBindings
+            extends DelegatingBindingRepository {
+        private final RuntimeSessionRepository nativeSessions;
+        private final ToolExecutionRepository nativeExecutions;
+
+        NativeAdmissionBindings(RuntimeBindingRepository delegate,
+                RuntimeSessionRepository nativeSessions,
+                ToolExecutionRepository nativeExecutions) {
+            super(delegate);
+            this.nativeSessions = nativeSessions;
+            this.nativeExecutions = nativeExecutions;
+        }
+
+        @Override
+        public RuntimeSessionRecord admitSession(
+                RuntimeSessionRepository sessions,
+                RuntimeSessionRecord candidate) {
+            return delegate.admitSession(nativeSessions, candidate);
+        }
+
+        @Override
+        public RuntimeSessionRecord createSessionTombstone(
+                RuntimeSessionRepository sessions,
+                RuntimeSessionRecord candidate) {
+            return delegate.createSessionTombstone(nativeSessions, candidate);
+        }
+
+        @Override
+        public RuntimeSessionRecord requireSessionAdmission(
+                RuntimeSessionRepository sessions,
+                RuntimeSessionRecord expected) {
+            return delegate.requireSessionAdmission(nativeSessions, expected);
+        }
+
+        @Override
+        public ToolExecutionRecord admitExecution(
+                RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions,
+                ToolExecutionRecord candidate) {
+            return delegate.admitExecution(nativeSessions, nativeExecutions,
+                    candidate);
+        }
+
+        @Override
+        public ToolExecutionRecord authorizeDispatch(
+                RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions,
+                ToolExecutionRecord expected, String owner,
+                long dispatchGeneration) {
+            return delegate.authorizeDispatch(nativeSessions, nativeExecutions,
+                    expected, owner, dispatchGeneration);
+        }
+
+        @Override
+        public RuntimeBindingRecord recoverLost(
+                RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions,
+                RuntimeBindingRecord expected) {
+            return delegate.recoverLost(nativeSessions, nativeExecutions,
+                    expected);
+        }
+
+        @Override
+        public RuntimeBindingRecord finishLostRecovery(
+                RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions,
+                RuntimeBindingRecord expected) {
+            return delegate.finishLostRecovery(nativeSessions, nativeExecutions,
+                    expected);
+        }
+
+        @Override
+        public RuntimeSessionRecord completeSessionRelease(
+                RuntimeSessionRepository sessions,
+                RuntimeSessionRecord expected) {
+            return delegate.completeSessionRelease(nativeSessions, expected);
+        }
+
+        @Override
+        public RuntimeSessionRecord completeStoppedSessionRelease(
+                RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions,
+                RuntimeSessionRecord expected, RuntimeBindingRecord claim) {
+            return delegate.completeStoppedSessionRelease(nativeSessions,
+                    nativeExecutions, expected, claim);
+        }
+
+        @Override
+        public RuntimeSessionRecord beginSessionRelease(
+                RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions,
+                RuntimeSessionRecord expected) {
+            return delegate.beginSessionRelease(nativeSessions, nativeExecutions,
+                    expected);
+        }
+    }
+
+    private static final class CountingSessionRepository
+            implements RuntimeSessionRepository {
+        final AtomicInteger batchReads = new AtomicInteger();
+        final AtomicInteger pointReads = new AtomicInteger();
+        private final RuntimeSessionRepository delegate;
+
+        CountingSessionRepository(RuntimeSessionRepository delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public RuntimeSessionRecord findOrCreate(RuntimeSessionRecord candidate) {
+            return delegate.findOrCreate(candidate);
+        }
+
+        @Override
+        public RuntimeSessionRecord findById(RuntimeScope scope,
+                String runtimeSessionId) {
+            return delegate.findById(scope, runtimeSessionId);
+        }
+
+        @Override
+        public RuntimeSessionRecord findHistorical(String tenantId,
                 String harnessSessionId, String runtimeSessionId) {
             pointReads.incrementAndGet();
-            return super.findHistorical(tenantId, harnessSessionId,
+            return delegate.findHistorical(tenantId, harnessSessionId,
                     runtimeSessionId);
         }
 
         @Override
-        public synchronized List<RuntimeSessionRecord> findHistoricalByIds(
+        public List<RuntimeSessionRecord> findHistoricalByIds(
                 String tenantId, String harnessSessionId,
                 java.util.Collection<String> runtimeSessionIds) {
             batchReads.incrementAndGet();
-            return super.findHistoricalByIds(tenantId, harnessSessionId,
+            return delegate.findHistoricalByIds(tenantId, harnessSessionId,
                     runtimeSessionIds);
+        }
+
+        @Override
+        public RuntimeSessionRecord compareAndSet(RuntimeSessionRecord expected,
+                RuntimeSessionRecord replacement) {
+            return delegate.compareAndSet(expected, replacement);
+        }
+
+        @Override
+        public List<RuntimeSessionRecord> findByBinding(String bindingId,
+                long generation, String afterRuntimeSessionId, int limit) {
+            return delegate.findByBinding(bindingId, generation,
+                    afterRuntimeSessionId, limit);
+        }
+
+        @Override
+        public long countActiveByBinding(String bindingId,
+                long runtimeGeneration) {
+            return delegate.countActiveByBinding(bindingId, runtimeGeneration);
+        }
+
+        @Override
+        public List<RuntimeSessionRecord> findActiveByHarnessSession(
+                String tenantId, String harnessSessionId,
+                RuntimeSessionRecord after, int limit) {
+            return delegate.findActiveByHarnessSession(tenantId,
+                    harnessSessionId, after, limit);
         }
     }
 
@@ -7494,147 +7971,52 @@ class RuntimeBrokerServiceTest {
         }
     }
 
-    private static final class TakeoverExecutionRepository
-            implements ToolExecutionRepository {
-        private final MutableClock clock;
-        private final InMemoryToolExecutionRepository delegate;
+    /**
+     * Stages a dispatch takeover at the admission that performs the
+     * DISPATCHING->EXECUTING write: the first broker-a authorization finds its
+     * claim lapsed (the stored deadline moved into the past) and broker-b has
+     * already claimed and executed, so broker-a's write fences and nothing here
+     * runs. JDBC performs that write inside authorizeDispatch, so the hook lives
+     * on the binding repository rather than on an execution compare-and-set.
+     */
+    private static final class TakeoverBindingRepository
+            extends DelegatingBindingRepository {
+        private final DataSource source;
+        private final ToolExecutionRepository executions;
         private boolean takeoverPending = true;
 
-        TakeoverExecutionRepository(MutableClock clock) {
-            this.clock = clock;
-            delegate = new InMemoryToolExecutionRepository(clock);
+        TakeoverBindingRepository(RuntimeBindingRepository delegate,
+                DataSource source, ToolExecutionRepository executions) {
+            super(delegate);
+            this.source = source;
+            this.executions = executions;
         }
 
         @Override
-        public ToolExecutionRecord settlePrepared(ToolExecutionRecord expected,
-                Map<String, Object> result, Instant settlementTime) {
-            return delegate.settlePrepared(expected, result, settlementTime);
-        }
-        @Override
-        public boolean hasActiveByRuntimeSession(String bindingId, long generation,
-                String runtimeSessionId) {
-            return delegate.hasActiveByRuntimeSession(bindingId, generation, runtimeSessionId);
-        }
-
-        @Override
-        public boolean hasActiveByRuntimeSession(String bindingId, long generation,
-                String runtimeSessionId,
-                java.util.Set<String> excludingExecutionCallIds) {
-            return delegate.hasActiveByRuntimeSession(bindingId, generation,
-                    runtimeSessionId, excludingExecutionCallIds);
-        }
-
-        @Override
-        public ToolExecutionRecord findOrCreate(
-                ToolExecutionRecord candidate) {
-            return delegate.findOrCreate(candidate);
-        }
-
-        @Override
-        public ToolExecutionRecord findByExecutionCallId(
-                String executionCallId) {
-            return delegate.findByExecutionCallId(executionCallId);
-        }
-
-        @Override
-        public ToolExecutionRecord findByIdempotencyKey(
-                String idempotencyKey) {
-            return delegate.findByIdempotencyKey(idempotencyKey);
-        }
-
-        @Override
-        public ToolExecutionRecord compareAndSet(
-                ToolExecutionRecord expected,
-                ToolExecutionRecord replacement, String owner,
+        public ToolExecutionRecord authorizeDispatch(
+                RuntimeSessionRepository sessions,
+                ToolExecutionRepository executions,
+                ToolExecutionRecord expected, String owner,
                 long dispatchGeneration) {
             if (takeoverPending && "broker-a".equals(owner)) {
                 takeoverPending = false;
-                clock.advance(Duration.ofSeconds(2));
-                ToolExecutionRecord claimed = delegate.claimDispatch(
+                expire(source, "ma_tool_execution", "dispatch_lease_until",
+                        "execution_call_id", expected.getExecutionCallId());
+                ToolExecutionRecord claimed = this.executions.claimDispatch(
                         expected.getExecutionCallId(), "broker-b",
                         Duration.ofMinutes(1));
-                delegate.compareAndSet(claimed, claimed.withState(
+                this.executions.compareAndSet(claimed, claimed.withState(
                         ToolExecutionRecord.State.EXECUTING, false),
                         "broker-b", claimed.getDispatchGeneration());
             }
-            return delegate.compareAndSet(expected, replacement, owner,
-                    dispatchGeneration);
-        }
-
-        @Override
-        public ToolExecutionRecord claimDispatch(String executionCallId,
-                String owner, Duration leaseDuration) {
-            return delegate.claimDispatch(executionCallId, owner,
-                    leaseDuration);
-        }
-
-        @Override
-        public ToolExecutionRecord renewDispatch(String executionCallId,
-                String owner, long dispatchGeneration,
-                Duration leaseDuration) {
-            return delegate.renewDispatch(executionCallId, owner,
-                    dispatchGeneration, leaseDuration);
-        }
-
-        @Override
-        public ToolExecutionRecord requestCancel(String executionCallId,
-                long expectedVersion) {
-            return delegate.requestCancel(executionCallId, expectedVersion);
-        }
-
-        @Override
-        public ToolExecutionRecord resolveUnknown(
-                ToolExecutionRecord expected,
-                Map<String, Object> resolutionResult,
-                Instant resolutionTime) {
-            return delegate.resolveUnknown(expected, resolutionResult,
-                    resolutionTime);
-        }
-
-        @Override
-        public boolean hasActiveByRuntimeSession(String runtimeSessionId) {
-            return delegate.hasActiveByRuntimeSession(runtimeSessionId);
-        }
-
-        @Override
-        public ToolExecutionRecord resolveUnsettled(ToolExecutionRecord expected,
-                Map<String, Object> result, Instant time) {
-            return delegate.resolveUnsettled(expected, result, time);
-        }
-
-        @Override
-        public List<ToolExecutionRecord> findUnsettled(RuntimeSessionRecord session,
-                String afterExecutionCallId, int limit) {
-            return delegate.findUnsettled(session, afterExecutionCallId, limit);
-        }
-
-        @Override
-        public List<ToolExecutionRecord> findBackgroundProcesses(
-                RuntimeSessionRecord session, String afterExecutionCallId,
-                int limit) {
-            return delegate.findBackgroundProcesses(session,
-                    afterExecutionCallId, limit);
-        }
-
-        @Override
-        public List<ToolHoldRow> findHoldRowsByHarnessSession(
-                String harnessSessionId, String afterExecutionCallId,
-                int limit) {
-            return delegate.findHoldRowsByHarnessSession(harnessSessionId,
-                    afterExecutionCallId, limit);
-        }
-
-        @Override
-        public boolean hasActiveByBinding(String bindingId,
-                long runtimeGeneration) {
-            return delegate.hasActiveByBinding(bindingId,
-                    runtimeGeneration);
+            return delegate.authorizeDispatch(sessions, executions, expected,
+                    owner, dispatchGeneration);
         }
     }
 
     private static final class HookedExecutionRepository
             implements ToolExecutionRepository {
-        private final InMemoryToolExecutionRepository delegate;
+        final JdbcToolExecutionRepository delegate;
         volatile Runnable beforeClaim;
         volatile Runnable afterClaim;
         volatile Runnable afterUnknown;
@@ -7643,8 +8025,8 @@ class RuntimeBrokerServiceTest {
         volatile boolean failResolve;
         volatile boolean failReads;
 
-        HookedExecutionRepository(Clock clock) {
-            delegate = new InMemoryToolExecutionRepository(clock);
+        HookedExecutionRepository(JdbcToolExecutionRepository delegate) {
+            this.delegate = delegate;
         }
 
         @Override
@@ -7799,8 +8181,9 @@ class RuntimeBrokerServiceTest {
         volatile RuntimeBindingRecord nextRead;
         volatile Runnable afterReady;
 
-        StaleBindingRepository(Clock clock) {
-            super(new InMemoryRuntimeBindingRepository(clock,
+        StaleBindingRepository(DataSource source) {
+            super(new JdbcRuntimeBindingRepository(source,
+                    new AesGcmSecretProtector("test", new byte[32]),
                     () -> "binding"));
         }
 
@@ -7837,7 +8220,7 @@ class RuntimeBrokerServiceTest {
      */
     private static RuntimeBindingRecord managedStoppedLostBinding(
             RuntimeBindingRepository bindings,
-            InMemoryRuntimeSessionRepository sessions, Clock clock) {
+            RuntimeSessionRepository sessions, Clock clock) {
         RuntimeScope scope = new RuntimeScope("tenant-m", "workspace-m", "1",
                 "/workspace", WorkspaceExecutionProfile.CAPABILITY_DIGEST,
                 "session");
@@ -7942,14 +8325,18 @@ class RuntimeBrokerServiceTest {
     /**
      * A binding repository whose {@code recoverLost} advances the clock
      * first, simulating the slow recovery transactions of a loaded runner.
+     * The fake-clock DataSource keeps the JDBC lease stamping on that clock.
      */
     private static final class SlowRecoveryBindingRepository
-            extends StaleBindingRepository {
+            extends DelegatingBindingRepository {
         private final MutableClock clock;
         private final Duration advance;
 
-        SlowRecoveryBindingRepository(MutableClock clock, Duration advance) {
-            super(clock);
+        SlowRecoveryBindingRepository(DataSource source, MutableClock clock,
+                Duration advance) {
+            super(new JdbcRuntimeBindingRepository(source,
+                    new AesGcmSecretProtector("test", new byte[32]),
+                    () -> "binding"));
             this.clock = clock;
             this.advance = advance;
         }
@@ -7960,7 +8347,7 @@ class RuntimeBrokerServiceTest {
                 ToolExecutionRepository executions,
                 RuntimeBindingRecord expected) {
             clock.advance(advance);
-            return super.recoverLost(sessions, executions, expected);
+            return delegate.recoverLost(sessions, executions, expected);
         }
     }
 

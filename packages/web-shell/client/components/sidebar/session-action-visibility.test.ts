@@ -71,6 +71,7 @@ describe('session action visibility matrix', () => {
       expect([...inline].sort()).toEqual(['pin']);
       expect([...dropdown].sort()).toEqual([
         'archive',
+        'bindPr',
         'delete',
         'export',
         'group',
@@ -115,6 +116,7 @@ describe('session action visibility matrix', () => {
       expect([...inline].sort()).toEqual(['delete']);
       expect([...dropdown].sort()).toEqual([
         'archive',
+        'bindPr',
         'export',
         'group',
         'pin',
