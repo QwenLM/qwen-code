@@ -203,6 +203,23 @@ describe('web-shell i18n catalog', () => {
     },
   );
 
+  it.each([
+    { type: 'dingtalk', english: 'DingTalk', chinese: '钉钉' },
+    { type: 'feishu', english: 'Feishu', chinese: '飞书' },
+  ])('localizes $type in the connection chooser', (platform) => {
+    for (const language of ['en', 'zh-CN'] as const) {
+      const t = getTranslator(language);
+      const name = t(`channels.platform.name.${platform.type}`);
+      expect(name).toBe(
+        language === 'zh-CN' ? platform.chinese : platform.english,
+      );
+      expect(t('channels.method.title', { platform: name })).toContain(name);
+      expect(t('channels.method.description', { platform: name })).toContain(
+        name,
+      );
+    }
+  });
+
   it('keeps the channel range message spacing in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');

@@ -4672,6 +4672,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.platform.available': 'Available',
   'channels.platform.configure': 'Configure',
   'channels.platform.add': 'Add connection',
+  'channels.platform.name.dingtalk': 'DingTalk',
+  'channels.platform.name.feishu': 'Feishu',
   'channels.method.title': (v) =>
     `Choose a ${v?.platform ?? 'Channel'} connection`,
   'channels.method.description': (v) =>
@@ -9609,9 +9611,11 @@ const ZH: Messages = {
   'channels.platform.available': '已开放',
   'channels.platform.configure': '配置',
   'channels.platform.add': '添加连接',
-  'channels.method.title': (v) => `选择 ${v?.platform ?? '此频道'} 的连接方式`,
+  'channels.platform.name.dingtalk': '钉钉',
+  'channels.platform.name.feishu': '飞书',
+  'channels.method.title': (v) => `选择${v?.platform ?? '此频道'}的连接方式`,
   'channels.method.description': (v) =>
-    `选择此频道连接 ${v?.platform ?? '平台'} 的方式。`,
+    `选择此频道连接${v?.platform ?? '平台'}的方式。`,
   'channels.method.applicationBot': '应用机器人',
   'channels.method.applicationBot.description':
     '通过应用机器人接收消息并回复。',

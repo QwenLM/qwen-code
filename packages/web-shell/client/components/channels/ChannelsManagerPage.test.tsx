@@ -431,6 +431,49 @@ describe('ChannelsManagerPage', () => {
     },
   );
 
+  it.each([
+    { type: 'dingtalk', english: 'DingTalk', chinese: '钉钉' },
+    { type: 'feishu', english: 'Feishu', chinese: '飞书' },
+  ])(
+    'localizes the open $type chooser when language changes',
+    async (platform) => {
+      channelState.current.catalog.push({
+        ...webhookType,
+        type: `${platform.type}-webhook`,
+        displayName: `${platform.english} Webhook`,
+      });
+      await renderPage('zh-CN');
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            `[data-testid="channel-platform-${platform.type}"]`,
+          )!
+          .click();
+      });
+      const dialog = document.querySelector('[role="dialog"]')!;
+      for (const language of ['zh-CN', 'en', 'zh-CN'] as const) {
+        await renderPage(language);
+        expect(document.querySelector('[role="dialog"]')).toBe(dialog);
+        expect(
+          document.getElementById(dialog.getAttribute('aria-labelledby')!)
+            ?.textContent,
+        ).toBe(
+          language === 'zh-CN'
+            ? `选择${platform.chinese}的连接方式`
+            : `Choose a ${platform.english} connection`,
+        );
+        expect(
+          document.getElementById(dialog.getAttribute('aria-describedby')!)
+            ?.textContent,
+        ).toBe(
+          language === 'zh-CN'
+            ? `选择此频道连接${platform.chinese}的方式。`
+            : `Choose how this Channel connects to ${platform.english}.`,
+        );
+      }
+    },
+  );
+
   it('shows only the three enabled platforms and configured instances', async () => {
     await renderPage();
 

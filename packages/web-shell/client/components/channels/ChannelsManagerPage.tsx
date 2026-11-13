@@ -222,9 +222,12 @@ export function ChannelsManagerPage({
     instance?: DaemonChannelInstanceSnapshot;
   }>();
   const [methodChoices, setMethodChoices] = useState<{
-    displayName: string;
+    type: string;
     methods: DaemonChannelTypeDescriptor[];
   }>();
+  const methodPlatformVariables = methodChoices && {
+    platform: t(`channels.platform.name.${methodChoices.type}`),
+  };
   const editorRef = useRef(editor);
   useEffect(() => {
     editorRef.current = editor;
@@ -914,16 +917,10 @@ export function ChannelsManagerPage({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {t(
-                'channels.method.title',
-                methodChoices && { platform: methodChoices.displayName },
-              )}
+              {t('channels.method.title', methodPlatformVariables)}
             </DialogTitle>
             <DialogDescription>
-              {t(
-                'channels.method.description',
-                methodChoices && { platform: methodChoices.displayName },
-              )}
+              {t('channels.method.description', methodPlatformVariables)}
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-3">
