@@ -32,7 +32,7 @@
 
 在 skill 中增加第二份配方，当增量触及 `packages/managed-agent-server/` 时选用：
 
-1. **镜像。** `maven:3.9.11-eclipse-temurin-21`（自带车道的 Maven 与 JDK）。按 digest 钉住，与 JS 配方钉 `node:22-bookworm` 一致。
+1. **镜像。** 自带车道 Maven 与 JDK 的 Maven 镜像，如 `maven:3.9.11-eclipse-temurin-21`。实现时核实确切 tag 存在并按 digest 钉住，与 JS 配方钉 `node:22-bookworm` 一致。
 2. **离线 Maven 仓库。** 宿主（可信侧）用 PR head 的 pom 跑 `mvn dependency:go-offline` 预置每轮仓库，使用宿主正常的镜像源配置。容器只挂载该仓库目录——绝不挂 `settings.xml`（可能带镜像源凭据）——并以 `-Dmaven.repo.local=/m2 --network none` 运行。离线解析保住无凭据边界：无网络即无外泄路径，容器内也没有镜像源鉴权。
 3. **可信脚本、PR 克隆、模型代理。** 与 JS 配方同一布局：脚本来自可信克隆，轮次跑在独立 PR 克隆里，任何模型驱动步骤走宿主侧 `verify-pr-model-proxy.mjs` 中继。Java 电池本身不需要模型访问。
 4. **声明。** 门禁通过后轮次写入 `{"mode":"container","detail":"maven:3.9.11-eclipse-temurin-21, --network none, offline m2, credential-free"}`。
@@ -46,7 +46,7 @@
 
 - 容器看不到任何宿主凭据；挂载的仓库只有依赖 jar。
 - `--require-isolation` 必须在内部 exit 0；仅有容器标记不算通过（既有规则）。
-- 预置步骤在宿主上以维护者正常的 Maven 配置运行，属可信操作；不得执行 PR 代码（只做解析）。
+- 预置步骤在宿主上以维护者正常的 Maven 配置运行，属可信操作；不得执行 PR 代码（只做解析）。Maven 启动时会加载 `.mvn/extensions.xml` 核心扩展，因此预置必须跑在移除了 PR `.mvn/` 目录的副本上——否则「只做解析」会在宿主上执行 PR 植入的代码。
 
 ## 风险
 

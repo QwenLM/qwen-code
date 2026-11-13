@@ -57,8 +57,10 @@ without `boundary.json`); this design removes the reason for it.
 A second recipe in the skill, selected when the delta touches
 `packages/managed-agent-server/`:
 
-1. **Image.** `maven:3.9.11-eclipse-temurin-21` (bundles the lane's Maven and
-   JDK). Pin by digest, as the JS recipe pins `node:22-bookworm`.
+1. **Image.** A Maven image bundling the lane's Maven and JDK, such as
+   `maven:3.9.11-eclipse-temurin-21`. Verify the exact tag exists at
+   implementation time and pin by digest, as the JS recipe pins
+   `node:22-bookworm`.
 2. **Offline Maven repository.** The host (trusted side) seeds a per-round
    repository with `mvn dependency:go-offline` against the PR head's poms,
    using the host's normal mirror settings. The container mounts that
@@ -99,6 +101,9 @@ A second recipe in the skill, selected when the delta touches
   pass (existing rule).
 - The seed step runs on the host with the maintainer's normal Maven settings
   and is a trusted operation; it must not execute PR code (resolution only).
+  Maven loads `.mvn/extensions.xml` core extensions at startup, so the seed
+  must run against a copy with the PR's `.mvn/` directory removed —
+  otherwise "resolution only" executes PR-planted code on the host.
 
 ## Risks
 
