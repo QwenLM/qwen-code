@@ -1,5 +1,5 @@
 import { cp, mkdir, rm, symlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import { PUBLIC_DOC_ROOTS } from '../src/app/public-docs.js';
 
@@ -13,7 +13,15 @@ async function linkPublicDocs() {
     await cp('../docs/_meta.ts', join(contentDir, '_meta.ts'));
 
     for (const root of PUBLIC_DOC_ROOTS) {
-      await symlink(join('..', '..', 'docs', root), join(contentDir, root));
+      const source = join('..', '..', 'docs', root);
+      // Windows symlinks need Developer Mode or elevation; a junction needs
+      // neither, but it must name an absolute target.
+      const target = join(contentDir, root);
+      if (process.platform === 'win32') {
+        await symlink(resolve(contentDir, source), target, 'junction');
+      } else {
+        await symlink(source, target);
+      }
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
