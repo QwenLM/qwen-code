@@ -43,7 +43,7 @@ action 响应，都在同一行上排队，而且没有 Turn 提交那样的五�
 | `beginContextCompression`、`beginTaskCancelOperation`、`ManagedActionStore.admit`                                     | 去掉               | 幂等键按 Session 划分。它们在写入 `TASK_CANCEL` 或 `ACTION_RESPONSE` 之前，都通过 `requireOpen` 或 `requireSessionOpen` 检查 fence，迁移 prepare 的修复覆盖了这种情况。 |
 | `requireMcpManagement`、`requireExtensionManagement`                                                                  | 去掉               | 独立的只读校验事务。配置提交会在自己的事务中再次校验。                                                                                                                  |
 | `beginSessionMutation`                                                                                                | 去掉，并做下述修改 | 命令键按租户划分，由回执唯一键处理跨 Session 竞争。                                                                                                                     |
-| `beginSessionRename`                                                                                                  | 保留               | 保留投递的锁定读与 supersede 更新会锁定操作索引的空范围。即使指定按 Session 划分的 identity 索引，MySQL 并发改名仍会死锁。                                              |
+| `settleRenameSync`（[单一权威重构](2026-11-12-managed-rename-single-authority.zh-CN.md)中取代 `beginSessionRename`）  | 去掉               | 同步结算不写投递行，因此不会锁定任何操作范围。Session 锁最先获取，跨 Session 竞争由回执唯一键裁决，与 `changeSessionModel` 一致。                                       |
 | `insertWorkspaceSessionCommand`、`insertInternalTeamLeadSessionCommand`、`insertChildSession`                         | 保留               | 本次未审计。创建流程依赖 guard 排在事务首次一致性读之前，且其 Workspace 解析与准入辅助方法尚未追踪（标准 2 与 4）。                                                     |
 | 生命周期（`beginLifecycle`、`beginOperation`、`beginWorkspaceClose`、`beginChildClose`、`unarchiveWorkspaceSession`） | 保留               | L3 生命周期协议，频率低。                                                                                                                                               |
 
@@ -60,13 +60,13 @@ mutation 准入另有以下修改：
   的所有唯一键都由它派生。此时尚未写入任何数据。命令以锁定读重新读取该回执，并沿用现有规则：
   Session 或摘要不同则返回 `409 idempotency_conflict`。若引擎仍看不到该回执，同样返回该冲突。
 
-改名准入继续保留租户 guard，直到能够安全替换其空范围锁定读与更新。已有改名投递和完成命令
-仍会去掉 guard。本改动依赖 Turn 准入设计中的迁移 prepare 修改，因为任务取消和 action 响应会创建
+改名准入也去掉 guard。[单一权威重构](2026-11-12-managed-rename-single-authority.zh-CN.md)
+已用 `settleRenameSync` 取代 `beginSessionRename`：同步结算不写投递行，保留 guard 的
+空范围锁定读与 supersede 更新随之消失，统计未结束标题投递的迁移空闲门也一并删除。
+本改动依赖 Turn 准入设计中的迁移 prepare 修改，因为任务取消和 action 响应会创建
 迁移需要统计的工作。
 
 ## 风险
-
-- 改名准入仍在租户内串行；去掉它的 guard 留待后续。
 
 - 同一 Session 的命令仍在其 Session 行上串行。检查 fence 的命令在迁移或物理 fence 期间，
   会在存储的别名行和目录行上短暂等待。
@@ -79,12 +79,15 @@ mutation 准入另有以下修改：
 2. `ManagedSchemaSessionStoreTest`（及其 MySQL 子类）：在另一 Session 以同一键提交改名之前
    固定快照，改名仍返回 `idempotency_conflict`，且不写入任何数据。
 3. 同一租户的两个 Session 使用不同键并发准入首次改名，两者均成功，revision 均为一，
-   两个投递均保持待处理。该用例在 H2 及其 MySQL 子类中执行。
+   且不写任何投递行。保持打开的首次改名不阻塞另一 Session 的首次改名（同租户或跨租户）。
+   用例在 H2 及其 MySQL 子类中执行。
 4. 现有的改名、模型、审批、MCP、扩展、上下文压缩、任务取消、cwd 变更、action 响应、
    迁移以及 CSI Session 拒绝测试继续通过，包括 CI 中的 MySQL profile。
 
 ## 后续工作
 
-- 消除共享空范围的间隙锁，并在 MySQL 上验证并发首次改名后，再去掉改名准入的 guard。
+- 已完成：改名准入的 guard 已去掉。单一权威重构通过删除投递行消除了共享空范围的间隙锁，
+  `ManagedSchemaSessionStoreTest` 的 `anOpenFirstRenameDoesNotHoldBackAnotherSessionsFirstRename`
+  （及其 `ManagedSchemaSessionMySqlIT` 子类）在 MySQL 上验证了并发首次改名。
 
 - 审计 Session 创建：追踪其 Workspace 解析与准入辅助方法，并在首次一致性读之前改用对相关行的锁定读，替代 guard 的排序作用。
