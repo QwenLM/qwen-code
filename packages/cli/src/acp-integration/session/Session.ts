@@ -326,8 +326,6 @@ import {
   decideNotificationAdmission,
   DroppedNotificationTally,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
-  getExtractNoopSkipTurns,
-  isBelowCompactionWarn,
 } from '@qwen-code/qwen-code-core';
 import {
   MANAGED_RUNTIME_OUTCOME_UNKNOWN,
@@ -11582,69 +11580,31 @@ export class Session implements SessionContext {
       return;
     }
     // The shared round leaves skill review to the client, which runs it on the
-    // tool turns too. The legacy round only reaches this ACP-side branch, so
-    // without this call `toolCallCount` would accumulate unread and `qwen
-    // serve` would never produce an auto-skill candidate.
-    const skillReview = this.#runManagedAutoSkillReview();
+    // tool turns too. The legacy round runs no client round of its own, so it
+    // reaches the client's post-turn work from here. Delegating instead of
+    // re-implementing it keeps the per-scope migration, Extract, Dream, the
+    // channel-turn skip and the session-agent skip in one place — the copies
+    // had already drifted on the last of those, and only this round's client
+    // side keeps `toolCallCount` fed so `qwen serve` produces an auto-skill
+    // candidate.
     if (!this.config.getManagedAutoMemoryEnabled()) {
-      return skillReview;
+      return this.#runManagedAutoSkillReview();
     }
-    this.config.getLlmClient().captureCacheSafeParams();
-    const memoryManager = this.config.getMemoryManager();
-    const projectRoot = this.config.getProjectRoot();
-    const history = this.#getCurrentChat().getHistoryShallow();
-    for (const scope of ['project', 'user'] as const) {
-      void memoryManager
-        .scheduleMetadataMigration({
-          projectRoot,
-          scope,
-          config: this.config,
-        })
-        .catch((error: unknown) => {
-          debugLogger.warn(
-            `Failed to schedule ACP ${scope} memory metadata migration.`,
-            error,
-          );
-        });
+    const llmClient = this.config.getLlmClient();
+    llmClient.captureCacheSafeParams();
+    llmClient.runManagedAutoMemoryBackgroundTasks(SendMessageType.UserQuery, {
+      skipMemoryExtraction: channelTurn,
+    });
+    // ACP reports no memory updates, so take the tasks the client queued for
+    // that report instead of leaving them to pile up over the session, and
+    // hand the caller the drain so the turn really waits for it.
+    const drained = llmClient.consumePendingMemoryTaskPromises();
+    if (drained.length === 0) {
+      return;
     }
-    // As the client does for a shared round's channel turn.
-    if (channelTurn) {
-      return skillReview;
-    }
-    void memoryManager
-      .scheduleExtract({
-        projectRoot,
-        sessionId: this.config.getSessionId(),
-        history,
-        config: this.config,
-        ...(getExtractNoopSkipTurns() > 0 && {
-          // The next prompt's known base; see isBelowCompactionWarn.
-          belowCompactionWarn: isBelowCompactionWarn(
-            this.config,
-            this.#getCurrentChat().getLastPromptTokenCount() +
-              this.#getCurrentChat().getLastOutputTokenCount(),
-          ),
-        }),
-      })
-      .catch((error: unknown) => {
-        debugLogger.warn(
-          'Failed to schedule ACP managed auto-memory extraction.',
-          error,
-        );
-      });
-    void memoryManager
-      .scheduleDream({
-        projectRoot,
-        sessionId: this.config.getSessionId(),
-        config: this.config,
-      })
-      .catch((error: unknown) => {
-        debugLogger.warn(
-          'Failed to schedule ACP managed auto-memory dream.',
-          error,
-        );
-      });
-    return skillReview;
+    return Promise.all(drained.map((promise) => promise.catch(() => {}))).then(
+      () => undefined,
+    );
   }
 
   async #buildNextMessageAfterToolRun(

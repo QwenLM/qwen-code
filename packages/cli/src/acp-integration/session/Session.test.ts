@@ -6733,42 +6733,30 @@ describe('Session', () => {
         mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
       ).toHaveBeenCalledOnce();
       expect(textParts(firstSentMessage())).toEqual([memoryPrompt, 'hello']);
-      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
-        2,
-      );
-      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledWith({
-        projectRoot: '/repo',
-        scope: 'project',
-        config: mockConfig,
+      // The migration, Extract and Dream work lives in the client, which the
+      // ACP branch now delegates to instead of re-implementing it: one copy,
+      // so the session-agent skip cannot drift again.
+      expect(
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+      ).toHaveBeenCalledWith(core.SendMessageType.UserQuery, {
+        skipMemoryExtraction: false,
       });
-      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledWith({
-        projectRoot: '/repo',
-        scope: 'user',
-        config: mockConfig,
-      });
+      expect(
+        mockMemoryManager.scheduleMetadataMigration,
+      ).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
 
       // Captured twice: once inside `#recordPromptCompletionEffects` (before
-      // `scheduleExtract`, pinned below) and once at the turn boundary that
+      // the delegated background work) and once at the turn boundary that
       // feeds the follow-up suggestion.
       expect(mockLlmClient.captureCacheSafeParams).toHaveBeenCalledTimes(2);
       expect(
         mockLlmClient.captureCacheSafeParams.mock.invocationCallOrder[0],
       ).toBeLessThan(
-        mockMemoryManager.scheduleExtract.mock.invocationCallOrder[0]!,
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks.mock
+          .invocationCallOrder[0]!,
       );
-      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledWith({
-        projectRoot: '/repo',
-        sessionId: 'test-session-id',
-        history: finalHistory,
-        config: mockConfig,
-      });
-      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledOnce();
-      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledWith({
-        projectRoot: '/repo',
-        sessionId: 'test-session-id',
-        config: mockConfig,
-      });
-      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledOnce();
       expect(
         mockLlmClient.finishManagedAutoMemoryRecall,
       ).toHaveBeenCalledOnce();
@@ -6784,7 +6772,8 @@ describe('Session', () => {
         .mockResolvedValue(createEmptyStream());
       // Blocking work that never settles on its own: if the ACP branch drops
       // the drain promise instead of awaiting it, the turn still completes and
-      // the race below sees 'turn-finished'.
+      // the race below sees 'turn-finished'. Both drains read it — the skill
+      // review's and the one after the delegated background work.
       mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValue([
         new Promise<number>(() => {}),
       ]);
@@ -6802,19 +6791,22 @@ describe('Session', () => {
       ]);
       expect(outcome).toBe('turn-still-waiting');
 
-      // The ACP-side branch owns the memory tasks, so it owns the skill
-      // review too: nothing else in the legacy round would schedule it.
-      expect(mockLlmClient.runManagedAutoSkillReview).toHaveBeenCalledOnce();
+      // The skill review is the client's job now — it schedules one on every
+      // UserQuery/ToolResult turn — so the ACP branch only has to reach that
+      // entry point and drain what it queues.
       expect(
         mockLlmClient.runManagedAutoMemoryBackgroundTasks,
-      ).not.toHaveBeenCalled();
+      ).toHaveBeenCalledWith(core.SendMessageType.UserQuery, {
+        skipMemoryExtraction: false,
+      });
       // The queued promise belongs to this branch, so this branch has to take
       // it back; nothing on the ACP path would ever drain it otherwise.
       expect(mockLlmClient.consumePendingMemoryTaskPromises).toHaveBeenCalled();
-      // Draining before the schedule would empty an array the review has not
+      // Draining before the schedule would empty an array the client has not
       // filled yet, leaving the real promise to pile up.
       expect(
-        mockLlmClient.runManagedAutoSkillReview.mock.invocationCallOrder[0]!,
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks.mock
+          .invocationCallOrder[0]!,
       ).toBeLessThan(
         mockLlmClient.consumePendingMemoryTaskPromises.mock
           .invocationCallOrder[0]!,
@@ -6840,15 +6832,48 @@ describe('Session', () => {
 
       expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
       expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
-      // The metadata migration reads no turn: it still runs.
-      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
-        2,
-      );
+      // The client still runs the migration for a channel turn; only the
+      // turn-shaped work is skipped.
+      expect(
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+      ).toHaveBeenCalledWith(core.SendMessageType.UserQuery, {
+        skipMemoryExtraction: true,
+      });
       // Recall still serves the reply.
       expect(mockLlmClient.beginManagedAutoMemoryRecall).toHaveBeenCalledWith(
         'a comment',
         expect.any(AbortSignal),
       );
+    });
+
+    it("leaves an agent session's turn to the client's own skip", async () => {
+      // The hidden session an agent runs is agent-to-agent work: the client's
+      // helper drops Extract and Dream for it. The legacy round used to
+      // re-implement that block without the check, so it extracted memory from
+      // chatter the shared round deliberately excludes.
+      Object.assign(mockConfig, { isSessionAgentSession: () => true });
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
+        { role: 'user', parts: [{ text: 'agent prompt' }] },
+        { role: 'model', parts: [{ text: 'agent reply' }] },
+      ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'agent prompt' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+      expect(
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+      ).toHaveBeenCalledWith(core.SendMessageType.UserQuery, {
+        skipMemoryExtraction: false,
+      });
     });
 
     it('drives the prepared recall-mode transition before the per-turn reset on a fresh user turn', async () => {
@@ -40350,8 +40375,13 @@ describe('Session', () => {
           });
 
           expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
-          expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledOnce();
-          expect(mockMemoryManager.scheduleDream).toHaveBeenCalledOnce();
+          // Extract and Dream belong to the client's background work now, so
+          // the ACP branch only reaches that entry point.
+          expect(
+            mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+          ).toHaveBeenCalledWith(core.SendMessageType.UserQuery, {
+            skipMemoryExtraction: false,
+          });
         });
 
         it('waits for a requested delivery final without a channel marker', async () => {
