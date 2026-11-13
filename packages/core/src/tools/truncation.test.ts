@@ -1002,4 +1002,26 @@ The full output has been saved to: not a header, just text`;
     expect(unsaved.content).toContain('session disk budget exhausted');
     expect(isPersistedOutputStub(unsaved.content)).toBe(false);
   });
+
+  // The `<persisted-output>` tag branch of `buildStub` is only reached via a
+  // *successful* persist with an absolute tool-results dir; the note-form
+  // stubs above (budget exhausted, invalid callId) never carry the tag. Pin
+  // the shape the real producer emits so a moved or rewrapped tag turns red.
+  it('classifies a real persisted-output stub from the producer', async () => {
+    const saved = await persistAndTruncateToolResult(
+      'call-1',
+      'shell',
+      'x'.repeat(60_000),
+      {
+        getToolResultBytesWritten: () => 0,
+        trackToolResultBytes: vi.fn(),
+        storage: {
+          getToolResultsDir: () => path.resolve('/tmp/tool-results'),
+          getProjectTempDir: () => path.resolve('/tmp'),
+        },
+      } as unknown as Config,
+    );
+    expect(saved.content.startsWith('<persisted-output>')).toBe(true);
+    expect(isPersistedOutputStub(saved.content)).toBe(true);
+  });
 });
