@@ -22,6 +22,8 @@ import type {
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelQrLoginStartResult,
+  DaemonChannelQrLoginView,
   DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
   DaemonChannelsSnapshot,
@@ -266,6 +268,31 @@ export interface DaemonChannelObservedContacts {
     label: string;
     lastObservedAt: string;
   }>;
+}
+
+export interface DaemonChannelQrLoginActions {
+  /**
+   * `clientId` attributes the login to this browser tab. Without it the daemon
+   * treats every id-less caller as the same client, so it reattaches a peer's
+   * login and lets any of them cancel it.
+   */
+  start(
+    name: string,
+    clientId?: string,
+  ): Promise<DaemonChannelQrLoginStartResult>;
+  state(loginId: string, clientId?: string): Promise<DaemonChannelQrLoginView>;
+  cancel(loginId: string, clientId?: string): Promise<DaemonChannelQrLoginView>;
+  /**
+   * Release a login while the page is going away. Sent with `keepalive` so the
+   * request outlives the document: a reload or tab close runs no React cleanup,
+   * so `cancel` alone never fires for the abandonment path operators use most.
+   * Best-effort — the session still expires if the request is lost.
+   */
+  release(
+    loginId: string,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<void>;
 }
 
 export interface DaemonChannelPairingActions {
@@ -553,6 +580,7 @@ export interface DaemonWorkspaceActions
   activateSubscription(options?: {
     workspaceCwd?: string;
     signal?: AbortSignal;
+    settingsScope?: 'provider' | 'user';
   }): Promise<DaemonSubscriptionActivation>;
   setUiLanguage(
     language: string,
@@ -620,6 +648,7 @@ export interface DaemonWorkspaceActions
   stopChannel(name: string): Promise<DaemonChannelMutationResult>;
   restartChannel(name: string): Promise<DaemonChannelMutationResult>;
   channelPairing: DaemonChannelPairingActions;
+  channelQrLogin: DaemonChannelQrLoginActions;
 
   // MCP
   ensureRuntime(): Promise<DaemonWorkspaceRuntimeStatus>;
@@ -905,3 +934,8 @@ export interface DaemonWorkspaceActions
     options?: { force?: boolean; timeoutMs?: number },
   ): Promise<DaemonWorkspaceRemovalResult>;
 }
+
+export type {
+  DaemonChannelQrLoginStartResult,
+  DaemonChannelQrLoginView,
+} from '@qwen-code/sdk/daemon';

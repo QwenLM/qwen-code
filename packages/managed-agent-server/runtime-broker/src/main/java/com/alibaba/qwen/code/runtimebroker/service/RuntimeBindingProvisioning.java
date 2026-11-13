@@ -16,9 +16,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.BindingContext;
-import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService.BindingRenewal;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -51,7 +49,7 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.u
  * {@link RuntimeBrokerService}: durable provisioning and attestation, the
  * bounded reconciliation loop, lost-binding cleanup, and the trusted
  * maintenance recovery path. Every step runs under this Broker's operation
- * claim, renewed by the service's {@code BindingRenewal}.
+ * claim, renewed by {@code BindingRenewal}.
  */
 final class RuntimeBindingProvisioning {
     private final RuntimeBindingRegistry bindingRegistry;
@@ -110,21 +108,6 @@ final class RuntimeBindingProvisioning {
     // a larger generation answers runtime_broker_runtime_lost and the next
     // reclaim resumes where this one stopped.
     private static final int MAX_RECOVERY_PASSES = 16;
-
-    /**
-     * Retryable provider answers that keep an already-placed external worker
-     * adoptable: capacity and unavailable/shutdown. Both external kinds share
-     * them under scratch and under registered-storage (managed-context)
-     * placement, so a transient provider answer never buries a recoverable
-     * worker behind a permanent recovery block.
-     */
-    private static boolean externalRetryable(RuntimeProvisionRequest request,
-            RuntimeBrokerException failure) {
-        return ExternalRuntimeKinds.isExternal(request.getProvisionerKind())
-                && failure.getStatusCode() == 503
-                && ("runtime_external_capacity".equals(failure.getCode())
-                        || "runtime_external_unavailable".equals(failure.getCode()));
-    }
 
     CompletionStage<BindingContext> ensureBinding(
             RuntimeProvisionRequest request) {
@@ -314,7 +297,7 @@ final class RuntimeBindingProvisioning {
             // exactly capacity and shutdown.
             boolean busy = failure instanceof RuntimeBrokerException brokerFailure && brokerFailure.isRetryable()
                     && (claimed.getResourceHandle() == null
-                            || externalRetryable(request, brokerFailure)
+                            || RuntimeProvisionFailureHandler.externalRetryable(request, brokerFailure)
                             || (request.isManagedContext() && brokerFailure.getStatusCode() == 409
                                     && "workspace_csi_busy".equals(brokerFailure.getCode()))
                             || (!request.isManagedContext()

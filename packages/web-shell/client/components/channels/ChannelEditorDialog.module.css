@@ -499,3 +499,52 @@
     transition: none;
   }
 }
+
+.weixinPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.weixinStatusRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.weixinStatusLabel {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.weixinStatusMeta {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.weixinHint {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.weixinLink {
+  color: var(--foreground);
+  font-size: 12px;
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+}
+
+.weixinActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

@@ -31,7 +31,7 @@ class ActivationLeaseLookupMySqlIT {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             ManagedSchema.initialize(database.source());
             var jdbc = new CapturingJdbc(database.source());
-            var rows = new JournalStoreRows(new ManagedSessionReaderVersion(), jdbc);
+            var rows = new JournalStoreRows(new ManagedSessionReaderVersion(), jdbc, null);
             // An earlier activation and its history, then the current one:
             // installed, renewed once by a later transaction, then history.
             var journal = new ArrayList<Object[]>();
@@ -72,7 +72,7 @@ class ActivationLeaseLookupMySqlIT {
 
     private static JournalStoreRows.HeadRow head(long journalRevision) {
         return new JournalStoreRows.HeadRow(TENANT, "workspace", SESSION, "ACTIVE", 1, 1, "worker", null, null,
-                journalRevision, journalRevision, "digest", 2, null, 0, "READY", null, "current", "active", 2L,
+                journalRevision, journalRevision, "digest", 2, null, 0, 0, "READY", null, "current", "active", 2L,
                 EXPIRES_AT, journalRevision);
     }
 

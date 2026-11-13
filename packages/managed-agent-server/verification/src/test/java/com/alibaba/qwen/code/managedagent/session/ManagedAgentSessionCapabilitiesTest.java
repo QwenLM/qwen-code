@@ -11,7 +11,8 @@ import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -39,7 +40,7 @@ class ManagedAgentSessionCapabilitiesTest {
     @CsvSource({"false,true", "false,false", "true,true", "true,false"})
     void publicChildRestrictionsComposeWithLifecycleOwnership(boolean child, boolean owner) {
         var store = mock(AgentStateStore.class);
-        var workspaces = mock(ManagedWorkspaceRegistry.class);
+        var workspaces = mock(JdbcManagedWorkspaceRegistry.class);
         var harness = mock(HarnessConnector.class);
         var warmer = mock(RuntimeWarmer.class);
         var service = new ManagedAgentService(store, new RequestDigests(),
@@ -61,7 +62,7 @@ class ManagedAgentSessionCapabilitiesTest {
         when(workspaces.canRead("tenant", "actor", "workspace")).thenReturn(true);
         when(workspaces.findReadable(eq("tenant"), eq("actor"), anyCollection()))
                 .thenReturn(Map.of("workspace",
-                        new ManagedWorkspaceRegistry.ReadableGrant("workspace", 1, "storage", true)));
+                        new JdbcManagedWorkspaceRegistry.ReadableGrant("workspace", 1, "storage", true)));
         when(store.sessionsWithExecutionRegistryFacts(eq("tenant"), any())).thenReturn(Set.of("session"));
         when(store.findApprovalOwners("tenant", "actor", List.of("session")))
                 .thenReturn(owner ? Set.of("session") : Set.of());
@@ -89,7 +90,7 @@ class ManagedAgentSessionCapabilitiesTest {
     void recoveryProjectionKeepsAnUnsettledLifecycleOperationOnSingleSessionReads() {
         var store = mock(AgentStateStore.class);
         var service = new ManagedAgentService(store, new RequestDigests(),
-                mock(HarnessCoordinator.class), mock(HarnessConnector.class), mock(ManagedWorkspaceRegistry.class), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                mock(HarnessCoordinator.class), mock(HarnessConnector.class), mock(JdbcManagedWorkspaceRegistry.class), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var session = new SessionRecord("tenant", "session", "qwen-code", "title", "CLOSING",
                 null, null, 0, 0, 1, 1, null, 1);
         var operation = new WebShellLifecycleOperation("op-close", "close", "running", null);
@@ -113,7 +114,7 @@ class ManagedAgentSessionCapabilitiesTest {
     @Test
     void mixedPageDoesNotGrantApprovalSelectionToAnUnsupportedProfile() {
         var store = mock(AgentStateStore.class);
-        var workspaces = mock(ManagedWorkspaceRegistry.class);
+        var workspaces = mock(JdbcManagedWorkspaceRegistry.class);
         var harness = mock(HarnessConnector.class);
         var warmer = mock(RuntimeWarmer.class);
         var service = new ManagedAgentService(store, new RequestDigests(),
@@ -135,7 +136,7 @@ class ManagedAgentSessionCapabilitiesTest {
         when(workspaces.canRead("tenant", "actor", "workspace")).thenReturn(true);
         when(workspaces.findReadable(eq("tenant"), eq("actor"), anyCollection()))
                 .thenReturn(Map.of("workspace",
-                        new ManagedWorkspaceRegistry.ReadableGrant("workspace", 1, "storage", true)));
+                        new JdbcManagedWorkspaceRegistry.ReadableGrant("workspace", 1, "storage", true)));
         when(store.sessionsWithExecutionRegistryFacts(eq("tenant"), any()))
                 .thenReturn(Set.of("supported", "excluded"));
         when(store.findApprovalOwners(eq("tenant"), eq("actor"), anyList()))
@@ -159,15 +160,17 @@ class ManagedAgentSessionCapabilitiesTest {
 
     @ParameterizedTest
     @CsvSource({
-        "true,ACTIVE,true,true,true", "true,CLOSED,true,true,true",
-        "false,ACTIVE,true,true,true", "false,CLOSED,true,true,true",
-        "false,ACTIVE,false,true,true", "false,ACTIVE,true,false,true",
-        "false,ACTIVE,true,true,false"
+        "csi-files-retirement/1,ACTIVE,true,true,true", "csi-files-retirement/1,CLOSED,true,true,true",
+        "csi-files-retirement/2,ACTIVE,true,true,true", "csi-files-retirement/2,CLOSED,true,true,true",
+        "hosted-workspace-files/1,ACTIVE,true,true,true", "hosted-workspace-files/1,CLOSED,true,true,true",
+        "hosted-workspace-files/1,ACTIVE,false,true,true", "hosted-workspace-files/1,ACTIVE,true,false,true",
+        "hosted-workspace-files/1,ACTIVE,true,true,false"
     })
-    void publicAndWebShellViewsUseBindingCloseSupportAndKeepPrivateCsiUnavailable(boolean csi, String status,
+    void publicAndWebShellViewsUseBindingCloseSupportAndKeepPrivateCsiUnavailable(String profile, String status,
             boolean globalSupport, boolean bindingSupport, boolean harnessSupport) {
+        boolean csi = CsiFilesRetirementProfile.isProfile(profile);
         var store = mock(AgentStateStore.class);
-        var workspaces = mock(ManagedWorkspaceRegistry.class);
+        var workspaces = mock(JdbcManagedWorkspaceRegistry.class);
         var harness = mock(HarnessConnector.class);
         var warmer = mock(RuntimeWarmer.class);
         var service = new ManagedAgentService(store, new RequestDigests(),
@@ -182,7 +185,7 @@ class ManagedAgentSessionCapabilitiesTest {
         when(warmer.supportsWorkspaceClose(workspace)).thenReturn(bindingSupport);
         var session = new SessionRecord("tenant", "session", "agent", "1", "title",
                 status, null, null, 0, 0, 0, 1, 1, null, 1, workspace, "default",
-                csi ? CsiFilesRetirementProfile.PROFILE : WorkspaceToolProfiles.FILES);
+                profile);
         when(store.requireSession("tenant", "session")).thenReturn(session);
         when(store.listSessions("tenant", "actor", null, null, 10))
                 .thenReturn(new SessionPage(List.of(session), false));
@@ -207,5 +210,60 @@ class ManagedAgentSessionCapabilitiesTest {
             assertThat(view.capabilities().sessionDelete())
                     .isEqualTo(!csi && ("CLOSED".equals(status) || bindingSupport && harnessSupport));
         });
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "true,true,ACTIVE,true,true,true",
+        "true,true,CLOSED,true,false,true",
+        "false,true,ACTIVE,true,false,true",
+        "true,false,ACTIVE,true,false,false",
+        // Registration refuses a Workspace-less Session, so the capability
+        // must not advertise it there even with the flag and harness on.
+        "true,true,ACTIVE,false,false,true",
+        // foregroundOnly (ssh workspace + extensions off): the flag and the
+        // parameterless harness capability are on, but the session-aware
+        // predicate refuses because the register route would answer 409, so the
+        // capability must be false. Removing the session-aware check reds this.
+        "true,true,ACTIVE,true,false,false"
+    })
+    void clientFilesCapabilityRequiresTheDeploymentFlagHarnessSupportAndAnActiveSession(boolean enabled,
+            boolean harnessSupports, String status, boolean hasWorkspace, boolean expected,
+            boolean sessionAwareSupports) {
+        var store = mock(AgentStateStore.class);
+        var harness = mock(HarnessConnector.class);
+        var workspaces = mock(JdbcManagedWorkspaceRegistry.class);
+        var service = new ManagedAgentService(store, new RequestDigests(),
+                mock(HarnessCoordinator.class), harness, workspaces,
+                new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        var workspace = new ContextBinding("tenant", "workspace", 1,
+                "storage", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        var session = hasWorkspace
+                ? new SessionRecord("tenant", "session", "qwen-code", "1", "title", status,
+                        null, null, 0, 0, 0, 1, 1, null, 1, workspace, "default",
+                        WorkspaceToolProfiles.FILES, null, 1)
+                : new SessionRecord("tenant", "session", "qwen-code", "title", status,
+                        null, null, 0, 0, 1, 1, null, 1);
+        when(store.workspaceFilesEnabled()).thenReturn(true);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(workspaces.canRead("tenant", "actor", "workspace")).thenReturn(true);
+        when(workspaces.findReadable(eq("tenant"), eq("actor"), anyCollection()))
+                .thenReturn(Map.of("workspace",
+                        new JdbcManagedWorkspaceRegistry.ReadableGrant("workspace", 1, "storage", true)));
+        when(store.sessionsWithExecutionRegistryFacts(eq("tenant"), any())).thenReturn(Set.of("session"));
+        when(store.requireSession("tenant", "session")).thenReturn(session);
+        assertThat(service.getWebShellSession("tenant", "actor", "session")
+                .capabilities().clientFiles()).isFalse();
+
+        var settings = mock(ManagedAgentSettings.class);
+        var clientFiles = mock(ManagedAgentSettings.ClientFiles.class);
+        when(settings.getClientFiles()).thenReturn(clientFiles);
+        when(clientFiles.isEnabled()).thenReturn(enabled);
+        when(harness.supportsClientFiles()).thenReturn(harnessSupports);
+        when(harness.supportsClientFiles(any(SessionRecord.class))).thenReturn(sessionAwareSupports);
+        service.configureClientFiles(settings);
+
+        assertThat(service.getWebShellSession("tenant", "actor", "session")
+                .capabilities().clientFiles()).isEqualTo(expected);
     }
 }

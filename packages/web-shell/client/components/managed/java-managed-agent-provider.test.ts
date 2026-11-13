@@ -3,7 +3,13 @@ import { artifact } from './managed-tool-result.test-fixtures';
 import { createJavaManagedAgentProvider } from './java-managed-agent-provider';
 import { pendingQuestion } from './managed-question.test-fixtures';
 import {
+  sideQuery,
+  sideQueryContext,
+} from './managed-side-query.test-fixtures';
+import {
+  diagnosticContext,
   diagnosticResources,
+  diagnosticStats,
   diagnosticTrace,
 } from './managed-diagnostics.test-fixtures';
 
@@ -15,9 +21,82 @@ function jsonResponse(value: unknown): Response {
 }
 
 describe('createJavaManagedAgentProvider', () => {
+  it('uses the private product side-query routes and resumes full snapshots by revision', async () => {
+    const running = {
+      ...sideQuery,
+      status: 'running',
+      resultRevision: 1,
+      text: 'partial',
+    };
+    const frames = [running, running, sideQuery]
+      .map((query) => `event: snapshot\ndata: ${JSON.stringify(query)}\n\n`)
+      .join('');
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(sideQueryContext))
+      .mockResolvedValueOnce(jsonResponse(running))
+      .mockResolvedValueOnce(
+        jsonResponse({ items: [running], nextCursor: 'older' }),
+      )
+      .mockResolvedValueOnce(jsonResponse(running))
+      .mockResolvedValueOnce(
+        new Response(frames, {
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ ...sideQuery, status: 'cancelled' }),
+      );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    const signal = new AbortController().signal;
+    const options = { clientId: 'c', signal };
+    const api = provider.sideQueries!;
+    expect(await api.context('s1', options)).toEqual(sideQueryContext);
+    await api.create(
+      's1',
+      { kind: 'btw', question: 'question' },
+      { ...options, idempotencyKey: 'original-key' },
+    );
+    await api.list('s1', { ...options, cursor: 'cursor', limit: 20 });
+    await api.get('s1', 'q1', options);
+    const snapshots = [];
+    for await (const snapshot of api.stream('s1', 'q1', {
+      ...options,
+      afterRevision: 1,
+    }))
+      snapshots.push(snapshot);
+    expect(snapshots).toEqual([sideQuery]);
+    await api.cancel('s1', 'q1', options);
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual(
+      ['context', 'create', 'list', 'get', 'stream', 'cancel'].map(
+        (route) =>
+          `https://product.example/api/agent/web-shell/v1/session-side-queries/${route}`,
+      ),
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      sessionId: 's1',
+      kind: 'btw',
+      question: 'question',
+      idempotencyKey: 'original-key',
+    });
+    expect(JSON.parse(String(fetchImpl.mock.calls[4][1]?.body))).toEqual({
+      sessionId: 's1',
+      queryId: 'q1',
+      afterRevision: 1,
+    });
+    expect(
+      fetchImpl.mock.calls.every(([, request]) => request?.signal === signal),
+    ).toBe(true);
+  });
+
   it('reads diagnostics through passive product routes and rejects foreign snapshots', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(diagnosticContext))
+      .mockResolvedValueOnce(jsonResponse(diagnosticStats))
       .mockResolvedValueOnce(jsonResponse(diagnosticResources))
       .mockResolvedValueOnce(jsonResponse(diagnosticTrace));
     const provider = createJavaManagedAgentProvider({
@@ -27,6 +106,12 @@ describe('createJavaManagedAgentProvider', () => {
     });
     const signal = new AbortController().signal;
     const request = { clientId: 'c', signal };
+    await expect(
+      provider.diagnostics!.getContextUsage('s1', request),
+    ).resolves.toEqual(diagnosticContext);
+    await expect(
+      provider.diagnostics!.getStatistics('s1', request),
+    ).resolves.toEqual(diagnosticStats);
     await expect(
       provider.diagnostics!.getResources('s1', request),
     ).resolves.toEqual(diagnosticResources);
@@ -38,12 +123,17 @@ describe('createJavaManagedAgentProvider', () => {
       }),
     ).resolves.toEqual(diagnosticTrace);
     expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual(
-      ['session-resources', 'session-agent-trace'].map(
+      [
+        'session-context-usage',
+        'session-stats',
+        'session-resources',
+        'session-agent-trace',
+      ].map(
         (route) =>
           `https://product.example/api/agent/web-shell/v1/${route}/query`,
       ),
     );
-    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+    expect(JSON.parse(String(fetchImpl.mock.calls[3][1]?.body))).toEqual({
       sessionId: 's1',
       cursor: 'older',
       limit: 20,
@@ -52,10 +142,10 @@ describe('createJavaManagedAgentProvider', () => {
       fetchImpl.mock.calls.every(([, options]) => options?.signal === signal),
     ).toBe(true);
     fetchImpl.mockResolvedValueOnce(
-      jsonResponse({ ...diagnosticResources, sessionId: 'foreign' }),
+      jsonResponse({ ...diagnosticStats, sessionId: 'foreign' }),
     );
     await expect(
-      provider.diagnostics!.getResources('s1', request),
+      provider.diagnostics!.getStatistics('s1', request),
     ).rejects.toThrow('identity mismatch');
     fetchImpl.mockResolvedValueOnce(
       jsonResponse({
@@ -69,6 +159,28 @@ describe('createJavaManagedAgentProvider', () => {
     const summary = await provider.getSession('s1', request);
     expect(summary.capabilities.diagnostics).toBe(true);
     expect(summary.capabilities.canSend).toBe(false);
+  });
+
+  it('projects the client files capability only when the server advertises it', async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: fetchImpl,
+    });
+    for (const advertised of [true, false]) {
+      fetchImpl.mockResolvedValueOnce(
+        jsonResponse({
+          sessionId: 's1',
+          status: 'closed',
+          createdAt: 1,
+          updatedAt: 2,
+          capabilities: { clientFiles: advertised },
+        }),
+      );
+      const summary = await provider.getSession('s1', { clientId: 'c' });
+      expect(summary.capabilities.clientFiles === true).toBe(advertised);
+    }
   });
 
   it('submits and reads a compression operation through the product routes', async () => {
@@ -1098,7 +1210,7 @@ describe('createJavaManagedAgentProvider', () => {
     ).toThrow('productScope');
   });
 
-  it('preserves model, worktree and extension pins on both creation paths', async () => {
+  it('preserves explicit memory, model, worktree and extension pins on both creation paths', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
       .mockImplementation(async () =>
@@ -1113,6 +1225,7 @@ describe('createJavaManagedAgentProvider', () => {
     const request = {
       agentId: 'qwen-code',
       modelId: 'model-b',
+      memoryStoreId: 'memstore_personal',
       workspaceId: 'ws',
       cwdRelative: '.',
       approvalMode: 'yolo' as const,
@@ -1136,6 +1249,7 @@ describe('createJavaManagedAgentProvider', () => {
         expect.objectContaining({
           agentId: 'qwen-code',
           modelId: 'model-b',
+          memoryStoreId: 'memstore_personal',
           approvalMode: 'yolo',
           worktree: request.worktree,
           extensionPins: request.extensionPins,
@@ -1521,6 +1635,34 @@ describe('createJavaManagedAgentProvider', () => {
       expect(fetchImpl).toHaveBeenCalledTimes(1);
     },
   );
+
+  it('forwards personal memory only when explicitly selected', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () =>
+        jsonResponse({ sessionId: 's', turnId: 't' }),
+      );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    await provider.createSession(
+      { text: 'hello', memoryStoreId: 'memstore_personal' },
+      { clientId: 'client', idempotencyKey: 'with-memory' },
+    );
+    await provider.createSession(
+      { text: 'hello' },
+      { clientId: 'client', idempotencyKey: 'without-memory' },
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]![1]?.body))).toMatchObject(
+      {
+        memoryStoreId: 'memstore_personal',
+      },
+    );
+    expect(
+      JSON.parse(String(fetchImpl.mock.calls[1]![1]?.body)),
+    ).not.toHaveProperty('memoryStoreId');
+  });
 
   it('sends idempotent create, submit, and cancel commands only to Java', async () => {
     const fetchImpl = vi

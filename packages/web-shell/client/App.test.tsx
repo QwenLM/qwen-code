@@ -11,6 +11,9 @@ import { createRoot, type Root } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import { DAEMON_APPROVAL_MODES } from './test/sidebarHarness';
 const notificationScrollToBottom = vi.hoisted(() => vi.fn());
+const messageListScrollToMessage = vi.hoisted(() =>
+  vi.fn((_messageId: string, _callId?: string) => true),
+);
 const approvalModesProbe = vi.hoisted(() => ({
   cwd: undefined as string | undefined,
   setting: undefined as unknown,
@@ -77,6 +80,7 @@ import type { McpAppPromptSubmission } from './hooks/useMcpAppMessages';
 import type { ArtifactPanel } from './components/artifacts/ArtifactPanel';
 import type { WebShellSettingsOptions } from './settings';
 import type { WebShellModelManagementOptions } from './modelManagement';
+import type { WebShellModelPickerOptions } from './model-picker';
 import { DEFAULT_SESSION_ACTION_ITEMS } from './components/sidebar/WebShellSidebar';
 import type { Message } from './adapters/types';
 import type {
@@ -128,6 +132,7 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
       navigationActive?: boolean;
       navigationSearch?: string;
       navigationTarget?: HTMLElement | null;
+      archivedNavigationTarget?: HTMLElement | null;
       interactive?: boolean;
       creationSkills?: { workspaceCwd: string };
       workspaceCreationOpen?: boolean;
@@ -140,6 +145,7 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
         <section
           data-testid="managed-conversation"
           data-session={props.sessionId ?? 'new'}
+          data-navigation-target={String(props.navigationTarget)}
           data-interactive={props.interactive}
           data-skills-workspace={props.creationSkills?.workspaceCwd}
           data-workspace={props.workspaceId}
@@ -246,6 +252,13 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
                 </button>
               </nav>,
               props.navigationTarget,
+            )}
+          {props.archivedNavigationTarget &&
+            createPortal(
+              <nav aria-label="Managed archived sessions">
+                <button>Archived managed sessions</button>
+              </nav>,
+              props.archivedNavigationTarget,
             )}
         </section>
       );
@@ -409,6 +422,12 @@ type ChatEditorTestProps = {
     trusted: boolean;
   }>;
   atWorkspaceCwd?: string;
+  modelPickerScope?: {
+    sessionId?: string;
+    workspaceId?: string;
+    workspaceCwd?: string;
+    daemonBaseUrl?: string;
+  };
   composerScopeKey?: string;
   workspaceFeaturesEnabled?: boolean;
   attachmentsEnabled?: boolean;
@@ -931,14 +950,16 @@ const {
       queuedPromptSessionHasActivePrompt: false,
       chatEditorRenderCount: 0,
       latestChatEditorProps: null as ChatEditorTestProps | null,
+      latestModelPicker: undefined as WebShellModelPickerOptions | undefined,
       onChatEditorLayout: null as ((props: ChatEditorTestProps) => void) | null,
       latestToastHostElevated: false,
-      latestStatusBarTasks: null as
-        | DaemonSessionTaskWithWorkflowStatus[]
+      latestTaskChipsTasks: null as
+        | readonly DaemonSessionTaskWithWorkflowStatus[]
         | null,
-      latestStatusBarOnOpenTasks: null as (() => void) | null,
-      latestStatusBarHideSettings: false,
-      latestStatusBarOnSelectModel: null as (() => void) | null,
+      latestTaskChipsIncludeAgents: null as boolean | null,
+      latestTaskChipsOnSelectTask: null as
+        | ((task: DaemonSessionTaskWithWorkflowStatus) => void)
+        | null,
       openTurnCalls: undefined as
         | ((
             turnId: string,
@@ -950,6 +971,7 @@ const {
       backgroundDetails: undefined as
         | ((turn: import('@qwen-code/sdk/daemon').DaemonBackgroundTurn) => void)
         | undefined,
+      capturedHostOwnsArtifactPreview: undefined as boolean | undefined,
       latestMessageListProps: null as {
         onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
         turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
@@ -997,6 +1019,10 @@ const {
         }) => Promise<boolean | void> | boolean | void;
         manageLiveState?: boolean;
         onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
+      } | null,
+      latestChannelsManagerProps: null as {
+        clientId?: string;
+        sessionWorkspaceCwd?: string;
       } | null,
       latestToolApprovalDisabled: false,
       latestToolApprovalKeyboardActive: null as boolean | null,
@@ -1470,6 +1496,7 @@ vi.mock('./components/ChatEditor', async () => {
         testState.latestChatEditorProps = props;
         const { onAttachmentsChange } = props;
         const customization = useWebShellCustomization();
+        testState.latestModelPicker = customization.modelPicker;
         React.useEffect(() => {
           onAttachmentsChange?.(
             Boolean(
@@ -1601,6 +1628,7 @@ vi.mock('./components/TranscriptViewport', async () => {
   const { useInteractionBlocker } = await import('./interactionBlockContext');
   const { useSubagentDetails } = await import('./subagentDetailsContext');
   const { useOpenTurnCalls } = await import('./turnCallsContext');
+  const { useWebShellCustomization } = await import('./customization');
   function InteractionBlockerProbe() {
     const registerInteractionBlocker = useInteractionBlocker();
     const releaseRef = React.useRef<(() => void) | null>(null);
@@ -1651,8 +1679,13 @@ vi.mock('./components/TranscriptViewport', async () => {
       testState.latestMessageListProps = props;
       testState.backgroundDetails = useSubagentDetails()?.onOpenBackground;
       testState.openTurnCalls = useOpenTurnCalls();
+      // The main transcript mounts inside mainChatCustomization, so this reads
+      // the hostOwnsArtifactPreview value App derives from onRightPanelOpen.
+      testState.capturedHostOwnsArtifactPreview =
+        useWebShellCustomization().hostOwnsArtifactPreview;
       React.useImperativeHandle(ref, () => ({
         scrollToBottom: notificationScrollToBottom,
+        scrollToMessage: messageListScrollToMessage,
       }));
       return React.createElement(
         'div',
@@ -2351,21 +2384,21 @@ function mockComponent(path: string, exportName: string): void {
   });
 }
 
-vi.doMock('./components/StatusBar', async () => {
+vi.doMock('./components/ComposerTaskChips', async () => {
   const React = await import('react');
   return {
-    StatusBar: (props: {
-      tasks?: DaemonSessionTaskWithWorkflowStatus[];
-      onOpenTasks?: () => void;
-      hideSettings?: boolean;
-      onSelectModel?: () => void;
-    }) => {
-      testState.latestStatusBarTasks = props.tasks ?? [];
-      testState.latestStatusBarOnOpenTasks = props.onOpenTasks ?? null;
-      testState.latestStatusBarHideSettings = props.hideSettings ?? false;
-      testState.latestStatusBarOnSelectModel = props.onSelectModel ?? null;
-      return React.createElement('div');
-    },
+    ComposerTaskChips: React.forwardRef(function ComposerTaskChips(props: {
+      tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
+      includeAgents: boolean;
+      onSelectTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
+    }) {
+      testState.latestTaskChipsTasks = props.tasks;
+      testState.latestTaskChipsIncludeAgents = props.includeAgents;
+      testState.latestTaskChipsOnSelectTask = props.onSelectTask;
+      return React.createElement('div', {
+        'data-testid': 'composer-task-chips',
+      });
+    }),
   };
 });
 vi.doMock('./components/StreamingStatus', async () => {
@@ -2467,8 +2500,15 @@ vi.doMock('./components/SessionOverviewPanel', async () => {
 vi.doMock('./components/channels/ChannelsManagerPage', async () => {
   const React = await import('react');
   return {
-    ChannelsManagerPage: () =>
-      React.createElement('div', { 'data-testid': 'channels-manager-page' }),
+    ChannelsManagerPage: (props: {
+      clientId?: string;
+      sessionWorkspaceCwd?: string;
+    }) => {
+      testState.latestChannelsManagerProps = props;
+      return React.createElement('div', {
+        'data-testid': 'channels-manager-page',
+      });
+    },
   };
 });
 vi.doMock('./components/channels/ChannelEventsPage', async () => {
@@ -3086,6 +3126,27 @@ const { I18nProvider } = await import('./i18n');
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+
+/** A live workflow run with no tool call in the transcript. */
+const unlinkedWorkflowTask: DaemonSessionWorkflowTaskStatus = {
+  kind: 'workflow',
+  id: 'workflow-unlinked',
+  label: 'review-and-fix',
+  description: 'Review and fix',
+  status: 'running',
+  startTime: 1,
+  runtimeMs: 10,
+  isBackgrounded: true,
+  currentPhase: null,
+  phaseVisits: [],
+  dispatches: [],
+  agentsDispatched: 0,
+  agentsCompleted: 0,
+  tokensSpent: 0,
+  tokenBudgetTotal: null,
+  recentLogs: [],
+  pendingApprovalCount: 0,
+};
 
 describe('canArchiveSideTaskSummary', () => {
   it.each([
@@ -12824,18 +12885,20 @@ beforeEach(() => {
   testState.queuedPromptSessionHasActivePrompt = false;
   testState.chatEditorRenderCount = 0;
   testState.latestChatEditorProps = null;
+  testState.latestModelPicker = undefined;
   testState.onChatEditorLayout = null;
   testState.latestToastHostElevated = false;
-  testState.latestStatusBarTasks = null;
-  testState.latestStatusBarOnOpenTasks = null;
-  testState.latestStatusBarHideSettings = false;
-  testState.latestStatusBarOnSelectModel = null;
+  testState.latestTaskChipsTasks = null;
+  testState.latestTaskChipsIncludeAgents = null;
+  testState.latestTaskChipsOnSelectTask = null;
   testState.latestMessageListProps = null;
   testState.backgroundDetails = undefined;
   testState.openTurnCalls = undefined;
+  testState.capturedHostOwnsArtifactPreview = undefined;
   testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestSessionOverviewProps = null;
+  testState.latestChannelsManagerProps = null;
   testState.latestToolApprovalKeyboardActive = null;
   testState.toolApprovalKeyboardActiveHistory = [];
   testState.latestToolApprovalPlanTodos = [];
@@ -14038,7 +14101,7 @@ describe('App plan todos', () => {
     await flush();
 
     await act(async () => {
-      testState.latestStatusBarOnOpenTasks?.();
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
       await Promise.resolve();
     });
 
@@ -14872,7 +14935,7 @@ describe('App session workflow', () => {
     await flush();
 
     await act(async () => {
-      testState.latestStatusBarOnOpenTasks?.();
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
       await Promise.resolve();
     });
     await flush();
@@ -18976,27 +19039,7 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.contextWindow).toBe(0);
   });
 
-  it('keeps legacy task status for a custom header without explicit header configuration', () => {
-    const monitor: DaemonSessionMonitorTaskStatus = {
-      kind: 'monitor',
-      id: 'monitor-1',
-      label: 'Watch server',
-      description: 'Watch server',
-      status: 'running',
-      startTime: 1,
-      runtimeMs: 10,
-    };
-    testState.backgroundTasks = [monitor];
-
-    renderApp({
-      header: undefined,
-      renderChatHeader: () => <header>Custom session header</header>,
-    });
-
-    expect(testState.latestStatusBarTasks).toEqual([monitor]);
-  });
-
-  it('feeds the footer pill the task snapshot while a background agent runs', () => {
+  it('feeds the composer task chips the full task snapshot', () => {
     const agent: DaemonSessionAgentTaskStatus = {
       kind: 'agent',
       id: 'agent-running',
@@ -19034,71 +19077,145 @@ describe('App session callbacks', () => {
       },
     });
 
-    // The pill must see the unfiltered snapshot (the design doc's
-    // "1 shell, 3 local agents"), not an agents-only projection.
-    expect(testState.latestStatusBarTasks).toEqual([agent, shell]);
+    // The chips pick the unfinished tasks themselves, background agents
+    // included, so they need the unfiltered snapshot.
+    expect(testState.latestTaskChipsTasks).toEqual([agent, shell]);
+    expect(testState.latestTaskChipsIncludeAgents).toBe(true);
   });
 
-  it('keeps the footer pill suppressed in the shipped entry without a running agent', () => {
-    const monitor: DaemonSessionMonitorTaskStatus = {
-      kind: 'monitor',
-      id: 'monitor-suppressed',
-      label: 'Watch build',
-      description: 'Watch build',
-      status: 'running',
-      startTime: 2,
-      runtimeMs: 20,
-    };
-    // A parked (paused) background agent must not re-open the pill: the
-    // gate is hasActiveBackgroundAgent (running only), not a kind check.
-    const pausedAgent: DaemonSessionAgentTaskStatus = {
-      kind: 'agent',
-      id: 'agent-paused',
-      label: 'Research',
-      description: 'Research',
-      status: 'paused',
-      startTime: 3,
-      runtimeMs: 30,
-      isBackgrounded: true,
-      subagentType: 'general-purpose',
-    };
-    testState.backgroundTasks = [monitor, pausedAgent];
-
-    renderApp();
-
-    expect(testState.latestStatusBarTasks).toEqual([]);
-  });
-
-  it('keeps background agents out of headerless embed footers', () => {
+  it('keeps background agents out of the chips in headerless embeds', () => {
     // Headerless embeds (e.g. the VS Code companion, header={{ items: [] }})
-    // land on the !environmentTasksReplacementEnabled arm: they keep the
-    // pre-filtered composer tasks, so a live background agent must not
-    // open or feed their footer.
-    const agent: DaemonSessionAgentTaskStatus = {
-      kind: 'agent',
-      id: 'agent-embed',
-      label: 'Research',
-      description: 'Research',
-      status: 'running',
-      startTime: 1,
-      runtimeMs: 10,
-      isBackgrounded: true,
-      subagentType: 'general-purpose',
-    };
-    const monitor: DaemonSessionMonitorTaskStatus = {
-      kind: 'monitor',
-      id: 'monitor-embed',
-      label: 'Watch build',
-      description: 'Watch build',
-      status: 'running',
-      startTime: 2,
-      runtimeMs: 20,
-    };
-    testState.backgroundTasks = [agent, monitor];
-
+    // have no environment panel and keep background agents out of their
+    // task surfaces.
     renderApp({ header: { items: [] } });
 
-    expect(testState.latestStatusBarTasks).toEqual([monitor]);
+    expect(testState.latestTaskChipsIncludeAgents).toBe(false);
+  });
+
+  it('keeps background agents out of the chips for a custom header without explicit header configuration', () => {
+    renderApp({
+      header: undefined,
+      renderChatHeader: () => <header>Custom session header</header>,
+    });
+
+    expect(testState.latestTaskChipsIncludeAgents).toBe(false);
+  });
+
+  it('leaves task chips to a host-provided footer', () => {
+    const { container } = renderApp({
+      renderFooter: () => <footer>Host footer</footer>,
+    });
+
+    expect(
+      container.querySelector('[data-testid="composer-task-chips"]'),
+    ).toBeNull();
+    expect(testState.latestTaskChipsTasks).toBeNull();
+  });
+
+  it('locates a workflow chip in the transcript and opens its row', async () => {
+    testState.messages = [
+      {
+        id: 'workflow-message',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'workflow-call',
+            toolName: 'Workflow',
+            status: 'completed',
+            args: {},
+          },
+        ],
+      },
+    ];
+    renderApp();
+    await flush();
+    messageListScrollToMessage.mockClear();
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.({
+        ...unlinkedWorkflowTask,
+        toolUseId: 'workflow-call',
+      });
+      await Promise.resolve();
+    });
+
+    expect(messageListScrollToMessage).toHaveBeenCalledWith(
+      'workflow-message',
+      'workflow-call',
+    );
+    expect(testState.latestTasksStatusProps).toBeNull();
+  });
+
+  it.each([
+    ['the shipped entry', {}],
+    ['a headerless embed', { header: { items: [] } }],
+  ] as const)(
+    'opens shell, monitor and agent chips in the right panel in %s',
+    async (_entry, options) => {
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-chip',
+        label: 'npm run dev',
+        description: 'npm run dev',
+        status: 'running',
+        startTime: 1,
+        runtimeMs: 10,
+        command: 'npm run dev',
+        cwd: '/tmp/project',
+      };
+      const monitor: DaemonSessionMonitorTaskStatus = {
+        kind: 'monitor',
+        id: 'monitor-chip',
+        label: 'Watch server log',
+        description: 'Watch server log',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+      };
+      const agent: DaemonSessionAgentTaskStatus = {
+        kind: 'agent',
+        id: 'agent-chip',
+        label: 'Research the API',
+        description: 'Research the API',
+        status: 'running',
+        startTime: 3,
+        runtimeMs: 30,
+        isBackgrounded: true,
+        subagentType: 'general-purpose',
+      };
+      const { container } = renderApp(options);
+      await flush();
+
+      for (const task of [shell, monitor, agent]) {
+        await act(async () => {
+          testState.latestTaskChipsOnSelectTask?.(task);
+          await Promise.resolve();
+        });
+        await flush();
+      }
+
+      // One right-panel tab per chip, none of them the tasks dialog.
+      expect(container.querySelectorAll('button[title="Close"]')).toHaveLength(
+        3,
+      );
+      expect(container.querySelector('button[title="npm"]')).not.toBeNull();
+      expect(container.textContent).toContain('Watch server log');
+      expect(container.textContent).toContain('Agent: Research the API');
+      expect(testState.latestTasksStatusProps).toBeNull();
+    },
+  );
+
+  it('opens the tasks dialog for a workflow chip with no transcript row', async () => {
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestTasksStatusProps).not.toBeNull();
   });
 
   it('passes agent tasks to a host-provided footer', () => {
@@ -22771,24 +22888,6 @@ describe('App session callbacks', () => {
     );
   });
 
-  it('toasts instead of opening the model dialog from the status bar when standalone models are unavailable', async () => {
-    const onToast = vi.fn();
-    mockConnection.sessionId = undefined;
-    mockConnection.sessionContext = { kind: 'standalone' };
-    mockConnection.models = [];
-    renderApp({ onToast });
-    await flush();
-
-    act(() => {
-      testState.latestStatusBarOnSelectModel?.();
-    });
-
-    expect(onToast).toHaveBeenCalledWith(
-      'info',
-      'Models are unavailable; the daemon default will be used.',
-    );
-  });
-
   it('keeps a newer standalone draft when an older session load fails', async () => {
     const load = deferred<void>();
     mockConnection.sessionContext = { kind: 'workspace', cwd: '/tmp/project' };
@@ -24831,6 +24930,49 @@ describe('App session callbacks', () => {
       expect.objectContaining({ workspaceCwd: '/work/secondary' }),
     );
   });
+
+  it.each([true, false])(
+    'uses the activated subscription on first send only while its draft is current (%s)',
+    async (keepDraft) => {
+      mockConnection.sessionId = undefined;
+      mockConnection.currentModel = 'legacy-api-model(openai)';
+      mockWorkspace.capabilities = {
+        workspaces: [
+          { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+          { id: 'secondary', cwd: '/work/secondary', trusted: true },
+        ],
+      };
+      const props = { initialSelectedWorkspaceCwd: '/work/secondary' };
+      const { rerender } = renderApp({
+        ...props,
+        subscriptionDraft: { modelId: 'qwen3.8-max' },
+      });
+      await flush();
+
+      act(() => {
+        testState.latestChatEditorProps?.onSelectWorkspace?.('/work/secondary');
+      });
+      await flush();
+      if (!keepDraft) rerender(props);
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('first message');
+        await vi.waitFor(() => {
+          expect(mockSessionActions.createSession).toHaveBeenCalled();
+        });
+      });
+      expect(mockSessionActions.createSession.mock.calls[0]?.[0]).toMatchObject(
+        { workspaceCwd: '/work/secondary' },
+      );
+      const options = mockSessionActions.createSession.mock.calls[0]?.[0];
+      if (keepDraft) {
+        expect(options).toMatchObject({
+          startupConfig: { modelServiceId: 'qwen3.8-max(qwen-subscription)' },
+        });
+      } else {
+        expect(options).not.toHaveProperty('startupConfig');
+      }
+    },
+  );
 
   it('clears the git mode intent when starting a new session from the sidebar', async () => {
     mockConnection.sessionId = undefined;
@@ -38726,6 +38868,46 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
   });
 
+  it("attributes channel QR logins to the live session's tab", async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-channels"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestChannelsManagerProps).not.toBeNull();
+    expect(testState.latestChannelsManagerProps?.clientId).toBe('client-1');
+    expect(testState.latestChannelsManagerProps?.sessionWorkspaceCwd).toBe(
+      '/tmp/project',
+    );
+  });
+
+  it('withholds the tab id once the session is cleared', async () => {
+    // The terminal session paths keep clientId and workspaceCwd while dropping
+    // sessionId, so the page's workspace comparison still matches. Only the
+    // session gate keeps a dead id off the routes.
+    mockConnection.sessionId = undefined;
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-channels"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestChannelsManagerProps).not.toBeNull();
+    expect(testState.latestChannelsManagerProps?.sessionWorkspaceCwd).toBe(
+      '/tmp/project',
+    );
+    expect(testState.latestChannelsManagerProps?.clientId).toBeUndefined();
+  });
+
   it('shadow-isolates the unified plugin manager body when plugins is enabled', async () => {
     const { container } = renderApp({
       shadowDom: {
@@ -43468,6 +43650,22 @@ describe('App session callbacks', () => {
     },
   );
 
+  it.each([
+    { withHost: true, expected: true },
+    { withHost: false, expected: false },
+  ])(
+    'derives host artifact-preview ownership from onRightPanelOpen (withHost=$withHost)',
+    async ({ withHost, expected }) => {
+      // Pins App's hostOwnsArtifactPreview = Boolean(onRightPanelOpen): the
+      // main-transcript customization carries the flag only when a host
+      // supplies the callback. The card's honoring of the flag is pinned by
+      // the TurnOutputs DOM tests.
+      renderApp(withHost ? { onRightPanelOpen: vi.fn(() => true) } : {});
+      await flush();
+      expect(testState.capturedHostOwnsArtifactPreview).toBe(expected);
+    },
+  );
+
   it('keeps same-name attachment tabs separate across split sessions', async () => {
     const { container } = renderApp();
     await flush();
@@ -45998,7 +46196,7 @@ describe('App session callbacks', () => {
     },
   );
 
-  it('keeps a status-bar model picker open when a stale settings key is excluded', async () => {
+  it('keeps a /model picker open when a stale settings key is excluded', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {
       workspaceCwd: '/work/primary',
@@ -46038,17 +46236,16 @@ describe('App session callbacks', () => {
         ?.click();
       await Promise.resolve();
     });
-    // The status-bar model chip opens a 'main' picker without touching the
-    // settings-dialog key.
-    act(() => {
-      testState.latestStatusBarOnSelectModel?.();
-    });
+    // /model opens a 'main' picker without touching the settings-dialog key.
+    testState.prompt = '/model';
+    await clickSubmit(container);
+    await flush();
     expect(
       container.querySelector('[data-testid="model-select"]'),
     ).not.toBeNull();
     rerender({ settings: { excludeItems: ['setting:voice-model'] } });
     await flush();
-    // The exclusion owns only the voice picker; the status-bar picker stays.
+    // The exclusion owns only the voice picker; the /model picker stays.
     expect(
       container.querySelector('[data-testid="model-select"]'),
     ).not.toBeNull();
@@ -47707,7 +47904,6 @@ describe('App session callbacks', () => {
       composerScopeKey: 'standalone',
       workspaceFeaturesEnabled: false,
     });
-    expect(testState.latestStatusBarHideSettings).toBe(true);
     mockWorkspaceActions.loadMcpStatus.mockClear();
     mockWorkspaceActions.loadPreflight.mockClear();
     mockWorkspaceActions.loadProviders.mockClear();
@@ -51880,7 +52076,7 @@ describe('App workflow history entry', () => {
     await flush();
 
     await act(async () => {
-      testState.latestStatusBarOnOpenTasks?.();
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
       await Promise.resolve();
     });
     await flush();
@@ -51894,7 +52090,7 @@ describe('App workflow history entry', () => {
     await flush();
 
     await act(async () => {
-      testState.latestStatusBarOnOpenTasks?.();
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
       await Promise.resolve();
     });
     await flush();
@@ -52457,6 +52653,40 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
   });
 });
 
+describe('modelPicker customization plumbing', () => {
+  it('shares and updates the host picker configuration through customization', async () => {
+    const first = { mountHeader: () => null };
+    const second = { displayContentByModelId: { qwen: () => null } };
+    const { rerender } = renderApp({ modelPicker: first });
+    await flush();
+    expect(testState.latestModelPicker).toBe(first);
+
+    rerender({ modelPicker: second });
+    await flush();
+    expect(testState.latestModelPicker).toBe(second);
+
+    rerender({});
+    await flush();
+    expect(testState.latestModelPicker).toBeUndefined();
+  });
+
+  it.each(['workspace', 'standalone'] as const)(
+    'uses the main %s composer scope and preserves the full daemon base URL',
+    async (kind) => {
+      mockConnection.sessionContext =
+        kind === 'workspace' ? { kind, cwd: '/tmp/project' } : { kind };
+      mockWorkspace.baseUrl = 'https://models.example/daemon/proxy';
+      renderApp();
+      await flush();
+      expect(testState.latestChatEditorProps?.modelPickerScope).toEqual({
+        sessionId: 'session-1',
+        workspaceCwd: kind === 'workspace' ? '/tmp/project' : undefined,
+        daemonBaseUrl: 'https://models.example/daemon/proxy',
+      });
+    },
+  );
+});
+
 describe('fileUploadEnabled customization plumbing', () => {
   it.each(['upload', 'attach'] as const)(
     'passes the %s drop preference to composers',
@@ -52865,6 +53095,19 @@ describe('brand resolution', () => {
 
     expect(handler).toHaveBeenLastCalledWith({ name: 'Second' });
     expect(handler).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('chat width styles', () => {
+  it('applies the host maximum to responsive content', async () => {
+    const { container } = renderApp({ chatMaxWidth: 720 });
+    await flush();
+
+    expect(
+      container
+        .querySelector<HTMLElement>('[data-web-shell-root]')
+        ?.style.getPropertyValue('--chat-responsive-content-width'),
+    ).toBe('min(720px, clamp(440px, 85cqw, calc(100cqw - 128px)))');
   });
 });
 
@@ -56009,6 +56252,31 @@ describe('Managed home integration', () => {
       expectSelectedTab('Extensions');
     },
   );
+
+  it('passes a null navigation target for sidebar:false hosts without flipping it to undefined', async () => {
+    // The null/undefined distinction is the documented contract: null keeps the
+    // home layout while the host owns the navigation surface; undefined would
+    // mount the page's inline navigation back inside the chat pane.
+    window.history.replaceState(null, '', '/?managed=1');
+    renderApp({
+      managedAgentProvider: managedProvider(),
+      sidebar: false,
+      language: 'en',
+    });
+    await flush();
+    const managed = document.querySelector<HTMLElement>(
+      '[data-testid="managed-conversation"]',
+    );
+    expect(managed).not.toBeNull();
+    // The page keys its home layout off `navigationTarget !== undefined`, so
+    // the fixture must observe the value itself, not only its truthiness:
+    // `undefined` would flip the page back to its inline navigation.
+    expect(managed?.dataset.navigationTarget).toBe('null');
+    // With no sidebar the page must not portal its inline navigation anywhere.
+    expect(
+      document.querySelector('nav[aria-label="Managed sessions"]'),
+    ).toBeNull();
+  });
 });
 
 describe('upstream embedded transport reproduction', () => {

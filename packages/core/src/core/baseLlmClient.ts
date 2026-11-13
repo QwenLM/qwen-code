@@ -24,6 +24,7 @@ import type {
 import { AuthType, createContentGenerator } from './contentGenerator.js';
 import type { ResolvedModelConfig } from '../models/types.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
+import { QWEN_OAUTH_TOKEN_PLACEHOLDER } from '../qwen/oauth-config.js';
 import {
   buildModelIdContext,
   resolveModelId,
@@ -417,6 +418,16 @@ export interface GenerateTextOptions {
    * conversion closed instead.
    */
   failClosed?: boolean;
+  /**
+   * Use endpoint-bound credentials and cached OAuth only, with one model
+   * attempt even when the session enables automatic retries.
+   */
+  isolatedRequest?: boolean;
+}
+
+interface ModelRoutingOptions {
+  failClosed?: boolean;
+  isolatedRoute?: boolean;
 }
 
 /**
@@ -687,6 +698,7 @@ export class BaseLlmClient {
       promptId,
       maxAttempts,
       stream,
+      isolatedRequest,
     } = options;
 
     const requestConfig: GenerateContentConfig = {
@@ -695,6 +707,7 @@ export class BaseLlmClient {
       ...(systemInstruction && { systemInstruction }),
     };
 
+    if (isolatedRequest) abortSignal.throwIfAborted();
     const {
       contentGenerator,
       contentGeneratorConfig,
@@ -702,7 +715,12 @@ export class BaseLlmClient {
       retryErrorCodes,
       model: requestModel,
       contextWindowSize: resolvedContextWindowSize,
-    } = await this.resolveForModel(model, { failClosed: options.failClosed });
+    } = await this.resolveForModel(model, {
+      failClosed: options.failClosed,
+      isolatedRoute: isolatedRequest,
+    });
+    // An already-started shared OAuth refresh may outlive this request.
+    if (isolatedRequest) abortSignal.throwIfAborted();
     const requestContents = slimCompactionInput(
       contents,
       contentGeneratorConfig.modalities,
@@ -765,6 +783,7 @@ export class BaseLlmClient {
 
       const result = await retryWithBackoff(apiCall, {
         maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+        ...(isolatedRequest && { singleAttempt: true }),
         authType: retryAuthType,
         extraRetryErrorCodes: retryErrorCodes,
         persistentMode: isUnattendedMode(),
@@ -866,7 +885,7 @@ export class BaseLlmClient {
    */
   async resolveForModel(
     model: string,
-    opts?: { failClosed?: boolean },
+    opts?: ModelRoutingOptions,
   ): Promise<ResolvedGeneratorForModel> {
     const requested = splitModelBaseUrl(model);
     const selector = this.resolveModelSelector(requested.model);
@@ -884,21 +903,38 @@ export class BaseLlmClient {
           requested.baseUrl === mainGeneratorConfig?.baseUrl)) ||
       isMainRouteSelector(model, this.config)
     ) {
-      return {
-        contentGenerator: this.getCurrentContentGenerator(),
-        contentGeneratorConfig: mainGeneratorConfig,
-        retryAuthType: mainAuthType,
-        retryErrorCodes: mainRetryErrorCodes,
-        model: requestModel,
-      };
+      // The default URL can be shared by an implicit row and an explicit one.
+      const pinnedModel =
+        opts?.isolatedRoute && requested.baseUrl !== undefined
+          ? this.resolveModelAcrossAuthTypes(
+              requested.model,
+              selector,
+              requested.baseUrl,
+            )
+          : undefined;
+      const matchesRegistryPin =
+        !pinnedModel ||
+        (pinnedModel.registryBaseUrl ?? null) ===
+          ('reasoningRouteBaseUrl' in mainGeneratorConfig
+            ? mainGeneratorConfig.reasoningRouteBaseUrl
+            : this.config.getCurrentModelRegistryBaseUrl?.());
+      if (matchesRegistryPin) {
+        return {
+          contentGenerator: this.getCurrentContentGenerator(),
+          contentGeneratorConfig: mainGeneratorConfig,
+          retryAuthType: mainAuthType,
+          retryErrorCodes: mainRetryErrorCodes,
+          model: requestModel,
+        };
+      }
     }
 
     const { contentGenerator, contentGeneratorConfig } =
       await this.createRuntimeViewForModel(
         requested.model,
         selector,
-        opts?.failClosed ?? false,
         requested.baseUrl,
+        opts,
       );
     const resolvedModel = this.resolveModelAcrossAuthTypes(
       requested.model,
@@ -991,15 +1027,17 @@ export class BaseLlmClient {
   private async createRuntimeViewForModel(
     model: string,
     selector: ResolvedModelId | undefined,
-    failClosed = false,
     modelBaseUrl?: string,
+    opts?: ModelRoutingOptions,
   ): Promise<RuntimeContentGeneratorView> {
+    const { isolatedRoute = false } = opts ?? {};
+    const failClosed = opts?.failClosed || isolatedRoute;
     const routeKey = selector
       ? modelBaseUrl === undefined
         ? `${selector.authType ?? ''}:${selector.modelId}`
         : `${selector.authType ?? ''}:${selector.modelId}\0${modelBaseUrl}`
       : model;
-    const cacheKey = routeKey;
+    const cacheKey = isolatedRoute ? `isolated\0${routeKey}` : routeKey;
     const cached = this.perModelGeneratorCache.get(cacheKey);
     const normalizeGeneratorError = (err: unknown) =>
       err instanceof Error
@@ -1052,8 +1090,13 @@ export class BaseLlmClient {
       };
     }
 
-    const generatorPromise = (async () => {
-      try {
+    if (isolatedRoute && resolvedModel.visionOnly) {
+      throw new Error(
+        `Vision-only model '${resolvedModel.id}' cannot be used for a text completion`,
+      );
+    }
+    const generatorPromise = Promise.resolve()
+      .then(async () => {
         const targetModel = resolvedModel.id ?? selector?.modelId ?? model;
         const targetConfig = buildAgentContentGeneratorConfig(
           this.config,
@@ -1064,6 +1107,10 @@ export class BaseLlmClient {
               ? (process.env[resolvedModel.envKey] ?? undefined)
               : undefined,
             baseUrl: resolvedModel.baseUrl,
+            ...(isolatedRoute && {
+              isolatedRoute,
+              registryBaseUrl: resolvedModel.registryBaseUrl ?? null,
+            }),
           },
         );
         if (resolvedModel.capabilities?.vision) {
@@ -1072,18 +1119,22 @@ export class BaseLlmClient {
             image: true,
           };
         }
+        if (isolatedRoute && resolvedModel.authType === AuthType.QWEN_OAUTH) {
+          targetConfig.apiKey = QWEN_OAUTH_TOKEN_PLACEHOLDER;
+        }
         return {
-          contentGenerator: await createContentGenerator(
-            targetConfig,
-            this.config,
-          ),
+          contentGenerator: isolatedRoute
+            ? await createContentGenerator(targetConfig, this.config, true)
+            : await createContentGenerator(targetConfig, this.config),
           contentGeneratorConfig: targetConfig,
         };
-      } catch (err: unknown) {
-        this.perModelGeneratorCache.delete(cacheKey);
+      })
+      .catch((err: unknown) => {
+        if (this.perModelGeneratorCache.get(cacheKey) === generatorPromise) {
+          this.perModelGeneratorCache.delete(cacheKey);
+        }
         throw normalizeGeneratorError(err);
-      }
-    })();
+      });
 
     this.perModelGeneratorCache.set(cacheKey, generatorPromise);
     return generatorPromise.catch(fallbackAfterGeneratorError);

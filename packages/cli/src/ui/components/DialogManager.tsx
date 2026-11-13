@@ -181,6 +181,7 @@ export const DialogManager = ({
       <ConsentPrompt
         prompt={uiState.confirmationRequest.prompt}
         onConfirm={uiState.confirmationRequest.onConfirm}
+        dismissOnEscape
         terminalWidth={terminalWidth}
         availableTerminalHeight={constrainedDialogHeight}
       />

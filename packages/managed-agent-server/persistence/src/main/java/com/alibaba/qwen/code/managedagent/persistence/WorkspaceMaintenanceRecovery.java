@@ -169,7 +169,7 @@ public final class WorkspaceMaintenanceRecovery {
             operations.updateWork(kind(jdbc, binding, maintenance), maintenance, WORK_KIND, stepTarget(maintenance, generation, executionId), Map.of("state", "STOPPED"));
             if (jdbc.update("UPDATE ma_storage_owner SET holder_key = NULL, maintenance_id = NULL, maintenance_generation = NULL"
                             + " WHERE storage_key = ? AND maintenance_id = ? AND maintenance_generation = ? AND holder_key = ?",
-                    WorkspaceExecutionStore.storageKey(jdbc, binding), maintenance, generation, original.get("holderKey")) != 1
+                    JdbcWorkspaceExecutionStore.storageKey(jdbc, binding), maintenance, generation, original.get("holderKey")) != 1
                     || jdbc.update("UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_owner = NULL, claim_until = NULL WHERE operation_key = ? AND claim_generation = ?", operations.key(kind(jdbc, binding, maintenance), maintenance), generation) != 1) {
                 throw blocked();
             }
@@ -210,7 +210,7 @@ public final class WorkspaceMaintenanceRecovery {
 
     private static Map<String, Object> owner(JdbcTemplate jdbc, ContextBinding binding, boolean lock) {
         var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL'"
-                + (lock ? " FOR UPDATE" : ""), WorkspaceExecutionStore.storageKey(jdbc, binding));
+                + (lock ? " FOR UPDATE" : ""), JdbcWorkspaceExecutionStore.storageKey(jdbc, binding));
         return rows.size() == 1 ? rows.getFirst() : null;
     }
 
