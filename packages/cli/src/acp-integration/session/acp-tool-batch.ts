@@ -12,6 +12,7 @@ import type {
   ToolResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { createToolLifecycle } from '@qwen-code/qwen-code-core/telemetry/tool-lifecycle.js';
 import {
   canonicalToolName,
@@ -149,7 +150,9 @@ export async function runAcpToolBatch(
   else signal.addEventListener('abort', abortTools, { once: true });
 
   let stopAfterPermissionCancel = false;
+  let closed = false;
   const stopBatch = () => {
+    if (closed) return;
     stopAfterPermissionCancel = true;
     tools.abort(USER_CANCEL_ABORT_REASON);
   };
@@ -158,6 +161,7 @@ export async function runAcpToolBatch(
   let emissions = Promise.resolve();
   const emit = (task: () => Promise<unknown> | unknown, what: string) => {
     emissions = emissions.then(async () => {
+      if (closed) return;
       try {
         await task();
       } catch (error) {
@@ -330,6 +334,7 @@ export async function runAcpToolBatch(
       outcome = ToolConfirmationOutcome.ProceedOnce;
       config.setApprovalMode(ApprovalMode.DEFAULT);
       await host.sendModeUpdate();
+      if (tools.signal.aborted) return;
     }
     state.modeUpdateBeforeStart =
       details.type === 'edit' &&
@@ -519,7 +524,7 @@ export async function runAcpToolBatch(
       );
   };
 
-  const results: AgentLoopToolResult[] = [];
+  const results = new Map<ToolCallRequestInfo, AgentLoopToolResult>();
   try {
     const batch = await options.loop.runBatch({
       ...options.duplicates,
@@ -534,8 +539,9 @@ export async function runAcpToolBatch(
         },
         onToolResultFullTurnModel: options.onFullTurnModel,
         refuseToolCall: (request) => host.refuseToolCall(request),
-        onPermissionPromptTerminalSequence: (sequence) =>
-          host.sendTerminalSequence(sequence),
+        onPermissionPromptTerminalSequence: (sequence) => {
+          if (!closed) host.sendTerminalSequence(sequence);
+        },
       }),
       beforeToolLaunch: (request) => {
         const approval = states.get(request.callId)?.todoPlanApproval;
@@ -546,25 +552,88 @@ export async function runAcpToolBatch(
         return true;
       },
       onToolResult: (result) => {
-        results.push(result);
+        results.set(result.request, result);
         if (result.origin === 'replayed' || result.origin === 'duplicate') {
           emitDuplicate(host, result, emit);
         }
       },
     });
-    await Promise.all(approvals);
+    // A batch that settles after an abort still returns its recorded
+    // responses. At the deadline the kernel returns without them, and an
+    // approval promise may still be running the tool.
+    if (batch.stop === 'cancelled' && batch.responses === undefined) {
+      // Keep the per-call responses already available at the deadline.
+      // The scheduler's final batch hooks and budget can still be pending.
+      const seen = new Set<string>();
+      const completed: AgentLoopToolResult[] = [];
+      for (const request of options.requests) {
+        let result = results.get(request);
+        if (!result && !seen.has(request.callId)) {
+          const call = latest.get(request.callId);
+          if (
+            call?.status === 'success' ||
+            call?.status === 'error' ||
+            call?.status === 'cancelled'
+          ) {
+            result = {
+              request,
+              executionRequest: call.request,
+              response: call.response,
+              status: call.status,
+              origin: 'executed',
+            };
+            if (call.response.executionStatus !== 'not_started') {
+              config
+                .getLlmClient()
+                .recordCompletedToolCall(call.request.name, call.request.args);
+            }
+          }
+        }
+        seen.add(request.callId);
+        if (!result) continue;
+        const { response, status, executionRequest } = result;
+        config.getChatRecordingService()?.recordToolResult(
+          response.responseParts,
+          {
+            callId: request.callId,
+            status,
+            resultDisplay: response.resultDisplay,
+            persistedOutputFiles: response.persistedOutputFiles,
+            artifacts: response.artifacts,
+            error: response.error,
+            errorType: response.errorType,
+            executionStatus: response.executionStatus,
+          },
+          goalToolResultProvenance(executionRequest, response.responseParts),
+        );
+        completed.push(result);
+      }
+      return {
+        parts: completed.flatMap(({ response }) => response.responseParts),
+        stop: batch.stop,
+        stopAfterPermissionCancel,
+        results: completed,
+      };
+    }
+    if (!signal.aborted || config.isEventBusAgentLoopEnabled?.() !== true) {
+      await Promise.all(approvals);
+    }
     await emissions;
     return {
       parts: batch.parts,
       stop: batch.stop,
       stopAfterPermissionCancel,
       results: options.requests.flatMap(
-        (request) => results.find((result) => result.request === request) ?? [],
+        (request) => results.get(request) ?? [],
       ),
     };
   } finally {
+    closed = true;
     signal.removeEventListener('abort', abortTools);
-    for (const state of states.values()) state.cleanupTracker?.();
+    for (const state of states.values()) {
+      if (!state.settled) state.settleRelatedAgent?.(false);
+      state.cleanupTracker?.();
+    }
   }
 }
 
