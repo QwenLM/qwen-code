@@ -25,6 +25,29 @@ function setFilterInput(element: HTMLInputElement, value: string): void {
   });
 }
 
+// A real keystroke: keydown (what the menu's typeahead search listens to)
+// plus the value change + input event.
+async function typeFilterKey(
+  element: HTMLInputElement,
+  key: string,
+): Promise<void> {
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLInputElement.prototype,
+    'value',
+  )!.set!;
+  act(() => {
+    setter.call(element, element.value + key);
+    element.dispatchEvent(
+      new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }),
+    );
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  // Radix typeahead focuses the matched item on a timer.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+}
+
 async function openMenu(element: HTMLElement): Promise<void> {
   const trigger = element.querySelector('button')!;
   await act(async () => {
@@ -393,6 +416,29 @@ describe('WorkspaceSelector', () => {
     items = [...document.querySelectorAll('[role="menuitemradio"]')];
     expect(items.length).toBe(0);
     expect(document.body.textContent).toContain('No workspaces match');
+  });
+
+  it('keeps keyboard focus in the filter input while typing', async () => {
+    const element = renderSelector();
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.focus();
+    });
+    expect(document.activeElement).toBe(filter);
+    // The menu runs a typeahead search on character keys; typing in the
+    // filter field must not hand focus over to a matching menu item.
+    await typeFilterKey(filter, 'p');
+    expect(document.activeElement).toBe(filter);
+    expect(filter.value).toBe('p');
+    await typeFilterKey(filter, 'r');
+    expect(document.activeElement).toBe(filter);
+    const items = [...document.querySelectorAll('[role="menuitemradio"]')];
+    expect(items.length).toBe(1);
+    expect(items[0]!.textContent).toContain('primary');
+    expect(document.activeElement).not.toBe(items[0]);
   });
 
   it('keeps matching host groups and drops empty ones while filtering', async () => {
