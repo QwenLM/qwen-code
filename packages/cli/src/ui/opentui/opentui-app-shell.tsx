@@ -149,6 +149,7 @@ import { useProjectHooksApproval } from '../hooks/use-project-hooks-approval.js'
 import { dialogAreaWidth } from './dialogs-shared.js';
 import { sanitizeTerminalText } from '../utils/textUtils.js';
 import { C } from './theme.js';
+import { ExtensionSettingInput } from './ExtensionAcquisition.js';
 import {
   getDialogMaxHeight,
   STATIC_EXTRA_HEIGHT,
@@ -307,7 +308,8 @@ interface ActionModal {
   resolve: (confirmed: boolean) => void;
 }
 
-type ConfirmationModal = ShellModal | ActionModal;
+type SettingModal = Parameters<typeof ExtensionSettingInput>[0]['permission'];
+type ConfirmationModal = ShellModal | ActionModal | SettingModal;
 
 export function OpenTuiApp(props: OpenTuiAppProps) {
   const {
@@ -596,6 +598,41 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             },
           ]);
         }),
+      presentSetting: (setting: SettingModal['setting'], signal: AbortSignal) =>
+        new Promise<string>((resolve, reject) => {
+          if (signal.aborted) {
+            reject(new Error(t('Setting input cancelled')));
+            return;
+          }
+          const id = ++modalSeq.current;
+          let settled = false;
+          const finish = (value: string | null, remove = true) => {
+            if (settled) return;
+            settled = true;
+            signal.removeEventListener('abort', abort);
+            ownedActionModals.current.delete(lifetime);
+            if (remove) setModals((prev) => prev.filter((m) => m.id !== id));
+            if (value !== null && !signal.aborted) resolve(value);
+            else reject(new Error(t('Setting input cancelled')));
+          };
+          const abort = () => finish(null);
+          const lifetime = {
+            cancel: abort,
+            dispose: () => finish(null, false),
+          };
+          signal.addEventListener('abort', abort, { once: true });
+          ownedActionModals.current.add(lifetime);
+          setModals((prev) => [
+            ...prev,
+            {
+              kind: 'setting',
+              id,
+              setting,
+              resolve: (value) => finish(value),
+              cancel: abort,
+            },
+          ]);
+        }),
       presentAction: (
         prompt: ReactNode,
         options?: Pick<ConfirmationRequest, 'signal' | 'isCurrent'>,
@@ -661,6 +698,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         options,
       );
     });
+    manager.setRequestSetting((setting) =>
+      confirmations.presentSetting(setting, controller.signal),
+    );
     return () => controller.abort();
   }, [config, confirmations]);
 
@@ -1784,7 +1824,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               </box>
             </box>
           ) : activeModal ? (
-            activeModal.kind === 'shell' ? (
+            activeModal.kind === 'setting' ? (
+              <ExtensionSettingInput
+                key={`setting-${activeModal.id}`}
+                permission={activeModal}
+                width={Math.max(0, terminalWidth - 4)}
+                height={dialogRegionHeight}
+              />
+            ) : activeModal.kind === 'shell' ? (
               <OpenTuiShellConfirmation
                 key={`shell-${activeModal.id}`}
                 commands={activeModal.commands}
