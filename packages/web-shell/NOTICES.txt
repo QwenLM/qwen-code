@@ -6917,7 +6917,7 @@ SOFTWARE.
 
 
 ============================================================
-qs@6.16.0
+qs@6.17.1
 (https://github.com/ljharb/qs.git)
 
 BSD 3-Clause License
