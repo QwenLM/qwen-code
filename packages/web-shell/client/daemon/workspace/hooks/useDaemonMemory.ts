@@ -31,8 +31,8 @@ export function useDaemonMemory(options: DaemonResourceOptions = {}) {
         return { content: file.content, truncated: file.truncated === true };
       }
       if (file?.truncated === true) {
-        // The daemon deliberately withheld non-round-trippable content.
-        // A generic file read can decode it without preserving its bytes.
+        // The daemon could not provide a safely replaceable snapshot.
+        // Preserve its read-only marker for withheld content or a torn read.
         return { content: '', truncated: true };
       }
       return workspaceActions.readWorkspaceFile(filePath);

@@ -233,7 +233,7 @@ Two things to know before enabling it:
 
 ### `/memory`
 
-Opens the Memory panel. In Web Shell, files remain read-only when the daemon cannot provide their complete content without losing encoding information.
+Opens the Memory panel. In Web Shell, files stay read-only when their complete text is unavailable, including files that exceed the content limit, files that change during a read, and files with a byte-order mark or invalid UTF-8. If a file changed during a read, select its memory tab again to retry.
 
 From here you can:
 

@@ -214,6 +214,29 @@ describe('workspace memory routes', () => {
       expect(file.content).toHaveLength(1024 * 1024);
     });
 
+    it('returns complete BOM-free UTF-8 content at the 1 MB cap', async () => {
+      const wsFile = path.join(workspace, 'QWEN.md');
+      const content = 'a'.repeat(1024 * 1024);
+      await fs.writeFile(wsFile, content);
+      const app = buildApp({
+        bridge: buildBridgeStub(),
+        boundWorkspace: workspace,
+      });
+
+      const res = await request(app).get('/workspace/memory?content=true');
+
+      expect(res.status).toBe(200);
+      expect(res.body.files).toEqual([
+        {
+          kind: 'memory_file',
+          path: wsFile,
+          scope: 'workspace',
+          bytes: content.length,
+          content,
+        },
+      ]);
+    });
+
     it.each(['workspace', 'global'] as const)(
       'refuses content outside the %s root while retaining metadata',
       async (scope) => {
@@ -364,8 +387,45 @@ describe('workspace memory routes', () => {
       expect(res.status).toBe(200);
       const [file] = res.body.files as Array<Record<string, unknown>>;
       expect(file['path']).toBe(globalFile);
+      expect(file['truncated']).toBe(true);
       expect(file).not.toHaveProperty('content');
     });
+
+    it.each(
+      [
+        { encoding: 'UTF-8 BOM', prefix: [0xef, 0xbb, 0xbf] },
+        { encoding: 'UTF-16 BOM', prefix: [0xff, 0xfe] },
+        { encoding: 'invalid UTF-8', prefix: [0x80] },
+      ].flatMap((fixture) =>
+        [32, 1024 * 1024].map((bytes) => ({ ...fixture, bytes })),
+      ),
+    )(
+      'marks withheld $encoding workspace content read-only at $bytes bytes',
+      async ({ prefix, bytes }) => {
+        const wsFile = path.join(workspace, 'QWEN.md');
+        const original = Buffer.alloc(bytes, 0x61);
+        original.set(prefix);
+        await fs.writeFile(wsFile, original);
+        const app = buildApp({
+          bridge: buildBridgeStub(),
+          boundWorkspace: workspace,
+        });
+
+        const res = await request(app).get('/workspace/memory?content=true');
+
+        expect(res.status).toBe(200);
+        expect(res.body.files).toEqual([
+          {
+            kind: 'memory_file',
+            path: wsFile,
+            scope: 'workspace',
+            bytes,
+            truncated: true,
+          },
+        ]);
+        expect(await fs.readFile(wsFile)).toEqual(original);
+      },
+    );
 
     it('flags a torn read (size changed between stat and open) as truncated', async () => {
       // Memory writes are truncate-then-write; a read landing inside that

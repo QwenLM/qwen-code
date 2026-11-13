@@ -671,8 +671,8 @@ async function walkWorkspaceForMemory(
  *   makes the snapshot unsafe to replace: flag `truncated` and omit text.
  * - Bytes that are not valid BOM-free UTF-8 (GBK, Shift_JIS, UTF-16 from
  *   PowerShell `>` redirection, BOM'd UTF-8) cannot round-trip through
- *   a replace write: omit `content` so the client's fallback path takes
- *   over instead of saving a lossy decode back over the original bytes.
+ *   a replace write: omit `content` and flag `truncated` so the panel
+ *   stays read-only, even when the file is below the content-size cap.
  */
 async function readMemoryFileContent(
   filePath: string,
@@ -726,7 +726,7 @@ async function readMemoryFileContent(
     }
     const truncated = opened.size > MAX_MEMORY_CONTENT_BYTES;
     const slice = buffer.subarray(0, MAX_MEMORY_CONTENT_BYTES);
-    if (detectBOM(slice)) return { truncated };
+    if (detectBOM(slice)) return { truncated: true };
     try {
       return {
         content: new TextDecoder('utf-8', { fatal: true }).decode(slice, {
@@ -735,7 +735,7 @@ async function readMemoryFileContent(
         truncated,
       };
     } catch {
-      return { truncated };
+      return { truncated: true };
     }
   } finally {
     await handle.close();

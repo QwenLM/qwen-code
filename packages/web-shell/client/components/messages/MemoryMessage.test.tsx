@@ -181,6 +181,35 @@ describe('MemoryMessage', () => {
     expect(button('Edit').disabled).toBe(true);
   });
 
+  it('keeps withheld workspace content read-only without offering a replacement', async () => {
+    const workspacePath = '/workspace/QWEN.md';
+    memory.files = [
+      {
+        kind: 'memory_file',
+        path: workspacePath,
+        scope: 'workspace',
+        bytes: 32,
+        truncated: true,
+      },
+    ];
+    memory.status = { ...memory.status!, files: memory.files, totalBytes: 32 };
+    memory.readMemoryFile.mockResolvedValue({ content: '', truncated: true });
+
+    await mountOnUserTab();
+    act(() => button('Workspace').click());
+    await flush();
+
+    expect(memory.readMemoryFile).toHaveBeenLastCalledWith(workspacePath);
+    expect(container.textContent).toContain(
+      'The complete memory file text is unavailable. Editing is disabled.',
+    );
+    expect(button('Edit').disabled).toBe(true);
+    act(() => button('Edit').click());
+    await flush();
+    expect(container.querySelector('textarea')).toBeNull();
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+  });
+
   // #13100's destructive step: an outstanding status load makes `files`
   // empty, which looks exactly like "no memory file yet" and used to open
   // the create path with Edit + Save enabled over a file that is on disk.

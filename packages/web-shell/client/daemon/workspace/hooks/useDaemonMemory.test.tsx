@@ -27,6 +27,7 @@ vi.mock('../../session/DaemonSessionProvider.js', () => ({
 const { useDaemonMemory } = await import('./useDaemonMemory.js');
 
 const GLOBAL_PATH = '/home/u/.qwen/QWEN.md';
+const WORKSPACE_PATH = '/w/QWEN.md';
 
 function captureReadMemoryFile() {
   let read: ReturnType<typeof useDaemonMemory>['readMemoryFile'] | undefined;
@@ -69,21 +70,27 @@ describe('useDaemonMemory.readMemoryFile', () => {
     expect(actions.readWorkspaceFile).not.toHaveBeenCalled();
   });
 
-  it('keeps explicitly withheld content read-only without using the file API', async () => {
-    actions.loadMemoryStatus.mockResolvedValue(
-      statusWith({ bytes: 4, truncated: true }),
-    );
-    actions.readWorkspaceFile.mockResolvedValue({
-      content: 'decoded without its BOM',
-      truncated: false,
-    });
+  it.each([
+    { path: GLOBAL_PATH, scope: 'global' },
+    { path: WORKSPACE_PATH, scope: 'workspace' },
+  ])(
+    'keeps explicitly withheld $scope content read-only without using the file API',
+    async ({ path, scope }) => {
+      actions.loadMemoryStatus.mockResolvedValue(
+        statusWith({ path, scope, bytes: 4, truncated: true }),
+      );
+      actions.readWorkspaceFile.mockResolvedValue({
+        content: 'decoded without its BOM',
+        truncated: false,
+      });
 
-    await expect(captureReadMemoryFile()(GLOBAL_PATH)).resolves.toEqual({
-      content: '',
-      truncated: true,
-    });
-    expect(actions.readWorkspaceFile).not.toHaveBeenCalled();
-  });
+      await expect(captureReadMemoryFile()(path)).resolves.toEqual({
+        content: '',
+        truncated: true,
+      });
+      expect(actions.readWorkspaceFile).not.toHaveBeenCalled();
+    },
+  );
 
   it('preserves the read-only marker for a partial content prefix', async () => {
     actions.loadMemoryStatus.mockResolvedValue(
@@ -119,5 +126,21 @@ describe('useDaemonMemory.readMemoryFile', () => {
       'path escapes workspace',
     );
     expect(actions.readWorkspaceFile).toHaveBeenCalledWith(GLOBAL_PATH);
+  });
+
+  it('preserves workspace fallback for daemons without content support', async () => {
+    actions.loadMemoryStatus.mockResolvedValue(
+      statusWith({ path: WORKSPACE_PATH, scope: 'workspace', bytes: 4 }),
+    );
+    actions.readWorkspaceFile.mockResolvedValue({
+      content: 'mem\n',
+      truncated: false,
+    });
+
+    await expect(captureReadMemoryFile()(WORKSPACE_PATH)).resolves.toEqual({
+      content: 'mem\n',
+      truncated: false,
+    });
+    expect(actions.readWorkspaceFile).toHaveBeenCalledWith(WORKSPACE_PATH);
   });
 });
