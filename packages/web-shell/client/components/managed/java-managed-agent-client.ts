@@ -65,6 +65,8 @@ export type JavaAgentEvent = Schemas['WebShellEvent'];
 
 export type JavaAgentResyncRequired = Schemas['WebShellResyncRequired'];
 
+export type JavaAgentTerminalTicket = Schemas['WebShellTerminalTicket'];
+
 const RESYNC_REQUIRED = 'agent.session.resync_required';
 
 // Corrupt frames tolerated in a row before the stream resyncs past the
@@ -152,6 +154,28 @@ export class JavaManagedAgentClient {
 
   getSession(sessionId: string, signal?: AbortSignal) {
     return this.post<JavaAgentSession>('/sessions/get', { sessionId }, signal);
+  }
+
+  terminalTicket(
+    sessionId: string,
+    terminalId: string,
+    signal?: AbortSignal,
+  ): Promise<JavaAgentTerminalTicket> {
+    return this.post(
+      '/sessions/terminal-ticket',
+      { sessionId, terminalId },
+      signal,
+    );
+  }
+
+  terminalWebSocketUrl(sessionId: string, terminalId: string): string {
+    const url = new URL(
+      `${this.baseUrl}${API_PREFIX}/sessions/${encodeURIComponent(sessionId)}/terminal`,
+    );
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    url.searchParams.set('terminalId', terminalId);
+    url.searchParams.set('replay', '1');
+    return url.toString();
   }
 
   getRecovery(sessionId: string, signal?: AbortSignal) {
