@@ -994,6 +994,16 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
     }
 
+    /** Registers or unregisters the Session's client filesystem relay. */
+    public Map<String, Object> clientFilesOperation(HarnessSessionRef session, Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/client-files";
+        HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/client-files",
+                body, ref.getHarnessSessionId(), ref.getHarnessClientId(), operation);
+        DaemonClient.requireStatus(response, 200, operation);
+        return JsonSupport.parseObject(response.getBody(), operation);
+    }
+
     public Map<String, Object> mcpManagementOperation(HarnessSessionRef session, String operationId) {
         HarnessSessionRef ref = requireSessionRef(session);
         String id = requireUuid(operationId, "operationId");
@@ -1638,6 +1648,7 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         boolean v2 = version == 2;
         if (v2 && !("hosted-workspace-shell/1".equals(request.get("toolProfile"))
+                || "hosted-workspace-shell/3".equals(request.get("toolProfile"))
                 || "hosted-workspace-mcp/1".equals(request.get("toolProfile")))) {
             throw new DaemonProtocolException("Unsupported Hosted lifecycle profile");
         }

@@ -272,6 +272,13 @@ describe('detectIsolation', () => {
       signals: ['/.dockerenv'],
       seatbelt: false,
     });
+    expect(
+      detectIsolation({}, (path) => path === '/run/.containerenv'),
+    ).toEqual({
+      isolated: true,
+      signals: ['/run/.containerenv'],
+      seatbelt: false,
+    });
   });
 
   // The built-in macOS sandbox sets this value and runs a profile that still
@@ -724,6 +731,14 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     const { dir, base, head } = makeRepo();
     const env = installFakeGh(snapshotFor({ base, head }));
     env.SANDBOX = 'docker';
+    // A containerized runner also carries ambient markers of its own
+    // (/.dockerenv, container=...), and prepare reports every signal it
+    // finds. Derive the expected line from the environment the spawned CLI
+    // receives instead of assuming SANDBOX=docker is the only one; the
+    // report must still name that signal and count it as a boundary.
+    const isolation = detectIsolation(env);
+    expect(isolation.isolated).toBe(true);
+    expect(isolation.signals).toContain('SANDBOX=docker');
 
     const result = runPrepare(dir, ['42', '--repo', REPO], env);
     expect(result.stderr).toBe('');
@@ -738,7 +753,9 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(result.stdout).toContain(
       'tree       at PR head, clean — reuse this tree; verify or refresh its install/build first',
     );
-    expect(result.stdout).toMatch(/^ {2}isolation {2}.*\bSANDBOX=docker\b/m);
+    expect(result.stdout).toContain(
+      `isolation  ${isolation.signals.join(', ')}`,
+    );
     expect(result.stdout).toContain('--require-isolation');
 
     const root = realpathSync(dir);
