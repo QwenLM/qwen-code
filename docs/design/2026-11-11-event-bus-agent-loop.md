@@ -114,7 +114,7 @@ Preview routes by `queryId` and scopes rounds by a UUID `roundId`. Main's loop r
 | `tool.settled`   | `{ round }`                            | Tool, at batch end               |
 | `handler.failed` | `{ source, eventType, round?, error }` | bus, on listener failure         |
 
-Events marked _planned_ are in the vocabulary but not emitted yet; they arrive with streaming dispatch (#17045 block S). Preview's `query.output` has no counterpart: main's surfaces hear the round through their host callbacks, so `loop.output` was removed from the vocabulary until a consumer needs it.
+Events marked _planned_ gain their publishers in the [streaming dispatch follow-up](2026-11-11-streaming-tool-dispatch.md). Block S in #17045 records the decision to defer implementation. Main's surfaces receive round output through host callbacks, so the vocabulary omits `loop.output` (Preview's `query.output`) until a consumer needs it.
 
 `llm.settled` is the round-end signal; the terminal classification (the `STOP_EVENTS` mapping that `runModelRound` does today) lives in run state (`state.model.stop`), and Conversation is the only place that turns that round-end state into the loop result. Duplicate/replay bookkeeping stays in the Tool handler, using the existing `toolCallIdUtils` helpers, exactly where `runToolBatch` does it today. Event payloads carry only routing and decision data; the full model result and tool batch live in the run state under their owner's slot, so the bus never duplicates them.
 
@@ -204,7 +204,7 @@ G5 enables both flags through an isolated user settings file with no environment
 - **Callback order is a contract.** Surfaces depend on the exact order of `onModelEvent`/`onToolResult`/output callbacks. The adapter must preserve it; the parity suites are the check, and PR 2 adds an explicit order test.
 - **`runModelRound`/`runToolBatch` are public seams.** ACP's merged round step (#15509) calls them directly; PR 2 keeps them as the handlers' inner implementations rather than deleting them.
 - **Round identity.** Numeric rounds are simpler than preview's UUIDs and match main's logs; if a future surface needs globally unique round ids, the event payload can carry both without a routing change.
-- **Streaming dispatch** remains an open product decision (latency win vs approval/ordering semantics); Phase 3 exists to force that decision explicitly rather than smuggling it in.
+- **Streaming dispatch** was evaluated in Phase 3. The [streaming dispatch design](2026-11-11-streaming-tool-dispatch.md) records the decision and the scope of the opt-in follow-up.
 - **Throwaway risk.** The 1.0 line may eventually replace main wholesale; this port is justified only as long as main's unified-loop program continues. It reuses main's types and contracts precisely so the work is not preview-specific.
 
 ## Files affected

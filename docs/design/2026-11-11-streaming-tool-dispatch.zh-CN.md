@@ -18,7 +18,7 @@ main 把一个模型轮跑完、收集其工具调用，然后作为一批执行
 
 2. **`CoreToolScheduler` 可增量调度，但其完成信号是基于空闲的。** `schedule`（`coreToolScheduler.ts:3094`）在调度器运行中时把请求入队、空闲时排空。因此可以逐个喂入调用。但 `onAllToolCallsComplete` 在调度器带着全部已收尾调用进入空闲时就触发——这在流式调用之间就会发生。所以流式执行器必须自己跟踪 dispatched 与 settled 的 call id，仅当一个轮已收尾**且**每个 dispatched 调用都终态时才 resolve 该轮；不能只依赖 `onAllToolCallsComplete`。
 
-3. **`runToolBatch` 不止是执行。** 它做去重/replay 抑制、surface 选择、launch 钩子、有序结果、`finalizeToolResponses`、以及带 Goal 溯源的录制（`core/agent-loop.ts:503`）。流式路径必须增量复刻所有这些——preview 用独立的流式 tool-executor 与 `completeToolExecutions` 实现，而不是调批处理函数。原样复用 `runToolBatch` 与流中派发不兼容。
+3. **`runToolBatch` 不止是执行。** 它做去重/replay 抑制、入口选择、启动钩子、有序结果、`finalizeToolResponses` 和带 Goal 溯源的记录（`core/agent-loop.ts:503`）。后续实现需要在批次准备启动调用时接入提前执行的结果，让批次继续负责这些决策和轮次收尾。
 
 ## 流式路径引入的 parity 差异
 
@@ -32,15 +32,16 @@ main 把一个模型轮跑完、收集其工具调用，然后作为一批执行
 | Structured-output 选择 | headless `selectCalls` 读整批：同批出现 `structured_output` 时只运行这些调用，其它调用（含先到的）全部跳过 | 后到的 `structured_output` 可能在先到的调用已运行后才到达，无法撤销                        | 与 plan-mode 同形：逐派发无法保住契约；需保守缓冲或显式放宽                                 |
 | 批次级 hook / 输出预算 | `PostToolBatch` 每批一次、以该批已完成调用触发                                                             | 逐派发会变成逐调用触发（`[A]`、`[B]` 而非 `[A, B]`），改变按数量敏感的 hook 输出与停止决策 | 批次级 hook/预算/录制延迟到轮次结算、按整轮已完成调用一次性执行，否则把拆批列为额外语义变化 |
 
-这些不是要修的 bug；它们就是流式的语义。重试那一行是承重的：它改变了 main 的 surface 与测试所依赖的一个正确性契约（重试即丢弃）。下面保留给后续 issue 的设计，对它会提前启动的调用避开了每一行。
+上表描述不加限制的流式派发会改变的行为。后续设计保留现有的审批时机和批次结果处理。批次仍可能跳过已花时间执行的读取，这次读取也可能留下工具调用日志。
 
 ## 决定（2026-11-13）
 
-2026-11-13 #17045 把流式派发作为 S 块接下来，范围收窄到只读且无需审批的调用。对照 main 核对后，这种收窄后的形式几乎省不下时间，所以不在 #17045 中实现。实现连同下面的设计移到后续 issue。决定基于三个发现：
+2026-11-13，#17045 将流式派发纳入 S 块，范围限定为只读且无需审批的调用。评估发现，主要 provider 路径能节省的时间有限。实现移到后续 issue，采用下文的设计。
 
-- **在主要的 provider 路径上，调用很晚才到达 loop。** chat-completions 协议没有结束单个工具调用的事件：调用以按 `index` 区分的增量到达，只有回复的 `finish_reason` 能可靠地结束它们。因此 main 的转换层在 `finish_reason` 到达时才发出回复中的工具调用（`openaiContentGenerator/converter.ts:2058`）。把下一个 `index` 的出现当作上一个调用的结束并不安全，因为解析器还要处理交错或重复使用 index 的 provider。1.0 也是这样：它的 chat-completions 工厂只在 `finish_reason` 时关闭工具块，所以 1.0 在这条路径上同样不会提前派发。Qwen 和百炼的预设以及对拍套件的假服务器都走这条路径。Messages 和 Responses 协议用各自的事件结束每个调用（`content_block_stop`、`response.output_item.done`），1.0 的提前派发正来自这里；它的 Qoder provider 用的是 Responses。main 的 Anthropic、Responses API 和 Gemini 生成器也在每个调用完成时就发出它，但即使在那里，也只有回复中最后一个调用之前的调用能提前启动。
-- **能提前运行的调用恰好是快的那些。** 读取和搜索工具以及只读的 shell 命令大多在一秒内就完成。慢的工具，例如 agent、需要询问的获取、会写入的命令，都被排除在外。
-- **提前运行后被丢弃的那次运行并非不可见。** 读取会把文件记入文件读取缓存，之后编辑时检查是否先读过会查它；每次运行也都会写进工具调用日志。
+- **Chat Completions 在结束帧发出工具调用。** Qwen 和百炼的预设以及对拍套件的假服务器使用该协议。Main 的转换层在 `finish_reason` 到达时一次性发出调用（`openaiContentGenerator/converter.ts:2058`）。Provider 可能交错或复用索引，因此不能把下一个 `index` 当作调用边界。Preview 同样在 `finish_reason` 关闭工具块，此时执行可以与用量帧等流尾数据的接收重叠。
+- **生成器及时转发调用时，单调用结束事件才有帮助。** Preview 可以根据 Messages 的 `content_block_stop` 和 Responses 的 `response.output_item.done` 派发调用。它的 Qoder provider 使用 Responses。Main 的 Anthropic 生成器会缓存已完成的调用，成功响应要等停止原因到达才发出（`anthropicContentGenerator/anthropicContentGenerator.ts:1610`）。Responses 转换层在 `response.output_item.done` 发出调用（`openaiResponsesContentGenerator/responses-converter.ts:278`）。即使是唯一或最后一个调用，也能和 `response.completed` 之前的工作重叠。Gemini 直接转发 SDK 的流式分片，可重叠的时间取决于分片何时携带完整调用。
+- **符合条件的调用范围有限。** 读取、搜索和只读 shell 命令可提前启动。Agent、需要审批的获取工具和会写入的命令等到批次执行。评估依据是 provider 发出调用的时机和符合条件的工具范围。
+- **丢弃结果可能影响后续调用。** 完整的 `read_file` 在结果进入历史前就会更新文件读取缓存。结果被丢弃后，再读同一文件可能返回 `file_unchanged`，指向模型从未见过的正文，后续编辑也可能通过先读检查。执行还可能留下工具调用日志。
 
 评估中的三个决策点，按后续 issue 的做法答复如下：
 
@@ -50,30 +51,32 @@ main 把一个模型轮跑完、收集其工具调用，然后作为一批执行
 
 ## 设计（供后续 issue 使用）
 
-**哪些调用提前启动。** 一个回复中按流的顺序排在最前面的调用，直到第一个不符合条件的调用为止。这一轮中它之后的调用都不提前启动，因为工具批会在一个可能写入的调用之后才运行它们。符合条件的调用需要满足：
+**哪些调用提前启动。** Headless 通过 `--max-tool-calls` 或 `model.maxToolCalls` 配置有限预算时走正常批处理。预算限制实际执行次数，事后丢弃结果无法挽回超额执行。符合条件的运行按流的顺序派发回复开头的调用，遇到第一个不符合条件的调用就停止，以免后续读取越过可能写入的调用。每个提前启动的调用都须满足以下条件。
 
 - 只读：读取、搜索或获取类工具，或者通过 scheduler 只读检查的 shell 命令；agent 虽然会被 scheduler 并行运行，但不在此列；
 - 工具的默认权限和权限规则不经询问即允许它；这项检查不调用任何模型；
 - 没有注册任何工具事件的 hook（PreToolUse、PostToolUse、PostToolUseFailure、PostToolBatch、PermissionRequest），也没有 Mod 的工具检查，因为它们可能询问、拒绝或替换调用的输入，而且触发时外部可见；
 - 不是重放，也不是重复的 id。
 
-**由工具批取用结果。** 提前启动的调用在到达时通过入口的 executor 运行。这一轮结束时，工具批照今天的方式运行：去重、`selectCalls`、按顺序对每个调用执行 `beforeToolLaunch`、结果和记录。工具批要启动的调用如果已经提前启动，它就取用这个调用的结果（还在运行就等待），只运行没有提前启动的调用。工具批不会启动的调用（`enter_plan_mode` 的同批调用、被 `structured_output` 挤掉的调用、宿主拒绝启动的调用、`--max-tool-calls` 预算），提前运行的结果被丢弃，这个调用按今天的方式处理。被丢弃的运行会花掉它的时间，并留下上面提到的影响。结果在这一轮结束后按工具批的顺序交给 `onToolResult`，因此设置开和关时宿主回调相同。提前运行时，调用的实时输出不会转发，而是随结果一起到达。
+**由工具批取用结果。** 执行器适配器在符合条件的调用到达时启动它，并暂存结果和输出。轮次结束后，工具批继续负责去重和 `selectCalls`。在正常的启动环节，按批次顺序对选中的调用各执行一次 `beforeToolLaunch`，包括已经提前启动的调用。适配器在此处交付提前执行的结果，必要时等待完成，其余调用照常运行。工具批跳过调用时，例如 `enter_plan_mode` 的同批调用、被 `structured_output` 排除的调用，或宿主拒绝启动的调用，丢弃提前结果并采用正常的批处理结果。批次按原有顺序通过 `onToolResult` 交付接纳的结果。已接纳调用的入口通知和暂存输出按正常批处理阶段发出。被丢弃的调用仍可能留下执行日志。
 
-**事件。** 设置开启时，Llm handler 在流送达每个调用时发布 `llm.tool_call`，Tool handler 启动其中符合条件的调用。`tool.request` 仍在这一轮结束时携带这一轮的调用并运行工具批。某次尝试被放弃（`Retry`、`ModelFallback`）或请求失败时，如果有提前启动的调用还在运行，就发布 `tool.cancel`，由 Tool handler 取消它们。
+**读取缓存。** 提前读取产生的缓存更新在共享文件读取缓存之外暂存。批次接纳结果时，先提交供先读检查使用的更新，再运行依赖该读取的后续批次工作。使用读取时捕获的文件身份和指纹，并遵循尝试期间的缓存失效。正文进入模型历史后，再标记读取结果在历史中可用。结果被拒绝或所在尝试被放弃时，一并丢弃暂存的更新。
 
-**收尾与取消。** 每次尝试中提前启动的调用在一个由运行的工具 signal 派生的 signal 下执行，所以重试只取消这次尝试的调用，中止则取消全部。提前启动的调用还在运行时，运行不会结束：如果这一轮结束时没有工具批来取用这个调用（重试后没有剩下调用、请求失败、停止），就取消这个调用并等它结束，与今天等待工具批里的工具相同。中止之后，被取消运行的 10 秒上限（K 块，#17145）限制这段等待。
+**事件。** 设置开启时，Llm handler 在流送达每个调用时发布 `llm.tool_call`，Tool handler 启动其中符合条件的调用。`tool.request` 仍在轮次结束时携带该轮调用并运行工具批。尝试被放弃（`Retry`、`ModelFallback`）或请求失败时，用 `tool.cancel` 取消提前调用。按运行、轮次和尝试定位提前调用及其结果，确保重试复用调用 ID 时取不到已丢弃的结果。
 
-**入口。** headless 和 AgentCore 在调用 `runAgentLoop` 时就交出 executor，所以它们的轮次可以在流式过程中派发。Ink TUI 和 OpenTUI 只在 `onRoundEnd` 中交出 scheduler，ACP 分开运行模型轮和工具批；它们需要先能在一轮开始时交出 executor。
+**收尾与取消。** 每次尝试提前启动的调用使用从运行的工具 signal 派生的 signal。重试取消被放弃的尝试，运行中止取消所有尝试。取消批次跳过的调用，以及轮次停止而没有进入批次的调用，并持续跟踪尚未结束的提前调用，直至清理完成。Handler 抛错时，循环适配器保留原始错误，取消未完成的提前调用，等待收尾，再抛出错误并清理总线。K 块（#17145）的计时器由运行中止触发，因此运行 signal 尚未中止时，终止清理也须有 10 秒上限。运行已中止时沿用已有截止时间。到期时交付已记录的终止结果，并丢弃迟到的结果和通知。
 
-**设置。** `experimental.streamingToolDispatch`，默认关闭，只在内核上读取（`experimental.eventBusAgentLoop`）。测试比较它开和关，并钉住符合条件的前缀、提前启动的调用还在运行时发生重试、工具批不启动的调用，以及提前启动的调用还在运行时中止。
+**入口。** 内核在轮次开始前创建 headless 的默认执行器，headless 可以基于它接入。AgentCore 也在轮次开始前提供执行器。启用前，执行器须改用传入的尝试 signal，并将直接发布的 `TOOL_CALL` 和 `TOOL_RESULT` 事件留到批次接纳调用后再发。这两个事件会进入 AgentCore 的会话记录。Ink TUI 和 OpenTUI 在 `onRoundEnd` 中交出 scheduler，ACP 分开运行模型轮和工具批。这些入口须先能在轮次开始时提供执行器。
+
+**设置与验收测试。** `experimental.streamingToolDispatch` 默认关闭，只在内核上读取（`experimental.eventBusAgentLoop`）。对照开关两种状态，验证符合条件的调用前缀、启动钩子的调用次数和结果顺序。覆盖 headless 的有限预算（含零）、完整读取结果被丢弃后再次读取同一文件，以及调用被跳过时 AgentCore 会话记录的一致性。验证重试复用尚在执行的调用 ID、有提前调用在执行时中止，以及运行 signal 尚未中止、执行器忽略取消时的请求抛错。检查原始错误仍可返回，且清理在截止时间内完成。
 
 ## 2026-11-11 的建议
 
 2026-11-13 的决定维持这一决断：**本切片不实现流式派发。落地本评估，并把流式作为统一循环各 surface 收敛之后的一个独立 opt-in 实验切片来实现。** 理由，接地于上述代码：
 
 - 架构移植（PR 1 + PR 2）交付了 event-bus 循环，自身成立；流式是可选的时延优化，不是前置条件。
-- 流式改变一个正确性契约（重试即丢弃）与审批时机。现在就落地——而只有 headless 与部分 ACP 在共享循环上、等价 harness 也只覆盖这些——会在 parity harness 覆盖那些真正依赖批处理契约的 surface（Ink、OpenTUI、AgentCore、Hosted）之前就把语义锁死。
-- 执行器适配器加上对 `runToolBatch` finalize/去重/录制的增量复刻，是一个相当大的、对正确性敏感的改动；它应配完整 parity harness 独立成片，而不是塞进架构移植里的原型。
+- 初始评估确定，接入流式派发前要核对重试、审批和输出顺序这三项批处理契约。后续 opt-in 实现需要为每个启用的入口提供等价性证据。
+- 执行器适配器、缓存暂存和失败清理需要独立的验收测试。结果收尾、去重和记录仍由工具批负责。
 
 上面的设计保住了两个契约，重试仍然丢弃，审批仍然按批进行，并由工具批直接取用提前运行的结果，而不是增量复刻 `runToolBatch`。
 
