@@ -11341,6 +11341,191 @@ describe('DaemonSessionProvider', () => {
     expect(promptStatus).toBe('idle');
   });
 
+  it.each(['active', 'idle', 'completed', 'error'] as const)(
+    'reconciles an observer after activity coverage is lost (%s snapshot)',
+    async (result) => {
+      const owner = {
+        workspaceCwd: '/mock-workspace',
+        sessionId: 'session-activity-recovery',
+      };
+      const reloadEntered = createDeferred<void>();
+      const snapshot = createDeferred<MockSession>();
+      let sentPromptChunk = false;
+      const firstSession = createMockSession({
+        sessionId: owner.sessionId,
+        hasActivePrompt: false,
+        events: async function* observedPrompt(opts = {}) {
+          if (!sentPromptChunk) {
+            sentPromptChunk = true;
+            yield {
+              id: 9,
+              v: 1,
+              type: 'session_update',
+              originatorClientId: 'client-other',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'Still working' },
+                },
+              },
+            } satisfies DaemonEvent;
+          }
+          yield* createIdleEvents()(opts);
+        },
+      });
+      sdkMocks.sessions.push(firstSession);
+      let actions: DaemonUiSessionActions | undefined;
+      let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+      let connection: ReturnType<typeof useDaemonConnection> | undefined;
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+      function Harness() {
+        actions = useDaemonActions();
+        promptStatus = useDaemonPromptStatus();
+        connection = useDaemonConnection();
+        blocks = useDaemonTranscriptBlocks();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      await act(async () => {
+        await wait(20);
+        actions?.setDaemonActivePrompt(true, owner);
+        await flushPromises();
+      });
+      expect(promptStatus).toBe('streaming');
+      sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(async () => {
+        reloadEntered.resolve();
+        return snapshot.promise;
+      });
+
+      await act(async () => {
+        actions?.setDaemonActivePrompt(undefined, owner);
+        await flushPromises();
+      });
+      expect(promptStatus).toBe('streaming');
+      expect(
+        blocks.some(
+          (block) =>
+            block.kind === 'assistant' && block.text === 'Still working',
+        ),
+      ).toBe(true);
+      if (result === 'completed') {
+        await act(async () => {
+          await reloadEntered.promise;
+          actions?.setDaemonActivePrompt(false, owner);
+          await flushPromises();
+        });
+        expect(promptStatus).toBe('idle');
+      }
+      await act(async () => {
+        await reloadEntered.promise;
+        if (result === 'idle' || result === 'completed') {
+          actions?.setDaemonActivePrompt(true, owner);
+        }
+        if (result === 'error') {
+          snapshot.reject(new Error('Activity recovery unavailable'));
+        } else {
+          snapshot.resolve(
+            createMockSession({
+              sessionId: owner.sessionId,
+              hasActivePrompt: result === 'active' || result === 'completed',
+              events: createIdleEvents(),
+            }),
+          );
+        }
+        await wait(20);
+        await flushPromises();
+      });
+      expect(promptStatus).toBe(result === 'active' ? 'streaming' : 'idle');
+      if (result === 'error') {
+        expect(connection?.error).toContain('Activity recovery unavailable');
+      } else {
+        expect(connection?.error).toBeUndefined();
+      }
+      if (result === 'idle' || result === 'completed') {
+        await act(async () => {
+          actions?.setDaemonActivePrompt(true, owner);
+          await flushPromises();
+        });
+        expect(promptStatus).toBe('idle');
+      }
+    },
+  );
+
+  it.each([
+    { workspaceCwd: '/other-workspace', sessionId: 'session-owner-check' },
+    { workspaceCwd: '/mock-workspace', sessionId: 'other-session' },
+  ])(
+    'keeps observer activity when an unrelated owner publishes %j',
+    async (otherOwner) => {
+      const streamEnd = createDeferred<void>();
+      const reconnected = createDeferred<void>();
+      let subscriptions = 0;
+      const session = createMockSession({
+        sessionId: 'session-owner-check',
+        hasActivePrompt: false,
+        events: async function* observedThenCut(opts = {}) {
+          subscriptions += 1;
+          if (subscriptions === 1) {
+            yield {
+              id: 9,
+              v: 1,
+              type: 'session_update',
+              originatorClientId: 'client-other',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'Still working' },
+                },
+              },
+            } satisfies DaemonEvent;
+            await streamEnd.promise;
+            return;
+          }
+          reconnected.resolve();
+          yield* createIdleEvents()(opts);
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let actions: DaemonUiSessionActions | undefined;
+      let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+      function Harness() {
+        actions = useDaemonActions();
+        promptStatus = useDaemonPromptStatus();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      await act(async () => {
+        await wait(20);
+        actions?.setDaemonActivePrompt(true, {
+          workspaceCwd: '/mock-workspace',
+          sessionId: session.sessionId,
+        });
+        await flushPromises();
+      });
+      expect(promptStatus).toBe('streaming');
+      const loadsBeforeResume =
+        sdkMocks.MockDaemonSessionClient.load.mock.calls.length;
+      await act(async () => {
+        actions?.setDaemonActivePrompt(true, otherOwner);
+        streamEnd.resolve();
+        await reconnected.promise;
+        await flushPromises();
+      });
+      expect(promptStatus).toBe('streaming');
+      expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(
+        loadsBeforeResume,
+      );
+    },
+  );
+
   it('reloads restored active prompts after epoch reset', async () => {
     const reloaded = createDeferred<void>();
     const firstSession = createMockSession({
@@ -14165,12 +14350,21 @@ describe('DaemonSessionProvider', () => {
           blocks.filter((block) => block.kind === 'assistant'),
         ).toMatchObject([{ text: 'starting resumed', streaming: true }]);
 
-        // The authority's own channel then stops answering too — a dead daemon,
-        // not a long tool call. Once the live-state poll gives up on its
-        // snapshot the bridge publishes `undefined`, and the pane must be
-        // released rather than showing a running turn for the tab's lifetime.
+        // Coverage loss is not completion. A fresh inactive load releases the
+        // observer without depending on a terminal event from the old stream.
+        const reloaded = createDeferred<void>();
+        sdkMocks.sessions.push(
+          createMockSession({
+            hasActivePrompt: false,
+            events: createPendingEvents(reloaded),
+          }),
+        );
         await act(async () => {
           actions?.setDaemonActivePrompt(undefined);
+          await flushPromises();
+        });
+        await act(async () => {
+          await reloaded.promise;
           await flushPromises();
         });
         expect(promptStatus).toBe('idle');
