@@ -465,6 +465,56 @@ describe('shouldForceAutoModeReviewForAllow', () => {
   const heredoc = (body: string) =>
     ["bash <<'SCRIPT'", body, 'SCRIPT'].join('\n');
 
+  it.each([
+    'curl -sS --proxy http://127.0.0.1:7890 -o catalog.json https://raw.githubusercontent.com/Pal-AI-Lab/cortico-extensions/main/catalog.json',
+    'curl -o catalog.json "HTTPS://example.com/catalog.json?mirror=//fileserver/share"',
+    'python -c \'download("https://example.com/catalog.json")\'',
+  ])('does not probe URL authorities as filesystem paths: %s', (command) => {
+    const realpathSpy = vi
+      .spyOn(fs.realpathSync, 'native')
+      .mockImplementation(() => {
+        throw Object.assign(new Error('missing test path'), { code: 'ENOENT' });
+      });
+    try {
+      expect(forcesReview(command)).toBe(false);
+      expect(
+        realpathSpy.mock.calls.some(([filePath]) =>
+          /^[/\\]{2}/.test(String(filePath)),
+        ),
+      ).toBe(false);
+    } finally {
+      realpathSpy.mockRestore();
+    }
+  });
+
+  it('still reviews protected writes beside URL literals in the same token', () => {
+    expect(
+      forcesReview(
+        'node -e \'fetch("https://example.com/data");fs.writeFileSync(".qwen/settings.json","{}");\'',
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    'cp //fileserver/share/alias output.txt',
+    'curl file://fileserver/share/alias -o output.txt',
+  ])('still resolves genuine network paths: %s', (command) => {
+    const realpathSpy = vi
+      .spyOn(fs.realpathSync, 'native')
+      .mockImplementation((filePath) => {
+        if (String(filePath) === '//fileserver/share/alias') {
+          return '/repo/.qwen/settings.json';
+        }
+        throw Object.assign(new Error('missing test path'), { code: 'ENOENT' });
+      });
+    try {
+      expect(forcesReview(command)).toBe(true);
+      expect(realpathSpy).toHaveBeenCalledWith('//fileserver/share/alias');
+    } finally {
+      realpathSpy.mockRestore();
+    }
+  });
+
   it('returns true for Edit/Write targeting protected self-modification paths', () => {
     expect(
       forcesReviewOf(ToolNames.EDIT, '/Users/test/.qwen/settings.json'),

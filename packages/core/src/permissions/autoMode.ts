@@ -428,7 +428,10 @@ function rawFlagValue(token: string, line: string): string | undefined {
 }
 
 function containsProtectedPathFragment(token: string, cwd: string): boolean {
-  for (const candidate of token.match(/[A-Za-z0-9_./~-]+/g) ?? []) {
+  // Keep URL authorities from becoming UNC paths during filesystem checks.
+  for (const candidate of token.match(
+    /https?:\/\/[^\s"'`]+|[A-Za-z0-9_./~-]+/gi,
+  ) ?? []) {
     const resolved = path.isAbsolute(candidate)
       ? candidate
       : path.join(cwd, candidate);
