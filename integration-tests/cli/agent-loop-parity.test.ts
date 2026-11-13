@@ -12,7 +12,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -46,6 +46,11 @@ interface Scenario {
   /** The exit code both runs must end with; defaults to 0. */
   exitCode?: number;
   /**
+   * The main session's model rounds; defaults to one per main-session
+   * request. A round that resends its request counts once.
+   */
+  mainRounds?: number;
+  /**
    * The model's reply to a streaming request, from its message history.
    * `subagentRequest` is the one-based request number for the subagent,
    * including continuations.
@@ -78,6 +83,8 @@ interface Run {
   sharedSubagentBatches: number;
   /** Subagent rounds run on the shared loop's event-bus kernel. */
   kernelSubagentRounds: number;
+  /** Main-session rounds run on the shared loop's event-bus kernel. */
+  kernelMainRounds: number;
   subagentRequests: number;
 }
 
@@ -88,6 +95,9 @@ const SHARED_SUBAGENT_ROUND =
 /** The debug-log line of a subagent round on the event-bus kernel. */
 const KERNEL_SUBAGENT_ROUND =
   /subagent \S+ round \d+ on the shared agent loop on the event bus/g;
+
+/** The debug-log line of each `runAgentLoop` call on the event-bus kernel. */
+const KERNEL_RUN = /runAgentLoopOnBus started/g;
 
 /** The debug-log line of a subagent tool batch on the shared agent loop. */
 const SHARED_SUBAGENT_BATCH =
@@ -151,11 +161,17 @@ const toolResults = (messages: JsonObject[]) =>
 const userTurns = (messages: JsonObject[]) =>
   messages.filter((message) => message['role'] === 'user').length;
 
+// The startup context's date, in `formatDateForContext`'s format. Runs that
+// straddle midnight render it a day apart.
+const CONTEXT_DATE =
+  /\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (?:January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}\b/g;
+
 function normalize(value: unknown, dir: string): unknown {
   return JSON.parse(
     JSON.stringify(value ?? null)
       .split(dir)
-      .join('<DIR>'),
+      .join('<DIR>')
+      .replace(CONTEXT_DATE, '<DATE>'),
   );
 }
 
@@ -247,6 +263,9 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     vi.stubEnv('NO_PROXY', noProxy);
     vi.stubEnv('no_proxy', noProxy);
     vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+    // The kernel leg of the nightly matrix sets this in the ambient env;
+    // without the stub it would override the per-arm kernel setting and the
+    // suite would compare a different pair than on the other legs.
     vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
   });
 
@@ -272,6 +291,8 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     });
     const dir = rig.testDir!;
     scenario.prepare?.(rig);
+    // Snapshot the fixture's home writes before the child can touch it.
+    const homeBefore = readdirSync(join(dir, '.qwen-home')).sort();
     let subagentRequests = 0;
     server = await startFakeOpenAIServer(({ body }) => {
       if (body['stream'] !== true)
@@ -283,9 +304,11 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       return scenario.reply(messages, dir, subagentRequest);
     }, fakeServerHostOptions());
     // Outside the project, so the folder structure in the requests does not
-    // list the session's debug log.
+    // list the session's debug log or background housekeeping markers in
+    // QWEN_HOME (#16710).
     const runtimeDir = `${dir}-runtime`;
     rmSync(runtimeDir, { recursive: true, force: true });
+    cpSync(join(dir, '.qwen-home'), runtimeDir, { recursive: true });
     const args = [
       rig.bundlePath,
       '--no-chat-recording',
@@ -306,14 +329,12 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     const child = spawn('node', args, {
       cwd: dir,
       stdio: 'pipe',
-      env:
-        scenario.subagentRounds === undefined
-          ? process.env
-          : {
-              ...process.env,
-              QWEN_DEBUG_LOG_FILE: '1',
-              QWEN_RUNTIME_DIR: runtimeDir,
-            },
+      env: {
+        ...process.env,
+        QWEN_DEBUG_LOG_FILE: '1',
+        QWEN_HOME: runtimeDir,
+        QWEN_RUNTIME_DIR: runtimeDir,
+      },
     });
     const messages = [...(scenario.messages ?? [])];
     const sendNext = () => {
@@ -367,6 +388,11 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     const exitCode = await new Promise<number | null>((resolve) =>
       child.on('close', resolve),
     );
+    expect(readdirSync(join(dir, '.qwen-home')).sort()).toEqual(homeBefore);
+    const log = debugLog(runtimeDir);
+    const count = (line: RegExp) => log.match(line)?.length ?? 0;
+    // AgentCore's rounds on the kernel are `runAgentLoop` calls too.
+    const kernelSubagentRounds = count(KERNEL_SUBAGENT_ROUND);
     return {
       exitCode,
       requests: modelRequests(server, dir),
@@ -374,19 +400,25 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       stderr,
       approvals,
       subagentRequests,
-      sharedSubagentRounds:
-        debugLog(runtimeDir).match(SHARED_SUBAGENT_ROUND)?.length ?? 0,
-      sharedSubagentBatches:
-        debugLog(runtimeDir).match(SHARED_SUBAGENT_BATCH)?.length ?? 0,
-      kernelSubagentRounds:
-        debugLog(runtimeDir).match(KERNEL_SUBAGENT_ROUND)?.length ?? 0,
+      sharedSubagentRounds: count(SHARED_SUBAGENT_ROUND),
+      sharedSubagentBatches: count(SHARED_SUBAGENT_BATCH),
+      kernelSubagentRounds,
+      kernelMainRounds: count(KERNEL_RUN) - kernelSubagentRounds,
     };
   }
 
-  async function both(scenario: Scenario) {
+  /** The current loop, the shared loop, and the shared loop on the kernel. */
+  async function arms(scenario: Scenario) {
     const current = await run(scenario, false);
     const shared = await run(scenario, true);
-    return { current, shared };
+    const kernel = await run(scenario, true, true);
+    expect(current.kernelMainRounds + current.kernelSubagentRounds).toBe(0);
+    expect(shared.kernelMainRounds + shared.kernelSubagentRounds).toBe(0);
+    // The main session runs each round in its own `runAgentLoop` call.
+    expect(kernel.kernelMainRounds).toBe(
+      scenario.mainRounds ?? kernel.requests.length - kernel.subagentRequests,
+    );
+    return { current, shared, kernel };
   }
 
   const read = (file: string, id: string) =>
@@ -474,6 +506,8 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     {
       name: 'cut-off edit',
       prompt: 'Write the notes.',
+      // The cut-off reply is resent with a higher output limit.
+      mainRounds: 2,
       reply: (messages, dir) =>
         toolResults(messages) === 0
           ? {
@@ -674,34 +708,27 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
   it.each(scenarios.map((scenario) => [scenario.name, scenario] as const))(
     '%s: same requests and output',
     async (_name, scenario) => {
-      const { current, shared } = await both(scenario);
+      const { current, shared, kernel } = await arms(scenario);
 
       expect(current.exitCode).toBe(scenario.exitCode ?? 0);
       expect(shared.exitCode).toBe(current.exitCode);
       expect(shared.requests).toEqual(current.requests);
       expect(shared.frames).toEqual(current.frames);
+      // The kernel must send and print what the shared loop does.
+      expect(kernel.exitCode).toBe(shared.exitCode);
+      expect(kernel.requests).toEqual(shared.requests);
+      expect(kernel.frames).toEqual(shared.frames);
       // Only the run with the setting on sends its subagent rounds on the
       // shared loop.
       expect(current.sharedSubagentRounds).toBe(0);
       expect(shared.sharedSubagentRounds).toBe(scenario.subagentRounds ?? 0);
       expect(current.sharedSubagentBatches).toBe(0);
       expect(shared.sharedSubagentBatches).toBe(scenario.subagentBatches ?? 0);
-      expect(shared.kernelSubagentRounds).toBe(0);
-      // A subagent scenario also runs on the event-bus kernel, which must
-      // send and print what the shared loop does.
-      if (scenario.subagentRounds !== undefined) {
-        const kernel = await run(scenario, true, true);
-        expect(kernel.exitCode).toBe(shared.exitCode);
-        expect(kernel.requests).toEqual(shared.requests);
-        expect(kernel.frames).toEqual(shared.frames);
-        expect(kernel.kernelSubagentRounds).toBe(scenario.subagentRounds);
-        expect(kernel.sharedSubagentBatches).toBe(
-          scenario.subagentBatches ?? 0,
-        );
-      }
+      expect(kernel.kernelSubagentRounds).toBe(scenario.subagentRounds ?? 0);
+      expect(kernel.sharedSubagentBatches).toBe(scenario.subagentBatches ?? 0);
       const recovery = scenario.subagentRecovery;
       if (recovery) {
-        for (const run of [current, shared]) {
+        for (const run of [current, shared, kernel]) {
           expect(run.subagentRequests).toBe(recovery.requests);
           expect(run.frames).toContainEqual({
             type: 'user',
@@ -717,7 +744,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
         }
       }
     },
-    120_000,
+    240_000,
   );
 
   it('ends a stream-json message past --max-session-turns at the limit (#15325)', async () => {
@@ -728,7 +755,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       reply: (messages) => ({ content: `answer ${userTurns(messages)}` }),
     };
 
-    const { current, shared } = await both(scenario);
+    const { current, shared, kernel } = await arms(scenario);
     const results = (frames: unknown[]) =>
       frames.filter((frame) => (frame as JsonObject)['type'] === 'result');
 
@@ -748,7 +775,11 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       { is_error: false, result: 'answer 1' },
     ]);
     expect(shared.stderr).toContain('Reached max session turns');
-  }, 120_000);
+    expect(kernel.exitCode).toBe(shared.exitCode);
+    expect(kernel.requests).toEqual(shared.requests);
+    expect(kernel.frames).toEqual(shared.frames);
+    expect(kernel.stderr).toContain('Reached max session turns');
+  }, 240_000);
 
   it('asks for approval of a whole batch before the tool budget stops it', async () => {
     const scenario: Scenario = {
@@ -775,7 +806,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
           : { content: 'Both written.' },
     };
 
-    const { current, shared } = await both(scenario);
+    const { current, shared, kernel } = await arms(scenario);
     const output = (frames: unknown[]) =>
       frames.filter(
         (frame) => (frame as JsonObject)['type'] !== 'control_request',
@@ -790,5 +821,9 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     // first, and the budget then stops the second call before it runs.
     expect(current.approvals).toEqual(['call_one']);
     expect(shared.approvals).toEqual(['call_one', 'call_two']);
-  }, 120_000);
+    expect(kernel.exitCode).toBe(shared.exitCode);
+    expect(kernel.requests).toEqual(shared.requests);
+    expect(output(kernel.frames)).toEqual(output(shared.frames));
+    expect(kernel.approvals).toEqual(shared.approvals);
+  }, 240_000);
 });

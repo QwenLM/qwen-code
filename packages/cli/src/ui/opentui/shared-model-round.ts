@@ -80,8 +80,13 @@ export function sharedModelRound(
   runBatch: (executor: AgentLoopToolExecutor) => Promise<ToolBatchResult>;
   close: () => Promise<void>;
 } {
+  const consumer = options.useEventBus ? new AbortController() : undefined;
+  const runSignal = consumer
+    ? AbortSignal.any([signal, consumer.signal])
+    : signal;
   let result: SharedModelRoundResult | undefined;
   let run: Promise<AgentLoopResult> | undefined;
+  let runSettled = false;
   let supply!: (executor: AgentLoopToolExecutor | undefined) => void;
   const executor = new Promise<AgentLoopToolExecutor | undefined>(
     (resolve) => (supply = resolve),
@@ -90,6 +95,9 @@ export function sharedModelRound(
     request: ToolCallRequestInfo;
     response: ToolCallResponseInfo;
   }> = [];
+  const abortConsumer = (error: SharedModelRoundClosed) => {
+    if (run && !runSettled && !result) consumer?.abort(error);
+  };
   async function* events(): AsyncGenerator<ServerLlmStreamEvent> {
     interface Offer {
       event: ServerLlmStreamEvent;
@@ -104,7 +112,8 @@ export function sharedModelRound(
     run = runAgentLoop({
       client,
       config: options.config,
-      signal,
+      signal: runSignal,
+      toolSignal: signal,
       first: round,
       maxRounds: 1,
       duplicates: options.duplicates,
@@ -120,7 +129,7 @@ export function sharedModelRound(
       host: {
         onModelEvent: (event) =>
           new Promise<void>((take, refuse) => {
-            if (closed) {
+            if (closed || consumer?.signal.aborted) {
               refuse(new SharedModelRoundClosed());
               return;
             }
@@ -128,6 +137,7 @@ export function sharedModelRound(
             wake?.();
           }),
         onRoundEnd: async (_round, model) => {
+          if (consumer?.signal.aborted) return 'surface_ended';
           result = {
             calls: [...model.calls],
             ...(model.stop ? { stop: model.stop } : {}),
@@ -135,7 +145,7 @@ export function sharedModelRound(
           done = true;
           wake?.();
           if (model.stop || model.calls.length === 0) return;
-          if (!(await executor)) return 'surface_ended';
+          if (!(await executor) || runSettled) return 'surface_ended';
           options.beforeBatch();
           return undefined;
         },
@@ -145,6 +155,7 @@ export function sharedModelRound(
       },
     });
     const settled = () => {
+      runSettled = true;
       done = true;
       wake?.();
     };
@@ -177,14 +188,28 @@ export function sharedModelRound(
     } finally {
       if (!result) {
         closed = true;
-        (taking ?? offered)?.refuse(new SharedModelRoundClosed());
+        const error = new SharedModelRoundClosed();
+        abortConsumer(error);
+        (taking ?? offered)?.refuse(error);
         supply(undefined);
         await run.catch(() => {});
       }
     }
   }
+  const stream = events();
   return {
-    events: events(),
+    events: consumer
+      ? {
+          [Symbol.asyncIterator]: () => ({
+            next: () => stream.next(),
+            return: () => {
+              // A generator's return waits behind any pending next call.
+              abortConsumer(new SharedModelRoundClosed());
+              return stream.return(undefined);
+            },
+          }),
+        }
+      : stream,
     result: () => result,
     answered,
     runBatch: (batchExecutor) => {
@@ -199,6 +224,10 @@ export function sharedModelRound(
     },
     close: async () => {
       supply(undefined);
+      if (consumer && run && !result) {
+        abortConsumer(new SharedModelRoundClosed());
+        await stream.return(undefined);
+      }
       await run?.catch(() => {});
     },
   };
