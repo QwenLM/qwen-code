@@ -53,5 +53,6 @@ describe('installEnvironmentProxy', () => {
     } finally {
       vi.unstubAllEnvs();
     }
+    expect(process.env['HTTP_PROXY']).not.toBe('not a URL');
   });
 });
