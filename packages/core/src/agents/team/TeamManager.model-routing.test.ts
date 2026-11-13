@@ -399,9 +399,16 @@ describe('TeamManager teammate model routing (#10071)', () => {
     // only the provider's mapped protocol and the bare model ID may leave
     // this process.
     const leader = leaderConfig as unknown as {
+      getContentGeneratorConfig: ReturnType<typeof vi.fn>;
+      getAuthType: ReturnType<typeof vi.fn>;
       getModelProvidersConfig: ReturnType<typeof vi.fn>;
       getProviderProtocolConfig: ReturnType<typeof vi.fn>;
     };
+    leader.getContentGeneratorConfig.mockReturnValue({
+      ...leaderConfig.getContentGeneratorConfig(),
+      authType: 'anthropic',
+    });
+    leader.getAuthType.mockReturnValue('anthropic');
     leader.getModelProvidersConfig.mockReturnValue({
       'huawei-maas': [
         {

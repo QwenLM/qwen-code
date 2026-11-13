@@ -2259,7 +2259,7 @@ describe('SubagentManager', () => {
           providerProtocolConfig: { 'huawei-maas': 'openai' },
         });
         vi.spyOn(providerConfig, 'getContentGeneratorConfig').mockReturnValue({
-          authType: AuthType.USE_OPENAI,
+          authType: AuthType.USE_ANTHROPIC,
           model: 'deepseek-v4.1-flash',
         });
         return new SubagentManager(providerConfig);
@@ -2294,7 +2294,7 @@ describe('SubagentManager', () => {
           providerProtocolConfig: { 'huawei-maas': 'openai' },
         });
         vi.spyOn(providerConfig, 'getContentGeneratorConfig').mockReturnValue({
-          authType: AuthType.USE_OPENAI_RESPONSES,
+          authType: AuthType.USE_ANTHROPIC,
           model: 'deepseek-v4.1-reasoner',
         });
         const mgr = new SubagentManager(providerConfig);
