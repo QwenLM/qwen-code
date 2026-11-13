@@ -906,6 +906,13 @@ function ManagedSessionsContent({
     setDiscarded(false);
   }, [provider, sessionId, hostSessionOnly]);
 
+  // submit and discardPending are recreated on every render, so the intent
+  // effect below reads them through refs: depending on them directly would
+  // re-run a guard that can only early-return, and wrapping either in
+  // useCallback would change when their large closures are captured.
+  const submitRef = useRef<() => void>(() => {});
+  const discardPendingRef = useRef<() => void>(() => {});
+
   useEffect(() => {
     const intent = pendingElsewhereIntent.current;
     if (
@@ -916,11 +923,8 @@ function ManagedSessionsContent({
     )
       return;
     pendingElsewhereIntent.current = undefined;
-    if (intent.action === 'retry') void submit();
-    else discardPending();
-    // submit/discardPending are declared in this render and act on the record
-    // the deps above identify; re-running for their identity would be noise.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (intent.action === 'retry') void submitRef.current();
+    else discardPendingRef.current();
   }, [busy, pendingHere, sessionId]);
 
   // The Discard button unmounts itself, dropping focus to <body>: land it on
@@ -1390,6 +1394,9 @@ function ManagedSessionsContent({
     }
   }
 
+  // Keep the intent effect on the latest closure without re-running it.
+  submitRef.current = submit;
+
   const attachmentCapability = useRef({ sessionId, enabled: false });
   if (attachmentCapability.current.sessionId !== sessionId)
     attachmentCapability.current = { sessionId, enabled: false };
@@ -1622,6 +1629,9 @@ function ManagedSessionsContent({
     focusComposer.current = { sessionId };
     setDiscarded(true);
   }
+
+  discardPendingRef.current = discardPending;
+
   function openSession(id: string, targetWorkspaceId?: string) {
     const open = onOpenSession ?? onSelectSession;
     if (targetWorkspaceId) open(id, targetWorkspaceId);
