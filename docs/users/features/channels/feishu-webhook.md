@@ -23,8 +23,8 @@ encoding, query parameters or fragment.
 
 ## Configure a Channel
 
-Configure this integration in `settings.json`. Web Shell's Channels
-page does not currently list Feishu Webhook instances or offer a create entry.
+Configure this integration in [Web Shell](#use-web-shell) or `settings.json` as
+shown below.
 
 Add a named instance to the workspace's Channel settings:
 
@@ -57,6 +57,21 @@ that reference it.
 Starting the Channel makes it locally ready to send; it does not send a test
 message or verify remote credentials. Stopping cancels in-flight sends. Restart
 or reload applies saved configuration changes.
+
+## Use Web Shell
+
+In Channels, choose Feishu and then Webhook (send only). Select the workspace,
+save the webhook URL and optional signing secret, and start the Channel.
+Receiving, pairing and agent-session settings do not apply to this method.
+The application-bot method remains available under the same Feishu platform.
+
+In Scheduled Tasks, choose a persistent task session and select this Channel
+as the delivery destination. Web Shell fills its configured group automatically;
+no observed contacts or manually entered chat ID are needed. Existing per-run
+and manual-trigger delivery restrictions remain in effect.
+
+The same controls are available through `WebShellWithProviders` when the host
+enables Channels and Scheduled Tasks and supplies a daemon workspace.
 
 ## Explicit API delivery
 

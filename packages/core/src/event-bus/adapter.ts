@@ -79,12 +79,21 @@ export async function runAgentLoopOnBus(
     { runId },
   );
 
+  const { signal } = options;
+  const onAbort = () =>
+    runtime.bus.publish(
+      createBusEvent('loop.cancelled', state, { reason: 'abort' }),
+    );
   try {
     runtime.bus.publish(
       createBusEvent('loop.started', state, { promptId: state.promptId }),
     );
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
     return await result;
   } finally {
+    signal.removeEventListener('abort', onAbort);
+    clearTimeout(state.settleTimer);
     off();
     runtime.store.delete(runId);
     runtime.dispose();
