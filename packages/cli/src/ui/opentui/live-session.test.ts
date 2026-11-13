@@ -4836,7 +4836,7 @@ describe.each([false, true])(
     });
 
     it.skipIf(!kernel)(
-      'drops native observations after the cancellation cap',
+      'settles OpenTUI cards and drops native observations at the cancellation cap',
       async () => {
         vi.useFakeTimers();
         try {
@@ -4848,16 +4848,38 @@ describe.each([false, true])(
           const config = shared(createFakeConfig(send));
           const recordCompletedToolCall = vi.fn();
           const client = config.getGeminiClient();
-          Object.assign(config, { getLlmClient: () => client });
+          Object.assign(config, {
+            getLlmClient: () => client,
+            getProjectRoot: () => '/tmp',
+          });
           Object.assign(client, { recordCompletedToolCall });
-          const turn = drain(livePromptEvents(config, 'start', abort.signal));
+          const turn = drain(
+            livePromptEvents(config, 'start', abort.signal, {
+              checkpointHistory: { allocateId: () => 1, snapshot: () => [] },
+            }),
+          );
           await vi.advanceTimersByTimeAsync(0);
           expect(schedulerControl.finish).not.toBeNull();
           abort.abort();
           await vi.advanceTimersByTimeAsync(10_000);
-          await turn;
+          const events = await turn;
+          const rows = events.reduce<readonly LiveHistoryItem[]>(
+            foldLiveEvent,
+            [],
+          );
+          expect(rows.find((row) => row.kind === 'tool')).toMatchObject({
+            id: 't1',
+            done: true,
+            success: false,
+            summary: 'cancelled',
+            canonicalPending: false,
+            canonicalHistoryItem: {
+              tools: [{ callId: 't1', status: ToolCallStatus.Canceled }],
+            },
+          });
           await schedulerControl.finish!();
           expect(recordCompletedToolCall).not.toHaveBeenCalled();
+          expect(send).toHaveBeenCalledOnce();
         } finally {
           vi.useRealTimers();
         }

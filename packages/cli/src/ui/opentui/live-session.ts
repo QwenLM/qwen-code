@@ -1404,6 +1404,9 @@ export async function* livePromptEvents(
       options?.onExecutingShells?.([]);
     };
     let isBatchFinished: (() => boolean) | undefined;
+    let schedulerCompleted = false;
+    let displayedCancelledBatch = false;
+    const lastToolCalls = new Map<string, InteractiveToolCall>();
     // Settles the shared batch once the scheduler completed it.
     let settleBatch: (() => void) | undefined;
     const scheduler = new InteractiveModToolScheduler({
@@ -1425,6 +1428,10 @@ export async function* livePromptEvents(
       },
       onToolCallsUpdate: (calls) => {
         if (isBatchFinished?.()) return;
+        if (sharedRound) {
+          for (const call of calls)
+            lastToolCalls.set(call.request.callId, call);
+        }
         if (shellOwnerOpen)
           options?.onExecutingShells?.(
             current() && !abort.aborted
@@ -1542,6 +1549,7 @@ export async function* livePromptEvents(
           settleBatch?.();
           return;
         }
+        schedulerCompleted = true;
         closeShellOwner();
         publishToolHistory(calls);
         emitPermissionTransitions(calls);
@@ -1628,7 +1636,7 @@ export async function* livePromptEvents(
         },
       });
       // A batch that runs no call never completes the scheduler.
-      const closeBatch = () => {
+      const closeBatch = (result?: ToolBatchResult) => {
         try {
           if (isBatchFinished?.()) {
             closeShellOwner();
@@ -1638,6 +1646,56 @@ export async function* livePromptEvents(
               }
             }
             permissionRequests.clear();
+          }
+          if (
+            result?.stop === 'cancelled' &&
+            !schedulerCompleted &&
+            isCurrentSession()
+          ) {
+            displayedCancelledBatch = true;
+            const replayed = new Map(
+              answered.map(({ request, response }) => [
+                request.callId,
+                response,
+              ]),
+            );
+            const settled = skippedCalls(
+              'cancelled',
+              'Tool call cancelled.',
+            ).map((skipped): InteractiveCompletedToolCall => {
+              const id = skipped.request.callId;
+              const response = replayed.get(id);
+              if (response)
+                return response.error
+                  ? { ...skipped, response, status: 'error' }
+                  : { ...skipped, response, status: 'success' };
+              const last = lastToolCalls.get(id);
+              return last?.status === 'success' ||
+                last?.status === 'error' ||
+                last?.status === 'cancelled'
+                ? last
+                : skipped;
+            });
+            publishToolHistory(settled);
+            for (const { request, response, status } of settled) {
+              const id = request.callId;
+              if (queuedSeen.delete(id))
+                live.push({ type: 'tool-queued', id, queued: false });
+              if (waitingSeen.delete(id))
+                live.push({
+                  type: 'confirm-resolved',
+                  id,
+                  outcome: 'rejected',
+                });
+              const display = toolResultEvent(id, response.resultDisplay);
+              if (status !== 'cancelled' && display) live.push(display);
+              live.push({
+                type: 'tool-end',
+                id,
+                success: status === 'success',
+                summary: status === 'success' ? 'ok' : status,
+              });
+            }
           }
         } finally {
           live.close();
@@ -1872,9 +1930,9 @@ export async function* livePromptEvents(
     const displayed = new Map(
       completed.map((call) => [call.request.callId, call]),
     );
-    const answeredOnly = answered.filter(
-      ({ request }) => !displayed.has(request.callId),
-    );
+    const answeredOnly = displayedCancelledBatch
+      ? []
+      : answered.filter(({ request }) => !displayed.has(request.callId));
     if (shared) {
       if (answeredOnly.length > 0) {
         for (const { request, response } of answeredOnly) {
