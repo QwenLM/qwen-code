@@ -17,6 +17,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFile, execFileSync } from 'child_process';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { InputPromptProps } from './input-prompt.js';
+import type { OpenTuiSlashGateway } from './slash-gateway.js';
 import type { HistoryItem } from '../types.js';
 import { useTextBuffer } from '../components/shared/text-buffer.js';
 import type { LiveHistoryItem } from './live-session-model.js';
@@ -69,7 +70,12 @@ const mocks = vi.hoisted(() => {
     streaming: false,
     interrupt: vi.fn(),
     keyboard: [] as Array<
-      (key: { name: string; ctrl: boolean; eventType?: string }) => void
+      (key: {
+        name: string;
+        ctrl: boolean;
+        shift?: boolean;
+        eventType?: string;
+      }) => void
     >,
     items: [] as LiveHistoryItem[],
     isCurrentHistory: vi.fn(),
@@ -79,6 +85,7 @@ const mocks = vi.hoisted(() => {
       isCurrentHistory?: (snapshot: readonly LiveHistoryItem[]) => boolean;
       renderMain?: () => unknown;
       onQuit?: (messages: readonly HistoryItem[]) => void;
+      slashGateway?: OpenTuiSlashGateway;
       onToggleVim?: () => Promise<boolean>;
       vimMode?: string;
       vim?: InputPromptProps['vim'];
@@ -88,7 +95,9 @@ const mocks = vi.hoisted(() => {
           setText: (text: string) => void;
           submitDraft?: (text: string) => Promise<void>;
           invalidateImportedInput?: () => void;
+          restoreSubmission?: (submission: { text: string }) => void;
         } | null;
+        returned?: { text: string };
       };
     } | null,
     seedPromptCount: null as ((count: number) => void) | null,
@@ -146,7 +155,12 @@ vi.mock('@opentui/core', () => ({
 vi.mock('@opentui/react', () => ({
   createRoot: vi.fn(() => mocks.state.root),
   useKeyboard: (
-    handler: (key: { name: string; ctrl: boolean; eventType?: string }) => void,
+    handler: (key: {
+      name: string;
+      ctrl: boolean;
+      shift?: boolean;
+      eventType?: string;
+    }) => void,
   ) => {
     mocks.state.keyboard.push(handler);
   },
@@ -770,6 +784,33 @@ describe('startOpenTuiUI fallback contract', () => {
     });
   });
 
+  it('hands a prompt the live turn returns to the composer, or keeps it until one mounts', async () => {
+    await withEntryApp(() => {
+      const handle = mocks.state.appProps!.composerHandle!;
+      const onPromptReturned = (
+        mocks.state.liveOptions as {
+          onPromptReturned: (submission: { text: string }) => void;
+        }
+      ).onPromptReturned;
+      handle.current = null;
+      onPromptReturned({ text: 'held' });
+      expect(handle.returned).toEqual({ text: 'held' });
+
+      handle.returned = undefined;
+      const restoreSubmission = vi.fn();
+      handle.current = {
+        getText: () => '',
+        setText: vi.fn(),
+        restoreSubmission,
+      };
+      onPromptReturned({ text: 'dropped' });
+      expect(restoreSubmission).toHaveBeenCalledExactlyOnceWith({
+        text: 'dropped',
+      });
+      expect(handle.returned).toBeUndefined();
+    });
+  });
+
   it('flushes the assistant synchronously before renderer unmount and writer shutdown', async () => {
     await startOpenTuiUI(
       buildConfig(),
@@ -791,6 +832,7 @@ describe('startOpenTuiUI fallback contract', () => {
   });
 
   it('reads live composer text for Ctrl+D and only arms exit after it becomes empty', async () => {
+    const config = buildConfig();
     await withEntryApp(() => {
       let text = 'draft';
       const handle = mocks.state.appProps?.composerHandle;
@@ -813,31 +855,121 @@ describe('startOpenTuiUI fallback contract', () => {
       press();
       expect(exitSession).not.toHaveBeenCalled();
       press();
-      expect(exitSession).toHaveBeenCalledTimes(1);
-    });
+      expect(exitSession).toHaveBeenCalledExactlyOnceWith(config, 0);
+    }, config);
   });
 
-  it.each(['stream-c', 'confirmation-d'] as const)(
-    'arms before cleanup and exits on the second key: %s',
-    async (mode) => {
+  it.each(['c', 'd'])(
+    'does not arm or exit on Ctrl+%s during a slash command commit',
+    async (name) => {
+      const config = buildConfig();
+      await withEntryApp(() => {
+        const gateway = mocks.state.appProps!.slashGateway!;
+        const commit = vi
+          .spyOn(gateway, 'isCommitInProgress')
+          .mockReturnValue(true);
+        vi.spyOn(gateway, 'isBusy').mockReturnValue(true);
+        const cancel = vi.spyOn(gateway, 'cancel');
+        const press = () =>
+          act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
+
+        press();
+        press();
+        expect(exitSession).not.toHaveBeenCalled();
+        expect(cancel).not.toHaveBeenCalled();
+
+        commit.mockReturnValue(false);
+        press();
+        expect(exitSession).not.toHaveBeenCalled();
+        expect(cancel).not.toHaveBeenCalled();
+        press();
+        expect(cancel).toHaveBeenCalledOnce();
+        expect(exitSession).toHaveBeenCalledExactlyOnceWith(config, 0);
+      }, config);
+    },
+  );
+
+  it.each([false, true])(
+    'does not arm exit or cancel a parked call on Shift+Ctrl+C (parked=%s)',
+    async (parked) => {
+      const config = buildConfig();
       const confirm = vi.fn(async () => {});
-      mocks.state.streaming = true;
-      if (mode === 'confirmation-d')
+      if (parked)
         mocks.state.waitingCalls = [
           { callId: 'parked', confirmationDetails: { onConfirm: confirm } },
         ];
       await withEntryApp(() => {
-        const name = mode === 'stream-c' ? 'c' : 'd';
-        act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
+        for (let i = 0; i < 2; i++)
+          act(() =>
+            mocks.state.keyboard.at(-1)!({
+              name: 'c',
+              ctrl: true,
+              shift: true,
+            }),
+          );
         expect(exitSession).not.toHaveBeenCalled();
         expect(confirm).not.toHaveBeenCalled();
-        expect(mocks.state.interrupt).toHaveBeenCalledTimes(
-          mode === 'stream-c' ? 1 : 0,
-        );
+        expect(mocks.state.interrupt).not.toHaveBeenCalled();
+        act(() => mocks.state.keyboard.at(-1)!({ name: 'c', ctrl: true }));
+        expect(exitSession).not.toHaveBeenCalled();
+        expect(confirm).toHaveBeenCalledTimes(parked ? 1 : 0);
+        act(() => mocks.state.keyboard.at(-1)!({ name: 'c', ctrl: true }));
+        expect(exitSession).toHaveBeenCalledExactlyOnceWith(config, 0);
+        expect(confirm).toHaveBeenCalledTimes(parked ? 1 : 0);
+      }, config);
+    },
+  );
+
+  it.each(['c', 'd'] as const)(
+    'exits idle keyboard confirmation with code 0: %s',
+    async (name) => {
+      const config = buildConfig();
+      await withEntryApp(() => {
         act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
-        expect(exitSession).toHaveBeenCalledTimes(1);
-        expect(confirm).not.toHaveBeenCalled();
-      });
+        expect(exitSession).not.toHaveBeenCalled();
+        expect(mocks.state.interrupt).not.toHaveBeenCalled();
+        act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
+        expect(exitSession).toHaveBeenCalledExactlyOnceWith(config, 0);
+      }, config);
+    },
+  );
+
+  it.each([
+    'stream-c',
+    'stream-d',
+    'confirmation-c',
+    'confirmation-d',
+  ] as const)(
+    'preserves cancellation before confirmed graceful exit: %s',
+    async (mode) => {
+      const config = buildConfig();
+      const confirm = vi.fn(async () => {});
+      mocks.state.streaming = true;
+      const parked = mode.startsWith('confirmation');
+      if (parked)
+        mocks.state.waitingCalls = [
+          { callId: 'parked', confirmationDetails: { onConfirm: confirm } },
+        ];
+      await withEntryApp((rerender) => {
+        const name = mode.endsWith('c') ? 'c' : 'd';
+        act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
+        expect(exitSession).not.toHaveBeenCalled();
+        expect(confirm).toHaveBeenCalledTimes(
+          mode === 'confirmation-c' ? 1 : 0,
+        );
+        expect(mocks.state.interrupt).toHaveBeenCalledTimes(parked ? 0 : 1);
+        if (mode === 'stream-d') {
+          mocks.state.streaming = false;
+          act(rerender);
+          act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
+          expect(exitSession).not.toHaveBeenCalled();
+        }
+        act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
+        expect(exitSession).toHaveBeenCalledExactlyOnceWith(config, 0);
+        expect(confirm).toHaveBeenCalledTimes(
+          mode === 'confirmation-c' ? 1 : 0,
+        );
+      }, config);
     },
   );
 

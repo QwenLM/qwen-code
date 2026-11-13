@@ -18,12 +18,14 @@ import {
   mergeSessionPrLists,
   moveSessionPrSidecar,
   readSessionPrs,
+  readSessionPrsDetailed,
   replaceSessionPrs,
   updateSessionPrStates,
   upsertSessionPr,
   upsertSessionPrs,
   writeSessionPrs,
   type SessionPr,
+  type SessionPrRole,
   type SessionPrState,
 } from './session-pr-service.js';
 
@@ -64,10 +66,16 @@ type StateUpdate =
     ? U
     : never;
 
-/** A bind candidate for PR `number`; the url defaults to `entry(number).url`. */
+/**
+ * A bind candidate for PR `number`; the url defaults to `entry(number).url`.
+ * The extra shape is what BOTH upserts accept: the single-bind null role
+ * clear is exercised through upsertSessionPr directly, not this helper.
+ */
 const cand = (
   number: number,
-  extra: Partial<Parameters<typeof upsertSessionPr>[1]> = {},
+  extra: Partial<Parameters<typeof upsertSessionPr>[1]> & {
+    role?: SessionPrRole;
+  } = {},
 ) => ({ number, url: entry(number).url, ...extra });
 const bind = (...args: Parameters<typeof cand>) =>
   upsertSessionPr(filePath, cand(...args));
@@ -125,6 +133,19 @@ describe('readSessionPrs', () => {
     expect(await read()).toBeNull();
   });
 
+  it('reads a well-formed empty list as an authoritative clear (R9-B2)', async () => {
+    // replaceSessionPrs's explicit empty plan writes {prs: []}; that clear
+    // must read back as "no bindings" (ok/[]), NOT as corruption — an
+    // invalid verdict would degrade authoritative snapshots to permanent
+    // partial and shadow the observed unbind.
+    await writeSessionPrs(filePath, []);
+    expect(await read()).toEqual([]);
+    expect(await readSessionPrsDetailed(filePath)).toEqual({
+      status: 'ok',
+      prs: [],
+    });
+  });
+
   it('returns null for invalid JSON', async () => {
     await fs.writeFile(filePath, '{not json', 'utf-8');
     expect(await read()).toBeNull();
@@ -132,7 +153,6 @@ describe('readSessionPrs', () => {
 
   it.each([
     ['bare object (legacy single shape)', entry(1)],
-    ['empty list', { prs: [] }],
     ['entry missing url', { prs: [{ number: 1, createdAt: 'x' }] }],
     ['entry non-integer number', { prs: [{ ...entry(1), number: 1.5 }] }],
     ['entry non-positive number', { prs: [entry(0)] }],
@@ -413,6 +433,120 @@ describe('upsertSessionPr state', () => {
   });
 });
 
+describe('binding roles', () => {
+  it('sets, preserves, and clears the role through upsertSessionPr', async () => {
+    await bind(100, { role: 'fix' });
+    expect((await read())?.[0]?.role).toBe('fix');
+    // An omitted role preserves the known one (a rename or state refresh
+    // must not silently untype the binding).
+    await bind(100, { state: 'open' });
+    expect((await read())?.[0]?.role).toBe('fix');
+    // null is the explicit clear.
+    await upsertSessionPr(filePath, {
+      number: 100,
+      url: entry(100).url,
+      role: null,
+    });
+    expect((await read())?.[0]?.role).toBeUndefined();
+  });
+
+  it('does not inherit the role across a URL change', async () => {
+    await seed({ ...entry(5), role: 'review' });
+    const prs = await bind(5, { url: pull('other/repo', 5) });
+    expect(prs[0]?.role).toBeUndefined();
+  });
+
+  it('declines an entry whose role is outside the closed vocabulary', async () => {
+    await seed(entry(5));
+    const before = await read();
+    const prs = await upsertSessionPr(filePath, {
+      number: 5,
+      url: entry(5).url,
+      role: 'triage' as never,
+    });
+    expect(prs).toEqual(before);
+  });
+
+  it('reads a sidecar with an unknown role as invalid, not unbound', async () => {
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({
+        prs: [{ ...entry(5), role: 'triage' }],
+      }),
+    );
+    expect(await readSessionPrsDetailed(filePath)).toEqual({
+      status: 'invalid',
+    });
+  });
+
+  it('upsertSessionPrs stamps a role only where none exists', async () => {
+    // A fresh command-position binding carries its role.
+    await upsertSessionPrs(filePath, [
+      { number: 100, url: entry(100).url, role: 'review' },
+    ]);
+    expect((await read())?.[0]?.role).toBe('review');
+    // A later re-offer (another /review, or a verify of the same PR) never
+    // overwrites the persisted role — an explicit metadata-route role
+    // outranks every backfill.
+    await upsertSessionPrs(filePath, [
+      { number: 100, url: entry(100).url, role: 'verify' },
+    ]);
+    expect((await read())?.[0]?.role).toBe('review');
+    // An untyped entry is stamped by the first offer that carries a role.
+    await upsertSessionPrs(filePath, [{ number: 101, url: entry(101).url }]);
+    await upsertSessionPrs(filePath, [
+      { number: 101, url: entry(101).url, role: 'verify' },
+    ]);
+    expect((await read())?.find((pr) => pr.number === 101)?.role).toBe(
+      'verify',
+    );
+  });
+
+  it('mergeSessionPrLists lets the newer half win, preserving an explicit clear', () => {
+    // A missing role on the newer half can be an explicit `role: null`
+    // clear, not a pre-role binding: resurrecting the older role would
+    // re-enable instructions the operator removed (split-sidecar restore).
+    const older: SessionPr = {
+      ...entry(5),
+      createdAt: '2026-08-01T00:00:00.000Z',
+      role: 'fix',
+    };
+    const newer: SessionPr = {
+      ...entry(5),
+      createdAt: '2026-08-02T00:00:00.000Z',
+    };
+    expect(mergeSessionPrLists([older], [newer])[0]?.role).toBeUndefined();
+    expect(mergeSessionPrLists([newer], [older])[0]?.role).toBeUndefined();
+    // A newer role still wins over an older one.
+    const newerTyped: SessionPr = { ...newer, role: 'review' };
+    expect(mergeSessionPrLists([older], [newerTyped])[0]?.role).toBe('review');
+  });
+
+  it('restoring a split sidecar does not resurrect a cleared role', async () => {
+    // Archive stopped after moving the transcript: the active half keeps
+    // the role; the operator then clears the archived binding through the
+    // metadata route (newer, role-less). Restoring merges the halves and
+    // the explicit clear must survive.
+    const activePath = path.join(tmpDir, 'active.pr.json');
+    const archivePath = path.join(tmpDir, 'archive.pr.json');
+    const seeded: SessionPr = {
+      ...entry(5),
+      createdAt: '2026-08-01T00:00:00.000Z',
+      role: 'fix',
+    };
+    await writeSessionPrs(activePath, [seeded]);
+    await writeSessionPrs(archivePath, [seeded]);
+    await upsertSessionPr(archivePath, {
+      number: 5,
+      url: entry(5).url,
+      role: null,
+    });
+    expect((await readSessionPrs(archivePath))?.[0]?.role).toBeUndefined();
+    await moveSessionPrSidecar(archivePath, activePath);
+    expect((await readSessionPrs(activePath))?.[0]?.role).toBeUndefined();
+  });
+});
+
 describe('upsertSessionPrs', () => {
   const offer = (...candidates: Parameters<typeof upsertSessionPrs>[1]) =>
     upsertSessionPrs(filePath, candidates);
@@ -433,6 +567,47 @@ describe('upsertSessionPrs', () => {
     const persisted = await read();
     expect(numbers(persisted)).toEqual([100, 101, 102]);
     expect(persisted?.[0]).toEqual(entry(100));
+  });
+
+  it('repairs a stateless same-URL binding with an explicit state, keeping position and createdAt', async () => {
+    // A manual re-bind resolves state through gh after a stateless degrade:
+    // the snapshot must land in place, not be dropped as "already bound".
+    await seed({ ...entry(100), state: undefined }, entry(101));
+    const result = await offer(cand(100, { state: 'merged' }));
+    expect(result.added).toEqual([]);
+    expect(result.alreadyBound).toEqual([100]);
+    const persisted = await read();
+    expect(numbers(persisted)).toEqual([100, 101]);
+    expect(persisted?.[0]?.state).toBe('merged');
+    expect(persisted?.[0]?.createdAt).toBe(entry(100).createdAt);
+  });
+
+  it('repairs a stale same-URL state in place, keeping position and createdAt', async () => {
+    // The other half of the in-place repair: a persisted state that has gone
+    // stale (open → merged) is refreshed, not left as-is.
+    await seed({ ...entry(100), state: 'open' }, entry(101));
+    const result = await offer(cand(100, { state: 'merged' }));
+    expect(result.added).toEqual([]);
+    expect(result.alreadyBound).toEqual([100]);
+    const persisted = await read();
+    expect(numbers(persisted)).toEqual([100, 101]);
+    expect(persisted?.[0]?.state).toBe('merged');
+    expect(persisted?.[0]?.createdAt).toBe(entry(100).createdAt);
+  });
+
+  it('preserves a terminal state when a same-URL re-bind offers no state', async () => {
+    // The candidate.state !== undefined half of the repair guard: /pr's
+    // degrade arm produces a stateless candidate, and re-binding an already
+    // merged PR while gh is down must NOT erase the known state. Dropping
+    // that clause makes upgraded.state = undefined and reds this test.
+    await seed({ ...entry(100), state: 'merged' }, entry(101));
+    const result = await offer(cand(100));
+    expect(result.added).toEqual([]);
+    expect(result.alreadyBound).toEqual([100]);
+    const persisted = await read();
+    expect(numbers(persisted)).toEqual([100, 101]);
+    expect(persisted?.[0]?.state).toBe('merged');
+    expect(persisted?.[0]?.createdAt).toBe(entry(100).createdAt);
   });
 
   it('re-binds a number whose persisted entry points at another repository', async () => {
@@ -775,8 +950,9 @@ describe('replaceSessionPrs', () => {
       existing.filter((p) => p.number !== 100),
     );
     expect(persisted).toEqual([]);
-    // An empty list reads back as null (isValidSessionPrList rejects it).
-    expect(await read()).toBeNull();
+    // The explicit empty plan clears the bindings: the well-formed empty
+    // list reads back as an authoritative "no bindings", not as corruption.
+    expect(await read()).toEqual([]);
   });
 
   it('declines entries the reader would reject instead of poisoning the list', async () => {

@@ -100,16 +100,47 @@ Check with `readlink -f "$(command -v qwen)"`.
 
 ## Verify
 
-Load the same environment file the unit uses, then run the preflight while the
-service is stopped:
+Run the preflight while the service is stopped, the way the unit runs the
+server: as its account, with its environment file, in its working directory
+and inside its sandbox:
 
 ```bash
 sudo systemd-run --wait --pipe --collect \
   --property=User=qwen-managed-agent \
+  --property=Group=qwen-managed-agent \
   --property=EnvironmentFile=/etc/qwen-managed-agent/server.env \
+  --working-directory=/opt/qwen-managed-agent \
+  --property=StateDirectory=qwen-managed-agent \
+  --property=StateDirectoryMode=0750 \
+  --property="ReadWritePaths=/var/lib/qwen-managed-agent /srv/qwen-workspace" \
+  --property=NoNewPrivileges=true \
+  --property=PrivateTmp=true \
+  --property=ProtectSystem=strict \
+  --property=ProtectHome=true \
   /opt/qwen-managed-agent/bin/qwen-managed-agent-server --check
 curl --fail http://127.0.0.1:8080/actuator/health
 ```
+
+The preflight reads the configuration as the server does, and the server
+also reads `application.yml` and `config/application.yml` in its working
+directory beside the file `SPRING_CONFIG_ADDITIONAL_LOCATION` names, so
+`--working-directory` must match the unit's `WorkingDirectory`. The sandbox
+properties repeat the unit's, so the preflight sees the files the server sees:
+the unit hides `/home`, `/root`, `/run/user`, and the host's `/tmp` and
+`/var/tmp`, and writes only to its `ReadWritePaths`. Keep them in step when
+you change the unit. The preflight prints a `config` row for each file it
+read, and fails that row where the server would not start, or where this run
+cannot check what it reads:
+
+- a named file that does not exist;
+- a file the service account cannot read;
+- a file only the account running `--check` cannot read, or cannot reach past
+  a directory on its path; the fix is then to run it as the service account;
+- a YAML error, with its line, and with its file unless an import inside
+  another file named it.
+
+A file that holds a secret and that group or others can read gets a `WARN` row
+with its `chmod 600`; a `WARN` does not fail the check.
 
 `--check` binds the configured ports, and its `workers` row warns about Runtime
 workers still running from an earlier start, so run it while the service is
@@ -131,9 +162,26 @@ keep the state directory and Workspace, and a following start races them. Reap
 them before restarting with
 `systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server`.
 
+The JVM exits with status 143 after a clean shutdown on `SIGTERM`, so the unit
+sets `SuccessExitStatus=143`; without it, every stop leaves the unit failed.
+
+## Upgrade
+
+Upgrade with the new distribution's `bin/qwen-managed-agent-upgrade`, as the
+deployment guide's "Upgrade" section shows. It stops these units, reaps the
+Runtime workers, backs up the database, Runtime state and configuration, and
+starts the new release after its preflight passes. Its first `install` moves
+`/opt/qwen-managed-agent` to `/opt/qwen-managed-agent-releases/<version>` and
+puts a link in its place, so the units keep their paths. It never edits these
+units: when its `check` reports a changed template, carry the change over and
+run `systemctl daemon-reload` before `start`.
+
 ## Paths
 
-- `/opt/qwen-managed-agent` — extracted distribution (read-only).
+- `/opt/qwen-managed-agent` — extracted distribution (read-only); after the
+  first upgrade, a link to the installed release.
+- `/opt/qwen-managed-agent-releases` — releases the upgrade installed, the
+  previous one included.
 - `/etc/qwen-managed-agent` — credentials and `application.yml`.
 - `/var/lib/qwen-managed-agent` — Runtime state.
 - `/srv/qwen-workspace` — Workspace; adjust `ReadWritePaths` when it moves.

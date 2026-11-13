@@ -55,6 +55,7 @@ import {
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import {
   DEFAULT_RING_SIZE,
+  normalizeMaxRingBytes,
   type BridgeEvent,
 } from '@qwen-code/acp-bridge/eventBus';
 import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
@@ -140,6 +141,7 @@ import {
   parseAllowOriginPatterns,
 } from './auth.js';
 import type { LocalControlService } from './local-control/index.js';
+import type { RemoteAccessService } from './remote-access.js';
 import {
   createPermissionAuditPublisher,
   PermissionAuditRing,
@@ -200,6 +202,7 @@ import {
 } from './managed-scratch-workspace.js';
 import { ConversationRuntimeOwnershipError } from './conversations/conversation-runtime-errors.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
+import { readEnvironmentVariable } from '../config/storage-paths-lite.js';
 import { LIVE_HOST_PROTOCOL_VERSION } from './live/types.js';
 import { ServeAppLifecycleController } from './serve-app-lifecycle.js';
 import {
@@ -517,10 +520,12 @@ type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
   workspace?: string | string[];
   requireWebShell?: boolean;
 };
-type WorkspaceSettingsWrite =
-  import('./workspace-service/types.js').WorkspaceSettingsWrite;
+type WorkspaceSettingsWrites =
+  import('./workspace-service/types.js').WorkspaceSettingsWrites;
 type PersistDisabledSkillsBatchResult =
   import('./workspace-service/types.js').PersistDisabledSkillsBatchResult;
+type PersistUserSkillsActivationResult =
+  import('./workspace-service/types.js').PersistUserSkillsActivationResult;
 type ServeWorkspaceSkillStatus =
   import('@qwen-code/acp-bridge/status').ServeWorkspaceSkillStatus;
 type ChannelWebhookConfigRuntime = {
@@ -2480,6 +2485,7 @@ function currentServeFeaturesForRunQwenServe(
       ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
       : {}),
     persistSettingAvailable: true,
+    userSkillActivationAvailable: true,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable: true,
@@ -2924,6 +2930,7 @@ function createBootstrapServeApp(input: {
         ),
         listenerMaxConnections: listenerMaxConnections(opts.maxConnections),
         eventRingSize: opts.eventRingSize ?? DEFAULT_RING_SIZE,
+        eventRingMaxBytes: opts.eventRingMaxBytes!,
         compactedReplayMaxBytes:
           opts.compactedReplayMaxBytes ?? DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
         maxJournalEvents: opts.maxJournalEvents ?? DEFAULT_MAX_JOURNAL_EVENTS,
@@ -3492,6 +3499,7 @@ async function runQwenServeImpl(
         'Must be "git-root" or "workspace".',
     );
   }
+  const eventRingMaxBytes = normalizeMaxRingBytes(optsIn.eventRingMaxBytes);
   preResolveServeFastPathHomeEnvOverrides();
   assertExecutionSandboxSupported(
     readOperatorSandboxSettings(),
@@ -3523,6 +3531,14 @@ async function runQwenServeImpl(
     hostedCsiSessionStoreUrl,
   });
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
+  const liveConversationWorkspace =
+    deps.liveConversationWorkspace ??
+    new ConversationWorkspace({
+      rootPath:
+        optsIn.conversationsDir !== undefined
+          ? optsIn.conversationsDir
+          : readEnvironmentVariable(baseEnv, 'QWEN_CONVERSATIONS_DIR'),
+    });
   const launchMemoryProjectScopeValue =
     baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
   const launchMemoryProjectScope = launchMemoryProjectScopeValue?.trim()
@@ -3648,6 +3664,7 @@ async function runQwenServeImpl(
   // resolved below.
   const opts: ServeOptions = {
     ...optsIn,
+    eventRingMaxBytes,
     hostname: bindHostname,
     requireAuth:
       optsIn.profile === 'hosted-harness' ? true : optsIn.requireAuth,
@@ -3959,8 +3976,6 @@ async function runQwenServeImpl(
   // Resolve the bound workspace list. The first explicit workspace remains the
   // primary workspace for legacy APIs; later workspaces are isolated secondary
   // runtimes.
-  const liveConversationWorkspace =
-    deps.liveConversationWorkspace ?? new ConversationWorkspace();
   const isReservedConversationWorkspace = (candidate: string): boolean => {
     const resolvedCandidate = path.resolve(candidate);
     const resolvedRoot = path.resolve(liveConversationWorkspace.rootPath);
@@ -4836,7 +4851,10 @@ async function runQwenServeImpl(
   const restartForUpdate = deps.updateRestartArgv
     ? createDaemonUpdateRestarter({
         argv: deps.updateRestartArgv,
-        env: daemonRuntimeBaseEnv,
+        env: {
+          ...daemonRuntimeBaseEnv,
+          QWEN_CONVERSATIONS_DIR: liveConversationWorkspace.rootPath,
+        },
         token,
         externalToolGuardToken: optsIn.externalToolGuard?.token,
         managedRuntimeBrokerUrl: opts.managedRuntimeBrokerUrl,
@@ -4893,8 +4911,25 @@ async function runQwenServeImpl(
   // The refresh module loads via dynamic import (see start site) because it
   // pulls the SessionService chain, which must stay out of the pre-listen
   // static closure; the generation guards dispose-vs-async-start races.
-  let sessionPrRefreshTimer: { dispose(): void } | undefined;
+  let sessionPrRefreshTimer:
+    | { dispose(): void; stopWatch(): Promise<void> }
+    | undefined;
   let sessionPrRefreshGeneration = 0;
+  // Kept separately from the timer handle: the event-loop-monitor cleanup
+  // disposes and clears that handle before the lifecycle close runs its drains,
+  // but the watch still has to stop in order (timer, in-flight work, owner
+  // record). The disposed handle's closure stays valid, and disposing twice is
+  // a no-op, so the drain can call it afterwards.
+  //
+  // A buildRuntime re-entry takes the other path — the monitor cleanup disposes
+  // the timer without an ordered stop, so the owner record is left behind. That
+  // is safe, not a hole in the ordering: the claim returns `retained` for a
+  // record whose pid is this process and whose process token verifies, so the
+  // restarted timer re-adopts it and no second process can overlap.
+  let stopPrWatchOnShutdown: (() => Promise<void>) | undefined;
+  serveAppLifecycle.addAppDrain(async () => {
+    await stopPrWatchOnShutdown?.();
+  });
   let runtimeStartupError: string | undefined;
   let runtimeStarting: Promise<void> | undefined;
   let markRuntimeReady!: () => void;
@@ -5219,6 +5254,8 @@ async function runQwenServeImpl(
       stopAgentHostRestore?: () => void;
       stopWebTerminalRegistry?: () => void;
       stopHostedMountHandbacks?: () => void;
+      stopSubscriptionAuth?: () => void;
+      stopWeixinAuth?: () => void;
       subSessionStoppers?: Array<() => void>;
     };
     const stopSafely = (name: string, stop: (() => void) | undefined) => {
@@ -5239,6 +5276,8 @@ async function runQwenServeImpl(
     stopSafely('Agent Host reconnect', locals.stopAgentHostRestore);
     stopSafely('web terminal registry', locals.stopWebTerminalRegistry);
     stopSafely('Hosted mount handbacks', locals.stopHostedMountHandbacks);
+    stopSafely('Subscription authorization', locals.stopSubscriptionAuth);
+    stopSafely('WeChat authorization', locals.stopWeixinAuth);
     stopTrustPolicyMonitor(app);
     for (const stop of locals.subSessionStoppers ?? []) {
       stopSafely('sub-session launcher', stop);
@@ -5269,6 +5308,15 @@ async function runQwenServeImpl(
     // serialized disable runs on the next microtask and wins before further IO;
     // ACP disposal below also removes the upgrade listeners while the daemon
     // mount is being torn down.
+    const remoteAccessService = app.locals?.['remoteAccessService'] as
+      | RemoteAccessService
+      | undefined;
+    if (remoteAccessService) {
+      void remoteAccessService.dispose().catch((error: unknown) => {
+        daemonLog.warn(`Remote access dispose error: ${String(error)}`);
+      });
+    }
+
     const localControlService = app.locals?.['localControlService'] as
       | LocalControlService
       | undefined;
@@ -6200,6 +6248,62 @@ async function runQwenServeImpl(
           return { outcomes, settingsChanges };
         });
       });
+    const persistUserSkillsActivationFn = (
+      workspace: string,
+      skillNames: readonly string[],
+      activation: import('../config/skill-settings.js').UserSkillActivation,
+      assertGenerationOpen?: () => void,
+    ): Promise<PersistUserSkillsActivationResult> =>
+      withSettingsLock(workspace, async () => {
+        assertGenerationOpen?.();
+        const { updateUserSkillSettingLists } = await import(
+          '../config/skill-settings.js'
+        );
+        const { SettingScope } = settingsRuntime.settings;
+        const fresh = loadSettingsForPersistence(workspace);
+        const userSkills = fresh.user.originalSettings.skills;
+        const asList = (value: unknown): string[] =>
+          Array.isArray(value)
+            ? value.filter((name): name is string => typeof name === 'string')
+            : [];
+        const initial = {
+          disabled: asList(userSkills?.disabled),
+          defaultDisabled: asList(userSkills?.defaultDisabled),
+          enabled: asList(userSkills?.enabled),
+        };
+        let next = initial;
+        const outcomes = skillNames.map((skillName) => {
+          const updated = updateUserSkillSettingLists(
+            next,
+            skillName,
+            activation,
+          );
+          const changed = JSON.stringify(updated) !== JSON.stringify(next);
+          next = updated;
+          return { skillName, changed };
+        });
+        const settingsChanges: PersistUserSkillsActivationResult['settingsChanges'] =
+          [];
+        for (const key of ['disabled', 'defaultDisabled', 'enabled'] as const) {
+          if (JSON.stringify(next[key]) !== JSON.stringify(initial[key])) {
+            settingsChanges.push({
+              key: `skills.${key}`,
+              value: next[key].length ? next[key] : undefined,
+            });
+          }
+        }
+        if (settingsChanges.length) {
+          fresh.setValues(
+            settingsChanges.map((change) => ({
+              scope: SettingScope.User,
+              ...change,
+            })),
+            undefined,
+            assertGenerationOpen,
+          );
+        }
+        return { outcomes, settingsChanges };
+      });
     const persistSettingFn = (
       workspace: string,
       scope: import('../config/settings.js').SettingScope,
@@ -6216,12 +6320,16 @@ async function runQwenServeImpl(
       });
     const persistSettingsFn = (
       workspace: string,
-      writes: WorkspaceSettingsWrite[],
+      requestedWrites: WorkspaceSettingsWrites,
       assertGenerationOpen?: () => void,
     ): Promise<void> =>
       withSettingsLock(workspace, async () => {
         assertGenerationOpen?.();
         const fresh = loadSettingsForPersistence(workspace);
+        const writes =
+          typeof requestedWrites === 'function'
+            ? requestedWrites(fresh)
+            : requestedWrites;
         const writesByScope = new Map<
           import('../config/settings.js').SettingScope,
           number
@@ -6386,6 +6494,7 @@ async function runQwenServeImpl(
         ...(opts.eventRingSize !== undefined
           ? { eventRingSize: opts.eventRingSize }
           : {}),
+        eventRingMaxBytes,
         ...(opts.compactedReplayMaxBytes !== undefined
           ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
           : {}),
@@ -7035,6 +7144,7 @@ async function runQwenServeImpl(
         ...(opts.eventRingSize !== undefined
           ? { eventRingSize: opts.eventRingSize }
           : {}),
+        eventRingMaxBytes,
         ...(opts.compactedReplayMaxBytes !== undefined
           ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
           : {}),
@@ -7533,6 +7643,8 @@ async function runQwenServeImpl(
                 }
               ).sessionArchiveCoordinator,
           });
+          const handle = sessionPrRefreshTimer;
+          stopPrWatchOnShutdown = handle ? () => handle.stopWatch() : undefined;
         })
         .catch((error) => {
           // Degrade to "no PR-state sweep" instead of leaking an unhandled
@@ -7771,6 +7883,7 @@ async function runQwenServeImpl(
           ...(opts.eventRingSize !== undefined
             ? { eventRingSize: opts.eventRingSize }
             : {}),
+          eventRingMaxBytes,
           ...(opts.compactedReplayMaxBytes !== undefined
             ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
             : {}),
@@ -8755,6 +8868,7 @@ async function runQwenServeImpl(
       persistDisabledTools: persistDisabledToolsFn,
       persistDisabledSkills: persistDisabledSkillsFn,
       persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
+      persistUserSkillsActivation: persistUserSkillsActivationFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
       sessionArtifactsPersistenceAvailable:
@@ -8968,6 +9082,10 @@ async function runQwenServeImpl(
           });
         },
         drainRuntime: async (runtimeToDrain) => {
+          const invalidateSkillsConfigStatus = app.locals[
+            'invalidateSkillsConfigStatus'
+          ] as (workspaceCwd: string) => void;
+          invalidateSkillsConfigStatus(runtimeToDrain.workspaceCwd);
           workspaceRuntimeRemoval.beginDrain(runtimeToDrain);
           acpHandle()?.beginWorkspaceDrain(runtimeToDrain.workspaceId);
         },
@@ -10893,6 +11011,7 @@ async function runQwenServeImpl(
             .filter((workspace) => !workspace.removable)
             .map((workspace) => workspace.cwd),
           primaryWorkspace: boundWorkspace,
+          conversationsDir: liveConversationWorkspace.rootPath,
           startedAt: new Date().toISOString(),
           auth: token ? 'bearer' : 'none',
           ...(generatedToken ? { tokenGenerated: true } : {}),

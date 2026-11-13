@@ -32,8 +32,11 @@ import {
   type ServerLlmStreamEvent,
   type ToolCallRequestInfo,
   type ToolCallResponseInfo,
-  type Turn,
+  Turn,
+  type TurnRunOptions,
 } from './turn.js';
+import type { LlmChat } from './llm-chat.js';
+import { runAgentLoopOnBus } from '../event-bus/adapter.js';
 
 type SchedulerOptions = ConstructorParameters<typeof CoreToolScheduler>[0];
 
@@ -92,13 +95,74 @@ export interface AgentLoopToolResult {
 export type AgentLoopSettledCall = Pick<
   CompletedToolCall,
   'status' | 'request' | 'response'
->;
+> & {
+  /**
+   * The executor counts the call toward the client's tool-call stats
+   * itself, as the Ink TUI's Mod tool middleware does for each attempt.
+   */
+  recorded?: boolean;
+};
 
 /** Provider replay bookkeeping; shared when several loops serve one run. */
 export interface AgentLoopDuplicateState {
   handled: Map<string, string>;
   responded: Set<string>;
 }
+
+/**
+ * What a surface returns for a model event: a stop reason ends the round
+ * there, as a stop event of the client does, and closes its stream.
+ */
+export type ModelEventResult = AgentLoopStopReason | void;
+
+/**
+ * Sends one model round. The main session's round is its `LlmClient`; an
+ * agent with its own `LlmChat` sends its rounds with {@link turnModelRound}.
+ * The iterator's return value is the round's `Turn`.
+ */
+export interface ModelRoundSource {
+  sendRound(
+    round: AgentLoopRound,
+    signal: AbortSignal,
+  ): AsyncIterator<ServerLlmStreamEvent, Turn | undefined>;
+}
+
+/**
+ * A round on a `Turn` over `chat`, for an agent that owns its chat: the
+ * stream's chunks are parsed into events only in `turn.ts`. `round.options`
+ * belong to the main session's client and are not used.
+ */
+export function turnModelRound(
+  chat: LlmChat,
+  model: string,
+  options?: TurnRunOptions,
+): ModelRoundSource {
+  return {
+    sendRound: (round, signal) =>
+      runTurn(
+        new Turn(chat, round.promptId),
+        model,
+        round.parts,
+        signal,
+        options,
+      ),
+  };
+}
+
+async function* runTurn(
+  turn: Turn,
+  model: string,
+  parts: PartListUnion,
+  signal: AbortSignal,
+  options: TurnRunOptions | undefined,
+): AsyncGenerator<ServerLlmStreamEvent, Turn> {
+  yield* turn.run(model, parts, signal, undefined, options);
+  return turn;
+}
+
+const isModelRoundSource = (
+  source: LlmClient | ModelRoundSource,
+): source is ModelRoundSource => 'sendRound' in source;
 
 /** Behavior the surface owns. Every hook is optional. */
 export interface AgentLoopHost {
@@ -111,7 +175,7 @@ export interface AgentLoopHost {
   onModelEvent?(
     event: ServerLlmStreamEvent,
     discardedCalls: readonly ToolCallRequestInfo[],
-  ): void | Promise<void>;
+  ): ModelEventResult | Promise<ModelEventResult>;
   onRoundEnd?(round: number): void;
   /** The request for a round after the first; defaults to the tool results. */
   nextRound?(round: number, parts: Part[]): AgentLoopRound;
@@ -183,6 +247,12 @@ export interface AgentLoopOptions {
   scheduler?: Partial<SchedulerOptions>;
   executor?: AgentLoopToolExecutor;
   runtimeView?: RuntimeContentGeneratorView;
+  /**
+   * Run the loop on the event-bus implementation instead of the procedural
+   * one. Opt-in; the two are behaviorally equivalent. See
+   * docs/design/2026-11-11-event-bus-agent-loop.md.
+   */
+  useEventBus?: boolean;
 }
 
 /**
@@ -194,6 +264,9 @@ export interface AgentLoopOptions {
 export async function runAgentLoop(
   options: AgentLoopOptions,
 ): Promise<AgentLoopResult> {
+  if (options.useEventBus) {
+    return runAgentLoopOnBus(options);
+  }
   const { client, config, signal, host = {} } = options;
   const duplicates = options.duplicates ?? {
     handled: new Map(client.getHistoryToolCallFingerprints()),
@@ -239,13 +312,19 @@ export async function runAgentLoop(
   }
 }
 
-const STOP_EVENTS: Partial<Record<LlmEventType, AgentLoopStopReason>> = {
-  [LlmEventType.UserCancelled]: 'cancelled',
-  [LlmEventType.LoopDetected]: 'loop_detected',
-  [LlmEventType.MaxSessionTurns]: 'max_session_turns',
-  [LlmEventType.SessionTokenLimitExceeded]: 'session_token_limit',
-  [LlmEventType.UserPromptSubmitBlocked]: 'user_prompt_blocked',
-};
+/**
+ * The stop reason of a client's terminal event. Built on first use: agent
+ * runtimes import this module while `turn.ts` may still be evaluating.
+ */
+let stopEvents: Partial<Record<LlmEventType, AgentLoopStopReason>> | undefined;
+const stopReasonOf = (type: LlmEventType) =>
+  (stopEvents ??= {
+    [LlmEventType.UserCancelled]: 'cancelled',
+    [LlmEventType.LoopDetected]: 'loop_detected',
+    [LlmEventType.MaxSessionTurns]: 'max_session_turns',
+    [LlmEventType.SessionTokenLimitExceeded]: 'session_token_limit',
+    [LlmEventType.UserPromptSubmitBlocked]: 'user_prompt_blocked',
+  })[type];
 
 /**
  * One model round of the loop: the events go to `host.onModelEvent`, the
@@ -254,7 +333,7 @@ const STOP_EVENTS: Partial<Record<LlmEventType, AgentLoopStopReason>> = {
  * its own tool step calls it directly.
  */
 export async function runModelRound(
-  client: LlmClient,
+  source: LlmClient | ModelRoundSource,
   round: AgentLoopRound,
   signal: AbortSignal,
   host: Pick<AgentLoopHost, 'onModelEvent'>,
@@ -265,12 +344,15 @@ export async function runModelRound(
 }> {
   const calls: ToolCallRequestInfo[] = [];
   let stop: AgentLoopStopReason | undefined;
-  const stream = client.sendMessageStream(
-    round.parts,
-    signal,
-    round.promptId,
-    round.options,
-  );
+  const stream: AsyncIterator<ServerLlmStreamEvent, Turn | undefined> =
+    isModelRoundSource(source)
+      ? source.sendRound(round, signal)
+      : source.sendMessageStream(
+          round.parts,
+          signal,
+          round.promptId,
+          round.options,
+        );
   let finished = false;
   try {
     for (;;) {
@@ -289,31 +371,60 @@ export async function runModelRound(
       } else if (event.type === LlmEventType.ToolCallRequest) {
         calls.push(event.value);
       } else if (event.type !== LlmEventType.UserCancelled || signal.aborted) {
-        stop ??= STOP_EVENTS[event.type];
+        stop ??= stopReasonOf(event.type);
       }
-      await host.onModelEvent?.(event, discardedCalls);
+      const surfaceStop = await host.onModelEvent?.(event, discardedCalls);
+      if (surfaceStop) return { calls, stop: stop ?? surfaceStop };
     }
   } finally {
-    // The surface threw out of an event: close the client's turn too.
-    if (!finished) await stream.return(undefined as unknown as Turn);
+    // The surface stopped the round or threw out of an event: close the
+    // client's turn too.
+    if (!finished) await stream.return?.(undefined);
   }
 }
 
 export interface ToolBatchOptions {
   config: Config;
-  client: LlmClient;
+  /**
+   * Counts the executed calls toward the session's tool calls. An agent with
+   * its own chat leaves it out.
+   */
+  client?: Pick<LlmClient, 'recordCompletedToolCall'>;
   /** Cancels the batch, as the loop's signal does. */
   signal: AbortSignal;
   /** The signal tools run under, when it differs from `signal`. */
   toolSignal?: AbortSignal;
   host?: AgentLoopHost;
   duplicates: AgentLoopDuplicateState;
+  /** Keeps distinct classes of calls from claiming each other's provider IDs. */
+  duplicateStateForCall?(request: ToolCallRequestInfo): AgentLoopDuplicateState;
   executor: AgentLoopToolExecutor;
   /**
    * Finish and record a batch `signal` cancelled and return its results,
    * with the stop reason `cancelled`, for a surface that keeps them.
    */
   keepCancelledResults?: boolean;
+  /**
+   * Leave each result unrecorded and return its recording as `record` on
+   * `responses`, for a surface that records only the results it sends.
+   */
+  deferRecording?: boolean;
+}
+
+export interface ToolBatchResult {
+  /** The results in request order, finalized, as the next round sends them. */
+  parts: Part[];
+  /**
+   * The same parts by call, for a surface that drops some calls' results.
+   * Absent when the batch stopped before it answered any call.
+   */
+  responses?: Array<{
+    callId: string;
+    parts: Part[];
+    /** Records the result, when the batch deferred recording. */
+    record?: () => void;
+  }>;
+  stop?: AgentLoopStopReason;
 }
 
 /**
@@ -324,17 +435,22 @@ export interface ToolBatchOptions {
 export async function runToolBatch(
   calls: ToolCallRequestInfo[],
   options: ToolBatchOptions,
-): Promise<{ parts: Part[]; stop?: AgentLoopStopReason }> {
+): Promise<ToolBatchResult> {
   const { config, client, signal, duplicates, executor } = options;
   const host = options.host ?? {};
   const toolSignal = options.toolSignal ?? signal;
+  const duplicateStateFor = (request: ToolCallRequestInfo) =>
+    options.duplicateStateForCall?.(request) ?? duplicates;
   const providerKey = (request: ToolCallRequestInfo) =>
     request.providerCallId ?? (request.callId || undefined);
-  const isReplay = (request: ToolCallRequestInfo) => {
+  const isReplay = (
+    request: ToolCallRequestInfo,
+    state: AgentLoopDuplicateState,
+  ) => {
     const key = providerKey(request);
     return key
       ? isReplayOfHandledToolCall(
-          duplicates.handled,
+          state.handled,
           key,
           getCachedToolCallFingerprint(request, request.name, request.args),
         )
@@ -352,15 +468,27 @@ export async function runToolBatch(
     if (request.callId) seenCallIds.add(request.callId);
     unique.push(request);
   }
-  if (
-    findRepeatedDuplicateProviderToolCall(
-      [...unique, ...repeated],
-      providerKey,
-      isReplay,
-      duplicates.responded,
-    )
-  ) {
-    return { parts: [], stop: 'duplicate_provider_call' };
+  const callsByDuplicateState = new Map<
+    AgentLoopDuplicateState,
+    ToolCallRequestInfo[]
+  >();
+  for (const request of [...unique, ...repeated]) {
+    const state = duplicateStateFor(request);
+    const group = callsByDuplicateState.get(state);
+    if (group) group.push(request);
+    else callsByDuplicateState.set(state, [request]);
+  }
+  for (const [state, group] of callsByDuplicateState) {
+    if (
+      findRepeatedDuplicateProviderToolCall(
+        group,
+        providerKey,
+        (request) => isReplay(request, state),
+        state.responded,
+      )
+    ) {
+      return { parts: [], stop: 'duplicate_provider_call' };
+    }
   }
 
   const results = new Map<ToolCallRequestInfo, AgentLoopToolResult>();
@@ -385,8 +513,9 @@ export async function runToolBatch(
   const executable: ToolCallRequestInfo[] = [];
   for (const request of unique) {
     const key = providerKey(request);
-    if (key && isReplay(request)) {
-      markDuplicateProviderToolCallResponseSent(key, duplicates.responded);
+    const state = duplicateStateFor(request);
+    if (key && isReplay(request, state)) {
+      markDuplicateProviderToolCallResponseSent(key, state.responded);
       answer(
         request,
         createDuplicateProviderToolCallResponse(request),
@@ -396,7 +525,7 @@ export async function runToolBatch(
     }
     if (key) {
       recordHandledToolCall(
-        duplicates.handled,
+        state.handled,
         key,
         getCachedToolCallFingerprint(request, request.name, request.args),
       );
@@ -454,8 +583,11 @@ export async function runToolBatch(
     if (!call || !launches.get(request.callId)) continue;
     terminateTurn ||= call.response.terminateTurn === true;
     // A plan-mode entry's siblings never ran.
-    if (planModeEntry === undefined || index === planModeEntry) {
-      client.recordCompletedToolCall(
+    if (
+      !call.recorded &&
+      (planModeEntry === undefined || index === planModeEntry)
+    ) {
+      client?.recordCompletedToolCall(
         call.request.name,
         call.request.args as Record<string, unknown>,
       );
@@ -478,7 +610,10 @@ export async function runToolBatch(
   for (const request of repeated) {
     const key = providerKey(request);
     if (!key) continue;
-    markDuplicateProviderToolCallResponseSent(key, duplicates.responded);
+    markDuplicateProviderToolCallResponseSent(
+      key,
+      duplicateStateFor(request).responded,
+    );
     answer(
       request,
       createDuplicateProviderToolCallResponse(request),
@@ -501,37 +636,47 @@ export async function runToolBatch(
     })),
     new Map(ordered.map(({ request }) => [request.callId, request.prompt_id])),
   );
-  const recorder = config.getChatRecordingService?.();
   const parts: Part[] = [];
+  const responses: NonNullable<ToolBatchResult['responses']> = [];
   ordered.forEach(({ request, executionRequest, response, status }, index) => {
     const responseParts = finalized[index].responseParts;
     parts.push(...responseParts);
-    const provenance = goalToolResultProvenance(
-      executionRequest,
-      responseParts,
-    );
-    recorder?.recordToolResult?.(
-      responseParts,
-      {
-        callId: request.callId,
-        status,
-        resultDisplay: response.resultDisplay,
-        persistedOutputFiles: finalized[index].persistedOutputFiles,
-        artifacts: finalized[index].artifacts,
-        error: response.error,
-        errorType: response.errorType,
-        executionStatus: response.executionStatus,
-      },
-      ...(provenance ? ([provenance] as const) : ([] as const)),
-    );
+    // The recorder is resolved when the result is written, as the surface
+    // may record it later.
+    const record = () => {
+      const provenance = goalToolResultProvenance(
+        executionRequest,
+        responseParts,
+      );
+      config.getChatRecordingService?.()?.recordToolResult?.(
+        responseParts,
+        {
+          callId: request.callId,
+          status,
+          resultDisplay: response.resultDisplay,
+          persistedOutputFiles: finalized[index].persistedOutputFiles,
+          artifacts: finalized[index].artifacts,
+          error: response.error,
+          errorType: response.errorType,
+          executionStatus: response.executionStatus,
+        },
+        ...(provenance ? ([provenance] as const) : ([] as const)),
+      );
+    };
+    if (options.deferRecording) {
+      responses.push({ callId: request.callId, parts: responseParts, record });
+    } else {
+      responses.push({ callId: request.callId, parts: responseParts });
+      record();
+    }
   });
 
-  if (aborted && !ended) return { parts, stop: 'cancelled' };
-  if (ended) return { parts, stop: 'surface_ended' };
+  if (aborted && !ended) return { parts, responses, stop: 'cancelled' };
+  if (ended) return { parts, responses, stop: 'surface_ended' };
   if (terminateTurn && (host.endsOnTerminateTurn?.() ?? true)) {
-    return { parts, stop: 'tool_ended_turn' };
+    return { parts, responses, stop: 'tool_ended_turn' };
   }
-  return { parts };
+  return { parts, responses };
 }
 
 function executedResult(

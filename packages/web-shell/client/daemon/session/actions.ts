@@ -51,8 +51,11 @@ import {
   extractHttpStatus,
   isInvalidClientIdError,
   isAcpChildCapacityError,
+  isSessionLimitExceededError,
 } from './httpErrors.js';
 import {
+  applyConfigOptions,
+  applySessionConfigContext,
   getPlanExecutionMode,
   mapProviderStatus,
   mapSessionContextModels,
@@ -62,6 +65,15 @@ import {
   selectGoalState,
   selectGoalStateFromRead,
 } from './mappers.js';
+import {
+  beginSessionConfigMutation,
+  beginSessionConfigRead,
+  getSessionConfigSync,
+  observeSessionConfig,
+  queueSessionConfigRefresh,
+  type SessionConfigSyncMap,
+  type SessionConfigSync,
+} from './session-config-sync.js';
 import {
   attachmentUriForName,
   daemonPromptImageToBlob,
@@ -79,6 +91,7 @@ import {
   persistStableClientId,
 } from './clientLifecycle.js';
 import {
+  daemonClientSessionContext,
   getDaemonErrorCode,
   getStandaloneConnectionState,
   resolveActionSessionContext,
@@ -225,7 +238,7 @@ export interface CreateDaemonSessionActionsArgs {
   settledPromptsRef: RefBox<Map<string, SettledPrompt>>;
   pendingSessionLoadRef: RefBox<PendingSessionLoad | undefined>;
   pendingSessionLoadIdRef: RefBox<number>;
-  sessionConfigGeneration: WeakMap<DaemonSessionClient, number>;
+  sessionConfigGeneration: SessionConfigSyncMap;
   sessionRecoveryGeneration: WeakMap<DaemonSessionClient, number>;
   heartbeatSupportedRef: RefBox<boolean>;
   manualSessionClearRef: RefBox<boolean>;
@@ -259,7 +272,7 @@ export interface CreateDaemonSessionActionsArgs {
     workspaceCwd?: string,
     overrides?: Pick<
       CreateSessionRequest,
-      'approvalMode' | 'sourceType' | 'worktree' | 'branch'
+      'approvalMode' | 'sourceType' | 'worktree' | 'branch' | 'startupConfig'
     >,
   ) => Promise<DaemonSessionClient>;
   createDetachedStandaloneSession: (
@@ -398,6 +411,9 @@ export function getConnectionAfterSessionClear(
     delete next.supportedCommands;
     delete next.context;
     delete next.reasoning;
+    delete next.workflowMode;
+    delete next.workflowModePending;
+    next.workflowModeStatus = 'unbound';
     if (dropSessionContext) {
       // Leaving a context (Live, in practice) has to be a real state change.
       // An undefined pending session context means "inherit from the
@@ -497,6 +513,7 @@ export function createDaemonSessionActions({
   let modelMutationGeneration = 0;
   let pendingPersistedReasoningAction: Promise<void> | undefined;
   let branchInFlight = false;
+  const workflowWrites = new WeakSet<SessionConfigSync>();
   let attachmentClient = sessionRef.current?.client;
   let attachmentSessionId = sessionRef.current?.sessionId;
   let attachmentClientId = sessionRef.current?.clientId;
@@ -506,6 +523,10 @@ export function createDaemonSessionActions({
       sessionRecoveryGeneration,
       session,
     );
+    const configCurrent = getConnection().context
+      ? undefined
+      : beginSessionConfigRead(sessionConfigGeneration, session);
+    const isOwner = captureConfigOwner(session);
     const context = await withActionTimeout(
       session.context(),
       'Load context timed out',
@@ -516,17 +537,23 @@ export function createDaemonSessionActions({
       context.sessionId === session.sessionId &&
       sessionRecoveryGeneration.get(session) === generation
     ) {
-      setConnection((current) =>
-        sessionRef.current === session &&
-        sessionRecoveryGeneration.get(session) === generation
-          ? {
-              ...current,
-              context: current.context
-                ? { ...current.context, recovery: context.recovery }
-                : context,
-            }
-          : current,
-      );
+      setConnection((current) => {
+        if (
+          sessionRef.current !== session ||
+          sessionRecoveryGeneration.get(session) !== generation
+        )
+          return current;
+        const next =
+          configCurrent?.() && isOwner(current)
+            ? applySessionConfigContext(current, context)
+            : current;
+        return {
+          ...next,
+          context: next.context
+            ? { ...next.context, recovery: context.recovery }
+            : { ...context, state: {} },
+        };
+      });
     }
   }
 
@@ -555,26 +582,72 @@ export function createDaemonSessionActions({
     );
   }
 
-  function trackSessionConfigMutation<T>(
-    session: DaemonSessionClient,
-    operation: Promise<T>,
-  ): Promise<T> {
-    sessionConfigGeneration.set(
-      session,
-      (sessionConfigGeneration.get(session) ?? 0) + 1,
-    );
-    void operation.then(
-      () => finishSessionConfigMutation(session),
-      () => finishSessionConfigMutation(session),
-    );
-    return operation;
+  function captureConfigOwner(session: DaemonSessionClient) {
+    const before = getConnection();
+    const state = getSessionConfigSync(sessionConfigGeneration, session);
+    const client = session.client;
+    const clientId = session.clientId;
+    const epoch = session.eventEpoch;
+    return (current = getConnection()) =>
+      sessionRef.current === session &&
+      session.client === client &&
+      session.clientId === clientId &&
+      session.eventEpoch === epoch &&
+      sessionConfigGeneration.get(session) === state &&
+      current.sessionId === before.sessionId &&
+      sessionContextKey(current.sessionContext) ===
+        sessionContextKey(before.sessionContext);
   }
 
-  function finishSessionConfigMutation(session: DaemonSessionClient): void {
-    sessionConfigGeneration.set(
-      session,
-      (sessionConfigGeneration.get(session) ?? 0) + 1,
-    );
+  async function reconcileSessionConfig(
+    session: DaemonSessionClient,
+    isOwner: ReturnType<typeof captureConfigOwner>,
+  ): Promise<void> {
+    if (!isOwner()) return;
+    const isCurrent = beginSessionConfigRead(sessionConfigGeneration, session);
+    try {
+      const context = await withActionTimeout(
+        session.context(),
+        'Refresh session configuration timed out',
+      );
+      setConnection((current) =>
+        isOwner(current) && isCurrent()
+          ? context.sessionId === session.sessionId
+            ? applySessionConfigContext(current, context)
+            : { ...current, workflowModeStatus: 'unknown' }
+          : current,
+      );
+    } catch {
+      setConnection((current) =>
+        isOwner(current) && isCurrent()
+          ? { ...current, workflowModeStatus: 'unknown' }
+          : current,
+      );
+    }
+  }
+
+  async function trackSessionConfigMutation<T>(
+    session: DaemonSessionClient,
+    operation: Promise<T>,
+    timeoutMessage: string,
+    mutation = beginSessionConfigMutation(sessionConfigGeneration, session),
+    reconcile = true,
+  ): Promise<T> {
+    const isOwner = captureConfigOwner(session);
+    try {
+      return await withActionTimeout(operation, timeoutMessage);
+    } finally {
+      mutation.finish();
+      if (
+        reconcile &&
+        isOwner() &&
+        getConnection().workflowModeStatus !== undefined
+      ) {
+        queueSessionConfigRefresh(sessionConfigGeneration, session, () => {
+          void reconcileSessionConfig(session, isOwner);
+        });
+      }
+    }
   }
 
   function discardsSlashCommandAttachments(
@@ -582,6 +655,7 @@ export function createDaemonSessionActions({
     text: string,
     hasAttachments: boolean,
     signal?: AbortSignal,
+    isCurrent: () => boolean = () => sessionRef.current === session,
   ): boolean | Promise<boolean> {
     const trimmed = text.trim();
     if (!trimmed.startsWith('/')) return false;
@@ -592,7 +666,11 @@ export function createDaemonSessionActions({
     // Keep this lexical gate and two-pass lookup aligned with the daemon's
     // isSlashCommand/parseSlashCommand behavior. A built-in entry marks a
     // fully loaded command snapshot; until then unresolved commands fail closed.
-    let commands = getConnection().commands;
+    // The connection's snapshot belongs to the current session only; a
+    // detached client must classify against its own catalog (the async read
+    // below), not the session the user navigated to.
+    let commands =
+      sessionRef.current === session ? getConnection().commands : undefined;
     const findCommand = () =>
       commands?.find((candidate) => candidate.name === name) ??
       commands?.find((candidate) => candidate.altNames?.includes(name));
@@ -613,7 +691,7 @@ export function createDaemonSessionActions({
       return (
         signal ? Promise.race([request, rejectOnAbort(signal)]) : request
       ).then((status) => {
-        if (sessionRef.current !== session)
+        if (!isCurrent())
           throw new Error('Session changed before prompt submission');
         const mapped = mapSupportedCommands(status);
         commands = mapped.commands;
@@ -966,12 +1044,7 @@ export function createDaemonSessionActions({
       currentConnection.sessionContext ??
       (currentConnection.workspaceCwd
         ? { kind: 'workspace' as const, cwd: currentConnection.workspaceCwd }
-        : currentSession?.workspaceCwd
-          ? {
-              kind: 'workspace' as const,
-              cwd: currentSession.workspaceCwd,
-            }
-          : undefined);
+        : daemonClientSessionContext(currentSession));
     const fallbackContext = currentConnection.error
       ? getDefaultSessionContext()
       : (currentSessionContext ?? getDefaultSessionContext());
@@ -1250,6 +1323,8 @@ export function createDaemonSessionActions({
         );
       }
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+      const localPrompt = { sessionId, startedAt: Date.now() };
+      setConnection((current) => ({ ...current, localPrompt }));
       setPromptStatus('waiting');
       const ctrl = new AbortController();
       activePromptsRef.current.set(sessionId, {
@@ -1457,6 +1532,12 @@ export function createDaemonSessionActions({
           'send_prompt',
         );
       } finally {
+        setConnection((current) => {
+          if (current.localPrompt !== localPrompt) return current;
+          const next = { ...current };
+          delete next.localPrompt;
+          return next;
+        });
         const active = activePromptsRef.current.get(sessionId);
         if (active?.controller === ctrl) {
           activePromptsRef.current.delete(sessionId);
@@ -1784,6 +1865,86 @@ export function createDaemonSessionActions({
       return { promptId: accepted.promptId };
     },
 
+    async sendDetachedPrompt(session, text, options) {
+      // Admission-only dispatch to a session created for a first prompt whose
+      // submitter navigated away during creation. Nothing here may write the
+      // transcript store, prompt status, or connection: they belong to the
+      // session the user navigated to. The daemon keeps the session and runs
+      // the turn after this client detaches.
+      try {
+        const normalizedImages: Array<{ data: string; mimeType: string }> = (
+          options?.images ?? []
+        ).map((img) => ({
+          data: img.data,
+          mimeType:
+            img.mimeType || img.mediaType || img.media_type || 'image/*',
+        }));
+        const normalizedFiles = normalizePromptFiles(options?.files);
+        const classification = discardsSlashCommandAttachments(
+          session,
+          text,
+          normalizedImages.length > 0 || normalizedFiles.length > 0,
+          undefined,
+          // The detached client is owned by this dispatch; no session switch
+          // can supersede it, and its command snapshot must never publish to
+          // the current connection (the setConnection guard below stays
+          // keyed on sessionRef).
+          () => true,
+        );
+        const discardAttachments =
+          typeof classification === 'boolean'
+            ? classification
+            : await classification;
+        const uploaded = await promptContentWithUploadedAttachments(
+          session,
+          text,
+          normalizedImages,
+          normalizedFiles,
+          discardAttachments,
+        );
+        const inputAnnotations =
+          options?.inputAnnotations && options.inputAnnotations.length > 0
+            ? options.inputAnnotations
+            : undefined;
+        const promptRequest: Record<string, unknown> = {
+          prompt: uploaded.content,
+          eventDetailMode: getEventDetailMode(),
+        };
+        if (inputAnnotations || typeof options?.submittedPrompt === 'string') {
+          promptRequest['_meta'] = {
+            ...(typeof options?.submittedPrompt === 'string'
+              ? { 'qwen.submittedPrompt': options.submittedPrompt }
+              : {}),
+            ...(inputAnnotations ? { inputAnnotations } : {}),
+          };
+        }
+        if (options?.retry) {
+          promptRequest['retry'] = true;
+        }
+        options?.onAdmissionStarted?.();
+        let accepted: Awaited<ReturnType<typeof session.submitPrompt>>;
+        try {
+          accepted = await session.submitPrompt(
+            promptRequest as Parameters<typeof session.submitPrompt>[0],
+          );
+        } catch (error) {
+          if (isDefinitePromptAdmissionRejection(error)) {
+            await removeUploadedAttachments(session, uploaded.references);
+          }
+          throw error;
+        }
+        options?.onAdmitted?.({ promptId: accepted.promptId });
+        return { promptId: accepted.promptId };
+      } finally {
+        await session.detach().catch((error: unknown) => {
+          console.warn(
+            '[DaemonSessionActions] detach after detached prompt failed:',
+            error,
+          );
+        });
+      }
+    },
+
     async cancel() {
       const session = requireSessionForAction(
         addNotice,
@@ -1835,9 +1996,11 @@ export function createDaemonSessionActions({
       }
     },
 
-    async refreshModels(beforeRefresh) {
+    async refreshModels(beforeRefresh, options) {
       const session = sessionRef.current;
       const before = getConnection();
+      const readOnly = options?.reloadProviders === false;
+      const priorModelMutation = modelMutationGeneration;
       const context = before.sessionContext;
       const client = session?.client ?? getClient?.();
       const workspaceCwd =
@@ -1858,33 +2021,131 @@ export function createDaemonSessionActions({
           sessionContextKey(context) &&
         current.workspaceCwd === before.workspaceCwd &&
         current.status === 'connected' &&
-        (session ? session.client === client : getClient?.() === client);
+        (session ? session.client === client : getClient?.() === client) &&
+        (!readOnly ||
+          (priorModelMutation === modelMutationGeneration &&
+            current.currentModel === before.currentModel));
+      const checkSubscriptionSelection = (models: typeof before.models) => {
+        const selected = before.models?.find(
+          (model) => model.id === before.currentModel,
+        );
+        if (
+          selected?.authType === 'qwen-subscription' &&
+          !models?.some((model) => model.id === before.currentModel)
+        ) {
+          throw new Error(
+            `The selected model, ${selected.baseModelId ?? selected.label}, is no longer available. Run /model to choose another model.`,
+          );
+        }
+      };
       await beforeRefresh?.({ workspaceCwd, sessionId: session?.sessionId });
       if (!isCurrent()) return;
+      if (readOnly && session) {
+        // Invalidate older reconnect snapshots without starting a config write.
+        observeSessionConfig(sessionConfigGeneration, session);
+      }
       const workspace = client.workspaceByCwd(workspaceCwd);
-      const reload = workspace.reloadModelProviders({
-        clientId: session?.clientId,
-      });
-      const result = await (session
-        ? trackSessionConfigMutation(session, reload)
-        : reload);
-      if (!isCurrent()) return;
-      if (
-        result.status !== 'applied' &&
-        !(result.status === 'deferred' && !session)
-      ) {
-        throw new Error('Unable to reload model providers.');
+      if (!readOnly) {
+        const reload = workspace.reloadModelProviders({
+          clientId: session?.clientId,
+        });
+        const result = await (session
+          ? trackSessionConfigMutation(
+              session,
+              reload,
+              'Reload models timed out',
+            )
+          : reload);
+        if (!isCurrent()) return;
+        if (
+          result.status !== 'applied' &&
+          !(result.status === 'deferred' && !session)
+        ) {
+          throw new Error('Unable to reload model providers.');
+        }
       }
       if (session) {
         const status = await session.context();
         if (!isCurrent()) return;
-        const models = mapSessionContextModels(status);
-        if (status.sessionId !== session.sessionId || !models) {
-          throw new Error('Unable to read the refreshed session model list.');
-        }
         const providers = await workspace.workspaceProviders();
         if (!isCurrent()) return;
         if (!providers.initialized) {
+          throw new Error(
+            providers.errors?.[0]?.error ??
+              'Unable to read the refreshed model list.',
+          );
+        }
+        const refreshed = mapSessionContextModels(status);
+        if (
+          status.sessionId !== session.sessionId ||
+          (!refreshed && providers.current?.authType)
+        ) {
+          throw new Error('Unable to read the refreshed session model list.');
+        }
+        const models = refreshed ?? { models: [] };
+        const currentModel =
+          readOnly ||
+          models.models.some((model) => model.id === refreshed?.currentModel)
+            ? refreshed?.currentModel
+            : undefined;
+        setConnection((current) =>
+          isCurrent(current)
+            ? {
+                ...current,
+                providers,
+                models: models.models,
+                ...(readOnly && current.context
+                  ? {
+                      context: {
+                        ...current.context,
+                        state: {
+                          ...current.context.state,
+                          _meta: {
+                            ...current.context.state._meta,
+                            authType: status.state._meta?.['authType'],
+                          },
+                          models: status.state.models,
+                        },
+                      },
+                    }
+                  : {}),
+                contextWindow:
+                  models.models.find(
+                    (model) => model.id === current.currentModel,
+                  )?.contextWindow ?? current.contextWindow,
+                ...((readOnly ||
+                  (models.models.length === 0 &&
+                    !providers.current?.authType)) &&
+                priorModelMutation === modelMutationGeneration
+                  ? {
+                      currentModel,
+                      contextWindow:
+                        models.models.find((model) => model.id === currentModel)
+                          ?.contextWindow ??
+                        (current.currentModel === currentModel
+                          ? current.contextWindow
+                          : undefined),
+                      reasoning:
+                        current.currentModel === currentModel
+                          ? current.reasoning
+                          : undefined,
+                    }
+                  : {}),
+              }
+            : current,
+        );
+        if (!readOnly) checkSubscriptionSelection(models.models);
+      } else {
+        const providers = await workspace.workspaceProviders();
+        if (!isCurrent()) return;
+        const { models, currentModel, contextWindow } =
+          mapProviderStatus(providers);
+        if (
+          !providers.initialized ||
+          (models.length === 0 &&
+            providers.current?.authType &&
+            !(readOnly && providers.current.authType === 'qwen-subscription'))
+        ) {
           throw new Error(
             providers.errors?.[0]?.error ??
               'Unable to read the refreshed model list.',
@@ -1895,27 +2156,24 @@ export function createDaemonSessionActions({
             ? {
                 ...current,
                 providers,
-                models: models.models,
-                contextWindow:
-                  models.models.find(
-                    (model) => model.id === current.currentModel,
-                  )?.contextWindow ?? current.contextWindow,
+                models,
+                ...(readOnly
+                  ? {
+                      currentModel: providers.current?.authType
+                        ? currentModel
+                        : undefined,
+                      contextWindow: providers.current?.authType
+                        ? (contextWindow ??
+                          (current.currentModel === currentModel
+                            ? current.contextWindow
+                            : undefined))
+                        : undefined,
+                    }
+                  : {}),
               }
             : current,
         );
-      } else {
-        const providers = await workspace.workspaceProviders();
-        if (!isCurrent()) return;
-        const { models } = mapProviderStatus(providers);
-        if (!providers.initialized || models.length === 0) {
-          throw new Error(
-            providers.errors?.[0]?.error ??
-              'Unable to read the refreshed model list.',
-          );
-        }
-        setConnection((current) =>
-          isCurrent(current) ? { ...current, providers, models } : current,
-        );
+        if (!readOnly) checkSubscriptionSelection(models);
       }
     },
 
@@ -1926,24 +2184,23 @@ export function createDaemonSessionActions({
         'Set model failed',
         'switch_model',
       );
+      const isOwner = captureConfigOwner(session);
       try {
-        const modelRequest = session.setModel(modelId);
-        const contextRequest = trackSessionConfigMutation(
+        const result = await trackSessionConfigMutation(
           session,
-          modelRequest.then(() => session.context()),
-        );
-        const result = await withActionTimeout(
-          modelRequest,
+          session.setModel(modelId),
           'Set model timed out',
+          undefined,
+          false,
         );
-        const modelGeneration =
-          sessionRef.current === session
-            ? ++modelMutationGeneration
-            : undefined;
+        if (!isOwner()) return result;
+        const modelGeneration = isOwner()
+          ? ++modelMutationGeneration
+          : undefined;
         if (modelGeneration !== undefined) {
           setConnection((current) => {
             if (
-              sessionRef.current !== session ||
+              !isOwner(current) ||
               modelGeneration !== modelMutationGeneration
             ) {
               return current;
@@ -1951,10 +2208,18 @@ export function createDaemonSessionActions({
             return { ...current, currentModel: modelId, reasoning: undefined };
           });
         }
+        const configCurrent = beginSessionConfigRead(
+          sessionConfigGeneration,
+          session,
+        );
         const context = await withActionTimeout(
-          contextRequest,
+          session.context(),
           'Refresh model context timed out',
-        ).catch(() => undefined);
+        )
+          .then((value) =>
+            value.sessionId === session.sessionId ? value : undefined,
+          )
+          .catch(() => undefined);
         if (
           modelGeneration !== undefined &&
           sessionRef.current === session &&
@@ -1964,12 +2229,17 @@ export function createDaemonSessionActions({
             if (
               sessionRef.current !== session ||
               modelGeneration !== modelMutationGeneration ||
-              current.currentModel !== modelId
+              current.currentModel !== modelId ||
+              !isOwner(current) ||
+              !configCurrent()
             ) {
               return current;
             }
             return {
               ...current,
+              ...(context
+                ? applyConfigOptions(current, context.state.configOptions ?? [])
+                : { workflowModeStatus: 'unknown' as const }),
               context: context
                 ? {
                     ...context,
@@ -1986,12 +2256,86 @@ export function createDaemonSessionActions({
         }
         return result;
       } catch (error) {
+        if (isOwner() && getConnection().workflowModeStatus !== undefined) {
+          queueSessionConfigRefresh(sessionConfigGeneration, session, () => {
+            void reconcileSessionConfig(session, isOwner);
+          });
+        }
         throw dispatchActionError(
           addNotice,
           'Set model failed',
           error,
           'switch_model',
         );
+      }
+    },
+
+    async setWorkflowMode(requested) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Set Workflow mode failed',
+        'set_workflow_mode',
+      );
+      const before = getConnection();
+      if (
+        before.status !== 'connected' ||
+        before.workflowModeStatus !== 'ready' ||
+        !before.workflowMode ||
+        workflowWrites.has(
+          getSessionConfigSync(sessionConfigGeneration, session),
+        ) ||
+        (requested && !before.workflowMode.available)
+      ) {
+        throw new Error('Workflow mode is not available for this session');
+      }
+      const isOwner = captureConfigOwner(session);
+      const workflowState = getSessionConfigSync(
+        sessionConfigGeneration,
+        session,
+      );
+      workflowWrites.add(workflowState);
+      const mutation = beginSessionConfigMutation(
+        sessionConfigGeneration,
+        session,
+      );
+      setConnection((current) =>
+        isOwner(current) ? { ...current, workflowModePending: true } : current,
+      );
+      try {
+        const result = await trackSessionConfigMutation(
+          session,
+          session.setConfigOption('workflow_mode', requested ? 'on' : 'off'),
+          'Workflow mode update was not confirmed',
+          mutation,
+          false,
+        );
+        if (result?.persisted !== true)
+          throw new Error('Workflow mode update was not confirmed');
+      } catch (error) {
+        throw dispatchActionError(
+          isOwner() ? addNotice : ignoreStaleNotice,
+          'Workflow mode update was not confirmed',
+          error,
+          'set_workflow_mode',
+        );
+      } finally {
+        mutation.finish();
+        workflowWrites.delete(workflowState);
+        if (isOwner()) {
+          setConnection((current) =>
+            isOwner(current)
+              ? {
+                  ...current,
+                  workflowModePending: false,
+                  workflowModeStatus: 'syncing',
+                }
+              : current,
+          );
+          queueSessionConfigRefresh(sessionConfigGeneration, session, () => {
+            void reconcileSessionConfig(session, isOwner);
+          });
+        }
       }
     },
 
@@ -2013,13 +2357,18 @@ export function createDaemonSessionActions({
       const actionToken = ++reasoningActionToken;
       const sourceModel = getConnection().currentModel;
       const sourceModelGeneration = modelMutationGeneration;
+      const isOwner = captureConfigOwner(session);
+      const mutation = beginSessionConfigMutation(
+        sessionConfigGeneration,
+        session,
+      );
       try {
-        const result = await withActionTimeout(
-          trackSessionConfigMutation(
-            session,
-            session.setConfigOption('reasoning_effort', value, opts),
-          ),
+        const result = await trackSessionConfigMutation(
+          session,
+          session.setConfigOption('reasoning_effort', value, opts),
           'Set reasoning effort timed out',
+          mutation,
+          false,
         );
         const nextReasoning = mapReasoningControls(result.configOptions);
         const confirmed =
@@ -2036,15 +2385,18 @@ export function createDaemonSessionActions({
         }
         const current = getConnection();
         if (
-          sessionRef.current === session &&
+          isOwner() &&
+          mutation.isCurrent() &&
           sourceModelGeneration === modelMutationGeneration &&
           current.currentModel === sourceModel &&
           actionToken > appliedReasoningActionToken
         ) {
           appliedReasoningActionToken = actionToken;
+          // Check freshness before enqueueing: our own readback can start
+          // before React applies this update. Later observations enqueue after it.
           setConnection((current) => {
             if (
-              sessionRef.current !== session ||
+              !isOwner(current) ||
               sourceModelGeneration !== modelMutationGeneration ||
               current.currentModel !== sourceModel
             ) {
@@ -2065,7 +2417,25 @@ export function createDaemonSessionActions({
               context: current.context
                 ? {
                     ...current.context,
-                    state: { ...current.context.state, configOptions },
+                    state: {
+                      ...current.context.state,
+                      configOptions: [
+                        ...(current.context.state.configOptions ?? []).filter(
+                          (item) =>
+                            !item ||
+                            typeof item !== 'object' ||
+                            (item as { id?: unknown }).id !==
+                              'reasoning_effort',
+                        ),
+                        ...configOptions.filter(
+                          (item) =>
+                            item &&
+                            typeof item === 'object' &&
+                            (item as { id?: unknown }).id ===
+                              'reasoning_effort',
+                        ),
+                      ],
+                    },
                   }
                 : current.context,
             };
@@ -2079,6 +2449,12 @@ export function createDaemonSessionActions({
           'set_reasoning_effort',
         );
       } finally {
+        mutation.finish();
+        if (isOwner() && getConnection().workflowModeStatus !== undefined) {
+          queueSessionConfigRefresh(sessionConfigGeneration, session, () => {
+            void reconcileSessionConfig(session, isOwner);
+          });
+        }
         completePersistedAction?.();
         if (pendingPersistedReasoningAction === persistedAction) {
           pendingPersistedReasoningAction = undefined;
@@ -2093,27 +2469,32 @@ export function createDaemonSessionActions({
         'Set approval mode failed',
         'set_approval_mode',
       );
+      const isOwner = captureConfigOwner(session);
       try {
-        const result = await withActionTimeout(
-          trackSessionConfigMutation(
-            session,
-            session.client.setSessionApprovalMode(session.sessionId, mode, {
-              persist: opts?.persist,
-              clientId: session.clientId,
-              ...(opts?.planMode !== undefined
-                ? { planMode: opts.planMode }
-                : {}),
-            }),
-          ),
+        const result = await trackSessionConfigMutation(
+          session,
+          session.client.setSessionApprovalMode(session.sessionId, mode, {
+            persist: opts?.persist,
+            clientId: session.clientId,
+            ...(opts?.planMode !== undefined
+              ? { planMode: opts.planMode }
+              : {}),
+          }),
           'Set approval mode timed out',
         );
-        if (sessionRef.current === session) {
-          setConnection((current) => ({
-            ...current,
-            currentMode: result.mode || mode,
-            planExecutionMode:
-              result.mode === 'plan' ? result.planExecutionMode : undefined,
-          }));
+        if (isOwner()) {
+          setConnection((current) =>
+            isOwner(current)
+              ? {
+                  ...current,
+                  currentMode: result.mode || mode,
+                  planExecutionMode:
+                    result.mode === 'plan'
+                      ? result.planExecutionMode
+                      : undefined,
+                }
+              : current,
+          );
         }
         return result;
       } catch (error) {
@@ -2224,10 +2605,9 @@ export function createDaemonSessionActions({
         session.sessionId,
         'load',
         {
-          sessionContext: getConnection().sessionContext ?? {
-            kind: 'workspace',
-            cwd: session.workspaceCwd,
-          },
+          sessionContext:
+            getConnection().sessionContext ??
+            daemonClientSessionContext(session),
         },
         signal,
         options?.replaySource,
@@ -2243,10 +2623,15 @@ export function createDaemonSessionActions({
       getCurrentWorkspaceCwd?: () => string | undefined;
       sessionContext?: DaemonProductSessionContext;
       modelServiceId?: string;
+      startupConfig?: CreateSessionRequest['startupConfig'];
       approvalMode?: DaemonApprovalMode;
       sourceType?: string;
       worktree?: { slug?: string };
       branch?: { name: string };
+      keepOnNavigation?: boolean;
+      navigationOutcome?: { bound: boolean };
+      sourceVersion?: number;
+      getCurrentSourceVersion?: () => number;
     }) {
       let targetSessionContext: DaemonProductSessionContext | undefined;
       let rawCreateStarted = false;
@@ -2332,6 +2717,9 @@ export function createDaemonSessionActions({
             ? { worktree: options.worktree }
             : {}),
           ...(options?.branch !== undefined ? { branch: options.branch } : {}),
+          ...(options?.startupConfig
+            ? { startupConfig: options.startupConfig }
+            : {}),
         };
         const session = sessionRef.current;
         const activeSession =
@@ -2405,9 +2793,21 @@ export function createDaemonSessionActions({
               );
         const userMovedAway =
           (getConnection().sessionId !== connectionSessionIdAtStart ||
-            getWorkspaceSelectionKey() !== workspaceSelectionAtStart) &&
+            getWorkspaceSelectionKey() !== workspaceSelectionAtStart ||
+            (options?.sourceVersion !== undefined &&
+              options.getCurrentSourceVersion?.() !== options.sourceVersion)) &&
           getConnection().sessionId !== nextSession.sessionId;
         if (manualSessionClearRef.current || userMovedAway) {
+          if (options?.keepOnNavigation) {
+            // A submitted prompt owns this session even though the user
+            // navigated away: hand the client back unbound so the caller can
+            // dispatch without hijacking the navigation. Binding here would
+            // replace the session the user just opened.
+            if (options.navigationOutcome) {
+              options.navigationOutcome.bound = false;
+            }
+            return nextSession;
+          }
           try {
             await withActionTimeout(
               nextSession.detach(),
@@ -2501,6 +2901,9 @@ export function createDaemonSessionActions({
           }`,
           error,
           'create_session',
+          isSessionLimitExceededError(error)
+            ? { code: 'session_limit_exceeded' }
+            : undefined,
         );
       }
     },
@@ -2582,17 +2985,19 @@ export function createDaemonSessionActions({
 
     async releaseSession(sessionId) {
       try {
-        const session = requireSessionForAction(
-          addNotice,
-          sessionRef.current,
-          'Release session failed',
-          'release_session',
-        );
+        const session = sessionRef.current;
+        // The release dialog is reachable from the empty new-session screen,
+        // where no session client exists yet. Fall back to the workspace
+        // daemon client so the recovery action still frees the slot.
+        const client = session?.client ?? getClient?.();
+        if (!client) {
+          throw new Error('Daemon session is not connected');
+        }
         await withActionTimeout(
-          session.client.closeSession(sessionId),
+          client.closeSession(sessionId),
           'Release session timed out',
         );
-        onGeneratedUiInvalidated?.(session, 'deleted', sessionId);
+        if (session) onGeneratedUiInvalidated?.(session, 'deleted', sessionId);
       } catch (error) {
         throw dispatchActionError(
           addNotice,
@@ -2653,30 +3058,36 @@ export function createDaemonSessionActions({
       }
     },
 
-    async getContext() {
+    async getContext(opts) {
+      const currentSession = sessionRef.current;
+      if (!currentSession && opts?.silent) {
+        throw new Error('Daemon session is not connected');
+      }
       const session = requireSessionForAction(
         addNotice,
-        sessionRef.current,
+        currentSession,
         'Load context failed',
         'load_context',
       );
-      const configGeneration = sessionConfigGeneration.get(session) ?? 0;
+      const configCurrent = beginSessionConfigRead(
+        sessionConfigGeneration,
+        session,
+      );
+      const isOwner = captureConfigOwner(session);
       try {
         const context = await withActionTimeout(
           session.context(),
           'Load context timed out',
         );
         setConnection((current) => {
-          if (
-            sessionRef.current !== session ||
-            configGeneration % 2 !== 0 ||
-            (sessionConfigGeneration.get(session) ?? 0) !== configGeneration
-          ) {
+          if (!isOwner(current) || !configCurrent()) {
             return current;
           }
+          if (context.sessionId !== session.sessionId)
+            return { ...current, workflowModeStatus: 'unknown' };
           const currentMode = getModeFromSessionContext(context);
           return {
-            ...current,
+            ...applyConfigOptions(current, context.state.configOptions ?? []),
             context: {
               ...context,
               recovery: current.context
@@ -2695,6 +3106,14 @@ export function createDaemonSessionActions({
         });
         return context;
       } catch (error) {
+        setConnection((current) =>
+          isOwner(current) && configCurrent()
+            ? { ...current, workflowModeStatus: 'unknown' }
+            : current,
+        );
+        if (opts?.silent && isTransientSessionReadError(error)) {
+          throw error;
+        }
         throw dispatchActionError(
           addNotice,
           'Load context failed',
@@ -2791,6 +3210,28 @@ export function createDaemonSessionActions({
           'Rename session failed',
           error,
           'rename_session',
+        );
+      }
+    },
+
+    async bindSessionPr(pr) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Bind PR failed',
+        'bind_session_pr',
+      );
+      try {
+        return await withActionTimeout(
+          session.updateMetadata({ pr }),
+          'Bind PR timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Bind PR failed',
+          error,
+          'bind_session_pr',
         );
       }
     },

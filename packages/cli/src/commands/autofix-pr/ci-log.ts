@@ -21,10 +21,11 @@ import {
   taskArg,
   assertPositiveInteger,
   autofixPrPaths,
-  repoRoot,
+  resolveWatchRoot,
   requireState,
 } from './state.js';
 import { assertNoFixInFlight } from './fix.js';
+import { AutofixPrRefusal } from './refusal.js';
 
 const FAILED_JOB_CONCLUSIONS = new Set(['failure', 'timed_out']);
 
@@ -85,7 +86,7 @@ export function runCiLog(
   // `slice(-0)` and `slice(NaN)` both keep the whole log.
   assertPositiveInteger(limit, '--lines');
   assertPositiveInteger(runId, 'run id');
-  const root = repoRoot();
+  const root = resolveWatchRoot(prNumber);
   const paths = autofixPrPaths(root, prNumber);
   const state = requireState(paths.statePath, prNumber);
   assertWatching(state, task);
@@ -115,7 +116,8 @@ export function runCiLog(
     .filter((job) => FAILED_JOB_CONCLUSIONS.has(job.conclusion));
   if (failed.length === 0) {
     // An empty file would read as "the log says nothing".
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'no_failed_job',
       `run ${runId} has no finished job that failed or timed out: its failed jobs are still running, or it failed before any job started.`,
     );
   }

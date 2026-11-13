@@ -21,6 +21,184 @@ function invalidPlugin(
 }
 
 describe('channel registry', () => {
+  it('publishes an outbound destination without injecting conversation controls', async () => {
+    const plugin: ChannelPlugin = {
+      channelType: 'valid-outbound-only',
+      displayName: 'Outbound only',
+      outboundOnly: true,
+      defaultDeliveryTarget: {
+        type: 'chat',
+        id: 'default',
+        label: 'Configured group',
+      },
+      management: {
+        fields: [
+          {
+            key: 'webhookUrl',
+            label: 'Webhook URL',
+            kind: 'secret',
+            required: true,
+            envResolvable: true,
+          },
+        ],
+      },
+      createChannel() {
+        throw new Error('not used');
+      },
+    };
+    registerPlugin(plugin);
+
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === plugin.channelType,
+    );
+    expect(entry).toEqual({
+      type: plugin.channelType,
+      displayName: plugin.displayName,
+      manageable: true,
+      supportsQrLogin: false,
+      outboundOnly: true,
+      defaultDeliveryTarget: {
+        type: 'chat',
+        id: 'default',
+        label: 'Configured group',
+      },
+      fields: plugin.management?.fields,
+    });
+    expect(entry?.defaultDeliveryTarget).not.toBe(plugin.defaultDeliveryTarget);
+  });
+
+  it('keeps the legacy catalog shape when delivery metadata is omitted', async () => {
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === 'dingtalk',
+    );
+    expect(Object.keys(entry!).sort()).toEqual([
+      'displayName',
+      'fields',
+      'manageable',
+      'supportsQrLogin',
+      'type',
+    ]);
+    expect(entry?.fields).toContainEqual(
+      expect.objectContaining({ key: 'privatePolicy' }),
+    );
+  });
+
+  it.each([
+    { name: 'length-boundary', id: 'x'.repeat(2048) },
+    { name: 'surrounding-whitespace', id: ' default ' },
+  ])('preserves a valid $name target ID', async ({ name, id }) => {
+    const plugin: ChannelPlugin = {
+      ...invalidPlugin(`valid-delivery-${name}`, []),
+      defaultDeliveryTarget: { type: 'chat', id },
+    };
+    registerPlugin(plugin);
+    expect(
+      (await supportedChannelCatalog()).find(
+        (candidate) => candidate.type === plugin.channelType,
+      ),
+    ).toMatchObject({
+      manageable: true,
+      defaultDeliveryTarget: { type: 'chat', id },
+    });
+  });
+
+  it.each([
+    { name: 'outbound-flag', metadata: { outboundOnly: 'true' } },
+    { name: 'null-target', metadata: { defaultDeliveryTarget: null } },
+    { name: 'array-target', metadata: { defaultDeliveryTarget: [] } },
+    {
+      name: 'target-type',
+      metadata: { defaultDeliveryTarget: { type: 'url', id: 'default' } },
+    },
+    {
+      name: 'target-id',
+      metadata: { defaultDeliveryTarget: { type: 'chat', id: '   ' } },
+    },
+    {
+      name: 'oversize-target-id',
+      metadata: {
+        defaultDeliveryTarget: { type: 'chat', id: 'x'.repeat(2049) },
+      },
+    },
+    ...[
+      'https://oapi.dingtalk.com/robot/send?access_token=private-token',
+      ' HTTPS://oapi.dingtalk.com/robot/send?access_token=private-token ',
+    ].map((id, index) => ({
+      name: `url-target-id-${index}`,
+      metadata: { defaultDeliveryTarget: { type: 'chat', id } },
+    })),
+    {
+      name: 'target-label',
+      metadata: {
+        defaultDeliveryTarget: { type: 'chat', id: 'default', label: 3 },
+      },
+    },
+    {
+      name: 'target-credentials',
+      metadata: {
+        defaultDeliveryTarget: {
+          type: 'chat',
+          id: 'default',
+          webhookUrl: 'https://example.invalid/secret',
+        },
+      },
+    },
+  ])('does not publish invalid $name metadata', async ({ name, metadata }) => {
+    const plugin = {
+      ...invalidPlugin(`invalid-delivery-${name}`, []),
+      ...metadata,
+    } as unknown as ChannelPlugin;
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      registerPlugin(plugin);
+      const registered = await getPlugin(plugin.channelType);
+      expect(registered?.createChannel).toBe(plugin.createChannel);
+      expect(registered?.management).toBeUndefined();
+      expect(registered?.outboundOnly).toBeUndefined();
+      expect(registered?.defaultDeliveryTarget).toBeUndefined();
+      expect(
+        (await supportedChannelCatalog()).find(
+          (candidate) => candidate.type === plugin.channelType,
+        ),
+      ).toEqual({
+        type: plugin.channelType,
+        displayName: plugin.displayName,
+        manageable: false,
+        supportsQrLogin: false,
+        fields: [],
+      });
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('strips delivery hints when other management metadata is invalid', async () => {
+    const plugin: ChannelPlugin = {
+      ...invalidPlugin('invalid-outbound-management', [
+        { key: 'token', label: 'Token', kind: 'unsupported' },
+      ]),
+      outboundOnly: true,
+      defaultDeliveryTarget: { type: 'chat', id: 'default' },
+    };
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      registerPlugin(plugin);
+      expect(
+        (await supportedChannelCatalog()).find(
+          (entry) => entry.type === plugin.channelType,
+        ),
+      ).toEqual({
+        type: plugin.channelType,
+        displayName: plugin.displayName,
+        manageable: false,
+        supportsQrLogin: false,
+        fields: [],
+      });
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('adds the shared output descriptor only when a plugin opts in', async () => {
     registerPlugin({
       channelType: 'valid-output-mode',
@@ -375,6 +553,84 @@ describe('channel registry', () => {
         'Channel field "retentionDays" can only declare exclusiveMinimum on number fields.',
     },
     {
+      type: 'invalid-maximum-on-string',
+      fields: [
+        {
+          key: 'retentionDays',
+          label: 'Retention days',
+          kind: 'string',
+          maximum: 0,
+        },
+      ],
+      message:
+        'Channel field "retentionDays" can only declare maximum on number fields.',
+    },
+    {
+      type: 'invalid-non-finite-maximum',
+      fields: [
+        {
+          key: 'retries',
+          label: 'Retries',
+          kind: 'number',
+          maximum: Number.NaN,
+        },
+      ],
+      message: 'Channel field "retries" must declare a finite maximum.',
+    },
+    {
+      type: 'invalid-maximum-leaves-no-valid-value',
+      fields: [
+        {
+          key: 'retries',
+          label: 'Retries',
+          kind: 'number',
+          exclusiveMinimum: 5,
+          maximum: 5,
+        },
+      ],
+      message:
+        'Channel field "retries" declares a maximum that leaves no valid value.',
+    },
+    {
+      type: 'invalid-non-finite-minimum',
+      fields: [
+        {
+          key: 'retries',
+          label: 'Retries',
+          kind: 'number',
+          minimum: Number.NaN,
+        },
+      ],
+      message: 'Channel field "retries" must declare a finite minimum.',
+    },
+    {
+      type: 'invalid-minimum-on-string',
+      fields: [
+        {
+          key: 'retentionDays',
+          label: 'Retention days',
+          kind: 'string',
+          minimum: 0,
+        },
+      ],
+      message:
+        'Channel field "retentionDays" can only declare minimum on number fields.',
+    },
+    {
+      type: 'invalid-maximum-below-inclusive-minimum',
+      fields: [
+        {
+          key: 'retries',
+          label: 'Retries',
+          kind: 'number',
+          minimum: 6,
+          maximum: 5,
+        },
+      ],
+      message:
+        'Channel field "retries" declares a maximum that leaves no valid value.',
+    },
+    {
       type: 'invalid-env-resolvable-number',
       fields: [
         {
@@ -548,10 +804,63 @@ describe('channel registry', () => {
         type,
         displayName: type,
         manageable: false,
+        supportsQrLogin: false,
         fields: [],
       });
     },
   );
+
+  it.each([
+    ['null', null],
+    ['a non-object', 'qr'],
+    ['an object without start', {}],
+    ['a non-function start', { start: 42 }],
+  ])(
+    'strips management when qrLogin is %s instead of throwing',
+    async (_label, qrLogin) => {
+      const type = `invalid-qr-login-${_label.replace(/[^a-z]+/g, '-')}`;
+      const plugin = {
+        channelType: type,
+        displayName: type,
+        management: { fields: [], qrLogin },
+        createChannel() {
+          throw new Error('not used');
+        },
+      } as unknown as ChannelPlugin;
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+      registerPlugin(plugin);
+
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Channel management metadata must declare qrLogin.start as a function.',
+        ),
+      );
+      stderr.mockRestore();
+
+      const registered = await getPlugin(type);
+      expect(registered?.management).toBeUndefined();
+    },
+  );
+
+  it('keeps management when qrLogin declares a start function', async () => {
+    const plugin = {
+      channelType: 'valid-qr-login',
+      displayName: 'valid-qr-login',
+      management: { fields: [], qrLogin: { start: () => () => {} } },
+      createChannel() {
+        throw new Error('not used');
+      },
+    } as unknown as ChannelPlugin;
+
+    registerPlugin(plugin);
+
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === 'valid-qr-login',
+    );
+    expect(entry?.manageable).toBe(true);
+    expect(entry?.supportsQrLogin).toBe(true);
+  });
 
   it('registers a plugin whose management descriptor lacks a fields array without management metadata', async () => {
     const plugin = {
@@ -585,6 +894,7 @@ describe('channel registry', () => {
       type: 'invalid-missing-fields-array',
       displayName: 'invalid-missing-fields-array',
       manageable: false,
+      supportsQrLogin: false,
       fields: [],
     });
   });
@@ -624,6 +934,7 @@ describe('channel registry', () => {
       type: 'invalid-validate-config',
       displayName: 'invalid-validate-config',
       manageable: false,
+      supportsQrLogin: false,
       fields: [],
     });
   });
@@ -663,6 +974,7 @@ describe('channel registry', () => {
       type: 'invalid-async-validate-config',
       displayName: 'invalid-async-validate-config',
       manageable: false,
+      supportsQrLogin: false,
       fields: [],
     });
   });
@@ -791,6 +1103,48 @@ describe('channel registry', () => {
     });
   });
 
+  it('registers a single-value interval whose maximum equals its inclusive floor', async () => {
+    // The inclusive clause must stay strict `<`. Copying the exclusive
+    // sibling's `<=` one line above would refuse a field with exactly one
+    // legal value and drop that channel's whole management surface — and
+    // every other new case here is a rejection, so nothing else notices.
+    const plugin: ChannelPlugin = {
+      channelType: 'valid-single-value-interval',
+      displayName: 'valid-single-value-interval',
+      defaultSessionScope: 'thread',
+      management: {
+        fields: [
+          {
+            key: 'retries',
+            label: 'Retries',
+            kind: 'number',
+            minimum: 5,
+            maximum: 5,
+          },
+        ],
+      },
+      createChannel() {
+        throw new Error('not used');
+      },
+    };
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    registerPlugin(plugin);
+
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('Invalid management metadata'),
+    );
+    stderr.mockRestore();
+
+    const entry = (await supportedChannelCatalog()).find(
+      (candidate) => candidate.type === 'valid-single-value-interval',
+    );
+    expect(entry?.manageable).toBe(true);
+    expect(
+      entry?.fields.find((field) => field.key === 'retries'),
+    ).toMatchObject({ minimum: 5, maximum: 5 });
+  });
+
   it('only marks the manually configurable built-in types as manageable', async () => {
     const catalog = await supportedChannelCatalog();
     const builtinCatalog = catalog.filter(
@@ -801,6 +1155,7 @@ describe('channel registry', () => {
       'telegram',
       'weixin',
       'dingtalk',
+      'dingtalk-webhook',
       'dws',
       'email',
       'wecom',
@@ -815,12 +1170,15 @@ describe('channel registry', () => {
         .filter((entry) => entry.manageable)
         .map((entry) => entry.type),
     ).toEqual([
+      'weixin',
       'dingtalk',
+      'dingtalk-webhook',
       'dws',
       'email',
       'wecom',
       'wecom-callback',
       'feishu',
+      'qq',
       'github',
       'gitlab',
     ]);
@@ -831,9 +1189,31 @@ describe('channel registry', () => {
         )
         .map((entry) => entry.type),
     ).toEqual(['dingtalk']);
+    // WeChat's iLink Bot only produces direct messages, so its group policy
+    // must offer nothing else. Without this the shared four-option descriptor
+    // would silently come back and let an operator enable a mode the adapter
+    // can never reach.
+    expect(
+      builtinCatalog
+        .find((entry) => entry.type === 'weixin')
+        ?.fields.find((field) => field.key === 'groupPolicy'),
+    ).toMatchObject({
+      kind: 'enum',
+      required: true,
+      default: 'disabled',
+      options: [{ value: 'disabled', label: 'Disabled' }],
+    });
+    // No API-root knob: `connect()` replaces the configured root with the one
+    // stored at login, and both login paths always store one, so the field
+    // would promise an override that can never reach a request.
+    expect(
+      builtinCatalog
+        .find((entry) => entry.type === 'weixin')
+        ?.fields.some((field) => field.key === 'baseUrl'),
+    ).toBe(false);
     // The registry skips the shared `instructions` injection for any channel
     // that declares its own, so pin the render invariants the editor depends on
-    // for every manageable built-in: exactly one field, plus the multiline hint
+    // for every manageable inbound type: one field, plus the multiline hint
     // (without it the editor falls back to a single-line input that flattens
     // stored guidance on the first edit). The copy guarantee is scoped to the
     // injected descriptor, because a channel declaring its own `instructions`
@@ -842,7 +1222,9 @@ describe('channel registry', () => {
     // (ChannelEditorDialog.test.tsx): fieldDescription resolves
     // `${labelKey}.description` and falls back to this literal only when that
     // i18n key is missing.
-    for (const entry of builtinCatalog.filter((item) => item.manageable)) {
+    for (const entry of builtinCatalog.filter(
+      (item) => item.manageable && !item.outboundOnly,
+    )) {
       const instructions = entry.fields.filter(
         (field) => field.key === 'instructions',
       );
@@ -869,6 +1251,16 @@ describe('channel registry', () => {
         required: true,
       }),
     );
+    const webhook = catalog.find((entry) => entry.type === 'dingtalk-webhook');
+    expect(webhook).toMatchObject({
+      manageable: true,
+      outboundOnly: true,
+      defaultDeliveryTarget: { type: 'chat', id: 'default' },
+    });
+    expect(webhook?.fields.map((field) => field.key)).toEqual([
+      'webhookUrl',
+      'signingSecret',
+    ]);
     for (const type of ['dingtalk', 'wecom', 'feishu'] as const) {
       const fields = catalog.find((entry) => entry.type === type)?.fields;
       expect(fields).not.toContainEqual(

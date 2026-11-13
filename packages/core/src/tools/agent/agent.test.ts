@@ -206,6 +206,9 @@ const baseRegistry = () => ({
   get: vi.fn(),
   register: vi.fn(),
   unregisterForeground: vi.fn(),
+  // Foreground launches call the returned unsubscribe in their finally.
+  trackInlineApprovals: vi.fn().mockReturnValue(vi.fn()),
+  clearInlineApproval: vi.fn(),
   complete: vi.fn(),
   fail: vi.fn(),
   finalizeCancelled: vi.fn(),
@@ -396,6 +399,7 @@ describe('AgentTool', () => {
       getMaxSessionTurns: vi.fn().mockReturnValue(-1),
       getMaxSubagentDepth: vi.fn().mockReturnValue(5),
       getMaxToolCalls: vi.fn().mockReturnValue(-1),
+      getAgentsSettings: vi.fn().mockReturnValue({}),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       isInteractive: vi.fn().mockReturnValue(false),
       getFileFilteringOptions: vi.fn().mockReturnValue({
@@ -1182,10 +1186,11 @@ describe('AgentTool', () => {
         ['For a background fork, do not read or tail its output'],
       ],
       [
-        'advertises background execution as the default with a foreground opt-out',
+        'explains both values of the configurable execution default',
         false,
         [
-          'background by default',
+          '`true` runs in the background with completion notifications',
+          '`false` waits and returns the result inline',
           'run_in_background: false',
           'foreground regular agent returns its result inline',
           'Unnamed caller-owned `working_dir` launches run in the foreground: an explicit `run_in_background: true` request is rejected',
@@ -1259,22 +1264,36 @@ describe('AgentTool', () => {
       expect(await withGrades(new Map())).toBeUndefined();
     });
 
-    it('declares the background default and foreground opt-out', () => {
-      const runInBackground = schemaProps().run_in_background!;
-      expect(runInBackground.default).toBe(true);
-      // Teammate clauses are about `name`, undeclared with teams off here.
-      expectText(
-        runInBackground.description,
-        [
-          'Set to false',
-          'interactive fork',
-          'Nested agents run in the foreground unless run_in_background is explicitly true',
-          'explicit run_in_background: true is rejected',
-          'a configured background default is rejected at the top level and downgraded to the foreground for nested launches',
-        ],
-        ['Named teammates are always concurrent'],
-      );
-    });
+    it.each([undefined, true, false])(
+      'declares mode precedence and configurable defaults with setting=%s',
+      async (defaultBackground) => {
+        vi.mocked(config.getAgentsSettings).mockReturnValue({
+          defaultBackground,
+        });
+        const tool = await freshTool();
+        const runInBackground = schemaProps(tool).run_in_background!;
+        expect(runInBackground.default).toBeUndefined();
+        // Teammate clauses are about `name`, undeclared with teams off here.
+        expectText(
+          runInBackground.description,
+          [
+            'agents.defaultBackground (true: background, false: foreground; default: true)',
+            'explicit value > definition background > agents.defaultBackground',
+            'Set to false',
+            'interactive fork',
+            'Nested agents run in the foreground unless run_in_background is explicitly true',
+            'explicit run_in_background: true is rejected',
+            'a configured background default is rejected at the top level and downgraded to the foreground for nested launches',
+          ],
+          ['Named teammates are always concurrent'],
+        );
+        expectText(tool.description, [
+          '`true` runs in the background with completion notifications',
+          '`false` waits and returns the result inline',
+          'For top-level regular subagents, explicit `run_in_background` overrides definition `background`, which overrides `agents.defaultBackground`',
+        ]);
+      },
+    );
 
     it('declares the teammate background rules when teams are enabled', async () => {
       vi.mocked(config.isAgentTeamEnabled).mockReturnValue(true);
@@ -2369,6 +2388,7 @@ describe('AgentTool', () => {
       const registry = config.getBackgroundTaskRegistry() as unknown as {
         get: MockFn;
         bridgeApprovalEvents: MockFn;
+        trackInlineApprovals: MockFn;
       };
       registry.get.mockImplementation((id: string) =>
         id === 'fork-entry'
@@ -2495,6 +2515,8 @@ describe('AgentTool', () => {
       expect(opts).toEqual({ nestedSource: true });
       // Unbridged in the foreground finally — no listener leak.
       expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      // The ancestor's entry carries the prompt; nothing waits inline.
+      expect(registry.trackInlineApprovals).not.toHaveBeenCalled();
     });
 
     it.each(['success', 'throw', 'cancel', 'no-goal', 'nested'])(
@@ -2532,6 +2554,28 @@ describe('AgentTool', () => {
           );
       },
     );
+
+    it('records inline prompts of a top-level foreground launch on its entry', async () => {
+      // The prompt is answered inline in the parent session; the entry only
+      // mirrors it so the live panel can say the agent is waiting.
+      const registry = config.getBackgroundTaskRegistry() as unknown as {
+        register: MockFn;
+        trackInlineApprovals: MockFn;
+      };
+      const cleanupSpy = vi.fn();
+      registry.trackInlineApprovals.mockReturnValue(cleanupSpy);
+
+      const invocation = agentTool.build(fg());
+      await invocation.execute(new AbortController().signal);
+
+      expect(registry.trackInlineApprovals).toHaveBeenCalledTimes(1);
+      const [agentId, emitter] = registry.trackInlineApprovals.mock.calls[0];
+      expect(agentId).toBe(registry.register.mock.calls[0][0].agentId);
+      expect(emitter).toBe(
+        (invocation as unknown as { eventEmitter: unknown }).eventEmitter,
+      );
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+    });
 
     it('does not bridge approvals for a top-level foreground launch', async () => {
       // No frame → no backgrounded ancestor → inline confirmation applies.
@@ -3513,9 +3557,21 @@ describe('AgentTool', () => {
         .mockReturnValue(
           client as unknown as ReturnType<Config['getLlmClient']>,
         );
-    const chatWith = (generationConfig: object) => ({
+    const chatWith = (
+      generationConfig: object,
+      dispatchedConfig?: object,
+      dispatchedRequest?: object,
+    ) => ({
       getChat: vi.fn().mockReturnValue({
         getGenerationConfig: vi.fn().mockReturnValue(generationConfig),
+        ...(dispatchedConfig && {
+          getDispatchedGenerationConfig: vi
+            .fn()
+            .mockReturnValue(dispatchedConfig),
+        }),
+        ...(dispatchedRequest && {
+          getDispatchedRequest: vi.fn().mockReturnValue(dispatchedRequest),
+        }),
       }),
     });
     /** Parent declarations `[name, description][]` (+ registry names). */
@@ -3921,6 +3977,54 @@ describe('AgentTool', () => {
       expectSeed([h.startup, h.secondUser, h.secondModel]);
     });
 
+    it.each([false, true])(
+      'inherits the dispatched parent prompt instead of a later canonical variant (background=%s)',
+      async (runInBackground) => {
+        const generationConfig = {
+          systemInstruction: 'dispatched parent instruction',
+        };
+        const runtimeView = {
+          contentGenerator: {
+            generateContent: vi.fn(),
+            generateContentStream: vi.fn(),
+            embedContent: vi.fn(),
+          },
+          contentGeneratorConfig: {
+            ...config.getContentGeneratorConfig(),
+            model: 'dispatched-parent-model',
+          },
+        };
+        llmClient({
+          getHistory: vi.fn().mockReturnValue([]),
+          ...chatWith(
+            { systemInstruction: 'canonical model instruction' },
+            generationConfig,
+            { model: 'dispatched-parent-model', generationConfig, runtimeView },
+          ),
+        });
+        if (runInBackground) withMessaging();
+        await runFork(
+          forkParams('some task', { run_in_background: runInBackground }),
+        );
+        expect(createArgs()?.[2]).toMatchObject({
+          renderedSystemPrompt: 'dispatched parent instruction',
+        });
+        expect(createArgs()?.[3]).toEqual({ model: 'dispatched-parent-model' });
+        expect(createArgs()?.[8]).toBe(runtimeView);
+        if (runInBackground) {
+          const registry = config.getBackgroundTaskRegistry();
+          expect(registry.tryReserveBackgroundSlot).toHaveBeenCalledWith(
+            'dispatched-parent-model',
+            null,
+          );
+          expect(registry.register).toHaveBeenCalledWith(
+            expect.objectContaining({ model: 'dispatched-parent-model' }),
+            expect.anything(),
+          );
+        }
+      },
+    );
+
     it('caps fork turns and uses bubble approval mode', async () => {
       loadGeneralPurpose();
       await runFork(forkParams('some task'));
@@ -4109,6 +4213,9 @@ describe('AgentTool', () => {
 
     it('runs a non-interactive fork through the background registry', async () => {
       vi.mocked(config.isInteractive).mockReturnValue(false);
+      vi.mocked(config.getAgentsSettings).mockReturnValue({
+        defaultBackground: false,
+      });
       vi.mocked(mockAgent.getFinalText).mockReturnValue('headless fork result');
       withMessaging();
       llmClient({
@@ -4860,6 +4967,54 @@ describe('AgentTool', () => {
     });
   });
 
+  describe('inline approval record on the registry entry', () => {
+    beforeEach(() => {
+      newContextState();
+      loadFirstSubagent();
+    });
+
+    it('clears the record when the prompt is answered, not when the call ends', async () => {
+      // The call's result arrives only after it has run; a long tool would
+      // keep "needs approval" on the panel row for its whole run otherwise.
+      const registry = config.getBackgroundTaskRegistry() as unknown as {
+        register: MockFn;
+        clearInlineApproval: MockFn;
+      };
+      const mockAgent = mockHeadless('Done', statsOf(1, 100, 1, [10, 5]));
+      const invocation = invoke(fg());
+      vi.mocked(mockAgent.execute).mockImplementation(async () => {
+        invocation.eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-slow-1',
+          name: 'run_shell_command',
+          description: 'wait 15s',
+          timestamp: Date.now(),
+          confirmationDetails: { type: 'exec', title: 'Shell' },
+          respond: vi.fn(),
+        } as unknown as AgentApprovalRequestEvent);
+      });
+      serveAgent(mockAgent);
+
+      let answered = false;
+      await invocation.execute(undefined, (output) => {
+        const display = output as AgentResultDisplay;
+        if (!answered && display.pendingConfirmation?.onConfirm) {
+          answered = true;
+          void display.pendingConfirmation.onConfirm(
+            ToolConfirmationOutcome.ProceedOnce,
+          );
+        }
+      });
+
+      expect(answered).toBe(true);
+      expect(registry.clearInlineApproval).toHaveBeenCalledExactlyOnceWith(
+        registry.register.mock.calls[0][0].agentId,
+        'call-slow-1',
+      );
+    });
+  });
+
   describe('Agent-level background: true', () => {
     let mockAgent: AgentHeadless;
     let mockContextState: ContextState;
@@ -5543,20 +5698,43 @@ describe('AgentTool', () => {
     });
 
     it.each([
-      [
-        'should run in background when run_in_background is true even without background config',
-        search({ run_in_background: true }),
-      ],
-      [
-        'runs a top-level subagent in the background when the flag is omitted',
-        search(),
-      ],
-    ])('%s', async (_title, params) => {
-      loadForeground();
-      const result = await invoke(params).execute();
-      expect(textOf(result)).toContain('Background agent launched');
-      expect(mockRegistry.register).toHaveBeenCalled();
-    });
+      [undefined, undefined, undefined, true],
+      [true, undefined, undefined, true],
+      [false, undefined, undefined, false],
+      [false, undefined, true, true],
+      [true, undefined, false, false],
+      [false, true, undefined, true],
+      [true, false, undefined, false],
+      [false, true, false, false],
+      [true, false, true, true],
+    ])(
+      'resolves background mode with setting=%s, definition=%s, argument=%s to %s',
+      async (
+        defaultBackground,
+        background,
+        runInBackground,
+        expectedBackground,
+      ) => {
+        vi.mocked(config.getAgentsSettings).mockReturnValue({
+          defaultBackground,
+        });
+        loadAs({ name: 'file-search', background });
+        const { updates, onUpdate } = trackUpdates();
+        const result = await invoke(
+          search({ run_in_background: runInBackground }),
+        ).execute(undefined, onUpdate);
+        const executionMode = expectedBackground ? 'background' : 'foreground';
+
+        expect(textOf(result)).toContain(
+          expectedBackground ? 'Background agent launched' : 'Monitor done',
+        );
+        expectDisplay(result, { executionMode });
+        expect(updates[0]).toMatchObject({ executionMode });
+        expect(mockRegistry.register.mock.calls[0]?.[0]).toMatchObject({
+          isBackgrounded: expectedBackground,
+        });
+      },
+    );
 
     it('keeps a named-teammate launch in the foreground when no team is active and the flag is omitted', async () => {
       // Without a team a `name` falls through to a one-shot agent, and
@@ -5597,6 +5775,9 @@ describe('AgentTool', () => {
       // Background is top-level-only in v1 (a nested launcher cannot honor
       // the completion contract); never silently run it in the foreground.
       vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      vi.mocked(config.getAgentsSettings).mockReturnValue({
+        defaultBackground: false,
+      });
       const invocation = invoke(
         monitor({
           description: 'Start monitor from a nested sub-agent',
@@ -5687,6 +5868,29 @@ describe('AgentTool', () => {
         PermissionMode.AutoEdit,
         undefined,
       );
+      expect(mockAgent.execute).not.toHaveBeenCalled();
+    });
+
+    it('does not register a background agent after cancellation during SubagentStart', async () => {
+      const hookSystem = installHookSystem();
+      let releaseHook!: () => void;
+      vi.mocked(hookSystem.fireSubagentStartEvent).mockReturnValueOnce(
+        new Promise((resolve) => {
+          releaseHook = () => resolve(undefined);
+        }),
+      );
+      const controller = new AbortController();
+      const result = invoke(monitor()).execute(controller.signal);
+      await vi.waitFor(() =>
+        expect(hookSystem.fireSubagentStartEvent).toHaveBeenCalledOnce(),
+      );
+
+      controller.abort();
+      releaseHook();
+
+      expectDisplay(await result, { status: 'failed' });
+      expect(mockRegistry.releaseBackgroundSlot).toHaveBeenCalledOnce();
+      expect(mockRegistry.register).not.toHaveBeenCalled();
       expect(mockAgent.execute).not.toHaveBeenCalled();
     });
 

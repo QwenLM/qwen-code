@@ -2243,22 +2243,27 @@ describe('SubagentManager', () => {
     });
 
     describe('custom provider-prefixed model selectors (#13561)', () => {
-      const providerManager = () =>
-        new SubagentManager(
-          makeFakeConfig({
-            modelProvidersConfig: {
-              'huawei-maas': [
-                {
-                  id: 'deepseek-v4.1-flash',
-                  name: 'DeepSeek-V4.1-Flash',
-                  envKey: 'MAAS_API_KEY',
-                  baseUrl: 'https://maas.example.com/v2',
-                },
-              ],
-            },
-            providerProtocolConfig: { 'huawei-maas': 'openai' },
-          }),
-        );
+      const providerManager = () => {
+        const providerConfig = makeFakeConfig({
+          model: 'deepseek-v4.1-flash',
+          modelProvidersConfig: {
+            'huawei-maas': [
+              {
+                id: 'deepseek-v4.1-flash',
+                name: 'DeepSeek-V4.1-Flash',
+                envKey: 'MAAS_API_KEY',
+                baseUrl: 'https://maas.example.com/v2',
+              },
+            ],
+          },
+          providerProtocolConfig: { 'huawei-maas': 'openai' },
+        });
+        vi.spyOn(providerConfig, 'getContentGeneratorConfig').mockReturnValue({
+          authType: AuthType.USE_OPENAI,
+          model: 'deepseek-v4.1-flash',
+        });
+        return new SubagentManager(providerConfig);
+      };
 
       it('routes a modelProviders-prefixed selector and exposes only the bare model ID', async () => {
         const mgr = providerManager();
@@ -2279,16 +2284,20 @@ describe('SubagentManager', () => {
       });
 
       it('routes a provider entry declaring wireApi responses onto the responses protocol', () => {
-        const mgr = new SubagentManager(
-          makeFakeConfig({
-            modelProvidersConfig: {
-              'huawei-maas': [
-                { id: 'deepseek-v4.1-reasoner', wireApi: 'responses' },
-              ],
-            },
-            providerProtocolConfig: { 'huawei-maas': 'openai' },
-          }),
-        );
+        const providerConfig = makeFakeConfig({
+          model: 'deepseek-v4.1-reasoner',
+          modelProvidersConfig: {
+            'huawei-maas': [
+              { id: 'deepseek-v4.1-reasoner', wireApi: 'responses' },
+            ],
+          },
+          providerProtocolConfig: { 'huawei-maas': 'openai' },
+        });
+        vi.spyOn(providerConfig, 'getContentGeneratorConfig').mockReturnValue({
+          authType: AuthType.USE_OPENAI_RESPONSES,
+          model: 'deepseek-v4.1-reasoner',
+        });
+        const mgr = new SubagentManager(providerConfig);
 
         expect(
           mgr.resolveSubagentModelRoute({
@@ -3086,7 +3095,9 @@ describe('SubagentManager', () => {
 
       it('does not register hooks for a project-level subagent in an untrusted folder', async () => {
         const addAgentHooksSpy = stubHookRegistry();
-        vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(false);
+        vi.spyOn(mockConfig, 'isExplicitlyTrustedFolder').mockReturnValue(
+          false,
+        );
 
         const result = await createHooked('Bash', { level: 'project' });
 
@@ -3098,14 +3109,14 @@ describe('SubagentManager', () => {
 
       it('registers hooks for a project-level subagent in a trusted folder', async () => {
         const addAgentHooksSpy = stubHookRegistry();
-        vi.spyOn(mockConfig, 'isTrustedFolder').mockReturnValue(true);
+        vi.spyOn(mockConfig, 'isExplicitlyTrustedFolder').mockReturnValue(true);
 
         const result = await createHooked('Bash', { level: 'project' });
 
         expect(addAgentHooksSpy).toHaveBeenCalledTimes(1);
         const registration = addAgentHooksSpy.mock.calls[0][2];
         expect(registration.isSourceTrusted()).toBe(true);
-        vi.mocked(mockConfig.isTrustedFolder).mockReturnValue(false);
+        vi.mocked(mockConfig.isExplicitlyTrustedFolder).mockReturnValue(false);
         expect(registration.isSourceTrusted()).toBe(false);
         await result.dispose();
       });
@@ -3117,9 +3128,9 @@ describe('SubagentManager', () => {
           ({ getRegistry: () => ({ addAgentHooks }) }) as unknown as ReturnType<
             Config['getHookSystem']
           >;
-        runtime.isTrustedFolder = () => true;
+        runtime.isExplicitlyTrustedFolder = () => true;
         const sourceTrust = vi
-          .spyOn(mockConfig, 'isTrustedFolder')
+          .spyOn(mockConfig, 'isExplicitlyTrustedFolder')
           .mockReturnValue(false);
         const config: SubagentConfig = {
           ...baseConfig,
@@ -3132,7 +3143,7 @@ describe('SubagentManager', () => {
         expect(addAgentHooks).not.toHaveBeenCalled();
         await untrusted.dispose();
         sourceTrust.mockReturnValue(true);
-        runtime.isTrustedFolder = () => false;
+        runtime.isExplicitlyTrustedFolder = () => false;
         const trusted = await manager.createAgentHeadless(config, runtime);
         expect(addAgentHooks).toHaveBeenCalledOnce();
         const registration = addAgentHooks.mock.calls[0][2];

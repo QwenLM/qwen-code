@@ -19,19 +19,23 @@ import {
   useConnection,
   useStatusReport,
   useWorkspace,
+  type DaemonProductSessionContext,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import type {
-  DaemonSessionGroupPresetColor,
-  DaemonSessionPrInfo,
-  DaemonSessionSummary,
-  DaemonStatusReportSession,
-  SessionMetadataResult,
+import {
+  STANDALONE_SESSIONS_CAPABILITY,
+  type DaemonSessionGroupPresetColor,
+  type DaemonSessionPrInfo,
+  type DaemonSessionSummary,
+  type DaemonStandaloneSessionSummary,
+  type DaemonStatusReportSession,
+  type SessionMetadataResult,
 } from '@qwen-code/sdk/daemon';
 import {
   ArchiveIcon,
   ArrowUpDownIcon,
   CircleIcon,
   CircleHelpIcon,
+  GitPullRequestIcon,
   InfoIcon,
   ShieldQuestionIcon,
   DownloadIcon,
@@ -69,7 +73,12 @@ import {
   SESSION_ORGANIZATION_FEATURE,
 } from '../constants/sessions';
 import { ErrorBoundary } from './ErrorBoundary';
+import {
+  BindSessionPrDialog,
+  type BindSessionPrPayload,
+} from './dialogs/BindSessionPrDialog';
 import { SessionDetailsTooltip } from './sidebar/SessionDetailsTooltip';
+import { isAbsolutePath } from './sidebar/WorkspaceSection';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Checkbox } from './ui/checkbox';
@@ -103,6 +112,9 @@ import styles from './SessionOverviewPanel.module.css';
 const LIST_POLL_MS = 3000;
 const STATUS_POLL_MS = 10000;
 const PAGE_SIZE = 50;
+// The standalone route accepts up to 100 entries per page; 50 matches the
+// sidebar's standalone walk so both views fetch the same page shape.
+const STANDALONE_SESSIONS_PAGE_SIZE = 50;
 const PAGE_SIZES = [10, 50, 100] as const;
 const PAGE_SIZE_STORAGE_KEY = 'qwen-web-shell-session-overview-page-size';
 
@@ -144,6 +156,8 @@ export interface SessionCard {
   gitBranch?: string;
   /** The workspace the session lives in. */
   workspaceCwd: string;
+  /** Catalog the session came from; 'standalone' has no workspace of its own. */
+  sourceType?: string;
 }
 
 type SessionStatusFilter = 'all' | 'attention' | 'running' | 'idle';
@@ -173,15 +187,35 @@ function getSessionIdentity(session: SessionIdentity): string {
   return `${session.workspaceCwd}\0${session.sessionId}`;
 }
 
+/**
+ * Standalone conversations live outside every workspace catalog, so opening
+ * one through the workspace route would fail: rows from the standalone
+ * catalog carry the standalone context to the open handler. The catalog
+ * discriminator decides, never the cwd — an empty cwd means the primary
+ * workspace everywhere else in this panel, and a standalone row's cwd is the
+ * daemon's internal Conversations root.
+ */
+function openSessionContext(
+  card: Pick<SessionCard, 'sourceType'>,
+): DaemonProductSessionContext | undefined {
+  return card.sourceType === 'standalone' ? { kind: 'standalone' } : undefined;
+}
+
 function isCurrentSession(
-  session: SessionIdentity,
+  session: Pick<SessionCard, 'sessionId' | 'workspaceCwd' | 'sourceType'>,
   currentSessionId: string | undefined,
   currentWorkspaceCwd: string | undefined,
+  currentContextKind?: string,
 ): boolean {
-  return (
-    session.sessionId === currentSessionId &&
-    (!currentWorkspaceCwd || session.workspaceCwd === currentWorkspaceCwd)
-  );
+  if (session.sessionId !== currentSessionId) return false;
+  // A standalone open session carries no product workspace cwd, so the cwd
+  // comparison can never match its internal-root card; key on the context
+  // kind plus the catalog discriminator instead (the sidebar matches on the
+  // id alone).
+  if (currentContextKind === 'standalone') {
+    return session.sourceType === 'standalone';
+  }
+  return !currentWorkspaceCwd || session.workspaceCwd === currentWorkspaceCwd;
 }
 
 const STATUS_PRIORITY: Record<SessionCardStatus, number> = {
@@ -207,6 +241,7 @@ export function deriveSessionCards(
   currentSessionId: string | undefined,
   statusSessions: DaemonStatusReportSession[] = [],
   currentWorkspaceCwd?: string,
+  currentContextKind?: string,
 ): SessionCard[] {
   const statusByIdentity = new Map(
     statusSessions.map((session) => [getSessionIdentity(session), session]),
@@ -235,10 +270,12 @@ export function deriveSessionCards(
         session,
         currentSessionId,
         currentWorkspaceCwd,
+        currentContextKind,
       ),
       prs: session.prs,
       gitBranch: session.worktree?.branch ?? session.branch?.name,
       workspaceCwd: session.workspaceCwd,
+      sourceType: session.sourceType,
     };
   });
   cards.sort((a, b) => {
@@ -282,8 +319,13 @@ function SessionOverviewPanelInner({
   includeOtherWorkspaces,
   workspaceCwd,
   manageLiveState,
+  onLiveStateWorkspaceCwdsChange,
 }: {
-  onOpenSession: (sessionId: string, workspaceCwd?: string) => void;
+  onOpenSession: (
+    sessionId: string,
+    workspaceCwd?: string,
+    sessionContext?: DaemonProductSessionContext,
+  ) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
   onCurrentSessionRemoved?: (
     session: SessionIdentity,
@@ -291,6 +333,7 @@ function SessionOverviewPanelInner({
   includeOtherWorkspaces: boolean;
   workspaceCwd?: string;
   manageLiveState: boolean;
+  onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
 }) {
   const { t } = useI18n();
   const generatedUiOwner = useContext(McpAppGeneratedUiOwnerContext);
@@ -303,6 +346,11 @@ function SessionOverviewPanelInner({
   );
   const actions = useActions();
   const currentSessionId = connection.sessionId;
+  // The open session's product context (workspace/standalone/live); absent
+  // for legacy opens. A standalone context carries no product workspace cwd,
+  // so a standalone current session must match its rows by the context
+  // kind, not a cwd.
+  const currentContextKind = connection.sessionContext?.kind;
   const organizationEnabled =
     connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE) ??
     false;
@@ -340,28 +388,45 @@ function SessionOverviewPanelInner({
   // isWaitingForUserQuestion and coordinates full-catalog reconciles only when
   // something actually changed. Adopt it only when trusted live-state routes
   // cover every visible workspace; otherwise fall back to catalog polling.
-  const liveStateWorkspaceCwds = useMemo(() => {
-    if (!workspaceCatalogAdvertised) {
-      const legacyCwd = workspaceCwd || primaryCwd;
-      return legacyCwd ? [legacyCwd] : [];
-    }
-    const visible = workspaceCwd
+  const visibleWorkspaces = useMemo(() => {
+    if (!workspaceCatalogAdvertised) return undefined;
+    return workspaceCwd
       ? (registeredWorkspaces ?? []).filter(
           (entry) => entry.cwd === workspaceCwd,
         )
       : (registeredWorkspaces ?? []).filter(
           (entry) => entry.primary || entry.trusted,
         );
-    return visible.length > 0 &&
-      visible.every((entry) => entry.trusted && entry.kind !== 'live')
-      ? visible.map((entry) => entry.cwd)
+  }, [registeredWorkspaces, workspaceCatalogAdvertised, workspaceCwd]);
+  const liveStateWorkspaceCwds = useMemo(() => {
+    if (!visibleWorkspaces) {
+      const legacyCwd = workspaceCwd || primaryCwd;
+      return legacyCwd ? [legacyCwd] : [];
+    }
+    return visibleWorkspaces.length > 0 &&
+      visibleWorkspaces.every((entry) => entry.trusted && entry.kind !== 'live')
+      ? visibleWorkspaces.map((entry) => entry.cwd)
       : [];
-  }, [
-    primaryCwd,
-    registeredWorkspaces,
-    workspaceCatalogAdvertised,
-    workspaceCwd,
-  ]);
+  }, [visibleWorkspaces, primaryCwd, workspaceCwd]);
+  // The app-level sidebarless poller covers workspaces per entry, so report
+  // the pollable subset of the displayed set even when the panel's own
+  // all-or-nothing adoption above falls back to catalog polling (#16355).
+  const reportableLiveStateWorkspaceCwds = useMemo(() => {
+    if (!visibleWorkspaces) return liveStateWorkspaceCwds;
+    return visibleWorkspaces
+      .filter(
+        (entry) =>
+          entry.trusted && entry.kind !== 'live' && isAbsolutePath(entry.cwd),
+      )
+      .map((entry) => entry.cwd);
+  }, [visibleWorkspaces, liveStateWorkspaceCwds]);
+  useEffect(() => {
+    onLiveStateWorkspaceCwdsChange?.(reportableLiveStateWorkspaceCwds);
+  }, [onLiveStateWorkspaceCwdsChange, reportableLiveStateWorkspaceCwds]);
+  useEffect(
+    () => () => onLiveStateWorkspaceCwdsChange?.([]),
+    [onLiveStateWorkspaceCwdsChange],
+  );
   const liveStateEnabled =
     (connection.capabilities?.features?.includes(SESSION_LIVE_STATE_FEATURE) ??
       false) &&
@@ -394,11 +459,101 @@ function SessionOverviewPanelInner({
       includeOtherWorkspaces && !workspaceCwd,
       liveStateActive ? undefined : LIST_POLL_MS,
     );
-  const mergedSessions = useMemo(
-    () =>
-      otherSessions.length === 0 ? sessions : [...sessions, ...otherSessions],
-    [sessions, otherSessions],
-  );
+  // Standalone (no-workspace) sessions never appear in any workspace catalog,
+  // so without this the overview would miss every conversation the user has
+  // outside a workspace. Gated on the capability: daemons without the route
+  // must not get the request at all. A host-locked shell (workspaceCwd set)
+  // is confined to that workspace, so the process-global standalone catalog
+  // stays hidden there too — the same !workspaceCwd scope the
+  // other-workspace fold above honours.
+  const standaloneFeatures = connection.capabilities?.features;
+  const standaloneSessionsSupported =
+    !workspaceCwd &&
+    standaloneFeatures?.includes(STANDALONE_SESSIONS_CAPABILITY) === true;
+  const [standaloneSessions, setStandaloneSessions] = useState<
+    DaemonStandaloneSessionSummary[]
+  >([]);
+  // A re-run or unmount supersedes an in-flight walk: its pages must not
+  // land after the effect they belonged to is gone.
+  const standalonePollGenerationRef = useRef(0);
+  const standaloneWalkInFlightRef = useRef(false);
+  // One full paginated walk, shared by the poll interval and post-mutation
+  // refreshes. A partial walk would hide the tail of the list for a whole
+  // poll interval, and an in-flight walk is never overlapped, so a stale page
+  // set cannot overwrite a newer one.
+  const reloadStandalone = useCallback(async () => {
+    if (!standaloneSessionsSupported) {
+      setStandaloneSessions((prev) => (prev.length === 0 ? prev : []));
+      return;
+    }
+    if (standaloneWalkInFlightRef.current) return;
+    standaloneWalkInFlightRef.current = true;
+    const generation = standalonePollGenerationRef.current;
+    const collected: DaemonStandaloneSessionSummary[] = [];
+    let cursor: string | undefined;
+    try {
+      do {
+        const page = await workspace.client.listStandaloneSessionsPage({
+          archiveState: 'active',
+          pageSize: STANDALONE_SESSIONS_PAGE_SIZE,
+          ...(cursor ? { cursor } : {}),
+        });
+        if (standalonePollGenerationRef.current !== generation) return;
+        collected.push(...page.sessions);
+        cursor = page.nextCursor;
+      } while (cursor);
+      if (standalonePollGenerationRef.current === generation) {
+        setStandaloneSessions(collected);
+      }
+    } catch (error) {
+      if (standalonePollGenerationRef.current === generation) {
+        console.warn(
+          '[web-shell] overview standalone sessions list failed:',
+          error,
+        );
+      }
+    } finally {
+      standaloneWalkInFlightRef.current = false;
+    }
+  }, [standaloneSessionsSupported, workspace.client]);
+  useEffect(() => {
+    if (!standaloneSessionsSupported) {
+      setStandaloneSessions([]);
+      return;
+    }
+    standalonePollGenerationRef.current += 1;
+    void reloadStandalone();
+    // Same cadence as the workspace catalog poll above; unlike that poll,
+    // the live-state channel does not cover standalone sessions, so this is
+    // their only refresh path — it pauses only while the tab is hidden,
+    // like the status poll below.
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      void reloadStandalone();
+    }, LIST_POLL_MS);
+    return () => {
+      window.clearInterval(timer);
+      standalonePollGenerationRef.current += 1;
+    };
+  }, [standaloneSessionsSupported, reloadStandalone]);
+  const mergedSessions = useMemo(() => {
+    // Deduplicate on the row identity (workspaceCwd + sessionId): a session
+    // can surface in more than one of the lists, and duplicate row ids would
+    // break the table.
+    const seen = new Set<string>();
+    const merged: DaemonSessionSummary[] = [];
+    for (const session of [
+      ...sessions,
+      ...otherSessions,
+      ...standaloneSessions,
+    ]) {
+      const identity = getSessionIdentity(session);
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      merged.push(session);
+    }
+    return merged;
+  }, [sessions, otherSessions, standaloneSessions]);
   const sessionByIdentity = useMemo(
     () =>
       new Map(
@@ -438,11 +593,13 @@ function SessionOverviewPanelInner({
         currentSessionId,
         liveStateActive ? [] : (statusReport?.full?.sessions ?? []),
         currentWorkspaceCwd,
+        currentContextKind,
       ),
     [
       mergedSessions,
       currentSessionId,
       currentWorkspaceCwd,
+      currentContextKind,
       liveStateActive,
       statusReport,
     ],
@@ -471,6 +628,8 @@ function SessionOverviewPanelInner({
     null,
   );
   const [deleteTarget, setDeleteTarget] = useState<SessionCard[] | null>(null);
+  const [bindPrTarget, setBindPrTarget] = useState<SessionCard | null>(null);
+  const [bindPrError, setBindPrError] = useState<string | undefined>();
   const [batchBusy, setBatchBusy] = useState(false);
   const [footerSticky, setFooterSticky] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -488,6 +647,7 @@ function SessionOverviewPanelInner({
         card,
         current.sessionId,
         current.workspaceCwd || workspaceCwd || primaryCwd,
+        current.sessionContext?.kind,
       );
     },
     [primaryCwd, workspaceCwd],
@@ -499,11 +659,17 @@ function SessionOverviewPanelInner({
     if (workspaceCwd || !multiWorkspace) return [];
     const workspaces = registeredWorkspaces ?? [];
     const listed = workspaces.filter((entry) => entry.primary || entry.trusted);
+    // The live entry is the daemon's internal Conversations runtime that
+    // standalone rows carry as their cwd; it is not a project, so its facet
+    // reads the same "No workspace" the rows do.
     return listed.map((entry) => ({
       cwd: entry.cwd,
-      label: workspaceLabel(entry),
+      label:
+        entry.kind === 'live'
+          ? t('sidebar.noWorkspace')
+          : workspaceLabel(entry),
     }));
-  }, [multiWorkspace, registeredWorkspaces, workspaceCwd]);
+  }, [multiWorkspace, registeredWorkspaces, t, workspaceCwd]);
 
   // Exclusions are only manageable through the filter popover. When the
   // option set shrinks — most sharply when the host locks the panel to one
@@ -574,6 +740,12 @@ function SessionOverviewPanelInner({
           isWaitingForPermission: card.status === 'needsApproval',
           isWaitingForUserQuestion: card.status === 'askUserQuestion',
         },
+        // A standalone row's cwd is the daemon's internal Conversations root,
+        // a routing detail that must not be shown as a project — the sidebar
+        // labels the same session "No workspace".
+        workspaceLabel: openSessionContext(card)
+          ? t('sidebar.noWorkspace')
+          : undefined,
         label: card.label,
         time: card.updatedAt ? formatRelativeTime(card.updatedAt, t) : '',
         completedUnread: false,
@@ -691,8 +863,9 @@ function SessionOverviewPanelInner({
         liveStateActive
           ? Promise.resolve()
           : statusReload().catch(() => undefined),
+        reloadStandalone().catch(() => undefined),
       ]),
-    [liveStateActive, reload, reloadOther, statusReload],
+    [liveStateActive, reload, reloadOther, reloadStandalone, statusReload],
   );
   const refresh = useCallback(() => {
     if (refreshing) return;
@@ -701,7 +874,11 @@ function SessionOverviewPanelInner({
     void reloadData().finally(() => setRefreshing(false));
   }, [refreshing, reloadData]);
 
-  // Route each batch through its owning workspace client.
+  // Route each batch through its owning client: workspace-qualified routes
+  // per secondary workspace, the standalone client routes for no-workspace
+  // sessions (their workspaceCwd is the daemon's internal Conversations
+  // root, so a workspace-qualified call would land but skip the standalone
+  // lifecycle — working dir, deletion journal, live-runtime guard).
   const mutateCards = useCallback(
     async (cards: SessionCard[], mutation: 'archive' | 'delete') => {
       const canMutate = mutation === 'archive' ? canArchiveCard : canDeleteCard;
@@ -709,7 +886,12 @@ function SessionOverviewPanelInner({
         throw new Error(t('sessionsOverview.actionUnavailable'));
       }
       const byCwd = new Map<string, SessionCard[]>();
+      const standaloneCards: SessionCard[] = [];
       for (const card of cards) {
+        if (openSessionContext(card)) {
+          standaloneCards.push(card);
+          continue;
+        }
         const key =
           !card.workspaceCwd || card.workspaceCwd === primaryCwd
             ? ''
@@ -717,6 +899,7 @@ function SessionOverviewPanelInner({
         byCwd.set(key, [...(byCwd.get(key) ?? []), card]);
       }
       const succeededIdentities = new Set<string>();
+      const deleteFailures: string[] = [];
       let firstError: Error | undefined;
       for (const [cwd, group] of byCwd) {
         const ids = group.map((card) => card.sessionId);
@@ -750,28 +933,95 @@ function SessionOverviewPanelInner({
                 : undefined;
             }
           } else {
-            const invalidateDeleted =
-              generatedUiOwner?.captureSessionDeletion(ownerCwd);
-            const result = await client.deleteSessionsData(ids);
-            invalidateDeleted?.([...result.removed, ...result.notFound]);
-            for (const id of [...result.removed, ...result.notFound]) {
-              const card = cardsById.get(id);
-              if (card) succeededIdentities.add(getSessionIdentity(card));
+            for (
+              let offset = 0;
+              offset < ids.length;
+              offset += SESSION_ARCHIVE_BATCH_SIZE
+            ) {
+              const invalidateDeleted =
+                generatedUiOwner?.captureSessionDeletion(ownerCwd);
+              const result = await client.deleteSessionsData(
+                ids.slice(offset, offset + SESSION_ARCHIVE_BATCH_SIZE),
+              );
+              invalidateDeleted?.([...result.removed, ...result.notFound]);
+              for (const id of [...result.removed, ...result.notFound]) {
+                const card = cardsById.get(id);
+                if (card) succeededIdentities.add(getSessionIdentity(card));
+              }
+              deleteFailures.push(...result.errors.map(({ error }) => error));
             }
-            firstError ??= result.errors[0]
-              ? new Error(result.errors[0].error)
-              : undefined;
           }
         } catch (error) {
-          firstError ??=
+          const requestError =
             error instanceof Error ? error : new Error(String(error));
+          if (mutation === 'delete') {
+            deleteFailures.push(requestError.message);
+          } else {
+            firstError ??= requestError;
+          }
         } finally {
           if (ownerCwd) {
             sessionCatalogController.refreshWorkspace(ownerCwd);
           }
         }
       }
-      return { succeededIdentities, error: firstError };
+      // The standalone batch routes reject more than 100 ids per request,
+      // the same cap the workspace archive batches above honour.
+      for (
+        let offset = 0;
+        offset < standaloneCards.length;
+        offset += SESSION_ARCHIVE_BATCH_SIZE
+      ) {
+        const batch = standaloneCards.slice(
+          offset,
+          offset + SESSION_ARCHIVE_BATCH_SIZE,
+        );
+        const ids = batch.map((card) => card.sessionId);
+        try {
+          if (mutation === 'archive') {
+            const result =
+              await workspace.client.archiveStandaloneSessions(ids);
+            for (const id of [
+              ...result.archived,
+              ...result.alreadyArchived,
+              ...result.notFound,
+            ]) {
+              const card = batch.find((entry) => entry.sessionId === id);
+              if (card) succeededIdentities.add(getSessionIdentity(card));
+            }
+            firstError ??= result.errors[0]
+              ? new Error(result.errors[0].message)
+              : undefined;
+          } else {
+            const result = await workspace.client.deleteStandaloneSessions(ids);
+            for (const id of [...result.removed, ...result.notFound]) {
+              const card = batch.find((entry) => entry.sessionId === id);
+              if (card) succeededIdentities.add(getSessionIdentity(card));
+            }
+            for (const id of result.fileCleanupPending) {
+              console.warn(
+                '[web-shell] standalone session file cleanup pending:',
+                id,
+              );
+            }
+            deleteFailures.push(...result.errors.map(({ message }) => message));
+          }
+        } catch (error) {
+          const requestError =
+            error instanceof Error ? error : new Error(String(error));
+          if (mutation === 'delete') {
+            deleteFailures.push(requestError.message);
+          } else {
+            firstError ??= requestError;
+          }
+        }
+      }
+      return {
+        succeededIdentities,
+        error: deleteFailures.length
+          ? new Error(deleteFailures.join('; '))
+          : firstError,
+      };
     },
     [
       canArchiveCard,
@@ -833,12 +1083,24 @@ function SessionOverviewPanelInner({
     cancelRename();
     void runBusy(card, async () => {
       const ownerCwd = card.workspaceCwd || primaryCwd;
+      // Standalone rows live in the daemon's internal Conversations runtime;
+      // the workspace-qualified metadata routes cannot see them, so they take
+      // the standalone client route the sidebar uses.
+      const standalone = openSessionContext(card) !== undefined;
       try {
-        // The current session renames through its own session actions (the
-        // daemon only allows it there); other sessions update metadata on the
-        // owning workspace client — mirroring the sidebar.
-        let result: SessionMetadataResult | void;
-        if (isCurrentCard(card)) {
+        // Standalone rows rename through the standalone route even when they
+        // are the open session — the same route App's /rename takes for a
+        // standalone context. The current workspace session renames through
+        // its own session actions (the daemon only allows it there); other
+        // sessions update metadata on the owning workspace client — mirroring
+        // the sidebar.
+        let result: SessionMetadataResult | undefined = undefined;
+        if (standalone) {
+          await workspace.client.renameStandaloneSession(
+            card.sessionId,
+            nextName,
+          );
+        } else if (isCurrentCard(card)) {
           result = await actions.renameSession(nextName);
         } else if (card.workspaceCwd) {
           result = await workspace.client
@@ -852,7 +1114,7 @@ function SessionOverviewPanelInner({
             },
           );
         }
-        if (ownerCwd) {
+        if (ownerCwd && !standalone) {
           sessionCatalogController.renamed(
             ownerCwd,
             card.sessionId,
@@ -862,7 +1124,7 @@ function SessionOverviewPanelInner({
         }
         await reloadData();
       } catch (err) {
-        if (ownerCwd) {
+        if (ownerCwd && !standalone) {
           sessionCatalogController.refreshWorkspace(ownerCwd);
         }
         setActionError(
@@ -887,6 +1149,81 @@ function SessionOverviewPanelInner({
     t,
     workspace.client,
   ]);
+
+  const startBindPr = useCallback((card: SessionCard) => {
+    setActionError(null);
+    setBindPrError(undefined);
+    setBindPrTarget(card);
+  }, []);
+
+  // Supplementary PR registration — mirrors saveRename's workspace routing
+  // (current session → own session actions; other sessions → the owning
+  // workspace's metadata route; cwd-less cards → the global route). Standalone
+  // cards are excluded by the button gate (openSessionContext), not by
+  // canRenameCard — which is true for them — since their metadata route only
+  // accepts displayName.
+  const bindPrTargetRef = useRef(bindPrTarget);
+  bindPrTargetRef.current = bindPrTarget;
+  const submitBindPr = useCallback(
+    (pr: BindSessionPrPayload) => {
+      const card = bindPrTarget;
+      if (!card || batchBusy) return;
+      const ownerCwd = card.workspaceCwd || primaryCwd;
+      void runBusy(card, async () => {
+        setBindPrError(undefined);
+        try {
+          if (isCurrentCard(card)) {
+            await actions.bindSessionPr(pr);
+          } else if (card.workspaceCwd) {
+            await workspace.client
+              .workspaceByCwd(card.workspaceCwd)
+              .updateSessionMetadata(card.sessionId, { pr });
+          } else {
+            await workspace.client.updateSessionMetadata(card.sessionId, {
+              pr,
+            });
+          }
+          // A late completion must not close a dialog the user has since
+          // opened for another card.
+          if (bindPrTargetRef.current === card) {
+            setBindPrTarget(null);
+          }
+          if (ownerCwd) {
+            sessionCatalogController.refreshWorkspace(ownerCwd);
+          }
+          await reloadData();
+        } catch (err) {
+          if (ownerCwd) {
+            sessionCatalogController.refreshWorkspace(ownerCwd);
+          }
+          const message =
+            err instanceof Error
+              ? `${t('sessionsOverview.bindPrFailed')}: ${err.message}`
+              : t('sessionsOverview.bindPrFailed');
+          // Surface the failure on the still-open dialog, or on the panel's
+          // error row if the user already dismissed it.
+          if (bindPrTargetRef.current === card) {
+            setBindPrError(message);
+          } else {
+            setActionError(message);
+          }
+        }
+      });
+    },
+    [
+      actions,
+      batchBusy,
+      bindPrTarget,
+      isCurrentCard,
+      primaryCwd,
+      reloadData,
+      runBusy,
+      sessionCatalogController,
+      t,
+      workspace.client,
+    ],
+  );
+
   const editingNameRef = useRef(editingName);
   const saveRenameRef = useRef(saveRename);
   editingNameRef.current = editingName;
@@ -904,8 +1241,11 @@ function SessionOverviewPanelInner({
       }
       void runBusy(card, async () => {
         try {
-          const result =
-            !card.workspaceCwd || card.workspaceCwd === primaryCwd
+          const result = openSessionContext(card)
+            ? await workspace.client.exportStandaloneSession(card.sessionId, {
+                format: 'html',
+              })
+            : !card.workspaceCwd || card.workspaceCwd === primaryCwd
               ? await workspace.actions.exportSession(card.sessionId, 'html')
               : await workspace.client
                   .workspaceByCwd(card.workspaceCwd)
@@ -1113,8 +1453,8 @@ function SessionOverviewPanelInner({
         cell: ({ row }) => {
           const card = row.original;
           return (
-            <div className="min-w-0 space-y-1 py-1">
-              <div className="flex min-w-0 items-center gap-2">
+            <div className="min-w-0 space-y-1 py-0">
+              <div className="flex min-h-7 min-w-0 items-center gap-2">
                 {card.color && (
                   <span
                     className={cx(styles.colorDot, colorDotClass(card.color))}
@@ -1183,7 +1523,11 @@ function SessionOverviewPanelInner({
                             window.getSelection()?.isCollapsed === false
                           )
                             return;
-                          onOpenSession(card.sessionId, card.workspaceCwd);
+                          onOpenSession(
+                            card.sessionId,
+                            card.workspaceCwd,
+                            openSessionContext(card),
+                          );
                         }}
                       >
                         {card.label}
@@ -1207,12 +1551,18 @@ function SessionOverviewPanelInner({
                 <span
                   className="max-w-[40%] truncate"
                   data-web-shell-session-workspace
-                  title={card.workspaceCwd}
+                  title={
+                    openSessionContext(card)
+                      ? t('sidebar.noWorkspace')
+                      : card.workspaceCwd
+                  }
                 >
-                  {workspaceLabelForCwd(
-                    card.workspaceCwd,
-                    registeredWorkspaces,
-                  )}
+                  {openSessionContext(card)
+                    ? t('sidebar.noWorkspace')
+                    : workspaceLabelForCwd(
+                        card.workspaceCwd,
+                        registeredWorkspaces,
+                      )}
                 </span>
                 {card.gitBranch && (
                   <>
@@ -1361,6 +1711,25 @@ function SessionOverviewPanelInner({
                   <PenLineIcon className="size-4" />
                 </Button>
               )}
+              {(isCurrentCard(card) || sessionMetadataEnabled) &&
+                !openSessionContext(card) && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    className="shrink-0 text-muted-foreground hover:text-foreground"
+                    disabled={batchBusy || busy || !canRename}
+                    onClick={() => startBindPr(card)}
+                    aria-label={t('sessionsOverview.bindPr')}
+                    title={
+                      canRename
+                        ? t('sessionsOverview.bindPr')
+                        : t('sessionsOverview.actionUnavailable')
+                    }
+                  >
+                    <GitPullRequestIcon className="size-4" />
+                  </Button>
+                )}
               {(canExportSessions || canExportWorkspaceSessions) && (
                 <Button
                   type="button"
@@ -1417,7 +1786,7 @@ function SessionOverviewPanelInner({
         meta: {
           fixed: 'right',
           fixedEdge: true,
-          width: 156,
+          width: 180,
           fixedWidth: true,
           headerClassName: 'text-center',
           stopRowClick: true,
@@ -1441,6 +1810,7 @@ function SessionOverviewPanelInner({
       registeredWorkspaces,
       sessionMetadataEnabled,
       sessionDetailsProps,
+      startBindPr,
       startRename,
       t,
     ],
@@ -1491,7 +1861,10 @@ function SessionOverviewPanelInner({
           card.sessionId !== selected.sessionId ||
           card.workspaceCwd === selected.workspaceCwd,
       ),
-    );
+    ) &&
+    // Standalone rows open through the standalone route only: the split/tab
+    // paths sanitize them away, so an enabled button would no-op silently.
+    selectedCards.every((selected) => !openSessionContext(selected));
   const canArchiveSelection =
     selectedCount > 0 && selectedCards.every(canArchiveCard);
   const canDeleteSelection =
@@ -1741,7 +2114,12 @@ function SessionOverviewPanelInner({
           onRowClick={(row) => {
             if (editingCard || window.getSelection()?.isCollapsed === false)
               return;
-            onOpenSession(row.original.sessionId, row.original.workspaceCwd);
+            const card = row.original;
+            onOpenSession(
+              card.sessionId,
+              card.workspaceCwd,
+              openSessionContext(card),
+            );
           }}
           data-web-shell-session-table-viewport
         />
@@ -1920,6 +2298,16 @@ function SessionOverviewPanelInner({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {bindPrTarget && (
+        <BindSessionPrDialog
+          workspaceCwd={bindPrTarget.workspaceCwd ?? ''}
+          busy={busyIds.has(getSessionIdentity(bindPrTarget))}
+          error={bindPrError}
+          onSubmit={submitBindPr}
+          onClose={() => setBindPrTarget(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1935,8 +2323,13 @@ export function SessionOverviewPanel({
   includeOtherWorkspaces = true,
   workspaceCwd,
   manageLiveState = true,
+  onLiveStateWorkspaceCwdsChange,
 }: {
-  onOpenSession: (sessionId: string, workspaceCwd?: string) => void;
+  onOpenSession: (
+    sessionId: string,
+    workspaceCwd?: string,
+    sessionContext?: DaemonProductSessionContext,
+  ) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
   onCurrentSessionRemoved?: (
     session: SessionIdentity,
@@ -1944,6 +2337,7 @@ export function SessionOverviewPanel({
   includeOtherWorkspaces?: boolean;
   workspaceCwd?: string;
   manageLiveState?: boolean;
+  onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
 }) {
   const { t } = useI18n();
   return (
@@ -1964,6 +2358,7 @@ export function SessionOverviewPanel({
         includeOtherWorkspaces={includeOtherWorkspaces}
         workspaceCwd={workspaceCwd}
         manageLiveState={manageLiveState}
+        onLiveStateWorkspaceCwdsChange={onLiveStateWorkspaceCwdsChange}
       />
     </ErrorBoundary>
   );

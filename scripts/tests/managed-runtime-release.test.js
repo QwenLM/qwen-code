@@ -537,20 +537,14 @@ describe('Managed runtime publication gates', () => {
     expect(verification).not.toContain('-DargLine=');
   });
 
-  it('keeps auxiliary executable JARs out of Central without changing their ordinary build attachment', () => {
+  it('ships a single executable JAR and keeps the Central release plugins', () => {
     const pom = fs.readFileSync(
       path.join(root, 'packages/managed-agent-server/pom.xml'),
       'utf8',
     );
-    expect(pom).toContain(
-      '<managed.operator-tools.attach>true</managed.operator-tools.attach>',
-    );
     const profile = pom.match(
       /<profile>\s*<id>central-release<\/id>([\s\S]*?)<\/profile>/,
     )[1];
-    expect(profile).toContain(
-      '<managed.operator-tools.attach>false</managed.operator-tools.attach>',
-    );
     for (const plugin of [
       'central-publishing-maven-plugin',
       'maven-source-plugin',
@@ -558,9 +552,18 @@ describe('Managed runtime publication gates', () => {
       'maven-gpg-plugin',
     ])
       expect(profile).toContain(plugin);
-    expect(
-      pom.match(/<attach>\$\{managed.operator-tools.attach\}<\/attach>/g),
-    ).toHaveLength(6);
+    expect(pom).not.toContain('managed.operator-tools');
+    const serverPom = fs.readFileSync(
+      path.join(root, 'packages/managed-agent-server/server/pom.xml'),
+      'utf8',
+    );
+    expect(serverPom).not.toContain('managed.operator-tools');
+    // Only the exec classifier remains (jar resources plus repackage); the
+    // auxiliary operator-tool jars and their attachment machinery are gone.
+    expect(serverPom.match(/<classifier>[^<]+<\/classifier>/g)).toEqual([
+      '<classifier>exec</classifier>',
+      '<classifier>exec</classifier>',
+    ]);
   });
 });
 
@@ -606,7 +609,13 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
   const repairPatch = 'scripts/patches/managed-runtime-v0.26.3-tests.patch';
 
   function repairFixture() {
-    const fixed = fs.readFileSync(path.join(root, repairedTest), 'utf8');
+    const fixed = fs.readFileSync(
+      path.join(
+        root,
+        repairedTest.replace('/src/test/', '/verification/src/test/'),
+      ),
+      'utf8',
+    );
     const target = path.join(temporary, repairedTest);
     const patch = path.join(
       temporary,
@@ -684,6 +693,172 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
     },
   );
 
+  const steps = workflow.jobs.release.steps;
+  const step = (name) => steps.find((item) => item.name === name);
+  const releaseRepair = step('Repair the 0.26.5 release inputs');
+  const verificationPom = 'packages/managed-agent-server/verification/pom.xml';
+  const repairPaths = [
+    'packages/managed-agent-server/adapters/src/main/java/com/alibaba/qwen/code/runtimebroker/provisioning/ExternalRuntimeProvisioner.java',
+    'packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/event/ManagedEventEnvelopes.java',
+    verificationPom,
+  ];
+
+  function releaseFixture() {
+    // The patches still target the released layout after source moves.
+    const currentPaths = [
+      'packages/managed-agent-server/runtime-external/src/main/java/com/alibaba/qwen/code/runtimebroker/provisioning/external/ExternalRuntimeProvisioner.java',
+      ...repairPaths.slice(1),
+    ];
+    const fixed = currentPaths.map((file) =>
+      fs.readFileSync(path.join(root, file), 'utf8'),
+    );
+    for (const [index, file] of repairPaths.entries()) {
+      const target = path.join(temporary, file);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, fixed[index]);
+    }
+    const patches = ['javadoc', 'verification'].map((kind) => {
+      const relative = `scripts/patches/managed-runtime-v0.26.5-${kind}.patch`;
+      const patch = path.join(
+        temporary,
+        '.qwen/managed-release-tools',
+        relative,
+      );
+      fs.mkdirSync(path.dirname(patch), { recursive: true });
+      fs.copyFileSync(path.join(root, relative), patch);
+      return patch;
+    });
+    const git = (...args) => {
+      const result = spawnSync(
+        'git',
+        [
+          '-c',
+          'core.hooksPath=/dev/null',
+          '-c',
+          'commit.gpgsign=false',
+          '-c',
+          'user.name=Release test',
+          '-c',
+          'user.email=release-test@example.invalid',
+          ...args,
+        ],
+        { cwd: temporary, encoding: 'utf8' },
+      );
+      expect(result.status, result.stderr).toBe(0);
+    };
+    git('init', '--quiet');
+    git('apply', '--reverse', ...patches);
+    fs.writeFileSync(path.join(temporary, 'product.java'), 'original product');
+    git('add', ...repairPaths, 'product.java');
+    git('commit', '--quiet', '-m', 'Pinned release input fixture');
+    return {
+      fixed,
+      patches,
+      originalPom: fs.readFileSync(
+        path.join(temporary, verificationPom),
+        'utf8',
+      ),
+    };
+  }
+
+  it('repairs the pinned 0.26.5 release inputs while preserving every specialist test profile', () => {
+    expect(releaseRepair.if).toBe("${{ env.RELEASE_TAG == 'v0.26.5' }}");
+    expect(steps.indexOf(releaseRepair)).toBeLessThan(
+      steps.indexOf(step('Build the matching CLI prerequisites')),
+    );
+    const { fixed, patches, originalPom } = releaseFixture();
+    const [patch] = patches;
+    const additions = fs
+      .readFileSync(patch, 'utf8')
+      .split('\n')
+      .filter((line) => line.startsWith('+') && !line.startsWith('+++'));
+    expect(additions).toEqual([
+      '+import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;',
+      '+     * decimal form while 1e-6 ≤ |x| &lt; 1e21, exponential outside it.',
+    ]);
+    expect(
+      fs
+        .readFileSync(patch, 'utf8')
+        .split('\n')
+        .filter((line) => line.startsWith('-') && !line.startsWith('---')),
+    ).toEqual([
+      '-     * decimal form while 1e-6 ≤ |x| < 1e21, exponential outside it.',
+    ]);
+    const result = run(releaseRepair.run, {
+      RELEASE_TAG: 'v0.26.5',
+      SOURCE_SHA: 'db0e4e24a0d89b211b2a15f4af2be22adac71dfc',
+      GITHUB_STEP_SUMMARY: path.join(temporary, 'summary'),
+    });
+    expect(result.status, result.stderr).toBe(0);
+    for (const [index, file] of repairPaths.entries()) {
+      expect(fs.readFileSync(path.join(temporary, file), 'utf8')).toBe(
+        fixed[index],
+      );
+    }
+    expect(fs.readFileSync(path.join(temporary, 'product.java'), 'utf8')).toBe(
+      'original product',
+    );
+    const pom = fs.readFileSync(path.join(temporary, verificationPom), 'utf8');
+    expect(pom.slice(pom.indexOf('<profiles>'))).toBe(
+      originalPom.slice(originalPom.indexOf('<profiles>')),
+    );
+    const defaultBuild = pom
+      .slice(pom.indexOf('<build>'), pom.indexOf('<profiles>'))
+      .replace(/<pluginManagement>[\s\S]*?<\/pluginManagement>/, '');
+    expect(defaultBuild).not.toContain(
+      '<artifactId>maven-failsafe-plugin</artifactId>',
+    );
+    const packaging = (xml) =>
+      xml.match(
+        /<execution>\s*<id>artifact-packaging<\/id>[\s\S]*?<\/execution>/,
+      )?.[0];
+    expect(packaging(pom)).toBeTruthy();
+    expect(packaging(pom)).toBe(packaging(originalPom));
+    expect(fs.readFileSync(path.join(temporary, 'summary'), 'utf8')).toContain(
+      'original tag unchanged',
+    );
+    expect(JSON.stringify(workflow)).not.toMatch(
+      /-D(?:maven\.javadoc\.skip|doclint=|additionalJOption=)/,
+    );
+  });
+
+  it.each([
+    'wrong source',
+    'changed Javadoc patch',
+    'changed verification patch',
+    'dirty checkout',
+  ])(
+    'refuses the 0.26.5 release repair with %s before applying either patch',
+    (failure) => {
+      const { patches } = releaseFixture();
+      if (failure.startsWith('changed ')) {
+        const patch = patches[failure === 'changed Javadoc patch' ? 0 : 1];
+        fs.writeFileSync(patch, `${fs.readFileSync(patch, 'utf8')}\n`);
+      }
+      if (failure === 'dirty checkout') {
+        const target = path.join(temporary, repairPaths[0]);
+        fs.writeFileSync(target, `${fs.readFileSync(target, 'utf8')}\n`);
+      }
+      const before = repairPaths.map((file) =>
+        fs.readFileSync(path.join(temporary, file), 'utf8'),
+      );
+      const result = run(releaseRepair.run, {
+        RELEASE_TAG: 'v0.26.5',
+        SOURCE_SHA:
+          failure === 'wrong source'
+            ? 'other-sha'
+            : 'db0e4e24a0d89b211b2a15f4af2be22adac71dfc',
+        GITHUB_STEP_SUMMARY: path.join(temporary, 'summary'),
+      });
+      expect(result.status).not.toBe(0);
+      for (const [index, file] of repairPaths.entries()) {
+        expect(fs.readFileSync(path.join(temporary, file), 'utf8')).toBe(
+          before[index],
+        );
+      }
+    },
+  );
+
   it('requires both credentials before creating a private shared OSS configuration', () => {
     const configure = workflow.jobs.release.steps.find(
       (item) => item.name === 'Configure authenticated OSS access',
@@ -697,7 +872,17 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
       ALIYUN_OSS_ACCESS_KEY_SECRET: '',
       ALIYUN_OSS_ENDPOINT: 'https://example.invalid',
     };
-    expect(run(configure, env).status).not.toBe(0);
+    for (const missing of [
+      'ALIYUN_OSS_ACCESS_KEY_ID',
+      'ALIYUN_OSS_ACCESS_KEY_SECRET',
+    ]) {
+      const result = run(configure, {
+        ...env,
+        ALIYUN_OSS_ACCESS_KEY_SECRET: 'fixture-secret',
+        [missing]: '',
+      });
+      expect(result.status, result.stderr).not.toBe(0);
+    }
     expect(fs.existsSync(path.join(temporary, 'oss-called'))).toBe(false);
     expect(
       run(configure, { ...env, ALIYUN_OSS_ACCESS_KEY_SECRET: 'fixture-secret' })

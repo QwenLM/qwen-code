@@ -15,6 +15,7 @@ export const HOSTED_LIFECYCLE_V2_PROFILES_ENV =
   'QWEN_HOSTED_LIFECYCLE_V2_PROFILES';
 const LIFECYCLE_V2_PROFILES = [
   'hosted-workspace-shell/1',
+  'hosted-workspace-shell/3',
   'hosted-workspace-mcp/1',
 ] as const;
 export const HOSTED_HARNESS_PROTOCOL_VERSION = 1 as const;
@@ -83,6 +84,9 @@ export function createHostedHarnessContract(
       'hosted_approval_resume_v1',
       'hosted_model_round_recovery_v1',
       'model-selection/1',
+      'session-model-config/1',
+      'side-query/1',
+      'session-memory/1',
       'context-compression/1',
       'user-message-queue/1',
       'public-child-agents/1',
@@ -98,6 +102,8 @@ export function createHostedHarnessContract(
       'workspace-shell-mcp/1',
       'session-mcp-management/1',
       'session-extension-packages/1',
+      'managed-package-preparation/1',
+      'managed-runtime-skill-import/1',
       'recovery-cleanup/1',
       'targeted-cancel/1',
       // GET /session/:id/events writes keepalive comments while no event
@@ -153,5 +159,8 @@ export function installHostedHarnessContractMiddleware(
   contract: HostedHarnessContract | undefined,
 ): void {
   if (!contract) return;
-  app.use('/session', hostedHarnessContractMiddleware(contract));
+  app.use(
+    ['/session', '/side-queries'],
+    hostedHarnessContractMiddleware(contract),
+  );
 }

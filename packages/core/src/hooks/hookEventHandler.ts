@@ -57,6 +57,8 @@ import type {
   InstructionLoadReason,
   BackgroundTaskInfo,
   CronJobInfo,
+  FileChangedInput,
+  FileChangeEvent,
 } from './types.js';
 import {
   createHookOutput,
@@ -216,6 +218,24 @@ export class HookEventHandler {
   private readonly sessionHooksManager: SessionHooksManager;
   /** Optional provider for conversation history */
   private messagesProvider?: MessagesProvider;
+
+  async fireFileChangedEvent(
+    filePath: string,
+    event: FileChangeEvent,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: FileChangedInput = {
+      ...this.createBaseInput(HookEventName.FileChanged),
+      file_path: filePath,
+      event,
+    };
+    return this.executeHooks(
+      HookEventName.FileChanged,
+      input,
+      { filePath },
+      signal,
+    );
+  }
 
   constructor(
     config: Config,
@@ -1006,7 +1026,7 @@ export class HookEventHandler {
           : [];
       // The second side of the project-skill trust gate: a hook registered
       // from a repository's `.qwen/skills/` frontmatter (`trustGated`) runs
-      // only while the folder is STILL trusted. `Config.isTrustedFolder()`
+      // only while the folder is STILL trusted. `Config.isExplicitlyTrustedFolder()`
       // is live under an IDE connection, so a revocation mid-session
       // silences the hook at its next event without a restart or any
       // per-skill unregistration; trust granted again lets it fire. Only
@@ -1015,7 +1035,8 @@ export class HookEventHandler {
         (entry) => entry.trustGated === true,
       )
         ? registeredSessionHooks.filter(
-            (entry) => !entry.trustGated || this.config.isTrustedFolder(),
+            (entry) =>
+              !entry.trustGated || this.config.isExplicitlyTrustedFolder(),
           )
         : registeredSessionHooks;
       if (sessionHooks.length !== registeredSessionHooks.length) {

@@ -106,12 +106,17 @@ import {
   type ForegroundShellOwner,
 } from './live-turn.js';
 import type { LiveHistoryItem } from './live-session-model.js';
+import type { OpenTuiStreamEvent } from './event-adapter.js';
 import { ensureConfigInitialized } from './live-session.js';
 import { consumeLastRenderError } from './opentui-error-boundary.js';
 import { createExitGuard, exitGuardHint } from './exit-guard.js';
-import { EXIT_CODE_INTERRUPT, exitSession } from './exit-lifecycle.js';
+import { exitSession } from './exit-lifecycle.js';
+import { OpenTuiSlashGateway } from './slash-gateway.js';
 import { Command, matchesCommand } from './key-map.js';
-import type { OpenTuiComposerHandle } from './input-submission.js';
+import {
+  returnToComposer,
+  type OpenTuiComposerSlot,
+} from './input-submission.js';
 import { buildUiHistoryItems } from './session-switch.js';
 import { projectHistoryToStreamEvents } from './item-projection.js';
 import {
@@ -162,13 +167,36 @@ function OpenTuiEntryApp({
   }, [config, renderer, width]);
   const { stats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, config.getSessionId());
+  // A prompt handed back while a dialog has the composer unmounted waits in
+  // the slot's `returned`.
+  const composerHandle: OpenTuiComposerSlot =
+    useRef<OpenTuiComposerSlot['current']>(null);
   const live = useOpenTuiLiveTurn({
     config,
     logger,
     dualOutput: runtime.dualOutputBridge,
+    onPromptReturned: (submission) =>
+      returnToComposer(composerHandle, submission),
   });
-  const { applyEvent, submit, interrupt, resetTranscript, settleWaitingCall } =
-    live;
+  const {
+    applyEvent,
+    submit,
+    interrupt,
+    resetTranscript: resetLiveTranscript,
+    settleWaitingCall,
+  } = live;
+  // The session the transcript belongs to, taken each time it is replaced:
+  // a session switch replaces it after the core adopted the new session.
+  const [transcriptSessionId, setTranscriptSessionId] = useState(() =>
+    config.getSessionId(),
+  );
+  const resetTranscript = useCallback(
+    (events: OpenTuiStreamEvent[]) => {
+      resetLiveTranscript(events);
+      setTranscriptSessionId(config.getSessionId());
+    },
+    [config, resetLiveTranscript],
+  );
   // The Mods' band above the prompt. OpenTUI has no session survey.
   useEffect(() => {
     getInteractiveModSession(config)?.setRenderInput(
@@ -254,7 +282,6 @@ function OpenTuiEntryApp({
   const getSessionStats = useCallback(() => statsRef.current, []);
 
   // --- early-input injection (ink initialCapturedInput parity) -------------
-  const composerHandle = useRef<OpenTuiComposerHandle | null>(null);
   const vimComposerBuffer = useRef<VimBuffer | null>(null);
   const vimBuffer = useMemo(
     () => createVimBuffer(() => vimComposerBuffer.current!),
@@ -310,6 +337,7 @@ function OpenTuiEntryApp({
   useUpdateNoticeFlush(addUpdateItem, setUpdateInfo, isIdleRef, live.streaming);
 
   // --- two-press exit guard (ink useDoublePress parity) ---------------------
+  const slashGateway = useMemo(() => new OpenTuiSlashGateway(), []);
   const [exitHint, setExitHint] = useState<string | null>(null);
   const exitGuard = useMemo(
     () => createExitGuard({ onWindowExpired: () => setExitHint(null) }),
@@ -337,17 +365,18 @@ function OpenTuiEntryApp({
   useKeyboard((key: KeyEvent) => {
     if (
       key.eventType === 'release' ||
-      !key.ctrl ||
-      (key.name !== 'c' && key.name !== 'd')
+      (!matchesCommand(Command.QUIT, key) && !matchesCommand(Command.EXIT, key))
     )
       return;
+    if (slashGateway.isCommitInProgress()) return;
     if (key.name === 'd' && composerHandle.current?.getText()) return;
     const guardKey = key.name === 'd' ? 'ctrl-d' : 'ctrl-c';
     const parked = waitingCallsRef.current[0];
     // Ink pre-arms C before cleanup; D only arms at an idle/confirmation boundary.
     if (key.name === 'c' || parked || !streamingRef.current) {
       if (exitGuard.press(guardKey) === 'exit') {
-        void exitSession(config, EXIT_CODE_INTERRUPT);
+        if (slashGateway.isBusy()) slashGateway.cancel();
+        void exitSession(config, 0);
         return;
       }
       setExitHint(exitGuardHint(guardKey));
@@ -369,6 +398,11 @@ function OpenTuiEntryApp({
   });
 
   // --- seams handed to the shell ---------------------------------------------
+  // The main transcript's reply rows, which the Mods may draw.
+  const modRows = useMemo(
+    () => ({ config, sessionId: transcriptSessionId }),
+    [config, transcriptSessionId],
+  );
   const renderMain = useCallback(
     (shell?: { owner: ForegroundShellOwner | null; focused: boolean }) => (
       <box flexDirection="column">
@@ -376,6 +410,7 @@ function OpenTuiEntryApp({
             its content budget is 4 short of the terminal width. */}
         <OpenTuiTranscriptView
           items={live.items}
+          modRows={modRows}
           availableWidth={Math.max(0, width - 4)}
           availableTerminalHeight={height}
           thoughtsExpanded={thoughtsExpanded}
@@ -391,7 +426,15 @@ function OpenTuiEntryApp({
         />
       </box>
     ),
-    [live.items, live.waitingCalls, width, height, thoughtsExpanded, settings],
+    [
+      live.items,
+      live.waitingCalls,
+      width,
+      height,
+      thoughtsExpanded,
+      settings,
+      modRows,
+    ],
   );
 
   const handleRenderError = useCallback(
@@ -475,11 +518,13 @@ function OpenTuiEntryApp({
       getSessionStats={getSessionStats}
       sessionStats={stats}
       runtime={runtime}
+      slashGateway={slashGateway}
       extensionRefreshState={extensionRefreshState}
       initialDialog={initialDialog}
       renderMain={renderMain}
       onSubmitPrompt={handleSubmitPrompt}
       onScheduleTool={live.scheduleTool}
+      onRunModPrompt={live.runModPrompt}
       onRetryPrompt={live.retryLastPrompt}
       onInputProcessed={live.notifyInputProcessed}
       onQuit={handleQuit}
@@ -609,12 +654,9 @@ export async function startOpenTuiUI(
     // over stdin; the decoded text is injected into the composer after mount.
     const capturedText = drainCapturedInputAsText();
 
-    // U-6: ink's boot auto-open is "unauthenticated" (useAuth initial state)
-    // plus the one-shot startup authError (useInitializationAuthError);
-    // shouldOpenAuthDialog is never read in ink's production code, so the
-    // behavior contract is exactly these two.
     const initialDialog: OpenTuiDialogRequest | null =
-      initializationResult.authError || config.getAuthType() === undefined
+      !initializationResult.skipStartupAuthDialog &&
+      (initializationResult.authError || config.getAuthType() === undefined)
         ? {
             dialog: 'auth',
             initialError: initializationResult.authError ?? undefined,

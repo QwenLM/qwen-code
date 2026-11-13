@@ -432,6 +432,10 @@ describe('model catalog', () => {
   // must survive both the bundled snapshot and a newer downloaded one.
   it.each([
     ['kimi-k3', 1_000_000],
+    ['kimi-k3.1-pro', 1_000_000],
+    ['kimi-k3.1-pro-highspeed', 1_000_000],
+    ['kimi-k3-1-pro-highspeed', 1_000_000],
+    ['k3-256k', 262_144],
     ['minimax-m2.5', 196_608],
     ['minimax-m2.5-highspeed', 196_608],
     ['glm-4.7', 202_752],

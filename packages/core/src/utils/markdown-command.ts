@@ -23,8 +23,10 @@ export const MarkdownCommandDefSchema = z.object({
     .passthrough()
     .optional(),
   prompt: z.string({
-    required_error: 'The prompt content is required.',
-    invalid_type_error: 'The prompt content must be a string.',
+    error: (issue) =>
+      issue.input === undefined
+        ? 'The prompt content is required.'
+        : 'The prompt content must be a string.',
   }),
 });
 

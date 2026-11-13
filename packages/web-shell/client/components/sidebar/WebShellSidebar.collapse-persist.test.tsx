@@ -1,126 +1,57 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import * as React from 'react';
 import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import type { WebShellSidebarSessionActionsOptions } from './WebShellSidebar';
 import sidebarStyles from './WebShellSidebar.module.css';
 import {
   clickSidebarElement as click,
+  createSidebarMocks,
+  DAEMON_APPROVAL_MODES,
   flushSidebar,
   installSidebarDomShims,
   makeSidebarSession as makeSession,
-  resolveWebShellSessions,
+  useResolvedWebShellSessions,
+  sidebarSessionPage,
+  useSidebarSessionCatalogQuery,
 } from '../../test/sidebarHarness';
 
-const { connection, workspace, workspaceActions, active, pinned, archived } =
-  vi.hoisted(() => {
-    const makeSessions = () => {
-      const state = {
-        sessions: [] as DaemonSessionSummary[],
-        loading: false,
-        error: null as Error | null,
-        // Mirror useDaemonSessions: data is undefined until the first list
-        // settles. Unit tests treat the mock as already settled.
-        data: [] as DaemonSessionSummary[] | undefined,
-        reload: vi.fn().mockResolvedValue(undefined),
-        deleteSession: vi.fn().mockResolvedValue(true),
-        archiveSession: vi.fn().mockResolvedValue(true),
-        unarchiveSession: vi.fn().mockResolvedValue(true),
-        exportSession: vi.fn(),
-      };
-      state.data = state.sessions;
-      return state;
-    };
-    return {
-      connection: {
-        status: 'connected',
-        error: undefined as Error | undefined,
-        sessionId: null as string | null,
-        loadingTranscript: false,
-        workspaceCwd: '/tmp/project',
-        sessionContext: undefined as { kind: 'standalone' } | undefined,
-        capabilities: undefined as
-          | {
-              qwenCodeVersion: string;
-              features: string[];
-            }
-          | undefined,
-      },
-      workspace: {
-        capabilities: undefined as
-          | {
-              qwenCodeVersion: string;
-              features: string[];
-            }
-          | undefined,
-        client: {
-          listWorkspaceSessionsPage: vi
-            .fn()
-            .mockResolvedValue({ sessions: [] }),
-          listStandaloneSessionsPage: vi
-            .fn()
-            .mockResolvedValue({ sessions: [] }),
-          archiveStandaloneSessions: vi.fn(),
-          workspaceByCwd: vi.fn(() => ({
-            listWorkspaceSessions: vi.fn().mockResolvedValue([]),
-            listSessionGroups: vi.fn().mockResolvedValue({
-              groups: [],
-              colorOptions: [
-                'red',
-                'orange',
-                'yellow',
-                'green',
-                'blue',
-                'purple',
-              ],
-            }),
-          })),
-        },
-        refreshCapabilities: vi.fn(),
-      },
-      workspaceActions: {
-        addWorkspace: vi.fn(),
-        removeWorkspace: vi.fn(),
-        listSessionGroups: vi.fn().mockResolvedValue({
-          groups: [],
-          colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
-        }),
-        createSessionGroup: vi.fn(),
-        updateSessionGroup: vi.fn(),
-        deleteSessionGroup: vi.fn(),
-        updateSessionOrganization: vi.fn(),
-      },
-      active: makeSessions(),
-      pinned: makeSessions(),
-      archived: makeSessions(),
-    };
-  });
-const refreshSessionCatalogQueries = vi.hoisted(() => vi.fn());
-const sessionCatalogController = vi.hoisted(() => ({
+const mocks = createSidebarMocks({
+  colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+  connection: { capabilities: undefined },
+});
+const {
+  connection,
+  workspace,
+  workspaceActions,
+  active,
+  pinned,
+  archived,
+  refreshSessionCatalogQueries,
+  useSessionCatalogQueries,
+  loadSession,
+} = mocks;
+// Stable identity across renders: the sidebar's useLayoutEffect depends on
+// the controller object, and a fresh literal per render re-runs the effect
+// (extra refreshQueries) on each render.
+const sessionCatalogController = {
   refreshQueries: refreshSessionCatalogQueries,
   invalidateWorkspace: vi.fn(),
   refreshWorkspace: vi.fn(),
   renamed: vi.fn(),
   toggleSessionPinned: vi.fn(),
-}));
-const useSessionCatalogQueries = vi.hoisted(() => vi.fn(() => []));
-const loadSession = vi.hoisted(() => vi.fn());
+};
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
-  useConnection: () => connection,
-  useActions: () => ({ renameSession: vi.fn() }),
-  useWorkspace: () => workspace,
-  useWorkspaceActions: () => workspaceActions,
-  useChannels: () => ({ data: undefined, catalog: [], channels: {} }),
+  DAEMON_APPROVAL_MODES,
+  useConnection: () => mocks.connection,
+  useActions: () => mocks.actions,
+  useWorkspace: () => mocks.workspace,
+  useWorkspaceActions: () => mocks.workspaceActions,
+  useChannels: () => mocks.channels,
+  useSessions: (options?: { archiveState?: string; group?: string }) =>
+    sidebarSessionPage(mocks, options),
   useStreamingState: () => 'idle',
-  useSessions: (options?: { archiveState?: string; group?: string }) => {
-    if (options?.archiveState === 'archived') return archived;
-    if (options?.group === 'pinned') return pinned;
-    return active;
-  },
 }));
 
 vi.mock('../../session-catalog/session-catalog-hooks', () => ({
@@ -128,57 +59,14 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
     enabled?: boolean;
     archiveState?: string;
     group?: string;
-  }) => {
-    const state =
-      options?.archiveState === 'archived'
-        ? archived
-        : options?.group === 'pinned'
-          ? pinned
-          : active;
-    const { enabled: _enabled, ...catalogOptions } = options ?? {};
-    const optionsKey = JSON.stringify(catalogOptions);
-    const workspaceCwd = connection.workspaceCwd;
-    const catalogQuery = React.useMemo(
-      () => ({
-        routeKind: 'legacy',
-        workspaceCwd,
-        options: JSON.parse(optionsKey) as typeof catalogOptions,
-      }),
-      [optionsKey, workspaceCwd],
-    );
-    return resolveWebShellSessions(
-      state,
-      options?.enabled !== false,
-      catalogQuery,
-    );
-  },
+  }) => useResolvedWebShellSessions(mocks, options),
   useSessionCatalogController: () => sessionCatalogController,
   useSessionCatalogPolling: () => undefined,
   useSessionCatalogQuery: (
-    client: typeof workspace.client,
+    client: typeof mocks.workspace.client,
     query: { workspaceCwd: string; options?: Record<string, unknown> },
     options: { autoLoad?: boolean; enabled?: boolean },
-  ) => {
-    const [snapshot, setSnapshot] = React.useState({
-      sessions: [] as DaemonSessionSummary[],
-      loading: false,
-      error: undefined as Error | undefined,
-    });
-    const reload = React.useCallback(async () => {
-      const sessions = await client
-        .workspaceByCwd(query.workspaceCwd)
-        .listWorkspaceSessions(query.options);
-      setSnapshot({ sessions, loading: false, error: undefined });
-      return { sessions };
-    }, [client, query.options, query.workspaceCwd]);
-    React.useEffect(() => {
-      if (options.enabled === false || !options.autoLoad) return;
-      void reload().catch((error: Error) => {
-        setSnapshot((current) => ({ ...current, loading: false, error }));
-      });
-    }, [options.autoLoad, options.enabled, reload]);
-    return { ...snapshot, reload };
-  },
+  ) => useSidebarSessionCatalogQuery(client, query, options),
   useSessionCatalogQueries,
 }));
 
@@ -363,6 +251,137 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       );
     },
   );
+  it('moves the session search to the right of the activity toggle', async () => {
+    renderSidebar();
+    await flushSidebar();
+
+    const topRow = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.topRow}`,
+    );
+    expect(topRow).not.toBeNull();
+    const search = topRow!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    const activity = topRow!.querySelector<HTMLButtonElement>(
+      'button[aria-label="View activity"]',
+    );
+    expect(search).not.toBeNull();
+    expect(activity).not.toBeNull();
+    expect(search!.parentElement).toBe(activity!.parentElement);
+    const controls = [...activity!.parentElement!.querySelectorAll('button')];
+    expect(controls.indexOf(search!)).toBeGreaterThan(
+      controls.indexOf(activity!),
+    );
+
+    const projectsHeader = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.projectsHeader}`,
+    );
+    expect(projectsHeader).not.toBeNull();
+    expect(
+      projectsHeader!.querySelector('button[aria-label="Search sessions"]'),
+    ).toBeNull();
+
+    click(search!);
+    await flushSidebar();
+    expect(
+      topRow!.querySelector('input[aria-label="Search sessions"]'),
+    ).not.toBeNull();
+  });
+  it('hides the session search while the activity view is open', async () => {
+    renderSidebar();
+    await flushSidebar();
+
+    const activity = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="View activity"]',
+    );
+    expect(activity).not.toBeNull();
+    act(() => click(activity!));
+    await flushSidebar();
+
+    expect(
+      container.querySelector('button[aria-label="Search sessions"]'),
+    ).toBeNull();
+    const close = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Close activity view"]',
+    );
+    expect(close).not.toBeNull();
+    act(() => click(close!));
+    await flushSidebar();
+    expect(
+      container.querySelector('button[aria-label="Search sessions"]'),
+    ).not.toBeNull();
+  });
+  it('drops the search field below the icon row in the mobile drawer', async () => {
+    renderSidebar(false, { mobileOpen: true });
+    await flushSidebar();
+
+    const topRow = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.topRow}`,
+    );
+    const search = topRow!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(search).not.toBeNull();
+    act(() => click(search!));
+    await flushSidebar();
+
+    expect(
+      topRow!.querySelector('input[aria-label="Search sessions"]'),
+    ).toBeNull();
+    const row = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.topRowSearchRow}`,
+    );
+    expect(row).not.toBeNull();
+    expect(
+      row!.querySelector('input[aria-label="Search sessions"]'),
+    ).not.toBeNull();
+  });
+  it('drops the search field below the icon row in a narrow column', async () => {
+    window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '276');
+    renderSidebar(false, { layout: 'rail' });
+    await flushSidebar();
+
+    const topRow = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.topRow}`,
+    );
+    const search = topRow!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(search).not.toBeNull();
+    act(() => click(search!));
+    await flushSidebar();
+
+    expect(
+      topRow!.querySelector('input[aria-label="Search sessions"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector(`.${sidebarStyles.topRowSearchRow}`),
+    ).not.toBeNull();
+  });
+  it('keeps the session search in the Channels section header', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_source_metadata', 'session_organization'],
+    };
+    workspace.capabilities = connection.capabilities;
+    renderSidebar(false, { layout: 'rail', activePage: 'channels' });
+    await flushSidebar();
+
+    const header = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.sectionHeader}`,
+    );
+    expect(header).not.toBeNull();
+    expect(header!.textContent).toContain('Channels');
+    const search = header!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(search).not.toBeNull();
+    act(() => click(search!));
+    await flushSidebar();
+    expect(
+      header!.querySelector('input[aria-label="Search sessions"]'),
+    ).not.toBeNull();
+  });
   it('uses drawer constraints and closes mobile without persisting desktop collapse', async () => {
     const onCollapsedChange = vi.fn();
     const onMobileClose = vi.fn();
@@ -466,8 +485,8 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       .map((call) => call[1])
       .filter((queries) =>
         queries.some(
-          (query: { options: { group?: string } }) =>
-            query.options.group === 'all',
+          (query: { options: { group?: string; pageSize?: number } }) =>
+            query.options.group === 'all' && query.options.pageSize !== 100,
         ),
       );
     expect(activeQueryCalls.length).toBeGreaterThan(0);
@@ -630,9 +649,16 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     const activeQueryCalls = useSessionCatalogQueries.mock.calls.filter(
       (call) =>
         call[1].some(
-          (query: { options: { group?: string; archiveState?: string } }) =>
+          (query: {
+            options: {
+              group?: string;
+              archiveState?: string;
+              pageSize?: number;
+            };
+          }) =>
             query.options.group === 'all' &&
-            query.options.archiveState === 'active',
+            query.options.archiveState === 'active' &&
+            query.options.pageSize !== 100,
         ),
     );
     expect(activeQueryCalls.length).toBeGreaterThan(0);
@@ -911,9 +937,16 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     const activeQueryCalls = useSessionCatalogQueries.mock.calls.filter(
       (call) =>
         call[1].some(
-          (query: { options: { group?: string; archiveState?: string } }) =>
+          (query: {
+            options: {
+              group?: string;
+              archiveState?: string;
+              pageSize?: number;
+            };
+          }) =>
             query.options.group === 'all' &&
-            query.options.archiveState === 'active',
+            query.options.archiveState === 'active' &&
+            query.options.pageSize !== 100,
         ),
     );
     expect(activeQueryCalls.length).toBeGreaterThan(0);
@@ -2125,7 +2158,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     const preview = document.querySelector('[data-web-shell-home-popover]');
     expect(preview).not.toBeNull();
     expect(preview!.textContent).toContain('Qwen Code');
-    expect(preview!.textContent).toContain('New task');
+    expect(preview!.textContent).toContain('New session');
     expect(preview!.textContent).toContain('Release notes');
     expect(
       document.querySelectorAll('[data-web-shell-home-column]'),
@@ -2184,7 +2217,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       ).not.toBeNull();
       expect(
         document.querySelector('[data-web-shell-home-popover]')!.textContent,
-      ).toContain('New task');
+      ).toContain('New session');
       expect(
         container
           .querySelector('button[aria-current="page"]')
@@ -2889,7 +2922,7 @@ describe('Recent sessions shared rows', () => {
         '[data-testid="recent-sessions"]',
       )!;
       const create = recent.querySelector<HTMLButtonElement>(
-        '[aria-label="New task"]',
+        '[aria-label="New session"]',
       )!;
       click(create);
       await flushSidebar();
@@ -2946,7 +2979,7 @@ describe('Recent sessions shared rows', () => {
         '[data-testid="recent-sessions"]',
       )!;
       click(
-        recent.querySelector<HTMLButtonElement>('[aria-label="New task"]')!,
+        recent.querySelector<HTMLButtonElement>('[aria-label="New session"]')!,
       );
       await flushSidebar();
       renderSidebar(false, { onNewSession });
@@ -3056,7 +3089,9 @@ describe('Recent sessions shared rows', () => {
     renderSidebar(false, { onNewSession });
     await flushSidebar();
     const recent = container.querySelector('[data-testid="recent-sessions"]')!;
-    click(recent.querySelector<HTMLButtonElement>('[aria-label="New task"]')!);
+    click(
+      recent.querySelector<HTMLButtonElement>('[aria-label="New session"]')!,
+    );
     await flushSidebar();
     connection.sessionId = 'session-b';
     workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
@@ -3098,9 +3133,8 @@ describe('Recent sessions shared rows', () => {
     ]);
     expect(recent.textContent).not.toContain('Independent chat');
     expect(
-      container.querySelector('[data-testid="standalone-active-group"]')
-        ?.textContent,
-    ).not.toContain('Independent chat');
+      container.querySelector('[data-testid="standalone-active-group"]'),
+    ).toBeNull();
     expect(active.archiveSession).not.toHaveBeenCalled();
   });
 
