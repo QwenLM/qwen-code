@@ -106,6 +106,8 @@ The `tools.shell.enableInteractiveShell` setting controls whether shell commands
 
 When the setting is omitted, explicit one-shot prompts use `child_process`; interactive TUI, ACP, stream-json input, stdin-only, and file-input sessions use PTY. On Windows builds **<= 19041** (before Windows 10 version 2004), PTY mode falls back to `child_process` because older ConPTY implementations have known reliability issues (missing output, hangs). This matches the same cutoff used by VS Code ([microsoft/vscode#123725](https://github.com/microsoft/vscode/issues/123725)). If `node-pty` is not available at runtime, the tool also falls back to `child_process`.
 
+Non-PTY commands collect both output streams through the child process's `close` event, so data delivered just after process exit is retained. A foreground buffered command waits at most 200 ms after exit if a descendant keeps a pipe open; streaming and managed raw-capture callers retain their 1000 ms drain bound. Normal commands return as soon as their pipes close. `stdoutHeldAfterExit` identifies a stdout pipe still open at that bound; shell-level `&` remains untracked, so use `is_background: true` for managed background work.
+
 To explicitly override the default, set the value in `settings.json`:
 
 **Example `settings.json`:**
