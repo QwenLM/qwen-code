@@ -10458,6 +10458,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     includeSensitiveSpanAttributes?: boolean;
     sensitiveSpanAttributeMaxLength?: number;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
+    isFinished?: () => boolean;
     shouldObserveProducer?: (callId: string) => boolean;
     configOverrides?: Record<string, unknown>;
   };
@@ -10515,6 +10516,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       {
         onAllToolCallsComplete,
         onToolCallsUpdate,
+        isFinished: options.isFinished,
         shouldObserveProducer: options.shouldObserveProducer,
       },
     );
@@ -12799,6 +12801,75 @@ describe('CoreToolScheduler telemetry spans', () => {
         ? { hookSpecificOutput: { artifacts: [{ title, workspacePath }] } }
         : { decision: 'allow' },
     );
+
+  it.each(['resolve', 'reject'])(
+    'skips the failure hook when an abandoned tool settles by %s',
+    async (outcome) => {
+      const abort = new AbortController();
+      const entered = deferred();
+      const release = deferred();
+      let finished = false;
+      const hookEvents: string[] = [];
+      const { scheduler, onAllToolCallsComplete } = buildScheduler({
+        isFinished: () => finished,
+        hooks: eventHookBus(allowAll, (name) => hookEvents.push(name)),
+        execute: async () => {
+          entered.resolve();
+          await release.promise;
+          if (outcome === 'reject') throw new Error('interrupted');
+          return textResult('done');
+        },
+      });
+      const scheduled = scheduler.schedule(
+        mockToolRequest('abandoned'),
+        abort.signal,
+      );
+      await entered.promise;
+      abort.abort();
+      finished = true;
+      release.resolve();
+      await scheduled;
+      const [call] = await settledLastBatch(onAllToolCallsComplete);
+      expectStatus(call, 'cancelled');
+      expect(hookEvents).toEqual(['PreToolUse']);
+    },
+  );
+
+  it('skips per-tool persistence when a post hook outlives the run', async () => {
+    const abort = new AbortController();
+    const entered = deferred();
+    const release = deferred();
+    let finished = false;
+    const trackToolResultBytes = vi.fn();
+    const { scheduler, onAllToolCallsComplete } = buildScheduler({
+      isFinished: () => finished,
+      execute: async () => textResult('x'.repeat(2320)),
+      hooks: hookBus(async ({ eventName }) => {
+        if (eventName === 'PostToolUse') {
+          entered.resolve();
+          await release.promise;
+        }
+        return hookResponse(eventName, { decision: 'allow' });
+      }),
+      configOverrides: {
+        getTruncateToolOutputThreshold: () => 128,
+        storage: { getProjectTempDir: () => '/dev/null/tool-results' },
+        trackToolResultBytes,
+      },
+    });
+    const scheduled = scheduler.schedule(
+      mockToolRequest('late-post-hook'),
+      abort.signal,
+    );
+    await entered.promise;
+    abort.abort();
+    finished = true;
+    release.resolve();
+    await scheduled;
+    const [call] = await settledLastBatch(onAllToolCallsComplete);
+    expectStatus(call, 'cancelled');
+    expect(trackToolResultBytes).not.toHaveBeenCalled();
+  });
 
   it('PostToolUseFailure hook span records is_interrupt=true on user-abort path (#4321)', async () => {
     // _executeToolCallBody's catch fires PostToolUseFailure with
@@ -16033,9 +16104,11 @@ describe('persistence size attribution', () => {
       getTruncateToolOutputThreshold: () => 25000,
       getChatCompression: () => ({ imageTokenEstimate: 800 }),
     } as Config;
-    const owner = Object.assign(Object.create(CoreToolScheduler.prototype), {
+    const owner = new CoreToolScheduler({
       config: cfg,
-    }) as {
+      getPreferredEditor: () => undefined,
+      onEditorClose: () => {},
+    }) as unknown as {
       maybePersistLargeToolResult(
         callId: string,
         toolName: string,

@@ -2266,6 +2266,7 @@ export class AgentCore {
                 abortController,
                 currentRound: round,
                 declaredToolNames,
+                isFinished: hooks.isFinished,
                 onSettled: (call) => {
                   settled.set(call.response.callId, call);
                   durations.set(call.response.callId, call.durationMs);
@@ -3163,6 +3164,7 @@ export class AgentCore {
     abortController: AbortController;
     currentRound: number;
     declaredToolNames: ReadonlySet<string | undefined>;
+    isFinished?: () => boolean;
     onSettled: (call: SettledToolCall) => void;
   }): Promise<void> {
     const {
@@ -3170,6 +3172,7 @@ export class AgentCore {
       abortController,
       currentRound,
       declaredToolNames,
+      isFinished,
       onSettled,
     } = params;
     // Build scheduler
@@ -3273,6 +3276,7 @@ export class AgentCore {
     };
     const deliverApproval = (state: ApprovalDeliveryState) => {
       if (
+        isFinished?.() ||
         !state.active ||
         state.delivered ||
         state.responded ||
@@ -3324,7 +3328,9 @@ export class AgentCore {
     };
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
+      isFinished,
       onToolExecutionStarted: (callId, epoch) => {
+        if (isFinished?.()) return;
         startedLifecycles.add(callId);
         publishLifecycle(
           callId,
@@ -3342,7 +3348,8 @@ export class AgentCore {
           );
         }
       },
-      shouldObserveProducer: (callId) => !emittedCallIds.has(callId),
+      shouldObserveProducer: (callId) =>
+        !isFinished?.() && !emittedCallIds.has(callId),
       // `declaredToolNames` is the batch's own list, computed above from the
       // `toolsList` sent to the model. See `CoreToolSchedulerOptions.hasSkillTool`
       // for why the registry cannot answer this and what the predicate owes.
@@ -3354,7 +3361,7 @@ export class AgentCore {
       outputUpdateHandler: (callId, outputChunk) => {
         // Shell liveness heartbeats have no subagent consumer; broadcasting
         // one would overwrite the live output view kept in liveOutputs.
-        if (isShellProgressData(outputChunk)) {
+        if (isFinished?.() || isShellProgressData(outputChunk)) {
           return;
         }
         this.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
@@ -3369,6 +3376,7 @@ export class AgentCore {
       onAllToolCallsComplete: async (completedCalls) => {
         clearApprovalDeliveries();
         for (const call of completedCalls) {
+          if (isFinished?.()) break;
           if (emittedCallIds.has(call.request.callId)) continue;
           emittedCallIds.add(call.request.callId);
 
@@ -3444,6 +3452,7 @@ export class AgentCore {
         resolveBatch?.();
       },
       onToolCallsUpdate: (calls: ToolCall[]) => {
+        if (isFinished?.()) return;
         for (const call of calls) {
           const { callId } = call.request;
           if (!pendingToolCallStarts.delete(callId)) continue;

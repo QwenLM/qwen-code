@@ -1073,6 +1073,53 @@ describe.each(LOOPS)(
       expect(core.getShellPids().has('call')).toBe(false);
     });
 
+    it.skipIf(!kernel)(
+      'drops scheduler output after the loop cancellation cap',
+      async () => {
+        vi.useFakeTimers();
+        const { core } = buildCore('late-output', { tools: ['*'] });
+        let sendOutput!: (callId: string, chunk: string) => void;
+        let release!: () => void;
+        const waiting = new Promise<void>((resolve) => (release = resolve));
+        const schedule = vi
+          .spyOn(CoreToolScheduler.prototype, 'schedule')
+          .mockImplementation(async function (this: CoreToolScheduler) {
+            const { outputUpdateHandler } = (
+              this as unknown as {
+                schedulerOptions: { outputUpdateHandler: typeof sendOutput };
+              }
+            ).schedulerOptions;
+            sendOutput = outputUpdateHandler;
+            await waiting;
+          });
+        try {
+          const abort = new AbortController();
+          const running = runToolStep(
+            core,
+            shared,
+            [{ id: 'late-call', name: 'read_file', args: {} }],
+            abort,
+            'late-prompt',
+            [{ name: 'read_file' }],
+          );
+          await vi.advanceTimersByTimeAsync(0);
+          expect(sendOutput).toBeDefined();
+          sendOutput('late-call', 'live');
+          expect(core.getLiveOutputs().get('late-call')).toBe('live');
+          abort.abort();
+          await vi.advanceTimersByTimeAsync(10_000);
+          await running;
+          sendOutput('late-call', 'late');
+          expect(core.getLiveOutputs().has('late-call')).toBe(false);
+        } finally {
+          release();
+          await vi.advanceTimersByTimeAsync(0);
+          schedule.mockRestore();
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it.each(['undeclared', 'allowlist'])(
       'records %s rejection as not_started with original owner',
       async (reason) => {

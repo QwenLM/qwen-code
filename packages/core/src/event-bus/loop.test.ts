@@ -16,6 +16,7 @@ import {
 import * as agentLoop from '../core/agent-loop.js';
 import { SendMessageType } from '../core/client.js';
 import { LoopEventBus } from './bus.js';
+import { CANCEL_SETTLEMENT_CAP_MS } from './conversation.js';
 import {
   LlmEventType,
   type ServerLlmStreamEvent,
@@ -518,6 +519,42 @@ describe('runAgentLoop event-bus parity', () => {
     expect(bus.log).not.toContain('tool:c1:executed');
   });
 
+  it("gives onRoundEnd the round's calls and stop on both paths", async () => {
+    const rounds = [
+      [{ type: LlmEventType.ToolCallRequest, value: call('c1') }],
+      [
+        { type: LlmEventType.ToolCallRequest, value: call('c2') },
+        { type: LlmEventType.MaxSessionTurns },
+      ],
+    ] as ServerLlmStreamEvent[][];
+    const run = async (useEventBus: boolean) => {
+      const seen: unknown[] = [];
+      const result = await runAgentLoop({
+        ...options(rounds, {
+          onRoundEnd: (round, model) => {
+            seen.push({
+              round,
+              calls: model.calls.map(({ callId }) => callId),
+              stop: model.stop,
+            });
+          },
+        }),
+        useEventBus,
+      });
+      return { seen, reason: result.reason };
+    };
+    const procedural = await run(false);
+    const bus = await run(true);
+    expect(bus).toEqual(procedural);
+    expect(bus).toEqual({
+      seen: [
+        { round: 0, calls: ['c1'], stop: undefined },
+        { round: 1, calls: ['c2'], stop: 'max_session_turns' },
+      ],
+      reason: 'max_session_turns',
+    });
+  });
+
   it('matches on the batch options and returns each call result', async () => {
     const calls = [call('c1'), call('c2')];
     const round = calls.map((value) => ({
@@ -742,5 +779,334 @@ describe('runAgentLoop default executor wiring', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe('runAgentLoop on the event bus when its signal aborts', () => {
+  const toolCall = {
+    type: LlmEventType.ToolCallRequest,
+    value: call('c1'),
+  } as ServerLlmStreamEvent;
+
+  /** An executor whose batch settles only when `settle` is called. */
+  function heldExecutor() {
+    let settle!: () => void;
+    let start!: () => void;
+    const started = new Promise<void>((resolve) => (start = resolve));
+    const executor: AgentLoopToolExecutor = {
+      run: (requests, _signal, hooks) => {
+        start();
+        return new Promise((done) => {
+          settle = () =>
+            done(
+              requests.map((request) => {
+                hooks.beforeLaunch(request, []);
+                return {
+                  request,
+                  response: response(request),
+                  status: 'success' as const,
+                };
+              }),
+            );
+        });
+      },
+    };
+    return { executor, started, settle: () => settle() };
+  }
+
+  it('publishes loop.cancelled and decides as the procedural loop, keeping the results of the batch it cut off', async () => {
+    const publish = vi.spyOn(LoopEventBus.prototype, 'publish');
+    const run = async (useEventBus: boolean) => {
+      const abort = new AbortController();
+      const held = heldExecutor();
+      const { host, log } = makeHost();
+      const running = runAgentLoop({
+        ...options([[toolCall], [content]], host, {
+          signal: abort.signal,
+          executor: held.executor,
+          keepCancelledResults: true,
+        }),
+        useEventBus,
+      });
+      await held.started;
+      abort.abort();
+      held.settle();
+      const result = await running;
+      return { result, log };
+    };
+    try {
+      const procedural = await run(false);
+      publish.mockClear();
+      const bus = await run(true);
+      expect(bus).toEqual(procedural);
+      expect(bus.result.reason).toBe('cancelled');
+      expect(bus.result.responses?.map(({ callId }) => callId)).toEqual(['c1']);
+      expect(
+        publish.mock.calls.filter(([event]) => event.type === 'loop.cancelled'),
+      ).toHaveLength(1);
+    } finally {
+      publish.mockRestore();
+    }
+  });
+
+  it('removes its abort listener and clears its cap when the run settles', async () => {
+    vi.useFakeTimers();
+    try {
+      const abort = new AbortController();
+      const added = vi.spyOn(abort.signal, 'addEventListener');
+      const removed = vi.spyOn(abort.signal, 'removeEventListener');
+      const held = heldExecutor();
+      const running = runAgentLoop({
+        ...options([[toolCall], [content]], makeHost().host, {
+          signal: abort.signal,
+          executor: held.executor,
+          keepCancelledResults: true,
+        }),
+        useEventBus: true,
+      });
+      await held.started;
+      abort.abort();
+      // The cancellation reaches Conversation before the batch settles.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      held.settle();
+      expect((await running).reason).toBe('cancelled');
+      const listener = added.mock.calls.find(([type]) => type === 'abort')?.[1];
+      expect(listener).toBeDefined();
+      expect(removed).toHaveBeenCalledWith('abort', listener);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears its cap when a host callback rejects the cancelled run', async () => {
+    vi.useFakeTimers();
+    try {
+      const abort = new AbortController();
+      const held = heldExecutor();
+      const running = runAgentLoop({
+        ...options(
+          [[toolCall], [content]],
+          {
+            onToolResult: () => {
+              throw new Error('host failed');
+            },
+          },
+          {
+            signal: abort.signal,
+            executor: held.executor,
+            keepCancelledResults: true,
+          },
+        ),
+        useEventBus: true,
+      });
+      await held.started;
+      abort.abort();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      held.settle();
+      await expect(running).rejects.toThrow('host failed');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds cancellation while onRoundEnd is waiting', async () => {
+    vi.useFakeTimers();
+    try {
+      const abort = new AbortController();
+      let enterRoundEnd!: () => void;
+      const roundEnded = new Promise<void>(
+        (resolve) => (enterRoundEnd = resolve),
+      );
+      let release!: () => void;
+      const waiting = new Promise<void>((resolve) => (release = resolve));
+      const executor = { run: vi.fn(makeExecutor().run) };
+      const running = runAgentLoop({
+        ...options(
+          [[toolCall]],
+          {
+            onRoundEnd: () => {
+              enterRoundEnd();
+              return waiting;
+            },
+          },
+          { signal: abort.signal, executor },
+        ),
+        useEventBus: true,
+      });
+      await roundEnded;
+      abort.abort();
+      const settled = vi.fn();
+      void running.then(settled);
+      await vi.advanceTimersByTimeAsync(CANCEL_SETTLEMENT_CAP_MS - 1);
+      expect(settled).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toHaveBeenCalledWith({
+        reason: 'cancelled',
+        rounds: 1,
+        turn: {},
+      });
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(executor.run).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ends a run whose batch does not settle within the cap, and its host hears nothing after', async () => {
+    vi.useFakeTimers();
+    try {
+      const abort = new AbortController();
+      const held = heldExecutor();
+      const { host, log } = makeHost();
+      let settled: unknown;
+      const running = runAgentLoop({
+        ...options([[toolCall], [content]], host, {
+          signal: abort.signal,
+          executor: held.executor,
+          keepCancelledResults: true,
+        }),
+        useEventBus: true,
+      }).then((result) => (settled = result));
+      await held.started;
+      abort.abort();
+      await vi.advanceTimersByTimeAsync(CANCEL_SETTLEMENT_CAP_MS - 1);
+      expect(settled).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      await running;
+      // The round's turn, and no results: the batch never settled.
+      expect(settled).toEqual({ reason: 'cancelled', rounds: 1, turn: {} });
+      const heard = [...log];
+      held.settle();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(log).toEqual(heard);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([true, false])(
+    'closes the late model stream (with host: %s)',
+    async (withHost) => {
+      vi.useFakeTimers();
+      try {
+        const abort = new AbortController();
+        let release!: () => void;
+        const progress = { closed: false, pulled: 0 };
+        const client = {
+          async *sendMessageStream() {
+            try {
+              yield content;
+              await new Promise<void>((resolve) => (release = resolve));
+              // A stream that keeps going for as long as it is read.
+              for (let i = 0; i < 50; i++) {
+                progress.pulled++;
+                yield content;
+              }
+            } finally {
+              progress.closed = true;
+            }
+          },
+          getHistoryToolCallFingerprints: () => [],
+          recordCompletedToolCall: () => {},
+        } as unknown as LlmClient;
+        const { host, log } = makeHost();
+        const running = runAgentLoop({
+          ...options([], host, {
+            client,
+            host: withHost ? host : undefined,
+            signal: abort.signal,
+          }),
+          useEventBus: true,
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        abort.abort();
+        await vi.advanceTimersByTimeAsync(CANCEL_SETTLEMENT_CAP_MS);
+        expect(await running).toEqual({ reason: 'cancelled', rounds: 1 });
+        const heard = [...log];
+        release();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(log).toEqual(heard);
+        // The first event after the close stops the round.
+        expect(progress.pulled).toBe(1);
+        expect(progress.closed).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('drops late progress and results of tools already launched', async () => {
+    vi.useFakeTimers();
+    try {
+      const abort = new AbortController();
+      let start!: () => void;
+      const started = new Promise<void>((resolve) => (start = resolve));
+      let release!: () => void;
+      const waiting = new Promise<void>((resolve) => (release = resolve));
+      const onProgress = vi.fn();
+      const recordToolResult = vi.fn();
+      const client = makeClient([[toolCall]]);
+      client.recordCompletedToolCall = vi.fn();
+      const nextLaunch = vi.fn();
+      const running = runAgentLoop({
+        ...options(
+          [],
+          { outputHandler: () => onProgress },
+          {
+            client,
+            config: {
+              getChatRecordingService: () => ({ recordToolResult }),
+            } as unknown as Config,
+            signal: abort.signal,
+            keepCancelledResults: true,
+            executor: {
+              run: async ([request], _signal, hooks) => {
+                expect(hooks.beforeLaunch(request, [])).toBe(true);
+                hooks.output(request.callId, 'live');
+                start();
+                await waiting;
+                nextLaunch(hooks.beforeLaunch(request, []));
+                hooks.output(request.callId, 'late');
+                return [
+                  { request, response: response(request), status: 'success' },
+                ];
+              },
+            },
+          },
+        ),
+        useEventBus: true,
+      });
+      await started;
+      abort.abort();
+      await vi.advanceTimersByTimeAsync(CANCEL_SETTLEMENT_CAP_MS);
+      expect((await running).reason).toBe('cancelled');
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(nextLaunch).toHaveBeenCalledWith(false);
+      expect(onProgress.mock.calls).toEqual([['c1', 'live']]);
+      expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+      expect(recordToolResult).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('accepts a frozen host and preserves its receiver', async () => {
+    const onModelEvent = vi.fn(function (this: AgentLoopHost) {
+      expect(this).toBe(host);
+    });
+    const host = Object.freeze({ onModelEvent });
+    const result = await runAgentLoop({
+      ...options([[content]], host),
+      useEventBus: true,
+    });
+    expect(result.reason).toBe('completed');
+    expect(onModelEvent).toHaveBeenCalledOnce();
   });
 });

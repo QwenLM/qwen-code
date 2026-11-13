@@ -4,6 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { HookProgress } from '@qwen-code/qwen-code-core/confirmation-bus/types.js';
+import { parseHookLifecycle } from '@qwen-code/qwen-code-core/telemetry/hook-lifecycle-contract.js';
+import {
+  createTranscriptHookLifecycleUpdate,
+  createAgentRecordTranscriptUpdate,
+  createTranscriptExecutionLifecycleUpdate,
+} from '@qwen-code/acp-bridge/transcriptReplay';
 import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
@@ -30,10 +37,13 @@ import {
   type AgentLoopStopReason,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import {
+  recordUserTurn,
   SendMessageType,
   type SendMessageOptions,
   type StopPolicy,
   type UserPromptAdmission,
+  type UserTurnInput,
+  type UserTurnRecord,
 } from '@qwen-code/qwen-code-core/core/client.js';
 import {
   getStructuredErrorCause,
@@ -64,6 +74,7 @@ import {
 import type { LoopReminderInput } from '@qwen-code/qwen-code-core/services/loop-protection.js';
 import {
   captureHookExecutionOwner,
+  enterHookExecutionOwner,
   runWithHookExecutionOwner,
   type HookExecutionOwner,
 } from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
@@ -376,10 +387,6 @@ import {
   INTERRUPTED_PROMPT_ABORT_REASON,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
-import {
-  createAgentRecordTranscriptUpdate,
-  createTranscriptExecutionLifecycleUpdate,
-} from '@qwen-code/acp-bridge/transcriptReplay';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   SERVE_CONTROL_EXT_METHODS,
@@ -2845,6 +2852,8 @@ export class Session implements SessionContext {
   private availableCommandsUpdateTail: Promise<void> = Promise.resolve();
   private lastSuccessfulAvailableCommandsHash?: string;
   private unsubscribeRequestLifecycle?: () => void;
+  private unsubscribeHookBusChange?: () => void;
+  private unsubscribeHookProgress?: () => void;
   private requestLifecycleSessionId: string;
   private readonly requestLifecycleExecutions = new Set<string>();
   /** The exact status-change callback this Session installed, so dispose can
@@ -3072,6 +3081,24 @@ export class Session implements SessionContext {
     this.planEmitter = new PlanEmitter(this);
     this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
+    this.unsubscribeHookBusChange = this.config.onMessageBusChange?.((bus) => {
+      this.unsubscribeHookProgress?.();
+      const listener = (message: HookProgress) => {
+        const event = parseHookLifecycle(message.hookLifecycle);
+        if (
+          this.disposed ||
+          !event ||
+          event.sessionId !== this.requestLifecycleSessionId
+        )
+          return;
+        void this.sendUpdate(createTranscriptHookLifecycleUpdate(event)).catch(
+          () => debugLogger.warn('Failed to send hook lifecycle'),
+        );
+      };
+      bus.subscribe(MessageBusType.HOOK_PROGRESS, listener);
+      this.unsubscribeHookProgress = () =>
+        bus.unsubscribe(MessageBusType.HOOK_PROGRESS, listener);
+    });
     this.unsubscribeRequestLifecycle = this.config.onRequestLifecycle?.(
       (event) => {
         if (this.disposed) return;
@@ -5356,6 +5383,10 @@ export class Session implements SessionContext {
     this.unsubscribeWorkflowModeChange = undefined;
     this.unsubscribeApprovalModeChange?.();
     this.unsubscribeApprovalModeChange = undefined;
+    this.unsubscribeHookBusChange?.();
+    this.unsubscribeHookBusChange = undefined;
+    this.unsubscribeHookProgress?.();
+    this.unsubscribeHookProgress = undefined;
     this.unsubscribeRequestLifecycle?.();
     this.unsubscribeRequestLifecycle = undefined;
     this.requestLifecycleExecutions.clear();
@@ -7134,6 +7165,14 @@ export class Session implements SessionContext {
         promptIdContext.enterWith(promptId);
         const parentContext = extractDaemonTraceContext(params);
 
+        const hookOwner = captureHookExecutionOwner(this.config);
+        if (hookOwner)
+          enterHookExecutionOwner(
+            Object.freeze({
+              ...hookOwner,
+              historyPromptId: responseCapture.turnId,
+            }),
+          );
         return await withInteractionSpan(
           this.config,
           {
@@ -7264,14 +7303,16 @@ export class Session implements SessionContext {
             // — so hold it (and a push-count snapshot) to restore on that path.
             let strippedOrphanEntries: Content[] | null = null;
             let orphanPushCountSnapshot = 0;
+            const userTurn: UserTurnInput = { promptId };
             if (goalTurn?.origin === 'runtime') {
               void recordDaemonSessionApprovalModeFromConfig(this.config);
-              this.config.getChatRecordingService()?.recordGoalRuntimeMessage(
-                modelPromptBlocks
+              recordUserTurn(this.config, {
+                kind: 'goal',
+                message: modelPromptBlocks
                   .filter((block) => block.type === 'text')
                   .map((block) => ({ text: block.text })),
-                goalTurn.permit,
-              );
+                goalPermit: goalTurn.permit,
+              });
             } else if (isContinue) {
               const recoveryPlan = (await this.#isContinueBlocked(
                 promptMetadata?.['qwen.daemon.confirmCancellation'],
@@ -7344,25 +7385,28 @@ export class Session implements SessionContext {
               const resourceLinks = params.prompt
                 .filter((block) => block.type === 'resource_link')
                 .map((block) => structuredClone(block));
-              const recorder = this.config.getChatRecordingService();
-              recorder?.recordUserMessage(
-                promptText,
-                goalTurn?.permit,
-                promptDisplayText !== undefined ||
+              recordUserTurn(this.config, {
+                kind: 'user',
+                message: promptText,
+                goalPermit: goalTurn?.permit,
+                payload:
+                  promptDisplayText !== undefined ||
                   inputAnnotations ||
                   attachmentReferences ||
                   resourceLinks.length > 0
-                  ? {
-                      displayText: promptDisplayText ?? promptText,
-                      hookContext: '',
-                      ...(inputAnnotations ? { inputAnnotations } : {}),
-                      ...(attachmentReferences ? { attachmentReferences } : {}),
-                      ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
-                    }
-                  : undefined,
+                    ? {
+                        displayText: promptDisplayText ?? promptText,
+                        hookContext: '',
+                        ...(inputAnnotations ? { inputAnnotations } : {}),
+                        ...(attachmentReferences
+                          ? { attachmentReferences }
+                          : {}),
+                        ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
+                      }
+                    : undefined,
                 promptId,
                 daemonPromptId,
-              );
+              });
             }
 
             if (
@@ -7442,20 +7486,21 @@ export class Session implements SessionContext {
                 goalTurn?.origin !== 'runtime' &&
                 !isRetry
               ) {
-                const recorder = this.config.getChatRecordingService();
-                recorder?.recordUserMessage(
-                  promptText,
-                  goalTurn?.permit,
-                  promptDisplayText !== undefined || inputAnnotations
-                    ? {
-                        displayText: promptDisplayText ?? promptText,
-                        hookContext: '',
-                        ...(inputAnnotations ? { inputAnnotations } : {}),
-                      }
-                    : undefined,
+                recordUserTurn(this.config, {
+                  kind: 'user',
+                  message: promptText,
+                  goalPermit: goalTurn?.permit,
+                  payload:
+                    promptDisplayText !== undefined || inputAnnotations
+                      ? {
+                          displayText: promptDisplayText ?? promptText,
+                          hookContext: '',
+                          ...(inputAnnotations ? { inputAnnotations } : {}),
+                        }
+                      : undefined,
                   promptId,
                   daemonPromptId,
-                );
+                });
               }
 
               try {
@@ -7601,8 +7646,8 @@ export class Session implements SessionContext {
                     options: {
                       type: firstRoundType,
                       promptAdmission,
-                      userTurnRecordedByHost: true,
-                      interactionSpanByHost: true,
+                      userTurn,
+                      interactionSpan: getActiveInteractionSpan(promptId),
                     },
                   },
                   pendingSend.signal,
@@ -7725,12 +7770,11 @@ export class Session implements SessionContext {
                 this.config.getActiveTodoWorkChainOwner(
                   this.activeTodoWorkChainPromptId,
                 ) === this.config.getActiveTodoPlanWriterOwner());
-            this.config.startActiveTodoWorkChain(
-              promptId,
-              continuesTodoWorkChain
-                ? this.activeTodoWorkChainPromptId
-                : undefined,
-            );
+            const continuedFrom = continuesTodoWorkChain
+              ? this.activeTodoWorkChainPromptId
+              : undefined;
+            userTurn.todoWorkChain = { promptId };
+            this.config.startActiveTodoWorkChain(promptId, continuedFrom);
             this.activeTodoWorkChainPromptId = promptId;
             if (responseCapture.channelTask) {
               responseCapture.channelTask.sourceTurnId =
@@ -7767,6 +7811,8 @@ export class Session implements SessionContext {
                 debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
               }
             }
+
+            userTurn.fileHistory = { promptId };
 
             if (
               isFreshUserTurn &&
@@ -8326,12 +8372,12 @@ export class Session implements SessionContext {
                     promptId,
                     type: roundType,
                     options: {
-                      interactionSpanByHost: true,
+                      interactionSpan: getActiveInteractionSpan(promptId),
+                      ...(turnCount === 1 && { userTurn }),
                       // Every round: the client schedules the turn's memory
                       // work at whichever round's stop ends it.
                       ...(channelTurn && { skipMemoryExtraction: true }),
                       ...(roundType === SendMessageType.UserQuery && {
-                        userTurnRecordedByHost: true,
                         workflowModeEligible,
                         promptAdmission,
                         // Recall searches the user's words, as the current
@@ -8347,15 +8393,10 @@ export class Session implements SessionContext {
                           }),
                       }),
                       ...(roundType === SendMessageType.Retry && {
-                        userTurnRecordedByHost: true,
                         ...(historyPromptId !== undefined && {
                           historyPromptId,
                         }),
                         ...(promptAdmission && { promptAdmission }),
-                      }),
-                      // The session recorded the continuation's message.
-                      ...(roundType === SendMessageType.Goal && {
-                        userTurnRecordedByHost: true,
                       }),
                       ...(goalTurn &&
                         !goalPermitReleasedByClient &&
@@ -9244,7 +9285,7 @@ export class Session implements SessionContext {
     type: SendMessageType.Cron | SendMessageType.Notification;
     /** The send options of the turn's first round. */
     options: Partial<SendMessageOptions>;
-    interactionSpanByHost: boolean;
+    interactionSpan?: SendMessageOptions['interactionSpan'];
     promptId: string;
     signal: AbortSignal;
     responseCapture: AgentResponseCapture;
@@ -9316,7 +9357,9 @@ export class Session implements SessionContext {
               ? SendMessageType.ToolResult
               : SendMessageType.Steer,
           options: {
-            ...(turn.interactionSpanByHost && { interactionSpanByHost: true }),
+            ...(turn.interactionSpan && {
+              interactionSpan: turn.interactionSpan,
+            }),
             ...(first && turn.options),
           },
           stopPolicies,
@@ -13099,22 +13142,25 @@ export class Session implements SessionContext {
               // as for the other surfaces. The session records the prompt
               // once it reached history.
               if (this.config.isUnifiedAgentLoopEnabled?.() === true) {
+                const cronRecord: UserTurnRecord = {
+                  kind: 'cron',
+                  message: [{ text: modelText }],
+                  displayText: echoText,
+                };
                 const result = await this.#runAutomaticTurnOnSharedLoop({
                   message: { role: 'user', parts: [{ text: modelText }] },
                   type: SendMessageType.Cron,
                   options: {
-                    userTurnRecordedByHost: true,
+                    userTurn: { promptId },
                     todoWorkChainId: item.todoWorkChainId,
                   },
-                  interactionSpanByHost: true,
+                  interactionSpan: getActiveInteractionSpan(promptId),
                   promptId,
                   signal: ac.signal,
                   responseCapture,
                   label: 'cron/loop tick',
                   onMessageKept: (sent) => {
-                    this.config
-                      .getChatRecordingService()
-                      ?.recordCronPrompt([{ text: modelText }], echoText);
+                    recordUserTurn(this.config, cronRecord);
                     // Committed once the block reached the model, so the next
                     // tick can tell it unchanged.
                     if (sent && loopTick) {
@@ -14476,17 +14522,18 @@ export class Session implements SessionContext {
             notificationParts.unshift({ text: droppedSummary.modelText });
           }
           if (!item.persisted) {
-            const recording = this.config.getChatRecordingService();
             if (droppedSummary) {
-              recording?.recordNotification(
-                [{ text: droppedSummary.modelText }],
-                droppedSummary.displayText,
-              );
+              recordUserTurn(this.config, {
+                kind: 'notification',
+                message: [{ text: droppedSummary.modelText }],
+                displayText: droppedSummary.displayText,
+              });
             }
-            recording?.recordNotification(
-              [{ text: item.modelText }],
-              item.displayText,
-              {
+            recordUserTurn(this.config, {
+              kind: 'notification',
+              message: [{ text: item.modelText }],
+              displayText: item.displayText,
+              backgroundTask: {
                 taskId: item.taskId,
                 sourceTurnId: item.sourceTurnId,
                 status: item.status,
@@ -14494,14 +14541,13 @@ export class Session implements SessionContext {
                 toolUseId: item.toolUseId,
                 ...item.structured,
               },
-            );
+            });
           } else if (droppedSummary) {
-            this.config
-              .getChatRecordingService()
-              ?.recordNotification(
-                [{ text: droppedSummary.modelText }],
-                droppedSummary.displayText,
-              );
+            recordUserTurn(this.config, {
+              kind: 'notification',
+              message: [{ text: droppedSummary.modelText }],
+              displayText: droppedSummary.displayText,
+            });
           }
 
           const notificationReminders =
@@ -14527,10 +14573,9 @@ export class Session implements SessionContext {
               message: nextMessage,
               type: SendMessageType.Notification,
               options: {
-                userTurnRecordedByHost: true,
+                userTurn: { promptId },
                 todoWorkChainId: item.todoWorkChainId,
               },
-              interactionSpanByHost: false,
               promptId,
               signal: ac.signal,
               responseCapture: {
