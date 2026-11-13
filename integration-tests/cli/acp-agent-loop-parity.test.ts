@@ -226,9 +226,15 @@ function modelRequests(server: FakeOpenAIServer, dir: string): unknown[] {
   );
 }
 
-/** Leaves out `available_commands_update`, sent on its own schedule. */
-const isPromptUpdate = (update: unknown) =>
-  (update as JsonObject)?.['sessionUpdate'] !== 'available_commands_update';
+/** Leaves out scheduled command updates and loop-specific Hook diagnostics. */
+const isPromptUpdate = (update: unknown) => {
+  const frame = update as JsonObject | undefined;
+  const meta = frame?.['_meta'] as JsonObject | undefined;
+  return (
+    frame?.['sessionUpdate'] !== 'available_commands_update' &&
+    meta?.['hookLifecycle'] === undefined
+  );
+};
 
 /** The usage and the request end a finished response reports. */
 const isResponseEnd = (update: unknown) => {
