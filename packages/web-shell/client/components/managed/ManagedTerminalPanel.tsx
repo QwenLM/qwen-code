@@ -125,6 +125,7 @@ function ManagedTerminalSurface({
     let restoring: ReturnType<typeof createTerminal> | undefined;
     let ticketRequest: AbortController | undefined;
     let releaseRequested = false;
+    let releaseDelivered = false;
     let releaseFallbackStarted = false;
     let connectStarted = false;
 
@@ -367,6 +368,7 @@ function ManagedTerminalSurface({
           // The dialog closed while this handshake was in flight; deliver
           // the release now that the socket can carry it.
           ws.send(CONTROL_FRAME_PREFIX + JSON.stringify({ type: 'release' }));
+          releaseDelivered = true;
           ws.close();
           return;
         }
@@ -397,11 +399,15 @@ function ManagedTerminalSurface({
       ws.onclose = (event) => {
         if (wsRef.current === ws) wsRef.current = null;
         if (releaseRequested) {
-          // 4004 confirms the worker released the PTY; any other answer
-          // means the frame may not have landed, so the dedicated
-          // connection retries. Non-retryable codes other than 4004 mean
-          // the terminal is already gone — nothing left to release.
-          if (!NON_RETRYABLE_CLOSE_CODES.has(event.code)) {
+          // A release frame already sent on a live socket is delivered by
+          // the closing handshake, so the local close code (1000/1005)
+          // that follows it must not start a second release connection.
+          // Only when no frame was delivered does the close code decide:
+          // 4004 confirms the worker released the PTY, other non-retryable
+          // codes mean the terminal is already gone, and anything else
+          // means the frame may not have landed — the dedicated connection
+          // retries.
+          if (!releaseDelivered && !NON_RETRYABLE_CLOSE_CODES.has(event.code)) {
             startReleaseFallback();
           }
           return;
@@ -467,6 +473,7 @@ function ManagedTerminalSurface({
         ws?.close();
       } else if (ws?.readyState === WebSocket.OPEN) {
         ws.send(CONTROL_FRAME_PREFIX + JSON.stringify({ type: 'release' }));
+        releaseDelivered = true;
         ws.close();
       } else if (!ws || ws.readyState !== WebSocket.CONNECTING) {
         // No live socket can carry the release frame (ticket still in

@@ -72,8 +72,13 @@ class FakeWebSocket {
   onerror: (() => void) | null = null;
   onclose: ((event: CloseEvent) => void) | null = null;
   readonly send = vi.fn();
-  readonly close = vi.fn((_code?: number, _reason?: string) => {
+  readonly close = vi.fn((code?: number, _reason?: string) => {
+    if (this.readyState === FakeWebSocket.CLOSED) return;
     this.readyState = FakeWebSocket.CLOSED;
+    // A real browser reports a local close() as a normal closure (1000, or
+    // the code passed) through onclose; deliver it so the panel's close
+    // handling is exercised rather than silently skipped.
+    this.onclose?.({ code: code ?? 1000 } as CloseEvent);
   });
 
   constructor(
@@ -378,6 +383,16 @@ describe('ManagedTerminalPanel', () => {
     expect(ws.send).toHaveBeenCalledWith('\x00{"type":"release"}');
     expect(ws.close).toHaveBeenCalled();
     expect(terminalMock.dispose).toHaveBeenCalled();
+    // The local close() delivers onclose({code:1000}); because the release
+    // frame already went out on the live socket, that normal closure must
+    // not mint a second ticket / release connection (which would re-create
+    // and kill a PTY under the reused terminal id). Drain any fallback the
+    // close could have started, then assert none was.
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(ticketFn).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the dialog open when Escape reaches the terminal', async () => {
