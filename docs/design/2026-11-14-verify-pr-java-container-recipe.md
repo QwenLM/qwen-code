@@ -12,7 +12,10 @@ recipe below is the follow-up work it names.
 provides: a credential-free container or VM. The skill's local Docker recipe
 uses `node:22-bookworm`, which carries no JDK and no Maven. A round on a
 Java-heavy PR (anything under `packages/managed-agent-server/`) therefore has
-no ready container path.
+no ready container in the local recipe. The sandboxed CI lane already
+provisions Temurin JDK 21 + Maven 3.9.11 for diffs touching
+`packages/sdk-java/` or `packages/managed-agent-server/`; what is missing is
+the local path.
 
 Measured consequence: two consecutive local rounds on PR #16866 (r10, r11)
 ran the entire Java battery, mutation matrix, and JS suites on the
@@ -105,9 +108,16 @@ A second recipe in the skill, selected when the delta touches
   pass (existing rule).
 - The seed step runs on the host with the maintainer's normal Maven settings
   and is a trusted operation; it must not execute PR code (resolution only).
-  Maven loads `.mvn/extensions.xml` core extensions at startup, so the seed
-  must run against a copy with the PR's `.mvn/` directory removed —
-  otherwise "resolution only" executes PR-planted code on the host.
+  Name the check, not a directory to delete: Maven loads `.mvn/` core
+  extensions at startup, **and** resolves and loads pom-declared build
+  extensions (`<build><extensions>`, and any `<plugin>` with
+  `<extensions>true</extensions>`, in the root and every module pom) while
+  it builds the project model — before any goal runs. The seed copy must
+  strip or refuse both surfaces, or the seed must run inside a
+  credential-free container whose egress is limited to the configured
+  mirror, with the resulting repository copied out. The trusted mirror
+  settings stay host-side either way (the container never mounts
+  `settings.xml`).
 
 ## Risks
 
@@ -128,6 +138,9 @@ A second recipe in the skill, selected when the delta touches
 - A/B parity: the same battery's counts match a host run of the same head
   (the recipe changes the boundary, not the measurements).
 - Negative control: `--require-isolation` still exits 4 outside the boundary.
+- Negative control (seed): a fixture pom whose build extension writes a
+  marker file when loaded; the documented seed procedure must leave no
+  marker on the host.
 
 ## Acceptance criteria
 

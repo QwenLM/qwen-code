@@ -81,7 +81,10 @@ Checks a local round against the rules the CI publisher enforces:
     and lists at least one commit (an empty set makes the claim vacuous)
   - boundary.json declares where the untrusted PR code ran: mode container
     with a non-empty detail, or mode waived with the approving maintainer (by)
-    and the reason; a round without the declaration is refused
+    and the reason; a round without the declaration is refused. On the CI
+    entry path ($QWEN_VERIFY_CONTEXT set) an absent declaration is only a
+    warning: the publish job writes the CI lane's own before trusting the
+    verdict
 
 and warns (without failing) when the report does not lead with its verdict and
 head OID, when the verdict line is a heading (GitHub renders the whole
@@ -253,8 +256,17 @@ function leadShapeWarnings(text, verdict, label) {
 /**
  * Pure check over already-read artifacts. `files` carries raw text or null;
  * `evidence` is the PNG file names under evidence/.
+ * `publisherOwnsBoundary` marks the CI entry path, where the publish job
+ * writes the declaration after the round finishes: a round's own pre-finish
+ * self-check (which a base-pinned skill still instructs) must not see a
+ * false error for a file only the later job writes.
  */
-export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
+export function checkArtifacts({
+  files,
+  evidence = [],
+  expectedHead = null,
+  publisherOwnsBoundary = false,
+}) {
   const errors = [];
   const warnings = [];
 
@@ -420,7 +432,17 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
   }
 
   errors.push(...checkMutationCoverage(files.mutations).errors);
-  errors.push(...checkBoundary(files.boundary).errors);
+  const boundaryAbsent =
+    files.boundary === null ||
+    files.boundary === undefined ||
+    files.boundary.trim() === '';
+  if (publisherOwnsBoundary && boundaryAbsent) {
+    warnings.push(
+      'boundary.json is absent on the CI entry path ($QWEN_VERIFY_CONTEXT): the publish job writes the CI lane declaration before it trusts the verdict',
+    );
+  } else {
+    errors.push(...checkBoundary(files.boundary).errors);
+  }
 
   if (files.report && files.report.trim() !== '') {
     const report = normalizeNewlines(files.report);
@@ -581,7 +603,15 @@ function main(argv) {
     }
   }
 
-  const result = checkArtifacts({ files, evidence, expectedHead });
+  // The CI entry path is defined by $QWEN_VERIFY_CONTEXT; there the publish
+  // job owns the declaration, so an absent boundary.json is a warning for
+  // the round's own pre-finish self-check, not an error it cannot clear.
+  const result = checkArtifacts({
+    files,
+    evidence,
+    expectedHead,
+    publisherOwnsBoundary: !!process.env.QWEN_VERIFY_CONTEXT,
+  });
   if (snapshotWarning) result.warnings.unshift(snapshotWarning);
   const lines = [`verify-pr check: ${dir}`];
   if (expectedHead) lines.push(`  head source: ${snapshotPath}`);

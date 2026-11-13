@@ -21,6 +21,7 @@ import {
   completeRound,
   duplicateHead,
   readState,
+  releaseRound,
   startRound,
   statePath,
 } from '../../scripts/verify-pr-watch-state.mjs';
@@ -64,13 +65,20 @@ const COMPLETE = [
 describe('startRound', () => {
   it('writes the in-flight state with a UTC timestamp', () => {
     const root = makeRoot();
-    const result = startRound(root, {
-      pr: 16866,
-      head: HEAD,
-      round: 11,
-      artifactDir: 'tmp/pr16866-verify-20261114-020119',
-      repo: 'QwenLM/qwen-code',
-    });
+    // The clock seam, not the string shape: a local wall clock stamped with
+    // Z passes any regex/round-trip but fails this equality.
+    const now = new Date('2026-11-14T02:01:19.123Z');
+    const result = startRound(
+      root,
+      {
+        pr: 16866,
+        head: HEAD,
+        round: 11,
+        artifactDir: 'tmp/pr16866-verify-20261114-020119',
+        repo: 'QwenLM/qwen-code',
+      },
+      now,
+    );
     expect(result.duplicate).toBeUndefined();
     const state = readState(root, 16866);
     expect(state).toMatchObject({
@@ -83,17 +91,20 @@ describe('startRound', () => {
       commentId: null,
       artifactDir: 'tmp/pr16866-verify-20261114-020119',
     });
-    // The manual write this replaces stamped local time with a Z suffix.
-    expect(state.startedAt).toMatch(
-      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
-    );
-    expect(new Date(state.startedAt).toISOString()).toBe(state.startedAt);
+    expect(state.startedAt).toBe(now.toISOString());
   });
 
   it('preserves the previous verified heads and repo', () => {
     const root = makeRoot();
-    startRound(root, { pr: 1, head: PREV, round: 9, artifactDir: 'r9' });
+    startRound(root, {
+      pr: 1,
+      head: PREV,
+      round: 9,
+      artifactDir: 'r9',
+      repo: 'QwenLM/qwen-code',
+    });
     completeRound(root, { pr: 1, head: PREV, round: 9, verdict: 'findings' });
+    // The second start omits repo: the carry-over branch must keep it.
     const result = startRound(root, {
       pr: 1,
       head: HEAD,
@@ -103,7 +114,7 @@ describe('startRound', () => {
     expect(result.duplicate).toBeUndefined();
     expect(readState(root, 1)).toMatchObject({
       verifiedHead: PREV,
-      repo: null,
+      repo: 'QwenLM/qwen-code',
       round: 10,
       inFlight: true,
     });
@@ -167,14 +178,20 @@ describe('completeRound', () => {
     startRound(root, { pr: 1, head: PREV, round: 9, artifactDir: 'r9' });
     completeRound(root, { pr: 1, head: PREV, round: 9, verdict: 'findings' });
     startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
-    completeRound(root, {
-      pr: 1,
-      head: HEAD,
-      round: 10,
-      verdict: 'merge-ready',
-      commentId: '6845910895',
-    });
-    expect(readState(root, 1)).toMatchObject({
+    const now = new Date('2026-11-14T03:20:47.000Z');
+    completeRound(
+      root,
+      {
+        pr: 1,
+        head: HEAD,
+        round: 10,
+        verdict: 'merge-ready',
+        commentId: '6845910895',
+      },
+      now,
+    );
+    const state = readState(root, 1);
+    expect(state).toMatchObject({
       verifiedHead: HEAD,
       previousHead: PREV,
       round: 10,
@@ -184,6 +201,9 @@ describe('completeRound', () => {
       inFlightHead: null,
       artifactDir: 'r10',
     });
+    // The completion write is the step two rounds skipped; pin its instant
+    // through the clock seam, not the string shape.
+    expect(state.completedAt).toBe(now.toISOString());
   });
 
   it('keeps previousHead when the same head is re-recorded', () => {
@@ -237,6 +257,56 @@ describe('completeRound', () => {
   });
 });
 
+describe('releaseRound', () => {
+  it('clears a dead round marker and keeps the verified heads', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: PREV, round: 9, artifactDir: 'r9' });
+    completeRound(root, { pr: 1, head: PREV, round: 9, verdict: 'findings' });
+    startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
+    const result = releaseRound(root, { pr: 1, head: HEAD });
+    expect(result.released).toBe(true);
+    expect(result.head).toBe(HEAD);
+    expect(typeof result.startedAt).toBe('string');
+    const state = readState(root, 1);
+    expect(state).toMatchObject({
+      verifiedHead: PREV,
+      inFlight: false,
+      inFlightHead: null,
+    });
+    // The head is startable again after the release.
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' })
+        .duplicate,
+    ).toBeUndefined();
+  });
+
+  it('refuses a marker belonging to another head', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
+    const result = releaseRound(root, { pr: 1, head: PREV });
+    expect(result.mismatch).toBe(true);
+    expect(result.recorded).toBe(HEAD);
+    expect(readState(root, 1).inFlight).toBe(true);
+  });
+
+  it('accepts a short OID prefix of the recorded marker', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
+    expect(releaseRound(root, { pr: 1, head: HEAD.slice(0, 8) }).released).toBe(
+      true,
+    );
+  });
+
+  it('is a no-op without a marker', () => {
+    const root = makeRoot();
+    expect(releaseRound(root, { pr: 1 }).released).toBe(false);
+    startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
+    completeRound(root, { pr: 1, head: HEAD, round: 10, verdict: 'blocked' });
+    expect(releaseRound(root, { pr: 1 }).released).toBe(false);
+    expect(readState(root, 1).verifiedHead).toBe(HEAD);
+  });
+});
+
 describe('duplicateHead', () => {
   it('matches by prefix in both directions', () => {
     expect(duplicateHead({ verifiedHead: HEAD }, HEAD.slice(0, 8))).toBe(
@@ -273,6 +343,22 @@ describe('CLI', () => {
     const afterComplete = run(root, [...START, '--artifact-dir', 'r12']);
     expect(afterComplete.status).toBe(3);
     expect(afterComplete.stderr).toMatch(/already verified/);
+  });
+
+  it('release recovers a dead round so the head can start again', () => {
+    const root = makeRoot();
+    expect(run(root, [...START, '--artifact-dir', 'r11']).status).toBe(0);
+    expect(run(root, [...START, '--artifact-dir', 'dup']).status).toBe(3);
+    const foreign = run(root, ['16866', '--release', '--head', PREV]);
+    expect(foreign.status).toBe(3);
+    expect(foreign.stderr).toMatch(/refusing to release/);
+    const released = run(root, ['16866', '--release', '--head', HEAD]);
+    expect(released.status).toBe(0);
+    expect(released.stdout).toMatch(/released in-flight marker/);
+    const noop = run(root, ['16866', '--release']);
+    expect(noop.status).toBe(0);
+    expect(noop.stdout).toMatch(/no in-flight marker/);
+    expect(run(root, [...START, '--artifact-dir', 'r12']).status).toBe(0);
   });
 
   it('rejects bad usage with exit 2', () => {

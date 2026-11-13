@@ -63,7 +63,10 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   the completing head, so completing Y never wipes X's still-running marker
   — the bound-delivery design dedupes redelivered head-change events against
   it. `--start` writes the sha **before** the round begins, so a round that
-  dies still does not replay the same head.
+  dies still does not replay the same head. A round that dies after
+  `--start` is recovered with `--release [--head <oid>]`, which clears the
+  marker without recording a verdict and refuses a marker belonging to
+  another head — the same recovery the gate provides for a dead claim.
 
 ## Design decisions
 

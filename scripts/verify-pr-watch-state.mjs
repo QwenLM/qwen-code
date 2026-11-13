@@ -22,6 +22,8 @@
  *   node verify-pr-watch-state.mjs <pr> --complete --head <oid> --round <n> \
  *     --verdict <word> [--comment-id <id>] [--artifact-dir <dir>] \
  *     [--state-root <dir>]
+ *   node verify-pr-watch-state.mjs <pr> --release [--head <oid>] \
+ *     [--state-root <dir>]
  *
  * `--start` exits 3 when the file already records the head as verified or
  * in flight: that round answers instead of a duplicate. Dedup is per head:
@@ -29,10 +31,14 @@
  * flight, and that start takes the single in-flight slot. `--complete`
  * records the head as verified, rotates the previous verified head into
  * `previousHead`, and clears the in-flight marker only when it belongs to
- * the completing head. The state root defaults to the clone's main
- * worktree, the same place the watch gate keeps its cursor.
+ * the completing head. `--release` is the recovery path for a round that
+ * died after `--start`: it clears the marker without recording a verdict,
+ * and with `--head` refuses a marker belonging to another head. The state
+ * root defaults to the clone's main worktree, the same place the watch
+ * gate keeps its cursor.
  *
- * Exit codes: 0 written, 1 I/O error, 2 usage, 3 duplicate head.
+ * Exit codes: 0 written, 1 I/O error, 2 usage, 3 duplicate head / foreign
+ * marker.
  */
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
@@ -154,14 +160,43 @@ export function completeRound(
   return { path: writeState(stateRoot, pr, state), state };
 }
 
+/**
+ * Recovery for a round that died after --start: without it the head stays
+ * in flight forever, every later fire exits 3, and the skill forbids the
+ * hand-edit that used to be the escape hatch. Mirrors the watch gate's
+ * --release for a dead claim. A named head must prefix-match the recorded
+ * marker, so one round cannot release another's.
+ */
+export function releaseRound(stateRoot, { pr, head }) {
+  const existing = readState(stateRoot, pr);
+  if (!existing?.inFlight) return { released: false };
+  if (head && !sameCommit(existing.inFlightHead, head)) {
+    return { mismatch: true, recorded: existing.inFlightHead };
+  }
+  const state = {
+    ...existing,
+    inFlightHead: null,
+    inFlight: false,
+  };
+  writeState(stateRoot, pr, state);
+  return {
+    released: true,
+    head: existing.inFlightHead,
+    startedAt: existing.startedAt,
+  };
+}
+
 const HELP = `Usage:
   node verify-pr-watch-state.mjs <pr> --start --head <oid> --round <n> --artifact-dir <dir> [--repo <owner>/<repo>] [--state-root <dir>]
   node verify-pr-watch-state.mjs <pr> --complete --head <oid> --round <n> --verdict <word> [--comment-id <id>] [--artifact-dir <dir>] [--state-root <dir>]
+  node verify-pr-watch-state.mjs <pr> --release [--head <oid>] [--state-root <dir>]
 
 Owns .qwen/tmp/verify-pr-watch-<pr>.json so rounds never hand-write it.
 --start exits 3 when the head is already verified or in flight.
+--release clears a dead round's in-flight marker (verifiedHead is kept);
+with --head it refuses a marker belonging to another head (exit 3).
 
-Exit codes: 0 written, 1 I/O error, 2 usage, 3 duplicate head.
+Exit codes: 0 written, 1 I/O error, 2 usage, 3 duplicate head / foreign marker.
 `;
 
 function parseArgs(argv) {
@@ -169,6 +204,7 @@ function parseArgs(argv) {
     pr: null,
     start: false,
     complete: false,
+    release: false,
     head: null,
     round: null,
     verdict: null,
@@ -181,6 +217,7 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === '--start') out.start = true;
     else if (arg === '--complete') out.complete = true;
+    else if (arg === '--release') out.release = true;
     else if (arg === '--head') out.head = argv[++i];
     else if (arg === '--round') out.round = Number(argv[++i]);
     else if (arg === '--verdict') out.verdict = argv[++i];
@@ -194,15 +231,18 @@ function parseArgs(argv) {
   if (!Number.isInteger(out.pr) || out.pr <= 0) {
     throw new Error(`a positive PR number is required\n\n${HELP}`);
   }
-  if (out.start === out.complete) {
+  if ([out.start, out.complete, out.release].filter(Boolean).length !== 1) {
     throw new Error(
-      `exactly one of --start / --complete is required\n\n${HELP}`,
+      `exactly one of --start / --complete / --release is required\n\n${HELP}`,
     );
   }
-  if (!OID.test(out.head ?? '')) {
+  if (out.head !== null && !OID.test(out.head)) {
     throw new Error(`--head must be a 7-40 character hex OID\n\n${HELP}`);
   }
-  if (!Number.isInteger(out.round) || out.round <= 0) {
+  if (!out.release && !OID.test(out.head ?? '')) {
+    throw new Error(`--head is required\n\n${HELP}`);
+  }
+  if (!out.release && (!Number.isInteger(out.round) || out.round <= 0)) {
     throw new Error(`--round must be a positive integer\n\n${HELP}`);
   }
   if (out.start && !out.artifactDir) {
@@ -241,10 +281,23 @@ function main(argv) {
       process.stdout.write(
         `verify-pr watch-state: PR ${args.pr} round ${args.round} in flight at ${result.path}\n`,
       );
-    } else {
+    } else if (args.complete) {
       const result = completeRound(root, args);
       process.stdout.write(
         `verify-pr watch-state: PR ${args.pr} round ${args.round} verified ${args.head} (${args.verdict}) at ${result.path}\n`,
+      );
+    } else {
+      const result = releaseRound(root, args);
+      if (result.mismatch) {
+        process.stderr.write(
+          `verify-pr watch-state: PR ${args.pr} in-flight marker belongs to ${result.recorded}, not ${args.head}; refusing to release another round's marker\n`,
+        );
+        return 3;
+      }
+      process.stdout.write(
+        result.released
+          ? `verify-pr watch-state: PR ${args.pr} released in-flight marker for ${result.head} (started ${result.startedAt})\n`
+          : `verify-pr watch-state: PR ${args.pr} has no in-flight marker to release\n`,
       );
     }
     return 0;

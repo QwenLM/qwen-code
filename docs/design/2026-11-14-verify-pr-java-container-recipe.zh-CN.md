@@ -6,7 +6,7 @@
 
 ## 问题
 
-`/verify-pr` 执行不可信的 PR 代码，要求与 CI 同等的隔离：无凭据的容器或 VM。skill 的本地 Docker 配方使用 `node:22-bookworm`，其中没有 JDK 也没有 Maven。因此 Java 重 PR（`packages/managed-agent-server/` 下的任何改动）的验证轮没有现成的容器路径。
+`/verify-pr` 执行不可信的 PR 代码，要求与 CI 同等的隔离：无凭据的容器或 VM。skill 的本地 Docker 配方使用 `node:22-bookworm`，其中没有 JDK 也没有 Maven。因此 Java 重 PR（`packages/managed-agent-server/` 下的任何改动）的验证轮在本地配方里没有现成的容器。沙箱化 CI 车道已为触及 `packages/sdk-java/` 或 `packages/managed-agent-server/` 的 diff 准备 Temurin JDK 21 + Maven 3.9.11；缺的是本地路径。
 
 实测后果：PR #16866 的连续两个本地轮次（r10、r11）把整个 Java 电池、变异矩阵和 JS 套件都跑在维护者的宿主机上——没有 `--require-isolation`、没有容器、没有豁免，两份报告也都没有边界行。仅靠文字规则没能阻止这种静默降级。本次变更让降级变得可见（checker 拒绝没有 `boundary.json` 的轮次）；本设计要消除的是降级的理由。
 
@@ -46,7 +46,7 @@
 
 - 容器看不到任何宿主凭据；挂载的仓库只有依赖 jar。
 - `--require-isolation` 必须在内部 exit 0；仅有容器标记不算通过（既有规则）。
-- 预置步骤在宿主上以维护者正常的 Maven 配置运行，属可信操作；不得执行 PR 代码（只做解析）。Maven 启动时会加载 `.mvn/extensions.xml` 核心扩展，因此预置必须跑在移除了 PR `.mvn/` 目录的副本上——否则「只做解析」会在宿主上执行 PR 植入的代码。
+- 预置步骤在宿主上以维护者正常的 Maven 配置运行，属可信操作；不得执行 PR 代码（只做解析）。要点名检查，而不是只点名要删的目录：Maven 启动时会加载 `.mvn/` 核心扩展，**并且**在构建项目模型时解析并加载 pom 声明的构建扩展（`<build><extensions>`，以及根与每个模块 pom 里带 `<extensions>true</extensions>` 的 `<plugin>`）——早于任何 goal 运行。预置副本必须剥离或拒绝这两个入口，或者让预置在凭证隔离、仅允许配置镜像出网的容器内完成，再把产出的仓库拷贝出来。无论哪种方式，可信的镜像配置都留在宿主侧（容器绝不挂载 `settings.xml`）。
 
 ## 风险
 
@@ -59,6 +59,7 @@
 - 一个真实 Java 重轮次（某个 `managed-agent-server` PR）在配方内跑编译 + 电池 + 至少一条变异；门禁 exit 0，`boundary.json` 记录 container 模式。
 - A/B 一致性：同一电池在同一 head 上的计数与宿主运行一致（配方改变的是边界，不是测量）。
 - 负对照：边界之外 `--require-isolation` 仍 exit 4。
+- 负对照（预置）：一个夹具 pom，其构建扩展在被加载时写标记文件；按文档的预置流程跑完后，宿主上必须没有该标记。
 
 ## 验收标准
 

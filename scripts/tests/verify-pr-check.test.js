@@ -620,6 +620,28 @@ describe('checkBoundary', () => {
     });
     expect(result.errors.join('\n')).toMatch(/boundary\.json is missing/);
   });
+
+  // On the CI entry path the publish job writes the declaration after the
+  // round finishes; a base-pinned skill still tells the round to self-check
+  // before finishing, and that check must not see an error it cannot clear.
+  it('warns instead of erroring when the publisher owns the declaration', () => {
+    const result = checkArtifacts({
+      files: validFiles({ boundary: null }),
+      evidence: ['01-ab-cells.png'],
+      publisherOwnsBoundary: true,
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.join('\n')).toMatch(/CI entry path/);
+  });
+
+  it('still refuses a malformed declaration when the publisher owns it', () => {
+    const result = checkArtifacts({
+      files: validFiles({ boundary: '{' }),
+      evidence: ['01-ab-cells.png'],
+      publisherOwnsBoundary: true,
+    });
+    expect(result.errors.join('\n')).toMatch(/not valid JSON/);
+  });
 });
 
 // Three rounds of PR #15984 opened with the title and the whole verdict
@@ -759,6 +781,24 @@ describe('comment.md footer', () => {
 describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
   const run = (dir) =>
     spawnSync(process.execPath, [SCRIPT, dir], { encoding: 'utf8' });
+
+  it('downgrades an absent declaration to a warning under QWEN_VERIFY_CONTEXT', () => {
+    const dir = makeArtifactDir(validFiles({ boundary: undefined }), [
+      '01-ab-cells.png',
+    ]);
+    const ci = spawnSync(process.execPath, [SCRIPT, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '/verify-context/pr.json' },
+    });
+    expect(ci.status).toBe(0);
+    expect(ci.stdout).toMatch(/warn.*CI entry path/);
+    const local = spawnSync(process.execPath, [SCRIPT, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+    expect(local.status).toBe(1);
+    expect(local.stdout).toMatch(/boundary\.json is missing/);
+  });
 
   it('exits 0 on a consistent round and 1 on a contradiction', () => {
     const ok = run(makeArtifactDir(validFiles(), ['01-ab-cells.png']));

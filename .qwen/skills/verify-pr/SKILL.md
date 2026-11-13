@@ -18,7 +18,11 @@ Two entry paths share the contract below.
 
 - **Sandboxed lane** — comment `@qwen-code /verify` on the PR. The workflow
   supplies `$QWEN_VERIFY_CONTEXT`, an already-built tree and the time budget,
-  and publishes the report. There is nothing to prepare.
+  and publishes the report. There is nothing to prepare. The publish job
+  owns `boundary.json` on this path: it writes the CI lane's declaration
+  before running the checker, and the checker treats an absent declaration
+  as a warning while `$QWEN_VERIFY_CONTEXT` is set — so the round's own
+  pre-finish self-check never fails on a file only the later job writes.
 - **Maintainer round on a workstation** — `/verify-pr <n>`, starting with
   `cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>`
   (the trusted copy, with the PR clone only as its
@@ -189,10 +193,15 @@ or the CI publish job). The two shapes:
   alone did not stop them.
 
 The standard Docker recipe below is `node:22-bookworm` and carries no JDK or
-Maven, so a Java-heavy round has no ready container path today; until the
-Java recipe lands (see `docs/design/2026-11-14-verify-pr-java-container-recipe.md`),
-such a round either builds a JDK-equipped credential-free boundary or asks
-for the recorded waiver — never a silent host fallback.
+Maven, so a Java-heavy _local_ round has no ready container in this recipe.
+Until the Java recipe lands (see
+`docs/design/2026-11-14-verify-pr-java-container-recipe.md`), prefer the
+sandboxed `@qwen-code /verify` lane: it provisions Temurin JDK 21 + Maven
+3.9.11 when the diff touches `packages/sdk-java/` or
+`packages/managed-agent-server/` — those two paths only, and only when the
+toolchain install succeeded. The alternative is a JDK-equipped
+credential-free boundary you build yourself; the recorded waiver is the
+last resort, never a silent host fallback.
 
 Run `cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>`
 on the host before anything else: it fetches the metadata snapshot, resolves and verifies
@@ -567,7 +576,14 @@ register it with
 **before** starting, so a round that dies does not replay the same head;
 exit 3 means the file already records that head or marks a round in flight,
 and the fire is skipped. Record the finished round with the same script's
-`--complete` form. On `action: "stop"` (merged or closed),
+completion form:
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--comment-id <id>]`
+— `--verdict` is one of `merge-ready | findings | blocked | inconclusive`,
+verbatim; a completion without it exits 2 and leaves the head in flight
+forever. If a round dies after `--start`, recover its marker with
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha>`
+before starting the next round for that head — never hand-edit the state
+file. On `action: "stop"` (merged or closed),
 delete the task with `cron_delete`, drop the claim with
 `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release`, and stop
 watching; drop it too when task creation fails. Any other event — a comment, a
@@ -719,7 +735,12 @@ ambiguous rather than verify a guessed PR. Then, in order:
    that JSON:
    `node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --artifact-dir <dir> --repo <owner>/<repo>`.
    Exit 3 means the file already records `H` as verified or in flight: let
-   that round answer instead of starting a duplicate. The write happens
+   that round answer instead of starting a duplicate. When the in-flight
+   round is dead (killed session, OOM, aborted turn), nothing will answer:
+   recover the marker with
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H>`
+   and start again — the release keeps `verifiedHead` and refuses a marker
+   belonging to another head. The write happens
    **before** the round starts — the same write-before-start rule the watch
    prompt follows, so a watch fire during the manual round skips `H`. Once
    the round completes, record it with
@@ -2017,10 +2038,12 @@ workflow globs). It must contain:
   `{"mode":"container","detail":…}` once the isolation gate passes, or
   `{"mode":"waived","by":…,"reason":…}` for a host round the maintainer
   explicitly approved (see the local invocation contract). The checker
-  refuses a round without it. Whoever operates the boundary writes the
-  declaration, so a round never depends on the agent remembering this: the
-  CI publish job writes the CI lane's own, and the local container recipe's
-  host check step writes the container it built.
+  refuses a round without it — except on the CI entry path
+  (`$QWEN_VERIFY_CONTEXT` set), where an absent declaration is a warning
+  because the publish job writes it later. Whoever operates the boundary
+  writes the declaration, so a round never depends on the agent remembering
+  this: the CI publish job writes the CI lane's own, and the local container
+  recipe's host check step writes the container it built.
 - Harness scripts and raw logs (per-cell stdout/stderr, build logs).
 - `evidence/*.png` — image evidence. **Produce these whenever you ran a
   harness**, not only for TUI work. A table in the report is your _claim_
@@ -2090,7 +2113,10 @@ head behaviour the PR got wrong. Measured example: a round reproduced a
 regression, asserted that the head showed it, and published `blocked` over
 4382 passes and 0 failures. The CI publisher runs `verify-pr-check.mjs` before
 it trusts any verdict, so run it on the artifact dir before you finish, in
-either path. The publisher reads only the checker's last line and never
+either path. On the CI path (`$QWEN_VERIFY_CONTEXT` set) an absent
+`boundary.json` is only a warning in that self-check — the publish job
+writes the declaration later; do not withhold or downgrade a verdict over
+it. The publisher reads only the checker's last line and never
 echoes warnings, so a gates-size warning reaches nobody but you — record
 the suites under `gates` before publishing, or, if the round ran none, say in
 the report what the count holds.
