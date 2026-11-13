@@ -92,6 +92,8 @@ qwen serve --no-web
 
 **Open the Web Shell UI.** Browse to `http://127.0.0.1:4170/` (or start the daemon with `qwen serve --open` to launch it automatically) for the full browser terminal — chat, diffs, commit history, tool calls, and permission prompts. The UI is served at the daemon root on the same origin as the API. The rest of this guide uses raw HTTP so you can script against the API directly.
 
+You can open or refresh the PR watches page directly at `/pr-watches`, including on a bearer-protected daemon. The page document is public; its data requests still require the daemon's normal authentication.
+
 For an authenticated single-user launch without manually creating a token, opt in explicitly:
 
 ```bash
