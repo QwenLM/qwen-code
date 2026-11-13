@@ -85,6 +85,45 @@ const two = 2;
       expect(countOccurrences('你好\n你好', result.oldString)).toBe(2);
     });
 
+    it.each(['n', 't', 'r', 'b', 'f', 'v', '0', '"', "'", '/', '\\'])(
+      'refuses recovery inside a backslash-%s escape',
+      (escape) => {
+        for (const [disk, old] of [
+          [`a\\${escape}${String.raw`\u4f60\u597d`}`, `${escape}你好`],
+          [`${String.raw`\u4f60\u597d`}\\${escape}`, '你好\\'],
+        ]) {
+          expect(normalizeEditStrings(disk, old, 'X')).toEqual({
+            oldString: old,
+            newString: 'X',
+          });
+        }
+      },
+    );
+
+    it.each([
+      [String.raw`p = "\u4f60\u597d";`, '你好', 'C:\\路径'],
+      [String.raw`{"a": "\u4f60\u597d\n"}`, '你好', 'X\\'],
+      [String.raw`\u4f60\u597d`, '你', 'C:\\'],
+      [String.raw`\u4f60;\u4f60\n`, '你', 'X\\'],
+    ])('refuses replacement escape fusion in %j', (disk, old, next) => {
+      expect(normalizeEditStrings(disk, old, next)).toEqual({
+        oldString: old,
+        newString: next,
+      });
+    });
+
+    it.each([
+      [String.raw`C:\\路径`, String.raw`C:\\\u8def\u5f84`],
+      [String.raw`X\\`, String.raw`X\\`],
+      [String.raw`\n\t\u0022 $&`, String.raw`\n\t\u0022 $&`],
+    ])('preserves balanced replacement escapes in %j', (next, expected) => {
+      const disk = String.raw`\u4f60\u597d\n`;
+      expect(normalizeEditStrings(disk, '你好', next)).toEqual({
+        oldString: String.raw`\u4f60\u597d`,
+        newString: expected,
+      });
+    });
+
     it('preserves other escapes and regex characters in recovered text', () => {
       const disk = 'label = "你好"; // [a-z]+ ($&)';
       const old = String.raw`label = "\u4f60\u597d"; // [a-z]+ ($&)`;

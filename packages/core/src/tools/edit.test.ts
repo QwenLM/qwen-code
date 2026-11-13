@@ -30,6 +30,7 @@ import { ApprovalMode } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
+import type { TextFileIo } from '../services/fileSystemService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import {
   canonicalWorktreePath,
@@ -309,6 +310,8 @@ describe('EditTool', () => {
       [String.raw`{"a": "\u4f60\u597d\u518d"}`, '你好\\'],
       [String.raw`\u4f60\u4f60`, '60你'],
       ['你好\\\\', String.raw`\u4f60\u597d` + '\\'],
+      [String.raw`a\n\u4f60\u597d`, 'n你好'],
+      [String.raw`\u4f60\u597d\t`, '你好\\'],
     ])('refuses recovery that splits an escape in %j', async (content, old) => {
       const filePath = path.join(rootDir, 'partial-escape.txt');
       seedFile(filePath, content);
@@ -324,6 +327,30 @@ describe('EditTool', () => {
       expect(readText(filePath)).toBe(content);
       expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
     });
+
+    it.each([
+      [String.raw`p = "\u4f60\u597d";`, '你好', 'C:\\路径'],
+      [String.raw`{"a": "\u4f60\u597d\n"}`, '你好', 'X\\'],
+      [String.raw`\u4f60\u597d`, '你', 'C:\\'],
+      [String.raw`\u4f60;\u4f60\n`, '你', 'X\\'],
+    ])(
+      'refuses replacement escape fusion in %j',
+      async (content, old, next) => {
+        const filePath = path.join(rootDir, 'replacement-escape.txt');
+        seedFile(filePath, content);
+        const params = edit(filePath, old, next, { replace_all: true });
+
+        const proposed = await tool
+          .getModifyContext(new AbortController().signal)
+          .getProposedContent(params);
+        const result = await run(params);
+
+        expect(proposed).toBe(content);
+        expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
+        expect(readText(filePath)).toBe(content);
+        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+      },
+    );
 
     it('refuses a large Unicode recovery without an engine error', async () => {
       const filePath = path.join(rootDir, 'large-unicode.txt');
@@ -343,20 +370,59 @@ describe('EditTool', () => {
       expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
     });
 
-    it('shows the same recovered deletion in the proposal and write', async () => {
-      const filePath = path.join(rootDir, 'unicode-deletion.txt');
-      seedFile(filePath, String.raw`\u4f60\u597d` + '\nnext\n');
-      const params = edit(filePath, '你好', '');
+    it('preserves mixed line endings when a proposal cannot match', async () => {
+      const filePath = path.join(rootDir, 'mixed-proposal.txt');
+      const content = 'first\r\nsecond\n';
+      seedFile(filePath, content);
 
       const proposed = await tool
         .getModifyContext(new AbortController().signal)
-        .getProposedContent(params);
-      const result = await run(params);
+        .getProposedContent(edit(filePath, 'missing', 'replacement'));
 
-      expect(result.error).toBeUndefined();
-      expect(readText(filePath)).toBe('next\n');
-      expect(proposed).toBe(readText(filePath));
+      expect(proposed).toBe(content);
+      expect(readText(filePath)).toBe(content);
     });
+
+    it.each([
+      ['\n', false],
+      ['\r\n', false],
+      ['\n', true],
+      ['\r\n', true],
+    ])(
+      'matches deletion proposal/write for %j with scoped I/O=%s',
+      async (eol, scoped) => {
+        const filePath = path.join(rootDir, 'unicode-deletion.txt');
+        seedFile(filePath, String.raw`\u4f60\u597d` + `${eol}next${eol}`);
+        if (scoped) {
+          const io: TextFileIo = {
+            inspect: vi.fn(async () => ({
+              kind: 'file' as const,
+              response: await fsService.readTextFile({ path: filePath }),
+              stats: fs.statSync(filePath),
+            })),
+            withMutation: async (_path, signal, operation) =>
+              operation({
+                original: await io.inspect(filePath, signal),
+                write: async (params) => {
+                  await fsService.writeTextFile(params);
+                  return fs.statSync(filePath);
+                },
+              }),
+          };
+          Object.assign(fsService, { textFileIo: io });
+        }
+        const params = edit(filePath, '你好', '');
+
+        const proposed = await tool
+          .getModifyContext(new AbortController().signal)
+          .getProposedContent(params);
+        const result = await run(params);
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe(`next${eol}`);
+        expect(proposed).toBe(readText(filePath));
+      },
+    );
   });
 
   describe('fuzzy trailing-newline boundaries', () => {

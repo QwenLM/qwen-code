@@ -35,6 +35,7 @@ import {
   FileEncoding,
   needsUtf8Bom,
   detectLineEnding,
+  ensureCrlfLineEndings,
 } from '../services/fileSystemService.js';
 import type {
   LineEnding,
@@ -1063,6 +1064,9 @@ Expectation for required parameters:
         } else {
           return '';
         }
+        const originalContent = currentContent;
+        const lineEnding = detectLineEnding(currentContent);
+        currentContent = currentContent.replace(/\r\n/g, '\n');
         const normalized = normalizeEditStrings(
           currentContent,
           params.old_string,
@@ -1074,7 +1078,7 @@ Expectation for required parameters:
           normalized.newString,
           normalized.lineBasedMatch,
         );
-        return applyReplacement(
+        const proposed = applyReplacement(
           currentContent,
           oldString,
           normalized.newString,
@@ -1083,6 +1087,10 @@ Expectation for required parameters:
             ? findLineBasedMatchOffsets(currentContent, oldString)
             : undefined,
         );
+        if (proposed === currentContent) return originalContent;
+        return lineEnding === 'crlf'
+          ? ensureCrlfLineEndings(proposed)
+          : proposed;
       },
       createUpdatedParams: (
         oldContent: string,

@@ -319,7 +319,9 @@ function decodeUnicodeEscapes(text: string): string | null {
 }
 
 function splitsEscapeSequence(text: string, offset: number): boolean {
-  if (text[offset - 1] === '\\' && text[offset] === '\\') return true;
+  if (text[offset - 1] === '\\' && /[\\'"/bfnrtv0]/.test(text[offset] ?? '')) {
+    return true;
+  }
   for (let start = Math.max(0, offset - 5); start < offset; start++) {
     if (
       text[start] === '\\' &&
@@ -362,10 +364,13 @@ function findUnicodeEscapeMatch(
 
   let canonical: string | undefined;
   let literalSearchStart = 0;
+  const trailingBackslash = /(?:^|[^\\])(?:\\\\)*\\$/.test(newString);
   for (const match of fileContent.matchAll(new RegExp(pattern, 'g'))) {
+    const end = match.index + match[0].length;
     if (
       splitsEscapeSequence(fileContent, match.index) ||
-      splitsEscapeSequence(fileContent, match.index + match[0].length)
+      splitsEscapeSequence(fileContent, end) ||
+      (trailingBackslash && fileContent[end] === '\\')
     ) {
       return null;
     }
@@ -394,6 +399,7 @@ function findUnicodeEscapeMatch(
     };
   }
   if (/[\u0080-\uffff]/.test(canonical)) return null;
+  if (/(?:^|[^\\])(?:\\\\)*\\[\u0080-\uffff]/.test(newString)) return null;
 
   const byChar = new Map(
     escapes.map((escape) => [
