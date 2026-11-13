@@ -53,7 +53,20 @@ const AUTH_200_BODY = JSON.stringify({
   success: false,
 });
 
-type ServerMode = 'auth200' | 'jsonrpc-ok' | 'jsonrpc-error' | 'oauth401';
+// A gateway reporting an upstream connection failure as 200 + application/json.
+// The body mentions ECONNREFUSED, but the failure is server-side, not a
+// client-side network error — the captured body must survive classification.
+const UPSTREAM_200_BODY = JSON.stringify({
+  code: 502,
+  msg: 'upstream connect ECONNREFUSED 10.1.2.3:8080',
+});
+
+type ServerMode =
+  | 'auth200'
+  | 'econnrefused200'
+  | 'jsonrpc-ok'
+  | 'jsonrpc-error'
+  | 'oauth401';
 
 describe('non-JSON-RPC 200 response error surface', () => {
   let mode: ServerMode = 'auth200';
@@ -93,6 +106,11 @@ describe('non-JSON-RPC 200 response error surface', () => {
         if (mode === 'auth200') {
           res.writeHead(200, { 'content-type': 'application/json' });
           res.end(AUTH_200_BODY);
+          return;
+        }
+        if (mode === 'econnrefused200') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(UPSTREAM_200_BODY);
           return;
         }
         if (mode === 'oauth401') {
@@ -200,6 +218,29 @@ describe('non-JSON-RPC 200 response error surface', () => {
     await expect(
       connectToMcpServer(serverName, config(), false, workspaceContext),
     ).rejects.toThrow(/token expired or incorrect/);
+  });
+
+  it('keeps a captured gateway body that mentions ECONNREFUSED (classify on the raw error)', async () => {
+    // Witness for the network-classification bug: the gateway answered HTTP 200
+    // with a body naming an upstream ECONNREFUSED. The improved message embeds
+    // that server-controlled body, so classifying on it misreads the failure as
+    // a client-side network error and drops the capture. Classification must
+    // read the ORIGINAL error instead.
+    mode = 'econnrefused200';
+    const workspaceContext = {
+      getDirectories: () => [],
+      onDirectoriesChanged: () => () => {},
+    } as unknown as WorkspaceContext;
+    let caught: unknown;
+    try {
+      await connectToMcpServer(serverName, config(), false, workspaceContext);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const message = (caught as Error).message;
+    expect(message).toContain('upstream connect ECONNREFUSED 10.1.2.3:8080');
+    expect(message).not.toContain('server may be down');
   });
 
   it('leaves successful connections and unrelated errors untouched', async () => {

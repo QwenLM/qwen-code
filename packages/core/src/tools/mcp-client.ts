@@ -2773,9 +2773,14 @@ export async function connectToMcpServer(
       );
       const errorMessage =
         (surfacedError as Error).message || String(surfacedError);
+      // Classify on the ORIGINAL error, not the improved message: the improved
+      // message embeds the server-controlled captured body, which may itself
+      // mention ECONNREFUSED/ENOTFOUND (e.g. a gateway reporting an upstream
+      // failure as 200 + JSON). Genuine network failures never carry a capture
+      // (captures require a 2xx response), so their concise message is preserved.
+      const rawMessage = (error as Error)?.message ?? String(error);
       const isNetworkError =
-        errorMessage.includes('ENOTFOUND') ||
-        errorMessage.includes('ECONNREFUSED');
+        rawMessage.includes('ENOTFOUND') || rawMessage.includes('ECONNREFUSED');
 
       let conciseError: string;
       if (isNetworkError) {
