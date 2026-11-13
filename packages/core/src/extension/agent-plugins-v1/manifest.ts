@@ -58,7 +58,7 @@ export function getAgentPluginSchemaStatus(
   try {
     if (!fs.statSync(resolvedManifestPath).isFile()) return 'unrelated';
     value = JSON.parse(
-      fs.readFileSync(resolvedManifestPath, 'utf8'),
+      fs.readFileSync(resolvedManifestPath, 'utf8').replace(/^\uFEFF/, ''),
     ) as unknown;
   } catch {
     return 'unrelated';
@@ -85,7 +85,7 @@ export function loadAgentPluginManifest(
   }
 
   const value = JSON.parse(
-    fs.readFileSync(resolvedManifestPath, 'utf8'),
+    fs.readFileSync(resolvedManifestPath, 'utf8').replace(/^\uFEFF/, ''),
   ) as unknown;
   if (!isRecord(value)) {
     throw new Error('Agent Plugins root plugin.json must contain an object.');

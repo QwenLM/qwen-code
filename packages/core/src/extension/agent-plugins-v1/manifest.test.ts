@@ -58,6 +58,19 @@ describe('Agent Plugins v1 manifest', () => {
     expect(getAgentPluginSchemaStatus(pluginRoot)).toBe('unrelated');
   });
 
+  it('reads a root manifest saved with a UTF-8 BOM', () => {
+    fs.writeFileSync(
+      path.join(pluginRoot, 'plugin.json'),
+      '\uFEFF' +
+        JSON.stringify({ $schema: AGENT_PLUGIN_SCHEMA, name: 'portable' }),
+    );
+
+    expect(getAgentPluginSchemaStatus(pluginRoot)).toBe('supported');
+    expect(loadAgentPluginManifest(pluginRoot)).toMatchObject({
+      name: 'portable',
+    });
+  });
+
   it('does not read a non-regular root manifest', () => {
     fs.mkdirSync(path.join(pluginRoot, 'plugin.json'));
 
