@@ -36,6 +36,7 @@ vi.mock('./local-directory.js', () => ({
 }));
 
 import { useManagedLocalFilesBridge } from './useManagedLocalFilesBridge.js';
+import { pickDirectoryHandle } from './pick-directory.js';
 import type { ManagedFetch } from './managed-client-files-bridge.js';
 
 const peerFetch = ((url: string, init?: RequestInit) =>
@@ -168,5 +169,100 @@ describe('useManagedLocalFilesBridge', () => {
       await result.current.connect();
     });
     expect(result.current.status.phase).not.toBe('connected');
+  });
+
+  it('a plain connect reuses the stored handle without the picker', async () => {
+    const peer = await startPeer();
+    servers.push(peer.server);
+    const fakeWin = {
+      location: { origin: 'http://localhost' },
+    } as unknown as Window;
+    const { result } = renderHook(() =>
+      useManagedLocalFilesBridge({
+        sessionId: 'session-1',
+        baseUrl: peer.baseUrl,
+        fetch: peerFetch,
+        win: fakeWin,
+      }),
+    );
+    act(() => {
+      void result.current.connect();
+    });
+    await waitFor(() => expect(result.current.status.phase).toBe('connected'));
+
+    // The reuse decision is synchronous: with a handle bound, no picker run
+    // is even attempted. Assert the picker, not a second full connection
+    // (the disposable peer's single binding races across reconnects).
+    vi.mocked(pickDirectoryHandle).mockClear();
+    act(() => {
+      void result.current.connect();
+    });
+    expect(pickDirectoryHandle).not.toHaveBeenCalled();
+    await act(async () => {
+      await result.current.disconnect();
+    });
+  });
+
+  it('forcePicker opens the picker even with a stored grant', async () => {
+    const peer = await startPeer();
+    servers.push(peer.server);
+    const fakeWin = {
+      location: { origin: 'http://localhost' },
+    } as unknown as Window;
+    const { result } = renderHook(() =>
+      useManagedLocalFilesBridge({
+        sessionId: 'session-1',
+        baseUrl: peer.baseUrl,
+        fetch: peerFetch,
+        win: fakeWin,
+      }),
+    );
+    act(() => {
+      void result.current.connect();
+    });
+    await waitFor(() => expect(result.current.status.phase).toBe('connected'));
+
+    vi.mocked(pickDirectoryHandle).mockClear();
+    act(() => {
+      void result.current.connect({ forcePicker: true });
+    });
+    await waitFor(() => expect(pickDirectoryHandle).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await result.current.disconnect();
+    });
+  });
+
+  it('a failed forcePicker re-pick keeps the running bridge connected', async () => {
+    const peer = await startPeer();
+    servers.push(peer.server);
+    const fakeWin = {
+      location: { origin: 'http://localhost' },
+    } as unknown as Window;
+    const { result } = renderHook(() =>
+      useManagedLocalFilesBridge({
+        sessionId: 'session-1',
+        baseUrl: peer.baseUrl,
+        fetch: peerFetch,
+        win: fakeWin,
+      }),
+    );
+    act(() => {
+      void result.current.connect();
+    });
+    await waitFor(() => expect(result.current.status.phase).toBe('connected'));
+
+    vi.mocked(pickDirectoryHandle).mockResolvedValueOnce({
+      kind: 'failed',
+      message: 'boom',
+    });
+    await act(async () => {
+      await result.current.connect({ forcePicker: true });
+    });
+    // The failed re-pick returns before building a bridge: the old bridge is
+    // still running and must not be misreported as failed.
+    expect(result.current.status.phase).toBe('connected');
+    await act(async () => {
+      await result.current.disconnect();
+    });
   });
 });

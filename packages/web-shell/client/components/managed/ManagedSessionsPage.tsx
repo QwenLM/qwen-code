@@ -1416,6 +1416,11 @@ function ManagedSessionsContent({
       <ManagedLocalFilesControl
         provider={provider}
         sessionId={currentSummary.sessionId}
+        sessionName={
+          currentSummary.title === currentSummary.sessionId
+            ? undefined
+            : currentSummary.title
+        }
         triggerClassName="inline-flex h-8 w-8 items-center justify-center rounded-md border border-input bg-background text-muted-foreground hover:bg-accent hover:text-accent-foreground"
       />
     ) : null;

@@ -69,7 +69,7 @@ export function useManagedLocalFilesBridge(
   options: UseManagedLocalFilesBridgeOptions,
 ): {
   status: LocalFilesStatus;
-  connect: () => Promise<void>;
+  connect: (options?: { forcePicker?: boolean }) => Promise<void>;
   disconnect: () => Promise<void>;
 } {
   const { sessionId, baseUrl, fetch, headers } = options;
@@ -129,45 +129,63 @@ export function useManagedLocalFilesBridge(
     setStatus((current) => (current.phase === 'unavailable' ? current : IDLE));
   }, []);
 
-  const connect = useCallback(async () => {
-    if (!win || blocker !== null || !sessionId) return;
-    let handle = handleRef.current;
-    if (!handle) {
-      const picked = await pickDirectoryHandle(win);
-      if (picked.kind === 'cancelled') return;
-      if (picked.kind === 'unavailable') {
-        setStatus({ phase: 'unavailable', blocker: picked.blocker });
-        return;
+  const connect = useCallback(
+    async (options?: { forcePicker?: boolean }) => {
+      if (!win || blocker !== null || !sessionId) return;
+      const forcePicker = options?.forcePicker === true;
+      let handle = forcePicker ? undefined : handleRef.current;
+      if (!handle) {
+        const picked = await pickDirectoryHandle(win);
+        if (picked.kind === 'cancelled') return;
+        // A failed re-pick must not misreport the still-running bridge; leave
+        // the connected status and the old grant untouched.
+        if (
+          forcePicker &&
+          (picked.kind === 'unavailable' || picked.kind === 'failed')
+        ) {
+          return;
+        }
+        if (picked.kind === 'unavailable') {
+          setStatus({ phase: 'unavailable', blocker: picked.blocker });
+          return;
+        }
+        if (picked.kind === 'failed') {
+          setStatus({
+            phase: 'failed',
+            blocker: null,
+            message: picked.message,
+          });
+          return;
+        }
+        handle = picked.handle;
+        handleRef.current = handle;
+        await storeRef.current?.save(handle);
       }
-      if (picked.kind === 'failed') {
-        setStatus({ phase: 'failed', blocker: null, message: picked.message });
-        return;
-      }
-      handle = picked.handle;
-      handleRef.current = handle;
-      await storeRef.current?.save(handle);
-    }
-    const server = new LocalFilesMcpServer(new LocalDirectory(handle));
-    const bridge = new ManagedClientFilesBridge({
-      baseUrl,
-      sessionId,
-      server,
-      fetch,
-      headers,
-    });
-    bridgeRef.current?.disconnect();
-    bridgeRef.current = bridge;
-    bridge.onState((state) => {
-      setStatus({
-        phase: phaseOf(state, true),
-        blocker: null,
-        rootName: handle.name,
-        ...(state.phase === 'connected' ? { toolCount: state.toolCount } : {}),
-        ...(state.phase === 'failed' ? { message: state.message } : {}),
+      const server = new LocalFilesMcpServer(new LocalDirectory(handle));
+      const bridge = new ManagedClientFilesBridge({
+        baseUrl,
+        sessionId,
+        server,
+        fetch,
+        headers,
       });
-    });
-    await bridge.connect();
-  }, [win, blocker, sessionId, baseUrl, fetch, headers]);
+      bridgeRef.current?.disconnect();
+      bridgeRef.current = bridge;
+      bridge.onState((state) => {
+        setStatus({
+          phase: phaseOf(state, true),
+          blocker: null,
+          rootName: handle.name,
+          ...(state.phase === 'connected'
+            ? { toolCount: state.toolCount }
+            : {}),
+          ...(state.phase === 'failed' ? { message: state.message } : {}),
+        });
+      });
+      await bridge.connect();
+    },
+    [win, blocker, sessionId, baseUrl, fetch, headers],
+  );
 
   if (blocker !== null && status.phase !== 'unavailable') {
     return {

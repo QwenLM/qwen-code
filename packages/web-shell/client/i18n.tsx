@@ -2335,11 +2335,23 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'localFiles.blocker.unsupportedBrowser':
     'This browser has no File System Access API. Use Chrome or Edge to connect a local directory.',
   'localFiles.blocker.workspaceIneligible':
-    "This conversation's workspace cannot host a local directory (untrusted or live workspace).",
+    "This conversation's workspace cannot host a local directory (untrusted or live workspace). Use a session in a trusted, regular workspace instead.",
   'localFiles.blocker.workspaceResolving':
     'Which workspace this conversation belongs to is not known yet.',
   'localFiles.blocker.unsupportedDaemon':
     'This daemon does not advertise the client filesystem bridge (client_mcp_over_ws). Start the daemon with QWEN_SERVE_CLIENT_MCP_OVER_WS=1 to enable local files.',
+  'localFiles.changeDirectory': 'Change directory…',
+  'localFiles.session': 'Session',
+  'localFiles.newSession': 'New session',
+  'localFiles.retry': 'Retry',
+  'localFiles.copyStartupCommand': 'Copy startup command',
+  'localFiles.copyTunnelCommand': 'Copy SSH tunnel command',
+  'localFiles.copied': 'Command copied',
+  'localFiles.copyFailed': 'Could not copy the command',
+  'localFiles.gestureToast': (v) =>
+    v?.name
+      ? `Local directory "${v.name}" needs to be reconnected. Open Local files to grant access again.`
+      : 'Local files need to be reconnected. Open Local files to grant access again.',
   ...FILES_MESSAGES_EN,
   ...ACTIVITY_MESSAGES_EN,
   'rightPanel.add': 'Add panel',
@@ -7332,10 +7344,22 @@ const ZH: Messages = {
   'localFiles.blocker.unsupportedBrowser':
     '当前浏览器没有 File System Access API。请使用 Chrome 或 Edge 连接本地目录。',
   'localFiles.blocker.workspaceIneligible':
-    '该会话的工作区不能托管本地目录（不受信任或 live 工作区）。',
+    '该会话的工作区不能托管本地目录（不受信任或 live 工作区）。请改用受信任的普通工作区中的会话。',
   'localFiles.blocker.workspaceResolving': '尚不能确定该会话所属的工作区。',
   'localFiles.blocker.unsupportedDaemon':
     '该 daemon 未启用客户端文件桥（client_mcp_over_ws）。以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动 daemon 即可启用本地文件。',
+  'localFiles.changeDirectory': '更换目录…',
+  'localFiles.session': '会话',
+  'localFiles.newSession': '新建会话',
+  'localFiles.retry': '重试',
+  'localFiles.copyStartupCommand': '复制启动命令',
+  'localFiles.copyTunnelCommand': '复制 SSH 隧道命令',
+  'localFiles.copied': '命令已复制',
+  'localFiles.copyFailed': '复制命令失败',
+  'localFiles.gestureToast': (v) =>
+    v?.name
+      ? `本地目录「${v.name}」需要重新连接。打开「本地文件」即可重新授权。`
+      : '本地文件需要重新连接。打开「本地文件」即可重新授权。',
   ...FILES_MESSAGES_ZH,
   ...ACTIVITY_MESSAGES_ZH,
   'rightPanel.add': '添加页签',

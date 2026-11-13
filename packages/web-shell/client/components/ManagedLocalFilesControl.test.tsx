@@ -1,10 +1,21 @@
 // @vitest-environment jsdom
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ManagedAgentProvider } from './managed/managed-agent-provider';
 
+afterEach(() => {
+  cleanup();
+  bridge.status = { phase: 'idle', blocker: null };
+  bridge.connect.mockClear();
+});
+
 const bridge = vi.hoisted(() => ({
-  status: { phase: 'idle', blocker: null } as { phase: string; blocker: null },
+  status: { phase: 'idle', blocker: null } as {
+    phase: string;
+    blocker: null;
+    rootName?: string;
+    toolCount?: number;
+  },
   connect: vi.fn(async () => {}),
   disconnect: vi.fn(async () => {}),
 }));
@@ -54,5 +65,45 @@ describe('ManagedLocalFilesControl', () => {
       />,
     );
     expect(screen.getByLabelText('localFiles.trigger')).toBeTruthy();
+  });
+
+  it('names the bound session and offers change directory when connected', () => {
+    bridge.status = {
+      phase: 'connected',
+      blocker: null,
+      rootName: 'my-dir',
+      toolCount: 1,
+    };
+    bridge.connect.mockClear();
+    render(
+      <ManagedLocalFilesControl
+        provider={provider(true)}
+        sessionId="session-1"
+        triggerClassName="trigger"
+        sessionName="My task"
+      />,
+    );
+    fireEvent.click(screen.getByLabelText('localFiles.trigger'));
+    expect(screen.getByText('My task')).toBeTruthy();
+    fireEvent.click(screen.getByText('localFiles.changeDirectory'));
+    expect(bridge.connect).toHaveBeenCalledWith({ forcePicker: true });
+  });
+
+  it('omits the session row when no name is passed', () => {
+    bridge.status = {
+      phase: 'connected',
+      blocker: null,
+      rootName: 'my-dir',
+      toolCount: 1,
+    };
+    render(
+      <ManagedLocalFilesControl
+        provider={provider(true)}
+        sessionId="session-1"
+        triggerClassName="trigger"
+      />,
+    );
+    fireEvent.click(screen.getByLabelText('localFiles.trigger'));
+    expect(screen.queryByText('localFiles.session')).toBeNull();
   });
 });

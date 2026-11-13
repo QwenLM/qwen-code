@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { FolderOpenIcon } from 'lucide-react';
 import type {
@@ -14,6 +14,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
+  useActions,
   useConnection,
   useWorkspace,
   useWorkspaceActions,
@@ -27,9 +28,11 @@ import {
   type LocalFilesStatus,
 } from '../local-files/useLocalFilesBridge';
 import { resolveVoiceWorkspaceTarget } from '../voice/voice-workspace-target';
+import { writeClipboardText } from '../utils/clipboard';
 import { Button } from './ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { Spinner } from './ui/spinner';
+import { requestToast } from './ToastHost';
 import { cn } from '@/lib/utils';
 
 const STATUS_KEY: Record<LocalFilesPhase, string> = {
@@ -60,11 +63,57 @@ const BUSY: readonly LocalFilesPhase[] = [
   'reconnecting',
 ];
 
+/** Concrete command that enables the reverse channel on the daemon. */
+export const LOCAL_FILES_DAEMON_COMMAND =
+  'QWEN_SERVE_CLIENT_MCP_OVER_WS=1 qwen serve';
+
+/**
+ * Trigger dot color per phase. `null` means no dot. Failed and needs-gesture
+ * get distinct colors so a broken or re-authorization-pending bridge is not
+ * invisible the way a plain busy dot made it.
+ */
+export function getLocalFilesDotClass(status: LocalFilesStatus): string | null {
+  switch (status.phase) {
+    case 'connected':
+    case 'held-elsewhere':
+      return 'bg-primary';
+    case 'connecting':
+    case 'registering':
+      return 'bg-muted-foreground';
+    case 'reconnecting':
+    case 'needs-gesture':
+      return 'bg-amber-500';
+    case 'failed':
+      return 'bg-destructive';
+    default:
+      return null;
+  }
+}
+
+/** Tooltip naming the state (and directory) instead of the static label. */
+export function getLocalFilesTooltip(
+  status: LocalFilesStatus,
+  t: (key: string) => string,
+): string {
+  const name = status.rootName ? ` (${status.rootName})` : '';
+  return `${t('localFiles.trigger')} — ${t(STATUS_KEY[status.phase])}${name}`;
+}
+
 export interface LocalFilesPanelProps {
   status: LocalFilesStatus;
   onConnect: () => void;
   onDisconnect: () => void;
   onOpenInNewTab: () => void;
+  /** Offered only while connected; re-opens the picker for a new grant. */
+  onChangeDirectory?: () => void;
+  /** Bound session title, shown while connected when known. */
+  sessionName?: string;
+  /** Offered in needs-session when the host can create a session. */
+  onNewSession?: () => void;
+  /** Copies a concrete fix command; absent hosts render no copy buttons. */
+  onCopyCommand?: (command: string) => void;
+  /** SSH tunnel command for the insecure-context blocker, when derivable. */
+  tunnelCommand?: string;
 }
 
 /**
@@ -76,6 +125,11 @@ export function LocalFilesPanel({
   onConnect,
   onDisconnect,
   onOpenInNewTab,
+  onChangeDirectory,
+  sessionName,
+  onNewSession,
+  onCopyCommand,
+  tunnelCommand,
 }: LocalFilesPanelProps) {
   const { t } = useI18n();
   const busy = BUSY.includes(status.phase);
@@ -87,6 +141,12 @@ export function LocalFilesPanel({
   // The one transient blocker: pairing it with the permanent "Unavailable
   // here" header would assert impossibility next to a promise of progress.
   const resolving = status.blocker === 'workspace-resolving';
+  const connectLabel =
+    status.phase === 'needs-gesture'
+      ? t('localFiles.reconnect')
+      : status.phase === 'failed' && status.rootName !== undefined
+        ? t('localFiles.retry')
+        : t('localFiles.connect');
 
   return (
     <div className="flex flex-col gap-3">
@@ -110,6 +170,14 @@ export function LocalFilesPanel({
             </dt>
             <dd className="ml-auto break-all font-mono">{status.rootName}</dd>
           </div>
+          {status.phase === 'connected' && sessionName ? (
+            <div className="flex gap-2">
+              <dt className="text-muted-foreground">
+                {t('localFiles.session')}
+              </dt>
+              <dd className="ml-auto break-all">{sessionName}</dd>
+            </div>
+          ) : null}
           {status.toolCount === undefined ? null : (
             <p className="text-right text-muted-foreground">
               {t('localFiles.tools', { count: status.toolCount })}
@@ -133,6 +201,28 @@ export function LocalFilesPanel({
               {t('localFiles.openInNewTab')}
             </Button>
           ) : null}
+          {status.blocker === 'unsupported-daemon' && onCopyCommand ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => onCopyCommand(LOCAL_FILES_DAEMON_COMMAND)}
+            >
+              {t('localFiles.copyStartupCommand')}
+            </Button>
+          ) : null}
+          {status.blocker === 'insecure-context' &&
+          onCopyCommand &&
+          tunnelCommand ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => onCopyCommand(tunnelCommand)}
+            >
+              {t('localFiles.copyTunnelCommand')}
+            </Button>
+          ) : null}
         </div>
       ) : null}
 
@@ -151,9 +241,27 @@ export function LocalFilesPanel({
       <div className="flex gap-2">
         {canConnect ? (
           <Button type="button" variant="outline" size="sm" onClick={onConnect}>
-            {status.phase === 'needs-gesture'
-              ? t('localFiles.reconnect')
-              : t('localFiles.connect')}
+            {connectLabel}
+          </Button>
+        ) : null}
+        {status.phase === 'needs-session' && onNewSession ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={onNewSession}
+          >
+            {t('localFiles.newSession')}
+          </Button>
+        ) : null}
+        {status.phase === 'connected' && onChangeDirectory ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={onChangeDirectory}
+          >
+            {t('localFiles.changeDirectory')}
           </Button>
         ) : null}
         {granted ? (
@@ -321,7 +429,8 @@ export function LocalFilesControl({
   const { t } = useI18n();
   const { baseUrl, token, capabilities, client } = useWorkspace();
   const actions = useWorkspaceActions();
-  const { sessionId, workspaceCwd } = useConnection();
+  const sessionActions = useActions();
+  const { sessionId, workspaceCwd, displayName } = useConnection();
   const [open, setOpen] = useState(false);
   useEffect(() => {
     if (portalContainer === null) setOpen(false);
@@ -374,9 +483,46 @@ export function LocalFilesControl({
     withheldBlocker,
   });
 
-  const active =
-    status.phase === 'connected' || status.phase === 'held-elsewhere';
-  const busy = BUSY.includes(status.phase);
+  // A grant that fell back to `prompt` (e.g. after a reload) parks the bridge
+  // in needs-gesture. Nothing outside the popover would report it, so notify
+  // once per transition; the amber trigger dot keeps it discoverable after
+  // the toast dismisses.
+  const prevPhaseRef = useRef<LocalFilesPhase | undefined>(undefined);
+  useEffect(() => {
+    const prev = prevPhaseRef.current;
+    prevPhaseRef.current = status.phase;
+    if (status.phase === 'needs-gesture' && prev !== 'needs-gesture') {
+      requestToast(
+        'warning',
+        t('localFiles.gestureToast', { name: status.rootName ?? '' }),
+      );
+    }
+  }, [status.phase, status.rootName, t]);
+
+  const handleCopyCommand = useCallback(
+    (command: string) => {
+      void writeClipboardText(command).then(
+        () => requestToast('success', t('localFiles.copied')),
+        () => requestToast('error', t('localFiles.copyFailed')),
+      );
+    },
+    [t],
+  );
+
+  // Concrete SSH tunnel for the insecure-context blocker, when the daemon URL
+  // is absolute. A relative base (same-origin) yields no command.
+  const tunnelCommand = useMemo(() => {
+    try {
+      const url = new URL(baseUrl);
+      if (!url.hostname) return undefined;
+      const port = url.port || (url.protocol === 'https:' ? '443' : '80');
+      return `ssh -L ${port}:localhost:${port} ${url.hostname}`;
+    } catch {
+      return undefined;
+    }
+  }, [baseUrl]);
+
+  const dotClass = getLocalFilesDotClass(status);
 
   const control = (
     <Popover open={open} onOpenChange={setOpen}>
@@ -385,17 +531,15 @@ export function LocalFilesControl({
           type="button"
           className={cn('relative', triggerClassName)}
           aria-label={t('localFiles.trigger')}
-          title={t('localFiles.trigger')}
+          title={getLocalFilesTooltip(status, t)}
         >
           <FolderOpenIcon size={16} strokeWidth={1.2} aria-hidden="true" />
-          {active || busy ? (
+          {dotClass ? (
             <span
               aria-hidden="true"
               className={cn(
                 'absolute right-1 bottom-1 h-1.5 w-1.5 rounded-full',
-                status.phase === 'connected'
-                  ? 'bg-primary'
-                  : 'bg-muted-foreground',
+                dotClass,
               )}
             />
           ) : null}
@@ -415,6 +559,14 @@ export function LocalFilesControl({
             // top-level document this one is framed inside.
             window.open(window.location.href, '_blank', 'noopener');
           }}
+          onChangeDirectory={() => void connect({ forcePicker: true })}
+          sessionName={displayName}
+          onNewSession={() => {
+            // newSession reports its own failures through the notice system.
+            void sessionActions.newSession().catch(() => {});
+          }}
+          onCopyCommand={handleCopyCommand}
+          tunnelCommand={tunnelCommand}
         />
       </PopoverContent>
     </Popover>

@@ -273,6 +273,13 @@ test('Managed local files entry connects a directory through the relay peer @smo
     await expect(
       page.getByRole('button', { name: 'Disconnect' }),
     ).toBeVisible();
+    // Usability: the connected panel names the bound session and offers a
+    // one-step change-directory affordance.
+    const panel = page.locator('[data-web-shell-local-files-panel]');
+    await expect(panel.getByText('Local files task')).toBeVisible();
+    await expect(
+      panel.getByRole('button', { name: 'Change directory…' }),
+    ).toBeVisible();
     expect(peer.registered.length).toBeGreaterThanOrEqual(1);
     expect(peer.registered[0]).toMatchObject({ sessionId: 's1' });
     await expect
