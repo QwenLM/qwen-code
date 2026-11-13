@@ -1191,6 +1191,8 @@ export interface UseComposerCoreOptions {
   cycleModeOnTab?: boolean;
   onToggleShortcuts?: () => void;
   disabled?: boolean;
+  /** Keep the editor editable while rejecting every submit path. */
+  submitDisabled?: boolean;
   /**
    * Whether the composer may react to FILE drags at all (drag highlight and
    * drop ingestion on the inline image/text lane). `false` leaves paste
@@ -1621,6 +1623,7 @@ export function useComposerCore(
     cycleModeOnTab = false,
     onToggleShortcuts,
     disabled = false,
+    submitDisabled = false,
     fileDragEnabled = true,
     placeholderText = 'Type a message...',
     commands,
@@ -1772,6 +1775,8 @@ export function useComposerCore(
   onToggleShortcutsRef.current = onToggleShortcuts;
   const disabledRef = useRef(disabled);
   disabledRef.current = disabled;
+  const submitDisabledRef = useRef(submitDisabled);
+  submitDisabledRef.current = submitDisabled;
   const fileDragEnabledRef = useRef(fileDragEnabled);
   fileDragEnabledRef.current = fileDragEnabled;
   const attachmentsEnabledRef = useRef(attachmentsEnabled);
@@ -3267,6 +3272,7 @@ export function useComposerCore(
   ) => {
     if (
       disabledRef.current ||
+      submitDisabledRef.current ||
       activeDraftAttachmentRestoreRef.current !== null ||
       (sharedDraftRef.current?.session.pendingBatches ??
         imageIngestionLaneRef.current.pendingBatches) > 0 ||
@@ -5090,6 +5096,7 @@ export function useComposerCore(
   const retryLast = useCallback(() => {
     if (
       disabledRef.current ||
+      submitDisabledRef.current ||
       activeDraftAttachmentRestoreRef.current !== null ||
       (sharedDraftRef.current?.session.pendingBatches ??
         imageIngestionLaneRef.current.pendingBatches) > 0 ||
@@ -5295,6 +5302,7 @@ export function useComposerCore(
     (match: string) => {
       if (
         disabledRef.current ||
+      submitDisabledRef.current ||
         activeDraftAttachmentRestoreRef.current !== null ||
         (sharedDraftRef.current?.session.pendingBatches ??
           imageIngestionLaneRef.current.pendingBatches) > 0 ||
@@ -5452,6 +5460,7 @@ export function useComposerCore(
 
   const canSubmit =
     !disabled &&
+    !submitDisabled &&
     !draftAttachmentsRestoring &&
     pendingImageBatchCount === 0 &&
     !workspaceUploadBusy &&

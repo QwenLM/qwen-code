@@ -123,6 +123,8 @@ interface PendingPrompt {
   input?: ManagedInputBlock[];
 }
 
+type PendingElsewhereAction = 'retry' | 'discard';
+
 interface ManagedSessionListError {
   readonly httpError?: JavaManagedAgentHttpError;
 }
@@ -622,6 +624,11 @@ function ManagedSessionsContent({
   const pendingHere = pending?.sessionId === sessionId ? pending : undefined;
   const pendingElsewhere = pending !== undefined && pendingHere === undefined;
   const pendingRef = useRef(pending);
+  // 跨会话只拦提交：Retry / Discard 先回到归属会话，再复用该会话原有的
+  // 重试与草稿恢复逻辑，避免在异会话里直接操作另一条会话的输入。
+  const pendingElsewhereIntent = useRef<
+    { idempotencyKey: string; action: PendingElsewhereAction } | undefined
+  >(undefined);
   const encoding = useRef(false);
   const focusComposer = useRef<{ sessionId: string | undefined } | undefined>(
     undefined,
@@ -871,6 +878,20 @@ function ManagedSessionsContent({
     setError(undefined);
     setDiscarded(false);
   }, [provider, sessionId, hostSessionOnly]);
+
+  useEffect(() => {
+    const intent = pendingElsewhereIntent.current;
+    if (
+      !intent ||
+      busy ||
+      !pendingHere ||
+      pendingHere.idempotencyKey !== intent.idempotencyKey
+    )
+      return;
+    pendingElsewhereIntent.current = undefined;
+    if (intent.action === 'retry') void submit();
+    else discardPending();
+  }, [busy, pendingHere, sessionId]);
 
   // The Discard button unmounts itself, dropping focus to <body>: land it on
   // the composer that just got the draft back. The move must wait for the
@@ -1510,6 +1531,59 @@ function ManagedSessionsContent({
         {t('managed.cancel')}
       </Button>
     ) : null;
+  function openPendingOwner(current: PendingPrompt | undefined) {
+    const owner = current?.sessionId;
+    // Route through openSession like every other navigation entry: it clears
+    // the draft/error of the conversation being left and forwards the owner's
+    // workspace. A request with no owner clears the selection instead.
+    if (!owner) {
+      onSelectSession(undefined);
+      setText('');
+      setError(undefined);
+      return;
+    }
+    openSession(
+      owner,
+      // The owner may not be on the current (filtered, paginated, or
+      // host-mode empty) page, so prefer the workspace captured when the
+      // request was submitted.
+      current?.workspaceId ??
+        lifecycleSummaries.find((session) => session.sessionId === owner)
+          ?.workspace?.workspaceId,
+    );
+  }
+  // Retry / Discard belong to the conversation that owns the unconfirmed
+  // send: navigate there first, then let the effect above reuse that
+  // conversation's own retry (same idempotency key) or draft restoration.
+  function runPendingElsewhereAction(action: PendingElsewhereAction) {
+    const current = pendingRef.current;
+    if (!current) return;
+    pendingElsewhereIntent.current = {
+      idempotencyKey: current.idempotencyKey,
+      action,
+    };
+    openPendingOwner(current);
+  }
+  function discardPending() {
+    const current = pendingRef.current;
+    if (!current || current.sessionId !== sessionId) return;
+    // 放弃的是一条无法确认的发送意图，不是已经落库的消息；恢复到原会话
+    // 输入框后继续编辑，避免用户丢失唯一一份草稿。
+    pendingRef.current = undefined;
+    setPending(undefined);
+    void persistPending(pendingKey, undefined);
+    setText(current.text);
+    composerRef.current?.setText(current.text);
+    restoreManagedAttachments(composerRef.current, current.input);
+    composerCommit.current = undefined;
+    setError(undefined);
+    // A create that committed server-side before an unconfirmed failure is
+    // otherwise invisible until the user happens to press Refresh.
+    if (current.sessionId === undefined)
+      setListRevision((value) => value + 1);
+    focusComposer.current = { sessionId };
+    setDiscarded(true);
+  }
   function openSession(id: string, targetWorkspaceId?: string) {
     const open = onOpenSession ?? onSelectSession;
     if (targetWorkspaceId) open(id, targetWorkspaceId);
@@ -2241,35 +2315,26 @@ function ManagedSessionsContent({
           {pendingElsewhere && !busy && (
             <div
               role="status"
-              className="mx-auto mt-auto mb-2 flex w-full max-w-[var(--chat-shell-width)] items-center gap-3 text-sm text-muted-foreground"
+              className="mx-auto mt-auto mb-2 flex w-full max-w-[var(--chat-shell-width)] flex-wrap items-center gap-2 text-sm text-muted-foreground"
             >
-              <p>{t('managed.pendingElsewhere')}</p>
+              <p className="min-w-0 flex-1">{t('managed.pendingElsewhere')}</p>
+              <Button
+                size="sm"
+                onClick={() => runPendingElsewhereAction('retry')}
+              >
+                {t('managed.retry')}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => runPendingElsewhereAction('discard')}
+              >
+                {t('managed.discard')}
+              </Button>
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => {
-                  const owner = pending?.sessionId;
-                  // Route through openSession like every other navigation
-                  // entry: it clears the draft/error of the conversation being
-                  // left and forwards the owner's workspace. A request with no
-                  // owner clears the selection instead.
-                  if (!owner) {
-                    onSelectSession(undefined);
-                    setText('');
-                    setError(undefined);
-                    return;
-                  }
-                  openSession(
-                    owner,
-                    // The owner may not be on the current (filtered,
-                    // paginated, or host-mode empty) page, so prefer the
-                    // workspace captured when the request was submitted.
-                    pending?.workspaceId ??
-                      lifecycleSummaries.find(
-                        (session) => session.sessionId === owner,
-                      )?.workspace?.workspaceId,
-                  );
-                }}
+                onClick={() => openPendingOwner(pending)}
               >
                 {t('managed.openPendingOwner')}
               </Button>
@@ -2288,44 +2353,13 @@ function ManagedSessionsContent({
               >
                 {t('managed.retry')}
               </Button>
-              {/* Offered only where the handler can restore the draft:
-                  destroying the only copy from a foreign session would lose
-                  it for good. */}
-              {pendingHere.sessionId === sessionId && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    // An escape from a permanently failing retry: reuse the
-                    // draft text without minting a new idempotency key.
-                    pendingRef.current = undefined;
-                    setPending(undefined);
-                    void persistPending(pendingKey, undefined);
-                    // The pending record is client-scoped but the draft
-                    // belongs to the session it was written for: restore it
-                    // only there.
-                    if (pendingHere.sessionId === sessionId) {
-                      setText(pendingHere.text);
-                      composerRef.current?.setText(pendingHere.text);
-                      restoreManagedAttachments(
-                        composerRef.current,
-                        pendingHere.input,
-                      );
-                    }
-                    composerCommit.current = undefined;
-                    setError(undefined);
-                    // A create that committed server-side before an
-                    // unconfirmed failure is otherwise invisible until the
-                    // user happens to press Refresh.
-                    if (pendingHere.sessionId === undefined)
-                      setListRevision((current) => current + 1);
-                    focusComposer.current = { sessionId };
-                    setDiscarded(true);
-                  }}
-                >
-                  {t('managed.discard')}
-                </Button>
-              )}
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => discardPending()}
+              >
+                {t('managed.discard')}
+              </Button>
             </div>
           )}
           {pendingApproval && (
@@ -2793,7 +2827,7 @@ function ManagedSessionsContent({
                 disabled={
                   !interactive ||
                   busy ||
-                  Boolean(pending) ||
+                  Boolean(pendingHere) ||
                   lifecycle.blocked(sessionId) ||
                   modelChange.blocked ||
                   compression.blocked ||
@@ -2805,6 +2839,7 @@ function ManagedSessionsContent({
                       !userMessages.supported,
                   )
                 }
+                submitDisabled={pendingElsewhere}
                 placeholderText={t(
                   active && userMessages.supported
                     ? 'managed.queue.placeholder'
