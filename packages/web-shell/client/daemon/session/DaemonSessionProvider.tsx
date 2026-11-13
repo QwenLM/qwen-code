@@ -2060,6 +2060,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         const availabilityGeneration = availabilityRef.current?.getGeneration();
         const skipMetadataRefreshThisIteration = skipMetadataRefresh;
         skipMetadataRefresh = false;
+        // An incremental reconnect keeps the session client, so only a fresh
+        // load may re-arm the auto-continue fence below.
+        const loadedSessionThisIteration = session === undefined;
         let loadingRequestedSession = false;
         let generatedUiRestoreTarget:
           | { scopeId: string; sessionId: string }
@@ -3711,7 +3714,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 (context?.recovery
                   ? { ...context.recovery, canContinue: false }
                   : undefined));
-            autoContinueLoadRecoveryRef.current = publishedRecovery;
+            if (loadedSessionThisIteration) {
+              autoContinueLoadRecoveryRef.current = publishedRecovery;
+            }
             return {
               ...current,
               status: 'connected',

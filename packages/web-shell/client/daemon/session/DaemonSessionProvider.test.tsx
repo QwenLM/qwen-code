@@ -17864,6 +17864,71 @@ describe('DaemonSessionProvider', () => {
       expect(continued).not.toHaveBeenCalled();
       expect(notices).toEqual([]);
     });
+
+    // A `turn_error` re-arms the driver's reconnect iteration, which reads the
+    // context again. That read must not re-fence the snapshot: the turn the
+    // user watched fail would then resume unattended, and again on every SSE
+    // reconnect.
+    it('does not resume a failed turn after the stream reconnects', async () => {
+      const finish = createDeferred<void>();
+      let subscription = 0;
+      const { continued, context } = setup(
+        (call) =>
+          call === 1
+            ? { kind: 'clean', canContinue: false }
+            : { kind: 'interrupted_prompt', canContinue: true },
+        {
+          events(opts) {
+            subscription += 1;
+            if (subscription === 1) {
+              return (async function* firstStream() {
+                yield {
+                  v: 1,
+                  type: 'replay_complete',
+                  data: { replayedCount: 0 },
+                };
+                await finish.promise;
+                yield {
+                  v: 1,
+                  id: 11,
+                  type: 'turn_error',
+                  data: { promptId: 'prompt-1', message: 'provider exploded' },
+                };
+              })();
+            }
+            return replayedThenIdle()(opts);
+          },
+        },
+      );
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        sessionId: 'session-1',
+        autoContinueInterruptedTurn: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      expect(continued).not.toHaveBeenCalled();
+
+      await act(async () => {
+        finish.resolve();
+        await flushPromises();
+      });
+      // The reconnect iteration re-reads the context and drains its own
+      // `replay_complete`; waiting on it keeps the assertion from passing just
+      // because the stream has not settled yet.
+      await act(async () => {
+        await vi.waitFor(() => {
+          expect(subscription).toBe(2);
+          expect(context.mock.calls.length).toBeGreaterThan(1);
+        });
+        await flushPromises();
+      });
+
+      expect(subscription).toBe(2);
+      expect(continued).not.toHaveBeenCalled();
+      expect(notices).toEqual([]);
+    });
   });
 
   it('refreshes recovery after a rewind drops the interrupted turn', async () => {
