@@ -25,7 +25,6 @@ import type {
   ContentBlock,
   StreamEvent,
 } from '../../packages/cli/src/nonInteractive/types.js';
-import { DUAL_OUTPUT_PROTOCOL_VERSION } from '../../packages/cli/src/dualOutput/DualOutputBridge.js';
 import {
   fakeToolCall,
   startFakeOpenAIServer,
@@ -395,7 +394,11 @@ it.each(cases)(
       expect(frames[0]).toMatchObject({
         type: 'system',
         subtype: 'session_start',
-        data: { protocol_version: DUAL_OUTPUT_PROTOCOL_VERSION },
+        // Literal on purpose: importing the constant is a value import into
+        // packages/cli, and this suite's worker then loads the CLI's whole
+        // runtime graph — which cannot resolve `@qwen-code/sdk/daemon/ui` here.
+        // `DualOutputBridge.test.ts` pins the constant itself.
+        data: { protocol_version: 3 },
       });
       expect(frames.at(-1)).toMatchObject({
         type: 'system',
