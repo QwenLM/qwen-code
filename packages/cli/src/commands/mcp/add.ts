@@ -229,6 +229,7 @@ export const addCommand: CommandModule = {
         type: 'string',
         demandOption: true,
       })
+      .positional('args', { type: 'string', array: true })
       .option('scope', {
         alias: 's',
         describe: 'Configuration scope (user or project)',
@@ -310,7 +311,7 @@ export const addCommand: CommandModule = {
       .middleware((argv) => {
         // Handle -- separator args as server args if present
         if (argv['--']) {
-          const existingArgs = (argv['args'] as Array<string | number>) || [];
+          const existingArgs = argv['args'] || [];
           argv['args'] = [...existingArgs, ...(argv['--'] as string[])];
         }
 

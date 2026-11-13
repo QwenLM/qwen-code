@@ -72,14 +72,15 @@ describe('mcp add command', () => {
 
   it('should add a stdio server to user settings by default', async () => {
     await parser.parseAsync(
-      'add my-server /path/to/server arg1 arg2 -e FOO=bar',
+      'add my-server /path/to/server arg1 arg2 0x10 -e FOO=bar --timeout 1500',
     );
 
     expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
       'my-server': {
         command: '/path/to/server',
-        args: ['arg1', 'arg2'],
+        args: ['arg1', 'arg2', '0x10'],
         env: { FOO: 'bar' },
+        timeout: 1500,
       },
     });
   });

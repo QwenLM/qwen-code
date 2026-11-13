@@ -486,6 +486,7 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
       .fail((message, error) => {
         invalidPrefix = true;
         writeStderrLine(message || error?.message || 'Unknown argument error');
+        printMcpHelp();
         process.exitCode = 1;
       })
       .parseAsync(argv.slice(1));

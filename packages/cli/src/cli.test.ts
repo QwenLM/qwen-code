@@ -124,10 +124,12 @@ vi.mock('./commands/mcp.js', () => ({
           command: 'add <name> <commandOrUrl> [args...]',
           describe: 'Add a server',
           builder: (subYargs: Argv) =>
-            subYargs.parserConfiguration({
-              'unknown-options-as-args': true,
-              'populate--': true,
-            }),
+            subYargs
+              .parserConfiguration({
+                'unknown-options-as-args': true,
+                'populate--': true,
+              })
+              .positional('args', { type: 'string', array: true }),
           handler: mocks.mcpAddHandler,
         })
         .command({
@@ -1074,6 +1076,7 @@ describe('runCliEntry', () => {
         '--telemetry-outfile',
         'server.log',
         'alpine',
+        '0x10',
       ];
 
       await runCliEntry([
@@ -1144,6 +1147,7 @@ describe('runCliEntry', () => {
 
     expect(process.exitCode).toBe(1);
     expect(stderr.join('')).toContain('Unknown argument: unknown');
+    expect(stdout.join('')).toContain('Usage: qwen mcp');
     expect(mocks.mcpListHandler).not.toHaveBeenCalled();
     expect(mocks.main).not.toHaveBeenCalled();
   });
