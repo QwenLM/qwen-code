@@ -264,6 +264,8 @@ export {
   type DaemonSessionTurnIndexEntry,
   type DaemonSessionTurnIndexPage,
   type DaemonSessionTurnIndexPageOptions,
+  type DaemonSessionTurnHooksPage,
+  type DaemonSessionTurnHooksPageOptions,
   type DaemonSessionListPage,
   type DaemonSessionListPageOptions,
   type DaemonSessionCatalogWorkspace,
