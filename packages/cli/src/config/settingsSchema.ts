@@ -4602,7 +4602,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Run the shared agent loop on the event-bus architecture (experimental). Applies to headless sessions (`-p` and stream-json) when experimental.unifiedAgentLoop is also enabled; other surfaces keep their current loop internals. Can also be enabled via QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1 environment variable.',
+          'Run the shared agent loop on the event-bus architecture (experimental). When experimental.unifiedAgentLoop is also enabled, this applies to headless sessions (`-p` and stream-json), OpenTUI, and subagents. Can also be enabled via QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1 environment variable.',
         showInDialog: true,
       },
       agentCollaboration: {

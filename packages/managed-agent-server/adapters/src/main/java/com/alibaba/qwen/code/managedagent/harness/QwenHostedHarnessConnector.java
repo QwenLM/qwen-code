@@ -36,6 +36,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -717,6 +718,44 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             requireReadyForNewWork(tenantId, sessionId, false);
             HarnessSessionRef ref = mcpManagementAttachment(tenantId, sessionId, false);
             return client().mcpManagementOperation(ref, operationId);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
+    public boolean supportsClientFiles() {
+        return sessionStore.isEnabled() && feature(HarnessFeature.CLIENT_FILES);
+    }
+
+    @Override
+    public boolean supportsClientFiles(SessionRecord session) {
+        // Mirror the register route's refusal (hosted-harness-session): a
+        // foregroundOnly or profile-less Session never declares a client-files
+        // catalog, so the capability must not advertise it there.
+        if (!supportsClientFiles()) {
+            return false;
+        }
+        try {
+            return !foregroundOnly(session)
+                    && session.toolProfile() != null && !session.toolProfile().isBlank();
+        } catch (RuntimeBrokerException unavailable) {
+            // foregroundOnly reads the SSH storage authority, which refuses with
+            // workspace_unavailable when the storage row is degraded. The
+            // capability is computed for every Session in a list, so fail closed
+            // for this one Session instead of failing the whole list; a workspace
+            // whose storage authority is unavailable cannot serve client files.
+            return false;
+        }
+    }
+
+    @Override
+    public Map<String, Object> clientFilesOperation(String tenantId, String sessionId, Map<String, Object> body) {
+        try {
+            requireReadyForNewWork(tenantId, sessionId, false);
+            HarnessSessionRef ref = mcpManagementAttachment(tenantId, sessionId, true);
+            return client().clientFilesOperation(ref, body);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
