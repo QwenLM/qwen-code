@@ -2,7 +2,7 @@
 
 [English](2026-11-12-loop-rollout-switches.md) | [简体中文](2026-11-12-loop-rollout-switches.zh-CN.md)
 
-- **Status**: slice 1 (nightly legs) delivered as draft PR #17050; slice 2 (per-surface defaults) in implementation; slices 3–4 not started.
+- **Status**: slice 1 (nightly legs) merged as #17050; slice 2 (per-surface defaults) in implementation; slice 3 not started; slice 4 delivered by #17172.
 - **Tracker**: #17045, block B. The ladder, the rollout rules and the capability ledger belong to the unified-loop design (`2026-10-23-unified-agent-loop.md`), the event-bus design (`2026-11-11-event-bus-agent-loop.md`) and block A of #17045; this document designs only the switch mechanics and signals that block B owns.
 - **Checked at**: upstream `acc07c2eb0` (2026-11-12).
 
@@ -21,14 +21,14 @@ The shared agent loop and its event-bus kernel ship behind two experimental sett
 
 Each slice is one PR unless noted. Deadlines are #17045's.
 
-| Slice | Content                                                                                | Due   |
-| ----- | -------------------------------------------------------------------------------------- | ----- |
-| 1     | Nightly legs: OpenTUI with the shared loop on; Linux and OpenTUI with both switches on | 11-16 |
-| 2     | Per-surface defaults for both switches, env force on/off, parity arms forced           | 11-19 |
-| 3     | Loop visibility: debug marker on every surface, a line in `/about` and `/bug`          | 11-19 |
-| 4     | #16710 fixed; #16505, #16787, #16947 closed with a classification                      | 11-19 |
+| Slice | Content                                                                                         | Due   |
+| ----- | ----------------------------------------------------------------------------------------------- | ----- |
+| 1     | Nightly legs: OpenTUI with the shared loop on; Linux and OpenTUI with both switches on          | 11-16 |
+| 2     | Per-surface defaults for both switches, env force on/off, parity arms forced                    | 11-19 |
+| 3     | Loop visibility: debug marker on every surface, a line in `/about` and `/bug`                   | 11-19 |
+| 4     | #16710 fixed; #16505, #16787, #16947, #17131 closed with a classification — delivered by #17172 | 11-19 |
 
-Slice 2 and slice 3 may land as one PR if the diff stays reviewable; slice 4 is investigation plus a fix and is independent of the others.
+Slice 2 and slice 3 may land as one PR if the diff stays reviewable; slice 4 was delivered by #17172.
 
 ## Slice 1: nightly legs
 
@@ -90,11 +90,12 @@ Tokens are trimmed; empty tokens are ignored; an unknown surface name is ignored
 - Every surface logs one debug marker at its loop entry naming the surface and the resolved path (`legacy`, `shared`, `kernel`), through the same `debugLogger` channel the kernel's `[EVENT_BUS]` marker uses, so a run's path is provable from the debug log on every surface.
 - `/about` gains one line naming the loop the current surface resolves to; `/bug` includes the same line in the report it builds. The line is derived from the same resolution function the surface uses, not a second copy of the rules.
 
-## Slice 4: the CI-failure issues
+## Slice 4: the CI-failure issues — delivered by #17172
 
-- **#16710** (headless parity, `parallel read-only batch`, sandbox:docker): the two arms listed different startup directory trees. Reproduce from the run's artifacts, find what writes into the workspace between the arms (rig runtime files, debug logs, chat recording are the candidates), fix the harness or the loop, and classify. This one is a real difference until proven otherwise.
-- **#16505 / #16787** (`an approved write, then a declined one`, Ink macOS / OpenTUI): the approval wait was settled by #16881. Verify the scenarios pass in the nightly runs since that merge, then close each with the classification "harness flake, fixed by #16881" and the evidence.
-- **#16947** (`a retry after a model error`, Ink macOS): the startup date was settled by #16961. Same treatment: verify, classify, close.
+All five parity CI issues were classified as test-harness races, not loop regressions, and closed by #17172 (merged 2026-11-13):
+
+- **#16710** (headless parity, `parallel read-only batch`): `QWEN_RUNTIME_DIR` moved outside the workspace but `QWEN_HOME` stayed at `<workspace>/.qwen-home`; background OpenAI-log housekeeping raced `getFolderStructure` and wrote `.openai-logs-cleanup-<hash>`, pushing one arm's startup folder listing to the 20-item truncation cap. #17172 points `QWEN_HOME` at the scratch runtime dir, seeds it from the fixture's initial home files, and pins that the `.qwen-home` listing never changes during a run.
+- **#16505 / #16787 / #16947 / #17131** (TUI parity): after #16881 settled the consecutive-approval wait, the remaining failures were three harness timing races — `/goal` submitted before Ink's async `CommandService` registered it, `turnEnds`' quiet-output check vacuously true before the turn's requests arrived, and `Ctrl+Y` retries sent before the `Press Ctrl+Y to retry` hint. #17172 probes and clears `/` first, requires the expected request count before settling, and waits for the retry hint.
 
 ## Design decisions
 
@@ -127,12 +128,12 @@ Tokens are trimmed; empty tokens are ignored; an unknown surface name is ignored
 
 Block B's six checkboxes in #17045 are ticked, each by a merged PR or a recorded classification:
 
-1. nightly legs exist for OpenTUI + shared loop and for Linux/OpenTUI + both switches, and run on schedule;
+1. nightly legs exist for OpenTUI + shared loop and for Linux/OpenTUI + both switches, and run on schedule (merged as #17050);
 2. the shared loop resolves per surface with env force on/off;
 3. the kernel resolves the same way;
 4. every parity arm is explicitly forced;
 5. every surface's loop is visible in the debug log, `/about` and `/bug`;
-6. #16710 is fixed and the other three issues are closed with a classification.
+6. #16710 is fixed and the other issues are closed with a classification (delivered by #17172).
 
 ## Open questions
 

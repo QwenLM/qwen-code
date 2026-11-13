@@ -2,7 +2,7 @@
 
 [English](2026-11-12-loop-rollout-switches.md) | [简体中文](2026-11-12-loop-rollout-switches.zh-CN.md)
 
-- **状态**：切片 1（nightly 组）已交付为 draft PR #17050；切片 2（按入口默认值）实现中；切片 3–4 未开始。
+- **状态**：切片 1（nightly 组）已合入（#17050）；切片 2（按入口默认值）实现中；切片 3 未开始；切片 4 已由 #17172 交付。
 - **跟踪**：#17045 的 B 块。阶梯、灰度规则与能力台账属于统一 loop 设计（`2026-10-23-unified-agent-loop.md`）、事件总线设计（`2026-11-11-event-bus-agent-loop.md`）和 #17045 的 A 块；本文档只设计 B 块负责的开关机制与信号。
 - **核对提交**：upstream `acc07c2eb0`（2026-11-12）。
 
@@ -21,14 +21,14 @@
 
 除注明外，每个切片一个 PR。期限取自 #17045。
 
-| 切片 | 内容                                                            | 期限  |
-| ---- | --------------------------------------------------------------- | ----- |
-| 1    | nightly 组：OpenTUI 开共享 loop；Linux 与 OpenTUI 两个开关都开  | 11-16 |
-| 2    | 两个开关的按入口默认值、环境变量强制开/关、对拍两臂强制         | 11-19 |
-| 3    | loop 可见性：每个入口的 debug 标记，`/about` 与 `/bug` 里的一行 | 11-19 |
-| 4    | 修复 #16710；#16505、#16787、#16947 分类后关闭                  | 11-19 |
+| 切片 | 内容                                                                     | 期限  |
+| ---- | ------------------------------------------------------------------------ | ----- |
+| 1    | nightly 组：OpenTUI 开共享 loop；Linux 与 OpenTUI 两个开关都开           | 11-16 |
+| 2    | 两个开关的按入口默认值、环境变量强制开/关、对拍两臂强制                  | 11-19 |
+| 3    | loop 可见性：每个入口的 debug 标记，`/about` 与 `/bug` 里的一行          | 11-19 |
+| 4    | 修复 #16710；#16505、#16787、#16947、#17131 分类后关闭——已由 #17172 交付 | 11-19 |
 
-切片 2 与切片 3 在 diff 仍可评审时可以合成一个 PR；切片 4 是调查加修复，与其他切片相互独立。
+切片 2 与切片 3 在 diff 仍可评审时可以合成一个 PR；切片 4 已由 #17172 交付。
 
 ## 切片 1：nightly 组
 
@@ -90,11 +90,12 @@ token 去除首尾空白；空 token 忽略；未知入口名忽略并记 debug 
 - 每个入口在 loop 入口处记一条 debug 标记，写明入口与解析出的路径（`legacy`、`shared`、`kernel`），走内核 `[EVENT_BUS]` 标记所用的同一个 `debugLogger` 通道，让每个入口的运行路径都能从 debug 日志证明，而不是靠假设。
 - `/about` 增加一行，写明当前入口解析到的 loop；`/bug` 在它构建的报告里包含同一行。这一行由入口所用的同一个解析函数导出，不是规则的第二份副本。
 
-## 切片 4：CI 失败 issue
+## 切片 4：CI 失败 issue —— 已由 #17172 交付
 
-- **#16710**（headless 对拍，`parallel read-only batch`，sandbox:docker）：两臂列出了不同的启动目录树。从该次运行的 artifact 复现，找出是什么在两臂之间写进了工作区（候选：rig 运行时文件、debug 日志、chat recording），修复 harness 或 loop，并分类。在证明 otherwise 之前，这一条按真实差异对待。
-- **#16505 / #16787**（`an approved write, then a declined one`，Ink macOS / OpenTUI）：审批等待已由 #16881 修稳。核实该合入之后的 nightly 运行里这些场景通过，然后以「harness flake，已由 #16881 修复」的分类加证据关闭。
-- **#16947**（`a retry after a model error`，Ink macOS）：启动日期已由 #16961 修稳。同样处理：核实、分类、关闭。
+五个对拍 CI issue 均被分类为测试 harness 竞态而非 loop 回归，并由 #17172（2026-11-13 合入）关闭：
+
+- **#16710**（headless 对拍，`parallel read-only batch`）：`QWEN_RUNTIME_DIR` 移到了工作区外，但 `QWEN_HOME` 仍留在 `<workspace>/.qwen-home`；后台 OpenAI 日志 housekeeping 与 `getFolderStructure` 竞态写入 `.openai-logs-cleanup-<hash>`，把其中一臂的启动目录列表推到 20 项截断上限。#17172 把 `QWEN_HOME` 指向 scratch 运行时目录、用夹具初始 home 文件做种子，并钉住运行期间 `.qwen-home` 列表不变。
+- **#16505 / #16787 / #16947 / #17131**（TUI 对拍）：#16881 修稳连续审批等待后，剩余失败是三类 harness 时序竞态——`/goal` 在 Ink 异步 `CommandService` 注册它之前就被提交、`turnEnds` 的静默输出检查在该轮请求到达前恒真、`Ctrl+Y` 重试在 `Press Ctrl+Y to retry` 提示出现前就发出。#17172 先探测并清空 `/`、要求达到预期请求数再收尾、并等待重试提示。
 
 ## 设计决定
 
@@ -127,12 +128,12 @@ token 去除首尾空白；空 token 忽略；未知入口名忽略并记 debug 
 
 #17045 中 B 块的六个勾全部打上，每一个由已合入的 PR 或已记录的分类支撑：
 
-1. OpenTUI + 共享 loop、Linux/OpenTUI + 两个开关的 nightly 组存在并按 schedule 运行；
+1. OpenTUI + 共享 loop、Linux/OpenTUI + 两个开关的 nightly 组存在并按 schedule 运行（已合入 #17050）；
 2. 共享 loop 按入口解析，环境变量可强制开/关；
 3. 内核以同样方式解析；
 4. 每个对拍臂都被显式强制；
 5. 每个入口的 loop 在 debug 日志、`/about` 与 `/bug` 中可见；
-6. #16710 已修复，其余三个 issue 已分类关闭。
+6. #16710 已修复，其余 issue 已分类关闭（已由 #17172 交付）。
 
 ## 待解问题
 

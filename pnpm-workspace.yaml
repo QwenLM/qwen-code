@@ -92,6 +92,10 @@ overrides:
   'rehype-katex>katex': '0.18.2'
   'micromark-extension-math>katex': '0.18.2'
   'exceljs>uuid': '11.1.1'
+  'exceljs>unzipper': '0.12.5'
+  'archiver-utils@2>glob': '14.0.6'
+  'archiver-utils@3>glob': '14.0.6'
+  'readdir-glob@1': '4.0.0'
   # web-shell generates its Managed Agent API types with openapi-typescript,
   # which asks for supports-color 10. A second, higher supports-color in the
   # graph makes pnpm resolve every `debug` instance's optional supports-color

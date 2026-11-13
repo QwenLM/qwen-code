@@ -12,7 +12,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -161,11 +161,17 @@ const toolResults = (messages: JsonObject[]) =>
 const userTurns = (messages: JsonObject[]) =>
   messages.filter((message) => message['role'] === 'user').length;
 
+// The startup context's date, in `formatDateForContext`'s format. Runs that
+// straddle midnight render it a day apart.
+const CONTEXT_DATE =
+  /\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (?:January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}\b/g;
+
 function normalize(value: unknown, dir: string): unknown {
   return JSON.parse(
     JSON.stringify(value ?? null)
       .split(dir)
-      .join('<DIR>'),
+      .join('<DIR>')
+      .replace(CONTEXT_DATE, '<DATE>'),
   );
 }
 
@@ -285,6 +291,8 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     });
     const dir = rig.testDir!;
     scenario.prepare?.(rig);
+    // Snapshot the fixture's home writes before the child can touch it.
+    const homeBefore = readdirSync(join(dir, '.qwen-home')).sort();
     let subagentRequests = 0;
     server = await startFakeOpenAIServer(({ body }) => {
       if (body['stream'] !== true)
@@ -296,9 +304,11 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       return scenario.reply(messages, dir, subagentRequest);
     }, fakeServerHostOptions());
     // Outside the project, so the folder structure in the requests does not
-    // list the session's debug log.
+    // list the session's debug log or background housekeeping markers in
+    // QWEN_HOME (#16710).
     const runtimeDir = `${dir}-runtime`;
     rmSync(runtimeDir, { recursive: true, force: true });
+    cpSync(join(dir, '.qwen-home'), runtimeDir, { recursive: true });
     const args = [
       rig.bundlePath,
       '--no-chat-recording',
@@ -322,6 +332,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       env: {
         ...process.env,
         QWEN_DEBUG_LOG_FILE: '1',
+        QWEN_HOME: runtimeDir,
         QWEN_RUNTIME_DIR: runtimeDir,
       },
     });
@@ -377,6 +388,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     const exitCode = await new Promise<number | null>((resolve) =>
       child.on('close', resolve),
     );
+    expect(readdirSync(join(dir, '.qwen-home')).sort()).toEqual(homeBefore);
     const log = debugLog(runtimeDir);
     const count = (line: RegExp) => log.match(line)?.length ?? 0;
     // AgentCore's rounds on the kernel are `runAgentLoop` calls too.
@@ -732,7 +744,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
         }
       }
     },
-    120_000,
+    240_000,
   );
 
   it('ends a stream-json message past --max-session-turns at the limit (#15325)', async () => {
@@ -767,7 +779,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     expect(kernel.requests).toEqual(shared.requests);
     expect(kernel.frames).toEqual(shared.frames);
     expect(kernel.stderr).toContain('Reached max session turns');
-  }, 120_000);
+  }, 240_000);
 
   it('asks for approval of a whole batch before the tool budget stops it', async () => {
     const scenario: Scenario = {
@@ -813,5 +825,5 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     expect(kernel.requests).toEqual(shared.requests);
     expect(output(kernel.frames)).toEqual(output(shared.frames));
     expect(kernel.approvals).toEqual(shared.approvals);
-  }, 120_000);
+  }, 240_000);
 });

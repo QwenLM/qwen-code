@@ -104,8 +104,7 @@ Preview routes by `queryId` and scopes rounds by a UUID `roundId`. Main's loop r
 | Bus event        | Payload (main types)                   | Published by                     |
 | ---------------- | -------------------------------------- | -------------------------------- |
 | `loop.started`   | `{ promptId }`                         | adapter, after state creation    |
-| `loop.output`    | `{ event: ServerLlmStreamEvent }`      | planned (streaming slice)        |
-| `loop.cancelled` | `{ reason }`                           | planned (streaming slice)        |
+| `loop.cancelled` | `{ reason: 'abort' }`                  | adapter, when the signal aborts  |
 | `loop.finished`  | `{ result: AgentLoopResult }`          | Conversation                     |
 | `llm.request`    | `{ round, send: AgentLoopRound }`      | Conversation                     |
 | `llm.tool_call`  | `{ call: ToolCallRequestInfo }`        | planned (streaming slice)        |
@@ -115,7 +114,7 @@ Preview routes by `queryId` and scopes rounds by a UUID `roundId`. Main's loop r
 | `tool.settled`   | `{ round }`                            | Tool, at batch end               |
 | `handler.failed` | `{ source, eventType, round?, error }` | bus, on listener failure         |
 
-Events marked _planned_ are in the vocabulary but not emitted by this slice; they arrive with streaming dispatch. Cancellation today flows through the signal into `runModelRound`/`runToolBatch`, not through a bus event.
+Events marked _planned_ gain their publishers in the [streaming dispatch follow-up](2026-11-11-streaming-tool-dispatch.md). Block S in #17045 records the decision to defer implementation. Main's surfaces receive round output through host callbacks, so the vocabulary omits `loop.output` (Preview's `query.output`) until a consumer needs it.
 
 `llm.settled` is the round-end signal; the terminal classification (the `STOP_EVENTS` mapping that `runModelRound` does today) lives in run state (`state.model.stop`), and Conversation is the only place that turns that round-end state into the loop result. Duplicate/replay bookkeeping stays in the Tool handler, using the existing `toolCallIdUtils` helpers, exactly where `runToolBatch` does it today. Event payloads carry only routing and decision data; the full model result and tool batch live in the run state under their owner's slot, so the bus never duplicates them.
 
@@ -138,7 +137,15 @@ The bus (`LoopEventBus`) is ported essentially as-is (it depends only on a logge
 
 ### Cancellation
 
-The handlers read the run's `signal` and `toolSignal` and pass them to `runModelRound`/`runToolBatch` exactly as today; Tool cancels the in-flight batch through the executor's signal, and Conversation finalizes once Llm and Tool are quiet. The run settles when `loop.finished` arrives. A published `loop.cancelled` event and a bounded settlement cap (preview's `QueryListener` uses 10 s) belong to the streaming slice, not this one — see the _planned_ note in the event table.
+The handlers read the run's `signal` and `toolSignal` and pass them to `runModelRound`/`runToolBatch` exactly as today; Tool cancels the in-flight batch through the executor's signal, and Conversation finalizes once Llm and Tool are quiet. The run settles when `loop.finished` arrives.
+
+When the signal aborts, the adapter publishes `loop.cancelled` once. Conversation arms a 10 s settlement cap on a separate delivery queue so an awaited round-end hook cannot delay it. Inside the cap, cancellation follows the procedural loop, including keeping the results of an interrupted batch when the surface requests them. A run still pending at the cap ends as `cancelled` with no tool results. If a suspended handler resumes, it stops reading the model stream, refuses further tool launches, and drops tool progress and results at the loop boundary. A tool or callback already running can still finish. The adapter removes the abort listener and clears the timer when the run settles. The procedural path waits for the round or batch to settle.
+
+`runAgentLoop` returns a promise. A surface that exposes an event stream can abort its own run when the consumer stops reading. OpenTUI uses a round-local signal for the model stream and keeps the parent turn's signal for tool batches, so their per-turn resource budgets span multiple rounds. The deadline also covers a provider that stalls while closing its stream. A handler failure still rejects with the original error when the handler settles before the deadline.
+
+After the deadline, the default and surface-owned schedulers stop forwarding tool progress and results, while scheduler cleanup can finish. Batch finalization checks the run before starting persistence and again after each write.
+
+The shared `LlmChat` also stops waiting for provider stream creation, reads, and close when the caller's signal aborts, even if the provider ignores it. Its response processor saves already delivered partial output and unwinds before releasing the chat's send lock, so a subsequent prompt can use the same chat. Late provider results are discarded before reaching history or token accounting, and provider cleanup is attempted without blocking cancellation. This provider boundary applies to both loop paths; the procedural loop still has no settlement cap for other stuck work.
 
 ### Why not reuse an existing bus
 
@@ -156,7 +163,8 @@ Each slice keeps the parity suites green and changes no surface default.
 2. **PR 2 — handlers behind an opt-in flag.** Re-express `runAgentLoop` internals as Conversation/Llm/Tool handlers plus the host adapter, selected by a new `AgentLoopOptions.useEventBus` flag (default off, so the procedural path stays the default within the unified loop until parity is proven). `runModelRound`/`runToolBatch` keep their exports and signatures (ACP #15509 depends on them) and are reused unchanged by the handlers. An equivalence test runs both paths over scripted scenarios and asserts identical results and host-callback order; the headless parity suite and the ACP round tests are the acceptance gate.
 3. **PR 3 — streaming dispatch evaluation (optional, separate gate).** Preview executes a `tool_use` block while the stream is still running. Main runs the batch after the round ends, and approvals are batch-ordered; streaming dispatch changes approval timing and output interleaving. This slice first writes down the parity differences and gets an explicit decision; it is not required for the architecture port.
 4. **PR 4 — headless opt-in.** A new `experimental.eventBusAgentLoop` setting (env override `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP`, read by `Config.isEventBusAgentLoopEnabled(surface)`) makes the shared-loop path pass `useEventBus`. The env variable forces the switch per surface like the unified one — `1` on, `0` off, or a `surface=0/1` list. Headless was wired first; AgentCore and OpenTUI joined in later slices of the unified-loop migration. The flag only applies where the full shared loop runs (`runAgentLoop`); a surface that still uses `runModelRound` directly is unaffected. The adapter logs an `[EVENT_BUS]` execution marker through `debugLogger`, so with `QWEN_DEBUG_LOG_FILE` on, a run's path is provable from the debug log instead of assumed. Default off; the procedural path stays the default, and the flag alone (without `experimental.unifiedAgentLoop`) changes nothing. Per-surface resolution of both switches is specified in `2026-11-12-loop-rollout-switches.md` (#17045 block B).
-5. **Later — surface convergence** continues under the unified-agent-loop program (TUI, OpenTUI, AgentCore, speculation, Hosted). The bus makes loop-level attachments (hooks, Mods, protection, recording) single-place, which is that program's stated goal; no surface work is scheduled here.
+5. **Cancellation and bounded close** (#17045 block K). `loop.cancelled` and the settlement cap described under _Cancellation_; `loop.output` removed from the vocabulary.
+6. **Later — surface convergence** continues under the unified-agent-loop program (TUI, OpenTUI, AgentCore, speculation, Hosted). The bus makes loop-level attachments (hooks, Mods, protection, recording) single-place, which is that program's stated goal; no surface work is scheduled here.
 
 ## Testing
 
@@ -196,7 +204,7 @@ G5 enables both flags through an isolated user settings file with no environment
 - **Callback order is a contract.** Surfaces depend on the exact order of `onModelEvent`/`onToolResult`/output callbacks. The adapter must preserve it; the parity suites are the check, and PR 2 adds an explicit order test.
 - **`runModelRound`/`runToolBatch` are public seams.** ACP's merged round step (#15509) calls them directly; PR 2 keeps them as the handlers' inner implementations rather than deleting them.
 - **Round identity.** Numeric rounds are simpler than preview's UUIDs and match main's logs; if a future surface needs globally unique round ids, the event payload can carry both without a routing change.
-- **Streaming dispatch** remains an open product decision (latency win vs approval/ordering semantics); Phase 3 exists to force that decision explicitly rather than smuggling it in.
+- **Streaming dispatch** was evaluated in Phase 3. The [streaming dispatch design](2026-11-11-streaming-tool-dispatch.md) records the decision and the scope of the opt-in follow-up.
 - **Throwaway risk.** The 1.0 line may eventually replace main wholesale; this port is justified only as long as main's unified-loop program continues. It reuses main's types and contracts precisely so the work is not preview-specific.
 
 ## Files affected
