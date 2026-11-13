@@ -55,6 +55,8 @@ fetchRetryMaxtimeout: 120000
 fetchTimeout: 300000
 
 overrides:
+  'glob@10 || 13': '14.0.6'
+  'minimatch@9 || 10': '11.0.8'
   qs: '6.17.1'
   fast-uri: '3.1.9'
   ip-address: '10.7.4'
