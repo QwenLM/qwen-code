@@ -8612,6 +8612,7 @@ export class Session implements SessionContext {
                           resp.type === StreamEventType.RETRY ||
                           resp.type === StreamEventType.MODEL_FALLBACK
                         ) {
+                          this.#emitTurnProgressNotification(resp);
                           responseCapture.agentOutput.restartAttempt(
                             resp.type === StreamEventType.RETRY &&
                               resp.isContinuation === true,
@@ -9066,6 +9067,23 @@ export class Session implements SessionContext {
                 break;
               case LlmEventType.Retry:
               case LlmEventType.ModelFallback: {
+                if (event.type === LlmEventType.Retry) {
+                  this.#emitTurnProgressNotification({
+                    type: StreamEventType.RETRY,
+                    retryInfo: event.retryInfo,
+                    isContinuation: event.isContinuation,
+                  });
+                } else {
+                  this.#emitTurnProgressNotification({
+                    type: StreamEventType.MODEL_FALLBACK,
+                    info: {
+                      fromModel: event.fromModel,
+                      toModel: event.toModel,
+                      statusCode: event.statusCode,
+                      fallbackIndex: event.fallbackIndex,
+                    },
+                  });
+                }
                 const continuation =
                   event.type === LlmEventType.Retry &&
                   event.isContinuation === true;
@@ -10441,6 +10459,7 @@ export class Session implements SessionContext {
             response.type === StreamEventType.RETRY ||
             response.type === StreamEventType.MODEL_FALLBACK
           ) {
+            this.#emitTurnProgressNotification(response);
             options.responseCapture?.agentOutput.restartAttempt(
               response.type === StreamEventType.RETRY &&
                 response.isContinuation === true,
@@ -10815,6 +10834,53 @@ export class Session implements SessionContext {
 
   isDisposed(): boolean {
     return this.disposed;
+  }
+
+  // The interactive and headless front ends announce a scheduled retry and a
+  // model fallback to the user; the ACP turn loops used to drop both events
+  // on the floor (#12020). Forward them as vendor notifications so the bridge
+  // (and any ACP client) can surface the same feedback. Advisory only:
+  // delivery is fire-and-forget and must never stall the turn.
+  #emitTurnProgressNotification(
+    event: Extract<
+      StreamEvent,
+      { type: StreamEventType.RETRY | StreamEventType.MODEL_FALLBACK }
+    >,
+  ): void {
+    if (event.type === StreamEventType.RETRY) {
+      const info = event.retryInfo;
+      if (!info) return;
+      void this.client
+        .extNotification('qwen/notify/session/retry', {
+          v: 1,
+          sessionId: this.sessionId,
+          attempt: info.attempt,
+          maxRetries: info.maxRetries,
+          delayMs: info.delayMs,
+          ...(info.message ? { message: info.message } : {}),
+          ...(event.isContinuation === true ? { isContinuation: true } : {}),
+        })
+        .catch((error) => {
+          debugLogger.debug('retry extNotification failed', error);
+        });
+      return;
+    }
+    const info = event.info;
+    if (!info) return;
+    void this.client
+      .extNotification('qwen/notify/session/model-fallback', {
+        v: 1,
+        sessionId: this.sessionId,
+        fromModel: info.fromModel,
+        toModel: info.toModel,
+        ...(info.statusCode !== undefined
+          ? { statusCode: info.statusCode }
+          : {}),
+        fallbackIndex: info.fallbackIndex,
+      })
+      .catch((error) => {
+        debugLogger.debug('model-fallback extNotification failed', error);
+      });
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
@@ -13324,6 +13390,7 @@ export class Session implements SessionContext {
                         resp.type === StreamEventType.RETRY ||
                         resp.type === StreamEventType.MODEL_FALLBACK
                       ) {
+                        this.#emitTurnProgressNotification(resp);
                         responseCapture.agentOutput.restartAttempt(
                           resp.type === StreamEventType.RETRY &&
                             resp.isContinuation === true,
@@ -14684,6 +14751,7 @@ export class Session implements SessionContext {
                   resp.type === StreamEventType.RETRY ||
                   resp.type === StreamEventType.MODEL_FALLBACK
                 ) {
+                  this.#emitTurnProgressNotification(resp);
                   await finalizeToolCallPreparations(
                     preparationTracker,
                     true,

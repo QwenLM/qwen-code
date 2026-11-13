@@ -8861,6 +8861,8 @@ describe('createAcpSessionBridge', () => {
     'auth_device_flow_authorized',
     'auth_device_flow_failed',
     'auth_device_flow_cancelled',
+    'retry_scheduled',
+    'model_fallback',
   ] as const)(
     'keeps the turn error on refresh when %s bookkeeping lands after it',
     async (bookkeepingType) => {
@@ -9051,7 +9053,9 @@ describe('createAcpSessionBridge', () => {
         bookkeepingType === 'agent_changed' ||
         bookkeepingType === 'git_status_changed' ||
         bookkeepingType === 'git_branch_changed' ||
-        bookkeepingType === 'github_setup_completed'
+        bookkeepingType === 'github_setup_completed' ||
+        bookkeepingType === 'retry_scheduled' ||
+        bookkeepingType === 'model_fallback'
       ) {
         // The workspace service, git watcher, memory / agent CRUD, and the
         // device-flow registry publish these through the workspace fan-out,
