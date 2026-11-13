@@ -23,6 +23,7 @@ import {
   MCP_APPROVALS_FILENAME,
 } from '../../config/mcpApprovals.js';
 import { loadProjectMcpServers } from '../../config/mcpJson.js';
+import { setProjectMcpLiteralSource } from '../../config/mcpServers.js';
 
 describe('qwen mcp approve / reject', () => {
   let dir: string;
@@ -68,7 +69,10 @@ describe('qwen mcp approve / reject', () => {
 
   const stateOf = (name: string) => {
     resetMcpApprovalsForTesting();
-    const { servers } = loadProjectMcpServers(dir);
+    const { servers, literalServers } = loadProjectMcpServers(dir);
+    // Re-register the literal source the way assembly would, so the hash
+    // binding sees the pre-expansion config (#11499).
+    setProjectMcpLiteralSource(dir, literalServers);
     return loadMcpApprovals().getState(dir, name, servers[name]!);
   };
 
