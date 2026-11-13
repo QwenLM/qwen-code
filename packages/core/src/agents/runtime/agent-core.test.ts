@@ -20,7 +20,13 @@ import {
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { FunctionDeclaration, GenerateContentConfig } from '@google/genai';
+import type {
+  Content,
+  FunctionCall,
+  FunctionDeclaration,
+  GenerateContentConfig,
+  Part,
+} from '@google/genai';
 import {
   AgentCore,
   buildInheritedForkExecutionToolNames,
@@ -84,7 +90,9 @@ import {
 } from '../../core/coreToolScheduler.js';
 import { markToolCallArgumentsIncomplete } from '../../core/incomplete-tool-call-args.js';
 import { ToolConfirmationOutcome } from '../../tools/tools.js';
-import { runToolBatch } from '../../core/agent-loop.js';
+import { runAgentLoop } from '../../core/agent-loop.js';
+import { LoopDetectionService } from '../../services/loopDetectionService.js';
+import { streamOf } from '../../test-utils/model-fixtures.js';
 import {
   AgentEventType,
   type AgentApprovalRequestEvent,
@@ -96,22 +104,129 @@ import {
 vi.mock('../../core/agent-loop.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../core/agent-loop.js')>();
-  return { ...actual, runToolBatch: vi.fn(actual.runToolBatch) };
+  return { ...actual, runAgentLoop: vi.fn(actual.runAgentLoop) };
 });
 
 /**
- * Counts the agent's tool steps; the returned check asserts that each ran on
- * the shared loop's batch when `shared` is set, and none did otherwise.
+ * The returned check asserts that the agent's tool steps ran in the shared
+ * loop's rounds when `shared` is set, and on the current tool step otherwise.
  */
-function trackToolSteps(shared: boolean): () => void {
-  vi.mocked(runToolBatch).mockClear();
+function trackToolSteps(shared: boolean, kernel: boolean): () => void {
+  vi.mocked(runAgentLoop).mockClear();
   const steps = vi.spyOn(AgentCore.prototype, 'processFunctionCalls');
   return () => {
-    expect(vi.mocked(runToolBatch)).toHaveBeenCalledTimes(
-      shared ? steps.mock.calls.length : 0,
-    );
+    if (shared) expect(steps).not.toHaveBeenCalled();
+    else expect(vi.mocked(runAgentLoop)).not.toHaveBeenCalled();
+    for (const [options] of vi.mocked(runAgentLoop).mock.calls) {
+      expect(options.useEventBus).toBe(kernel);
+    }
     steps.mockRestore();
   };
+}
+
+/**
+ * The loops a test runs on: the current loop, the shared loop, and the shared
+ * loop on the event-bus kernel.
+ */
+type Loop = { name: string; shared: boolean; kernel: boolean };
+const LOOPS: Loop[] = [
+  { name: 'current', shared: false, kernel: false },
+  { name: 'shared', shared: true, kernel: false },
+  { name: 'kernel', shared: true, kernel: true },
+];
+
+/**
+ * The agent's tool step for `calls`. On the current loop it is
+ * `processFunctionCalls`. On the shared loop it is the first round of a run
+ * whose model asks for `calls`, with the results the step finalized; the run
+ * gives the round its own prompt id and number 1.
+ */
+async function runToolStep(
+  core: AgentCore,
+  shared: boolean,
+  calls: FunctionCall[],
+  abortController: AbortController,
+  promptId: string,
+  toolsList: FunctionDeclaration[],
+): Promise<{ messages: Content[]; results: unknown[] }> {
+  if (!shared) {
+    return core.processFunctionCalls(
+      calls,
+      abortController,
+      promptId,
+      1,
+      toolsList,
+    );
+  }
+  const rounds = vi.mocked(runAgentLoop).mock.calls.length;
+  let step: { messages: Content[]; results: unknown[] } | undefined;
+  core
+    .getEventEmitter()
+    .on(AgentEventType.TOOL_RESPONSES_FINALIZED, ({ responses }) => {
+      step ??= {
+        messages: [
+          {
+            role: 'user',
+            parts: responses.flatMap(
+              ({ responseParts }) => responseParts as Part[],
+            ),
+          },
+        ],
+        results: responses,
+      };
+    });
+  let sent = 0;
+  const chat = {
+    sendMessageStream: async () =>
+      streamOf({
+        type: 'chunk',
+        value:
+          sent++ === 0
+            ? {
+                functionCalls: calls,
+                candidates: [
+                  {
+                    content: {
+                      parts: calls.map((functionCall) => ({ functionCall })),
+                    },
+                  },
+                ],
+              }
+            : {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'Done.' }] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              },
+      }),
+    getHistoryToolCallFingerprints: () => [],
+  } as unknown as LlmChat;
+  // The loop detector is not under test here.
+  const detector = [
+    vi
+      .spyOn(LoopDetectionService.prototype, 'checkAlwaysOnSafeties')
+      .mockReturnValue(false),
+    vi
+      .spyOn(LoopDetectionService.prototype, 'addAndCheckHeuristicLoops')
+      .mockReturnValue(false),
+    vi
+      .spyOn(LoopDetectionService.prototype, 'recordToolResult')
+      .mockReturnValue(false),
+  ];
+  try {
+    await core.runReasoningLoop(
+      chat,
+      [{ role: 'user', parts: [{ text: 'Go.' }] }],
+      toolsList,
+      abortController,
+    );
+  } finally {
+    for (const spy of detector) spy.mockRestore();
+  }
+  expect(vi.mocked(runAgentLoop).mock.calls.length).toBeGreaterThan(rounds);
+  return step ?? { messages: [{ role: 'user', parts: [] }], results: [] };
 }
 
 const boundaryObserveMock = vi.hoisted(() =>
@@ -712,12 +827,12 @@ describe('AgentCore.runInAgentFrames', () => {
   });
 });
 
-describe.each([false, true])(
-  'AgentCore approval response deduplication (unifiedAgentLoop=%s)',
-  (shared) => {
+describe.each(LOOPS)(
+  'AgentCore approval response deduplication ($name loop)',
+  ({ shared, kernel }) => {
     let checkToolSteps: () => void;
     beforeEach(() => {
-      checkToolSteps = trackToolSteps(shared);
+      checkToolSteps = trackToolSteps(shared, kernel);
     });
     afterEach(() => checkToolSteps());
 
@@ -754,6 +869,8 @@ describe.each([false, true])(
         getToolResultBytesWritten: vi.fn().mockReturnValue(0),
         getSessionId: vi.fn().mockReturnValue(`${slug}-session`),
         isUnifiedAgentLoopEnabled: () => shared,
+        getSkipLoopDetection: () => false,
+        isEventBusAgentLoopEnabled: () => kernel,
         ...overrides,
       } as unknown as Config;
       const core = new AgentCore(
@@ -795,11 +912,12 @@ describe.each([false, true])(
         });
       try {
         const controller = new AbortController();
-        const running = core.processFunctionCalls(
+        const running = runToolStep(
+          core,
+          shared,
           [{ id: 'late-call', name: 'read_file', args: {} }],
           controller,
           'late-prompt',
-          1,
           [{ name: 'read_file' }],
         );
         await vi.waitFor(() => expect(outputs).toHaveLength(1));
@@ -864,11 +982,12 @@ describe.each([false, true])(
         });
       try {
         const controller = new AbortController();
-        const running = core.processFunctionCalls(
+        const running = runToolStep(
+          core,
+          shared,
           [{ id: 'late-call', name: 'read_file', args: {} }],
           controller,
           'late-prompt',
-          1,
           [{ name: 'read_file' }],
         );
         await vi.waitFor(() => expect(outputs).toHaveLength(1));
@@ -964,11 +1083,12 @@ describe.each([false, true])(
         core.getEventEmitter().on(AgentEventType.TOOL_CALL, () => {
           owner = 'rotated-owner';
         });
-        const result = await core.processFunctionCalls(
+        const result = await runToolStep(
+          core,
+          shared,
           [{ id: 'rejected-call', name: 'read_file', args: {} }],
           new AbortController(),
           'prompt-rejected',
-          1,
           reason === 'undeclared' ? [] : [{ name: 'read_file' }],
         );
         expect(result.results).toHaveLength(1);
@@ -994,6 +1114,57 @@ describe.each([false, true])(
       },
     );
 
+    it('schedules an MCP tool that recovers before the batch starts', async () => {
+      const name = 'mcp__catalog__lookup';
+      let available = false;
+      const { core } = buildCore(
+        'mcp-reconnect',
+        { tools: [name], executionAllowedTools: ['mcp__catalog__look*'] },
+        {
+          getToolRegistry: () => ({
+            getTool: (toolName: string) =>
+              available && toolName === name
+                ? { serverName: 'catalog', serverToolName: 'lookup' }
+                : undefined,
+          }),
+          getSkipLoopDetection: () => true,
+          getMaxToolCallsPerTurn: () => 100,
+          isMaxToolCallsPerTurnExplicit: () => false,
+        },
+      );
+      const chat = {
+        sendMessageStream: async () =>
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: { functionCalls: [{ id: 'lookup', name, args: {} }] },
+            };
+            available = true;
+          })(),
+        getHistoryToolCallFingerprints: () => new Map(),
+      } as unknown as LlmChat;
+      const schedule = vi
+        .spyOn(CoreToolScheduler.prototype, 'schedule')
+        .mockImplementation(async function (this: CoreToolScheduler) {
+          await (this as unknown as Scheduler).onAllToolCallsComplete?.([]);
+        });
+      try {
+        await core.runReasoningLoop(
+          chat,
+          [],
+          [{ name }],
+          new AbortController(),
+          { maxTurns: 1 },
+        );
+        expect(schedule).toHaveBeenCalledOnce();
+        expect(schedule.mock.calls[0]?.[0]).toEqual([
+          expect.objectContaining({ callId: 'lookup', name }),
+        ]);
+      } finally {
+        schedule.mockRestore();
+      }
+    });
+
     it("keeps the agent's results out of the session's transcript", async () => {
       const recordToolResult = vi.fn();
       const { core } = buildCore(
@@ -1001,11 +1172,12 @@ describe.each([false, true])(
         { tools: ['*'] },
         { getChatRecordingService: () => ({ recordToolResult }) },
       );
-      const result = await core.processFunctionCalls(
+      const result = await runToolStep(
+        core,
+        shared,
         [{ id: 'unrecorded-call', name: 'read_file', args: {} }],
         new AbortController(),
         'prompt-unrecorded',
-        1,
         [],
       );
       expect(result.messages[0].parts).toEqual([
@@ -1252,11 +1424,12 @@ describe.each([false, true])(
 
     function startCall(core: AgentCore, call: Call, promptId: string) {
       const abortController = new AbortController();
-      const processing = core.processFunctionCalls(
+      const processing = runToolStep(
+        core,
+        shared,
         [call],
         abortController,
         promptId,
-        1,
         [{ name: call.name } as FunctionDeclaration],
       );
       return { abortController, processing };
@@ -1275,6 +1448,11 @@ describe.each([false, true])(
       const scheduleSpy = mockScheduleUpdates(batches);
       const run = startCall(core, toCall(req), req.prompt_id);
       try {
+        // On the shared loop the call is scheduled in the run's first round.
+        // Microtasks only: fake timers must not advance meanwhile.
+        for (let i = 0; i < 1000 && !scheduleSpy.mock.calls.length; i++) {
+          await Promise.resolve();
+        }
         await body(run);
       } finally {
         run.abortController.abort();
@@ -1539,6 +1717,8 @@ describe.each([false, true])(
           getMaxSubagentDepth: vi.fn().mockReturnValue(5),
           getToolMode: vi.fn().mockReturnValue(ToolMode.CodeModeOnly),
           isUnifiedAgentLoopEnabled: () => shared,
+          getSkipLoopDetection: () => false,
+          isEventBusAgentLoopEnabled: () => kernel,
         } as unknown as Config;
         const core = new AgentCore(
           'code-mode-exec-agent',
@@ -1561,7 +1741,9 @@ describe.each([false, true])(
           });
         const abortController = new AbortController();
 
-        const processing = core.processFunctionCalls(
+        const processing = runToolStep(
+          core,
+          shared,
           [
             {
               id: 'call-code-mode-exec',
@@ -1571,7 +1753,6 @@ describe.each([false, true])(
           ],
           abortController,
           'prompt-code-mode-exec',
-          1,
           [{ name: gateway } as FunctionDeclaration],
         );
         await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
@@ -1846,12 +2027,14 @@ describe.each([false, true])(
 );
 
 describe('AgentCore.processFunctionCalls incomplete-argument marker', () => {
-  it.each([false, true])(
-    'forwards hadIncompleteArguments when the turn was not token-truncated (unifiedAgentLoop=%s)',
-    async (shared) => {
-      const checkToolSteps = trackToolSteps(shared);
+  it.each(LOOPS)(
+    'forwards hadIncompleteArguments when the turn was not token-truncated ($name loop)',
+    async ({ shared, kernel }) => {
+      const checkToolSteps = trackToolSteps(shared, kernel);
       const config = {
         isUnifiedAgentLoopEnabled: () => shared,
+        getSkipLoopDetection: () => false,
+        isEventBusAgentLoopEnabled: () => kernel,
         getToolRegistry: vi.fn().mockReturnValue({ getTool: vi.fn() }),
         getDebugLogger: vi
           .fn()
@@ -1890,18 +2073,16 @@ describe('AgentCore.processFunctionCalls incomplete-argument marker', () => {
         .mockResolvedValue(undefined);
       const abortController = new AbortController();
 
-      const processing = core.processFunctionCalls(
+      // The subagent turn saw no token cut, so the marker is the only thing
+      // left that can arm the scheduler's data-loss guard here — a subagent
+      // has no approval prompt between the response and the write (#12970).
+      const processing = runToolStep(
+        core,
+        shared,
         [functionCall, cleanFunctionCall],
         abortController,
         'prompt-incomplete',
-        1,
         [{ name: 'write_file' } as FunctionDeclaration],
-        undefined,
-        // The subagent turn saw finishReason STOP (delayed usage disproved a
-        // token cut), so the marker is the only thing left that can arm the
-        // scheduler's data-loss guard here — a subagent has no approval prompt
-        // between the response and the write (#12970).
-        false,
       );
       try {
         await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
@@ -1944,7 +2125,7 @@ describe('AgentCore.prepareTools', () => {
     fnDeclarations: FunctionDeclaration[],
     maxSubagentDepth = 5,
     toolOutputBatchBudget = Number.POSITIVE_INFINITY,
-    shared = false,
+    { shared, kernel }: Pick<Loop, 'shared' | 'kernel'> = LOOPS[0],
   ): {
     core: AgentCore;
     debugSpy: ReturnType<typeof vi.fn>;
@@ -1975,6 +2156,8 @@ describe('AgentCore.prepareTools', () => {
       getToolOutputBatchBudget: vi.fn().mockReturnValue(toolOutputBatchBudget),
       getToolResultBytesWritten: vi.fn().mockReturnValue(500 * 1024 * 1024),
       isUnifiedAgentLoopEnabled: () => shared,
+      getSkipLoopDetection: () => false,
+      isEventBusAgentLoopEnabled: () => kernel,
     } as unknown as Config;
 
     const core = new AgentCore(
@@ -2324,11 +2507,12 @@ describe('AgentCore.prepareTools', () => {
     },
   );
 
-  it.each([false, true])(
-    'hard-caps the aggregate subagent tool response (unifiedAgentLoop=%s)',
-    async (shared) => {
-      const checkToolSteps = trackToolSteps(shared);
-      const { core } = buildAgentForTools(undefined, [], 5, 1000, shared);
+  it.each(LOOPS)(
+    'hard-caps the aggregate subagent tool response ($name loop)',
+    async (loop) => {
+      const { shared } = loop;
+      const checkToolSteps = trackToolSteps(shared, loop.kernel);
+      const { core } = buildAgentForTools(undefined, [], 5, 1000, loop);
       const missingName = `missing_${'a'.repeat(2000)}`;
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-core-'));
       const jsonlPath = path.join(tempDir, 'agent.jsonl');
@@ -2345,14 +2529,15 @@ describe('AgentCore.prepareTools', () => {
       );
 
       try {
-        const result = await core.processFunctionCalls(
+        const result = await runToolStep(
+          core,
+          shared,
           [
             { name: missingName, args: {} },
             { name: missingName, args: {} },
           ],
           new AbortController(),
           'prompt-budget',
-          1,
           [],
         );
 

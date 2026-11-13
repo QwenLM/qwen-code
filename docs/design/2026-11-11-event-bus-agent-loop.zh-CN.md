@@ -2,7 +2,7 @@
 
 [English](2026-11-11-event-bus-agent-loop.md) | [简体中文](2026-11-11-event-bus-agent-loop.zh-CN.md)
 
-- **状态**：PR 1–3 已合入（#16935 原语、#16938 handler、#16949 流式评估）；PR 4（headless opt-in 设置）已在 #16994 合入；不改变任何 surface 的默认行为。
+- **状态**：PR 1–3 已合入（#16935 原语、#16938 handler、#16949 流式评估）；PR 4（headless opt-in 设置）已在 #16994 合入；从统一 loop 的 PR 5c 起，同一设置下 AgentCore 的轮次也跑在内核上；不改变任何 surface 的默认行为。
 - **日期**：2026-11-11，基于 `origin/main` `da270e434957`。
 - **关联**：
   - [Unified agent loop](2026-10-23-unified-agent-loop.zh-CN.md) —— 本设计对其做内部架构升级的已批准设计；跟踪 issue #15327，#15343 批准，headless 已在 #15369 合入，ACP 模型轮已在 #15509 合入；

@@ -2,7 +2,7 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）与 OpenTUI（PR 4，#16743–#16820）的迁移均已合入；各 surface 的默认开启等待 nightly 统一 loop E2E 门控（#16192）。PR 5（AgentCore）正在进行：5a（#16880）已合入。
+- **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）与 OpenTUI（PR 4，#16743–#16820）的迁移均已合入；各 surface 的默认开启等待 nightly 统一 loop E2E 门控（#16192）。PR 5（AgentCore）正在进行：5a（#16880）和 5b（#17035）已合入。其余步骤在 #17045 中跟踪。
 - **日期**：2026-10-23，基于 upstream `779a4d5d0d`。
 - **相关**：
   - tracking issue #15327；
@@ -480,12 +480,12 @@ PR 4c 覆盖轮次的其余部分。实时轮次已经会发出工具批接着�
 
 AgentCore 的推理循环（`agent-core.ts` 中的 `runReasoningLoop`）在每个入口下运行所有子代理、后台和 fork agent、workflow agent 以及进程内 teammate。它在 agent 自己的 `LlmChat` 上发出每一轮并自己解析流的 chunk，在新的 `CoreToolScheduler` 上运行这一轮的调用，把父 agent 的消息加在结果之后，一轮没有调用工具时等待消息或要求给出最终结果，并把各种停止映射到 `terminateMode`。它分以下几步迁移：
 
-| 步骤 | 内容                                                                                                                                        |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| 5a   | 每个模型轮走 loop 的 `runModelRound`，在 agent 自己 `LlmChat` 上的 `Turn` 上发出；agent 保留自己的工具步骤；对拍套件加入子代理场景          |
-| 5b   | 一轮的调用作为一个共享工具批，在 agent 的 scheduler 上运行，连同它的延后审批                                                                |
-| 5c   | 整个运行走 loop：父 agent 的消息经 loop 的下一轮发出，循环提醒和按结果判断的循环守卫、等待和要求最终结果，以及映射到 `terminateMode` 的停止 |
-| 5d   | 默认开启，然后移除现有 loop                                                                                                                 |
+| 步骤 | 内容                                                                                                                               |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| 5a   | 每个模型轮走 loop 的 `runModelRound`，在 agent 自己 `LlmChat` 上的 `Turn` 上发出；agent 保留自己的工具步骤；对拍套件加入子代理场景 |
+| 5b   | 一轮的调用作为一个共享工具批，在 agent 的 scheduler 上运行，连同它的延后审批                                                       |
+| 5c   | 每一轮及其工具批在一次 `runAgentLoop` 调用中运行，内核开启时跑在事件总线内核上；轮与轮之间仍由 agent 自己驱动                      |
+| 5d   | 默认开启，然后移除现有 loop                                                                                                        |
 
 PR 5a 让 `runModelRound` 有了第二种模型轮。它接收主会话的 `LlmClient` 或一个 `ModelRoundSource`，`turnModelRound(chat, model, options)` 在 agent 的 chat 上用 `Turn` 发出一轮。`Turn` 接收可选的工具和输出上限请求字段，在流准备完成时通知调用方，并在产出每个 chunk 的事件前提供其文本、响应 ID 和用量。`Retry` 事件可以携带提高后的输出上限。Agent 可以让 `Turn` 原样抛出请求错误。入口的模型事件回调可以返回停止原因，在那里结束这一轮并关闭它的流。
 
@@ -509,6 +509,22 @@ PR 5b 把一轮的调用作为 loop 的 `runToolBatch` 的一个工具批，在 
 | 自己排序并收尾结果                           | 由工具批完成，agent 据此发出 `TOOL_RESPONSES_FINALIZED`          |
 
 scheduler 及其事件、审批和 hook 仍是 agent 自己的，因此延后审批照旧恢复 agent 的四个 async-local 上下文帧。工具批不记录结果，因为结果进入 agent 的 chat，而不是会话记录。它保留被中止的工具批的结果，让运行像现在一样在下一轮的中止检查处结束。流中重复的调用 ID 仍只运行并应答一次。headless 套件在调试日志中统计共享 loop 上的子代理工具批，TUI 套件在 TUI 中应答子代理的审批。
+
+PR 5c 让每一轮，即它的模型请求和工具批，在一次 `runAgentLoop` 调用中运行，调用在工具批之后返回，与 headless 主轮次逐轮运行的方式相同。开启 `experimental.eventBusAgentLoop` 时，这次调用跑在事件总线内核上，因此 AgentCore 是内核到达的第二个入口。轮与轮之间仍由 agent 自己驱动：在结果之后加入父 agent 的消息、循环提醒和按结果判断的循环守卫、等待和要求最终结果，以及把停止映射到 `terminateMode`。把整个运行交给 loop、不再自己驱动，留给 #17045 的后续 issue。loop 的选项有如下变化，过程式路径和事件总线路径都支持：
+
+- `runAgentLoop` 接收工具批选项 `keepCancelledResults`、`deferRecording` 和 `duplicateStateForCall`，并按调用返回工具批的结果；
+- 它可以用 `ModelRoundSource` 代替 client；在轮次来源上运行的 loop，其调用不计入会话的工具调用数；
+- `onRoundEnd` 可以返回一个停止原因，在模型轮和它的工具批之间结束 loop。
+
+迁移的部分：
+
+| 5b 之后的 AgentCore                                          | 5c 之后                                                                                      |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| 把一轮的 function call 交给它的工具步骤                      | 它的轮次来源为每个调用向工具批提供 agent 自己的请求：每个调用 ID 一个，带这一轮最终的响应 ID |
+| 流结束后发出这一轮的文本、计数、检查时间上限并记录用量       | 在 `onRoundEnd` 中做同样的事；超过时间上限时它停止 loop，工具批不再运行                      |
+| 它的工具步骤把这一轮的调用作为一个 `runToolBatch` 工具批运行 | 同一个工具批在这次调用中运行，调用返回它的结果                                               |
+
+headless 套件把每个子代理场景在两个设置都开启时再跑一次，并与共享 loop 上的运行比较；调试日志会标出跑在内核上的每个子代理轮次。agent 工具步骤和运行的单元测试覆盖当前 loop、共享 loop 和内核三种情况。
 
 ## 迁移计划
 
@@ -538,7 +554,7 @@ scheduler 及其事件、审批和 hook 仍是 agent 自己的，因此延后审
 | 4d    | OpenTUI：默认开启，然后删除其现有 loop                                                                    |
 | 5a    | AgentCore：每个模型轮走 loop 的模型轮，在 agent 自己 chat 上的 `Turn` 上发出；agent 保留自己的工具步骤    |
 | 5b    | AgentCore：一轮的调用作为一个共享工具批，连同它的延后审批                                                 |
-| 5c    | AgentCore：整个运行走 loop，父 agent 的消息经下一轮发出；停止映射到 `terminateMode`                       |
+| 5c    | AgentCore：每一轮及其工具批在一次 `runAgentLoop` 调用中运行，内核开启时跑在事件总线内核上                 |
 | 5d    | AgentCore：默认开启，然后移除现有 loop                                                                    |
 | 6     | speculation                                                                                               |
 | —     | Hosted Harness：单独评估                                                                                  |
@@ -591,6 +607,8 @@ PR 6 之后同样跟随默认开启和删除旧 loop 两步。
 - 在一次响应中，子代理在一次读取之外调用了它不能使用的工具（PR 5b）；
 - 模型失败的子代理。
 
+从 PR 5c 起，每个子代理场景还会在开启 `experimental.eventBusAgentLoop` 时运行，并且必须与共享 loop 上的运行一致。
+
 **ACP 场景**（`integration-tests/cli/acp-agent-loop-parity.test.ts`）：
 
 - 纯文本，以及带 thought 的流式文本；
@@ -641,7 +659,7 @@ PR 6 之后同样跟随默认开启和删除旧 loop 两步。
 
 ## 兼容性
 
-- 设置关闭时，任何入口都不变。共享代码的改动都是增量的：scheduler 的可选项 `beforeToolLaunch`、从 PR 2a 起上文所列的 `Turn` 事件字段和发送选项，从 PR 2b 起导出的 `runToolBatch` 和 scheduler 的 `refuseToolCall`、`onPermissionPromptTerminalSequence`，从 PR 2c-1 起的 `stopPolicies`，从 PR 3b-1 起已完成调用的 `recorded`、工具批的 `responses` 和工具批选项 `deferRecording`，以及从 PR 5b 起工具批可选的 `client`，不使用它们的调用方不受影响。
+- 设置关闭时，任何入口都不变。共享代码的改动都是增量的：scheduler 的可选项 `beforeToolLaunch`、从 PR 2a 起上文所列的 `Turn` 事件字段和发送选项，从 PR 2b 起导出的 `runToolBatch` 和 scheduler 的 `refuseToolCall`、`onPermissionPromptTerminalSequence`，从 PR 2c-1 起的 `stopPolicies`，从 PR 3b-1 起已完成调用的 `recorded`、工具批的 `responses` 和工具批选项 `deferRecording`，从 PR 5b 起工具批可选的 `client`，以及从 PR 5c 起 loop 的工具批选项、按调用返回的结果、代替 client 的轮次来源和 `onRoundEnd` 返回的停止，不使用它们的调用方不受影响。
 - 设置开启时，headless 与现在相比有以下有意的差异。其中大多数源于把一批调用作为一个整体调度，这也是 TUI 现在的做法：
   - 在 stream-json 中，超过 `--max-session-turns` 的消息会在会话轮数上限处结束运行，与 `-p` 相同（错误写到 stderr，退出码 53），而不是返回一个重复上一条回答的成功结果（#15325）；
   - 通知轮次（cron、monitor 等排队条目）的每一轮模型调用都计入 `--max-session-turns`，与主轮次相同，而不是整个条目只计一轮，因此通知轮次中调用工具的运行可能更早到达上限；
