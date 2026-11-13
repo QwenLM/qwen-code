@@ -62,6 +62,14 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   // The shared approval card asks whether a tool is an agent launch.
   isAgentTool: () => false,
 }));
+const localFilesBridge = vi.hoisted(() => ({
+  status: { phase: 'idle', blocker: null },
+  connect: vi.fn(),
+  disconnect: vi.fn(),
+}));
+vi.mock('../../local-files/useManagedLocalFilesBridge', () => ({
+  useManagedLocalFilesBridge: () => localFilesBridge,
+}));
 vi.mock('../MessageList', () => ({
   MessageList: ({
     messages,
@@ -476,6 +484,42 @@ describe('ManagedSessionsPage', () => {
     expect(container.textContent).not.toContain('Session diagnostics');
     expect(getContextUsage.mock.calls[0][1].signal.aborted).toBe(true);
   });
+
+  it.each(
+    [true, false].flatMap((enabled) =>
+      [true, false].map((home) => ({ enabled, home })),
+    ),
+  )(
+    'gates the local files entry on the session capability (enabled: $enabled, home: $home)',
+    async ({ enabled, home }) => {
+      provider = {
+        ...provider,
+        clientFiles: {
+          transport: () => ({
+            baseUrl: 'http://managed-test/api/agent/web-shell/v1',
+            fetch: async () => new Response('{}', { status: 200 }),
+          }),
+        },
+      };
+      mocks.client.getSession.mockImplementation(async (id: string) =>
+        summary(id, {
+          capabilities: {
+            canSend: false,
+            canCancel: false,
+            ...(enabled ? { clientFiles: true } : {}),
+          },
+        }),
+      );
+      // The entry is inserted into two different headers (the home
+      // ChatContextHeader and the standalone session header); render both so
+      // neither insertion is unwitnessed.
+      await render('s1', 'en', provider, home ? null : undefined);
+      const button = container.querySelector(
+        'button[aria-label="Local files"]',
+      );
+      expect(button !== null).toBe(enabled);
+    },
+  );
 
   it('opens only the host Session without catalog, creation, cancellation or daemon calls', async () => {
     provider = { ...provider, canCancel: false };

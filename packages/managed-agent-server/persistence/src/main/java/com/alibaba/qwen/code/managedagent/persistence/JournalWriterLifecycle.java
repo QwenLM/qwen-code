@@ -36,13 +36,15 @@ final class JournalWriterLifecycle {
     private final WriterCredentialPolicy credentials;
     private final JdbcRuntimeBindingRepository csiBindings;
     private final JdbcManagedExtensionRecordStore extensionRecords;
+    private final JdbcJournalPacks packs;
 
     JournalWriterLifecycle(JournalFencing fencing,
             JournalStoreRows storeRows,
             com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion,
             JdbcTemplate jdbc,
             WriterCredentialPolicy credentials,
-            JdbcRuntimeBindingRepository csiBindings, JdbcManagedExtensionRecordStore extensionRecords) {
+            JdbcRuntimeBindingRepository csiBindings, JdbcManagedExtensionRecordStore extensionRecords,
+            JdbcJournalPacks packs) {
         this.fencing = fencing;
         this.storeRows = storeRows;
         this.readerVersion = readerVersion;
@@ -50,6 +52,7 @@ final class JournalWriterLifecycle {
         this.credentials = credentials;
         this.csiBindings = csiBindings;
         this.extensionRecords = extensionRecords;
+        this.packs = packs;
     }
 
     void bindControlSessionStorage(String tenantId, String workspaceId, String sessionId) {
@@ -310,7 +313,7 @@ final class JournalWriterLifecycle {
                 JdbcCsiActivationAdmission.qualifyColdWriter(connection, csiOriginal, csiBindings,
                         head.journalRevision(), head.committedSequence(), head.lastCommitDigest(), head.writerId(),
                         head.writerGeneration(), head.activationEpoch(), JournalStoreRows.epochMillis(head.writerLeaseUntil()),
-                        request.writerId());
+                        request.writerId(), packs);
                 return null;
             });
             now = storeRows.databaseNow();
