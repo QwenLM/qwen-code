@@ -24,6 +24,7 @@ import { ControlDispatcher } from './control/ControlDispatcher.js';
 import { ControlContext } from './control/ControlContext.js';
 import { ControlService } from './control/ControlService.js';
 import { waitForPendingMemoryTasks } from './memory-tasks.js';
+import { AlreadyReportedError } from '../utils/errors.js';
 
 const runNonInteractiveMock = vi.fn();
 
@@ -1946,6 +1947,84 @@ describe('runNonInteractiveStreamJson', () => {
         notificationDisplayText: 'Monitor "logs" event #1: ready',
         captureMonitorNotifications: false,
         captureMonitorRegistrations: false,
+      }),
+    );
+  });
+
+  it('keeps the provider status on a monitor-notification turn error result', async () => {
+    const initRequest = createControlRequest('initialize');
+    const userMessage = createUserMessage('Start a monitor');
+    let closeInput: (() => void) | undefined;
+    let registerCallback:
+      | ((entry: {
+          monitorId: string;
+          toolUseId?: string;
+          description: string;
+        }) => void)
+      | undefined;
+    let monitorCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            monitorId: string;
+            toolUseId?: string;
+            status: string;
+          },
+        ) => void)
+      | undefined;
+    mockMonitorRegistry.setRegisterCallback.mockImplementation((cb) => {
+      registerCallback = cb;
+    });
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      monitorCallback = cb;
+    });
+
+    runNonInteractiveMock
+      .mockImplementationOnce(async () => {
+        registerCallback?.({
+          monitorId: 'mon_1',
+          toolUseId: 'tool_mon_1',
+          description: 'logs',
+        });
+        monitorCallback?.(
+          'Monitor "logs" event #1: ready',
+          '<task-notification/>',
+          {
+            monitorId: 'mon_1',
+            toolUseId: 'tool_mon_1',
+            status: 'running',
+          },
+        );
+      })
+      .mockRejectedValueOnce(
+        new AlreadyReportedError('429 Too Many Requests', 1, 429),
+      );
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield userMessage;
+      await new Promise<void>((resolve) => {
+        closeInput = resolve;
+      });
+    };
+
+    const sessionPromise = runNonInteractiveStreamJson(config, '');
+    await vi.waitFor(() => {
+      expect(mockOutputAdapter.emitResult).toHaveBeenCalledWith(
+        expect.objectContaining({ isError: true, errorStatus: 429 }),
+      );
+    });
+    closeInput?.();
+    await sessionPromise;
+
+    // The notification turn's terminal envelope is the last result a
+    // consumer reads, so the status must survive on this path too.
+    expect(mockOutputAdapter.emitResult).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        isError: true,
+        errorMessage: '429 Too Many Requests',
+        errorStatus: 429,
       }),
     );
   });

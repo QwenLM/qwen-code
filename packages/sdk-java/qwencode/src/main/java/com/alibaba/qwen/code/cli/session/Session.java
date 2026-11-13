@@ -221,7 +221,7 @@ public class Session {
                             Optional.ofNullable(sessionEventConsumers.onUserMessageTimeout(this, sdkUserMessage)).orElse(defaultEventTimeout));
                     return false;
                 } else if ("result".equals(messageType)) {
-                    SDKResultMessage sdkResultMessage = jsonObject.to(SDKResultMessage.class);
+                    SDKResultMessage sdkResultMessage = jsonObject.to(SDKResultMessage.class, Feature.FieldBased);
                     MyConcurrentUtils.runAndWait(() -> sessionEventConsumers.onResultMessage(this, sdkResultMessage),
                             Optional.ofNullable(sessionEventConsumers.onResultMessageTimeout(this, sdkResultMessage)).orElse(defaultEventTimeout));
                     return true;
