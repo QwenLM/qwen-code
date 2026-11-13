@@ -53098,6 +53098,19 @@ describe('brand resolution', () => {
   });
 });
 
+describe('chat width styles', () => {
+  it('applies the host maximum to responsive content', async () => {
+    const { container } = renderApp({ chatMaxWidth: 720 });
+    await flush();
+
+    expect(
+      container
+        .querySelector<HTMLElement>('[data-web-shell-root]')
+        ?.style.getPropertyValue('--chat-responsive-content-width'),
+    ).toBe('min(720px, clamp(440px, 85cqw, calc(100cqw - 128px)))');
+  });
+});
+
 describe('settings-derived theme and language (#11955)', () => {
   function themeSetting(effective: string): DaemonSettingDescriptor {
     return {
