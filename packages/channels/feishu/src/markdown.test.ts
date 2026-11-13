@@ -93,12 +93,35 @@ describe('Feishu markdown utilities', () => {
       expect(splitByTables(`${code}\n${table}`)).toEqual([code, table]);
     });
 
+    it.each(['```', '~~~'])(
+      'does not close a %s fence with trailing text',
+      (fence) => {
+        const code = [fence, `${fence} still code`, table, fence].join('\n');
+        expect(splitByTables(`${code}\n${table}`)).toEqual([code, table]);
+      },
+    );
+
     it.each(
-      ['- ', '* ', '+ ', '1. ', '2) ', '\t-\t', '- 1. '].flatMap((prefix) =>
-        ['```', '~~~'].map((fence) => ({ prefix, fence })),
-      ),
+      [
+        '- ',
+        '* ',
+        '+ ',
+        '1. ',
+        '2) ',
+        '\t-\t',
+        '- 1. ',
+        '- [ ] ',
+        '- [x] ',
+        '- [X] ',
+        '- [\t] ',
+        '* [ ] ',
+        '+ [x] ',
+        '1. [ ] ',
+        '2) [X] ',
+        '- [ ] - [x] ',
+      ].flatMap((prefix) => ['```', '~~~'].map((fence) => ({ prefix, fence }))),
     )(
-      'preserves $prefix$fence list fences between tables',
+      'preserves $prefix / $fence list fences between tables',
       ({ prefix, fence }) => {
         const indent = ' '.repeat(prefix.replaceAll('\t', '    ').length);
         const code = [
@@ -116,10 +139,14 @@ describe('Feishu markdown utilities', () => {
       },
     );
 
-    it.each(['```', '~~~'])(
-      'does not close a %s fence on a list-prefixed literal delimiter',
-      (fence) => {
-        const code = [fence, `- ${fence}`, table, fence].join('\n');
+    it.each(
+      ['- ', '- [ ] ', '1. [X] '].flatMap((prefix) =>
+        ['```', '~~~'].map((fence) => ({ prefix, fence })),
+      ),
+    )(
+      'does not close a $fence fence on a $prefix literal delimiter',
+      ({ prefix, fence }) => {
+        const code = [fence, `${prefix}${fence}`, table, fence].join('\n');
         expect(splitByTables(`${code}\n${table}`)).toEqual([code, table]);
       },
     );
@@ -129,6 +156,12 @@ describe('Feishu markdown utilities', () => {
       '1. ```invalid`info',
       '-```',
       '1234567890. ```',
+      '- [ ] Use ``` literally.',
+      '- [x] ```invalid`info',
+      '- [  ] ```',
+      '- [✓] ```',
+      '- [x]```',
+      '[x] ```',
     ])('does not open a fence from %s', (prose) => {
       expect(splitByTables(`${prose}\n${table}\nAfter`)).toEqual([
         prose,
