@@ -61,6 +61,10 @@ Constraints:
   `retriesTransientGetAndRechecksTheOriginalGuard` asserts the guard runs three
   times on a retried read: once before the versioning probe and twice before the
   two `getObject` attempts. Removing the read probe changes this count to two.
+- `verification/.../persistence/AliyunToolPublicationReadRetryTest`
+  `transientReadsRecoverWithTheRealSdk` expects three `versioning` requests on
+  its versioning rows: the constructor probe fault plus its retry, and `open`'s
+  re-probe. Removing the read probe changes this count to two.
 - `verification/.../persistence/O4OssGate.java` delegates to the real store and
   does not count probes; its restricted identity skips `validateConfiguration`
   because the probe is itself a storage operation. Keeping the delete probe
@@ -223,7 +227,9 @@ The guarded read loop still runs the guard before every `getObject` attempt and
 retry, so the interface contract "check authorization before each new storage
 request, including implementation retries" is preserved. Update
 `retriesTransientGetAndRechecksTheOriginalGuard` to expect two guard runs instead
-of three. `deletionRejectsVersioningEnabledAfterConstruction` and all
+of three, and the versioning rows of `AliyunToolPublicationReadRetryTest`
+`transientReadsRecoverWithTheRealSdk` to expect two versioning requests instead
+of three. `deletionRejectsVersioningEnabledAfterConstruction` and the remaining
 request-count tests stay green. Reads on a bucket whose versioning drifts after
 construction are detected at the next verification, GC page or deletion; every
 external read still verifies length and SHA-256 and fails closed on mismatch.
@@ -442,7 +448,8 @@ until the required CI gates pass on the accepted revision.
 
 - `open`/`openRange` no longer issue a per-call `getBucketVersioning`;
   `putIfAbsent`/`deleteIfPresent` still refuse a versioned bucket; the deletion
-  regression test is green; the guard-count test expects two.
+  regression test is green; the guard-count and versioning request-count tests
+  expect two.
 - `object-storage.enabled=true` with `tool-publication.enabled=false` yields a
   store bean and no publication beans; existing tool-publication deployments work
   unchanged via the follows-default.
