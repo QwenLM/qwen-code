@@ -868,6 +868,10 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
       join(artifacts, 'assertions.json'),
       JSON.stringify({ pass: 1, fail: 0, total: 1 }),
     );
+    writeFileSync(
+      join(artifacts, 'boundary.json'),
+      JSON.stringify({ mode: 'container', detail: 'test boundary' }),
+    );
     const writeReport = (oid) =>
       writeFileSync(join(artifacts, 'report.md'), `merge-ready · ${oid}\n`);
     const check = () =>

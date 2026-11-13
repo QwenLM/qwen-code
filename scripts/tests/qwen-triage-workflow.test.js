@@ -6611,16 +6611,25 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('ask when that is ambiguous');
     // An unchanged head gets an answer, not a round.
     expect(flat).toContain('the head has not moved since');
-    // The shared state is checked and registered before the round runs.
+    // The shared state is checked and registered before the round runs,
+    // through the helper that owns the file: two consecutive rounds skipped
+    // the hand-written completion write and left the file two heads stale,
+    // so the contract now names one command per step instead of a JSON edit.
     expect(flat).toContain(
       'Register the round in the shared watch state before starting it',
     );
-    expect(flat).toContain('write `H` as in-flight');
+    expect(flat).toContain('never hand-write');
+    expect(flat).toContain(
+      'verify-pr-watch-state.mjs <n> --start --head <H> --round <r>',
+    );
+    expect(flat).toContain(
+      'Exit 3 means the file already records `H` as verified or in flight',
+    );
     expect(flat).toContain(
       'the same write-before-start rule the watch prompt follows',
     );
     expect(flat).toContain(
-      'record `H` as verified in the same file once the round completes',
+      'verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word>',
     );
     // Registration is a step of its own ahead of the round, not an
     // afterthought behind it.
@@ -6672,6 +6681,57 @@ describe('qwen-triage verify hardening round 2', () => {
       'a published comment found on the PR is evidence of a past round',
     );
     expect(flat).toContain('not consent for this one');
+  });
+
+  // Two local rounds on PR #16866 ran the whole battery on the host with no
+  // isolation gate and no waiver: the prose rule alone did not stop them.
+  // The declaration is the artifact the checker refuses to do without, and
+  // the waiver is an explicit per-round decision, never a silent fallback.
+  it('makes the isolation boundary a recorded declaration', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain('The boundary is a declaration, not a vibe');
+    expect(flat).toContain('`boundary.json` must be in the artifact directory');
+    expect(flat).toContain('the checker refuses a round without it');
+    // The boundary's operator owns the declaration, not the inner round.
+    expect(flat).toContain("a container's operator writes it");
+    expect(flat).toContain(
+      '{"mode":"container","detail":"<image, network policy, credential-free mount>"}',
+    );
+    expect(flat).toContain(
+      '{"mode":"waived","by":"<maintainer>","reason":"<why this round may run outside a boundary>"}',
+    );
+    expect(flat).toContain('explicitly approves host execution for this round');
+    expect(flat).toContain('The invocation itself is not that approval');
+    expect(flat).toContain(
+      'a waiver never carries over to the next round unasked',
+    );
+    // The Java gap is named, not left as a silent host fallback.
+    expect(flat).toContain('carries no JDK or Maven');
+    expect(flat).toContain('never a silent host fallback');
+    // The local container recipe's host check step declares the container
+    // it built, before the checker runs on the round dir.
+    expect(flat).toContain('> <round-dir>/boundary.json');
+    // The report carries the boundary for human readers too.
+    expect(flat).toContain('Open it with a `**Boundary.**` line');
+  });
+
+  // The rig traps and the waiting strategy are measured round behaviour,
+  // not advice: each cost a live round real time before it was written down.
+  it('teaches the rig backfill rule and event-driven waiting', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain(
+      "Reuse the prior round's rig — and feed every fix back into it",
+    );
+    expect(flat).toContain(
+      'fold the fix into the copy the next round will inherit',
+    );
+    expect(flat).toContain('A masking pipe eats the setup exit code');
+    expect(flat).toContain('Restore, then compare — never the reverse');
+    expect(flat).toContain('Fresh worktrees have no `dist`');
+    expect(flat).toContain('Wait on notifications, not foreground sleeps');
+    expect(flat).toContain(
+      'do the writable work — report draft, data files, read-only claim checks — while it runs',
+    );
   });
 
   // The TUI renders `argument-hint` beside the command name; without the field
@@ -6981,6 +7041,36 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(body).toContain('results unavailable');
       expect(body).not.toContain('A/B against the base build');
       expect(body).not.toContain('merge-ready');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The checker refuses a round without a boundary declaration, and the CI
+  // agent's base-pinned skill may predate boundary.json — so the workflow
+  // declares the lane itself, before the checker runs, and the verdict is
+  // still trusted.
+  it('declares the CI lane boundary before the artifact check', () => {
+    const dir = fixture();
+    try {
+      const art = join(dir, 'work', 'verify-results', 'prA-verify-1');
+      expect(existsSync(join(art, 'boundary.json'))).toBe(false);
+      const body = render(dir, {
+        NAME: 'boundary',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(
+        JSON.parse(readFileSync(join(art, 'boundary.json'), 'utf8')),
+      ).toEqual({
+        mode: 'container',
+        detail: 'CI verify lane (credential-free container)',
+      });
+      expect(body).toContain('merge-ready');
+      const script = publishScript();
+      expect(script.indexOf('CI verify lane')).toBeGreaterThan(-1);
+      expect(script.indexOf('CI verify lane')).toBeLessThan(
+        script.indexOf('VERIFY_PR_CHECK'),
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

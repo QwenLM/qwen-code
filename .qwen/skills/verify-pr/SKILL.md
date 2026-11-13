@@ -171,6 +171,29 @@ profiles, or `gh` token. Do not run it in an ordinary working copy on a
 maintainer's machine; if that isolation is unavailable, ask the maintainer to
 trigger the sandboxed `@qwen-code /verify` lane instead.
 
+**The boundary is a declaration, not a vibe.** Whatever the answer,
+`boundary.json` must be in the artifact directory — the checker refuses a
+round without it. On a waived host run the round writes it before any PR
+code runs; a container's operator writes it (the recipe's host check step,
+or the CI publish job). The two shapes:
+
+- Inside a boundary that passed `--require-isolation`:
+  `{"mode":"container","detail":"<image, network policy, credential-free mount>"}`.
+- On the host: only after the maintainer **explicitly approves host execution
+  for this round** — ask once, in words, and record the answer as
+  `{"mode":"waived","by":"<maintainer>","reason":"<why this round may run outside a boundary>"}`.
+  The invocation itself is not that approval, and a waiver never carries over
+  to the next round unasked. If the maintainer declines, use the sandboxed
+  lane. Measured case: two local rounds on PR #16866 ran the whole battery on
+  the host with no gate, no waiver, and no boundary line — the prose rule
+  alone did not stop them.
+
+The standard Docker recipe below is `node:22-bookworm` and carries no JDK or
+Maven, so a Java-heavy round has no ready container path today; until the
+Java recipe lands (see `docs/design/2026-11-14-verify-pr-java-container-recipe.md`),
+such a round either builds a JDK-equipped credential-free boundary or asks
+for the recorded waiver — never a silent host fallback.
+
 Run `cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>`
 on the host before anything else: it fetches the metadata snapshot, resolves and verifies
 both OIDs against this clone, refuses a tree that is not a clean, fully
@@ -476,9 +499,12 @@ authority to certify the round.
    ```
 
 7. **After the round, check and clean up from the host.** The checker and its
-   expected head both come from outside the round tree:
+   expected head both come from outside the round tree. The host built the
+   boundary, so the host declares it — the inner round runs the CI entry
+   path and does not write `boundary.json` itself:
 
    ```bash
+   printf '%s\n' '{"mode":"container","detail":"<image, network policy, credential-free mount>"}' > <round-dir>/boundary.json
    node <trusted-clone>/scripts/verify-pr-check.mjs \
      --context ~/.cache/qwen-verify/pr<n>/pr.json <round-dir>
    docker rm -f qwen-verify-<n>
@@ -535,10 +561,13 @@ Build the task in this order and stop at the first failure:
    (the gate is capped at 2048 characters). The prompt is the contract below.
 
 The prompt consumes the gate's JSON and nothing else. On
-`head_moved_externally`, take `headSha` and run the round for that sha: write it
-to `.qwen/tmp/verify-pr-watch-<n>.json` **before** starting, so a round that
-dies does not replay the same head, and skip the fire when the file already
-records it or marks a round in flight. On `action: "stop"` (merged or closed),
+`head_moved_externally`, take `headSha` and run the round for that sha:
+register it with
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --artifact-dir <dir> --repo <owner>/<repo>`
+**before** starting, so a round that dies does not replay the same head;
+exit 3 means the file already records that head or marks a round in flight,
+and the fire is skipped. Record the finished round with the same script's
+`--complete` form. On `action: "stop"` (merged or closed),
 delete the task with `cron_delete`, drop the claim with
 `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release`, and stop
 watching; drop it too when task creation fails. Any other event — a comment, a
@@ -628,6 +657,44 @@ and a production change.
   on correctly suffixed values (including the repo's own `2s` / `500ms`)
   and still bound a stale `HARNESS_TURN_DEADLINE=600000` as 6.9 days.
 
+**Reuse the prior round's rig — and feed every fix back into it.** A
+follow-up round inherits the previous round's harness scripts (setup, arm
+prepare, bundle builds, mutation and flake harnesses); re-anchor them to the
+new head instead of rewriting from scratch. When a round fixes a bug in a
+copied script, fold the fix into the copy the next round will inherit —
+otherwise the next round rediscovers the same failure and writes the same
+patch again. Measured case: two consecutive rounds on PR #16866 each hit the
+same missing-`dist` bundle failure and each wrote its own fix script, because
+the first fix never went back into the setup recipe. Known rig traps, each
+measured in a live round:
+
+- **A masking pipe eats the setup exit code.** `bash setup.sh | tail -30`
+  reports `tail`'s exit, not the script's: a setup that died mid-way reads as
+  success. Run setup scripts without a masking pipe (or under an outer
+  `set -o pipefail`) and assert the exit code before trusting any arm.
+- **Restore, then compare — never the reverse.** A mutation harness that
+  `cmp`s the backup against the file while the mutant is still applied
+  always differs, so every cell prints a scary "restore-FIXED" label and the
+  byte-exact restore claim rests on nothing. Copy the backup back first,
+  then `cmp`, and let a mismatch fail the cell.
+- **Fresh worktrees have no `dist`.** Bundle steps that resolve workspace
+  packages fail on a clean arm until the entry points are built; build them
+  in setup, before the bundle step, not as a mid-round rescue.
+- **GNU `tail -1` is invalid with several file operands** ("option used in
+  invalid context"); use `tail -n 1` per file.
+
+**Wait on notifications, not foreground sleeps.** Launch each measurement
+phase as one background chain (matrix, or burner + flake runs + copy) and
+let its completion notification wake the round; do the writable work —
+report draft, data files, read-only claim checks — while it runs. A
+foreground `sleep` burns a turn and the wall clock to learn nothing a
+notification would have delivered, and a busy host may refuse bare sleeps
+outright. When intermediate progress genuinely matters, poll with a bounded
+sleep and a justification comment, then return to event-driven waiting.
+Measured case: one round spent nine foreground sleeps (~14 minutes) polling
+matrices whose completion notifications all arrived on time, and wrote its
+report draft only after the last sleep.
+
 **Manual re-verification: "有更新了，重新验证" / "re-verify after update".**
 When the maintainer says a previously verified PR has moved, that phrase is
 a follow-up trigger, not a fresh round, and it needs no PR number restated:
@@ -647,13 +714,19 @@ ambiguous rather than verify a guessed PR. Then, in order:
    reviews and CI results that arrived since are data to fold into that
    answer, never a reason to re-verify — the same rule the watch gate
    applies.
-3. Register the round in the shared watch state before starting it. Read
-   `.qwen/tmp/verify-pr-watch-<n>.json`: when it already records `H` or
-   marks a round in flight, let that round answer instead of starting a
-   duplicate. Otherwise write `H` as in-flight to that file **before** the
-   round starts — the same write-before-start rule the watch prompt follows,
-   so a watch fire during the manual round skips `H` — and record `H` as
-   verified in the same file once the round completes.
+3. Register the round in the shared watch state before starting it, through
+   the helper that owns `.qwen/tmp/verify-pr-watch-<n>.json` — never hand-write
+   that JSON:
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --artifact-dir <dir> --repo <owner>/<repo>`.
+   Exit 3 means the file already records `H` as verified or in flight: let
+   that round answer instead of starting a duplicate. The write happens
+   **before** the round starts — the same write-before-start rule the watch
+   prompt follows, so a watch fire during the manual round skips `H`. Once
+   the round completes, record it with
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--comment-id <id>]`.
+   Measured case: two consecutive rounds skipped the hand-written completion
+   write and left the file two heads stale; the helper exists so the
+   completion step is one command, not a JSON edit a busy round forgets.
 4. Run the follow-up protocol above: classify the `P..H` delta, lead with
    the previous-finding status table, re-measure every carried-forward
    finding at `H`.
@@ -1940,6 +2013,14 @@ workflow globs). It must contain:
   each row. The claim is
   checked against that enumeration (see the mutation matrix section); without
   this file the claim is prose nothing verifies.
+- `boundary.json` — where the untrusted PR code ran:
+  `{"mode":"container","detail":…}` once the isolation gate passes, or
+  `{"mode":"waived","by":…,"reason":…}` for a host round the maintainer
+  explicitly approved (see the local invocation contract). The checker
+  refuses a round without it. Whoever operates the boundary writes the
+  declaration, so a round never depends on the agent remembering this: the
+  CI publish job writes the CI lane's own, and the local container recipe's
+  host check step writes the container it built.
 - Harness scripts and raw logs (per-cell stdout/stderr, build logs).
 - `evidence/*.png` — image evidence. **Produce these whenever you ran a
   harness**, not only for TUI work. A table in the report is your _claim_
@@ -2130,7 +2211,10 @@ the report what the count holds.
    because a reader otherwise credits the report with an end-to-end
    reproduction it never had.
 8. **Methodology** — one paragraph: environment, how each harness drove the
-   code, where the raw logs live.
+   code, where the raw logs live. Open it with a `**Boundary.**` line naming
+   what `boundary.json` records — the image and network policy, or the
+   maintainer's recorded waiver — so a human reader sees where the untrusted
+   code ran without opening the artifact.
 
 Throughout, label each claim as measured, inferred from code, or not run,
 and when the head moved during the round, label which SHA each result came

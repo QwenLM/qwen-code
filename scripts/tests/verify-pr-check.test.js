@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   checkArtifacts,
+  checkBoundary,
   checkMutationCoverage,
 } from '../../scripts/verify-pr-check.mjs';
 
@@ -25,6 +26,10 @@ function validFiles(overrides = {}) {
     report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n`,
     verdict: 'merge-ready\n',
     assertions: JSON.stringify({ pass: 4, fail: 0, total: 4 }),
+    boundary: JSON.stringify({
+      mode: 'container',
+      detail: 'node:22-bookworm, --network none, credential-free',
+    }),
     ...overrides,
   };
 }
@@ -47,6 +52,9 @@ function makeArtifactDir(files, evidence = []) {
   writeFileSync(join(dir, 'assertions.json'), files.assertions);
   if (files.comment !== undefined) {
     writeFileSync(join(dir, 'comment.md'), files.comment);
+  }
+  if (files.boundary !== undefined) {
+    writeFileSync(join(dir, 'boundary.json'), files.boundary);
   }
   if (evidence.length > 0) {
     mkdirSync(join(dir, 'evidence'));
@@ -530,6 +538,90 @@ describe('checkMutationCoverage', () => {
   });
 });
 
+// Two local rounds on PR #16866 executed the whole battery on the
+// maintainer's host with no isolation gate, no waiver, and no boundary line
+// in the report: the isolation rule existed only as prose. The declaration
+// is the artifact that makes a host round a visible exception.
+describe('checkBoundary', () => {
+  it('accepts a container declaration with a detail', () => {
+    expect(
+      checkBoundary(
+        JSON.stringify({ mode: 'container', detail: 'node:22-bookworm' }),
+      ).errors,
+    ).toEqual([]);
+  });
+
+  it('accepts a waiver naming the maintainer and the reason', () => {
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'waived',
+          by: 'maintainer',
+          reason: 'Java battery needs the host JDK; approved in words',
+        }),
+      ).errors,
+    ).toEqual([]);
+  });
+
+  it.each([null, undefined, '', '   '])(
+    'refuses a round without a declaration (%s)',
+    (text) => {
+      expect(checkBoundary(text).errors.join('\n')).toMatch(
+        /boundary\.json is missing/,
+      );
+    },
+  );
+
+  it('refuses malformed JSON and non-object shapes', () => {
+    expect(checkBoundary('{').errors).toContain(
+      'boundary.json is not valid JSON',
+    );
+    for (const text of ['null', '[]', '"container"']) {
+      expect(checkBoundary(text).errors).toContain(
+        'boundary.json must be an object with a mode',
+      );
+    }
+  });
+
+  it('refuses an unknown mode', () => {
+    expect(
+      checkBoundary(JSON.stringify({ mode: 'host' })).errors.join('\n'),
+    ).toMatch(/mode must be one of container \| waived/);
+  });
+
+  it('refuses a container declaration without a detail', () => {
+    for (const detail of [undefined, '', '  ', 42]) {
+      expect(
+        checkBoundary(
+          JSON.stringify({ mode: 'container', detail }),
+        ).errors.join('\n'),
+      ).toMatch(/mode container needs a non-empty detail/);
+    }
+  });
+
+  it('refuses a waiver missing the approver or the reason', () => {
+    for (const waiver of [
+      { mode: 'waived' },
+      { mode: 'waived', by: 'maintainer' },
+      { mode: 'waived', reason: 'why' },
+      { mode: 'waived', by: ' ', reason: 'why' },
+      { mode: 'waived', by: 'maintainer', reason: '' },
+    ]) {
+      expect(checkBoundary(JSON.stringify(waiver)).errors.join('\n')).toMatch(
+        /mode waived needs non-empty by .* and reason/,
+      );
+    }
+  });
+
+  it('reaches the verdict through checkArtifacts, not just on its own', () => {
+    const result = checkArtifacts({
+      files: validFiles({ boundary: null }),
+      evidence: ['01-ab-cells.png'],
+    });
+    expect(result.errors.join('\n')).toMatch(/boundary\.json is missing/);
+  });
+});
+
 // Three rounds of PR #15984 opened with the title and the whole verdict
 // paragraph merged into one `#` line. The Markdown is structurally valid;
 // GitHub renders it as a single giant H1, a wall of bold text. The shape is
@@ -739,6 +831,10 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     writeFileSync(
       join(artifacts, 'assertions.json'),
       JSON.stringify({ pass: 1, fail: 0, total: 1 }),
+    );
+    writeFileSync(
+      join(artifacts, 'boundary.json'),
+      JSON.stringify({ mode: 'container', detail: 'test boundary' }),
     );
     writeFileSync(
       join(artifacts, 'report.md'),

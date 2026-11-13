@@ -6796,6 +6796,12 @@ jobs:
             if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ] && [ -n "${AGENT_VERDICT:-}" ]; then
               check_log="${RUNNER_TEMP:-/tmp}/verify-pr-check.log"
               check_status=0
+              # The CI lane is itself the credential-free boundary. Declare it
+              # from the workflow, not the agent: a round whose base-pinned
+              # skill predates boundary.json still passes the checker's
+              # boundary rule, and the declaration is a workflow-level fact
+              # rather than an agent claim.
+              printf '%s\n' '{"mode":"container","detail":"CI verify lane (credential-free container)"}' > "$(dirname "$REPORT")/boundary.json"
               node "${VERIFY_PR_CHECK:-scripts/verify-pr-check.mjs}" "$(dirname "$REPORT")" > "$check_log" 2> "$check_log.err" || check_status=$?
               case "${check_status}:$(tail -n 1 "$check_log")" in
                 "0:  ok: verdict=${AGENT_VERDICT} ("*) ARTIFACT_CHECK=ok ;;

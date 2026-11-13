@@ -29,6 +29,14 @@ import { isEntryPoint } from './lib/entry-point.js';
 export const VERDICTS = ['merge-ready', 'findings', 'blocked', 'inconclusive'];
 
 /**
+ * How the round isolated the untrusted PR code. `container` is a
+ * credential-free boundary the isolation gate passed; `waived` is a
+ * maintainer's explicit decision to run on the host, recorded so a host
+ * round is a visible exception instead of a silent default.
+ */
+export const BOUNDARY_MODES = ['container', 'waived'];
+
+/**
  * Who caused a failed assertion. `pr` is the only one that can stamp a defect
  * on the PR: an `environment` red belongs in an expected-red assertion once an
  * A/A control proves both arms fail, and a `harness` fault is `inconclusive`.
@@ -71,6 +79,9 @@ Checks a local round against the rules the CI publisher enforces:
     the PR is a contradiction: expected reds are passes
   - a mutations.json claiming per-commit coverage covers every commit it lists,
     and lists at least one commit (an empty set makes the claim vacuous)
+  - boundary.json declares where the untrusted PR code ran: mode container
+    with a non-empty detail, or mode waived with the approving maintainer (by)
+    and the reason; a round without the declaration is refused
 
 and warns (without failing) when the report does not lead with its verdict and
 head OID, when the verdict line is a heading (GitHub renders the whole
@@ -161,6 +172,59 @@ export function checkMutationCoverage(text) {
     );
   }
   return { errors };
+}
+
+/**
+ * A round that executes untrusted PR code without declaring where it ran
+ * reads exactly like one that ran inside the boundary. Two local rounds on
+ * PR #16866 executed the whole battery on the maintainer's host with no
+ * isolation gate, no waiver, and no boundary line in the report — the rule
+ * existed only as prose. The declaration is the artifact that makes the
+ * exception visible; the checker refuses a round without one.
+ */
+export function checkBoundary(text) {
+  if (text === null || text === undefined || text.trim() === '') {
+    return {
+      errors: [
+        'boundary.json is missing: every round declares where the untrusted PR code ran — {"mode":"container","detail":…} once the isolation gate passes, or {"mode":"waived","by":…,"reason":…} for a host round the maintainer explicitly approved',
+      ],
+    };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { errors: ['boundary.json is not valid JSON'] };
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { errors: ['boundary.json must be an object with a mode'] };
+  }
+  if (!BOUNDARY_MODES.includes(parsed.mode)) {
+    return {
+      errors: [
+        `boundary.json mode must be one of ${BOUNDARY_MODES.join(' | ')}; got ${JSON.stringify(parsed.mode)}`,
+      ],
+    };
+  }
+  const nonEmpty = (value) => typeof value === 'string' && value.trim() !== '';
+  if (parsed.mode === 'container' && !nonEmpty(parsed.detail)) {
+    return {
+      errors: [
+        'boundary.json mode container needs a non-empty detail naming the boundary (image and network policy, or the CI lane)',
+      ],
+    };
+  }
+  if (
+    parsed.mode === 'waived' &&
+    (!nonEmpty(parsed.by) || !nonEmpty(parsed.reason))
+  ) {
+    return {
+      errors: [
+        'boundary.json mode waived needs non-empty by (the maintainer who approved host execution) and reason (why this round may run outside a boundary)',
+      ],
+    };
+  }
+  return { errors: [] };
 }
 
 // GitHub renders CRLF and LF identically, so a Windows-authored artifact
@@ -356,6 +420,7 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
   }
 
   errors.push(...checkMutationCoverage(files.mutations).errors);
+  errors.push(...checkBoundary(files.boundary).errors);
 
   if (files.report && files.report.trim() !== '') {
     const report = normalizeNewlines(files.report);
@@ -457,6 +522,7 @@ function main(argv) {
     assertions: readIfExists(join(dir, 'assertions.json')),
     mutations: readIfExists(join(dir, 'mutations.json')),
     comment: readIfExists(join(dir, 'comment.md')),
+    boundary: readIfExists(join(dir, 'boundary.json')),
   };
   const evidenceDir = join(dir, 'evidence');
   const evidence = existsSync(evidenceDir)
