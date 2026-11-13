@@ -1100,6 +1100,45 @@ describe('gitCommit', () => {
       'first.txt',
     );
   });
+
+  it('commits a root-relative path from a workspace below the root', async () => {
+    const dir = makeRepo();
+    commitFile(dir, 'sub/a.txt', 'one\n', 'add sub');
+    const sub = path.join(dir, 'sub');
+    write(sub, { 'a.txt': 'two\n' });
+
+    await gitCommit(sub, 'update sub', { paths: ['sub/a.txt'] });
+
+    expect(git(dir, 'show', '--name-only', '--format=', 'HEAD').trim()).toBe(
+      'sub/a.txt',
+    );
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+  });
+
+  it('refuses a partial commit while a merge is parked', async () => {
+    const dir = makeRepo();
+    commitFile(dir, 'a.txt', 'two\n', 'edit a');
+    fs.writeFileSync(path.join(dir, '.git', 'MERGE_HEAD'), headSha(dir));
+
+    await expect(
+      gitCommit(dir, 'merge resolution', { paths: ['a.txt'] }),
+    ).rejects.toThrow(/a merge is in progress/);
+  });
+
+  it('refuses when a file now sits at a rename pre-image', async () => {
+    const dir = makeRepo();
+    commitFile(dir, 'old.txt', 'content\n', 'add old');
+    git(dir, 'mv', 'old.txt', 'new.txt');
+    write(dir, { 'old.txt': 'local shim\n' });
+
+    await expect(
+      gitCommit(dir, 'rename file', { paths: ['new.txt'] }),
+    ).rejects.toThrow(/a file now sits at the old path/);
+    // Both halves are still staged exactly as before the attempt.
+    expect(git(dir, 'status', '--porcelain').trim()).toBe(
+      'R  old.txt -> new.txt\n?? old.txt',
+    );
+  });
 });
 
 describe('gitPull', () => {

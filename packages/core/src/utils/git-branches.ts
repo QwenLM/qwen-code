@@ -1339,10 +1339,14 @@ export interface GitCommitOptions {
 /**
  * Git reads `*`, `?` and `[]` in a pathspec as glob wildcards, so a selection
  * naming a file that literally contains one would also match its neighbours.
- * `:(literal)` turns that off for the single pathspec that follows it.
+ * `:(literal)` turns that off. `top` anchors the path at the repository root,
+ * which is where the caller's selection comes from: `fetchGitDiff` pins its
+ * keys to `findGitRoot(cwd)`, while git otherwise resolves a pathspec against
+ * the current directory. Without it a workspace bound below the root sends a
+ * root-relative path that matches nothing.
  */
 function literalPathspec(path: string): string {
-  return `:(literal)${path}`;
+  return `:(top,literal)${path}`;
 }
 
 function literalPathspecs(paths: readonly string[]): string[] {
@@ -1421,6 +1425,12 @@ function parseStatusEntries(output: string): Array<{
  * can name a path that is already committed as-is (toggled on, then reverted),
  * which `git add -- <path>` rejects with "did not match any files". Rename
  * halves are paired here so the caller only has to send one side.
+ *
+ * Pairing reads `git diff HEAD`, the same view the checklist renders. The index
+ * alone can still report a rename for two rows the checklist listed separately
+ * (a staged rename whose worktree copy was rewritten below git's rename
+ * threshold), and pairing those would record a deletion the user never
+ * selected.
  */
 async function resolveCommitPaths(
   cwd: string,
@@ -1429,7 +1439,17 @@ async function resolveCommitPaths(
 ): Promise<string[]> {
   const output = await runGit(
     cwd,
-    ['status', '--porcelain', '-z', '--', ...literalPathspecs(paths)],
+    [
+      'status',
+      '--porcelain',
+      '-z',
+      // The checklist enumerates untracked files, so the resolver must too:
+      // `status.showUntrackedFiles=no` would hide a selected new file and turn
+      // a valid selection into "none of the selected paths have changes".
+      '-uall',
+      '--',
+      ...literalPathspecs(paths),
+    ],
     env,
   );
   const entries = parseStatusEntries(output);
@@ -1452,34 +1472,40 @@ async function resolveCommitPaths(
       resolved.push(entry.path);
     }
   }
-  // A rename only exists when its two halves are recorded in one commit.
-  // `git commit -- <new path>` alone leaves the deletion behind, so add the
-  // pre-image whenever the selected paths form the other half of a rename.
+  // A directory prefix can match entries whose paths are not themselves in the
+  // selection, and a rename whose halves are both outside it is dropped above,
+  // so the loop can leave nothing behind. `[]` is truthy, so returning it would
+  // send `git commit --` an empty pathspec and commit the whole index.
+  if (resolved.length === 0) {
+    throw new Error('cannot commit: none of the selected paths have changes');
+  }
+  // A rename only exists when its two halves are recorded in one commit, so
+  // the pre-image is named too. `commit -- <old path>` takes the working-tree
+  // content of every path it names, so refuse rather than publish whatever now
+  // sits at the old path.
   // An unborn HEAD has nothing to rename against and `HEAD` does not resolve.
-  if (await hasHead(cwd, env)) {
-    const diffOutput = await runGit(
-      cwd,
-      [
-        'diff',
-        '--cached',
-        '--name-status',
-        '-z',
-        '-M',
-        '--diff-filter=R',
-        'HEAD',
-      ],
-      env,
-    );
-    const selectedSet = new Set(paths);
-    const tokens = diffOutput.split('\0');
-    for (let i = 0; i + 2 < tokens.length; i += 3) {
-      if (!tokens[i].startsWith('R')) continue;
-      const oldPath = tokens[i + 1];
-      const newPath = tokens[i + 2];
-      if (selectedSet.has(newPath) || selectedSet.has(oldPath)) {
-        if (!resolved.includes(newPath)) resolved.push(newPath);
-        if (!resolved.includes(oldPath)) resolved.push(oldPath);
+  if (!(await hasHead(cwd, env))) return resolved;
+  const diffOutput = await runGit(
+    cwd,
+    ['diff', '--name-status', '-z', '-M', '--diff-filter=R', 'HEAD'],
+    env,
+  );
+  const tokens = diffOutput.split('\0');
+  for (let i = 0; i + 2 < tokens.length; i += 3) {
+    if (!tokens[i].startsWith('R')) continue;
+    const oldPath = tokens[i + 1];
+    const newPath = tokens[i + 2];
+    if (!selected.has(newPath) && !selected.has(oldPath)) continue;
+    for (const p of [newPath, oldPath]) {
+      if (!seen.has(p)) {
+        seen.add(p);
+        resolved.push(p);
       }
+    }
+    if (fs.existsSync(path.join(cwd, oldPath))) {
+      throw new Error(
+        `cannot commit: ${oldPath} was renamed to ${newPath}, but a file now sits at the old path`,
+      );
     }
   }
   return resolved;
@@ -1503,6 +1529,18 @@ export async function gitCommit(
   const paths = opts?.paths ? normalizeCommitPaths(opts.paths) : undefined;
   if (paths && paths.length === 0) {
     throw new Error('cannot commit: no paths selected');
+  }
+  // `git commit -- <paths>` is a partial commit, which git refuses outright
+  // while a merge, cherry-pick, revert or rebase is parked. Say so here
+  // instead of surfacing git's raw fatal, and point at the whole-index commit
+  // that does work in that state.
+  if (paths) {
+    const operation = await operationInProgress(cwd, env);
+    if (operation) {
+      throw new Error(
+        `cannot commit selected paths: a ${operation} is in progress; commit everything to finish it`,
+      );
+    }
   }
   const selection = paths
     ? await resolveCommitPaths(cwd, paths, env)
@@ -1549,6 +1587,7 @@ export async function gitCommit(
         cwd,
         [
           'ls-files',
+          '--full-name',
           '--cached',
           '--others',
           '-z',
@@ -1575,9 +1614,21 @@ export async function gitCommit(
         ['add', '-A', '--', ...literalPathspecs(existing)],
         env,
       );
+      // `commit -- <path>` takes the working-tree content of every path it
+      // names, so a rename's pre-image is already staged and does not need to
+      // be named; only paths that still exist are named, which keeps whatever
+      // now sits at an old path out of the commit.
+      const root = (
+        await runGit(cwd, ['rev-parse', '--show-toplevel'], env)
+      ).trim();
+      const commitPaths = selection.filter(
+        (p) =>
+          known.has(p) ||
+          !fs.existsSync(path.join(root || cwd, ...p.split('/'))),
+      );
       await runGit(
         cwd,
-        ['commit', '-m', message, '--', ...literalPathspecs(selection)],
+        ['commit', '-m', message, '--', ...literalPathspecs(commitPaths)],
         env,
       );
     } else {
