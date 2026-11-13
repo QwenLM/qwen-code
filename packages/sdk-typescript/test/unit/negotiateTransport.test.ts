@@ -29,6 +29,64 @@ function installMockFetch(
   ) as unknown as typeof globalThis.fetch;
 }
 
+function installStallingFetch(
+  opts: {
+    firstChunk?: string;
+    headers?: HeadersInit;
+    abortBody?: boolean;
+    stallBeforeHeaders?: boolean;
+  } = {},
+) {
+  let signal: AbortSignal | undefined;
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  let release!: (reason: unknown) => void;
+  let started!: () => void;
+  const requestStarted = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+
+  installMockFetch((_url, init) => {
+    signal = init?.signal ?? undefined;
+    const response = opts.stallBeforeHeaders
+      ? new Promise<Response>((_resolve, reject) => {
+          release = reject;
+        })
+      : new Response(
+          new ReadableStream<Uint8Array>({
+            start(bodyController) {
+              controller = bodyController;
+              release = (reason) => controller.error(reason);
+              if (opts.firstChunk !== undefined) {
+                controller.enqueue(new TextEncoder().encode(opts.firstChunk));
+              }
+            },
+          }),
+          { headers: opts.headers },
+        );
+    if (opts.abortBody !== false) {
+      signal?.addEventListener('abort', () => release(signal?.reason), {
+        once: true,
+      });
+    }
+    started();
+    return response;
+  });
+
+  return {
+    requestStarted,
+    get signal() {
+      return signal;
+    },
+    get controller() {
+      return controller;
+    },
+    async cleanup(pending?: ReturnType<typeof negotiateTransport>) {
+      release(new Error('fixture cleanup'));
+      (await pending)?.dispose();
+    },
+  };
+}
+
 afterEach(() => {
   globalThis.fetch = originalFetch;
   vi.useRealTimers();
@@ -44,6 +102,36 @@ function jsonResponse(status: number, body: unknown): Response {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe('capabilities fetch fixture', () => {
+  it('delivers the first chunk and headers, then rejects a stalled read on abort', async () => {
+    const fixture = installStallingFetch({
+      firstChunk: '{"transports":',
+      headers: { 'content-type': 'application/json' },
+    });
+    const abort = new AbortController();
+    const response = await fetch('http://localhost:8080/capabilities', {
+      signal: abort.signal,
+    });
+    const reader = response.body!.getReader();
+    try {
+      expect(response.headers.get('content-type')).toBe('application/json');
+      expect(await reader.read()).toEqual({
+        done: false,
+        value: new TextEncoder().encode('{"transports":'),
+      });
+      const readRejected = vi.fn();
+      void reader.read().catch(readRejected);
+      const reason = new Error('fixture aborted');
+      abort.abort(reason);
+      await Promise.resolve();
+      expect(readRejected).toHaveBeenCalledWith(reason);
+    } finally {
+      await fixture.cleanup();
+      reader.releaseLock();
+    }
+  });
+});
 
 describe('negotiateTransport', () => {
   // ---- REST fallback cases ----------------------------------------------
@@ -200,181 +288,94 @@ describe('negotiateTransport', () => {
   describe('probe timeout', () => {
     it('falls back to REST when the capabilities body stalls after headers', async () => {
       vi.useFakeTimers();
-      let responseSignal: AbortSignal | undefined;
-      let bodyController: ReadableStreamDefaultController<Uint8Array>;
-      let receivedHeaders!: () => void;
-      const headersReady = new Promise<void>((resolve) => {
-        receivedHeaders = resolve;
+      const fixture = installStallingFetch({
+        firstChunk: '{"transports":',
+        headers: { 'content-type': 'application/json' },
       });
-      installMockFetch((_url, init) => {
-        responseSignal = init?.signal ?? undefined;
-        const body = new ReadableStream<Uint8Array>({
-          start(controller) {
-            bodyController = controller;
-            controller.enqueue(new TextEncoder().encode('{"transports":'));
-            responseSignal?.addEventListener(
-              'abort',
-              () => controller.error(responseSignal?.reason),
-              { once: true },
-            );
-          },
-        });
-        receivedHeaders();
-        return new Response(body, {
-          headers: { 'content-type': 'application/json' },
-        });
-      });
-
       const pending = negotiateTransport('http://localhost:8080', undefined, {
         probeTimeoutMs: 100,
       });
       try {
-        await headersReady;
+        await fixture.requestStarted;
         await vi.advanceTimersByTimeAsync(99);
-        expect(responseSignal?.aborted).toBe(false);
+        expect(fixture.signal?.aborted).toBe(false);
         await vi.advanceTimersByTimeAsync(1);
-        expect(responseSignal?.aborted).toBe(true);
-        const transport = await pending;
-        expect(transport.type).toBe('rest');
-        transport.dispose();
+        expect(fixture.signal?.aborted).toBe(true);
+        expect((await pending).type).toBe('rest');
       } finally {
-        bodyController!.error(new Error('fixture cleanup'));
-        (await pending).dispose();
+        await fixture.cleanup(pending);
       }
     });
 
     it('keeps a complete delayed capabilities response and clears its deadline', async () => {
       vi.useFakeTimers();
-      let responseSignal: AbortSignal | undefined;
-      let bodyController: ReadableStreamDefaultController<Uint8Array>;
-      let receivedHeaders!: () => void;
-      const headersReady = new Promise<void>((resolve) => {
-        receivedHeaders = resolve;
-      });
-      installMockFetch((_url, init) => {
-        responseSignal = init?.signal ?? undefined;
-        const body = new ReadableStream<Uint8Array>({
-          start(controller) {
-            bodyController = controller;
-          },
-        });
-        receivedHeaders();
-        return new Response(body);
-      });
-
+      const fixture = installStallingFetch({ abortBody: false });
       const pending = negotiateTransport('http://localhost:8080', undefined, {
         probeTimeoutMs: 100,
       });
       try {
-        await headersReady;
+        await fixture.requestStarted;
         await vi.advanceTimersByTimeAsync(99);
-        bodyController!.enqueue(
+        fixture.controller.enqueue(
           new TextEncoder().encode('{"transports":["acp-http"]}'),
         );
-        bodyController!.close();
-        const transport = await pending;
-        expect(transport.type).toBe('acp-http');
+        fixture.controller.close();
+        expect((await pending).type).toBe('acp-http');
         await vi.advanceTimersByTimeAsync(100);
-        expect(responseSignal?.aborted).toBe(false);
-        transport.dispose();
+        expect(fixture.signal?.aborted).toBe(false);
       } finally {
-        bodyController!.error(new Error('fixture cleanup'));
-        (await pending).dispose();
+        await fixture.cleanup(pending);
       }
     });
 
     it('clears the capabilities deadline when body parsing fails', async () => {
       vi.useFakeTimers();
-      let responseSignal: AbortSignal | undefined;
-      installMockFetch((_url, init) => {
-        responseSignal = init?.signal ?? undefined;
-        return new Response('{');
+      const fixture = installStallingFetch({ firstChunk: '{' });
+      const pending = negotiateTransport('http://localhost:8080', undefined, {
+        probeTimeoutMs: 100,
       });
-
-      const transport = await negotiateTransport(
-        'http://localhost:8080',
-        undefined,
-        { probeTimeoutMs: 100 },
-      );
-      expect(transport.type).toBe('rest');
-      await vi.advanceTimersByTimeAsync(100);
-      expect(responseSignal?.aborted).toBe(false);
-      transport.dispose();
+      try {
+        await fixture.requestStarted;
+        fixture.controller.close();
+        expect((await pending).type).toBe('rest');
+        await vi.advanceTimersByTimeAsync(100);
+        expect(fixture.signal?.aborted).toBe(false);
+      } finally {
+        await fixture.cleanup(pending);
+      }
     });
 
     it('uses default 5000ms timeout when not specified', async () => {
       vi.useFakeTimers();
-      let responseSignal: AbortSignal | undefined;
-      let bodyController: ReadableStreamDefaultController<Uint8Array>;
-      let receivedHeaders!: () => void;
-      const headersReady = new Promise<void>((resolve) => {
-        receivedHeaders = resolve;
-      });
-      installMockFetch((_url, init) => {
-        responseSignal = init?.signal ?? undefined;
-        const body = new ReadableStream<Uint8Array>({
-          start(controller) {
-            bodyController = controller;
-            responseSignal?.addEventListener(
-              'abort',
-              () => controller.error(responseSignal?.reason),
-              { once: true },
-            );
-          },
-        });
-        receivedHeaders();
-        return new Response(body);
-      });
-
+      const fixture = installStallingFetch();
       const pending = negotiateTransport('http://localhost:8080');
       try {
-        await headersReady;
+        await fixture.requestStarted;
         await vi.advanceTimersByTimeAsync(4_999);
-        expect(responseSignal?.aborted).toBe(false);
+        expect(fixture.signal?.aborted).toBe(false);
         await vi.advanceTimersByTimeAsync(1);
-        expect(responseSignal?.aborted).toBe(true);
+        expect(fixture.signal?.aborted).toBe(true);
         expect((await pending).type).toBe('rest');
       } finally {
-        bodyController!.error(new Error('fixture cleanup'));
-        (await pending).dispose();
+        await fixture.cleanup(pending);
       }
     });
 
     it('custom probeTimeoutMs aborts a request whose headers never arrive', async () => {
       vi.useFakeTimers();
-      let responseSignal: AbortSignal | undefined;
-      let rejectRequest!: (reason: unknown) => void;
-      let receivedRequest!: () => void;
-      const requestStarted = new Promise<void>((resolve) => {
-        receivedRequest = resolve;
-      });
-      installMockFetch((_url, init) => {
-        responseSignal = init?.signal ?? undefined;
-        const response = new Promise<Response>((_resolve, reject) => {
-          rejectRequest = reject;
-          responseSignal?.addEventListener(
-            'abort',
-            () => reject(responseSignal?.reason),
-            { once: true },
-          );
-        });
-        receivedRequest();
-        return response;
-      });
-
+      const fixture = installStallingFetch({ stallBeforeHeaders: true });
       const pending = negotiateTransport('http://localhost:8080', undefined, {
         probeTimeoutMs: 100,
       });
       try {
-        await requestStarted;
+        await fixture.requestStarted;
         await vi.advanceTimersByTimeAsync(99);
-        expect(responseSignal?.aborted).toBe(false);
+        expect(fixture.signal?.aborted).toBe(false);
         await vi.advanceTimersByTimeAsync(1);
-        expect(responseSignal?.aborted).toBe(true);
+        expect(fixture.signal?.aborted).toBe(true);
         expect((await pending).type).toBe('rest');
       } finally {
-        rejectRequest(new Error('fixture cleanup'));
-        (await pending).dispose();
+        await fixture.cleanup(pending);
       }
     });
   });
