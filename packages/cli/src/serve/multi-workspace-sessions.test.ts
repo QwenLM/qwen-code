@@ -5831,7 +5831,7 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
-  it('reads hook pages within their persisted workspace without loading a session', async () => {
+  it.each([false, true])('reads scoped hook pages (SSH=%s)', async (ssh) => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440283';
       const promptId = `${sessionId}########1`;
@@ -5882,9 +5882,17 @@ describe('multi-workspace session dispatch', () => {
           }) + '\n',
         );
       }
-      const { app, primaryBridge, secondaryBridge } = makeHarness({
+      const { app, registry, primaryBridge, secondaryBridge } = makeHarness({
         secondaryTrusted: false,
       });
+      if (ssh) {
+        Object.defineProperty(
+          registry.getEntryByWorkspaceId('secondary-id')!.current!.runtime
+            .routeFileSystemFactory,
+          'sshWorkspace',
+          { value: { host: 'fixture-host', directory: '/remote/project' } },
+        );
+      }
       const suffix = `/session/${sessionId}/turns/${encodeURIComponent(promptId)}/hooks`;
       const secondary = await request(app)
         .get('/workspaces/secondary-id' + suffix)
@@ -5920,6 +5928,16 @@ describe('multi-workspace session dispatch', () => {
         )
         .set('Host', host())
         .expect(404);
+      if (ssh) {
+        await request(app)
+          .post('/workspaces/secondary-id' + suffix)
+          .set('Host', host())
+          .expect(501);
+        await request(app)
+          .get(`/workspaces/secondary-id/session/${sessionId}/turns/turn/other`)
+          .set('Host', host())
+          .expect(501);
+      }
       expect(primaryBridge.spawnCalls).toEqual([]);
       expect(secondaryBridge.spawnCalls).toEqual([]);
       expect(secondaryBridge.restoreCalls).toEqual([]);

@@ -82,6 +82,7 @@ import type {
   BridgeTelemetry,
 } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
+import { createTranscriptHookLifecycleUpdate } from './transcript-replay.js';
 import {
   EventBus,
   DEFAULT_RING_MAX_BYTES,
@@ -9340,13 +9341,14 @@ describe('createAcpSessionBridge', () => {
     'current_mode_update',
     'session_info_update',
     'config_option_update',
+    'hookLifecycle',
   ] as const)(
     'keeps the turn error on refresh when an idle %s session_update lands after it',
     async (subtype) => {
       // Latest-wins state snapshots fan out to idle sessions (a workspace
       // skills/settings refresh, an approval-mode change). They carry no
       // turn content for the persisted transcript and must not defeat the
-      // refresh-append of the terminal.
+      // refresh-append of the terminal. Late Hook diagnostics do not either.
       const handle = makeChannel({
         promptImpl: () => {
           throw new RequestError(-32603, 'Loop protection stopped this turn', {
@@ -9403,7 +9405,8 @@ describe('createAcpSessionBridge', () => {
           if (
             event.type === 'session_update' &&
             (event.data as { update?: { sessionUpdate?: string } })?.update
-              ?.sessionUpdate === subtype
+              ?.sessionUpdate ===
+              (subtype === 'hookLifecycle' ? 'agent_message_chunk' : subtype)
           ) {
             return;
           }
@@ -9423,7 +9426,27 @@ describe('createAcpSessionBridge', () => {
               ? { sessionUpdate: subtype, currentModeId: 'plan' }
               : subtype === 'config_option_update'
                 ? { sessionUpdate: subtype, configOptions: [] }
-                : { sessionUpdate: subtype, title: 'Durable title' },
+                : subtype === 'hookLifecycle'
+                  ? createTranscriptHookLifecycleUpdate({
+                      v: 1,
+                      kind: 'hook',
+                      executionId: 'late-hook',
+                      runtimeId: 'runtime',
+                      sessionId: session.sessionId,
+                      promptId: 'prompt-loop',
+                      agentId: null,
+                      eventName: 'StopFailure',
+                      name: 'late hook',
+                      hookType: 'command',
+                      source: 'project',
+                      startedAt: 100,
+                      phase: 'ended',
+                      endedAt: 120,
+                      durationMs: 20,
+                      outcome: 'error',
+                      exitCode: 1,
+                    })
+                  : { sessionUpdate: subtype, title: 'Durable title' },
       });
       await sawIdleUpdate;
 
