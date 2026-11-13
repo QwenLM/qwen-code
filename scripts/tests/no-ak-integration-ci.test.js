@@ -1058,6 +1058,17 @@ describe('no-AK integration CI wiring', () => {
     expect(diagnosticJob).toContain("probe: 'off'");
     expect(diagnosticJob).toContain('QWEN17040_DISABLE_PRELOAD:');
     expect(diagnosticJob).toContain('QWEN17040_FIRST_PROMPT_DELAY_MS');
+    const fixJob = getWorkflowJob(smokeWorkflow, 'verify_fix');
+    expect(fixJob).toContain("inputs.source_sha != ''");
+    expect(fixJob).toContain("ref: '${{ inputs.source_sha }}'");
+    expect(fixJob).toContain('git rev-parse HEAD');
+    expect(fixJob).toContain('node scripts/setup-worktree.js');
+    expect(fixJob).toContain('npm run build');
+    expect(fixJob).toContain('npm run bundle');
+    expect(fixJob).toContain('src/permissions/autoMode.test.ts');
+    expect(fixJob).toContain('candidate/dist/cli.js');
+    expect(fixJob).toContain("name = 'delayed-baseline'");
+    expect(fixJob).toContain("name = 'delayed-probe'");
     // The gate's run steps inherit ci.yml's workflow-level bash default, so
     // the smoke must execute these commands under the same shell; a
     // powershell pin there would validate a shell the gate never runs.

@@ -2,6 +2,12 @@ name: 'Windows Self-Hosted Runner Validation'
 
 on:
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: 'Exact source commit to build and verify instead of the released baseline'
+        required: false
+        type: 'string'
+        default: ''
 
 permissions:
   contents: 'read'
@@ -127,7 +133,7 @@ jobs:
           npm run test:ci
 
   diagnose:
-    if: "${{ github.ref_name == 'codex/issue17040-windows-diagnostic' }}"
+    if: "${{ github.ref_name == 'codex/issue17040-windows-diagnostic' && inputs.source_sha == '' }}"
     name: 'Issue 17040 (${{ matrix.os }}, delay ${{ matrix.prompt_delay_ms }}, probe ${{ matrix.probe }})'
     runs-on: '${{ matrix.os }}'
     timeout-minutes: 15
@@ -176,4 +182,76 @@ jobs:
           path: |
             ${{ runner.temp }}/qwen17040-run/summary.json
             ${{ runner.temp }}/qwen17040-run/trace/*.jsonl
+          retention-days: 7
+
+  verify_fix:
+    if: "${{ github.ref_name == 'codex/issue17040-windows-diagnostic' && inputs.source_sha != '' }}"
+    name: 'Verify issue 17040 source fix on Windows'
+    runs-on: 'windows-2025'
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: 'pwsh'
+    steps:
+      - name: 'Checkout diagnostic'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
+      - name: 'Validate source commit'
+        env:
+          SOURCE_SHA: '${{ inputs.source_sha }}'
+        run: |
+          if ($env:SOURCE_SHA -notmatch '^[0-9a-f]{40}$') { throw 'source_sha must be an exact commit SHA' }
+      - name: 'Checkout source candidate'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
+        with:
+          ref: '${{ inputs.source_sha }}'
+          path: 'candidate'
+      - name: 'Use reported Node version'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
+        with:
+          node-version: '22.23.4'
+      - name: 'Build exact source candidate'
+        working-directory: 'candidate'
+        env:
+          SOURCE_SHA: '${{ inputs.source_sha }}'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD) -ne $env:SOURCE_SHA) { throw 'checkout SHA mismatch' }
+          node scripts/setup-worktree.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run bundle
+          exit $LASTEXITCODE
+      - name: 'Verify AUTO permission regressions'
+        working-directory: 'candidate/packages/core'
+        run: |
+          npx vitest run src/permissions/autoMode.test.ts --api.host=127.0.0.1
+          exit $LASTEXITCODE
+      - name: 'Verify fresh sessions with the source bundle'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cli = Join-Path $env:GITHUB_WORKSPACE 'candidate/dist/cli.js'
+          $cases = @(
+            @{ name = 'immediate-probe'; delay = '0'; disabled = '0' },
+            @{ name = 'delayed-baseline'; delay = '12000'; disabled = '1' },
+            @{ name = 'delayed-probe'; delay = '12000'; disabled = '0' }
+          )
+          $failed = $false
+          foreach ($case in $cases) {
+            $env:QWEN17040_FIRST_PROMPT_DELAY_MS = $case.delay
+            $env:QWEN17040_DISABLE_PRELOAD = $case.disabled
+            $out = Join-Path $env:RUNNER_TEMP ('qwen17040-fixed-' + $case.name)
+            node .qwen/e2e-tests/issue17040-diagnostic/run.mjs $cli $out
+            if ($LASTEXITCODE -ne 0) { $failed = $true }
+          }
+          if ($failed) { throw 'At least one fresh-session verification failed' }
+      - name: 'Upload source verification evidence'
+        if: '${{ always() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
+        with:
+          name: 'issue17040-source-${{ inputs.source_sha }}'
+          path: |
+            ${{ runner.temp }}/qwen17040-fixed-*/summary.json
+            ${{ runner.temp }}/qwen17040-fixed-*/trace/*.jsonl
+            candidate/packages/core/junit.xml
           retention-days: 7

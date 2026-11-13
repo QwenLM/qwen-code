@@ -12,6 +12,8 @@ Set `QWEN17040_FIRST_PROMPT_DELAY_MS=12000` for the phase comparison; the defaul
 
 Set `QWEN17040_DISABLE_PRELOAD=1` for the control with no diagnostic hooks loaded into either product process. The Windows matrix includes this control at the 12000ms delay to check for observer-induced stalls.
 
+Dispatch the temporary workflow with `source_sha=<exact 40-character commit>` to build that source with its frozen dependencies on Windows, run AUTO permission regressions, and verify its actual bundle in three fresh sessions: immediate/probe on, delayed/probe off, and delayed/probe on. Omitting the input runs the released baseline matrix instead. The candidate source and diagnostic harness use separate checkouts; the product PR does not include this workflow or harness.
+
 ```powershell
 $release = Join-Path $env:TEMP 'qwen17040-release'
 npm install --prefix $release --no-audit --no-fund '@qwen-code/qwen-code@0.27.2'
