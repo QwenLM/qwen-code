@@ -19,13 +19,14 @@ import {
   toHtml,
 } from '../packages/cli/src/ui/utils/export/formatters/html.js';
 import { escapeJsonForHtmlScriptData } from '../packages/cli/src/ui/utils/export/html-script-data.js';
+import { documentExportBudgetMs } from './document-export-budget.js';
 
 const RENDERER_VERSION = EXPORT_TRANSCRIPT_RENDERER_VERSION;
 const RENDERER_URL = `https://unpkg.com/@qwen-code/qwen-code@${RENDERER_VERSION.split('+')[0]}/export-transcript-document.js`;
 const RENDERER_CSS_URL = `https://unpkg.com/@qwen-code/qwen-code@${RENDERER_VERSION.split('+')[0]}/export-transcript-document.css`;
 const EXPORTED_AT = '2026-08-16T01:00:00.000Z';
 const CANARY = 'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT';
-const MAX_DOCUMENT_DURATION_MS = 60_000;
+const MAX_DOCUMENT_DURATION_MS = documentExportBudgetMs(process.env);
 const MAX_HEAP_DELTA_BYTES = 512 * 1024 * 1024;
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixtureRoot = resolve(
@@ -618,7 +619,7 @@ describe('ExportTranscriptDocument browser gate', () => {
     await page.close();
     await browser.close();
     browser = undefined;
-  }, 90_000);
+  });
 
   it('renders a stable error page for incompatible document envelopes', async () => {
     const document = createExportTranscriptDocumentV1(
