@@ -46,7 +46,7 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 `packages/web-shell/client/config/shell-state.ts` 负责桌面分支：
 
 - `hydrateShellState()` 在首次渲染前运行。它通过 IPC 读取两个键并缓存到内存。与原生值相同的 `localStorage` 副本会被删除。与之不同的副本在带有**本次启动的标记**时会被采纳——`writeShellState` 会把启动 nonce 与镜像一起写入，**每个目录一个标记**，因此另一个目录的写入不能为本次启动从未写过的副本背书。属于其它启动的副本可能在其启动结束后留在磁盘上，并在临时端口被复用时重新出现。除标记外，`writeShellState` 还会把镜像派生自的原生值——即最后一次确认已在原生存储中的值（只有水合读取或成功返回的写入才会更新它；本次读取失败时保留上一次启动留下的记录）——作为每个目录一份的基准记录在 `localStorage` 中；原生值有大小上限，其键白名单也不允许任何元数据键。带外部标记的镜像只有在其记录的基准仍等于当前原生值时才会被采纳并回推：此时它是某次未能落盘的写入唯一幸存的副本。一旦基准不再匹配，说明目录已经前进，镜像会被删除，保留原生值；没有记录基准的镜像在存在原生值时同样被删除。若完全没有原生副本则无可损失，因此桌面端之前的镜像仍会被迁移。
-- 迁移只取当前 origin 的 `localStorage` 条目。更早的启动写入的是已无法解析的端口，无法恢复。
+- 迁移只取当前 origin 的 `localStorage` 条目。更早的启动写入的是已无法解析的端口，无法恢复。本次改动之前的构建没有仅限桌面外壳的页面 origin 规则，会把页面 origin 存进工作区主机目录，因此迁移在回推前剔除该条目，若其余为空则不写入。
 - `readShellState` 在桌面外壳中优先使用已水合的缓存，在其他环境中退回 `localStorage`。
 - `writeShellState` 同时写入 `localStorage`（浏览器路径与会话内回退）和 IPC。IPC 写入是 fire-and-forget：失败时当前会话仍可用，镜像在同源重载下存活；只要原生目录仍与记录的基准一致，下一次同源水合就会回推它。在全新 origin 上启动会丢失该值，而期间已落盘的原生写入会取代它。
 - `remote-connections.ts` 与 `workspace-hosts.ts` 调用该适配器；它们读取侧的校验保持不变。`rememberWorkspaceHost` 新增了仅限桌面外壳的写入路径拒绝，同时会跳过其变更事件派发；详见下方工作区主机目录规则。已保存连接的写入方落盘的是存储中的列表，而不是它们展示用的、过滤掉页面 origin 的视图：隐藏本次启动的 origin 只是展示规则，若用该视图回写持久化目录，就会删掉恰好与本次启动临时端口相同的已保存条目。
@@ -78,7 +78,7 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 
 1. 已保存连接及其工作区主机条目在桌面客户端重启后仍然存在，包括页面 origin 变为新端口。
 2. 重启后 Settings → Connections 会列出已保存主机，删除后该条目从 `desktop-state.json` 中消失。
-3. 反复重启不会向 `qwen-workspace-hosts` 添加每次启动对应的 `127.0.0.1:<port>` 条目。
+3. 反复重启不会向 `qwen-workspace-hosts` 添加每次启动对应的 `127.0.0.1:<port>` 条目，包括从本次改动之前的构建迁移来的目录。
 4. 浏览器 Web Shell 保持既有的 `localStorage` 行为。
 5. 未知键、超过上限的值，以及来自 bootstrap 或其他 origin 的调用都会被拒绝。
 6. `desktop-state.json` 中不出现令牌或其他秘密。

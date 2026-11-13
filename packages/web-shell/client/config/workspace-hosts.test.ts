@@ -119,6 +119,30 @@ describe('workspace host catalog', () => {
     );
   });
 
+  it('does not persist the page origin when forgetting a host in the desktop shell', async () => {
+    const invoke = vi.fn(async (): Promise<unknown> => undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    try {
+      // A pre-change launch left the page origin in localStorage, and this
+      // launch's read fell back to it, so the local group is in the catalog.
+      localStorage.setItem(
+        'qwen-workspace-hosts',
+        JSON.stringify([
+          { origin: window.location.origin, workspaces: [] },
+          { origin: 'https://remote.example', workspaces: [] },
+        ]),
+      );
+
+      vi.resetModules();
+      const fresh = await import('./workspace-hosts');
+      fresh.forgetWorkspaceHost('https://remote.example');
+
+      expect(localStorage.getItem('qwen-workspace-hosts')).toBe('[]');
+    } finally {
+      delete (window as { __TAURI__?: unknown }).__TAURI__;
+    }
+  });
+
   it('ignores malformed or credential-bearing saved targets', () => {
     localStorage.setItem(
       'qwen-workspace-hosts',

@@ -150,6 +150,32 @@ function removeLocal(key: string): void {
 }
 
 /**
+ * What a `localStorage` mirror may contribute to the native store. The desktop
+ * shell's own daemon is an ephemeral loopback origin, so `rememberWorkspaceHost`
+ * refuses to save it; a mirror written before that rule existed still names it,
+ * and persisting it would add a host that never comes back and that nothing can
+ * delete. `null` means nothing in the mirror belongs in the durable store.
+ */
+function migratedValue(key: ShellStateKey, value: string): string | null {
+  if (key !== 'qwen-workspace-hosts') return value;
+  try {
+    const hosts: unknown = JSON.parse(value);
+    if (!Array.isArray(hosts)) return null;
+    const kept = hosts.filter(
+      (host) =>
+        !(
+          host !== null &&
+          typeof host === 'object' &&
+          (host as { origin?: unknown }).origin === window.location.origin
+        ),
+    );
+    return kept.length > 0 ? JSON.stringify(kept) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Reads a catalog. In the desktop shell the native store wins once hydration
  * has run; everywhere else (and before hydration) this origin's storage is the
  * source.
@@ -228,14 +254,20 @@ async function hydrateDesktop(): Promise<void> {
             removeLocal(key);
             return;
           }
+          const migrated = migratedValue(key, local);
+          if (migrated === null) {
+            cache.set(key, typeof native === 'string' ? native : null);
+            removeLocal(key);
+            return;
+          }
           await invoke('shell_state_write', {
             key,
-            value: local,
+            value: migrated,
             nonce: readShellNonce(),
           });
-          cache.set(key, local);
+          cache.set(key, migrated);
           // The re-push landed, so native now holds the mirror's value.
-          nativeValues.set(key, local);
+          nativeValues.set(key, migrated);
           removeLocal(key);
           return;
         }

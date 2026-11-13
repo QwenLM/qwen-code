@@ -68,6 +68,60 @@ describe('desktop shell state', () => {
     });
   });
 
+  it('drops the page origin from a migrated workspace-host catalog', async () => {
+    const invoke = vi.fn(
+      async (command: string): Promise<unknown> =>
+        command === 'shell_state_read' ? null : undefined,
+    );
+    installDesktop(invoke);
+    // A pre-PR launch saved the local daemon under the page origin; persisting
+    // it would add a host on an ephemeral loopback port that never comes back.
+    window.localStorage.setItem(
+      'qwen-workspace-hosts',
+      JSON.stringify([
+        {
+          origin: window.location.origin,
+          workspaces: [{ id: 'local', cwd: '/repo' }],
+        },
+        { origin: 'https://remote.example', workspaces: [] },
+      ]),
+    );
+
+    const { hydrateShellState, readShellState } = await import('./shell-state');
+    await hydrateShellState();
+
+    const remoteOnly = '[{"origin":"https://remote.example","workspaces":[]}]';
+    expect(readShellState('qwen-workspace-hosts')).toBe(remoteOnly);
+    expect(window.localStorage.getItem('qwen-workspace-hosts')).toBeNull();
+    expect(invoke).toHaveBeenCalledWith('shell_state_write', {
+      key: 'qwen-workspace-hosts',
+      value: remoteOnly,
+      nonce: 'launch-nonce',
+    });
+  });
+
+  it('writes nothing when the migrated catalog holds only the page origin', async () => {
+    const invoke = vi.fn(
+      async (command: string): Promise<unknown> =>
+        command === 'shell_state_read' ? null : undefined,
+    );
+    installDesktop(invoke);
+    window.localStorage.setItem(
+      'qwen-workspace-hosts',
+      JSON.stringify([{ origin: window.location.origin, workspaces: [] }]),
+    );
+
+    const { hydrateShellState, readShellState } = await import('./shell-state');
+    await hydrateShellState();
+
+    expect(readShellState('qwen-workspace-hosts')).toBeNull();
+    expect(window.localStorage.getItem('qwen-workspace-hosts')).toBeNull();
+    expect(invoke).not.toHaveBeenCalledWith(
+      'shell_state_write',
+      expect.objectContaining({ key: 'qwen-workspace-hosts' }),
+    );
+  });
+
   it('drops a mirror that already matches the native copy', async () => {
     const invoke = vi.fn(
       async (command: string, args?: Record<string, unknown>) => {

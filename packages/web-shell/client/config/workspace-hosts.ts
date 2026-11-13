@@ -77,7 +77,13 @@ export function rememberWorkspaceHost(
  * not just on the next load.
  */
 export function forgetWorkspaceHost(origin: string): void {
-  const hosts = readWorkspaceHosts().filter((host) => host.origin !== origin);
+  const hosts = readWorkspaceHosts().filter(
+    (host) =>
+      host.origin !== origin &&
+      // A read that fell back to a pre-change mirror can still name the page
+      // origin; the durable catalog must not carry it.
+      !(isDesktopShell() && host.origin === window.location.origin),
+  );
   writeShellState(STORAGE_KEY, JSON.stringify(hosts));
   window.dispatchEvent(new Event(CHANGE_EVENT));
 }
