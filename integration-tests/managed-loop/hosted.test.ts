@@ -7,7 +7,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   startFakeOpenAIServer,
   type FakeOpenAIServer,
@@ -175,7 +175,14 @@ it(`Hosted workflow_launch executes agent() on the ${mode} loop`, async () => {
       stopReason: 'end_turn',
     },
   });
-  const resultRef = settled?.payload['resultRef'] as ManagedSessionDurableRef;
+  // Narrow through the module's own validator: `payload` is a JSON value map,
+  // so asserting the ref's shape directly neither compiles (it does not
+  // overlap `ManagedSessionDurableRef`) nor would it check `resourceId` or
+  // `digest` against the bytes read back below.
+  const resultRef = assertManagedSessionDurableRef(
+    settled?.payload['resultRef'],
+    'turn.settled resultRef',
+  );
   expect(resultRef).toBeTruthy();
   durableResult = Buffer.from(await store.readResource(resultRef)).toString(
     'utf8',

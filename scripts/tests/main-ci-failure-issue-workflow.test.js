@@ -97,6 +97,7 @@ describe('main CI failure issue workflow', () => {
     const watchedFiles = {
       'E2E Tests': 'e2e',
       'Managed Agent gate': 'managed-agent-gate',
+      'Managed Agent loop verification': 'managed-agent-loop',
       'SDK Java': 'sdk-java',
       'SDK Python': 'sdk-python',
       'Qwen Code CI': 'ci',
@@ -138,7 +139,7 @@ describe('main CI failure issue workflow', () => {
         "((github.event.workflow_run.head_branch == 'main' && " +
         "(github.event.workflow_run.event == 'push' || " +
         "(github.event.workflow_run.event == 'schedule' && " +
-        'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks","tui-parity"]\'), github.event.workflow.name)))) || ' +
+        'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]\'), github.event.workflow.name)))) || ' +
         "(github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') || " +
         "(github.event.workflow.name == 'Managed Agent gate' && " +
         'contains(fromJSON(\'["pull_request","pull_request_review"]\'), github.event.workflow_run.event))) }}',

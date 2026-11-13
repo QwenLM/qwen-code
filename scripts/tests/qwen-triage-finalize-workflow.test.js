@@ -28,6 +28,7 @@ describe('qwen-triage-finalize workflow', () => {
       'Qwen Code CI',
       'Qwen Autofix',
       'Managed Agent gate',
+      'Managed Agent loop verification',
       'SDK Python',
       'Serve A/B',
       'Web-shell Visuals',

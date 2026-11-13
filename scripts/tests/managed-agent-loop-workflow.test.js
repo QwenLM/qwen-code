@@ -46,7 +46,10 @@ describe('Managed loop CI coverage', () => {
       'integration-tests/vitest.managed-loop.config.ts',
       'utf8',
     );
-    expect(config).toContain("include: ['managed-loop/*.test.ts']");
+    // Recursive, to match the recursive `**/managed-loop/**` exclusion in
+    // the ordinary config: a non-recursive include leaves a nested test
+    // collected by neither lane.
+    expect(config).toContain("include: ['managed-loop/**/*.test.ts']");
     expect(config).toContain('retry: 0');
     expect(
       readFileSync('integration-tests/vitest.config.ts', 'utf8'),
