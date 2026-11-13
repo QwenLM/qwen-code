@@ -235,6 +235,7 @@ import type {
 import { pickAuthMethodsForAuthRequired } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
+import { readPromptLedgerRecords } from '@qwen-code/acp-bridge/promptLedger';
 import { createAcpOutput } from './acp-output.js';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
@@ -17710,6 +17711,25 @@ class QwenAgent implements Agent {
       () => this.activeWorkReporter?.notifyChanged(),
       workflowHistory,
       (runId) => this.isWorkflowRunLiveOutsideSession(sessionId, runId),
+      // Recovery classification witness: the newest prompt-terminal-ledger
+      // record, so a turn that settled `end_turn` on a closed tool pair is
+      // not reported as an interrupted tool-result submission. The ledger
+      // is advisory evidence — any read failure maps to "no marker" and the
+      // classification stays conservative.
+      () => {
+        try {
+          const ledgerPath = config
+            .getSessionService()
+            .getPromptLedgerPath(sessionId);
+          // 256 KiB holds the trailing window for any realistic session
+          // (records are ~150 bytes); matches the load-response tail.
+          return readPromptLedgerRecords(ledgerPath, {
+            tailBytes: 256 * 1024,
+          }).at(-1);
+        } catch {
+          return undefined;
+        }
+      },
     );
     const replaySessionHistory = async () => {
       if (

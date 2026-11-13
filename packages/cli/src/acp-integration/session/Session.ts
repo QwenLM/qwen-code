@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { PromptLedgerRecord } from '@qwen-code/acp-bridge/promptLedger';
 import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
@@ -3003,6 +3004,18 @@ export class Session implements SessionContext {
     private readonly isWorkflowRunLiveInSiblingSession: (
       runId: string,
     ) => boolean = () => false,
+    /**
+     * The newest prompt-terminal-ledger record for this session, or
+     * `undefined` without usable ledger evidence (missing file, torn tail,
+     * I/O error). Wired by the serve layer that owns the ledger layout;
+     * absent for non-serve runtimes, where recovery classification stays
+     * conservative. Synchronous by design: the read is a bounded ledger
+     * tail, and the recovery status path must not schedule I/O it cannot
+     * cancel.
+     */
+    private readonly lastPromptLedgerRecord?: () =>
+      | PromptLedgerRecord
+      | undefined,
   ) {
     this.sessionId = id;
     this.requestLifecycleSessionId = id;
@@ -6727,6 +6740,16 @@ export class Session implements SessionContext {
       if (cancellation && !cancellation.confirmationId) {
         return { ...status, canContinue: false };
       }
+      // A turn that settled `end_turn` may legitimately end on a closed tool
+      // pair (a final `todo_write` with no trailing model text): the tail
+      // classifier reads that `user` `functionResponse` as an interrupted
+      // tool-result submission and pins the recovery banner on a clean
+      // session. The prompt terminal ledger is the only witness that the
+      // turn settled, so consult it before reporting the tail — any missing
+      // or ambiguous evidence keeps the conservative kind.
+      if (status.canContinue && this.#isSettledClosedToolResultTail()) {
+        return { kind: 'clean', canContinue: false };
+      }
       return {
         ...status,
         ...(status.canContinue && cancellation?.confirmationId
@@ -6736,6 +6759,44 @@ export class Session implements SessionContext {
     } catch {
       return { kind: this.getRecoveryStatus().kind, canContinue: false };
     }
+  }
+
+  /**
+   * Whether the current `interrupted_prompt` tail is a settled closed
+   * tool-result submission rather than an unfinished turn: the newest
+   * ledger record is a `completed`/`end_turn` terminal AND every part of
+   * the trailing user run is a `functionResponse` whose `functionCall`
+   * exists in the history. A tail carrying any other part (a real prompt
+   * text) is left classified. Fails conservative (`false`) on any missing
+   * or ambiguous evidence.
+   */
+  #isSettledClosedToolResultTail(): boolean {
+    let record: PromptLedgerRecord | undefined;
+    try {
+      record = this.lastPromptLedgerRecord?.();
+    } catch {
+      return false;
+    }
+    if (!record || !('terminal' in record)) return false;
+    if (record.terminal !== 'completed') return false;
+    if (record.stopReason !== undefined && record.stopReason !== 'end_turn') {
+      return false;
+    }
+    const plan = this.#getRecoveryPlan(false);
+    if (plan?.kind !== 'interrupted_prompt') return false;
+    const parts = plan.continuation?.parts;
+    if (!parts || parts.length === 0) return false;
+    const callIds = new Set<string>();
+    for (const entry of plan.originalApiHistory) {
+      for (const part of entry.parts ?? []) {
+        const id = part.functionCall?.id;
+        if (id) callIds.add(id);
+      }
+    }
+    return parts.every((part) => {
+      const id = part.functionResponse?.id;
+      return id !== undefined && callIds.has(id);
+    });
   }
 
   /**
