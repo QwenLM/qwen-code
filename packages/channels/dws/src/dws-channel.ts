@@ -20,6 +20,7 @@ import {
   type SessionTarget,
 } from '@qwen-code/channel-base';
 import {
+  DWS_CALLER_HEAD_BUDGET,
   DwsClient,
   DwsCommandError,
   type DwsClientLike,
@@ -2976,7 +2977,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     process.stderr.write(
       `[Channel:${sanitizeLogText(this.name, 64)}] DWS ${action} failed: ${sanitizeLogText(
         error instanceof Error ? error.message : String(error),
-        200,
+        DWS_CALLER_HEAD_BUDGET,
       )}\n`,
     );
   }

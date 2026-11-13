@@ -142,10 +142,11 @@ export type DwsCommandOutcome = 'not_sent' | 'unknown';
 // the head, so the composed message — prefix, exit detail, reason and the `…`
 // that says the reason was cut — has to fit inside it. The prefix is measured
 // from the argv rather than assumed: the longest subcommand in this client is
-// 33 code points (`chat message remove-emoji`), and the old fixed 150 bound
+// 26 code points (`chat message list-mentions`), and the old fixed 150 bound
 // assumed ~30, so a full-length reason composed to 212 and the head cut landed
-// on a line that looked complete.
-const DWS_CALLER_HEAD_BUDGET = 200;
+// on a line that looked complete. Callers import this constant instead of
+// repeating the literal, so narrowing a call site cannot silently undo the fit.
+export const DWS_CALLER_HEAD_BUDGET = 200;
 const DWS_ERROR_DETAIL_ELLIPSIS = '…';
 const DWS_ERROR_PREFIX = 'DWS command failed: ';
 
@@ -190,11 +191,15 @@ export function describeDwsCommandFailure(
   // The reason a failing CLI prints is its last meaningful line. A banner or a
   // progress log can be hundreds of code points long, and the whole composed
   // message is head-truncated by every caller, so keeping a tail wider than
-  // that budget would push the reason past the cut.
+  // that budget would push the reason past the cut. C0/DEL are stripped here
+  // rather than relying on every caller to sanitize: this message also reaches
+  // `writeStderrLine` raw, and a carriage return or escape sequence would
+  // otherwise repaint the operator's terminal.
   const reason =
     stderr
       .split(/\r?\n/)
-      .map((line) => line.trim())
+      // eslint-disable-next-line no-control-regex
+      .map((line) => line.replace(/[\u0000-\u001f\u007f]/g, ' ').trim())
       .filter(Boolean)
       .at(-1) ?? '';
   if (!reason) {

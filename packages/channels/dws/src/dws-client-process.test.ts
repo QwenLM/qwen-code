@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sanitizeLogText } from '@qwen-code/channel-base';
 import {
   describeDwsCommandFailure,
+  DWS_CALLER_HEAD_BUDGET,
   DwsClient,
   DwsCommandError,
 } from './dws-client.js';
@@ -165,6 +166,21 @@ describe('DWS command process', () => {
     );
   });
 
+  it('strips control characters before they reach a raw stderr write', () => {
+    // `qwen channel start` prints this message through `writeStderrLine`
+    // without sanitizing, so a carriage return or an escape sequence in the
+    // child's stderr would repaint the operator's terminal.
+    const message = describeDwsCommandFailure(
+      ['version'],
+      1,
+      'error:\u001b[31mnot authenticated\u001b[0m\rspoofed line',
+    );
+
+    expect(message).not.toContain('\r');
+    expect(message).not.toContain('\u001b');
+    expect(message).toContain('not authenticated');
+  });
+
   it('does not leak flag values from a send-shaped argv', () => {
     const message = describeDwsCommandFailure(
       [
@@ -201,23 +217,24 @@ describe('DWS command process', () => {
       `error: ${'x'.repeat(400)}`,
     );
 
-    // logReactionFailure sanitizes at 200 code points and keeps the head, so a
-    // reason that fits 150 there pushes the `…` past the cut and the operator
-    // sees a full-looking line that was actually truncated.
-    const logged = sanitizeLogText(message, 200);
+    // logReactionFailure sanitizes at DWS_CALLER_HEAD_BUDGET and keeps the
+    // head, so a reason that overruns it pushes the `…` past the cut and the
+    // operator sees a full-looking line that was actually truncated.
+    const logged = sanitizeLogText(message, DWS_CALLER_HEAD_BUDGET);
     expect(logged.endsWith('…')).toBe(true);
-    expect(logged.length).toBeLessThanOrEqual(200);
+    expect(logged.length).toBeLessThanOrEqual(DWS_CALLER_HEAD_BUDGET);
   });
 
   it('never cuts a surrogate pair in half', () => {
-    // 148 BMP characters put the 149th code unit on the high half of the next
-    // astral character, so a 150-CODE-UNIT cap splits that pair and leaves a
-    // lone surrogate, which sanitizeLogText blanks to a space where the
-    // reason was cut.
+    // The composed message fits DWS_CALLER_HEAD_BUDGET minus the 55 code points
+    // this argv's prefix and ellipsis reserve, so the reason is cut at 144 code
+    // points. 143 `a`s put the 144th on the high half of the first pair, which
+    // is where a code-unit cut leaves a lone surrogate — sanitizeLogText then
+    // blanks it to a space exactly where the reason was cut.
     const message = describeDwsCommandFailure(
       ['chat', 'message', 'send'],
       1,
-      `${'a'.repeat(148)}${'\u{1f389}'.repeat(20)}`,
+      `${'a'.repeat(143)}${'\u{1f389}'.repeat(20)}`,
     );
 
     expect(message).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
