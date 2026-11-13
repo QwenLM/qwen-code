@@ -30410,5 +30410,1294 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         );
       });
     });
+
+    describe('startup backlog (supersession folding + comment digest)', () => {
+      const commentOnlyConfig = {
+        deliverToBoundSessions: true,
+        prWatchEvents: [],
+        prCommentWatch: true,
+      };
+
+      function routeCommentPaginate(): void {
+        mockOctokit.paginate.mockImplementation(
+          async (_fn: unknown, params: Record<string, unknown> = {}) => {
+            if ('ref' in params) return mockOctokit.rest.checks.listForRef();
+            if ('pull_number' in params)
+              return mockOctokit.rest.pulls.listReviewComments();
+            if ('issue_number' in params)
+              return mockOctokit.rest.issues.listComments();
+            return mockOctokit.rest.activity.listNotificationsForAuthenticatedUser();
+          },
+        );
+        mockOctokit.rest.activity.listNotificationsForAuthenticatedUser.mockResolvedValue(
+          [],
+        );
+      }
+
+      function seedCommentEntry(overrides: Record<string, unknown> = {}): void {
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            prState: 'open',
+            commentBaseline: '2026-07-01T00:00:00.000Z',
+            commentSince: '2026-07-01T00:00:00.000Z',
+            commentLastFetchAt: 0,
+            ...overrides,
+          },
+        });
+      }
+
+      function gapComments(count: number) {
+        return Array.from({ length: count }, (_, i) => ({
+          id: 555 + i,
+          node_id: `IC_${555 + i}`,
+          body: `gap finding ${i}`,
+          created_at: `2026-07-02T10:00:${String(i).padStart(2, '0')}.000Z`,
+          user: { login: 'test-bot' },
+        }));
+      }
+
+      function setLastPollAt(value: string | undefined): void {
+        (
+          channel as unknown as { cursor: { lastPollAt?: string } }
+        ).cursor.lastPollAt = value;
+      }
+
+      function readCursor(): {
+        dispatchedComments?: string[];
+        lastPollAt?: string;
+      } {
+        return (
+          channel as unknown as {
+            cursor: { dispatchedComments?: string[]; lastPollAt?: string };
+          }
+        ).cursor;
+      }
+
+      async function runWatchPass(): Promise<void> {
+        const watch = channel as unknown as {
+          runPrStateWatch: () => Promise<void>;
+          refreshBoundSessions: () => Promise<void>;
+        };
+        await watch.refreshBoundSessions();
+        await watch.runPrStateWatch();
+      }
+
+      function parkedWatchTask(
+        messageKey: string,
+        overrides: Record<string, unknown> = {},
+      ) {
+        return makeInboundTaskRecord({
+          id: `task-${messageKey}`,
+          state: 'failed',
+          backpressure: true,
+          issueNumber: 42,
+          source: {
+            chatId: 'owner/repo',
+            threadId: 'pr:42',
+            messageId: messageKey,
+          },
+          envelope: {
+            channelName: 'test-github',
+            senderId: 'github',
+            senderName: 'GitHub',
+            chatId: 'owner/repo',
+            threadId: 'pr:42',
+            messageId: messageKey,
+            text: 'CI failed on head sha-1.',
+            isGroup: true,
+            isMentioned: true,
+            isReplyToBot: false,
+            metadata: 'Event: ci_failure.',
+          },
+          dedupe: {},
+          delivery: { kind: 'bound-session', sessionId: 'bound-session' },
+          ...overrides,
+        });
+      }
+
+      it('retires a pending ci_failure superseded by a head advance', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const staleKey = 'watch:ci_failure:42:sha-1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            ci: 'failure',
+            prState: 'open',
+            pending: [makePendingWatch({ key: staleKey })],
+          },
+        });
+        installWatchPaginateRouting();
+        mockPull({ head: { sha: 'sha-2' } });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+
+        expect(existsSync(boundDeadLetterPath())).toBe(true);
+        const records = readFileSync(boundDeadLetterPath(), 'utf-8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        expect(records).toHaveLength(1);
+        expect(records[0]!['reason']).toBe('superseded: head advanced');
+        expect((records[0]!['source'] as { messageId: string }).messageId).toBe(
+          staleKey,
+        );
+        expect(
+          readChannelEvents().filter((e) => e['reason'] === 'watch_superseded'),
+        ).toHaveLength(1);
+        // The stale CI prompt never delivers; the net head change does.
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'head moved from sha-1 to sha-2',
+        );
+        expect(readWatchState().entries['owner/repo#42']!['pending']).toEqual(
+          [],
+        );
+      });
+
+      it('retires a parked backpressure ci_failure task on a head advance', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const staleKey = 'watch:ci_failure:42:sha-1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            ci: 'failure',
+            prState: 'open',
+            fired: [staleKey],
+          },
+        });
+        writeInboundTasks([parkedWatchTask(staleKey)]);
+        installWatchPaginateRouting();
+        mockPull({ head: { sha: 'sha-2' } });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+
+        expect(existsSync(inboundTaskPath())).toBe(false);
+        const records = readFileSync(boundDeadLetterPath(), 'utf-8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        expect(records).toHaveLength(1);
+        expect(records[0]!['reason']).toBe('superseded: head advanced');
+        expect(
+          readChannelEvents().filter((e) => e['reason'] === 'watch_superseded'),
+        ).toHaveLength(1);
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'head moved from sha-1 to sha-2',
+        );
+      });
+
+      it('never folds delivered or non-backpressure watch tasks', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const deliveredKey = 'watch:ci_failure:42:sha-1:1751446800000';
+        const failedKey = 'watch:ci_failure:42:sha-1:1751446801000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            ci: 'failure',
+            prState: 'open',
+            fired: [deliveredKey, failedKey],
+          },
+        });
+        writeInboundTasks([
+          parkedWatchTask(deliveredKey, { deliveredAt: 1751446802000 }),
+          parkedWatchTask(failedKey, { backpressure: false }),
+        ]);
+        installWatchPaginateRouting();
+        mockPull({ head: { sha: 'sha-2' } });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+
+        // Neither task was folded: no dead-letter, both still in the store
+        // for the recovery contract to settle.
+        expect(existsSync(boundDeadLetterPath())).toBe(false);
+        const remaining = readInboundTasks().map(
+          (task) => (task['source'] as { messageId: string }).messageId,
+        );
+        expect(remaining).toEqual(
+          expect.arrayContaining([deliveredKey, failedKey]),
+        );
+      });
+
+      it('never folds a ci_failure key carrying the unknown SHA', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const unknownKey = 'watch:ci_failure:42:unknown:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            ci: 'failure',
+            prState: 'open',
+            pending: [
+              makePendingWatch({
+                key: unknownKey,
+                text: 'CI failed on head unknown.',
+              }),
+            ],
+          },
+        });
+        installWatchPaginateRouting();
+        mockPull({ head: { sha: 'sha-2' } });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+
+        expect(existsSync(boundDeadLetterPath())).toBe(false);
+        const prompts = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[1] as string,
+        );
+        expect(
+          prompts.some((p) => p.includes('CI failed on head unknown')),
+        ).toBe(true);
+      });
+
+      it('never folds merge_conflict while mergeable is null', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const conflictKey = 'watch:merge_conflict:42:1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            mergeableState: 'dirty',
+            prState: 'open',
+            pending: [
+              makePendingWatch({
+                key: conflictKey,
+                text: 'Merge conflicts detected (mergeable_state: dirty).',
+              }),
+            ],
+          },
+        });
+        installWatchPaginateRouting();
+        mockPull({ mergeable: null, mergeable_state: 'unknown' });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+
+        expect(existsSync(boundDeadLetterPath())).toBe(false);
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'Merge conflicts detected',
+        );
+      });
+
+      it('retires a pending merge_conflict once conflicts are resolved', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const conflictKey = 'watch:merge_conflict:42:1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            mergeableState: 'dirty',
+            prState: 'open',
+            pending: [
+              makePendingWatch({
+                key: conflictKey,
+                text: 'Merge conflicts detected (mergeable_state: dirty).',
+              }),
+            ],
+          },
+        });
+        installWatchPaginateRouting();
+        mockPull({ mergeable: true, mergeable_state: 'clean' });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+
+        const records = readFileSync(boundDeadLetterPath(), 'utf-8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        expect(records).toHaveLength(1);
+        expect(records[0]!['reason']).toBe('superseded: conflicts resolved');
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('coalesces pending head_change hops into the net change', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const firstKey = 'watch:head_change:42:1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            prState: 'open',
+            pending: [
+              {
+                ...makePendingWatch({
+                  key: firstKey,
+                  text: 'New commits pushed: head moved from sha-0 to sha-1.',
+                }),
+                headChangeFrom: 'sha-0',
+              },
+            ],
+          },
+        });
+        installWatchPaginateRouting();
+        mockPull({ head: { sha: 'sha-2' } });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'head moved from sha-0 to sha-2',
+        );
+      });
+
+      it('does not coalesce a legacy pending head_change without headChangeFrom', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const firstKey = 'watch:head_change:42:1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            prState: 'open',
+            pending: [
+              makePendingWatch({
+                key: firstKey,
+                text: 'New commits pushed: head moved from sha-0 to sha-1.',
+              }),
+            ],
+          },
+        });
+        installWatchPaginateRouting();
+        mockPull({ head: { sha: 'sha-2' } });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+        const prompts = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[1] as string,
+        );
+        expect(
+          prompts.some((p) => p.includes('head moved from sha-0 to sha-1')),
+        ).toBe(true);
+        expect(
+          prompts.some((p) => p.includes('head moved from sha-1 to sha-2')),
+        ).toBe(true);
+      });
+
+      it('keeps a superseded pending event queued when the dead-letter write fails', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const staleKey = 'watch:ci_failure:42:sha-1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            ci: 'failure',
+            prState: 'open',
+            pending: [makePendingWatch({ key: staleKey })],
+          },
+        });
+        // A directory at the dead-letter path makes the append fail.
+        mkdirSync(boundDeadLetterPath(), { recursive: true });
+        installWatchPaginateRouting();
+        mockPull({ head: { sha: 'sha-2' } });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        try {
+          await runWatchPass();
+          expect(
+            stderr.mock.calls
+              .map((call) => String(call[0]))
+              .some((line) =>
+                line.includes('failed to write watch dead-letter'),
+              ),
+          ).toBe(true);
+        } finally {
+          stderr.mockRestore();
+        }
+        // Fail-closed: without a durable retire record the event is NOT
+        // consumed — it stays deliverable and the drain delivers it alongside
+        // the head change.
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+        const prompts = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[1] as string,
+        );
+        expect(prompts.some((p) => p.includes('CI failed on head sha-1'))).toBe(
+          true,
+        );
+        expect(
+          prompts.some((p) => p.includes('head moved from sha-1 to sha-2')),
+        ).toBe(true);
+        expect(readWatchState().entries['owner/repo#42']!['fired']).toContain(
+          staleKey,
+        );
+      });
+
+      it('recovery completes a dead-lettered watch task instead of delivering', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const staleKey = 'watch:ci_failure:42:sha-1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            ci: 'failure',
+            prState: 'open',
+            fired: [staleKey],
+          },
+        });
+        writeInboundTasks([parkedWatchTask(staleKey)]);
+        mkdirSync(dirname(boundDeadLetterPath()), { recursive: true });
+        writeFileSync(
+          boundDeadLetterPath(),
+          `${JSON.stringify({
+            retiredAt: '2026-07-02T10:00:00.000Z',
+            issueNumber: 42,
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId: staleKey,
+            },
+            reason: 'superseded: head advanced',
+            text: 'CI failed on head sha-1.',
+          })}\n`,
+          'utf-8',
+        );
+        installWatchPaginateRouting();
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'failure' }]);
+        await pollOnce();
+
+        expect(existsSync(inboundTaskPath())).toBe(false);
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(
+          readChannelEvents().filter(
+            (e) => e['reason'] === 'watch_dead_lettered',
+          ),
+        ).toHaveLength(1);
+      });
+
+      it('digests the comment backlog into one prompt after a downtime gap', async () => {
+        await initChannel(commentOnlyConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(3));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+        expect(prompt).toContain('Offline backlog: 3');
+        expect(prompt).toContain('gap finding 2');
+        expect(prompt).toContain('issuecomment-557');
+        expect(readCursor().dispatchedComments).toEqual(
+          expect.arrayContaining(['IC_555', 'IC_556', 'IC_557']),
+        );
+        expect(
+          readWatchState().entries['owner/repo#42']!['commentSince'],
+        ).not.toBe('2026-07-01T00:00:00.000Z');
+      });
+
+      it('delivers per comment when the heartbeat shows no gap', async () => {
+        await initChannel(commentOnlyConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() - 5000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(3));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(3);
+        for (const call of boundSessions.deliverPrompt.mock.calls) {
+          expect(call[1] as string).not.toContain('Offline backlog');
+        }
+      });
+
+      it('delivers per comment on a legacy cursor without lastPollAt', async () => {
+        await initChannel(commentOnlyConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        // initChannel's cursor has no lastPollAt: the upgrade poll must not
+        // fabricate a gap.
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(3));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(3);
+        expect(readCursor().lastPollAt).toBeDefined();
+      });
+
+      it('scales the gap threshold with the poll interval', async () => {
+        await initChannel(
+          { ...commentOnlyConfig, pollInterval: 3600000 },
+          { boundSessions },
+        );
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        // 2h gap < 5 × 1h interval: no digest.
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(3));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(3);
+      });
+
+      it('stays silent on a first observation even under a gap', async () => {
+        await initChannel(commentOnlyConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        // No watch entry: the first observation baselines silently.
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(3));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(
+          readWatchState().entries['owner/repo#42']!['commentBaseline'],
+        ).toBeDefined();
+      });
+
+      it('drops author-owned comments before digesting and journals them', async () => {
+        await initChannel(commentOnlyConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockResolvedValue(new Set(['ic:555']));
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(3));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+
+        // The sole target authored IC_555: it is filtered at the deliverable
+        // stage (with a journal row) and the digest carries the remaining two.
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+        expect(prompt).toContain('Offline backlog: 2');
+        expect(prompt).toContain('gap finding 1');
+        expect(prompt).not.toContain('gap finding 0');
+        expect(
+          readChannelEvents().filter(
+            (e) => e['reason'] === 'comment_watch_no_target',
+          ),
+        ).toHaveLength(1);
+        expect(
+          readWatchState().entries['owner/repo#42']!['commentSince'],
+        ).not.toBe('2026-07-01T00:00:00.000Z');
+      });
+
+      it('excludes a role that authored any digest member from the whole digest (union)', async () => {
+        await initChannel(
+          {
+            ...commentOnlyConfig,
+            boundSessionActions: {
+              'fix:default': 'Handle the fix side.',
+              'verify:default': 'Handle the verify side.',
+            },
+          },
+          { boundSessions },
+        );
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'fix-session',
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role: 'fix',
+                },
+              ],
+            }),
+            makeBinding({
+              sessionId: 'verify-session',
+              updatedAt: '2026-07-02T00:00:00.000Z',
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role: 'verify',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) =>
+            sessionId === 'fix-session' ? new Set(['ic:555']) : new Set(),
+          );
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(3));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+
+        // IC_555 stays a member (verify can receive it), but the fix role
+        // authored it, so the UNION exclusion withholds the whole digest
+        // from fix-session; verify-session receives all three members.
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        const [sessionId, prompt] = boundSessions.deliverPrompt.mock
+          .calls[0] as [string, string];
+        expect(sessionId).toBe('verify-session');
+        expect(prompt).toContain('Offline backlog: 3');
+        expect(prompt).toContain('gap finding 0');
+      });
+
+      it('holds commentSince when the digest dispatch is refused', async () => {
+        await initChannel(commentOnlyConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(3));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        // A directory where the publication audit belongs refuses the
+        // dispatch without a durable claim.
+        const auditPath = inboundTaskPath().replace(
+          'github-inbound-tasks.json',
+          'github-audit.jsonl',
+        );
+        mkdirSync(auditPath, { recursive: true });
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(readWatchState().entries['owner/repo#42']!['commentSince']).toBe(
+          '2026-07-01T00:00:00.000Z',
+        );
+      });
+
+      it('keeps digest mode across an aborted pass and clears it after a complete one', async () => {
+        await initChannel(commentOnlyConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                },
+                {
+                  number: 43,
+                  url: 'https://github.com/owner/repo/pull/43',
+                  state: 'open',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        const seeded = {
+          headSha: 'sha-1',
+          prState: 'open',
+          commentBaseline: '2026-07-01T00:00:00.000Z',
+          commentSince: '2026-07-01T00:00:00.000Z',
+          commentLastFetchAt: 0,
+        };
+        seedWatchState({
+          'owner/repo#42': { ...seeded },
+          'owner/repo#43': { ...seeded },
+        });
+        mockPull({});
+        const commentsFor = (pr: number) =>
+          Array.from({ length: 2 }, (_, i) => ({
+            id: pr * 100 + i,
+            node_id: `IC_${pr}_${i}`,
+            body: `pr ${pr} finding ${i}`,
+            created_at: `2026-07-02T10:00:0${i}.000Z`,
+            user: { login: 'test-bot' },
+          }));
+        // Pass 1: PR 42's fetch hits a shared rate limit, aborting the pass
+        // before PR 43 is reached.
+        mockOctokit.paginate.mockImplementation(
+          async (_fn: unknown, params: Record<string, unknown> = {}) => {
+            if ('pull_number' in params) return [];
+            if ('issue_number' in params) {
+              if (params['issue_number'] === 42) {
+                throw Object.assign(new Error('rate limited'), { status: 429 });
+              }
+              return commentsFor(43);
+            }
+            return [];
+          },
+        );
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(readWatchState().entries['owner/repo#43']!['commentSince']).toBe(
+          '2026-07-01T00:00:00.000Z',
+        );
+
+        // Pass 2: the condition clears; BOTH PRs still digest.
+        mockOctokit.paginate.mockImplementation(
+          async (_fn: unknown, params: Record<string, unknown> = {}) => {
+            if ('pull_number' in params) return [];
+            if ('issue_number' in params)
+              return commentsFor(Number(params['issue_number']));
+            return [];
+          },
+        );
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+        for (const call of boundSessions.deliverPrompt.mock.calls) {
+          expect(call[1] as string).toContain('Offline backlog: 2');
+        }
+
+        // Pass 3: digest mode is cleared; a new comment delivers individually.
+        const state = (
+          channel as unknown as {
+            prWatchState: {
+              entries: Record<string, { commentLastFetchAt?: number }>;
+            };
+          }
+        ).prWatchState;
+        state.entries['owner/repo#42']!.commentLastFetchAt = 0;
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          {
+            id: 999,
+            node_id: 'IC_999',
+            body: 'fresh comment',
+            created_at: '2026-07-02T11:00:00.000Z',
+            user: { login: 'test-bot' },
+          },
+        ]);
+        mockOctokit.paginate.mockImplementation(
+          async (_fn: unknown, params: Record<string, unknown> = {}) => {
+            if ('pull_number' in params) return [];
+            if ('issue_number' in params)
+              return params['issue_number'] === 42
+                ? mockOctokit.rest.issues.listComments()
+                : [];
+            return [];
+          },
+        );
+        await pollOnce();
+        const lastCall =
+          boundSessions.deliverPrompt.mock.calls[
+            boundSessions.deliverPrompt.mock.calls.length - 1
+          ]!;
+        expect(lastCall[1] as string).toContain('New comment by @test-bot');
+        expect(lastCall[1] as string).not.toContain('Offline backlog');
+      });
+
+      it('renders the digest lead in Chinese under the zh locale', async () => {
+        await initChannel(commentOnlyConfig, { boundSessions, locale: 'zh' });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(2));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          '离线积压：channel 停摆期间 PR 新增 2 条评论：',
+        );
+      });
+
+      it('retires a pending head_change round trip instead of rendering A to A', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const firstKey = 'watch:head_change:42:1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-B',
+            prState: 'open',
+            pending: [
+              {
+                ...makePendingWatch({
+                  key: firstKey,
+                  text: 'New commits pushed: head moved from sha-A to sha-B.',
+                }),
+                headChangeFrom: 'sha-A',
+              },
+            ],
+          },
+        });
+        installWatchPaginateRouting();
+        mockPull({ head: { sha: 'sha-A' } });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+
+        // Net change is nothing: no prompt, a visible retirement instead.
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const records = readFileSync(boundDeadLetterPath(), 'utf-8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        expect(records).toHaveLength(1);
+        expect(records[0]!['reason']).toBe(
+          'superseded: head returned to original',
+        );
+        expect(
+          readChannelEvents().filter((e) => e['reason'] === 'watch_superseded'),
+        ).toHaveLength(1);
+        expect(readWatchState().entries['owner/repo#42']!['pending']).toEqual(
+          [],
+        );
+      });
+
+      it('round-trip retirement falls back to two prompts when the dead-letter write fails', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const firstKey = 'watch:head_change:42:1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-B',
+            prState: 'open',
+            pending: [
+              {
+                ...makePendingWatch({
+                  key: firstKey,
+                  text: 'New commits pushed: head moved from sha-A to sha-B.',
+                }),
+                headChangeFrom: 'sha-A',
+              },
+            ],
+          },
+        });
+        mkdirSync(boundDeadLetterPath(), { recursive: true });
+        installWatchPaginateRouting();
+        mockPull({ head: { sha: 'sha-A' } });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        try {
+          await runWatchPass();
+        } finally {
+          stderr.mockRestore();
+        }
+        // Fail-closed: both factual hops deliver, nothing is lost.
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+        const prompts = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[1] as string,
+        );
+        expect(
+          prompts.some((p) => p.includes('head moved from sha-A to sha-B')),
+        ).toBe(true);
+        expect(
+          prompts.some((p) => p.includes('head moved from sha-B to sha-A')),
+        ).toBe(true);
+      });
+
+      it('validateCursor drops a malformed lastPollAt and keeps a valid one', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const validate = (p: unknown) =>
+          (
+            channel as unknown as {
+              validateCursor: (x: unknown) => { lastPollAt?: string } | null;
+            }
+          ).validateCursor(p);
+        for (const bad of [123, 'not-a-date', '', null, {}]) {
+          const result = validate({
+            lastProcessedAt: '2026-07-01T00:00:00.000Z',
+            lastPollAt: bad,
+          });
+          expect(result).not.toBeNull();
+          expect(result!.lastPollAt).toBeUndefined();
+        }
+        const ok = validate({
+          lastProcessedAt: '2026-07-01T00:00:00.000Z',
+          lastPollAt: '2026-07-01T00:00:00.000Z',
+        });
+        expect(ok!.lastPollAt).toBe('2026-07-01T00:00:00.000Z');
+      });
+
+      it('a future heartbeat (clock skew) does not trigger the digest', async () => {
+        await initChannel(commentOnlyConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() + 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(1));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).not.toContain(
+          'Offline backlog',
+        );
+      });
+
+      it('a 25-member digest omits the oldest five visibly', async () => {
+        await initChannel(commentOnlyConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(
+          Array.from({ length: 25 }, (_, i) => ({
+            id: 600 + i,
+            node_id: `IC_${600 + i}`,
+            body: `member-${i}`,
+            created_at: `2026-07-02T10:${String(i).padStart(2, '0')}:00.000Z`,
+            user: { login: 'test-bot' },
+          })),
+        );
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+        expect(prompt).toContain('Offline backlog: 25');
+        expect(prompt).toContain('5 earlier comment(s) omitted');
+        expect(prompt).toContain('member-24');
+        expect(prompt).not.toContain('member-0 ');
+      });
+
+      it('the digest carries inline review location lines', async () => {
+        await initChannel(commentOnlyConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([
+          {
+            id: 700,
+            node_id: 'PRRC_700',
+            body: 'inline finding',
+            created_at: '2026-07-02T10:00:00.000Z',
+            user: { login: 'test-bot' },
+            path: 'src/a.ts',
+            line: 12,
+            side: 'RIGHT',
+            html_url: 'https://github.com/owner/repo/pull/42#discussion_r700',
+          },
+        ]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+        expect(prompt).toContain('New inline review comment by @test-bot');
+        expect(prompt).toContain('File: src/a.ts (line 12, RIGHT)');
+        expect(prompt).toContain('inline finding');
+      });
+
+      it('digest excerpt truncation is visible', async () => {
+        await initChannel(commentOnlyConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          {
+            id: 800,
+            node_id: 'IC_800',
+            body: 'x'.repeat(500),
+            created_at: '2026-07-02T10:00:00.000Z',
+            user: { login: 'test-bot' },
+          },
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+        expect(prompt).toContain('comment truncated: 100 more characters');
+      });
+
+      it('a gap digests comments while state events stay individual', async () => {
+        await initChannel(
+          {
+            deliverToBoundSessions: true,
+            prWatchEvents: ['head_change'],
+            prCommentWatch: true,
+          },
+          { boundSessions },
+        );
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({ head: { sha: 'sha-2' } });
+        // Full routing: the state watch's checks, BOTH comment endpoints, and
+        // the notification lane (installWatchPaginateRouting alone would let
+        // the review-comments fetch consume the notifications slot).
+        mockOctokit.paginate.mockImplementation(
+          async (
+            _fn: unknown,
+            params: Record<string, unknown> = {},
+            mapFn?: (
+              response: { data: unknown[] },
+              done: () => void,
+            ) => unknown[],
+          ) => {
+            if ('ref' in params) {
+              const runs = (await mockOctokit.rest.checks.listForRef()) ?? [];
+              if (mapFn) {
+                mapFn({ data: runs }, () => {});
+                return [];
+              }
+              return runs;
+            }
+            if ('pull_number' in params)
+              return mockOctokit.rest.pulls.listReviewComments();
+            if ('issue_number' in params)
+              return mockOctokit.rest.issues.listComments();
+            return mockOctokit.rest.activity.listNotificationsForAuthenticatedUser();
+          },
+        );
+        mockOctokit.rest.activity.listNotificationsForAuthenticatedUser.mockResolvedValue(
+          [],
+        );
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(1));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        mockOctokit.rest.checks.listForRef.mockResolvedValue([
+          { status: 'completed', conclusion: 'success' },
+        ]);
+        await pollOnce();
+        const prompts = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[1] as string,
+        );
+        expect(prompts).toHaveLength(2);
+        expect(
+          prompts.some((p) => p.includes('head moved from sha-1 to sha-2')),
+        ).toBe(true);
+        expect(prompts.some((p) => p.includes('Offline backlog: 1'))).toBe(
+          true,
+        );
+      });
+
+      it('recovery retires every role-aware dead-lettered watch task', async () => {
+        await initChannel(
+          {
+            ...watchConfig,
+            boundSessionActions: {
+              'fix:default': 'fix it',
+              'verify:default': 'verify it',
+            },
+          },
+          { boundSessions },
+        );
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'fix-session',
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role: 'fix',
+                },
+              ],
+            }),
+            makeBinding({
+              sessionId: 'verify-session',
+              updatedAt: '2026-07-02T00:00:00.000Z',
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role: 'verify',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        const staleKey = 'watch:ci_failure:42:sha-1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            ci: 'failure',
+            prState: 'open',
+            fired: [staleKey],
+          },
+        });
+        writeInboundTasks([
+          parkedWatchTask(staleKey, {
+            id: 'task-fix',
+            delivery: {
+              kind: 'bound-session',
+              sessionId: 'fix-session',
+              role: 'fix',
+            },
+          }),
+          parkedWatchTask(staleKey, {
+            id: 'task-verify',
+            delivery: {
+              kind: 'bound-session',
+              sessionId: 'verify-session',
+              role: 'verify',
+            },
+          }),
+        ]);
+        mkdirSync(dirname(boundDeadLetterPath()), { recursive: true });
+        writeFileSync(
+          boundDeadLetterPath(),
+          `${JSON.stringify({
+            retiredAt: '2026-07-02T10:00:00.000Z',
+            issueNumber: 42,
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId: staleKey,
+            },
+            reason: 'superseded: head advanced',
+            text: 'CI failed on head sha-1.',
+          })}\n`,
+          'utf-8',
+        );
+        installWatchPaginateRouting();
+        mockPull({});
+        mockNotificationsOnce([]);
+        mockChecks([{ status: 'completed', conclusion: 'failure' }]);
+        await pollOnce();
+        expect(existsSync(inboundTaskPath())).toBe(false);
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('an accepted in-flight watch task is never folded', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const staleKey = 'watch:ci_failure:42:sha-1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            ci: 'failure',
+            prState: 'open',
+            fired: [staleKey],
+          },
+        });
+        writeInboundTasks([
+          parkedWatchTask(staleKey, { id: 'task-inflight', state: 'accepted' }),
+        ]);
+        installWatchPaginateRouting();
+        mockPull({ head: { sha: 'sha-2' } });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+        const remaining = readInboundTasks().map(
+          (task) => (task['source'] as { messageId: string }).messageId,
+        );
+        expect(remaining).toContain(staleKey);
+        expect(existsSync(boundDeadLetterPath())).toBe(false);
+      });
+
+      it('malformed pending ci_failure keys do not crash the fold', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const truncatedKey = 'watch:ci_failure:42';
+        const emptyShaKey = 'watch:ci_failure:42::1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            ci: 'failure',
+            prState: 'open',
+            pending: [
+              makePendingWatch({ key: truncatedKey }),
+              makePendingWatch({ key: emptyShaKey }),
+            ],
+          },
+        });
+        installWatchPaginateRouting();
+        mockPull({ head: { sha: 'sha-2' } });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+        // No SHA segment: no supersession proof, the event delivers (along
+        // with the head change). Empty SHA: retired visibly. Neither crashes
+        // the pass.
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+        const prompts = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[1] as string,
+        );
+        expect(prompts.some((p) => p.includes('CI failed on head sha-1'))).toBe(
+          true,
+        );
+        expect(
+          prompts.some((p) => p.includes('head moved from sha-1 to sha-2')),
+        ).toBe(true);
+        const records = readFileSync(boundDeadLetterPath(), 'utf-8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        expect(
+          records.map((r) => (r['source'] as { messageId: string }).messageId),
+        ).toEqual([emptyShaKey]);
+      });
+
+      it('the digest keeps the gate grace hold under requireBoundWatch', async () => {
+        await initChannel(
+          { ...commentOnlyConfig, requireBoundWatch: true },
+          { boundSessions },
+        );
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role: 'verify',
+                  watching: false,
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(1));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        // Grace holds the cursor BEFORE the comment for one cycle.
+        expect(readWatchState().entries['owner/repo#42']!['commentSince']).toBe(
+          '2026-07-02T10:00:00.000Z',
+        );
+      });
+
+      it('a coalesced head_change keeps the original key identity', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const firstKey = 'watch:head_change:42:1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            prState: 'open',
+            pending: [
+              {
+                ...makePendingWatch({
+                  key: firstKey,
+                  text: 'New commits pushed: head moved from sha-0 to sha-1.',
+                }),
+                headChangeFrom: 'sha-0',
+              },
+            ],
+          },
+        });
+        installWatchPaginateRouting();
+        mockPull({ head: { sha: 'sha-2' } });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+        expect(readWatchState().entries['owner/repo#42']!['fired']).toContain(
+          firstKey,
+        );
+        expect(boundSessions.deliverPrompt.mock.calls[0]![2]).toBe(
+          `github:owner/repo:${firstKey}`,
+        );
+      });
+    });
   });
 });
