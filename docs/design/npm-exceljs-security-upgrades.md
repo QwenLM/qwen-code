@@ -96,7 +96,7 @@ three new regressions successfully. The actual ExcelJS parent also creates
 ordinary glob/directory ZIPs whose seven file contents match expectations.
 
 The Web Shell publish verifier passes. Its actual tarball contains 874 files
-(7,497,577 bytes unpacked); a fresh consumer installs it with the same-tree SDK
+(7,497,577 compressed bytes; 29,729,528 unpacked); a fresh consumer installs it with the same-tree SDK
 candidate tarball without overrides or workspace links, imports the root and
 transcript without a DOM, and completes a Vite 5.4.21 production build. The
 SpreadsheetPreview chunk is still dynamic. The package and consumer output

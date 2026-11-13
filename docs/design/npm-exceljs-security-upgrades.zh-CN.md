@@ -78,8 +78,8 @@ bare 浏览器读取及 inline-string 流往返也通过。
 缺陷，并单独复跑三项新增回归通过。实际 ExcelJS 父包的普通 glob/directory ZIP
 生成也通过，七个输出文件内容均符合预期。
 
-Web Shell 发布前 verifier 通过。实际 tarball 含 874 个文件、解包 7,497,577
-字节；新消费端与同树 SDK 候选 tarball 一起安装，不带 overrides 或 workspace
+Web Shell 发布前 verifier 通过。实际 tarball 含 874 个文件，压缩 7,497,577
+字节、解包 29,729,528 字节；新消费端与同树 SDK 候选 tarball 一起安装，不带 overrides 或 workspace
 链接，无 DOM 导入根入口/transcript 和 Vite 5.4.21 生产构建均通过。
 SpreadsheetPreview 仍为动态 chunk，包内与消费端输出的 inline worker 字节一致，
 受控 Node worker_threads 的 load/sheet 消息能正确解析普通工作簿。该资产/协议
