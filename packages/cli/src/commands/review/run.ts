@@ -42,6 +42,7 @@ import { REVIEW_TMP_DIR, REVIEWS_DIR, repoRelativeOf } from './lib/paths.js';
 import { safeTarget } from '../../utils/paths.js';
 import { gitOpt } from './lib/git.js';
 import { EFFORT_LEVELS, parseReviewArgs } from './parse-args.js';
+import { DEADLINE_ENV, resolveReviewDeadline } from './lib/deadline.js';
 
 export interface RunReviewArgs {
   target?: string;
@@ -51,6 +52,7 @@ export interface RunReviewArgs {
   json: boolean;
   failOn: 'none' | 'request-changes';
   timeoutMinutes: number;
+  timeoutExplicit: boolean;
   approvalMode: string;
   quiet: boolean;
 }
@@ -544,8 +546,15 @@ export function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
  * `isUnusableScriptEntry`, preserving the bare-`qwen` fallback instead of a
  * stamp that dies on exit 126.
  */
-function childEnv(runId: string): NodeJS.ProcessEnv {
+function childEnv(runId: string, deadlineEpoch?: number): NodeJS.ProcessEnv {
   const env = { ...process.env };
+  if (deadlineEpoch !== undefined) {
+    const inheritedDeadline = resolveReviewDeadline(env)?.epochSeconds;
+    // The child's gates must not outlive either this run or an earlier CI wall.
+    env[DEADLINE_ENV] = String(
+      Math.min(deadlineEpoch, inheritedDeadline ?? deadlineEpoch),
+    );
+  }
   // Ties every artifact this run's child writes back to THIS run. The stop
   // sidecar is verdict-bearing — it decides `completed` and can carry a
   // REQUEST_CHANGES event — and its name is the flattened target token, which
@@ -579,6 +588,7 @@ function childEnv(runId: string): NodeJS.ProcessEnv {
 
 async function runReview(args: RunReviewArgs): Promise<void> {
   const startMs = Date.now();
+  const timeoutAtMs = startMs + args.timeoutMinutes * 60_000;
   const prompt = buildReviewPrompt(args);
 
   // The verdict cutoff carries slack: a coarse filesystem clock can stamp a
@@ -609,7 +619,10 @@ async function runReview(args: RunReviewArgs): Promise<void> {
       args.approvalMode,
     ],
     {
-      env: childEnv(runId),
+      env: childEnv(
+        runId,
+        args.timeoutExplicit ? timeoutAtMs / 1000 : undefined,
+      ),
       // stdin CLOSED, not inherited: piped input would be prepended to the
       // prompt and the leading `/` would no longer be the first character —
       // the slash command would reach the model as plain text.
@@ -684,23 +697,25 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   }, COMPOSED_POLL_MS);
 
   let timedOut = false;
-  const timeoutMs = args.timeoutMinutes * 60_000;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    // Safe write: a throw on EPIPE would skip the kill below and leave the
-    // child review running on, burning compute and model API calls.
-    writeStderrLineSafe(
-      `review run: timeout after ${args.timeoutMinutes} minutes — terminating the review`,
-    );
-    // Kill the process group, not just the wrapper: child.kill() would only
-    // reach the relaunch wrapper, leaving the real review reparented to PID 1
-    // and still burning API calls.
-    const pid = child.pid;
-    if (pid !== undefined) {
-      killProcessGroup(pid, 'SIGTERM');
-      setTimeout(() => killProcessGroup(pid, 'SIGKILL'), 10_000).unref();
-    }
-  }, timeoutMs);
+  const timer = setTimeout(
+    () => {
+      timedOut = true;
+      // Safe write: a throw on EPIPE would skip the kill below and leave the
+      // child review running on, burning compute and model API calls.
+      writeStderrLineSafe(
+        `review run: timeout after ${args.timeoutMinutes} minutes — terminating the review`,
+      );
+      // Kill the process group, not just the wrapper: child.kill() would only
+      // reach the relaunch wrapper, leaving the real review reparented to PID 1
+      // and still burning API calls.
+      const pid = child.pid;
+      if (pid !== undefined) {
+        killProcessGroup(pid, 'SIGTERM');
+        setTimeout(() => killProcessGroup(pid, 'SIGKILL'), 10_000).unref();
+      }
+    },
+    Math.max(0, timeoutAtMs - Date.now()),
+  );
 
   // The child is detached (its own process group) so the timeout kill can reach
   // the relaunch wrapper's grandchild — but that also puts it outside the
@@ -901,7 +916,7 @@ export const runCommand: CommandModule = {
       })
       .option('timeout-minutes', {
         type: 'number',
-        default: 120,
+        defaultDescription: '120',
         describe:
           'Terminate the review after this long without a verdict (exit 1)',
       })
@@ -919,6 +934,7 @@ export const runCommand: CommandModule = {
         describe: 'Suppress the child CLI progress stream on stderr',
       }),
   handler: async (argv) => {
+    const timeout = Number(argv['timeout-minutes']);
     await runReview({
       target: argv['target'] as string | undefined,
       effort: argv['effort'] as string | undefined,
@@ -929,9 +945,11 @@ export const runCommand: CommandModule = {
       // `|| 120` would treat an explicit `--timeout-minutes 0` as falsy and
       // silently substitute the default; decide default-vs-value by finiteness
       // so 0 still reaches the 1-minute floor.
-      timeoutMinutes: Number.isFinite(Number(argv['timeout-minutes']))
-        ? Math.max(1, Number(argv['timeout-minutes']))
-        : 120,
+      timeoutMinutes: Number.isFinite(timeout) ? Math.max(1, timeout) : 120,
+      // Leave the absent default implicit: an explicit clock also changes the
+      // huge-review round cap, which ordinary runs must continue to retain.
+      timeoutExplicit:
+        argv['timeout-minutes'] !== undefined && Number.isFinite(timeout),
       approvalMode: String(argv['approval-mode'] ?? 'yolo'),
       quiet: Boolean(argv['quiet']),
     });

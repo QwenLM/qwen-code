@@ -31,6 +31,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import yargs from 'yargs';
+import {
+  captureDeadline,
+  DEADLINE_ENV,
+  resolveReviewDeadline,
+} from './lib/deadline.js';
 
 const spawnMock = vi.hoisted(() => vi.fn());
 const execFileSyncMock = vi.hoisted(() => vi.fn());
@@ -439,6 +445,138 @@ describe('review run (handler)', () => {
       ...over,
     });
   }
+
+  describe('explicit run deadline', () => {
+    const start = 1_700_000_000_000;
+
+    afterEach(() => vi.unstubAllEnvs());
+
+    it.each([
+      ['no inherited deadline', undefined, 600],
+      ['shorter inherited deadline', 300, 300],
+      ['longer inherited deadline', 900, 600],
+      ['expired inherited deadline', -5, -5],
+    ] as const)(
+      'aligns the live review clock with %s',
+      async (_name, inheritedMinutes, expectedMinutes) => {
+        vi.useFakeTimers();
+        vi.setSystemTime(start);
+        vi.stubEnv(
+          DEADLINE_ENV,
+          inheritedMinutes === undefined
+            ? undefined
+            : String(start / 1000 + inheritedMinutes * 60),
+        );
+        const child = new FakeChild();
+        spawnMock.mockReturnValue(child);
+
+        const done = runHandler({ 'timeout-minutes': 600 });
+        const env = spawnMock.mock.calls[0][2].env;
+        const captured = captureDeadline(env, undefined, {
+          srcDiffLines: 9000,
+          diffLines: 9000,
+        });
+        const planPath = join(dir, 'deadline-plan.json');
+        writeFileSync(planPath, JSON.stringify(captured.fields));
+        utimesSync(planPath, new Date(start), new Date(start));
+        const deadline = resolveReviewDeadline(env, planPath);
+        child.emit('close', 0, null);
+        await done;
+
+        expect(deadline?.epochSeconds).toBe(
+          start / 1000 + expectedMinutes * 60,
+        );
+        expect(captured.explicit).toBe(true);
+        expect(process.env[DEADLINE_ENV]).toBe(
+          inheritedMinutes === undefined
+            ? undefined
+            : String(start / 1000 + inheritedMinutes * 60),
+        );
+      },
+    );
+
+    it.each(['soon', '', '0', 'Infinity'])(
+      'replaces the invalid inherited deadline %j',
+      async (inherited) => {
+        vi.useFakeTimers();
+        vi.setSystemTime(start);
+        vi.stubEnv(DEADLINE_ENV, inherited);
+        const child = new FakeChild();
+        spawnMock.mockReturnValue(child);
+
+        const done = runHandler({ 'timeout-minutes': 600 });
+        const env = spawnMock.mock.calls[0][2].env;
+        child.emit('close', 0, null);
+        await done;
+
+        expect(resolveReviewDeadline(env)?.epochSeconds).toBe(
+          start / 1000 + 600 * 60,
+        );
+      },
+    );
+
+    it.each([undefined, '120', '0'])(
+      'distinguishes parsed absence from an explicit timeout of %s',
+      async (minutes) => {
+        vi.useFakeTimers();
+        vi.setSystemTime(start);
+        vi.stubEnv(DEADLINE_ENV, undefined);
+        const argv = await yargs()
+          .command({ ...runCommand, handler: () => {} })
+          .exitProcess(false)
+          .showHelpOnFail(false)
+          .fail((message, error) => {
+            throw error ?? new Error(message);
+          })
+          .parseAsync([
+            'run',
+            ...(minutes === undefined ? [] : ['--timeout-minutes', minutes]),
+          ]);
+        const child = new FakeChild();
+        spawnMock.mockReturnValue(child);
+
+        const done = runHandler({
+          'timeout-minutes': argv['timeout-minutes'],
+        });
+        const env = spawnMock.mock.calls[0][2].env;
+        child.emit('close', 0, null);
+        await done;
+
+        expect(env[DEADLINE_ENV]).toBe(
+          minutes === undefined
+            ? undefined
+            : String(start / 1000 + Math.max(1, Number(minutes)) * 60),
+        );
+        expect(
+          captureDeadline(env, undefined, {
+            srcDiffLines: 9000,
+            diffLines: 9000,
+          }).explicit,
+        ).toBe(minutes !== undefined);
+      },
+    );
+
+    it('charges startup time to the same hard deadline', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(start);
+      vi.stubEnv(DEADLINE_ENV, undefined);
+      const child = new FakeChild();
+      spawnMock.mockImplementation(() => {
+        vi.setSystemTime(start + 4000);
+        return child;
+      });
+
+      const done = runHandler({ 'timeout-minutes': 1 });
+      await vi.advanceTimersByTimeAsync(55_999);
+      expect(processKill).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      const signalsAtDeadline = [...processKill.mock.calls];
+      child.emit('close', null, 'SIGTERM');
+      await done;
+
+      expect(signalsAtDeadline).toContainEqual([-12345, 'SIGTERM']);
+    });
+  });
 
   /**
    * The run id the handler under test published to its (mock) child — for
