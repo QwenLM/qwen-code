@@ -4,6 +4,7 @@ import {
   installMockDaemon,
   replayCompleteEvent,
 } from './mockDaemon';
+import { fulfillTurnIndex } from './turnIndexRoute';
 
 function message(record: number, text: string) {
   return {
@@ -83,34 +84,12 @@ export async function setupConversationSearch(
       });
     }
     if (url.pathname.endsWith('/turn-index')) {
-      if (url.searchParams.has('start') && !url.searchParams.has('snapshot')) {
-        return route.fulfill({
-          status: 400,
-          json: { error: '`start` requires `snapshot`' },
-        });
-      }
-      const totalTurns = count / 2;
-      const limit = Number(url.searchParams.get('limit'));
-      const start = Number(
-        url.searchParams.get('start') ?? Math.max(0, totalTurns - limit),
-      );
-      return route.fulfill({
-        json: {
-          v: 1,
-          sessionId: scenario.sessionId,
-          snapshot: 'search-snapshot',
-          totalTurns,
-          start,
-          turns: Array.from(
-            { length: Math.min(limit, totalTurns - start) },
-            (_, index) => ({
-              ordinal: start + index,
-              turnId: `record-${2 * (start + index)}`,
-              kind: 'prompt',
-              label: `Synthetic turn ${start + index}`,
-            }),
-          ),
-        },
+      return fulfillTurnIndex(route, url, {
+        sessionId: scenario.sessionId,
+        totalTurns: count / 2,
+        turnId: (turn) => `record-${2 * turn}`,
+        label: (turn) => `Synthetic turn ${turn}`,
+        snapshot: 'search-snapshot',
       });
     }
     if (url.pathname.endsWith('/transcript')) {

@@ -14,15 +14,16 @@ Out of scope for this cut: an opt-out setting, a fallback for `legacy` and `degr
 
 ## Which turn and which label
 
-The overlay reads `current` from the `TurnFollowRange` that the rail already follows, so the two cannot disagree. It does not compute a scroll position. The label comes from `DaemonSessionTurnIndexEntry.label`, or from `DaemonProvisionalTurn.label` for a turn that the index does not have yet. If there is no label, the overlay renders nothing.
+The overlay reads `current` from the `TurnFollowRange` that the rail already follows, so the two cannot disagree. It does not compute a scroll position. The label comes from `DaemonSessionTurnIndexEntry.label`, or from `DaemonProvisionalTurn.label` for a turn that the index does not have yet. `turnLabelForOrdinal` in `turn-navigation-store.ts` holds this rule, and the rail uses the same helper. If there is no label, the overlay renders nothing.
 
 ## Changes to the follow computation
 
-The first version of the follow range did not cover this feature in three ways. Each one needed a change:
+The first version of the follow range did not cover this feature in four ways. Each one needed a change:
 
 - `updateFollow` stopped when the rail was hidden. That is the main case for this feature. It now also runs when the viewport has the `pinnedPrompt` prop. The rail still receives `follow` only when it is visible, so a hidden rail keeps its window.
 - The block to ordinal map existed only when the rail could show (`hideSessionTimeline` off and at least four turns). It now also exists with `pinnedPrompt` when turn navigation is `ready` or `loading`, so full-width mode and short sessions work.
 - `followRangeFromRows` inherits a turn only from mounted rows. In an expanded turn with more rows than the virtualizer's overscan (20), the prompt row unmounts and no mounted row maps to a turn, so the range was `undefined`. `turnOrdinal` now gives every block in `messages` the ordinal of its turn, using message order. The rail gets this fix as well, and it no longer loses its highlight in the middle of a long turn. `followRangeFromRows` does not change.
+- A user message whose block the index does not know starts an unknown turn, for example a turn that streams in another tab. `turnOrdinal` marks its blocks unknown instead of giving them the previous turn's ordinal. The rail still carries the previous turn over these rows, as before. The overlay reads the same follow rule with the unknown rows marked, and it renders nothing when the reading line is in an unknown turn.
 
 ## When it shows
 
@@ -34,7 +35,8 @@ These constraints come from the defects listed in #15426 for the earlier `Sticky
 
 - Positioning: the overlay uses `position: absolute` inside the `relative` wrapper of the message list, and it is a sibling of the scroller. It does not use `position: sticky`, so the scroller's overflow cannot make it inert. The end-to-end test measures its position before and after a scroll.
 - Row sizing: it is outside the scroller and out of flow, so it cannot change row measurements, `scrollHeight`, scroll anchoring, or the return-to-live control. The end-to-end test hides the overlay and confirms that `scrollTop` and `scrollHeight` do not change.
-- Landmarks: it is a plain `div` with `aria-hidden`. It adds no landmark, and it does not repeat text that is already in the transcript for assistive technology.
+- Landmarks: it is a plain `div`. It adds no landmark. It is not `aria-hidden`, because when the prompt row has left the mounted window, the overlay is the only copy of the prompt in the DOM. When the prompt row is still mounted, assistive technology can read the prompt twice. This is accepted.
+- History banner: the history loading and error banner uses the same top-centre slot. While it shows, the overlay moves down to `top: 40px`, so the banner does not cover the label. The overlay stays below `.searchAction` and `.navigation` (`z-index: 4`).
 - Input: it has `pointer-events: none`, so wheel, touch, click and selection go to the transcript below it.
 - Small viewports: below 600px of window height it clamps to one line. At 900x480 it is at most 30px high.
 
@@ -51,8 +53,8 @@ The overlay is an opt-in prop on `TranscriptViewport`, set by the main transcrip
 
 ## Validation and acceptance criteria
 
-- Unit tests in `TranscriptViewport.pinned.test.tsx` cover label choice, hiding, the collapse row, the unmounted prompt row, provisional turns, a missing label, unsupported modes, and panes without the prop.
-- `web-shell.pinned-prompt.spec.ts` covers positioning, label changes, the unmounted prompt row, row sizing, wheel input over the overlay, agreement with the rail, and a 900x480 viewport.
+- Unit tests in `TranscriptViewport.pinned.test.tsx` cover label choice, the reading line, hiding, a partly visible prompt row, the collapse row, the unmounted prompt row, a turn the index does not know, provisional turns, a missing label, the history banner, unsupported modes, and panes without the prop.
+- `web-shell.pinned-prompt.spec.ts` covers positioning, label changes, the unmounted prompt row, row sizing, wheel input over the overlay, agreement with the rail, and a label that wraps to two lines at 900x900 and to one line at 900x480. Its `/turn-index` mock is the shared `installTurnIndexRoute` helper in `client/e2e/utils/turnIndexRoute.ts`.
 - The existing `web-shell.turn-navigation-scroll-follow.spec.ts` and the `TranscriptViewport` unit tests still pass.
 
 ## Follow-up work

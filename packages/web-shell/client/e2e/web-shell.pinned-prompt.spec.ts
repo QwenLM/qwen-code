@@ -4,11 +4,17 @@ import {
   installMockDaemon,
   replayCompleteEvent,
 } from './utils/mockDaemon';
+import { installTurnIndexRoute } from './utils/turnIndexRoute';
 
 const TURNS = 12;
 // Output rows in one turn. More than the virtualizer's overscan once expanded.
 const OUTPUTS = 60;
 const PER_TURN = OUTPUTS + 1;
+// Long enough to wrap to two lines at 900px, so the small-viewport clamp has
+// something to clamp.
+const label = (turn: number) =>
+  `Prompt of turn ${turn}: ` +
+  'please explain how the transcript viewport decides what to keep '.repeat(3);
 
 function recordEvent(record: number) {
   const turn = Math.floor(record / PER_TURN);
@@ -52,31 +58,11 @@ async function openSession(page: Page, baseURL: string | undefined) {
     'session_transcript_pagination',
   );
   const daemon = await installMockDaemon(page, scenario, { baseURL });
-  await page.route(`${baseURL}/**`, async (route) => {
-    const url = new URL(route.request().url());
-    if (!url.pathname.endsWith('/turn-index')) return route.fallback();
-    const limit = Number(url.searchParams.get('limit'));
-    const start = Number(
-      url.searchParams.get('start') ?? Math.max(0, TURNS - limit),
-    );
-    await route.fulfill({
-      json: {
-        v: 1,
-        sessionId,
-        snapshot: 'mock-snapshot',
-        totalTurns: TURNS,
-        start,
-        turns: Array.from(
-          { length: Math.min(limit, TURNS - start) },
-          (_, index) => ({
-            ordinal: start + index,
-            turnId: `record-${PER_TURN * (start + index)}`,
-            kind: 'prompt',
-            label: `Prompt of turn ${start + index}`,
-          }),
-        ),
-      },
-    });
+  await installTurnIndexRoute(page, baseURL, {
+    sessionId,
+    totalTurns: TURNS,
+    turnId: (turn) => `record-${PER_TURN * turn}`,
+    label,
   });
   await page.goto(`/session/${sessionId}`);
   await daemon.sse.waitForConnection(sessionId, { timeout: 30_000 });
@@ -128,7 +114,7 @@ test('pins the prompt of the turn being read when the rail is hidden @smoke', as
   await expect(page.locator('[data-global-turn-navigation]')).toBeHidden();
 
   await scrollToRow(page, `ANSWER 5.${OUTPUTS}`, 200);
-  await expect(pinned(page)).toHaveText('Prompt of turn 5');
+  await expect(pinned(page)).toHaveText(label(5));
   await expect(pinned(page)).toHaveAttribute('data-pinned-turn-prompt', '5');
 
   // The overlay sits at the viewport edge and stays there during a scroll.
@@ -143,7 +129,7 @@ test('pins the prompt of the turn being read when the rail is hidden @smoke', as
 
   // The next turn switches the label, and its prompt row in view hides it.
   await scrollToRow(page, `ANSWER 6.${OUTPUTS}`, 200);
-  await expect(pinned(page)).toHaveText('Prompt of turn 6');
+  await expect(pinned(page)).toHaveText(label(6));
   await scrollToRow(page, 'QUESTION 6');
   await expect(pinned(page)).toHaveCount(0);
 });
@@ -171,7 +157,7 @@ test('keeps the label after the prompt row leaves the virtualizer window', async
     })
     .toBe(0);
   await expect(rowWith(page, 'ANSWER 5.')).not.toHaveCount(0);
-  await expect(pinned(page)).toHaveText('Prompt of turn 5');
+  await expect(pinned(page)).toHaveText(label(5));
 });
 
 test('stays out of row sizing, scroll position and hit testing', async ({
@@ -189,14 +175,20 @@ test('stays out of row sizing, scroll position and hit testing', async ({
       scrollTop: element.scrollTop,
       scrollHeight: element.scrollHeight,
     }));
-  // Hiding the overlay is the control: nothing in the list may move.
-  let shown = await measure();
+  // Wait until two samples in a row agree, then use that as the control.
+  let previous = await measure();
   await expect
     .poll(async () => {
-      shown = await measure();
-      return shown;
+      const next = await measure();
+      const stable =
+        next.scrollTop === previous.scrollTop &&
+        next.scrollHeight === previous.scrollHeight;
+      previous = next;
+      return stable;
     })
-    .toEqual(shown);
+    .toBe(true);
+  const shown = previous;
+  // Hiding the overlay is the control: nothing in the list may move.
   await pinned(page).evaluate((element) => {
     element.style.display = 'none';
   });
@@ -234,4 +226,10 @@ test('takes one line on a small viewport', async ({ page, baseURL }) => {
   await scrollToRow(page, `ANSWER 5.${OUTPUTS}`, 200);
   await expect(pinned(page)).toBeVisible();
   expect((await pinned(page).boundingBox())!.height).toBeLessThanOrEqual(30);
+
+  // The same label takes two lines on a taller viewport.
+  await page.setViewportSize({ width: 900, height: 900 });
+  await expect
+    .poll(async () => (await pinned(page).boundingBox())?.height ?? 0)
+    .toBeGreaterThan(30);
 });

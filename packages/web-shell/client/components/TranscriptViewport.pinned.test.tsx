@@ -8,6 +8,7 @@ import type { MessageListHandle, MessageListProps } from './MessageList';
 const observed = vi.hoisted(() => ({
   navigation: undefined as unknown,
   railVisible: false,
+  loading: false,
   railFollow: undefined as { current: number } | undefined,
   rows: [] as Array<{
     id: string;
@@ -32,7 +33,7 @@ vi.mock('../hooks/useTranscriptViewport', () => ({
     navigation: observed.navigation,
     messages,
     historical: false,
-    loading: false,
+    loading: observed.loading,
     viewKey: 'live',
     toolSources: new Map(),
     pin: vi.fn(),
@@ -54,7 +55,7 @@ vi.mock('./MessageList', () => ({
       <div data-web-shell-message-list data-top="0" data-bottom="300">
         {observed.rows.map((row) => (
           <div
-            key={row.id}
+            key={row.key ?? `msg:${row.id}`}
             data-source-block-ids={row.id}
             data-message-row-key={row.key ?? `msg:${row.id}`}
             data-top={row.top}
@@ -116,6 +117,7 @@ let container: HTMLDivElement | undefined;
 beforeEach(() => {
   observed.navigation = navigation();
   observed.railVisible = false;
+  observed.loading = false;
   observed.railFollow = undefined;
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
@@ -172,6 +174,11 @@ describe('TranscriptViewport pinned prompt', () => {
     expect(container!.querySelector('[role="banner"]')).toBeNull();
     expect(
       container!
+        .querySelector('[data-pinned-turn-prompt]')
+        ?.closest('[aria-hidden="true"]'),
+    ).toBeNull();
+    expect(
+      container!
         .querySelector('[data-web-shell-message-list]')
         ?.querySelector('[data-pinned-turn-prompt]'),
     ).toBeNull();
@@ -192,6 +199,15 @@ describe('TranscriptViewport pinned prompt', () => {
     expect(pinnedText()).toBeUndefined();
   });
 
+  it('counts a prompt row that is partly in view as in view', () => {
+    observed.rows = [
+      { id: 'prompt-1', top: -10, bottom: 30 },
+      { id: 'output-1a', top: 30, bottom: 300 },
+    ];
+    renderViewport();
+    expect(pinnedText()).toBeUndefined();
+  });
+
   it('does not take the collapse row of a turn for its prompt row', () => {
     observed.rows = [
       { id: 'prompt-1', top: -50, bottom: -10 },
@@ -199,17 +215,52 @@ describe('TranscriptViewport pinned prompt', () => {
       { id: 'output-1b', top: 30, bottom: 300 },
     ];
     renderViewport();
+    expect(
+      container!.querySelectorAll('[data-message-row-key="tc:prompt-1"]'),
+    ).toHaveLength(1);
     expect(pinnedText()).toBe('Second prompt');
   });
 
   it('follows the reading line, not the first visible row', () => {
+    // The reading line is at 100. The viewport top and the first visible row
+    // are both in turn 0, so only the reading line rule gives turn 1.
     observed.rows = [
-      { id: 'output-0b', top: -10, bottom: 200 },
-      { id: 'prompt-1', top: 200, bottom: 240 },
-      { id: 'output-1a', top: 240, bottom: 300 },
+      { id: 'output-0b', top: -10, bottom: 50 },
+      { id: 'output-1a', top: 50, bottom: 300 },
     ];
     renderViewport();
-    expect(pinnedText()).toBe('First prompt');
+    expect(pinnedText()).toBe('Second prompt');
+  });
+
+  it('renders nothing for a turn the index does not know', () => {
+    observed.navigation = navigation({
+      totalTurns: 1,
+      effectiveTurnCount: 1,
+      indexPages: new Map([
+        [0, { turns: [{ ordinal: 0, turnId: 't0', label: 'First prompt' }] }],
+      ]),
+      locations: new Map([['t0', { blockId: 'prompt-0' }]]),
+    });
+    observed.rows = [
+      { id: 'output-0b', top: -300, bottom: -10 },
+      { id: 'output-1a', top: -10, bottom: 300 },
+    ];
+    renderViewport();
+    expect(pinnedText()).toBeUndefined();
+  });
+
+  it('moves below the history loading banner', () => {
+    observed.rows = [{ id: 'output-1a', top: -10, bottom: 300 }];
+    renderViewport();
+    const overlay = () =>
+      container!.querySelector('[data-pinned-turn-prompt]')?.parentElement;
+    expect(overlay()?.className).not.toMatch(/pinnedPromptBelowBanner/);
+    act(() => root?.unmount());
+    root = undefined;
+    observed.loading = true;
+    renderViewport();
+    expect(pinnedText()).toBe('Second prompt');
+    expect(overlay()?.className).toMatch(/pinnedPromptBelowBanner/);
   });
 
   it('agrees with the turn the rail highlights', () => {

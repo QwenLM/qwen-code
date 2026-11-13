@@ -97,6 +97,33 @@ export interface DaemonProvisionalTurn {
   blockId?: string;
 }
 
+/** The index entries of the loaded pages, keyed by turn ordinal. */
+export function indexedTurnEntries(
+  state: Pick<DaemonTurnNavigationSnapshot, 'indexPages'>,
+): Map<number, DaemonSessionTurnIndexEntry> {
+  return new Map(
+    [...state.indexPages.values()].flatMap((page) =>
+      page.turns.map((entry) => [entry.ordinal, entry] as const),
+    ),
+  );
+}
+
+/**
+ * The prompt label of a turn: its index entry when a loaded page has one,
+ * else its provisional turn. Provisional turns are addressed as
+ * `totalTurns + index`, after the indexed turns.
+ */
+export function turnLabelForOrdinal(
+  state: Pick<DaemonTurnNavigationSnapshot, 'provisionalTurns' | 'totalTurns'>,
+  entries: ReadonlyMap<number, { label: string }>,
+  ordinal: number,
+): string | undefined {
+  return (
+    entries.get(ordinal)?.label ??
+    state.provisionalTurns[ordinal - state.totalTurns]?.label
+  );
+}
+
 export interface DaemonTurnLocation {
   turnId: string;
   blockId: string;

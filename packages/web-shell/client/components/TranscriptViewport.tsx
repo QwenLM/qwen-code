@@ -28,6 +28,10 @@ import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import { useI18n } from '../i18n';
 import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
 import { SESSION_TIMELINE_MIN_VISIBLE_ENTRIES } from '../constants/sessions';
+import {
+  indexedTurnEntries,
+  turnLabelForOrdinal,
+} from '../daemon/session/turn-navigation-store';
 
 interface ReadingAnchor {
   source: string;
@@ -74,6 +78,10 @@ export function followRangeFromRows(
   if (start === undefined || end === undefined) return undefined;
   return { start, end, current: current ?? firstVisible! };
 }
+
+// Marks rows of a turn the index does not know when the overlay reads the
+// follow range. Real ordinals are never negative.
+const UNKNOWN_TURN = -1;
 
 export const TranscriptViewport = forwardRef<
   MessageListHandle,
@@ -221,17 +229,25 @@ export const TranscriptViewport = forwardRef<
   // mounted rows alone cannot say which turn they belong to.
   const turnOrdinal = useMemo(() => {
     if (!blockOrdinal) return undefined;
-    const map = new Map<string, number>();
-    let ordinal: number | undefined;
+    // `null` marks the blocks of a turn the index does not know yet, such as
+    // a turn streaming in another tab. They must not borrow the turn before.
+    const map = new Map<string, number | null>();
+    let ordinal: number | null | undefined;
     for (const message of messages) {
       const ids = message.sourceBlockIds ?? [];
-      for (const id of ids) ordinal = blockOrdinal.get(id) ?? ordinal;
+      let mapped: number | undefined;
+      for (const id of ids) mapped = blockOrdinal.get(id) ?? mapped;
+      if (mapped !== undefined) ordinal = mapped;
+      else if (message.role === 'user' || message.role === 'user_shell')
+        ordinal = null;
       if (ordinal !== undefined) for (const id of ids) map.set(id, ordinal);
     }
     return map;
   }, [blockOrdinal, messages]);
+  // `pinnedTurn` is the turn whose prompt the overlay shows: undefined while
+  // that prompt row is on screen or the turn at the reading line is unknown.
   const [follow, setFollow] = useState<
-    (TurnFollowRange & { promptInView: boolean }) | undefined
+    (TurnFollowRange & { pinnedTurn: number | undefined }) | undefined
   >(undefined);
   const followFrame = useRef<number | undefined>(undefined);
   const updateFollow = useCallback(() => {
@@ -249,9 +265,14 @@ export const TranscriptViewport = forwardRef<
     const measured = rows().map((row) => {
       const ids = row.dataset.sourceBlockIds?.split(',') ?? [];
       let ordinal: number | undefined;
+      let unknownTurn = false;
       for (const id of ids) {
         const mapped = turnOrdinal.get(id);
-        if (mapped !== undefined && (ordinal === undefined || mapped < ordinal))
+        if (mapped === null) unknownTurn = true;
+        else if (
+          mapped !== undefined &&
+          (ordinal === undefined || mapped < ordinal)
+        )
           ordinal = mapped;
       }
       const bounds = row.getBoundingClientRect();
@@ -259,6 +280,7 @@ export const TranscriptViewport = forwardRef<
         top: bounds.top,
         bottom: bounds.bottom,
         ordinal,
+        unknownTurn: unknownTurn && ordinal === undefined,
         // A turn's collapse and outputs rows carry its prompt's block id too.
         prompts: row.dataset.messageRowKey?.startsWith('msg:')
           ? ids.map((id) => blockOrdinal.get(id))
@@ -266,14 +288,28 @@ export const TranscriptViewport = forwardRef<
       };
     });
     const range = followRangeFromRows(measured, rect.top, rect.bottom);
-    const next = range && {
-      ...range,
-      promptInView: measured.some(
+    // The rail keeps carrying a turn forward over unknown rows. The overlay
+    // reads the same rule with unknown rows marked, so it names no prompt
+    // when the reading line is in a turn the index does not know.
+    const reading = followRangeFromRows(
+      measured.map((row) =>
+        row.unknownTurn ? { ...row, ordinal: UNKNOWN_TURN } : row,
+      ),
+      rect.top,
+      rect.bottom,
+    )?.current;
+    const promptInView =
+      range !== undefined &&
+      measured.some(
         (row) =>
           row.prompts.includes(range.current) &&
           row.bottom > rect.top &&
           row.top < rect.bottom,
-      ),
+      );
+    const next = range && {
+      ...range,
+      pinnedTurn:
+        promptInView || reading === UNKNOWN_TURN ? undefined : range.current,
     };
     setFollow((previous) =>
       previous &&
@@ -281,7 +317,7 @@ export const TranscriptViewport = forwardRef<
       previous.start === next.start &&
       previous.end === next.end &&
       previous.current === next.current &&
-      previous.promptInView === next.promptInView
+      previous.pinnedTurn === next.pinnedTurn
         ? previous
         : next,
     );
@@ -427,15 +463,18 @@ export const TranscriptViewport = forwardRef<
     };
   }, [messages, viewKey, historical, viewport.target, capture, rows, scroller]);
 
-  const pinnedLabel =
-    pinnedPrompt && follow && !follow.promptInView
-      ? ([...viewport.navigation.indexPages.values()]
-          .flatMap((page) => page.turns)
-          .find((entry) => entry.ordinal === follow.current)?.label ??
-        viewport.navigation.provisionalTurns[
-          follow.current - viewport.navigation.totalTurns
-        ]?.label)
-      : undefined;
+  const pinnedTurn = pinnedPrompt ? follow?.pinnedTurn : undefined;
+  const pinnedLabel = useMemo(
+    () =>
+      pinnedTurn === undefined
+        ? undefined
+        : turnLabelForOrdinal(
+            viewport.navigation,
+            indexedTurnEntries(viewport.navigation),
+            pinnedTurn,
+          ),
+    [pinnedTurn, viewport.navigation],
+  );
 
   const load = (direction: 'older' | 'newer') => {
     if (loadFrame.current !== undefined) return;
@@ -649,10 +688,18 @@ export const TranscriptViewport = forwardRef<
             />
           </TurnCallsProvider>
           {pinnedLabel && (
-            <div className={styles.pinnedPrompt} aria-hidden="true">
+            // Not aria-hidden: when the prompt row has left the mounted
+            // window, this is the only copy of the prompt in the DOM.
+            <div
+              className={
+                loading || viewport.error
+                  ? `${styles.pinnedPrompt} ${styles.pinnedPromptBelowBanner}`
+                  : styles.pinnedPrompt
+              }
+            >
               <div
                 className={styles.pinnedPromptText}
-                data-pinned-turn-prompt={follow?.current}
+                data-pinned-turn-prompt={pinnedTurn}
               >
                 {pinnedLabel}
               </div>

@@ -4,6 +4,7 @@ import {
   installMockDaemon,
   replayCompleteEvent,
 } from './utils/mockDaemon';
+import { installTurnIndexRoute } from './utils/turnIndexRoute';
 
 const TURNS = 40;
 
@@ -97,34 +98,11 @@ test('global turn navigation follows transcript scrolling @smoke', async ({
     'session_transcript_pagination',
   );
   const daemon = await installMockDaemon(page, scenario, { baseURL });
-  await page.route(`${baseURL}/**`, async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname.endsWith('/turn-index')) {
-      const limit = Number(url.searchParams.get('limit'));
-      const start = Number(
-        url.searchParams.get('start') ?? Math.max(0, TURNS - limit),
-      );
-      await route.fulfill({
-        json: {
-          v: 1,
-          sessionId,
-          snapshot: 'mock-snapshot',
-          totalTurns: TURNS,
-          start,
-          turns: Array.from(
-            { length: Math.min(limit, TURNS - start) },
-            (_, index) => ({
-              ordinal: start + index,
-              turnId: `record-${2 * (start + index)}`,
-              kind: 'prompt',
-              label: `Turn ${start + index}`,
-            }),
-          ),
-        },
-      });
-    } else {
-      await route.fallback();
-    }
+  await installTurnIndexRoute(page, baseURL, {
+    sessionId,
+    totalTurns: TURNS,
+    turnId: (turn) => `record-${2 * turn}`,
+    label: (turn) => `Turn ${turn}`,
   });
   await page.goto(`/session/${sessionId}`);
   await daemon.sse.waitForConnection(sessionId, { timeout: 30_000 });

@@ -49,6 +49,11 @@
   transform: translateX(-50%);
 }
 
+/* Clear of the history loading and error banner, which uses the same slot. */
+.pinnedPromptBelowBanner {
+  top: 40px;
+}
+
 .pinnedPromptText {
   display: -webkit-box;
   max-width: 80%;

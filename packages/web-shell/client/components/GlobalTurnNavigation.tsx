@@ -11,9 +11,11 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import type {
-  DaemonTurnNavigationSnapshot,
-  DaemonTurnNavigationStore,
+import {
+  indexedTurnEntries,
+  turnLabelForOrdinal,
+  type DaemonTurnNavigationSnapshot,
+  type DaemonTurnNavigationStore,
 } from '../daemon/session/turn-navigation-store';
 import { WEB_SHELL_TURN_INDEX_PAGE_SIZE } from '../constants/sessions';
 import { useI18n } from '../i18n';
@@ -77,11 +79,7 @@ export function GlobalTurnNavigation({
     count,
     start + Math.ceil(height / ROW_HEIGHT) + 2 * OVERSCAN,
   );
-  const entries = new Map(
-    [...state.indexPages.values()].flatMap((page) =>
-      page.turns.map((entry) => [entry.ordinal, entry] as const),
-    ),
-  );
+  const entries = indexedTurnEntries(state);
 
   useLayoutEffect(() => {
     const element = viewport.current;
@@ -188,9 +186,7 @@ export function GlobalTurnNavigation({
             {Array.from({ length: end - start }, (_, index) => {
               const ordinal = start + index;
               const entry = entries.get(ordinal);
-              const label =
-                entry?.label ??
-                state.provisionalTurns[ordinal - state.totalTurns]?.label;
+              const label = turnLabelForOrdinal(state, entries, ordinal);
               const title = `${t('timeline.turnPrefix', { index: ordinal + 1 })}${label ? ` · ${label}` : ''}`;
               const isCurrent = ordinal === currentOrdinal;
               const inRange =
