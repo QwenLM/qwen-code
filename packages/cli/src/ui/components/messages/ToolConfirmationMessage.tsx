@@ -802,11 +802,15 @@ export const ToolConfirmationMessage: React.FC<
 
   return (
     <Box flexDirection="column" padding={outerPadding} width={outerWidth}>
+      {/* The cap also covers bodies that do not cap themselves (inline-Markdown
+          info prompts, long MCP labels). Ink clips the bottom, so an uncapped
+          body pushes the question line and the options out of the viewport. */}
       <Box
         flexGrow={1}
         flexShrink={1}
         overflow="hidden"
         marginBottom={sectionMargin}
+        maxHeight={availableBodyContentHeight()}
       >
         {bodyContent}
       </Box>
