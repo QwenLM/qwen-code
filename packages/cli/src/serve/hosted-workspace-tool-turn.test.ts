@@ -2309,6 +2309,69 @@ it('cron_create/list/delete drive the automation union on shell/4', async () => 
   }
 });
 
+it('cron_create rides its arm-time review, not the interactive approval dialog', async () => {
+  const automation = {
+    id: 'asch_y',
+    sessionId: 'session-a',
+    cron: '*/5 * * * *',
+    timezone: 'UTC',
+    goal: 'check',
+    state: 'active',
+    enabled: true,
+  };
+  const store = {
+    automationsCreate: async () => ({ automation, replayed: false }),
+    automationsList: async () => ({
+      data: [],
+      hasMore: false,
+      nextCursor: null,
+    }),
+    automationsRetire: async () => ({ automation, replayed: false }),
+  };
+  const crons = new HostedCronSession(store, undefined, {
+    classify: async () => ({ allowed: true, reason: null }),
+  });
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    { settings: { mode: 'auto', timeoutMs: 60_000 }, waiters },
+    { profile: 'hosted-workspace-shell/4', crons },
+  );
+  // A blocking auto-approval classifier would refuse an ordinary tool; the
+  // schedule's arm-time review is its single classification, so it is exempt.
+  turn.setPermissionClassifier(async () => ({
+    shouldBlock: true,
+    reason: 'would block an ordinary tool',
+    unavailable: false,
+  }));
+  await turn.declarations(new AbortController().signal);
+  const call = {
+    ...calls[0],
+    callId: 'call-cron_create',
+    name: 'cron_create',
+    args: { cron: '*/5 * * * *', prompt: '/loop check', recurring: true },
+  };
+  const responses = await turn.execute(
+    [call],
+    [
+      {
+        functionCall: { id: call.callId, name: 'cron_create', args: call.args },
+      },
+    ],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['executionStatus']).toBe(
+    'success',
+  );
+});
+
 it('a lone loop_wakeup batch acquires no Runtime mount', async () => {
   const gateKey = 'QWEN_MANAGED_AGENT_LOOP_ENABLED';
   const gateBefore = process.env[gateKey];

@@ -95,8 +95,8 @@ import {
 import {
   ManagedSessionStoreHttpError,
   ManagedSessionStoreTransportError,
-
-  HTTP_MANAGED_SESSION_STORE_CONTRACT} from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
+  HTTP_MANAGED_SESSION_STORE_CONTRACT,
+} from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { FunctionDeclaration, Part } from '@google/genai';
 import {
   HOSTED_PUBLIC_PLAN_TOOL,
@@ -9699,7 +9699,9 @@ export class HostedWorkspaceToolTurn {
           // The arm's funnel admission review is the single classification
           // (decision 9 replaces the interactive dialog); classifying here too
           // would double-gate every tick and lose the durable admission record.
+          // cron_create rides the same arm-time review for its schedule.
           request.loop ||
+          request.cronCreate ||
           !hostedApprovalAsks(settings, request.call.name, globProfile)
         )
           continue;
