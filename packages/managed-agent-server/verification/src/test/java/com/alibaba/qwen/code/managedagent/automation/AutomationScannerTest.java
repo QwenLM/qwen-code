@@ -199,6 +199,31 @@ class AutomationScannerTest {
     }
 
     @Test
+    void listSessionOmitsRetiredDefinitionsSoThePageIsBoundedByLiveCapacity() {
+        PublicAutomation live = service.create(tenant, ACTOR,
+                "iso-live-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true))
+                .body();
+        PublicAutomation retired = service.create(tenant, ACTOR,
+                "iso-retired-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true))
+                .body();
+        service.retireSession(tenant, sessionId, ACTOR, retired.id(),
+                "iso-retire-key-" + UUID.randomUUID());
+        // Retire only flips state (there is no production DELETE): without the
+        // live filter the Session's lifetime creations would accumulate in the
+        // model's inline cron_list tool_result instead of its 32 live slots.
+        assertThat(ledger.findSchedule(tenant, retired.id()).orElseThrow().state())
+                .isEqualTo(AutomationLedgerStore.STATE_RETIRED);
+        PublicList<PublicAutomation> page = service.listSession(tenant,
+                sessionId, null, 100);
+        assertThat(page.data()).extracting(PublicAutomation::id)
+                .containsExactly(live.id());
+    }
+
+    @Test
     void retireSessionRefusesAForeignDefinitionAndLeavesItLive() {
         PublicAutomation mine = service.create(tenant, ACTOR,
                 "iso-retire-" + UUID.randomUUID(),

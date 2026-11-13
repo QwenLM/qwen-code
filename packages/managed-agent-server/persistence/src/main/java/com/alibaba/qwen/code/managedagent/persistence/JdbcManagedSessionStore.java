@@ -151,12 +151,7 @@ public class JdbcManagedSessionStore
      * Empty when the Session has no creator key.
      */
     public String creatorActor(String tenantId, String sessionId) {
-        return jdbc.query("SELECT creator_actor_key FROM ma_session"
-                        + " WHERE tenant_id = ? AND session_id = ?",
-                (result, row) -> {
-                    byte[] actor = result.getBytes("creator_actor_key");
-                    return actor == null ? "" : new String(actor, java.nio.charset.StandardCharsets.UTF_8);
-                }, tenantId, sessionId).stream().findFirst().orElse("");
+        return storeRows.creatorActor(tenantId, sessionId);
     }
 
     @Transactional

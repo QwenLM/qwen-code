@@ -360,23 +360,14 @@ public class JdbcAutomationLedgerStore
     }
 
     public int countLive(String tenantId, String sessionId) {
-        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " ma_schedule WHERE tenant_id = ?"
-                        + " AND session_id = ? AND state = ?", Integer.class,
-                tenantId, sessionId, STATE_LIVE);
-        return count == null ? 0 : count;
+        return AutomationScheduleQueries.countLive(jdbc, tenantId, sessionId, STATE_LIVE);
     }
 
     // --- lease, fence, watermark ---
 
     /** Live, enabled, unblocked definitions whose lease is free or expired. */
     public List<ScheduleRow> findArmed(long now, int limit) {
-        return jdbc.query("SELECT " + ManagedSchemaProjection.SCHEDULE.columns() + " FROM ma_schedule"
-                        + " WHERE state = ? AND is_enabled = TRUE"
-                        + " AND blocked_reason IS NULL"
-                        + " AND (lease_until IS NULL OR lease_until < ?)"
-                        + " ORDER BY gmt_modified, schedule_id LIMIT ?", SCHEDULE,
-                STATE_LIVE, now, limit);
+        return AutomationScheduleQueries.findArmed(jdbc, SCHEDULE, STATE_LIVE, now, limit);
     }
 
     /**
