@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
@@ -513,7 +514,7 @@ class ManagedRuntimeRetentionGuardTest {
             jdbc.update(
                     "UPDATE ma_session_record SET task_state = 'pending', settled_at = NULL"
                             + " WHERE session_scope_key = ?",
-                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", unsettled));
+                    ManagedSessionStore.sessionScopeKey("tenant", unsettled));
             assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isTrue();
             jdbc.update("UPDATE ma_session_record SET task_state = 'succeeded', settled_at = 2");
             assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isFalse();
@@ -561,7 +562,7 @@ class ManagedRuntimeRetentionGuardTest {
                             row.set(columns.indexOf("session_id"), owner);
                             row.set(
                                     columns.indexOf("session_scope_key"),
-                                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", owner));
+                                    ManagedSessionStore.sessionScopeKey("tenant", owner));
                             row.set(columns.indexOf("record_id"), id);
                             row.set(
                                     columns.indexOf("record_key"),
@@ -719,7 +720,7 @@ class ManagedRuntimeRetentionGuardTest {
     private void projection(String tenant, String session, String kind) {
         jdbc.update(
                 "INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id, task_kind, task_state, runtime_state, delivery_target, delivery_state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, 'child_run', 'run', ?, 1, 'resource', ?, 'pending', 'unbound', 'session', 'planned', 1)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
+                ManagedSessionStore.sessionScopeKey(tenant, session),
                 ManagedExtensionProjection.recordKey(session, "child_run", "run"),
                 tenant,
                 session,

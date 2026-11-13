@@ -15,10 +15,11 @@ import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionModelConfigs;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -62,7 +63,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class ManagedSessionModelConfigTest {
     @Autowired private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
-    @Autowired private ManagedWorkspaceRegistry registry;
+    @Autowired private JdbcManagedWorkspaceRegistry registry;
     @Autowired private PlatformTransactionManager manager;
     private final String token = "synthetic-writer-token-0123456789012345";
     private String tenant;
@@ -97,7 +98,7 @@ class ManagedSessionModelConfigTest {
         store = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
                 registry, properties, new SdkHarnessRules(),
                 new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(),
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedSessionSkills(jdbc, json, new RequestDigests(), null),
+                new JdbcManagedSessionSkills(jdbc, json, new RequestDigests(), null),
                 null, null, null, null, null, null, configs);
         harness = mock(HarnessConnector.class);
         when(harness.supportsModelConfiguration()).thenReturn(true);
@@ -212,11 +213,11 @@ class ManagedSessionModelConfigTest {
 
     @Test
     void privateReadValidatesWriterBeforeAuthorization() throws Exception {
-        var authority = mock(ManagedSessionStore.class);
+        var authority = mock(JdbcManagedSessionStore.class);
         var modelConfigs = mock(ManagedSessionModelConfigs.class);
         var config = config("key");
         when(modelConfigs.read(tenant, "session", config.digest())).thenReturn(config);
-        var controller = new ManagedSessionStoreController(authority, null, null);
+        var controller = new ManagedSessionStoreController(authority, null, null, null);
         ReflectionTestUtils.setField(controller, "modelConfigs", modelConfigs);
         var mvc = MockMvcBuilders.standaloneSetup(controller)
                 .setCustomArgumentResolvers(new TenantContextArgumentResolver()).build();
@@ -243,7 +244,7 @@ class ManagedSessionModelConfigTest {
         var sessionStore = VerificationFixtures.managedSessionStore(jdbc);
         new TransactionTemplate(manager).execute(status -> sessionStore.acquireWriter(tenant, session, token,
                 new AcquireWriterRequest("ws", "writer", 60_000L)));
-        var controller = new ManagedSessionStoreController(sessionStore, null, null);
+        var controller = new ManagedSessionStoreController(sessionStore, null, null, null);
         ReflectionTestUtils.setField(controller, "modelConfigs", configs);
         var request = new ManagedSessionStoreController.ModelConfigQuery("ws", "writer", 1, config.digest(), null);
         var result = new TransactionTemplate(manager).execute(status -> controller.modelConfig(new TenantContext(tenant, null), session,
@@ -269,8 +270,8 @@ class ManagedSessionModelConfigTest {
     void secretReadsPreserveLegacyCloseAndLifecycleAuthority() {
         var config = config("hook-key");
         String session = create("hooks", config);
-        var authority = mock(ManagedSessionStore.class);
-        var controller = new ManagedSessionStoreController(authority, null, null);
+        var authority = mock(JdbcManagedSessionStore.class);
+        var controller = new ManagedSessionStoreController(authority, null, null, null);
         ReflectionTestUtils.setField(controller, "modelConfigs", configs);
         controller.modelConfig(new TenantContext(tenant, null), session, token,
                 new ManagedSessionStoreController.ModelConfigQuery("ws", "writer", 1, config.digest(), "legacy-close"), new HttpHeaders());

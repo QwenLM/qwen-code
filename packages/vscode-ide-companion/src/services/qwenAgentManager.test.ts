@@ -248,7 +248,7 @@ describe('QwenAgentManager.createNewSession', () => {
 });
 
 describe('QwenAgentManager.getSessionMessages', () => {
-  it.each(['request_lifecycle', 'tool_lifecycle'])(
+  it.each(['request_lifecycle', 'tool_lifecycle', 'hook_lifecycle'])(
     'omits %s telemetry from JSONL chat history while retaining messages and other telemetry',
     async (eventName) => {
       const tempDir = mkdtempSync(join(tmpdir(), 'qwen-agent-manager-'));

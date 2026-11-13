@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.DelegatingBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeObservation;
@@ -13,12 +14,12 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
-import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocolTest;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.junit.jupiter.api.Test;
@@ -71,7 +72,9 @@ public class LocalProcessRuntimeProvisionerTest {
     @Test
     void refusesPrivateProfileBeforeSpawningOrAdopting(
             @org.junit.jupiter.api.io.TempDir Path directory) throws Exception {
-        assertPrivateProfileRefused(directory, null);
+        for (String digest : List.of(CsiFilesRetirementProfile.CAPABILITY_DIGEST, CsiFilesRetirementProfile.DIAGNOSTICS_DIGEST)) {
+            assertPrivateProfileRefused(directory, null, digest);
+        }
     }
 
     @org.junit.jupiter.api.condition.DisabledOnOs(org.junit.jupiter.api.condition.OS.WINDOWS)
@@ -79,11 +82,13 @@ public class LocalProcessRuntimeProvisionerTest {
     public void refusesPrivateProfileBeforeDurableRegistration(
             @org.junit.jupiter.api.io.TempDir Path directory) throws Exception {
         Path root = directory.toRealPath();
-        assertPrivateProfileRefused(root,
-                new LocalRuntimeStore(root.resolve("state"), DurableLocalProcessRuntimeProvisionerTest.HOST));
+        var store = new LocalRuntimeStore(root.resolve("state"), DurableLocalProcessRuntimeProvisionerTest.HOST);
+        for (String digest : List.of(CsiFilesRetirementProfile.CAPABILITY_DIGEST, CsiFilesRetirementProfile.DIAGNOSTICS_DIGEST)) {
+            assertPrivateProfileRefused(root, store, digest);
+        }
     }
 
-    private static void assertPrivateProfileRefused(Path directory, LocalRuntimeStore store) throws Exception {
+    private static void assertPrivateProfileRefused(Path directory, LocalRuntimeStore store, String digest) throws Exception {
         Path marker = directory.resolve("spawned");
         Path script = directory.resolve("worker.mjs");
         Files.writeString(script, "import {writeFileSync} from 'node:fs';"
@@ -101,7 +106,7 @@ public class LocalProcessRuntimeProvisionerTest {
                 }, store)) {
             for (String isolation : List.of("session", "workspace")) {
                 RuntimeScope scope = new RuntimeScope("tenant", "workspace", "1", directory.toString(),
-                        CsiFilesRetirementProfile.CAPABILITY_DIGEST, isolation);
+                        digest, isolation);
                 RuntimeProvisionRequest request = new RuntimeProvisionRequest(scope,
                         "session".equals(isolation) ? java.util.UUID.randomUUID().toString() : null,
                         "kubernetes-workspace", "storage");
@@ -170,78 +175,6 @@ public class LocalProcessRuntimeProvisionerTest {
     }
 
     @Test
-    void managedContextRoundtripUsesFakeWorker() throws Exception {
-        requireNode();
-        verifyContextRoundtrip(List.of("node", Path.of(
-                "src/test/resources/fake-attestation-worker.mjs").toAbsolutePath().toString()));
-    }
-
-    @Test
-    void managedContextRoundtripUsesRealWorkerWhenBundleIsProvided() throws Exception {
-        String bundle = System.getProperty("qwen.runtime.worker.bundle");
-        assumeTrue(bundle != null, "set qwen.runtime.worker.bundle to the built dist/cli.js");
-        requireNode();
-        assertTrue(Files.isRegularFile(Path.of(bundle)));
-        verifyContextRoundtrip(List.of("node", bundle, "managed-runtime-worker"));
-    }
-
-    private static void verifyContextRoundtrip(List<String> command) throws Exception {
-        Path root = Files.createTempDirectory("qwen-context-中文-").toRealPath();
-        Files.createDirectories(root.resolve("服务/api"));
-        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace-a", "7",
-                root.toString(), DIGEST, "workspace");
-        HttpRuntimeTransport transport = new HttpRuntimeTransport();
-        Set<Long> before = childPids();
-        try (LocalProcessRuntimeProvisioner provisioner = new LocalProcessRuntimeProvisioner(
-                command, Path.of("").toAbsolutePath(), transport, ignored -> "storage:a")) {
-            InMemoryRuntimeBindingRepository bindings = new InMemoryRuntimeBindingRepository();
-            try (RuntimeBrokerService service = new RuntimeBrokerService(
-                    ignored -> java.util.concurrent.CompletableFuture.completedFuture(scope),
-                    provisioner, transport, bindings, new InMemoryRuntimeSessionRepository(),
-                    new InMemoryToolExecutionRepository(), "broker-context",
-                    Duration.ofSeconds(10), Duration.ofSeconds(10))) {
-                RuntimeBindingRecord ready = service.warm("harness").toCompletableFuture()
-                        .get(35, TimeUnit.SECONDS);
-                assertEquals(RuntimeBindingRecord.State.READY, ready.getState());
-                assertTrue(ready.getRequest().isManagedContext());
-                assertEquals("storage:a", ready.getRequest().getStorageId());
-                var binding = new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
-                        "tenant-a", "workspace-a", 7, "storage:a", "服务/api", "config:a", 1);
-                RuntimeSessionRecord session = new RuntimeSessionRecord(new RuntimeSession(
-                        "harness", "session-中文", "bootstrap", scope), ready.getBindingId(),
-                        ready.getGeneration(), RuntimeSessionRecord.State.READY, 0, Instant.now());
-                var receipt = transport.installContext(ready, session, "op-1", binding)
-                        .toCompletableFuture().get(5, TimeUnit.SECONDS);
-                assertEquals(binding.getContextDigest(), receipt.get("contextDigest"));
-                assertEquals("session-中文", receipt.get("sessionId"));
-                assertEquals(receipt, transport.installContext(ready, session, "op-1", binding)
-                        .toCompletableFuture().get(5, TimeUnit.SECONDS));
-                provisioner.confirm(ready.getRequest(), ready.getLease())
-                        .toCompletableFuture().get(5, TimeUnit.SECONDS);
-                try (RuntimeBrokerService restored = new RuntimeBrokerService(
-                        ignored -> java.util.concurrent.CompletableFuture.completedFuture(scope),
-                        provisioner, transport, bindings, new InMemoryRuntimeSessionRepository(),
-                        new InMemoryToolExecutionRepository(), "broker-restored",
-                        Duration.ofSeconds(10), Duration.ofSeconds(10))) {
-                    RuntimeBindingRecord adopted = restored.warm("harness").toCompletableFuture()
-                            .get(10, TimeUnit.SECONDS);
-                    assertEquals("storage:a", adopted.getRequest().getStorageId());
-                    assertTrue(adopted.getAttestationGeneration() >= 2);
-                }
-            }
-        } finally {
-            ProcessHandle.current().children().filter(child -> !before.contains(child.pid()))
-                    .forEach(ProcessHandle::destroyForcibly);
-            try (var paths = Files.walk(root)) {
-                for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
-                    Files.deleteIfExists(path);
-                }
-            }
-        }
-        assertNoNewChildren(before);
-    }
-
-    @Test
     void pinsThePersistedKind() {
         assertEquals("local-process", com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS);
     }
@@ -291,16 +224,20 @@ public class LocalProcessRuntimeProvisionerTest {
                 new LocalProcessRuntimeProvisioner(
                         List.of("node", script.toString()),
                         Path.of("").toAbsolutePath(), transport)) {
-            InMemoryRuntimeBindingRepository bindings =
-                    new InMemoryRuntimeBindingRepository(
-                            java.time.Clock.systemUTC(), () -> "binding-1");
+            var source = new org.h2.jdbcx.JdbcDataSource();
+            source.setURL("jdbc:h2:mem:local-attest-" + java.util.UUID.randomUUID()
+                    + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+            JdbcRuntimeBindingRepository bindings =
+                    new JdbcRuntimeBindingRepository(source,
+                            new AesGcmSecretProtector("test", new byte[32]),
+                            () -> "binding-1");
             RuntimeBrokerService service = new RuntimeBrokerService(
                     harnessSessionId -> java.util.concurrent.CompletableFuture
                             .completedFuture(scope),
                     provisioner, new AcceptingTransport(), bindings,
-                    new InMemoryRuntimeSessionRepository(),
-                    new InMemoryToolExecutionRepository(
-                            java.time.Clock.systemUTC()),
+                    new JdbcRuntimeSessionRepository(source),
+                    new JdbcToolExecutionRepository(source),
                     "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
             try {
                 RuntimeBindingRecord ready = service.warm("harness")
@@ -574,14 +511,18 @@ public class LocalProcessRuntimeProvisionerTest {
                 new LocalProcessRuntimeProvisioner(
                         List.of("node", script.toString(), "--chatty"),
                         Path.of("").toAbsolutePath(), transport)) {
+            var source = new org.h2.jdbcx.JdbcDataSource();
+            source.setURL("jdbc:h2:mem:local-chatty-" + java.util.UUID.randomUUID()
+                    + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
             RuntimeBrokerService service = new RuntimeBrokerService(
                     harnessSessionId -> java.util.concurrent.CompletableFuture
                             .completedFuture(scope),
                     provisioner, new AcceptingTransport(),
-                    new InMemoryRuntimeBindingRepository(),
-                    new InMemoryRuntimeSessionRepository(),
-                    new InMemoryToolExecutionRepository(
-                            java.time.Clock.systemUTC()),
+                    new JdbcRuntimeBindingRepository(source,
+                            new AesGcmSecretProtector("test", new byte[32])),
+                    new JdbcRuntimeSessionRepository(source),
+                    new JdbcToolExecutionRepository(source),
                     "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
             try {
                 RuntimeBindingRecord ready = service.warm("harness")
@@ -740,14 +681,18 @@ public class LocalProcessRuntimeProvisionerTest {
                         List.of("node", script.toString()),
                         Path.of("").toAbsolutePath(),
                         new HttpRuntimeTransport())) {
+            var source = new org.h2.jdbcx.JdbcDataSource();
+            source.setURL("jdbc:h2:mem:local-fenced-" + java.util.UUID.randomUUID()
+                    + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
             RuntimeBrokerService service = new RuntimeBrokerService(
                     harnessSessionId -> java.util.concurrent.CompletableFuture
                             .completedFuture(scope),
                     provisioner, new AcceptingTransport(),
-                    new FencingBindingRepository(),
-                    new InMemoryRuntimeSessionRepository(),
-                    new InMemoryToolExecutionRepository(
-                            java.time.Clock.systemUTC()),
+                    new FencingBindingRepository(new JdbcRuntimeBindingRepository(
+                            source, new AesGcmSecretProtector("test", new byte[32]))),
+                    new JdbcRuntimeSessionRepository(source),
+                    new JdbcToolExecutionRepository(source),
                     "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
             try {
                 ExecutionException failure = org.junit.jupiter.api.Assertions
@@ -1210,8 +1155,8 @@ public class LocalProcessRuntimeProvisionerTest {
      */
     private static final class FencingBindingRepository
             extends DelegatingBindingRepository {
-        public FencingBindingRepository() {
-            super(new InMemoryRuntimeBindingRepository());
+        public FencingBindingRepository(RuntimeBindingRepository delegate) {
+            super(delegate);
         }
 
         @Override

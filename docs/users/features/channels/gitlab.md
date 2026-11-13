@@ -102,17 +102,17 @@ Only keys present in `action_prompt_template` are processed. Unconfigured action
 
 ### Template Variables
 
-| Variable        | Value                             |
-| --------------- | --------------------------------- |
-| `%project%`     | Project path (e.g., `owner/repo`) |
-| `%project_url%` | Full project URL                  |
-| `%author%`      | Todo author username              |
-| `%target_type%` | `Issue` or `MergeRequest`         |
-| `%iid%`         | Issue/MR internal ID              |
-| `%title%`       | Issue/MR title                    |
-| `%description%` | Issue/MR description body         |
-| `%todo_id%`     | GitLab todo ID                    |
-| `%%`            | Literal `%` (escape)              |
+| Variable        | Value                                                                                         |
+| --------------- | --------------------------------------------------------------------------------------------- |
+| `%project%`     | Project path (e.g., `group/project`, or `group/subgroup/project` for a project in a subgroup) |
+| `%project_url%` | Full project URL                                                                              |
+| `%author%`      | Todo author username                                                                          |
+| `%target_type%` | `Issue` or `MergeRequest`                                                                     |
+| `%iid%`         | Issue/MR internal ID                                                                          |
+| `%title%`       | Issue/MR title                                                                                |
+| `%description%` | Issue/MR description body                                                                     |
+| `%todo_id%`     | GitLab todo ID                                                                                |
+| `%%`            | Literal `%` (escape)                                                                          |
 
 Unknown variables are preserved as-is in the output.
 
@@ -123,7 +123,7 @@ The template renders into `envelope.metadata` (structured context). The triggeri
 ```
 [alice] please fix this bug
 
-Project: owner/repo | URL: https://gitlab.com/owner/repo | Author: alice | Type: Issue | IID: 42 | Title: Test Issue | Description: ... | TodoID: 100
+Project: group/project | URL: https://gitlab.com/group/project | Author: alice | Type: Issue | IID: 42 | Title: Test Issue | Description: ... | TodoID: 100
 ```
 
 - Line 1: `[sender]` prefix + `envelope.text` (with `@bot` stripped)
@@ -139,7 +139,7 @@ Always use `groups["*"].senders: "allowlist"` with explicit group `allowedUsers`
 
 All GitLab traffic is group traffic. Group members default to `open`; set `groups["*"].senders` to `allowlist` and populate its `allowedUsers` to restrict authors. Private policy and user pairing never restrict repository members. Set `operators` explicitly for shared-session management.
 
-Note that under `groupPolicy: "pairing"`, access is granted per project: once a project is approved, **any GitLab user** can by default drive the bot through that project's issues and merge requests. All GitLab traffic is group traffic, so `privatePolicy` and the top-level `allowedUsers` do not gate members of an approved project; set `senders: "allowlist"` with `allowedUsers` on that project's `groups` entry to narrow it. Approvals are keyed by the project path (`owner/repo`), which changes on rename or transfer — revoke stale group approvals after any project rename, transfer, or deletion.
+Note that under `groupPolicy: "pairing"`, access is granted per project: once a project is approved, **any GitLab user** can by default drive the bot through that project's issues and merge requests. All GitLab traffic is group traffic, so `privatePolicy` and the top-level `allowedUsers` do not gate members of an approved project; set `senders: "allowlist"` with `allowedUsers` on that project's `groups` entry to narrow it. Approvals are keyed by the project path (`group/project`), which changes on rename or transfer — revoke stale group approvals after any project rename, transfer, or deletion. Group keys are matched case-insensitively (GitLab routing is case-insensitive), so a configured `group/project` also matches the canonical `Group/Project` spelling reported by the API.
 
 ## Mention Detection
 

@@ -33,6 +33,7 @@ import type { TextBuffer } from './shared/text-buffer.js';
 import { logicalPosToOffset } from './shared/text-buffer.js';
 import { cpSlice, cpLen } from '../utils/textUtils.js';
 import { renderSoftwareCursor } from '../utils/software-cursor.js';
+import { handleBtwViewKey } from '../utils/btw-view.js';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
 import {
@@ -978,6 +979,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       if (voiceInput.status !== 'idle') {
         return voiceInput.handleKeypress(key);
+      }
+
+      if (buffer.text.length === 0 && handleBtwViewKey(key)) {
+        return true;
       }
 
       // When the Arena tab bar or background pill has focus, block

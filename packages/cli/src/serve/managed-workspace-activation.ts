@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import type { Application, Request, Response } from 'express';
 import {
   authorizeManagedRuntime,
@@ -27,9 +28,75 @@ export const WORKSPACE_CONTEXT_CONFIG_REF =
   'sha256:5fa15183dcfe582ce54c28bf25aff62801d19038a9ec649e9bfc67b06f2a389f';
 export const WORKSPACE_CAPABILITY_DIGEST =
   'sha256:7df3981fa14b397fe09f6ba84ed0c096c71902394da667bf47f3b315866e7f91';
+export const MEASURED_WORKSPACE_CAPABILITY_DIGEST =
+  'sha256:b2ab403f278282eb8f2ca06c926be96bd3d85877714f64dc926eab535f544580';
+// The measured Workspace profile plus the user-terminal surface. Derived from
+// the canonical capability string exactly as the extension profiles are; the
+// Java control plane pins the same hex in WorkspaceExecutionProfile.
+export const MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST = `sha256:${createHash('sha256').update('managed-workspace-execution/2;web-terminal/1').digest('hex')}`;
+export const MEASURED_WORKSPACE_EXECUTION_PROFILE =
+  'managed-workspace-execution/2';
+
+export function isWorkspaceToolCapability(digest: string): boolean {
+  return (
+    digest === WORKSPACE_CAPABILITY_DIGEST ||
+    isMeasuredWorkspaceCapability(digest)
+  );
+}
+
+/** The measured result-protocol profiles, with or without the terminal. */
+export function isMeasuredWorkspaceCapability(digest: string): boolean {
+  return (
+    digest === MEASURED_WORKSPACE_CAPABILITY_DIGEST ||
+    digest === MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST
+  );
+}
 export const RESIDENT_WORKSPACE_PROFILE = 'resident-workspace-files/1';
 export const RESIDENT_WORKSPACE_CAPABILITY_DIGEST =
   'sha256:2cbf6f3825230848a65a546ec70714fbb2a53d1862a6caba73ae4cebf307b4ad';
+
+export interface ManagedShellPublisherModeInput {
+  readonly capabilityDigest: string;
+  readonly managedExtensions: boolean;
+  /** The effective capture flag: the worker passes publication ?? capturePublisher. */
+  readonly capturePublisher: boolean;
+  readonly remotePublishers: boolean;
+}
+
+export interface ManagedShellPublisherMode {
+  readonly resident: boolean;
+  readonly requiresActivation: boolean;
+  readonly remotePublisher: boolean;
+  readonly publisher: boolean;
+  readonly installRoute: boolean;
+}
+
+/**
+ * The one derivation of the Shell publisher surface, shared by the worker's
+ * route plan and the context worker's mounts so the gate and Express cannot
+ * drift apart.
+ */
+export function resolveManagedShellPublisherMode(
+  input: ManagedShellPublisherModeInput,
+): ManagedShellPublisherMode {
+  const resident =
+    input.capabilityDigest === RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+  const requiresActivation =
+    isWorkspaceToolCapability(input.capabilityDigest) ||
+    resident ||
+    input.managedExtensions;
+  const remotePublisher =
+    !input.capturePublisher && requiresActivation && !resident;
+  return {
+    resident,
+    requiresActivation,
+    remotePublisher,
+    publisher:
+      input.capturePublisher || input.remotePublishers || remotePublisher,
+    installRoute: remotePublisher,
+  };
+}
+
 export const WORKSPACE_ACTIVATION_ROUTE = Object.freeze({
   key: 'activation',
   method: 'POST',
@@ -92,6 +159,8 @@ export class WorkspaceActivations {
               request['profile'] !== RESIDENT_WORKSPACE_PROFILE
             : ![
                 WORKSPACE_CAPABILITY_DIGEST,
+                MEASURED_WORKSPACE_CAPABILITY_DIGEST,
+                MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST,
                 ...(boot.managedExtensions
                   ? [
                       MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
@@ -99,7 +168,10 @@ export class WorkspaceActivations {
                     ]
                   : []),
               ].includes(boot.capabilityDigest) ||
-              request['profile'] !== WORKSPACE_EXECUTION_PROFILE) ||
+              request['profile'] !==
+                (isMeasuredWorkspaceCapability(boot.capabilityDigest)
+                  ? MEASURED_WORKSPACE_EXECUTION_PROFILE
+                  : WORKSPACE_EXECUTION_PROFILE)) ||
           binding === undefined ||
           binding.contextConfigRef !== WORKSPACE_CONTEXT_CONFIG_REF ||
           request['contextConfigRef'] !== binding.contextConfigRef ||
