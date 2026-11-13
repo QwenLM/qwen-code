@@ -808,14 +808,18 @@ describe.each([false, true])(
         const result = await running;
         settle('late-call', 'success', 20);
         expect(results).toHaveLength(1);
-        // AgentCore must resolve the loop for the 'agent-core' surface.
-        expect(
-          (
-            core.runtimeContext as unknown as {
-              isUnifiedAgentLoopEnabled: ReturnType<typeof vi.fn>;
-            }
-          ).isUnifiedAgentLoopEnabled,
-        ).toHaveBeenCalledWith('agent-core');
+        // Every AgentCore surface read must pass 'agent-core' — the round loop
+        // and the shared tool-batch gate alike — not just the site this test
+        // drives.
+        const loopCalls = (
+          core.runtimeContext as unknown as {
+            isUnifiedAgentLoopEnabled: ReturnType<typeof vi.fn>;
+          }
+        ).isUnifiedAgentLoopEnabled.mock.calls;
+        expect(loopCalls.length).toBeGreaterThan(0);
+        expect(loopCalls.every(([surface]) => surface === 'agent-core')).toBe(
+          true,
+        );
         // The cancelled call's result stays for the next round's check.
         expect(result.messages[0].parts).toEqual([
           {

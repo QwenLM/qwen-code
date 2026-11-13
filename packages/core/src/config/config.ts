@@ -167,6 +167,8 @@ import type {
 import type { InstructionLoadReason } from '../hooks/types.js';
 import {
   resolveAgentLoopSwitch,
+  UNIFIED_SURFACE_DEFAULTS,
+  EVENT_BUS_SURFACE_DEFAULTS,
   type AgentLoopSurface,
 } from './agent-loop-rollout.js';
 import { ApprovalMode } from './approval-mode.js';
@@ -3740,6 +3742,10 @@ export class Config {
     this.lsToolEnabled = params.lsToolEnabled ?? false;
     this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
+    // Deliberately not `?? false`: these are tri-state. Unset must stay
+    // undefined so the resolver falls through to the per-surface built-in
+    // default; collapsing to false here would make "not set" indistinguishable
+    // from "explicitly off" and block a later per-surface default flip.
     this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled;
     this.eventBusAgentLoopEnabled = params.eventBusAgentLoopEnabled;
     this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
@@ -10839,6 +10845,7 @@ export class Config {
       env: process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'],
       setting: this.unifiedAgentLoopEnabled,
       surface,
+      surfaceDefault: UNIFIED_SURFACE_DEFAULTS[surface],
     });
   }
 
@@ -10847,6 +10854,7 @@ export class Config {
       env: process.env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'],
       setting: this.eventBusAgentLoopEnabled,
       surface,
+      surfaceDefault: EVENT_BUS_SURFACE_DEFAULTS[surface],
     });
   }
 

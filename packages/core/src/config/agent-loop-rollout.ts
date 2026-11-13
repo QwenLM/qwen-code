@@ -30,9 +30,20 @@ export const AGENT_LOOP_SURFACES: readonly AgentLoopSurface[] = [
   'speculation',
 ];
 
-// A rollout PR flips one entry at a time; until then every surface stays
+// Each switch has its own default table so a rollout flip of the unified
+// default for one surface cannot also flip the event-bus default. A rollout
+// PR flips one entry of one table at a time; until then every surface stays
 // on its legacy loop unless the setting or the environment says otherwise.
-const SURFACE_DEFAULTS: Record<AgentLoopSurface, boolean> = {
+export const UNIFIED_SURFACE_DEFAULTS: Record<AgentLoopSurface, boolean> = {
+  headless: false,
+  acp: false,
+  ink: false,
+  opentui: false,
+  'agent-core': false,
+  speculation: false,
+};
+
+export const EVENT_BUS_SURFACE_DEFAULTS: Record<AgentLoopSurface, boolean> = {
   headless: false,
   acp: false,
   ink: false,
@@ -43,6 +54,22 @@ const SURFACE_DEFAULTS: Record<AgentLoopSurface, boolean> = {
 
 function isSurface(name: string): name is AgentLoopSurface {
   return (AGENT_LOOP_SURFACES as readonly string[]).includes(name);
+}
+
+// The env value cannot change during a process, but the resolver runs on every
+// model round / tool batch; warn once per distinct token so a typo does not
+// append one identical line per round to the debug log.
+const warnedTokens = new Set<string>();
+
+/** Test hook: forget which tokens have already been warned about. */
+export function resetAgentLoopEnvWarnings(): void {
+  warnedTokens.clear();
+}
+
+function warnOnce(entry: string, message: string): void {
+  if (warnedTokens.has(entry)) return;
+  warnedTokens.add(entry);
+  debugLogger.warn(message);
 }
 
 /**
@@ -68,7 +95,7 @@ export function resolveAgentLoopEnvOverride(
     const name = eq === -1 ? entry : entry.slice(0, eq).trim();
     const flag = eq === -1 ? '1' : entry.slice(eq + 1).trim();
     if (!isSurface(name)) {
-      debugLogger.warn(`ignoring unknown agent-loop surface token: ${entry}`);
+      warnOnce(entry, `ignoring unknown agent-loop surface token: ${entry}`);
       continue;
     }
     if (name !== surface) continue;
@@ -77,7 +104,7 @@ export function resolveAgentLoopEnvOverride(
     // Skip only the unparseable token; a later well-formed token for the same
     // surface still applies, and a lone malformed token leaves the surface to
     // the setting/default. The first well-formed token wins.
-    debugLogger.warn(`ignoring malformed agent-loop token: ${entry}`);
+    warnOnce(entry, `ignoring malformed agent-loop token: ${entry}`);
     continue;
   }
   return undefined;
@@ -86,15 +113,17 @@ export function resolveAgentLoopEnvOverride(
 /**
  * Resolves one loop switch for one surface: the environment override when
  * it addresses the surface, else the explicit setting when set, else the
- * surface's built-in default.
+ * surface's built-in default for that switch. The caller supplies the
+ * per-switch default so the two switches cannot share a fallback table.
  */
 export function resolveAgentLoopSwitch(options: {
   env: string | undefined;
   setting: boolean | undefined;
   surface: AgentLoopSurface;
+  surfaceDefault: boolean;
 }): boolean {
   const override = resolveAgentLoopEnvOverride(options.env, options.surface);
   if (override !== undefined) return override;
   if (options.setting !== undefined) return options.setting;
-  return SURFACE_DEFAULTS[options.surface];
+  return options.surfaceDefault;
 }

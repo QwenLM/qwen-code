@@ -41,7 +41,11 @@ import {
   isValidGoalTokenBudget,
   installSessionWorkflowRevisionWriteThrough,
 } from './config.js';
-import { AGENT_LOOP_SURFACES } from './agent-loop-rollout.js';
+import {
+  AGENT_LOOP_SURFACES,
+  UNIFIED_SURFACE_DEFAULTS,
+  EVENT_BUS_SURFACE_DEFAULTS,
+} from './agent-loop-rollout.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { Storage } from './storage.js';
 import { ideContextStore } from '../ide/ideContext.js';
@@ -7462,6 +7466,38 @@ describe('Server Config (config.ts)', () => {
         expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(true);
         expect(config.isUnifiedAgentLoopEnabled('agent-core')).toBe(false);
         expect(config.isUnifiedAgentLoopEnabled('speculation')).toBe(false);
+      });
+    });
+
+    describe('loop-switch default tables are independent', () => {
+      afterEach(() => {
+        // Restore the all-false defaults the rollout starts from.
+        for (const surface of AGENT_LOOP_SURFACES) {
+          UNIFIED_SURFACE_DEFAULTS[surface] = false;
+          EVENT_BUS_SURFACE_DEFAULTS[surface] = false;
+        }
+        vi.unstubAllEnvs();
+      });
+
+      it('flipping a unified surface default does not flip the event-bus default', () => {
+        // The next rollout step flips one surface's unified default. The kernel
+        // must stay off for that surface unless its own table is flipped —
+        // re-merging the two tables reds this case.
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+        UNIFIED_SURFACE_DEFAULTS.headless = true;
+        const config = makeConfig();
+        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(true);
+        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(false);
+      });
+
+      it('flipping an event-bus surface default does not flip the unified default', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+        EVENT_BUS_SURFACE_DEFAULTS.headless = true;
+        const config = makeConfig();
+        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(false);
       });
     });
 

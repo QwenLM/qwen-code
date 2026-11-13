@@ -4,13 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AGENT_LOOP_SURFACES,
   resolveAgentLoopEnvOverride,
   resolveAgentLoopSwitch,
+  resetAgentLoopEnvWarnings,
   type AgentLoopSurface,
 } from './agent-loop-rollout.js';
+
+const { warnMock } = vi.hoisted(() => ({ warnMock: vi.fn() }));
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    warn: warnMock,
+    debug: vi.fn(),
+    info: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
 
 describe('resolveAgentLoopEnvOverride', () => {
   it('returns undefined when the variable is unset or blank', () => {
@@ -105,43 +116,124 @@ describe('resolveAgentLoopEnvOverride', () => {
 describe('resolveAgentLoopSwitch', () => {
   const surface: AgentLoopSurface = 'headless';
 
-  it('falls back to the built-in default when nothing is set', () => {
+  it('falls back to the supplied per-switch default when nothing is set', () => {
     expect(
-      resolveAgentLoopSwitch({ env: undefined, setting: undefined, surface }),
+      resolveAgentLoopSwitch({
+        env: undefined,
+        setting: undefined,
+        surface,
+        surfaceDefault: false,
+      }),
     ).toBe(false);
   });
 
   it('uses the explicit setting when the env does not address the surface', () => {
     expect(
-      resolveAgentLoopSwitch({ env: undefined, setting: true, surface }),
+      resolveAgentLoopSwitch({
+        env: undefined,
+        setting: true,
+        surface,
+        surfaceDefault: false,
+      }),
     ).toBe(true);
-    expect(resolveAgentLoopSwitch({ env: 'acp', setting: true, surface })).toBe(
-      true,
-    );
     expect(
-      resolveAgentLoopSwitch({ env: undefined, setting: false, surface }),
+      resolveAgentLoopSwitch({
+        env: 'acp',
+        setting: true,
+        surface,
+        surfaceDefault: false,
+      }),
+    ).toBe(true);
+    expect(
+      resolveAgentLoopSwitch({
+        env: undefined,
+        setting: false,
+        surface,
+        surfaceDefault: false,
+      }),
     ).toBe(false);
   });
 
   it('lets the env override the setting in both directions', () => {
-    expect(resolveAgentLoopSwitch({ env: '1', setting: false, surface })).toBe(
-      true,
-    );
-    expect(resolveAgentLoopSwitch({ env: '0', setting: true, surface })).toBe(
-      false,
-    );
     expect(
-      resolveAgentLoopSwitch({ env: 'headless=0', setting: true, surface }),
+      resolveAgentLoopSwitch({
+        env: '1',
+        setting: false,
+        surface,
+        surfaceDefault: false,
+      }),
+    ).toBe(true);
+    expect(
+      resolveAgentLoopSwitch({
+        env: '0',
+        setting: true,
+        surface,
+        surfaceDefault: false,
+      }),
+    ).toBe(false);
+    expect(
+      resolveAgentLoopSwitch({
+        env: 'headless=0',
+        setting: true,
+        surface,
+        surfaceDefault: false,
+      }),
     ).toBe(false);
   });
 
-  it('lets an explicit false setting beat the built-in default', () => {
-    // The built-in default is false today; an explicit false must still be
-    // honored once a surface default flips to true. The resolution order is
-    // observable here through the env: a list that does not name the surface
-    // leaves the explicit false in charge.
+  it('lets an explicit false setting beat a true per-switch default', () => {
+    // The acceptance for per-switch tables: a flipped default must not override
+    // an explicit opt-out. Removing the `setting !== undefined` branch reds this.
     expect(
-      resolveAgentLoopSwitch({ env: 'acp=1', setting: false, surface }),
+      resolveAgentLoopSwitch({
+        env: undefined,
+        setting: false,
+        surface,
+        surfaceDefault: true,
+      }),
     ).toBe(false);
+  });
+
+  it('falls through to a true per-switch default only when the setting is unset', () => {
+    // The acceptance for per-switch tables: with no setting and no env, the
+    // caller-supplied default wins. Re-merging the two switch tables reds the
+    // event-bus getter's independence (see config.test.ts).
+    expect(
+      resolveAgentLoopSwitch({
+        env: undefined,
+        setting: undefined,
+        surface,
+        surfaceDefault: true,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe('resolveAgentLoopEnvOverride warning dedup', () => {
+  beforeEach(() => {
+    resetAgentLoopEnvWarnings();
+    warnMock.mockClear();
+  });
+
+  it('warns once per distinct token across repeated resolutions', () => {
+    expect(resolveAgentLoopEnvOverride('bogus', 'headless')).toBeUndefined();
+    expect(resolveAgentLoopEnvOverride('bogus', 'headless')).toBeUndefined();
+    expect(warnMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('warns separately for different tokens', () => {
+    resolveAgentLoopEnvOverride('bogus', 'headless');
+    resolveAgentLoopEnvOverride('headless=2', 'headless');
+    expect(warnMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('dedup does not change the resolved value', () => {
+    expect(resolveAgentLoopEnvOverride('bogus,headless=1', 'headless')).toBe(
+      true,
+    );
+    expect(resolveAgentLoopEnvOverride('bogus,headless=1', 'headless')).toBe(
+      true,
+    );
+    expect(warnMock).toHaveBeenCalledTimes(1);
   });
 });
