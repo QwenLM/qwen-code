@@ -319,11 +319,9 @@ public class ManagedAutomationService {
         requireScheduleId(automationId);
         String requestDigest = digests.digest(Map.of("operation", "retire",
                 "automationId", automationId));
-        Optional<Result<PublicAutomation>> replay = replay(tenantId, actorId,
-                idempotencyKey, requestDigest, PublicAutomation.class);
-        if (replay.isPresent()) {
-            return replay.get();
-        }
+        // Verify the definition belongs to the bound Session before answering
+        // a replay (design decision 2): a foreign Session must not receive the
+        // committed record even when it presents the same idempotency key.
         ScheduleRow row = ledger.findSchedule(tenantId, automationId)
                 .orElseThrow(() -> new ManagedAgentException(404,
                         "automation_not_found",
@@ -331,6 +329,11 @@ public class ManagedAutomationService {
         if (!sessionId.equals(row.sessionId())) {
             throw new ManagedAgentException(404,
                     "automation_not_found", "The automation was not found.");
+        }
+        Optional<Result<PublicAutomation>> replay = replay(tenantId, actorId,
+                idempotencyKey, requestDigest, PublicAutomation.class);
+        if (replay.isPresent()) {
+            return replay.get();
         }
         SessionRecord session;
         try {

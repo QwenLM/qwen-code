@@ -5,6 +5,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.qwen.code.managedagent.AutomationHarnessFake;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.automation.AutomationSessionModels;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
@@ -60,6 +61,8 @@ import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * H6b: the scanner and the service against the real ledger on H2 and the
@@ -166,6 +169,91 @@ class AutomationScannerTest {
         service = new ManagedAutomationService(ledger, agentStore, workspaces,
                 connector, scanner, digests, mapper, settings, true,
                 clock::get);
+    }
+
+    private String activeOtherSession() {
+        String other = sessions.createWorkspaceSession(tenant, ACTOR,
+                "create-" + UUID.randomUUID(), "qwen-code", null, "Other",
+                Map.of(), List.of(), new WorkspaceSelection(WORKSPACE, "."))
+                .sessionId();
+        jdbc.update("UPDATE ma_session SET status = 'ACTIVE'"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, other);
+        return other;
+    }
+
+    @Test
+    void listSessionReturnsOnlyTheBoundSessionsDefinitions() {
+        PublicAutomation mine = service.create(tenant, ACTOR,
+                "iso-list-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true))
+                .body();
+        String other = activeOtherSession();
+        service.create(tenant, ACTOR, "iso-list-other-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(other, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true));
+        PublicList<PublicAutomation> page = service.listSession(tenant,
+                sessionId, null, 100);
+        assertThat(page.data()).extracting(PublicAutomation::id)
+                .containsExactly(mine.id());
+    }
+
+    @Test
+    void retireSessionRefusesAForeignDefinitionAndLeavesItLive() {
+        PublicAutomation mine = service.create(tenant, ACTOR,
+                "iso-retire-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true))
+                .body();
+        String other = activeOtherSession();
+        assertThatThrownBy(() -> service.retireSession(tenant, other, ACTOR,
+                mine.id(), "iso-foreign-" + UUID.randomUUID()))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(404);
+                    assertThat(error.getCode()).isEqualTo("automation_not_found");
+                });
+        assertThat(ledger.findSchedule(tenant, mine.id()).orElseThrow().state())
+                .isEqualTo(AutomationLedgerStore.STATE_LIVE);
+    }
+
+    @Test
+    void retireSessionVerifiesOwnershipBeforeAnsweringAReplay() {
+        PublicAutomation mine = service.create(tenant, ACTOR,
+                "iso-replay-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true))
+                .body();
+        // Land a replay receipt under this key by retiring once as the owner.
+        String key = "iso-replay-key-" + UUID.randomUUID();
+        service.retireSession(tenant, sessionId, ACTOR, mine.id(), key);
+        String other = activeOtherSession();
+        // A foreign Session presenting the same key and automationId must be
+        // refused, not handed the owner's replayed record.
+        assertThatThrownBy(() -> service.retireSession(tenant, other, ACTOR,
+                mine.id(), key))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(404);
+                    assertThat(error.getCode()).isEqualTo("automation_not_found");
+                });
+    }
+
+    @Test
+    void createForcesTheBoundSessionEvenWhenTheBodyNamesAnother() {
+        String other = activeOtherSession();
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        when(sessionStore.creatorActor(tenant, sessionId)).thenReturn(ACTOR);
+        ManagedAutomationSessionService sessionService =
+                new ManagedAutomationSessionService(sessionStore, service);
+        AutomationSessionModels.Create request = new AutomationSessionModels.Create(
+                WORKSPACE, "writer", 1,
+                new AutomationDefinitionRequest(other, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true));
+        PublicAutomation created = sessionService.create(tenant, sessionId,
+                "writer-token", "iso-create-" + UUID.randomUUID(), request)
+                .body();
+        assertThat(created.sessionId()).isEqualTo(sessionId);
+        assertThat(ledger.findSchedule(tenant, created.id()).orElseThrow()
+                .sessionId()).isEqualTo(sessionId);
     }
 
     private PublicAutomation defineGated(String gate) {

@@ -549,9 +549,11 @@ public class WakeRecoveryStoreTest {
         ObjectNode future = event("input.accepted", "loop-future", "loop");
         ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
         appendBatch(future);
-        // Push the journal past the 32-revision per-call proof bound so the
-        // deferred input and the head land in different proof pages.
-        for (int i = 0; i < 33; i++) {
+        // Push the journal well past the 32-revision per-call proof bound so the
+        // deferred input and the head land in different proof pages and the
+        // re-proof must span several calls (a small fixture never exercises the
+        // "a deferred partial proof must not be cached" branch).
+        for (int i = 0; i < 200; i++) {
             append("turn.settled", "settled-" + i, null);
         }
         // The first scan pages past the deferred input and certifies nothing.
@@ -561,7 +563,12 @@ public class WakeRecoveryStoreTest {
         // and certify "nothing pending", dropping the wakeup a second way.
         store.setNowMillis(() -> 3_000_000L);
         var answer = store.hasPendingInput(candidate());
-        for (int i = 0; i < 4 && answer.isEmpty(); i++) {
+        // The bound is tight on purpose: because the deferred partial proof is
+        // not cached, the due wakeup is re-discovered within one fresh proof
+        // span. A cached deferred proof would resume past the input, only
+        // re-discovering it after reaching the head and restarting, which takes
+        // more calls than this bound allows.
+        for (int i = 0; i < 9 && answer.isEmpty(); i++) {
             answer = store.hasPendingInput(candidate());
         }
         assertThat(answer).contains(true);

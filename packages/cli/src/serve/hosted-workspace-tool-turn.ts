@@ -883,7 +883,7 @@ export const HOSTED_CRON_CREATE_TOOL: FunctionDeclaration = {
 export const HOSTED_CRON_LIST_TOOL: FunctionDeclaration = {
   name: 'cron_list',
   description:
-    'List this Session’s recurring cron schedules (created via cron_create) and any pending loop wakeup scheduled via loop_wakeup. Shows each id, schedule/fire time, and prompt.',
+    'List this Session’s recurring cron schedules (created via cron_create) and any pending loop wakeup scheduled via loop_wakeup. Shows each schedule’s id, cron, timezone and state, and each wakeup’s id, fire time and prompt.',
   parametersJsonSchema: {
     type: 'object',
     properties: {},
