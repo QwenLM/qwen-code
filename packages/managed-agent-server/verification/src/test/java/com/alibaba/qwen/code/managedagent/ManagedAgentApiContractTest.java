@@ -133,6 +133,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "qwen.managed-agent.harness.enabled=false",
         "qwen.managed-agent.automation.enabled=true",
         "qwen.managed-agent.session-store.enabled=true",
+        "qwen.managed-agent.client-files.enabled=true",
         "qwen.managed-agent.dispatch.scan-delay=50ms",
         "qwen.managed-agent.events.poll-interval=10ms",
         "qwen.managed-agent.events.materialize-interval=10ms"
@@ -1795,6 +1796,21 @@ class ManagedAgentApiContractTest {
             exchange(drift, sideAction + "WebShellSessionSideQuery", 404,
                     post(WEB_SHELL + "/session-side-queries/" + sideAction).header(TENANT, tenant).principal(actor(tenant)), sideBody);
         }
+        exchange(drift, "registerWebShellClientFiles", 404,
+                post(WEB_SHELL + "/client-files/register").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"sessionId\":\"" + sideSession + "\",\"connectionId\":\"conn-contract\"}");
+        exchange(drift, "unregisterWebShellClientFiles", 404,
+                post(WEB_SHELL + "/client-files/unregister").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"sessionId\":\"" + sideSession + "\"}");
+        exchange(drift, "queryWebShellClientFilesStatus", 404,
+                post(WEB_SHELL + "/client-files/status").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"sessionId\":\"" + sideSession + "\"}");
+        exchange(drift, "streamWebShellClientFilesRequests", 404,
+                post(WEB_SHELL + "/client-files/requests/stream").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"sessionId\":\"" + sideSession + "\",\"generation\":1}");
+        exchange(drift, "respondWebShellClientFiles", 404,
+                post(WEB_SHELL + "/client-files/responses").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"sessionId\":\"" + sideSession + "\",\"generation\":1,\"rpcRequestId\":\"probe\",\"responseJson\":\"{}\"}");
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
@@ -3151,7 +3167,7 @@ class ManagedAgentApiContractTest {
                         .isEqualTo(session.get("last_event_id").asLong());
                 JsonNode webCapabilities = json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false,"diagnostics":true,"btw":false,"recap":false}
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false,"diagnostics":true,"btw":false,"recap":false,"clientFiles":false}
                                 """);
                 assertThat(other.get("capabilities")).isEqualTo(webCapabilities);
             }

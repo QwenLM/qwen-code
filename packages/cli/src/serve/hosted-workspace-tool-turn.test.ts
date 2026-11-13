@@ -14182,3 +14182,525 @@ it('restores an approved personal memory action without a Runtime or a second ap
   expect(broker.warm).not.toHaveBeenCalled();
   expect(broker.acquire).not.toHaveBeenCalled();
 });
+
+describe('client files tool execution', () => {
+  const clientFilesToolName = 'mcp_0123456789abcdef0123456789abcdef';
+  const clientFilesCall = {
+    name: clientFilesToolName,
+    callId: 'cf-call-1',
+    args: { path: 'a.txt' },
+    isClientInitiated: false,
+    prompt_id: 'prompt',
+  };
+  const clientFilesParts: Part[] = [
+    {
+      functionCall: {
+        id: clientFilesCall.callId,
+        name: clientFilesCall.name,
+        args: clientFilesCall.args,
+      },
+    },
+  ];
+  const browserTool = { name: 'read_file', inputSchema: {} };
+
+  function clientFilesSession(
+    invoke: (tool: unknown, args: unknown) => Promise<unknown>,
+    resolve: (name: string) => typeof browserTool | undefined = (name) =>
+      name === clientFilesToolName ? browserTool : undefined,
+  ) {
+    return {
+      tools: () => [
+        {
+          name: clientFilesToolName,
+          description: 'MCP tool: "read_file"',
+          parametersJsonSchema: { type: 'object' },
+        },
+      ],
+      catalogs: () => [
+        {
+          serverId: 'local-files',
+          generation: 1,
+          tools: [browserTool],
+        },
+      ],
+      resolve,
+      invoke,
+    } as unknown as import('./hosted-client-files-session.js').HostedClientFilesSession;
+  }
+
+  function clientFilesTurn(
+    files: import('./hosted-client-files-session.js').HostedClientFilesSession,
+    mode: HostedApprovalMode = 'yolo',
+    permissionRules?: HostedApprovalSettings['permissionRules'],
+  ) {
+    return new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      {
+        settings: {
+          mode,
+          timeoutMs: 60_000,
+          ...(permissionRules ? { permissionRules } : {}),
+        },
+        waiters,
+      },
+      { clientFiles: files },
+    );
+  }
+
+  it('executes a browser tool harness-locally and commits the durable result', async () => {
+    const invoke = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'file content' }],
+    }));
+    turn = clientFilesTurn(clientFilesSession(invoke));
+    const responses = await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['output']).toBe(
+      'file content',
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      browserTool,
+      { path: 'a.txt' },
+      expect.any(AbortSignal),
+    );
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    // A client-files-only batch takes no Workspace mount it never uses. (The
+    // constructor's eager warm is fire-and-forget; the per-batch gate no longer
+    // awaits it for a client-files-only batch, so the turn never blocks on it.)
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect((await session.sink.project()).map((record) => record.type)).toEqual(
+      ['assistant', 'tool_result'],
+    );
+    await turn.consumeResults();
+    await turn.finish();
+  });
+
+  it('admits a registered client-files tool on the resident Workspace profile', async () => {
+    // The resident profile advertises the registration's tools, so the resident
+    // batch guard must admit a name the registration resolves instead of
+    // refusing it as a non-file tool (the panel would report connected for
+    // tools that can never run).
+    broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+    const invoke = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'resident file content' }],
+    }));
+    turn = clientFilesTurn(clientFilesSession(invoke));
+    const advertised = (
+      await turn.declarations(new AbortController().signal)
+    ).map((tool) => tool.name);
+    expect(advertised).toContain(clientFilesToolName);
+    const responses = await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(responses)).not.toContain(
+      'Resident Workspace supports only',
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      browserTool,
+      { path: 'a.txt' },
+      expect.any(AbortSignal),
+    );
+    await turn.consumeResults();
+    await turn.finish();
+  });
+
+  it('still refuses an unregistered non-file tool on the resident profile', async () => {
+    // The admission is by registration resolution, not a prefix test: a name
+    // the registration does not resolve stays refused on the resident profile.
+    broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+    const invoke = vi.fn(async () => ({ content: [] }));
+    turn = clientFilesTurn(clientFilesSession(invoke));
+    const call = { ...clientFilesCall, name: 'web_fetch', callId: 'cf-web' };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(responses)).toContain(
+      'Resident Workspace supports only',
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    await turn.consumeResults();
+    await turn.finish();
+  });
+
+  it('refuses a declared client-files call revoked mid-turn with the registration-inactive message', async () => {
+    // The resident guard runs before prepareRequests; a registration revoked
+    // between declaration and dispatch must be refused with the accurate
+    // registration-inactive text, not the misleading file-tool message (which
+    // would send the model retrying read_file against the Workspace).
+    broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+    const invoke = vi.fn(async () => ({ content: [] }));
+    let active = true;
+    const files = clientFilesSession(invoke, (name) =>
+      active && name === clientFilesToolName ? browserTool : undefined,
+    );
+    turn = clientFilesTurn(files);
+    const advertised = (
+      await turn.declarations(new AbortController().signal)
+    ).map((tool) => tool.name);
+    expect(advertised).toContain(clientFilesToolName);
+    active = false;
+    const responses = await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(responses)).toContain(
+      'The client filesystem registration is no longer active.',
+    );
+    expect(JSON.stringify(responses)).not.toContain(
+      'Resident Workspace supports only',
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    await turn.consumeResults();
+    await turn.finish();
+  });
+
+  it('fires PostToolUse for a client-files call outcome', async () => {
+    // The client-files accept path commits a durable tool_result, so the
+    // outcome hook must fire (PreToolUse already does). Removing the
+    // client-files arm from the dispatched disjunction turns this red.
+    const fire = vi.fn<HostedHookSession['fire']>(async () => ({}));
+    const invoke = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'file content' }],
+    }));
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      { settings: { mode: 'yolo', timeoutMs: 60_000 }, waiters },
+      { clientFiles: clientFilesSession(invoke), hooks: hookSession(fire) },
+    );
+    await turn.declarations(new AbortController().signal);
+    await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    const events = fire.mock.calls.map(([event]) => event);
+    expect(events).toContain(HookEventName.PreToolUse);
+    expect(events).toContain(HookEventName.PostToolUse);
+    await turn.consumeResults();
+    await turn.finish();
+  });
+
+  it('does not fire an outcome hook for a client-files call denied at approval', async () => {
+    // A declared name alone is not dispatch evidence: the permission rules
+    // deny the call before the accept path runs, so no executionStatus-bearing
+    // tool_result is committed and no outcome hook may fire. Treating the
+    // declared name as dispatch (the pre-fix arm) turns this red.
+    const fire = vi.fn<HostedHookSession['fire']>(async () => ({}));
+    const invoke = vi.fn(async () => ({ content: [] }));
+    const permissionRules = {
+      allow: [] as string[],
+      ask: [] as string[],
+      deny: ['mcp__local-files__read_file'],
+    };
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      {
+        settings: { mode: 'default', timeoutMs: 60_000, permissionRules },
+        waiters,
+      },
+      { clientFiles: clientFilesSession(invoke), hooks: hookSession(fire) },
+    );
+    await turn.declarations(new AbortController().signal);
+    const responses = await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    expect(responses[0].functionResponse?.response?.['error']).toContain(
+      'permission rules denied',
+    );
+    const events = fire.mock.calls.map(([event]) => event);
+    expect(events).not.toContain(HookEventName.PostToolUse);
+    expect(events).not.toContain(HookEventName.PostToolUseFailure);
+    await turn.consumeResults();
+    await turn.finish();
+  });
+
+  it('fires PostToolUseFailure for an executed-but-failed client-files call', async () => {
+    // The accept path stamps executionStatus=error on the committed result, so
+    // the outcome hook fires for a call that ran and failed (the arm is not
+    // gated on success). Dropping the stamp or gating the arm on success turns
+    // this red.
+    const fire = vi.fn<HostedHookSession['fire']>(async () => ({}));
+    const invoke = vi.fn(async () => {
+      throw new Error('client_files_offline');
+    });
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      { settings: { mode: 'yolo', timeoutMs: 60_000 }, waiters },
+      { clientFiles: clientFilesSession(invoke), hooks: hookSession(fire) },
+    );
+    await turn.declarations(new AbortController().signal);
+    await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    const events = fire.mock.calls.map(([event]) => event);
+    expect(events).toContain(HookEventName.PostToolUseFailure);
+    expect(events).not.toContain(HookEventName.PostToolUse);
+    await turn.consumeResults();
+    await turn.finish();
+  });
+
+  it('advertises the registration tools on the main and read profiles', async () => {
+    // The resident-profile push is witnessed above; the main and read-profile
+    // declaration pushes must also hand the registration's tools to the model.
+    const invoke = vi.fn(async () => ({ content: [] }));
+    const files = clientFilesSession(invoke);
+    const declared = async (profile?: string) => {
+      const t = new HostedWorkspaceToolTurn(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        session,
+        harness,
+        'prompt',
+        commit,
+        messageFitsInline,
+        undefined,
+        undefined,
+        { settings: { mode: 'yolo', timeoutMs: 60_000 }, waiters },
+        { clientFiles: files, ...(profile ? { profile } : {}) },
+      );
+      return (await t.declarations(new AbortController().signal)).map(
+        (tool) => tool.name,
+      );
+    };
+    expect(await declared()).toContain(clientFilesToolName);
+    expect(await declared('hosted-workspace-read/1')).toContain(
+      clientFilesToolName,
+    );
+  });
+
+  it('does not journal a tool_result when the Turn is cancelled mid-call', async () => {
+    let release!: (value: unknown) => void;
+    const gate = new Promise<unknown>((resolve) => {
+      release = resolve;
+    });
+    const invoke = vi.fn(() => gate);
+    turn = clientFilesTurn(clientFilesSession(invoke));
+    const controller = new AbortController();
+    const running = turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      controller.signal,
+    );
+    // Park the browser call, cancel the Turn, then let the late answer land:
+    // the cancellation must propagate, not be journalled as a bogus failure.
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalled());
+    controller.abort();
+    release({ content: [{ type: 'text', text: 'late answer' }] });
+    await running.catch(() => {});
+    expect(
+      (await session.sink.project()).map((record) => record.type),
+    ).not.toContain('tool_result');
+  });
+
+  it.each(['allow', 'deny'] as const)(
+    'matches permission rules against the browser tool identity (%s)',
+    async (rule) => {
+      const invoke = vi.fn(async () => ({
+        content: [{ type: 'text', text: 'ok' }],
+      }));
+      // The identity permissionDecision resolves for a browser tool is
+      // mcp__<serverId>__<browser tool name>, not the namespaced declaration
+      // name; a rule on that identity must allow/deny the call accordingly.
+      const permissionRules = {
+        allow: [] as string[],
+        ask: [] as string[],
+        deny: [] as string[],
+      };
+      permissionRules[rule].push('mcp__local-files__read_file');
+      turn = clientFilesTurn(
+        clientFilesSession(invoke),
+        'default',
+        permissionRules,
+      );
+      const responses = await turn.execute(
+        [clientFilesCall],
+        clientFilesParts,
+        'model',
+        new AbortController().signal,
+      );
+      if (rule === 'deny') {
+        expect(responses[0].functionResponse?.response?.['error']).toContain(
+          'permission rules denied',
+        );
+        expect(invoke).not.toHaveBeenCalled();
+      } else {
+        expect(responses[0].functionResponse?.response?.['output']).toBe('ok');
+        expect(invoke).toHaveBeenCalledTimes(1);
+      }
+      await turn.consumeResults();
+      await turn.finish();
+    },
+  );
+
+  it('converts a relay call failure into a tool error without failing the Turn', async () => {
+    const invoke = vi.fn(async () => {
+      throw new Error('client_files_offline');
+    });
+    turn = clientFilesTurn(clientFilesSession(invoke));
+    const responses = await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toContain(
+      'client_files_offline',
+    );
+    expect(await toolResultErrors()).toEqual([
+      expect.stringContaining('client_files_offline'),
+    ]);
+    await turn.consumeResults();
+    await expect(turn.finish()).resolves.toBeUndefined();
+  });
+
+  it('reports a registration dropped between prepare and accept as a tool error', async () => {
+    const invoke = vi.fn();
+    // prepare resolves the tool once; the browser disconnects before accept
+    // resolves it again, which is the only way the dropped-registration arm
+    // is reachable (a call prepared without a tool never routes here).
+    let resolutions = 0;
+    turn = clientFilesTurn(
+      clientFilesSession(invoke, (name) => {
+        resolutions += 1;
+        return resolutions === 1 && name === clientFilesToolName
+          ? browserTool
+          : undefined;
+      }),
+    );
+    const responses = await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toContain(
+      'no longer active',
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    await turn.consumeResults();
+    await expect(turn.finish()).resolves.toBeUndefined();
+  });
+
+  it('refuses a declared client-files call revoked before prepare, without the broker', async () => {
+    const invoke = vi.fn();
+    // The declarations snapshot still advertises the tool, but resolve() no
+    // longer returns it: the registration was revoked before the call ran.
+    // The call must be refused here, not fall through to the Workspace
+    // file-tool arm and dispatch through the broker.
+    turn = clientFilesTurn(clientFilesSession(invoke, () => undefined));
+    const responses = await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['error']).toContain(
+      'no longer active',
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    expect(broker.acquire).not.toHaveBeenCalled();
+    await turn.consumeResults();
+    await expect(turn.finish()).resolves.toBeUndefined();
+  });
+
+  it('converts an isError browser result into a tool error', async () => {
+    const invoke = vi.fn(async () => ({
+      content: [{ type: 'text', text: 'permission denied' }],
+      isError: true,
+    }));
+    turn = clientFilesTurn(clientFilesSession(invoke));
+    const responses = await turn.execute(
+      [clientFilesCall],
+      clientFilesParts,
+      'model',
+      new AbortController().signal,
+    );
+    // The browser's own error text wins over the generic fallback.
+    expect(responses[0].functionResponse?.response?.['error']).toContain(
+      'permission denied',
+    );
+    await turn.consumeResults();
+    await turn.finish();
+  });
+
+  it.each(['allow', 'deny'])(
+    'asks for %s approval before executing a browser tool in default mode',
+    async (optionId) => {
+      const invoke = vi.fn(async () => ({
+        content: [{ type: 'text', text: 'ok' }],
+      }));
+      turn = clientFilesTurn(clientFilesSession(invoke), 'default');
+      const running = turn.execute(
+        [clientFilesCall],
+        clientFilesParts,
+        'model',
+        new AbortController().signal,
+      );
+      const requestId = await requested();
+      expect(invoke).not.toHaveBeenCalled();
+      await resolveHostedAction(session, waiters, requestId, answer(optionId));
+      const responses = await running;
+      if (optionId === 'allow') {
+        expect(responses[0].functionResponse?.response?.['output']).toBe('ok');
+        expect(invoke).toHaveBeenCalledTimes(1);
+      } else {
+        expect(responses[0].functionResponse?.response?.['error']).toContain(
+          'denied',
+        );
+        expect(invoke).not.toHaveBeenCalled();
+      }
+      await turn.consumeResults();
+      await turn.finish();
+    },
+  );
+});
