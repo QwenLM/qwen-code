@@ -8,8 +8,10 @@
  * The TUI that `QWEN_E2E_RENDERER` selects, Ink or OpenTUI, runs each
  * scripted scenario twice, with
  * `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` unset and set, and the two runs must
- * send the model the same requests and record the same session. The screen is
- * not compared: it repaints on timers, and what it shows comes from the same
+ * send the model the same requests and record the same session. OpenTUI runs
+ * each scenario a third time with `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` set
+ * as well, which must match the run on the shared loop. The screen is not
+ * compared: it repaints on timers, and what it shows comes from the same
  * events the session records.
  */
 
@@ -143,6 +145,8 @@ interface Run {
   sharedBatches: number;
   /** How many subagent tool batches the debug log says ran on it. */
   sharedSubagentBatches: number;
+  /** How many model rounds the debug log says ran on the event-bus kernel. */
+  kernelRounds: number;
 }
 
 /**
@@ -153,6 +157,9 @@ const PARITY_CASE_OPTIONS = { retry: 0, timeout: 240_000 };
 
 /** What the TUI logs for each model round it sends on the shared loop. */
 const SHARED_ROUND_LOG = 'model round on the shared agent loop';
+/** What the TUI logs for each model round it runs on the event-bus kernel. */
+const KERNEL_ROUND_LOG =
+  'model round on the shared agent loop on the event bus';
 /** The first option of a tool approval. */
 const APPROVAL_PROMPT = 'Yes, allow once';
 
@@ -414,7 +421,11 @@ describeTui(SUITE, () => {
     scratch = undefined;
   });
 
-  async function run(scenario: Scenario, shared: boolean): Promise<Run> {
+  async function run(
+    scenario: Scenario,
+    shared: boolean,
+    kernel = false,
+  ): Promise<Run> {
     await session?.close();
     await server?.close();
     if (scratch) rmSync(scratch, { recursive: true, force: true });
@@ -498,6 +509,7 @@ describeTui(SUITE, () => {
         no_proxy: 'localhost,127.0.0.1',
         ...scenario.env,
         ...(shared ? { QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: '1' } : {}),
+        QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP: kernel ? '1' : '0',
       },
       args: [
         '--auth-type',
@@ -627,6 +639,7 @@ describeTui(SUITE, () => {
       sharedBatches: debugLog.split(SHARED_BATCH_LOG).length - 1,
       sharedSubagentBatches:
         debugLog.match(SHARED_SUBAGENT_BATCH_LOG)?.length ?? 0,
+      kernelRounds: debugLog.split(KERNEL_ROUND_LOG).length - 1,
     };
   }
 
@@ -1203,6 +1216,18 @@ describeTui(SUITE, () => {
     expect(shared.sharedBatches).toBe(scenario.batches);
     expect(current.sharedSubagentBatches).toBe(0);
     expect(shared.sharedSubagentBatches).toBe(scenario.subagentBatches ?? 0);
+    expect(shared.kernelRounds).toBe(0);
+    // OpenTUI also runs each round on the event-bus kernel, which must send
+    // and record what the shared loop does.
+    if (renderer === 'opentui') {
+      const kernel = await run(scenario, true, true);
+      expect(kernel.kernelRounds).toBe(scenario.rounds);
+      expect(kernel.sharedRounds).toBe(shared.sharedRounds);
+      expect(kernel.sharedBatches).toBe(shared.sharedBatches);
+      expect(kernel.requests).toEqual(shared.requests);
+      expect(kernel.sideRequests).toEqual(shared.sideRequests);
+      expect(kernel.records).toEqual(shared.records);
+    }
     for (const run of [current, shared]) {
       expect(run.requests).toHaveLength(scenario.requests);
       if (scenario.sideRequests !== undefined)

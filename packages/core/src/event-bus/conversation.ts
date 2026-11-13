@@ -59,7 +59,10 @@ export class ConversationHandler {
         const round = currentRound(state, event.round);
         const model = state.model;
         if (round === undefined || !model) return;
-        const hostStop = host.onRoundEnd?.(round);
+        const hostStop = host.onRoundEnd?.(round, {
+          calls: model.calls,
+          ...(model.stop ? { stop: model.stop } : {}),
+        });
         const stop = model.stop ?? hostStop;
         const rounds = round + 1;
         if (stop) {
