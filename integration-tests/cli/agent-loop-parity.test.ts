@@ -46,6 +46,11 @@ interface Scenario {
   /** The exit code both runs must end with; defaults to 0. */
   exitCode?: number;
   /**
+   * The main session's model rounds; defaults to one per main-session
+   * request. A round that resends its request counts once.
+   */
+  mainRounds?: number;
+  /**
    * The model's reply to a streaming request, from its message history.
    * `subagentRequest` is the one-based request number for the subagent,
    * including continuations.
@@ -396,9 +401,8 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     expect(shared.kernelMainRounds + shared.kernelSubagentRounds).toBe(0);
     // The main session runs each round in its own `runAgentLoop` call.
     expect(kernel.kernelMainRounds).toBe(
-      kernel.requests.length - kernel.subagentRequests,
+      scenario.mainRounds ?? kernel.requests.length - kernel.subagentRequests,
     );
-    expect(kernel.kernelMainRounds).toBeGreaterThan(0);
     return { current, shared, kernel };
   }
 
@@ -487,6 +491,8 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     {
       name: 'cut-off edit',
       prompt: 'Write the notes.',
+      // The cut-off reply is resent with a higher output limit.
+      mainRounds: 2,
       reply: (messages, dir) =>
         toolResults(messages) === 0
           ? {

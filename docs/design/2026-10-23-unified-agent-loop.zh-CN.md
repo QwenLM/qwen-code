@@ -607,7 +607,7 @@ PR 6 之后同样跟随默认开启和删除旧 loop 两步。
 - 在一次响应中，子代理在一次读取之外调用了它不能使用的工具（PR 5b）；
 - 模型失败的子代理。
 
-从 PR 5c 起，每个子代理场景还会在开启 `experimental.eventBusAgentLoop` 时运行，并且必须与共享 loop 上的运行一致。
+从 PR 5c 起，每个子代理场景还会在开启 `experimental.eventBusAgentLoop` 时运行，并且必须与共享 loop 上的运行一致。现在每个 headless 场景都会这样运行：两个设置都开启的运行必须与共享 loop 上的运行一致，事件总线适配器的调试标记必须为主会话的每一轮记下一次 `runAgentLoop` 调用；不开内核的两次运行不能有这条标记。
 
 **ACP 场景**（`integration-tests/cli/acp-agent-loop-parity.test.ts`）：
 
