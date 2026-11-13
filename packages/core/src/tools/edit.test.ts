@@ -30,6 +30,7 @@ import { ApprovalMode } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
+import type { TextFileIo } from '../services/fileSystemService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import {
   canonicalWorktreePath,
@@ -159,6 +160,270 @@ describe('EditTool', () => {
     (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
       ApprovalMode.AUTO_EDIT,
     );
+
+  describe('Unicode escape recovery', () => {
+    it.each([
+      ['你好', String.raw`\u4f60\u597d`, String.raw`\u518d\u89c1`, '再见'],
+      [String.raw`\u4f60\u597d`, '你好', '再见', String.raw`\u518d\u89c1`],
+      [String.raw`\u4F60\u597D`, '你好', '你们', String.raw`\u4F60\u4EEC`],
+    ])(
+      'edits %j and preserves its Unicode representation',
+      async (disk, old, next, expected) => {
+        const filePath = path.join(rootDir, 'unicode.txt');
+        seedFile(filePath, `label = "${disk}";\n`);
+        const params = edit(
+          filePath,
+          `label = "${old}";`,
+          `label = "${next}";`,
+        );
+
+        expect(
+          await tool
+            .getModifyContext(new AbortController().signal)
+            .getProposedContent(params),
+        ).toBe(`label = "${expected}";\n`);
+        expect(readText(filePath)).toBe(`label = "${disk}";\n`);
+        const result = await run(params);
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe(`label = "${expected}";\n`);
+        expect(mockFileHistoryService.trackEdit).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each([false, true])(
+      'rejects different equivalent representations with replace_all=%s',
+      async (replaceAll) => {
+        const filePath = path.join(rootDir, 'ambiguous.txt');
+        const content = '你好\n' + String.raw`\u4F60\u597D` + '\n';
+        seedFile(filePath, content);
+
+        const result = await run(
+          edit(filePath, String.raw`\u4f60\u597d`, '再见', {
+            replace_all: replaceAll,
+          }),
+        );
+
+        expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
+        expect(readText(filePath)).toBe(content);
+        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([false, true])(
+      'retains identical-candidate uniqueness with replace_all=%s',
+      async (replaceAll) => {
+        const filePath = path.join(rootDir, 'repeated-unicode.txt');
+        const content = '你好\n你好\n';
+        seedFile(filePath, content);
+
+        const result = await run(
+          edit(filePath, String.raw`\u4f60\u597d`, String.raw`\u518d\u89c1`, {
+            replace_all: replaceAll,
+          }),
+        );
+
+        if (replaceAll) {
+          expect(result.error).toBeUndefined();
+          expect(readText(filePath)).toBe('再见\n再见\n');
+        } else {
+          expect(result.error?.type).toBe(
+            ToolErrorType.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
+          );
+          expect(readText(filePath)).toBe(content);
+          expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+        }
+      },
+    );
+
+    it.each([false, true])(
+      'rejects protected canonical substrings with replace_all=%s',
+      async (replaceAll) => {
+        const filePath = path.join(rootDir, 'protected-unicode.txt');
+        const content =
+          String.raw`\u4f60\u597d` + '\n' + String.raw`\\u4f60\u597d` + '\n';
+        seedFile(filePath, content);
+
+        const result = await run(
+          edit(filePath, '你好', '再见', { replace_all: replaceAll }),
+        );
+
+        expect(readText(filePath)).toBe(content);
+        expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
+        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+      },
+    );
+
+    it('gives an exact match priority without decoding the replacement', async () => {
+      const filePath = path.join(rootDir, 'exact-unicode.txt');
+      const escaped = String.raw`\u4f60\u597d`;
+      const next = String.raw`\u518d\u89c1`;
+      seedFile(filePath, `${escaped}\n你好\n`);
+
+      const result = await run(edit(filePath, '你好', next));
+
+      expect(result.error).toBeUndefined();
+      expect(readText(filePath)).toBe(`${escaped}\n${next}\n`);
+    });
+
+    it('rejects overlapping protected canonical substrings', async () => {
+      const filePath = path.join(rootDir, 'overlapping-unicode.txt');
+      const content = String.raw`\\u4f60\u4f60\u4f60`;
+      seedFile(filePath, content);
+
+      const result = await run(
+        edit(filePath, '你你', '再见', { replace_all: true }),
+      );
+
+      expect(readText(filePath)).toBe(content);
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
+      expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+    });
+
+    it('preserves doubled backslashes and literal dollar replacements', async () => {
+      const filePath = path.join(rootDir, 'escaped-replacement.txt');
+      seedFile(filePath, '你好\n');
+      const next = String.raw`\u518d\u89c1 \\u4f60 \n \u0022 $& $$`;
+
+      const result = await run(edit(filePath, String.raw`\u4f60\u597d`, next));
+
+      expect(result.error).toBeUndefined();
+      expect(readText(filePath)).toBe(
+        String.raw`再见 \\u4f60 \n \u0022 $& $$` + '\n',
+      );
+    });
+
+    it('keeps whole-line matching boundaries in editor proposals', async () => {
+      const filePath = path.join(rootDir, 'fuzzy-proposal.txt');
+      const content = ' const x = 1 \nfoo\nconst x = 1 \nbar\n';
+      seedFile(filePath, content);
+
+      const proposed = await tool
+        .getModifyContext(new AbortController().signal)
+        .getProposedContent(edit(filePath, 'const x = 1\n', 'replacement\n'));
+
+      expect(proposed).toBe(' const x = 1 \nfoo\nreplacement\nbar\n');
+      expect(readText(filePath)).toBe(content);
+    });
+
+    it.each([
+      [String.raw`{"a": "\u4f60\u597d\u518d"}`, '你好\\'],
+      [String.raw`\u4f60\u4f60`, '60你'],
+      ['你好\\\\', String.raw`\u4f60\u597d` + '\\'],
+      [String.raw`a\n\u4f60\u597d`, 'n你好'],
+      [String.raw`\u4f60\u597d\t`, '你好\\'],
+    ])('refuses recovery that splits an escape in %j', async (content, old) => {
+      const filePath = path.join(rootDir, 'partial-escape.txt');
+      seedFile(filePath, content);
+      const params = edit(filePath, old, 'X');
+
+      const proposed = await tool
+        .getModifyContext(new AbortController().signal)
+        .getProposedContent(params);
+      const result = await run(params);
+
+      expect(proposed).toBe(content);
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
+      expect(readText(filePath)).toBe(content);
+      expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [String.raw`p = "\u4f60\u597d";`, '你好', 'C:\\路径'],
+      [String.raw`{"a": "\u4f60\u597d\n"}`, '你好', 'X\\'],
+      [String.raw`\u4f60\u597d`, '你', 'C:\\'],
+      [String.raw`\u4f60;\u4f60\n`, '你', 'X\\'],
+    ])(
+      'refuses replacement escape fusion in %j',
+      async (content, old, next) => {
+        const filePath = path.join(rootDir, 'replacement-escape.txt');
+        seedFile(filePath, content);
+        const params = edit(filePath, old, next, { replace_all: true });
+
+        const proposed = await tool
+          .getModifyContext(new AbortController().signal)
+          .getProposedContent(params);
+        const result = await run(params);
+
+        expect(proposed).toBe(content);
+        expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
+        expect(readText(filePath)).toBe(content);
+        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+      },
+    );
+
+    it('refuses a large Unicode recovery without an engine error', async () => {
+      const filePath = path.join(rootDir, 'large-unicode.txt');
+      const old = '你'.repeat(4_000);
+      const content = String.raw`\u4f60`.repeat(4_000);
+      seedFile(filePath, content);
+      const params = edit(filePath, old, 'X');
+
+      const proposed = await tool
+        .getModifyContext(new AbortController().signal)
+        .getProposedContent(params);
+      const result = await run(params);
+
+      expect(proposed).toBe(content);
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
+      expect(readText(filePath)).toBe(content);
+      expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+    });
+
+    it('preserves mixed line endings when a proposal cannot match', async () => {
+      const filePath = path.join(rootDir, 'mixed-proposal.txt');
+      const content = 'first\r\nsecond\n';
+      seedFile(filePath, content);
+
+      const proposed = await tool
+        .getModifyContext(new AbortController().signal)
+        .getProposedContent(edit(filePath, 'missing', 'replacement'));
+
+      expect(proposed).toBe(content);
+      expect(readText(filePath)).toBe(content);
+    });
+
+    it.each([
+      ['\n', false],
+      ['\r\n', false],
+      ['\n', true],
+      ['\r\n', true],
+    ])(
+      'matches deletion proposal/write for %j with scoped I/O=%s',
+      async (eol, scoped) => {
+        const filePath = path.join(rootDir, 'unicode-deletion.txt');
+        seedFile(filePath, String.raw`\u4f60\u597d` + `${eol}next${eol}`);
+        if (scoped) {
+          const io: TextFileIo = {
+            inspect: vi.fn(async () => ({
+              kind: 'file' as const,
+              response: await fsService.readTextFile({ path: filePath }),
+              stats: fs.statSync(filePath),
+            })),
+            withMutation: async (_path, signal, operation) =>
+              operation({
+                original: await io.inspect(filePath, signal),
+                write: async (params) => {
+                  await fsService.writeTextFile(params);
+                  return fs.statSync(filePath);
+                },
+              }),
+          };
+          Object.assign(fsService, { textFileIo: io });
+        }
+        const params = edit(filePath, '你好', '');
+
+        const proposed = await tool
+          .getModifyContext(new AbortController().signal)
+          .getProposedContent(params);
+        const result = await run(params);
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe(`next${eol}`);
+        expect(proposed).toBe(readText(filePath));
+      },
+    );
+  });
 
   describe('fuzzy trailing-newline boundaries', () => {
     it.each(

@@ -24,6 +24,7 @@ export interface ExecuteToolCallOptions {
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
   onToolCallsUpdate?: ToolCallsUpdateHandler;
   onToolResultFullTurnModel?: (model: string) => boolean;
+  isFinished?: () => boolean;
   /** Direct calls record by default; aggregate callers can defer recording. */
   recordToolResult?: boolean;
   runtimeView?: RuntimeContentGeneratorView;
@@ -75,6 +76,7 @@ export async function executeToolCall(
   return new Promise<ToolCallResponseInfo>((resolve, reject) => {
     new CoreToolScheduler({
       config,
+      isFinished: options.isFinished,
       modToolCheck: options.modToolCheck,
       chatRecordingService:
         options.recordToolResult === false

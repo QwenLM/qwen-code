@@ -146,6 +146,9 @@ vi.mock('../ChatEditor', async () => {
           data-managed-composer-scope={props.composerScopeKey}
           onSubmit={(event) => {
             event.preventDefault();
+            // Matches the real editor: a submit-disabled composer keeps the
+            // draft and never reaches the page's submit path.
+            if (props.submitDisabled) return;
             const accepted = props.onSubmit(value, undefined, undefined, () => {
               mocks.commitAccepted();
               update('');
@@ -162,7 +165,12 @@ vi.mock('../ChatEditor', async () => {
           />
           <button
             type="submit"
-            disabled={props.disabled || props.isPreparing || !value.trim()}
+            disabled={
+              props.disabled ||
+              props.submitDisabled ||
+              props.isPreparing ||
+              !value.trim()
+            }
           >
             Send
           </button>
@@ -5457,11 +5465,22 @@ describe('ManagedSessionsPage', () => {
 
     await render('s1');
     expect(container.textContent).not.toContain('not confirmed as submitted');
-    expect(container.textContent).not.toContain('Retry the same request');
     expect(container.textContent).toContain(
       'Another conversation has an unconfirmed request',
     );
-    expect(container.querySelector('textarea')?.disabled).toBe(true);
+    expect(container.textContent).toContain('Retry the same request');
+    expect(container.querySelector('textarea')?.disabled).toBe(false);
+    // A foreign pending blocks submission only: the draft stays editable and
+    // the send control is inert until the record is resolved.
+    await input('Draft while blocked');
+    expect(container.querySelector('textarea')?.value).toBe(
+      'Draft while blocked',
+    );
+    expect(
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Send',
+      )?.disabled,
+    ).toBe(true);
     expect(mocks.client.createSession).toHaveBeenCalledTimes(1);
     expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
     await click('Open the original conversation');
@@ -5539,7 +5558,7 @@ describe('ManagedSessionsPage', () => {
     ).not.toBe(originalKey);
   });
 
-  it('offers the discard escape only in the session that owns the pending prompt', async () => {
+  it('resolves a foreign pending prompt through its owning session', async () => {
     mocks.client.listSessions.mockResolvedValue({
       sessions: [summary('s1'), summary('s2')],
     });
@@ -5553,9 +5572,9 @@ describe('ManagedSessionsPage', () => {
 
     await click('Task s2Completed');
     await render('s2');
-    // The pending belongs to s1: a foreign session only offers a redirect to
-    // the owning conversation, never the retry/discard escape (the draft that
-    // would be restored lives over there).
+    // The pending belongs to s1: the foreign session keeps its composer
+    // editable but offers the same Reset escapes, which redirect to the owner
+    // before acting on the record.
     expect(container.textContent).toContain(
       'Another conversation has an unconfirmed request',
     );
@@ -5568,16 +5587,54 @@ describe('ManagedSessionsPage', () => {
       [...container.querySelectorAll('button')].some(
         (item) => item.textContent === 'Discard this request',
       ),
-    ).toBe(false);
+    ).toBe(true);
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (item) => item.textContent === 'Retry the same request',
+      ),
+    ).toBe(true);
+    expect(container.querySelector('textarea')?.disabled).toBe(false);
 
-    // The escape stays reachable from the owning session.
-    await click('Task s1Completed');
-    await render('s1');
+    // Discarding from the foreign banner navigates first, then lets the owning
+    // session restore its own draft.
     await click('Discard this request');
+    expect(onSelect).toHaveBeenLastCalledWith('s1');
+    await render('s1');
+    await act(async () => {
+      await flush();
+    });
     expect(container.textContent).not.toContain('not confirmed as submitted');
     expect(container.querySelector('textarea')?.value).toBe(
       'For session A only',
     );
+  });
+
+  it('retries a foreign pending prompt from its owner with the same request', async () => {
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [summary('s1'), summary('s2')],
+    });
+    mocks.client.submitPrompt.mockRejectedValueOnce(
+      new TypeError('Lost response'),
+    );
+    await render('s1');
+    await input('Retry me elsewhere');
+    await click('Send');
+    const original = mocks.client.submitPrompt.mock.calls[0];
+
+    await render('s2');
+    expect(container.textContent).toContain(
+      'Another conversation has an unconfirmed request',
+    );
+    await click('Retry the same request');
+    expect(onSelect).toHaveBeenLastCalledWith('s1');
+
+    await render('s1');
+    await act(async () => {
+      await flush();
+    });
+    expect(mocks.client.submitPrompt).toHaveBeenCalledTimes(2);
+    expect(mocks.client.submitPrompt.mock.calls[1]).toEqual(original);
+    expect(container.textContent).not.toContain('not confirmed as submitted');
   });
 
   function seedPending(record: {
