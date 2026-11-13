@@ -287,8 +287,9 @@ digest 且准入链通过时才获得终端；已保存的 Session 作用域不�
   workspace 包含规则不适用于人类终端。能启用终端的只有普通本地 Workspace
   binding，那里 worker 以服务器账户运行、没有容器隔离。部署必须把该 opt-in
   视为授予该账户的 shell 访问。
-- 控制面活体中继注册表：供生命周期转换枚举以直接关闭中继，使授权撤销
-  能终止已 attach 的终端，而不必等待该 Session 的下一次 drain。
+- 控制面尚不存在活体中继注册表：生命周期转换不会枚举活体中继，因此授权
+  撤销只能在该 Session 的下一次 drain 时终止已 attach 的终端。未来的注册
+  表可让生命周期转换直接关闭中继，而不必等待 drain。
 - 后续工作：背景 Shell 的 `send_input`（H3 预留）、经独立持久 owner 跨
   close 存活的 detach、每 Session 终端配额，以及未来是否向 files-only
   Session 暴露终端的决策。

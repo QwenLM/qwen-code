@@ -342,9 +342,11 @@ scope is not rewritten. Do not downgrade consumers with active holds.
   terminal are ordinary local Workspace bindings, where the worker runs as
   the server account with no container isolating it. Deployments must treat
   the opt-in as granting that account's shell access.
-- A control-plane live-relay registry that lifecycle transitions enumerate
-  to close relays directly, so a grant revocation terminates an
-  already-attached terminal without waiting for the Session's next drain.
+- No control-plane live-relay registry exists yet: lifecycle transitions do
+  not enumerate live relays, so a grant revocation terminates an
+  already-attached terminal only at the Session's next drain. A future
+  registry would let lifecycle transitions close relays directly without
+  waiting for the drain.
 - Follow-ups: `send_input` for background Shells (H3 reserved), detach that
   survives close via an independent durable owner, per-Session terminal
   quotas, and any later decision to expose terminals to files-only Sessions.
