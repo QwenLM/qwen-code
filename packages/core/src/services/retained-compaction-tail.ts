@@ -5,6 +5,7 @@
  */
 
 import type { Content } from '@google/genai';
+import { getApiHistoryPromptId } from '../utils/api-history-metadata.js';
 
 /** Return a boundary only when the latest response is a complete operation. */
 export function findRetainedCompactionTail(
@@ -37,6 +38,13 @@ export function findRetainedCompactionTail(
   if (pendingToolResult) results.push(pendingToolResult);
   for (const entry of results) {
     if (entry.role !== 'user') return undefined;
+    if (
+      getApiHistoryPromptId(entry) === undefined &&
+      (!entry.parts?.length ||
+        entry.parts.some((part) => !part.functionResponse))
+    ) {
+      return undefined;
+    }
     for (const part of entry.parts ?? []) {
       if (part.functionCall) return undefined;
       const result = part.functionResponse;

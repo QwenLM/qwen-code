@@ -735,20 +735,22 @@ export class ChatCompressionService {
       candidateTailStart === undefined
         ? []
         : curatedHistory.slice(candidateTailStart);
+    const history = candidateTail.length > 0 ? chat.getHistoryShallow() : [];
+    const responseIndex = history.findLastIndex(
+      (entry) => entry.role === 'model',
+    );
+    // Coalesced user entries can lose a following prompt's identity.
+    const tailMatches =
+      responseIndex >= 0 &&
+      isDeepStrictEqual(history.slice(responseIndex), candidateTail);
     let retainedPromptId = candidateTail[0]
       ? getApiHistoryPromptId(candidateTail[0])
       : undefined;
     if (candidateTail.length > 0 && !retainedPromptId) {
       // Curation coalesces adjacent user entries and can lose the newer
       // prompt identity. Resolve ownership from the raw history instead.
-      const history = chat.getHistoryShallow();
-      const responseIndex = history.findLastIndex(
-        (entry) => entry.role === 'model',
-      );
       const responseMatches =
-        responseIndex >= 0 &&
-        history[responseIndex - 1]?.role !== 'model' &&
-        isDeepStrictEqual(history[responseIndex].parts, candidateTail[0].parts);
+        tailMatches && history[responseIndex - 1]?.role !== 'model';
       for (
         let index = responseMatches ? responseIndex - 1 : -1;
         index >= 0;
@@ -769,6 +771,7 @@ export class ChatCompressionService {
     // history. Never slice a tool call away from its result to fit a budget.
     const preserveTail =
       candidateTail.length > 0 &&
+      tailMatches &&
       retainedPromptId !== undefined &&
       estimateContentTokens(
         [...candidateTail, ...visiblePendingHistory],
@@ -1177,8 +1180,8 @@ export class ChatCompressionService {
         return {
           newHistory: null,
           info: {
-            originalTokenCount,
-            newTokenCount: originalTokenCount,
+            originalTokenCount: originalHistoryTokenCount,
+            newTokenCount: originalHistoryTokenCount,
             compressionStatus: CompressionStatus.COMPRESSION_FAILED_API_ERROR,
           },
         };
@@ -1282,8 +1285,8 @@ export class ChatCompressionService {
       return {
         newHistory: null,
         info: {
-          originalTokenCount,
-          newTokenCount: originalTokenCount,
+          originalTokenCount: originalHistoryTokenCount,
+          newTokenCount: originalHistoryTokenCount,
           // Distinct from EMPTY_SUMMARY so telemetry / logs can tell a
           // prompt-quality failure (empty summary → tune prompt / splitter)
           // apart from a capacity failure (output cap hit → raise cap or
@@ -1321,8 +1324,8 @@ export class ChatCompressionService {
       return {
         newHistory: null,
         info: {
-          originalTokenCount,
-          newTokenCount: originalTokenCount,
+          originalTokenCount: originalHistoryTokenCount,
+          newTokenCount: originalHistoryTokenCount,
           compressionStatus:
             CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
         },

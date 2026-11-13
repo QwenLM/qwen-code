@@ -1026,7 +1026,7 @@ async function runPreparedHostedHarnessTextTurn(
             typeof prefix !== 'number' ||
             !Number.isSafeInteger(prefix) ||
             prefix < 0 ||
-            payload.compressedHistory.length !== prefix + 1 ||
+            payload.compressedHistory.length < prefix + 1 ||
             pending?.role !== 'user' ||
             !responses?.length ||
             responses.some((response) => !resumedIds.has(response.id ?? ''))
@@ -1037,9 +1037,9 @@ async function runPreparedHostedHarnessTextTurn(
               ...record,
               systemPayload: {
                 ...payload,
-                compressedHistory: payload.compressedHistory.slice(0, prefix),
+                compressedHistory: payload.compressedHistory.slice(0, -1),
                 ...(payload.promptIds
-                  ? { promptIds: payload.promptIds.slice(0, prefix) }
+                  ? { promptIds: payload.promptIds.slice(0, -1) }
                   : {}),
               },
             },

@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Content } from '@google/genai';
 import { findRetainedCompactionTail } from './retained-compaction-tail.js';
+import { markApiHistoryPrompt } from '../utils/api-history-metadata.js';
 
 const prefix: Content[] = [
   { role: 'user', parts: [{ text: 'Earlier task' }] },
@@ -23,15 +24,28 @@ const result = (id?: string): Content => ({
 
 describe('findRetainedCompactionTail', () => {
   it('selects one response with all its following results and input', () => {
+    const followup = { ...prefix[0] };
+    markApiHistoryPrompt(followup, 'followup-prompt');
     expect(
-      findRetainedCompactionTail([
-        ...prefix,
-        call('a'),
-        result('a'),
-        prefix[0],
-      ]),
+      findRetainedCompactionTail([...prefix, call('a'), result('a'), followup]),
     ).toBe(3);
   });
+  it.each([
+    { role: 'user', parts: [{ text: 'Injected reminder.' }] },
+    { role: 'user', parts: [] },
+    {
+      role: 'user',
+      parts: [...result('a').parts!, { text: 'Unowned following input.' }],
+    },
+  ] as Content[])(
+    'rejects following input without reliable ownership: %j',
+    (entry) => {
+      const tail = entry.parts?.some((part) => part.functionResponse)
+        ? [call('a'), entry]
+        : [call('a'), result('a'), entry];
+      expect(findRetainedCompactionTail([...prefix, ...tail])).toBeUndefined();
+    },
+  );
   it('uses a pending result without changing stored history', () => {
     const history = [...prefix, call('a')];
     expect(findRetainedCompactionTail(history, result('a'))).toBe(3);

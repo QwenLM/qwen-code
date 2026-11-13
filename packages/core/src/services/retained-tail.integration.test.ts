@@ -285,6 +285,26 @@ describe('retained latest operation through compression', () => {
           expect(checkpoint.summaryPrefixLength).toBe(3);
           expect(checkpoint.promptIds?.[3]).toBe('latest-prompt');
         }
+        const { records: earlierDeleted } = deleteTranscriptMessageGroups(
+          records,
+          ['0'],
+          {
+            ...envelope,
+            uuid: 'deleted-earlier',
+            parentUuid: null,
+            type: 'system',
+          },
+        );
+        const earlierPayload = earlierDeleted.findLast(
+          (record) => record.subtype === 'chat_compression',
+        )!.systemPayload as ChatCompressionRecordPayload;
+        expect(earlierPayload.compressedHistory).toEqual(
+          JSON.parse(JSON.stringify(compressedHistory)),
+        );
+        expect(earlierPayload.promptIds?.[3]).toBe('latest-prompt');
+        expect(
+          buildApiHistoryFromConversation({ messages: earlierDeleted }),
+        ).toEqual(buildApiHistoryFromConversation({ messages: records }));
         const { records: kept } = deleteTranscriptMessageGroups(
           records,
           ['2'],
@@ -312,9 +332,91 @@ describe('retained latest operation through compression', () => {
           hasPendingPrompt ? 'next-prompt' : undefined,
         );
         expect(kept.some((record) => record.uuid === '3')).toBe(false);
+        expect(kept.some((record) => record.uuid === '2')).toBe(false);
+        if (operation === 'tool') {
+          expect(kept.some((record) => record.uuid === '4')).toBe(false);
+        }
       }
     },
   );
+
+  it('deletes an operation followed by an unowned injected reminder after compression', async () => {
+    const history = [
+      ...older(),
+      modelText('Raw latest reply.'),
+      userText('<system-reminder>Instructions changed.</system-reminder>'),
+    ];
+    const envelope = {
+      sessionId: 'retained-tail-session',
+      timestamp: '2026-11-13T00:00:00Z',
+      cwd: '/tmp',
+      version: 'test',
+    };
+    const records: ChatRecord[] = history.map((message, index) => ({
+      ...envelope,
+      uuid: String(index),
+      parentUuid: index ? String(index - 1) : null,
+      type: message.role === 'model' ? 'assistant' : 'user',
+      message,
+      promptId: getApiHistoryPromptId(message),
+    }));
+    const { compress, summarize } = setup(history);
+    const result = await compress();
+    const recorder = {
+      activeBranchRecords: records,
+      createBaseRecord: () => ({
+        ...envelope,
+        uuid: 'compressed',
+        parentUuid: records.at(-1)!.uuid,
+        type: 'system',
+      }),
+      appendRecord: (record: ChatRecord) =>
+        records.push(JSON.parse(JSON.stringify(record)) as ChatRecord),
+    } as unknown as ChatRecordingService;
+    ChatRecordingService.prototype.recordChatCompression.call(recorder, {
+      info: result.info,
+      compressedHistory: result.newHistory!,
+      summaryPrefixLength: result.info.summaryPrefixLength,
+    });
+    const { records: kept } = deleteTranscriptMessageGroups(records, ['2'], {
+      ...envelope,
+      uuid: 'deleted',
+      parentUuid: null,
+      type: 'system',
+    });
+    const restored = buildApiHistoryFromConversation({ messages: kept });
+    expect(JSON.stringify(restored)).toContain(summary);
+    expect(JSON.stringify(restored)).not.toContain('Raw latest reply.');
+    expect(result.info.summaryPrefixLength).toBe(result.newHistory!.length);
+    expect(JSON.stringify(summarize.mock.calls[0][1].contents)).toContain(
+      'Instructions changed.',
+    );
+  });
+
+  it('falls back when curation merges tool results with a separately owned prompt', async () => {
+    const tail = toolGroup();
+    markApiHistoryPrompt(tail[1], 'latest-prompt');
+    const followup = userText('Unrelated follow-up task.');
+    markApiHistoryPrompt(followup, 'followup-prompt');
+    const history = [...older(), ...tail, followup];
+    const { config, summarize } = setup(history);
+    const result = await new ChatCompressionService().compress(
+      new LlmChat(config, {}, history),
+      {
+        promptId: 'compress',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+      },
+    );
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.info.summaryPrefixLength).toBe(result.newHistory!.length);
+    expect(JSON.stringify(summarize.mock.calls[0][1].contents)).toContain(
+      'Unrelated follow-up task.',
+    );
+  });
 
   it('resolves the latest owner before curation coalesces adjacent prompts', async () => {
     const history = older();
@@ -369,7 +471,7 @@ describe('retained latest operation through compression', () => {
     expect(getApiHistoryPromptId(second.newHistory![3])).toBe('latest-prompt');
   });
 
-  it('does not assign an unanswered prompt to an earlier curated response', async () => {
+  it('falls back when curation drops the last empty model response', async () => {
     const history = [...older(), modelText('Earlier answer.')];
     const unanswered = userText('Unanswered request.');
     markApiHistoryPrompt(unanswered, 'unanswered-prompt');
@@ -392,6 +494,28 @@ describe('retained latest operation through compression', () => {
     expect(
       result.newHistory?.some((entry) => getApiHistoryPromptId(entry)),
     ).toBe(false);
+  });
+
+  it('keeps the earlier response owner when a later prompt is unanswered', async () => {
+    const unanswered = userText('Unanswered request.');
+    markApiHistoryPrompt(unanswered, 'unanswered-prompt');
+    const history = [...older(), modelText('Earlier answer.'), unanswered];
+    const { config } = setup(history);
+    const result = await new ChatCompressionService().compress(
+      new LlmChat(config, {}, history),
+      {
+        promptId: 'compress',
+        force: true,
+        config,
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+      },
+    );
+    expect(result.info.summaryPrefixLength).toBe(3);
+    expect(getApiHistoryPromptId(result.newHistory![3])).toBe('latest-prompt');
+    expect(getApiHistoryPromptId(result.newHistory![4])).toBe(
+      'unanswered-prompt',
+    );
   });
 
   it('falls back to full compression when the retained operation has no owner', async () => {
@@ -434,6 +558,12 @@ describe('retained latest operation through compression', () => {
     expect([...result.newHistory!, pending].map((entry) => entry.role)).toEqual(
       ['user', 'model', 'user', 'model', 'user'],
     );
+    expect(result.info.newTokenCount).toBe(
+      180_000 -
+        99_000 +
+        100 +
+        estimateContentTokens(result.newHistory!.slice(2, 3)),
+    );
   });
 
   it('retains a latest text response and following user input without summarizing either', async () => {
@@ -441,12 +571,22 @@ describe('retained latest operation through compression', () => {
       modelText('The fix is ready for review.'),
       userText('Also cover null.'),
     ];
+    markApiHistoryPrompt(tail[1], 'followup-prompt');
     const { summarize, compress } = setup([...older(), ...tail]);
 
     const result = await compress();
 
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
     expect(result.newHistory?.slice(-2)).toEqual(tail);
+    expect(
+      result.newHistory?.map((entry) => getApiHistoryPromptId(entry)),
+    ).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      'latest-prompt',
+      'followup-prompt',
+    ]);
     expect(JSON.stringify(summarize.mock.calls[0][1].contents)).not.toContain(
       'Also cover null.',
     );
@@ -500,6 +640,7 @@ describe('retained latest operation through compression', () => {
     const result = await compress({
       requestPayloadTooLarge: true,
       trigger: 'auto',
+      unaccountedOutputTokens: 3000,
     });
 
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
@@ -507,7 +648,40 @@ describe('retained latest operation through compression', () => {
       'test-call',
     );
     expect(result.newHistory?.includes(tail[0])).toBe(false);
+    expect(result.info.originalTokenCount).toBe(180_000);
   });
+
+  it.each(['output cap', 'unclosed snapshot', 'API error'])(
+    'keeps prompt-plus-output accounting on a retained-tail failure: %s',
+    async (failure) => {
+      const { compress, summarize, config } = setup([
+        ...older(),
+        modelText('Latest answer.'),
+      ]);
+      if (failure === 'output cap') {
+        summarize.mockResolvedValue({
+          text: summary,
+          usage: { promptTokenCount: 100_000, candidatesTokenCount: 20_000 },
+        });
+      } else if (failure === 'unclosed snapshot') {
+        vi.spyOn(config, 'getContentGeneratorConfig').mockReturnValue({
+          contextWindowSize: 16_000,
+        } as ReturnType<Config['getContentGeneratorConfig']>);
+        summarize.mockResolvedValue({ text: '<state_snapshot>truncated' });
+      } else {
+        summarize.mockRejectedValue(new Error('side query failed'));
+      }
+      const result = await compress({ unaccountedOutputTokens: 3000 });
+      expect(result.newHistory).toBeNull();
+      expect(result.info.compressionStatus).toBe(
+        failure === 'API error'
+          ? CompressionStatus.COMPRESSION_FAILED_API_ERROR
+          : CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+      );
+      expect(result.info.originalTokenCount).toBe(183_000);
+      expect(result.info.newTokenCount).toBe(183_000);
+    },
+  );
 
   it('uses the small-window tail budget rather than the fixed 20k ceiling', async () => {
     const tail = toolGroup('x'.repeat(18_000));
@@ -570,6 +744,7 @@ describe('retained latest operation through compression', () => {
         modelText('latest output '.repeat(1000)),
         userText('Continue.'),
       ];
+      markApiHistoryPrompt(tail[1], 'followup-prompt');
       const { summarize, compress } = setup([...older(), ...tail]);
       if (!hasUsage) summarize.mockResolvedValue({ text: summary });
       const baseline = await compress();
