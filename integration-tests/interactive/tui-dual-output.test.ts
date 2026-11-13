@@ -25,6 +25,7 @@ import type {
   ContentBlock,
   StreamEvent,
 } from '../../packages/cli/src/nonInteractive/types.js';
+import { DUAL_OUTPUT_PROTOCOL_VERSION } from '../../packages/cli/src/dualOutput/DualOutputBridge.js';
 import {
   fakeToolCall,
   startFakeOpenAIServer,
@@ -394,7 +395,7 @@ it.each(cases)(
       expect(frames[0]).toMatchObject({
         type: 'system',
         subtype: 'session_start',
-        data: { protocol_version: 2 },
+        data: { protocol_version: DUAL_OUTPUT_PROTOCOL_VERSION },
       });
       expect(frames.at(-1)).toMatchObject({
         type: 'system',
