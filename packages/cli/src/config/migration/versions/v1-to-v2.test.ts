@@ -5,6 +5,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import type { Settings } from '../../settings.js';
+import { isFolderTrustEnabled } from '../../trustedFolders.js';
 import { V1ToV2Migration } from './v1-to-v2.js';
 
 describe('V1ToV2Migration', () => {
@@ -72,10 +74,12 @@ describe('V1ToV2Migration', () => {
       (enabled) => {
         const input = { folderTrustFeature: enabled };
         expect(migration.shouldMigrate(input)).toBe(true);
-        expect(migration.migrate(input, 'user').settings).toEqual({
+        const { settings } = migration.migrate(input, 'user');
+        expect(settings).toEqual({
           $version: 2,
           security: { folderTrust: { enabled } },
         });
+        expect(isFolderTrustEnabled(settings as Settings)).toBe(enabled);
         expect(input).toEqual({ folderTrustFeature: enabled });
       },
     );
@@ -83,15 +87,15 @@ describe('V1ToV2Migration', () => {
     it.each([true, false])(
       'keeps an explicit legacy folderTrust value %s ahead of the feature alias',
       (enabled) => {
-        expect(
-          migration.migrate(
-            { folderTrustFeature: !enabled, folderTrust: enabled },
-            'user',
-          ).settings,
-        ).toEqual({
+        const { settings } = migration.migrate(
+          { folderTrustFeature: !enabled, folderTrust: enabled },
+          'user',
+        );
+        expect(settings).toEqual({
           $version: 2,
           security: { folderTrust: { enabled } },
         });
+        expect(isFolderTrustEnabled(settings as Settings)).toBe(enabled);
       },
     );
 
