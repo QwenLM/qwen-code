@@ -39,6 +39,7 @@ const TEXT_ONLY = equals({});
 const IMAGE_VIDEO = equals({ image: true, video: true });
 const IMAGE = has({ image: true });
 const IMAGE_NO_PDF = has({ image: true, pdf: undefined });
+const ONLY_IMAGE = equals({ image: true });
 const IMAGE_PDF = has({ image: true, pdf: true });
 const ONLY_IMAGE_VIDEO = has({
   image: true,
@@ -198,8 +199,9 @@ describe('defaultModalities', () => {
     });
 
     casesFor('returns image for', [
-      ['DeepSeek-VL2', IMAGE_NO_PDF, 'deepseek-ai/deepseek-vl2'],
-      ['DeepSeek-VL2-Small', IMAGE_NO_PDF, 'deepseek-ai/deepseek-vl2-small'],
+      ['DeepSeek-VL2', ONLY_IMAGE, 'deepseek-ai/deepseek-vl2'],
+      ['DeepSeek-VL2-Small', ONLY_IMAGE, 'deepseek-ai/deepseek-vl2-small'],
+      ['DeepSeek-VL', ONLY_IMAGE, 'deepseek-ai/deepseek-vl-7b-chat'],
     ]);
   });
 
@@ -229,7 +231,7 @@ describe('defaultModalities', () => {
     });
 
     it('returns image for MiniMax-VL-01', () => {
-      IMAGE_NO_PDF('MiniMaxAI/MiniMax-VL-01');
+      ONLY_IMAGE('MiniMaxAI/MiniMax-VL-01');
     });
   });
 
@@ -252,8 +254,8 @@ describe('defaultModalities', () => {
     });
 
     casesFor('returns image for', [
-      ['Kimi-VL-A3B-Instruct', IMAGE_NO_PDF, 'moonshotai/Kimi-VL-A3B-Instruct'],
-      ['Kimi-VL-A3B-Thinking', IMAGE_NO_PDF, 'moonshotai/Kimi-VL-A3B-Thinking'],
+      ['Kimi-VL-A3B-Instruct', ONLY_IMAGE, 'moonshotai/Kimi-VL-A3B-Instruct'],
+      ['Kimi-VL-A3B-Thinking', ONLY_IMAGE, 'moonshotai/Kimi-VL-A3B-Thinking'],
     ]);
   });
 
