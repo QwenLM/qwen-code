@@ -8,11 +8,11 @@
  * The TUI that `QWEN_E2E_RENDERER` selects, Ink or OpenTUI, runs each
  * scripted scenario twice, with
  * `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` unset and set, and the two runs must
- * send the model the same requests and record the same session. OpenTUI runs
- * each scenario a third time with `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` set
- * as well, which must match the run on the shared loop. The screen is not
- * compared: it repaints on timers, and what it shows comes from the same
- * events the session records.
+ * send the model the same requests and record the same session. Each
+ * scenario runs a third time with `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` set
+ * as well, which must match the run on the shared loop. Scenarios with an
+ * expected screen message check for it in each run. Full screens repaint on
+ * timers and are not compared.
  */
 
 import {
@@ -157,12 +157,15 @@ const PARITY_CASE_OPTIONS = { retry: 0, timeout: 240_000 };
 
 /** What the TUI logs for each model round it sends on the shared loop. */
 const SHARED_ROUND_LOG = 'model round on the shared agent loop';
-/** Match the adapter's execution marker against prompt IDs owned by OpenTUI. */
-function countOpenTuiKernelRounds(debugLog: string): number {
+/**
+ * Match the adapter's execution marker against the prompt IDs of the TUI's
+ * own rounds; a subagent logs its rounds without "model round".
+ */
+function countKernelRounds(debugLog: string): number {
   const promptIds = new Set(
     Array.from(
       debugLog.matchAll(
-        /\[OPENTUI_LIVE\][^\n]* model round on the shared agent loop \(prompt ([^)]+)\)/g,
+        /model round on the shared agent loop \(prompt ([^)]+)\)/g,
       ),
       ([, promptId]) => promptId,
     ),
@@ -769,7 +772,7 @@ describeTui(SUITE, () => {
       sharedBatches: debugLog.split(SHARED_BATCH_LOG).length - 1,
       sharedSubagentBatches:
         debugLog.match(SHARED_SUBAGENT_BATCH_LOG)?.length ?? 0,
-      kernelRounds: countOpenTuiKernelRounds(debugLog),
+      kernelRounds: countKernelRounds(debugLog),
     };
   }
 
@@ -1345,6 +1348,7 @@ describeTui(SUITE, () => {
   it.each(scenarios)('$name', PARITY_CASE_OPTIONS, async (scenario) => {
     const current = await run(scenario, false);
     const shared = await run(scenario, true);
+    const kernel = await run(scenario, true, true);
     // Only the run with the setting on sends its rounds on the shared loop.
     expect(current.sharedRounds).toBe(0);
     expect(shared.sharedRounds).toBe(scenario.rounds);
@@ -1354,18 +1358,15 @@ describeTui(SUITE, () => {
     expect(shared.sharedSubagentBatches).toBe(scenario.subagentBatches ?? 0);
     expect(current.kernelRounds).toBe(0);
     expect(shared.kernelRounds).toBe(0);
-    // OpenTUI also runs each round on the event-bus kernel, which must send
-    // and record what the shared loop does.
-    if (renderer === 'opentui') {
-      const kernel = await run(scenario, true, true);
-      expect(kernel.kernelRounds).toBe(scenario.rounds);
-      expect(kernel.sharedRounds).toBe(shared.sharedRounds);
-      expect(kernel.sharedBatches).toBe(shared.sharedBatches);
-      expect(kernel.requests).toEqual(shared.requests);
-      expect(kernel.sideRequests).toEqual(shared.sideRequests);
-      expect(kernel.records).toEqual(shared.records);
-    }
-    for (const run of [current, shared]) {
+    // Each round also runs on the event-bus kernel, which must send and
+    // record what the shared loop does.
+    expect(kernel.kernelRounds).toBe(scenario.rounds);
+    expect(kernel.sharedRounds).toBe(shared.sharedRounds);
+    expect(kernel.sharedBatches).toBe(shared.sharedBatches);
+    expect(kernel.requests).toEqual(shared.requests);
+    expect(kernel.sideRequests).toEqual(shared.sideRequests);
+    expect(kernel.records).toEqual(shared.records);
+    for (const run of [current, shared, kernel]) {
       expect(run.requests).toHaveLength(scenario.requests);
       if (scenario.sideRequests !== undefined)
         expect(run.sideRequests).toHaveLength(scenario.sideRequests);
