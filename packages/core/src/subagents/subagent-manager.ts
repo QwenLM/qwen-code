@@ -67,6 +67,7 @@ import {
   type ResolvedModelId,
 } from '../utils/modelId.js';
 import { resolveModelProtocol } from '../models/modelRegistry.js';
+import { AuthType } from '../utils/auth-type.js';
 const debugLogger = createDebugLogger('SUBAGENT_MANAGER');
 import { BuiltinAgentRegistry } from './builtin-agents.js';
 import {
@@ -1594,7 +1595,14 @@ export class SubagentManager {
       entry,
       runtimeContext.getProviderProtocolConfig?.(),
     );
-    return authType ? { authType, modelId } : undefined;
+    if (
+      !authType ||
+      authType === AuthType.QWEN_OAUTH ||
+      authType === AuthType.QWEN_SUBSCRIPTION
+    ) {
+      return undefined;
+    }
+    return { authType, modelId };
   }
 
   /**

@@ -2375,6 +2375,28 @@ describe('SubagentManager', () => {
           authType: AuthType.USE_OPENAI,
         });
       });
+
+      it('does not route a provider mapped to qwen-oauth (registry skips it)', () => {
+        const cfg = makeFakeConfig({
+          model: 'coder-model',
+          modelProvidersConfig: {
+            'my-oauth': [{ id: 'coder-model', name: 'Coder' }],
+          },
+          providerProtocolConfig: { 'my-oauth': 'qwen-oauth' },
+        });
+        vi.spyOn(cfg, 'getContentGeneratorConfig').mockReturnValue({
+          authType: AuthType.USE_OPENAI,
+          model: 'coder-model',
+        });
+        const mgr = new SubagentManager(cfg);
+        const route = mgr.resolveSubagentModelRoute({
+          ...validConfig,
+          model: 'my-oauth:coder-model',
+        });
+        // Must NOT return a qwen-oauth route; the registry skips that protocol.
+        // Falling through to bare-ID treatment is the pre-change loud failure.
+        expect(route?.authType).not.toBe(AuthType.QWEN_OAUTH);
+      });
     });
 
     describe('mergeConfigurations', () => {
