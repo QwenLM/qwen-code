@@ -148,6 +148,36 @@ describe('getStickyTodos', () => {
     ]);
   });
 
+  it('ignores a result display whose JSON is null', () => {
+    const todos = [
+      {
+        id: 'todo-1',
+        content: 'Keep this task',
+        status: 'in_progress' as const,
+      },
+    ];
+    const history: HistoryItem[] = [
+      makeCustomTodoToolGroup(todos, 1) as HistoryItem,
+      {
+        type: 'tool_group',
+        id: 2,
+        tools: [
+          {
+            callId: 'null-display',
+            name: 'TodoWrite',
+            description: 'Update todos',
+            resultDisplay: 'null',
+            status: ToolCallStatus.Success,
+            confirmationDetails: undefined,
+          },
+        ],
+      },
+      makeLlmHistoryItem('Response', 3),
+    ];
+
+    expect(getStickyTodos(history, [])).toEqual(todos);
+  });
+
   it('does not show sticky todos while a pending todo snapshot is visible', () => {
     const history = [makeTodoToolGroup('history task', 1)] as HistoryItem[];
     const pendingHistoryItems = [
