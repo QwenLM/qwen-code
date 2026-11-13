@@ -52,7 +52,35 @@
   color: var(--muted-foreground);
 }
 
-.value {
+.preview {
+  flex: 1;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toggle {
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  cursor: pointer;
+}
+
+.toggle:hover {
+  color: var(--foreground);
+}
+
+.toggle:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.details {
+  padding-top: 6px;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
