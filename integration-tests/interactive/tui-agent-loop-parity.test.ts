@@ -8,11 +8,11 @@
  * The TUI that `QWEN_E2E_RENDERER` selects, Ink or OpenTUI, runs each
  * scripted scenario twice, with
  * `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` unset and set, and the two runs must
- * send the model the same requests and record the same session. OpenTUI runs
- * each scenario a third time with `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` set
- * as well, which must match the run on the shared loop. The screen is not
- * compared: it repaints on timers, and what it shows comes from the same
- * events the session records.
+ * send the model the same requests and record the same session. Each
+ * scenario runs a third time with `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` set
+ * as well, which must match the run on the shared loop. Scenarios with an
+ * expected screen message check for it in each run. Full screens repaint on
+ * timers and are not compared.
  */
 
 import {
@@ -157,12 +157,15 @@ const PARITY_CASE_OPTIONS = { retry: 0, timeout: 240_000 };
 
 /** What the TUI logs for each model round it sends on the shared loop. */
 const SHARED_ROUND_LOG = 'model round on the shared agent loop';
-/** Match the adapter's execution marker against prompt IDs owned by OpenTUI. */
-function countOpenTuiKernelRounds(debugLog: string): number {
+/**
+ * Match the adapter's execution marker against the prompt IDs of the TUI's
+ * own rounds; a subagent logs its rounds without "model round".
+ */
+function countKernelRounds(debugLog: string): number {
   const promptIds = new Set(
     Array.from(
       debugLog.matchAll(
-        /\[OPENTUI_LIVE\][^\n]* model round on the shared agent loop \(prompt ([^)]+)\)/g,
+        /model round on the shared agent loop \(prompt ([^)]+)\)/g,
       ),
       ([, promptId]) => promptId,
     ),
@@ -658,18 +661,72 @@ describeTui(SUITE, () => {
       async () => !(await session!.viewport()).includes('Initializing...'),
       'initialization completes',
     );
+    // Both renderers load slash commands and skills asynchronously after the
+    // prompt renders; probing `/` ensures both CommandService and input focus
+    // are ready before the first prompt is typed (#16787, #17131). The signal
+    // is the completion list's own `(<n>/<total>)` counter, which cannot show
+    // early: the command list starts empty and is filled only once
+    // CommandService.create resolves, and the counter is printed only while
+    // that list holds more than MAX_SUGGESTIONS_TO_SHOW entries. Suggestion
+    // labels carry no leading `/` (they read `status (about)`), so a command
+    // name cannot be awaited as a literal.
+    session.pressKey('/');
+    await until(
+      async () =>
+        (await session!.viewport())
+          .split('\n')
+          .some((line) => /^\(\d+\/\d+\)$/.test(line.trim())),
+      'slash commands load',
+      30_000,
+      () => session!.viewport(),
+    );
+    session.pressKey('\x7f');
+    await until(
+      async () => (await session!.viewport()).includes('Type your message'),
+      'input clears',
+      30_000,
+      () => session!.viewport(),
+    );
     await session.idle(300, 5_000);
 
-    // A turn is over once the spinner stops and no request is in flight.
-    const turnEnds = async () => {
+    const streamingCount = () =>
+      server!.requests.filter((request) => request.body['stream'] === true)
+        .length;
+    const sideCount = () =>
+      server!.requests.filter((request) => request.body['stream'] !== true)
+        .length;
+
+    // A turn is over once its expected requests have completed and the
+    // spinner stops (#16787, #16947, #17131).
+    const turnEnds = async (minStreamingRequests: number) => {
       await sleep(500);
+      if (scenario.shows) {
+        await until(
+          async () => (await session!.screen()).includes(scenario.shows!),
+          'expected screen text',
+          30_000,
+          () => session!.viewport(),
+        );
+      }
+      await until(
+        () =>
+          streamingCount() >= minStreamingRequests &&
+          server!.requests.every(
+            (request) => request.transport.closedAt !== undefined,
+          ),
+        'model requests complete',
+        90_000,
+        () => session!.viewport(),
+      );
       await session!.idle(2_000, 90_000);
       await until(
         () =>
           server!.requests.every(
             (request) => request.transport.closedAt !== undefined,
           ),
-        'model requests complete',
+        'model requests settle',
+        30_000,
+        () => session!.viewport(),
       );
       await session!.idle(1_000, 30_000);
     };
@@ -724,21 +781,43 @@ describeTui(SUITE, () => {
         await sleep(1_000);
         await session.send(scenario.queue.input);
       }
-      await turnEnds();
+      const expectedAfterPrompt =
+        scenario.requests === 0
+          ? 0
+          : scenario.laterTurns || scenario.retries
+            ? index + 1
+            : index === scenario.prompts.length - 1
+              ? scenario.requests
+              : index + 1;
+      await turnEnds(expectedAfterPrompt);
       for (let retry = 0; retry < (scenario.retries ?? 0); retry++) {
+        await until(
+          async () =>
+            (await session!.viewport()).includes('Press Ctrl+Y to retry'),
+          'the failed turn is ready to retry',
+          30_000,
+          () => session!.viewport(),
+        );
+        const before = streamingCount();
         session.pressKey('\x19');
-        await turnEnds();
+        const expectedAfterRetry =
+          retry === (scenario.retries ?? 0) - 1
+            ? scenario.requests
+            : before + 1;
+        await turnEnds(expectedAfterRetry);
       }
     }
     if (scenario.laterTurns) {
       await until(
         () =>
-          server!.requests.filter((request) => request.body['stream'] === true)
-            .length >= scenario.requests,
+          streamingCount() >= scenario.requests &&
+          (scenario.sideRequests === undefined ||
+            sideCount() >= scenario.sideRequests),
         'the session starts its later turns',
         90_000,
+        () => session!.viewport(),
       );
-      await turnEnds();
+      await turnEnds(scenario.requests);
     }
 
     const screen = await session.screen();
@@ -769,7 +848,7 @@ describeTui(SUITE, () => {
       sharedBatches: debugLog.split(SHARED_BATCH_LOG).length - 1,
       sharedSubagentBatches:
         debugLog.match(SHARED_SUBAGENT_BATCH_LOG)?.length ?? 0,
-      kernelRounds: countOpenTuiKernelRounds(debugLog),
+      kernelRounds: countKernelRounds(debugLog),
     };
   }
 
@@ -1345,6 +1424,7 @@ describeTui(SUITE, () => {
   it.each(scenarios)('$name', PARITY_CASE_OPTIONS, async (scenario) => {
     const current = await run(scenario, false);
     const shared = await run(scenario, true);
+    const kernel = await run(scenario, true, true);
     // Only the run with the setting on sends its rounds on the shared loop.
     expect(current.sharedRounds).toBe(0);
     expect(shared.sharedRounds).toBe(scenario.rounds);
@@ -1354,18 +1434,15 @@ describeTui(SUITE, () => {
     expect(shared.sharedSubagentBatches).toBe(scenario.subagentBatches ?? 0);
     expect(current.kernelRounds).toBe(0);
     expect(shared.kernelRounds).toBe(0);
-    // OpenTUI also runs each round on the event-bus kernel, which must send
-    // and record what the shared loop does.
-    if (renderer === 'opentui') {
-      const kernel = await run(scenario, true, true);
-      expect(kernel.kernelRounds).toBe(scenario.rounds);
-      expect(kernel.sharedRounds).toBe(shared.sharedRounds);
-      expect(kernel.sharedBatches).toBe(shared.sharedBatches);
-      expect(kernel.requests).toEqual(shared.requests);
-      expect(kernel.sideRequests).toEqual(shared.sideRequests);
-      expect(kernel.records).toEqual(shared.records);
-    }
-    for (const run of [current, shared]) {
+    // Each round also runs on the event-bus kernel, which must send and
+    // record what the shared loop does.
+    expect(kernel.kernelRounds).toBe(scenario.rounds);
+    expect(kernel.sharedRounds).toBe(shared.sharedRounds);
+    expect(kernel.sharedBatches).toBe(shared.sharedBatches);
+    expect(kernel.requests).toEqual(shared.requests);
+    expect(kernel.sideRequests).toEqual(shared.sideRequests);
+    expect(kernel.records).toEqual(shared.records);
+    for (const run of [current, shared, kernel]) {
       expect(run.requests).toHaveLength(scenario.requests);
       if (scenario.sideRequests !== undefined)
         expect(run.sideRequests).toHaveLength(scenario.sideRequests);
