@@ -221,18 +221,31 @@ async function run(fn: () => Promise<void>): Promise<void> {
   await Promise.all(
     [process.stdout, process.stderr].map(
       (stream) =>
-        new Promise<void>((resolve) => {
-          try {
-            stream.write('', () => resolve());
-          } catch (error) {
-            const code = (error as NodeJS.ErrnoException)?.code;
+        new Promise<void>((resolve, reject) => {
+          const finish = (error?: Error | null) => {
+            const code = (error as NodeJS.ErrnoException | undefined)?.code;
+            const previousCode = (
+              stream.errored as NodeJS.ErrnoException | null
+            )?.code;
             if (
-              stream !== process.stderr ||
-              (code !== 'EPIPE' && code !== 'EBADF')
+              error &&
+              (stream !== process.stderr ||
+                (code !== 'EPIPE' &&
+                  code !== 'EBADF' &&
+                  !(
+                    code === 'ERR_STREAM_DESTROYED' &&
+                    (previousCode === 'EPIPE' || previousCode === 'EBADF')
+                  )))
             ) {
-              throw error;
+              reject(error);
+            } else {
+              resolve();
             }
-            resolve();
+          };
+          try {
+            stream.write('', finish);
+          } catch (error) {
+            finish(error as Error);
           }
         }),
     ),
@@ -398,6 +411,7 @@ const cleanWorkflowCommand: CommandModule = {
   // Local only: no endpoint or credentials needed.
   handler: (argv) =>
     run(async () => {
+      ignoreBrokenPipe();
       loadLocalBatchEnvironment();
       await cleanTask(
         {

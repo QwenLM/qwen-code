@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Writable } from 'node:stream';
 import yargs from 'yargs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { batchCommand } from './batch.js';
@@ -37,8 +38,12 @@ describe('local batch commands with real settings loading', () => {
   let previousExitCode: typeof process.exitCode;
   let stdout: string[];
   let stderr: string[];
+  let stdoutListeners: ReturnType<typeof process.stdout.listeners>;
+  let stderrListeners: ReturnType<typeof process.stderr.listeners>;
 
   beforeEach(() => {
+    stdoutListeners = process.stdout.listeners('error');
+    stderrListeners = process.stderr.listeners('error');
     previousEnvironment = { ...process.env };
     previousExitCode = process.exitCode;
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-batch-local-env-'));
@@ -98,6 +103,22 @@ describe('local batch commands with real settings loading', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    for (const listener of process.stdout.listeners('error')) {
+      if (!stdoutListeners.includes(listener)) {
+        process.stdout.removeListener(
+          'error',
+          listener as (...args: unknown[]) => void,
+        );
+      }
+    }
+    for (const listener of process.stderr.listeners('error')) {
+      if (!stderrListeners.includes(listener)) {
+        process.stderr.removeListener(
+          'error',
+          listener as (...args: unknown[]) => void,
+        );
+      }
+    }
     process.env = previousEnvironment;
     process.exitCode = previousExitCode;
     resetEnvironmentTrackingForTesting();
@@ -179,6 +200,99 @@ describe('local batch commands with real settings loading', () => {
         .fail(false)
         .parseAsync(),
     ).rejects.toThrow('unexpected stderr error');
+  });
+
+  it('clean handles an asynchronously reported broken stderr pipe', async () => {
+    fs.writeFileSync(userSettings, '{ invalid json');
+    const { store, task } = createTask(
+      path.join(isolated.home, '.qwen', 'batch'),
+      'fallback',
+    );
+    const listeners = process.stderr.listeners('error');
+    const destroy = vi
+      .spyOn(process.stderr, 'destroy')
+      .mockReturnValue(process.stderr);
+    const error = Object.assign(new Error('broken pipe'), { code: 'EPIPE' });
+    let unhandled: unknown;
+    vi.mocked(process.stderr.write).mockImplementation(((
+      chunk: unknown,
+      callback?: (err?: Error | null) => void,
+    ) => {
+      queueMicrotask(() => {
+        if (typeof callback === 'function') callback(error);
+        try {
+          process.stderr.emit('error', error);
+        } catch (caught) {
+          unhandled = caught;
+        }
+      });
+      return true;
+    }) as typeof process.stderr.write);
+    try {
+      await yargs(['batch', 'clean', task.id])
+        .command(batchCommand)
+        .exitProcess(false)
+        .fail(false)
+        .parseAsync();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toBeUndefined();
+      expect(destroy).toHaveBeenCalled();
+      expect(process.exitCode).toBeUndefined();
+      expect(fs.existsSync(store.fileOf(task.id))).toBe(false);
+    } finally {
+      for (const listener of process.stderr.listeners('error')) {
+        if (!listeners.includes(listener))
+          process.stderr.removeListener(
+            'error',
+            listener as (...args: unknown[]) => void,
+          );
+      }
+    }
+  });
+
+  it('rejects unexpected asynchronous stderr flush errors', async () => {
+    const error = Object.assign(new Error('unexpected async stderr error'), {
+      code: 'EIO',
+    });
+    vi.mocked(process.stderr.write).mockImplementation(((
+      chunk: unknown,
+      callback?: (err?: Error | null) => void,
+    ) => {
+      if (typeof callback === 'function') queueMicrotask(() => callback(error));
+      return true;
+    }) as typeof process.stderr.write);
+    await expect(
+      yargs(['batch', 'list'])
+        .command(batchCommand)
+        .exitProcess(false)
+        .fail(false)
+        .parseAsync(),
+    ).rejects.toThrow('unexpected async stderr error');
+  });
+
+  it('clean survives a real writable that breaks on its warning', async () => {
+    fs.writeFileSync(userSettings, '{ invalid json');
+    const { store, task } = createTask(
+      path.join(isolated.home, '.qwen', 'batch'),
+      'fallback',
+    );
+    const error = Object.assign(new Error('broken pipe'), { code: 'EPIPE' });
+    const broken = new Writable({
+      write(_chunk, _encoding, callback) {
+        queueMicrotask(() => callback(error));
+      },
+    });
+    vi.spyOn(process, 'stderr', 'get').mockReturnValue(
+      broken as typeof process.stderr,
+    );
+    await yargs(['batch', 'clean', task.id])
+      .command(batchCommand)
+      .exitProcess(false)
+      .fail(false)
+      .parseAsync();
+    expect(broken.errored).toBe(error);
+    expect(process.exitCode).toBeUndefined();
+    expect(fs.existsSync(store.fileOf(task.id))).toBe(false);
   });
 
   it.each(
