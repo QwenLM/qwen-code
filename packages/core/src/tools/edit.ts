@@ -1046,27 +1046,16 @@ Expectation for required parameters:
         const observation = await this.config
           .getFileSystemService()
           .textFileIo?.inspect(params.file_path, signal);
+        let currentContent: string;
         if (observation) {
           if (observation.kind === 'missing') return '';
-          const content = observation.response.content;
-          return applyReplacement(
-            content,
-            params.old_string,
-            params.new_string,
-            params.old_string === '' && content === '',
-          );
-        }
-        if (fs.existsSync(params.file_path)) {
+          currentContent = observation.response.content;
+        } else if (fs.existsSync(params.file_path)) {
           try {
-            const { content: currentContent } = await this.config
+            const { content } = await this.config
               .getFileSystemService()
               .readTextFile({ path: params.file_path });
-            return applyReplacement(
-              currentContent,
-              params.old_string,
-              params.new_string,
-              params.old_string === '' && currentContent === '',
-            );
+            currentContent = content;
           } catch (err) {
             if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
             return '';
@@ -1074,6 +1063,20 @@ Expectation for required parameters:
         } else {
           return '';
         }
+        const normalized = normalizeEditStrings(
+          currentContent,
+          params.old_string,
+          params.new_string,
+        );
+        return applyReplacement(
+          currentContent,
+          normalized.oldString,
+          normalized.newString,
+          params.old_string === '' && currentContent === '',
+          normalized.lineBasedMatch
+            ? findLineBasedMatchOffsets(currentContent, normalized.oldString)
+            : undefined,
+        );
       },
       createUpdatedParams: (
         oldContent: string,

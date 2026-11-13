@@ -29,6 +29,80 @@ const two = 2;
     });
   });
 
+  describe('Unicode escape recovery', () => {
+    it.each([
+      ['你好', String.raw`\u4f60\u597d`, String.raw`\u518d\u89c1`, '再见'],
+      [String.raw`\u4f60\u597d`, '你好', '再见', String.raw`\u518d\u89c1`],
+      [String.raw`\u4F60\u597D`, '你好', '你们', String.raw`\u4F60\u4EEC`],
+      ['😀', String.raw`\ud83d\ude00`, String.raw`\ud83d\ude01`, '😁'],
+      [String.raw`\ud83d\ude00`, '😀', '😁', String.raw`\ud83d\ude01`],
+    ])('preserves the representation in %j', (disk, old, next, expected) => {
+      expect(normalizeEditStrings(disk, old, next)).toEqual({
+        oldString: disk,
+        newString: expected,
+      });
+    });
+
+    it.each(['你好', String.raw`\u4f60\u597d`])(
+      'keeps an exact %j match and replacement unchanged',
+      (old) => {
+        const next = String.raw`\u518d\u89c1`;
+        expect(
+          normalizeEditStrings(`你好\n${String.raw`\u4f60\u597d`}`, old, next),
+        ).toEqual({ oldString: old, newString: next });
+      },
+    );
+
+    it.each([
+      ['你好\n' + String.raw`\u4F60\u597D`, String.raw`\u4f60\u597d`],
+      [String.raw`\u4f60\u597d` + '\n' + String.raw`\u4F60\u597D`, '你好'],
+      [String.raw`\u4f60好`, '你好'],
+      ['你好', String.raw`\\u4f60\\u597d`],
+      [String.raw`\\u4f60\\u597d`, '你好'],
+      [String.raw`\u4f60\u597d` + '\n' + String.raw`\\u4f60\u597d`, '你好'],
+      [String.raw`\\u4f60\u4f60\u4f60`, '你你'],
+      ['你好', String.raw`\u4f6\u597d`],
+      ['你好', String.raw`\u{4f60}\u{597d}`],
+      ['a\n', String.raw`\u0061\u000a`],
+      ['label = “你好”;', String.raw`label = "\u4f60\u597d";`],
+    ])('leaves unsupported or ambiguous %j matches unchanged', (disk, old) => {
+      expect(normalizeEditStrings(disk, old, 'replacement')).toEqual({
+        oldString: old,
+        newString: 'replacement',
+      });
+    });
+
+    it('keeps identical recovered occurrences visible to the caller', () => {
+      const result = normalizeEditStrings(
+        '你好\n你好',
+        String.raw`\u4f60\u597d`,
+        String.raw`\u518d\u89c1`,
+      );
+      expect(result).toEqual({ oldString: '你好', newString: '再见' });
+      expect(countOccurrences('你好\n你好', result.oldString)).toBe(2);
+    });
+
+    it('preserves other escapes and regex characters in recovered text', () => {
+      const disk = 'label = "你好"; // [a-z]+ ($&)';
+      const old = String.raw`label = "\u4f60\u597d"; // [a-z]+ ($&)`;
+      const next = String.raw`label = "\u518d\u89c1"; // \\u4f60 \n \t \u0022 $&`;
+      expect(normalizeEditStrings(disk, old, next)).toEqual({
+        oldString: disk,
+        newString: String.raw`label = "再见"; // \\u4f60 \n \t \u0022 $&`,
+      });
+    });
+
+    it('does not decode an unpaired surrogate in replacement text', () => {
+      expect(
+        normalizeEditStrings(
+          '你好',
+          String.raw`\u4f60\u597d`,
+          String.raw`\ud800`,
+        ),
+      ).toEqual({ oldString: '你好', newString: String.raw`\ud800` });
+    });
+  });
+
   it('normalizes smart quotes to match on-disk text', () => {
     const result = normalizeEditStrings(
       "const greeting = 'Don't';\n",
