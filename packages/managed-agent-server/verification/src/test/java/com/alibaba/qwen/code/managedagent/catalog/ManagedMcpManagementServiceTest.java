@@ -104,6 +104,11 @@ class ManagedMcpManagementServiceTest {
     @Test
     void boundsTheHarnessReportedRevisionAtTheSharedCounterCeiling() {
         var operation = "11111111-1111-4111-8111-111111111111";
+        // The accepted side first: without this stub the mock returns an empty
+        // body, `requireSnapshot` rejects it, and the assertion below never
+        // runs — the refusal half would be green for the wrong reason.
+        when(harness.mcpManagementOperation("tenant", "session", operation))
+                .thenReturn(snapshot(9_007_199_254_740_990L));
         assertThat(service.operation("tenant", "actor", "session", operation)
                 .path("revision").asLong()).isEqualTo(9_007_199_254_740_990L);
         when(harness.mcpManagementOperation("tenant", "session", operation)).thenReturn(snapshot(9_007_199_254_740_991L));
