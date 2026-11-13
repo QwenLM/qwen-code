@@ -529,3 +529,50 @@ qwen mcp add you -t http "https://api.you.com/mcp?profile=free"
 Replace `${YDC_API_KEY}` with your actual You.com API key, or set it as an environment variable.
 
 ---
+
+### SpecStream
+
+A hosted MCP server from SpecStream with web search, page reading and multi-step research. Search queries, the URLs you ask it to read and research questions are sent to SpecStream.
+
+- **Documentation:** https://specstream.ai/docs/mcp
+- **Cost:** Paid ($10 of credit on sign-up, no card). $5 per 1,000 searches, $1 per 1,000 with `speed: "fast"`, $0.80 per 1,000 pages read
+- **Get API Key:** https://specstream.ai/workspace (Agents & API)
+- **Best for:** Web search with a source URL and published date per result, and reading pages or PDFs as Markdown
+
+#### Available Tools
+
+- `search_web` — Web search
+- `read_pages` — Read up to 20 pages or documents as Markdown or text
+- `research_price`, `start_research`, `get_research` — Price, start and read a multi-step research report
+
+The server also exposes tools for the lists and monitors saved in a SpecStream account.
+
+#### Setup
+
+**Method 1: CLI command (Remote MCP)**
+
+```bash
+qwen mcp add specstream \
+  -t http \
+  "https://api.specstream.ai/mcp" \
+  -H "Authorization: Bearer ${SPECSTREAM_API_KEY}"
+```
+
+**Method 2: `settings.json` (Remote MCP)**
+
+```json
+{
+  "mcpServers": {
+    "specstream": {
+      "httpUrl": "https://api.specstream.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer ${SPECSTREAM_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Replace `${SPECSTREAM_API_KEY}` with your actual API key, or set it as an environment variable.
+
+---
