@@ -514,6 +514,7 @@ The value must be a finite, non-negative integer (validated at construction). In
 ## Caveats & Known Limits
 
 - **Disposing the optional `AutoReconnectTransport` stops reconnect retries.** If an asynchronous transport factory finishes after disposal, its returned transport is released and pending retry calls reject with `DaemonTransportClosedError`.
+- **`AutoReconnectTransport.supportsReplay` follows the current transport.** Re-read it after reconnecting: a WebSocket-to-REST fallback enables replay, while a replacement WebSocket transport does not support it. The Web Shell availability wrapper also forwards the current transport type and replay capability.
 
 - **`fetchTimeoutMs` is per-call, not connection-level.** Long body reads share the timer. A daemon that streams responses must override per-call or set the timeout to `0`.
 - **SSE bypasses the fetch timeout** — long-lived SSE connections are not killed by `fetchTimeoutMs`. Use `AbortSignal` for caller-controlled cancellation.

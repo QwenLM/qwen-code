@@ -225,8 +225,12 @@ export class DaemonAvailability {
     const getGeneration = this.getGeneration.bind(this);
     const assertAvailable = this.assertAvailable.bind(this);
     return {
-      type: transport.type,
-      supportsReplay: transport.supportsReplay,
+      get type() {
+        return transport.type;
+      },
+      get supportsReplay() {
+        return transport.supportsReplay;
+      },
       get connected() {
         return transport.connected;
       },
