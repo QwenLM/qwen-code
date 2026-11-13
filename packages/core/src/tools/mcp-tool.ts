@@ -47,6 +47,7 @@ import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import {
   addMCPStatusChangeListener,
   getAllMCPServerStatuses,
+  getMCPConnectionStatus,
   getMCPServerStatus,
   isMCPServerTeardownIntent,
   MCPServerStatus,
@@ -515,8 +516,17 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     // field, which the tool's client (the raw SDK `Client`) does not have.
     // A pooled session's shutdown is not in that set: it only releases the
     // connection and detaches the session, so it records no intent.
-    let wasConnected =
-      getMCPServerStatus(this.serverName) === MCPServerStatus.CONNECTED;
+    //
+    // The name-keyed registry also cannot tell two live connections for the
+    // same server apart, and the pool keeps one entry per `serverName +
+    // fingerprint`. A sibling connection's drop writes the same name, so
+    // provenance comes from this invocation's own connection when one is
+    // tracked; the name is only the fallback for legacy single-connection
+    // paths.
+    const connection: object | undefined = this.mcpClient;
+    const currentStatus = () =>
+      getMCPConnectionStatus(connection) ?? getMCPServerStatus(this.serverName);
+    let wasConnected = currentStatus() === MCPServerStatus.CONNECTED;
     const detach = () => {
       clearTimeout(expiry);
       removeMCPStatusChangeListener(listener);
@@ -531,10 +541,22 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       // Only a live connection dropping to DISCONNECTED is the teardown the
       // abort causes. A move into CONNECTING is an ordinary reconnect, and
       // `undefined` means the server was disabled or removed.
-      const connected = status === MCPServerStatus.CONNECTED;
+      const connectionStatus = getMCPConnectionStatus(connection);
+      const connected =
+        (connectionStatus ?? status) === MCPServerStatus.CONNECTED;
       const tornDown = wasConnected && status === MCPServerStatus.DISCONNECTED;
       wasConnected = connected;
       if (!tornDown) {
+        return;
+      }
+      // A transition that left this invocation's own connection CONNECTED
+      // belongs to a sibling that shares the name: it is not this abort's
+      // damage, and repairing it would restart a healthy transport another
+      // session is using. Keep listening; the expiry still bounds it.
+      if (
+        connectionStatus !== undefined &&
+        connectionStatus !== MCPServerStatus.DISCONNECTED
+      ) {
         return;
       }
       // A server its owner is stopping on purpose must stay stopped:
