@@ -3093,37 +3093,6 @@ function stripHeredocBodies(command: string): HeredocStrip {
   return { kind: 'ok', text: out.join('\n') };
 }
 
-function joinLogicalLines(lines: string[]): string[] {
-  const out: string[] = [];
-  let single = false;
-  let double = false;
-  let pending = '';
-  for (const rawLine of lines) {
-    const line = pending + rawLine;
-    pending = '';
-    // Track quote state up to the trailing backslash run.
-    let index = 0;
-    while (index < line.length) {
-      const character = line[index]!;
-      if (!single && character === '\\' && index + 1 < line.length) {
-        index += 2;
-        continue;
-      }
-      if (character === "'" && !double) single = !single;
-      else if (character === '"' && !single) double = !double;
-      index++;
-    }
-    const slashes = /\\+$/.exec(line)?.[0].length ?? 0;
-    if (!single && slashes % 2 === 1) {
-      pending = line.slice(0, -1);
-      continue;
-    }
-    out.push(line);
-  }
-  if (pending) out.push(pending);
-  return out;
-}
-
 // Remove `#` comments (word-start, outside quotes/substitutions) so
 // splitCommands does not cut on separators that are only comment text.
 // Mirrors the comment rule in readTopLevelSeparators.
