@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
+import { sanitizeControlChars } from '../messages/toolFormatting';
 import { Markdown } from '../messages/Markdown';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { DialogShell } from './DialogShell';
@@ -100,6 +101,14 @@ export function GitDialog({
     DaemonWorkspaceGitDiffFile[] | null
   >(null);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  // `null` until the first list lands, which is what separates "first load"
+  // (preselect everything) from "every row was deliberately unchecked".
+  const commitFilesRef = useRef<DaemonWorkspaceGitDiffFile[] | null>(null);
+  // Whether the list above is the whole dirty tree: the daemon caps the
+  // per-file rows (`hiddenCount`) and returns `available: false` for a
+  // transient state, and either way a paths-only commit would cover a subset.
+  const [commitListComplete, setCommitListComplete] = useState(true);
+  const loadedPathsRef = useRef<Set<string>>(new Set());
   // Files whose deletion must be committed together with their addition.
   // Map of `path` -> `oldPath`; both paths are sent for a renamed file.
   const renameOldPaths = useRef(new Map<string, string>());
@@ -176,18 +185,34 @@ export function GitDialog({
   // files that appear for the first time, so reopening the commit view does
   // not silently drop a deliberate unselection.
   const applyCommitFiles = useCallback(
-    (files: DaemonWorkspaceGitDiffFile[]) => {
+    (files: DaemonWorkspaceGitDiffFile[], complete = true) => {
+      setCommitListComplete(complete);
       setCommitFiles(files);
+      const firstLoad = commitFilesRef.current === null;
+      commitFilesRef.current = files;
       setSelectedPaths((prev) => {
+        // `prev.size === 0` cannot stand in for "first load": unchecking every
+        // row is a deliberate state, and the next refresh must not re-add them.
+        // Once loaded, keep what is still selected and preselect only paths
+        // that appear for the first time.
+        const seen = loadedPathsRef.current;
         const next = new Set<string>();
         for (const file of files) {
-          if (prev.size === 0 || prev.has(file.path)) next.add(file.path);
+          if (firstLoad || prev.has(file.path) || !seen.has(file.path)) {
+            next.add(file.path);
+          }
         }
+        loadedPathsRef.current = new Set(files.map((file) => file.path));
         return next;
       });
+      // A rename's old path has to be forwarded or the commit stages only the
+      // new one. A COPY reports the same shape (`diff.renames=copies`), but its
+      // source is still a live path in this list — forwarding it would commit a
+      // file the user left unchecked — so that is the discriminator.
+      const livePaths = new Set(files.map((file) => file.path));
       renameOldPaths.current = new Map(
         files
-          .filter((file) => file.oldPath)
+          .filter((file) => file.oldPath && !livePaths.has(file.oldPath))
           .map((file) => [file.path, file.oldPath as string]),
       );
     },
@@ -201,7 +226,9 @@ export function GitDialog({
     const ws = client.workspaceByCwd(workspaceCwd);
     return ws
       .workspaceGitDiff(gitCwd, gitSessionId)
-      .then((diff) => applyCommitFiles(diff.files))
+      .then((diff) =>
+        applyCommitFiles(diff.files, diff.available && diff.hiddenCount === 0),
+      )
       .catch(() => {});
   }, [client, workspaceCwd, gitCwd, gitSessionId, applyCommitFiles]);
 
@@ -234,7 +261,11 @@ export function GitDialog({
       const ws = client.workspaceByCwd(workspaceCwd);
       try {
         const diff = await ws.workspaceGitDiff(gitCwd, gitSessionId);
-        if (!abort.signal.aborted) applyCommitFiles(diff.files);
+        if (!abort.signal.aborted)
+          applyCommitFiles(
+            diff.files,
+            diff.available && diff.hiddenCount === 0,
+          );
       } catch {
         // Keep whatever list is already shown; the commit itself reports the
         // real error if the tree really is unreadable.
@@ -376,7 +407,13 @@ export function GitDialog({
     async (andPush: boolean) => {
       if (commitBusy || prBusy || !commitMsg.trim()) return;
       const paths = commitPathList();
-      if (paths.length === 0) {
+      // A capped or unavailable listing cannot express the tree as a path
+      // list: the rows it dropped would silently stay uncommitted, and an
+      // empty list is indistinguishable from "nothing selected". In that case
+      // commit everything — `all` and `paths` are mutually exclusive, so the
+      // request carries `all` alone.
+      const commitAll = !commitListComplete;
+      if (!commitAll && paths.length === 0) {
         setCommitStatus({
           msg: t('gitCommit.noFilesSelected'),
           type: 'error',
@@ -389,7 +426,7 @@ export function GitDialog({
         const ws = client.workspaceByCwd(workspaceCwd);
         const result = await ws.workspaceGitCommit(
           commitMsg.trim(),
-          { paths },
+          commitAll ? { all: true } : { paths },
           gitCwd,
           gitSessionId,
         );
@@ -844,8 +881,8 @@ export function GitDialog({
                       </span>
                       <span className={styles.commitFilePath}>
                         {file.oldPath
-                          ? `${file.oldPath} → ${file.path}`
-                          : file.path}
+                          ? `${sanitizeControlChars(file.oldPath)} → ${sanitizeControlChars(file.path)}`
+                          : sanitizeControlChars(file.path)}
                       </span>
                     </label>
                   ))}

@@ -670,6 +670,148 @@ describe('GitDialog', () => {
     expect(workspaceGitDiff.mock.calls.length).toBeGreaterThan(1);
   });
 
+  it('keeps a deliberate unselect-all across a refresh', async () => {
+    const file = (path: string) => ({
+      path,
+      added: 1,
+      removed: 0,
+      isBinary: false,
+      isUntracked: false,
+      isDeleted: false,
+      truncated: false,
+    });
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 2,
+      linesAdded: 2,
+      linesRemoved: 0,
+      files: [file('a.ts'), file('b.ts')],
+      hiddenCount: 0,
+    });
+    workspaceGitCommit.mockResolvedValue({ sha: 'abc1234', subject: 'x' });
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            initialView="commit"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const checkboxes = () =>
+      Array.from(
+        document.body.querySelectorAll<HTMLInputElement>(
+          '[data-web-shell-dialog] input[type="checkbox"]',
+        ),
+      );
+    expect(checkboxes().map((box) => box.checked)).toEqual([true, true]);
+
+    // Uncheck everything, then leave and re-enter the commit view.
+    await act(async () => {
+      for (const box of checkboxes()) box.click();
+    });
+    // Switch tabs inside the SAME tree, so the refresh runs through
+    // `applyCommitFiles` and the component keeps its selection state.
+    await act(async () => {
+      document.getElementById('git-dialog-tab-diff')!.click();
+    });
+    await flush();
+    await act(async () => {
+      document.getElementById('git-dialog-tab-commit')!.click();
+    });
+    await flush();
+
+    // The refresh must not resurrect rows the user cleared: the next Commit
+    // click has to stay empty rather than commit both files.
+    expect(checkboxes().map((box) => box.checked)).toEqual([false, false]);
+    expect(workspaceGitCommit).not.toHaveBeenCalled();
+  });
+
+  it('commits everything when the daemon caps the file list', async () => {
+    const file = (path: string) => ({
+      path,
+      added: 1,
+      removed: 0,
+      isBinary: false,
+      isUntracked: false,
+      isDeleted: false,
+      truncated: false,
+    });
+    // 60 dirty files, 50 rows: a paths-only commit would silently leave 10.
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 60,
+      linesAdded: 60,
+      linesRemoved: 0,
+      files: Array.from({ length: 50 }, (_, i) => file(`f${i}.ts`)),
+      hiddenCount: 10,
+    });
+    workspaceGitCommit.mockResolvedValue({ sha: 'abc1234', subject: 'x' });
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            initialView="commit"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const textarea = document.body.querySelector(
+      '[data-web-shell-dialog] textarea',
+    );
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      nativeSetter?.call(textarea, 'feat: everything');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const commitBtn = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-dialog] button',
+      ),
+    ).find(
+      (b) =>
+        b.textContent?.trim() === 'Commit' && b.getAttribute('role') !== 'tab',
+    );
+    await act(async () => {
+      commitBtn!.click();
+    });
+    await flush();
+
+    // `all` and `paths` are mutually exclusive on the route, so the request
+    // must carry `all` alone.
+    expect(workspaceGitCommit).toHaveBeenCalledWith(
+      'feat: everything',
+      { all: true },
+      undefined,
+      undefined,
+    );
+  });
+
   it('clamps to the diff view when the capability is withdrawn mid-session', async () => {
     workspaceGitDiff.mockResolvedValue({
       v: 1,
