@@ -3,6 +3,7 @@ import type { Message, TurnCollapseHead } from '../adapters/types';
 import {
   attachTurnOutputs,
   applyTurnCollapse,
+  collectFinalAssistantTurnIds,
   findDisplayItemIndex,
   findTurnIdForIndex,
   getSessionTimelineEntries,
@@ -3039,6 +3040,46 @@ it('retains a complete main reply when a later background tool-only execution en
       (item) => item.type === 'message' && item.message.id === 'main-reply',
     ),
   ).toBe(false);
+});
+
+it('keeps the deliverable when two background results land in one turn', () => {
+  // #13998 run twice: two markers, each followed by its own notice. Folding to
+  // the single-marker rule would answer the turn with the second notice (or,
+  // with a raw scan, with the `<task-notification>` bubble) and hide the reply.
+  const notice = (id: string) => ({
+    id,
+    role: 'system' as const,
+    variant: 'info' as const,
+    source: 'background_notification' as const,
+    content: 'Task finished',
+  });
+  const marker = (id: string) => ({
+    id,
+    role: 'system' as const,
+    variant: 'info' as const,
+    source: 'background_notification_turn_started' as const,
+    content: 'Background result',
+  });
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    marker('marker-a'),
+    notice('notice-a'),
+    makeAssistantMessage('ack-a'),
+    marker('marker-b'),
+    notice('notice-b'),
+    makeAssistantMessage('ack-b'),
+  ];
+  const collapsed = collapseItems(groupParallelAgents(messages));
+  expect(rowIds(collapsed)).toEqual(['u1', 'tc-u1', 'report']);
+  // The footer must key on the same row the collapse kept: a reply folded out
+  // of the turn must not own its copy/rating/branch controls.
+  const footerIds = collectFinalAssistantTurnIds(collapsed, {
+    isResponding: false,
+    latestTurnAwaitsAgentSummary: false,
+    gateBackgroundAgentStatus: true,
+  });
+  expect(footerIds).toMatchObject(new Map([['report', 'u1']]));
 });
 
 describe('background completion markers', () => {

@@ -864,6 +864,33 @@ function findFinalAnswerIndexForDisplay(
     }
   }
   if (markerIdx < 0) return answerIdx;
+  // A second marker above this one means more than one background result
+  // landed in this turn, so there is no lone acknowledgement to fold back in:
+  // the deliverable is whichever answer precedes the FIRST notice, and only
+  // when the rows between are notices rather than a real reply. Only assistant
+  // rows count as the deliverable — a `background_notification` candidate left
+  // by the default scan would render a `<task-notification>` bubble as the
+  // turn's answer and hide the reply under it.
+  let earliestMarker = markerIdx;
+  for (let i = markerIdx - 1; i > start; i--) {
+    const item = items[i]!;
+    if (
+      item.type === 'message' &&
+      item.message.role === 'system' &&
+      item.message.source === 'background_notification_turn_started'
+    ) {
+      earliestMarker = i;
+    }
+  }
+  if (earliestMarker !== markerIdx) {
+    const deliverable = findFinalAnswerIndex(
+      items,
+      start,
+      earliestMarker - 1,
+      false,
+    );
+    return deliverable >= 0 ? deliverable : answerIdx;
+  }
   const answerAboveMarker = findFinalAnswerIndex(
     items,
     start,
@@ -873,7 +900,7 @@ function findFinalAnswerIndexForDisplay(
   return answerAboveMarker >= 0 ? answerAboveMarker : answerIdx;
 }
 
-function collectFinalAssistantTurnIds(
+export function collectFinalAssistantTurnIds(
   items: readonly DisplayItem[],
   {
     isResponding,
