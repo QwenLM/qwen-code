@@ -385,13 +385,19 @@ export async function runModelRound(
 
 export interface ToolBatchOptions {
   config: Config;
-  client: LlmClient;
+  /**
+   * Counts the executed calls toward the session's tool calls. An agent with
+   * its own chat leaves it out.
+   */
+  client?: Pick<LlmClient, 'recordCompletedToolCall'>;
   /** Cancels the batch, as the loop's signal does. */
   signal: AbortSignal;
   /** The signal tools run under, when it differs from `signal`. */
   toolSignal?: AbortSignal;
   host?: AgentLoopHost;
   duplicates: AgentLoopDuplicateState;
+  /** Keeps distinct classes of calls from claiming each other's provider IDs. */
+  duplicateStateForCall?(request: ToolCallRequestInfo): AgentLoopDuplicateState;
   executor: AgentLoopToolExecutor;
   /**
    * Finish and record a batch `signal` cancelled and return its results,
@@ -433,13 +439,18 @@ export async function runToolBatch(
   const { config, client, signal, duplicates, executor } = options;
   const host = options.host ?? {};
   const toolSignal = options.toolSignal ?? signal;
+  const duplicateStateFor = (request: ToolCallRequestInfo) =>
+    options.duplicateStateForCall?.(request) ?? duplicates;
   const providerKey = (request: ToolCallRequestInfo) =>
     request.providerCallId ?? (request.callId || undefined);
-  const isReplay = (request: ToolCallRequestInfo) => {
+  const isReplay = (
+    request: ToolCallRequestInfo,
+    state: AgentLoopDuplicateState,
+  ) => {
     const key = providerKey(request);
     return key
       ? isReplayOfHandledToolCall(
-          duplicates.handled,
+          state.handled,
           key,
           getCachedToolCallFingerprint(request, request.name, request.args),
         )
@@ -457,15 +468,27 @@ export async function runToolBatch(
     if (request.callId) seenCallIds.add(request.callId);
     unique.push(request);
   }
-  if (
-    findRepeatedDuplicateProviderToolCall(
-      [...unique, ...repeated],
-      providerKey,
-      isReplay,
-      duplicates.responded,
-    )
-  ) {
-    return { parts: [], stop: 'duplicate_provider_call' };
+  const callsByDuplicateState = new Map<
+    AgentLoopDuplicateState,
+    ToolCallRequestInfo[]
+  >();
+  for (const request of [...unique, ...repeated]) {
+    const state = duplicateStateFor(request);
+    const group = callsByDuplicateState.get(state);
+    if (group) group.push(request);
+    else callsByDuplicateState.set(state, [request]);
+  }
+  for (const [state, group] of callsByDuplicateState) {
+    if (
+      findRepeatedDuplicateProviderToolCall(
+        group,
+        providerKey,
+        (request) => isReplay(request, state),
+        state.responded,
+      )
+    ) {
+      return { parts: [], stop: 'duplicate_provider_call' };
+    }
   }
 
   const results = new Map<ToolCallRequestInfo, AgentLoopToolResult>();
@@ -490,8 +513,9 @@ export async function runToolBatch(
   const executable: ToolCallRequestInfo[] = [];
   for (const request of unique) {
     const key = providerKey(request);
-    if (key && isReplay(request)) {
-      markDuplicateProviderToolCallResponseSent(key, duplicates.responded);
+    const state = duplicateStateFor(request);
+    if (key && isReplay(request, state)) {
+      markDuplicateProviderToolCallResponseSent(key, state.responded);
       answer(
         request,
         createDuplicateProviderToolCallResponse(request),
@@ -501,7 +525,7 @@ export async function runToolBatch(
     }
     if (key) {
       recordHandledToolCall(
-        duplicates.handled,
+        state.handled,
         key,
         getCachedToolCallFingerprint(request, request.name, request.args),
       );
@@ -563,7 +587,7 @@ export async function runToolBatch(
       !call.recorded &&
       (planModeEntry === undefined || index === planModeEntry)
     ) {
-      client.recordCompletedToolCall(
+      client?.recordCompletedToolCall(
         call.request.name,
         call.request.args as Record<string, unknown>,
       );
@@ -586,7 +610,10 @@ export async function runToolBatch(
   for (const request of repeated) {
     const key = providerKey(request);
     if (!key) continue;
-    markDuplicateProviderToolCallResponseSent(key, duplicates.responded);
+    markDuplicateProviderToolCallResponseSent(
+      key,
+      duplicateStateFor(request).responded,
+    );
     answer(
       request,
       createDuplicateProviderToolCallResponse(request),
