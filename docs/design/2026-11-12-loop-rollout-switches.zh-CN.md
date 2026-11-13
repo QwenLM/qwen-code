@@ -53,7 +53,7 @@ Linux 矩阵增加第三个 `agent-loop` 值 `kernel`，OpenTUI 任务加上它�
 
 **元测试。**`scripts/tests/e2e-workflow.test.js` 新增一个 describe 块，像并发 pin 求值自己的表达式那样，对 `push`、`schedule`、`workflow_dispatch` 求值真实的矩阵与环境变量表达式：push 在两个任务上都只产生 `current`；schedule/dispatch 产生全部三个值；docker 排除两个开关组；每个矩阵值在两个任务上映射到期望的一对环境变量值。既有的任务结构 pin（install 重试清单、artifact 时限、单一 build）不变，因为没有增删任务。
 
-**headless 对拍的内核维度也被强制。**headless 对拍会 stub `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 并用按臂设置强制两臂，但把 `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` 留给了环境。在新的内核组里这个变量是 `1`，共享臂就会悄悄跑内核，套件对比的就和其他组不是同一对了。套件现在把内核变量也 stub 成 undefined，让它在每个组里都测量「旧路径 vs 共享过程式路径」；内核路径仍由套件里继承组环境的其他用例跑到。ACP 对拍删除 unified 变量、且不读内核变量。TUI 对拍用 `inheritEnv: false`，但 `InteractiveSession` 现在会把两个 loop 开关转发进这个隔离环境（好让 nightly 组到达其他交互套件）；因此 TUI 对拍通过 `options.env` 显式钉住两臂——控制臂 `0`、共享臂 `1`——覆盖转发值，其对比不受影响。
+**headless 对拍的内核维度也被强制。**headless 对拍会 stub `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 并用按臂设置强制两臂，但把 `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` 留给了环境。在新的内核组里这个变量是 `1`，共享臂就会悄悄跑内核，套件对比的就和其他组不是同一对了。套件现在把内核变量也 stub 成 undefined，让它在每个组里都测量「旧路径 vs 共享过程式路径」；内核路径仍由套件里继承组环境的其他用例跑到。ACP 对拍删除 unified 变量、且不读内核变量。TUI 对拍用 `inheritEnv: false`，但 `InteractiveSession` 现在会把两个 loop 开关转发进这个隔离环境（好让 nightly 组到达其他交互套件）；因此 TUI 对拍通过 `options.env` 显式钉住两臂——unified 开关控制臂 `0`、共享臂 `1`，内核开关两臂都是 `0`（因为 TUI 还不消费内核）——覆盖转发值，其对比不受影响。
 
 **隔离的交互套件能收到开关。**约一半交互套件从零构建子进程环境（`inheritEnv: false`）以排除操作者环境，因此各组导出的开关到不了它们，它们会在每个臂上都跑默认 loop。`InteractiveSession.start` 只把这两个 loop 变量转发进隔离环境（测试自己的 `options.env` 仍可覆盖），于是开关组让整个交互套件都跑到共享 loop。一个真实 spawn 用例钉住开关到达、操作者变量不泄漏、且测试自己的 `env` 值优先于转发值；`scripts/tests/interactive-session-start.test.ts` 的 PR 门禁字节形状 pin 守住转发块与合并顺序。
 
@@ -81,7 +81,7 @@ token 去除首尾空白；空 token 忽略；未知入口名忽略并记 debug 
 
 **设置变为三态。**CLI 不再把未设置塌缩成 `false`（今天 `packages/cli/src/config/config.ts:2920` 是 `?? false`）；core 参数变为 `boolean | undefined`。schema 条目去掉 `default: false`，让设置对话框与合并后的设置能区分「未设置」和「显式关闭」，统一 loop 设计已经规定了这一点（「设置没有 schema 默认值」）。Web Shell 与 VS Code 副本跟随 schema。设置加载器不会把 schema 默认值注入合并对象（`packages/cli/src/config/settings.test.ts:4624` 钉住了这一点）；剩下的验证项是对话框对未设置的布尔值渲染合理。
 
-**对拍两臂强制。**同一 PR 内：ACP 对拍的 off 臂把环境变量设为 `'0'` 而不是删除；TUI 对拍的 off 臂设为 `'0'` 而不是省略。headless 对拍保留显式的按臂设置。有了切片 2 的强制关闭语义，`'0'` 无论默认值如何都钉住 off 臂；在切片 2 落地前，`'0'` 是惰性的（只读 `'1'`），所以对拍改动可以与机制同 PR 落地，但不能先于机制落地。
+**对拍两臂强制。**同一 PR 内：ACP 对拍的 off 臂把环境变量设为 `'0'` 而不是删除；TUI off 臂已在切片 1 钉住 `'0'`，切片 2 让 `'0'` 表示强制关闭。headless 对拍保留显式的按臂设置。有了切片 2 的强制关闭语义，`'0'` 无论默认值如何都钉住 off 臂；在切片 2 落地前，`'0'` 是惰性的（只读 `'1'`），所以 ACP 对拍改动可以与机制同 PR 安全落地。
 
 ## 切片 3：loop 可见性
 
