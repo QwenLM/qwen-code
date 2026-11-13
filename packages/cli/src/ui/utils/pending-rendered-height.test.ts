@@ -30,6 +30,33 @@ describe('splitMarkdownTableRow', () => {
     expect(splitMarkdownTableRow('``a | b`` | c')).toEqual(['``a | b``', 'c']);
   });
 
+  it('treats a backtick with no closing run as literal text', () => {
+    expect(splitMarkdownTableRow(' Backtick (`) | starts code ')).toEqual([
+      'Backtick (`)',
+      'starts code',
+    ]);
+    expect(splitMarkdownTableRow(' ` | backtick ')).toEqual(['`', 'backtick']);
+  });
+
+  it('treats an unclosed multi-backtick run as literal text', () => {
+    expect(splitMarkdownTableRow('``a | `b | c')).toEqual(['``a', '`b', 'c']);
+  });
+
+  it('only closes a code span with a backtick run of the same length', () => {
+    expect(splitMarkdownTableRow('`a | ``b`` | c')).toEqual([
+      '`a',
+      '``b``',
+      'c',
+    ]);
+  });
+
+  it('keeps pipes inside a code span whose closer follows a longer run', () => {
+    expect(splitMarkdownTableRow('`a | ``` | b` | c')).toEqual([
+      '`a | ``` | b`',
+      'c',
+    ]);
+  });
+
   it('does not split on a pipe inside an inline math span', () => {
     expect(splitMarkdownTableRow('$a|b$ | c')).toEqual(['$a|b$', 'c']);
   });
@@ -103,6 +130,12 @@ describe('isTableStart', () => {
 
   it('is true when header and separator column counts match', () => {
     expect(isTableStart(['| A | B |', '| --- | --- |'], 0)).toBe(true);
+  });
+
+  it('is true when a header cell holds an unmatched backtick', () => {
+    expect(
+      isTableStart(['| Backtick (`) | Meaning |', '| --- | --- |'], 0),
+    ).toBe(true);
   });
 });
 
