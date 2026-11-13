@@ -397,6 +397,49 @@ const SETTINGS_SCHEMA = {
           'Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers.',
         showInDialog: false,
       },
+      sessionPrWatch: {
+        type: 'object',
+        label: 'Session PR Watch',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: {},
+        description:
+          "PR-state transitions delivered to the sessions bound to a pull request. Off until events are subscribed. Honored from user, system, and system-defaults settings only — a workspace settings file must not spend daemon-wide gh budget or inject prompts across workspaces; a hosted GitHub channel's prWatchEvents is the trust-gated per-workspace path.",
+        showInDialog: false,
+        properties: {
+          events: {
+            type: 'array',
+            label: 'PR Watch Events',
+            category: 'Advanced',
+            requiresRestart: true,
+            default: [] as string[],
+            description:
+              'Transition types to deliver: ci_failure, merge_conflict, head_change, state_change. Empty (the default) runs no view and delivers nothing. QWEN_SESSION_PR_WATCH_EVENTS overrides this as a comma-separated list; an unrecognized value falls back to the default with a warning.',
+            showInDialog: false,
+            items: { type: 'string' },
+          },
+          wakeDormant: {
+            type: 'boolean',
+            label: 'PR Watch Wake Dormant',
+            category: 'Advanced',
+            requiresRestart: true,
+            default: true,
+            description:
+              "Restore a dormant bound session to deliver a transition. When false, the transition stays queued until that session's next live turn. QWEN_SESSION_PR_WATCH_WAKE_DORMANT overrides this.",
+            showInDialog: false,
+          },
+          actions: {
+            type: 'object',
+            label: 'PR Watch Actions',
+            category: 'Advanced',
+            requiresRestart: true,
+            default: {} as Record<string, string>,
+            description:
+              'Operator instruction templates keyed by event type, optionally prefixed with a role (review, verify, fix). Without it, delivery is the single most recently active binder and the generic prompt. An unrecognized key, an empty template or one over 2000 code points refuses the boot. Settings-only: no environment override.',
+            showInDialog: false,
+          },
+        },
+      },
     },
   },
 
