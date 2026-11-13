@@ -157,7 +157,7 @@ final class JdbcCsiRetirementSeal {
                 && row.getLong("target_revision") == original.generation() && !row.wasNull()
                 && com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant).equals(row.getString("scope_key"))
                 && com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("CSI_RETIREMENT", tenant, operation).equals(row.getString("operation_key"))
-                && JdbcRuntimeBindingRepository.storageAliasKey(tenant, original.request().getStorageId()).equals(row.getString("storage_key"))
+                && RuntimeAdmissionFences.storageAliasKey(tenant, original.request().getStorageId()).equals(row.getString("storage_key"))
                 && com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(encoded).equals(row.getString("request_digest")));
         return encoded;
     }

@@ -1277,6 +1277,26 @@ export default {
   'Usage: /forget <memory text to remove>': '用法：/forget <要刪除的記憶文本>',
   'No managed auto-memory entries matched: {{query}}':
     '沒有匹配的託管自動記憶條目：{{query}}',
+  'Bind a GitHub pull request to this session':
+    '將 GitHub 提取請求綁定到本會話',
+  'Usage: /pr <number | url>': '用法：/pr <編號 | url>',
+  'No PRs bound to this session.': '本會話尚未綁定 PR。',
+  'Bound PRs: {{list}}': '已綁定 PR：{{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    '無效的 PR 引用。用法：/pr <編號 | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    '無法透過 gh 解析 PR #{{number}}。請改用完整 PR URL。',
+  'Bound PR #{{number}} to this session: {{url}}':
+    '已將 PR #{{number}} 綁定到本會話：{{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} 已綁定到本會話：{{url}}',
+  'Failed to bind PR #{{number}}.': '綁定 PR #{{number}} 失敗。',
+  'Failed to bind PR #{{number}}: {{message}}':
+    '綁定 PR #{{number}} 失敗：{{message}}',
+  'Could not read the PR bindings for this session.':
+    '無法讀取本會話的 PR 綁定。',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) 不可用或逾時。請改用完整 PR URL 直接綁定。',
   'Consolidate managed auto-memory topic files.': '整理託管自動記憶主題檔案',
   'Import MCP servers from Claude configs': '從 Claude 設定匯入 MCP 伺服器',
   'Open MCP management dialog': '打開 MCP 管理對話框',

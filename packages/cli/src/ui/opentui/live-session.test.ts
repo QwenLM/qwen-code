@@ -941,12 +941,15 @@ describe('livePromptEvents', () => {
       'terminal tool.call',
     );
     expect(sendMessageStream).not.toHaveBeenCalled();
-    // OpenTUI offers the band above the prompt, raises prompt.submit and
-    // runs the prompts the Mods submit.
-    expect(initializeMods).toHaveBeenCalledExactlyOnceWith(['AbovePrompt'], {
-      prompts: true,
-      runsPrompts: true,
-    });
+    // OpenTUI offers the band and reply rows, raises prompt.submit and runs
+    // the prompts the Mods submit.
+    expect(initializeMods).toHaveBeenCalledExactlyOnceWith(
+      ['AbovePrompt', 'AssistantMessage'],
+      {
+        prompts: true,
+        runsPrompts: true,
+      },
+    );
   });
 
   it('waits for the shared initialization before the first send', async () => {
@@ -4295,6 +4298,13 @@ describe('live checkpoint producer and approval ownership', () => {
 });
 
 describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLoop)', () => {
+  beforeEach(() => {
+    atMocks.calls.length = 0;
+    atMocks.result = { processedQuery: null, shouldProceed: true };
+    atMocks.hang = null;
+    atMocks.abortAfter = null;
+  });
+
   /**
    * The config with the setting on. Its client answers the calls `history`
    * holds by provider id and fingerprint, and counts completed calls.
@@ -5143,5 +5153,229 @@ describe('livePromptEvents on the shared agent loop (experimental.unifiedAgentLo
       );
       expect(recordToolResult).toHaveBeenCalledTimes(stillCurrent ? 1 : 0);
     }
+  });
+
+  // --- The next round takes the steering input queued at the boundary ------
+
+  /** Each request, with the steering carrier reduced to its parts. */
+  const requestsOf = (send: ReturnType<typeof vi.fn>) =>
+    send.mock.calls.map(([parts, , promptId, options]) => {
+      const sendOptions = options as SendMessageOptions;
+      return {
+        parts,
+        promptId,
+        options: { ...sendOptions, steerInput: sendOptions.steerInput?.parts },
+      };
+    });
+
+  it.each([false, true])(
+    'sends the steering input after the batch as the current path does (retry: %s)',
+    async (retry) => {
+      const runs = [];
+      for (const onShared of [false, true]) {
+        const send = oneToolBatchStream({
+          callId: 't1',
+          name: 'test_tool',
+          args: {},
+        });
+        const recordMidTurnUserMessage = vi.fn();
+        const config = createFakeConfig(send, undefined, undefined, {
+          recordMidTurnUserMessage,
+        });
+        const onAcceptedSteering = vi.fn();
+        const restoreSteering = vi.fn();
+        const events = await drain(
+          livePromptEvents(
+            onShared ? shared(config) : config,
+            'start',
+            undefined,
+            {
+              promptId: 'p1',
+              drainSteering: () => steering('steer me'),
+              restoreSteering,
+              onAcceptedSteering,
+              ...(retry && {
+                retry: {
+                  content: [{ text: 'start' }],
+                  inlineModelOverride: false,
+                },
+              }),
+            },
+          ),
+        );
+        runs.push({
+          events,
+          requests: requestsOf(send),
+          recorded: recordMidTurnUserMessage.mock.calls,
+          accepted: onAcceptedSteering.mock.calls,
+          restored: restoreSteering.mock.calls,
+        });
+      }
+      expect(runs[1]).toEqual(runs[0]);
+      expect(runs[1].requests).toHaveLength(2);
+      expect(runs[1].requests[0].options.type).toBe(
+        retry ? SendMessageType.Retry : SendMessageType.UserQuery,
+      );
+      expect(runs[1].requests[1]).toMatchObject({
+        parts: [{ functionResponse: { id: 't1' } }, { text: 'steer me' }],
+        options: {
+          type: SendMessageType.ToolResult,
+          steerInput: [{ text: 'steer me' }],
+        },
+      });
+      expect(runs[1].accepted).toEqual([[['steer me']]]);
+      expect(runs[1].recorded).toHaveLength(1);
+      expect(runs[1].restored).toEqual([]);
+    },
+  );
+
+  it('sends the steering input after the answers of a batch of replays', async () => {
+    let sends = 0;
+    const send = vi.fn(function* (...args: unknown[]) {
+      if (++sends > 1) {
+        (args[3] as SendMessageOptions).steerInput?.accept();
+        return;
+      }
+      yield {
+        type: 'tool_call_request',
+        value: {
+          callId: 'r1',
+          providerCallId: 'p-old',
+          name: 'test_tool',
+          args: {},
+        },
+      };
+    });
+    const recordMidTurnUserMessage = vi.fn();
+    const config = shared(
+      createFakeConfig(send, undefined, undefined, {
+        recordMidTurnUserMessage,
+      }),
+      new Map([['p-old', getToolCallFingerprint('test_tool', {})]]),
+    );
+    const drainSteering = vi.fn(() => steering('after the replay'));
+    const restoreSteering = vi.fn();
+    await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering,
+        restoreSteering,
+      }),
+    );
+    expect(drainSteering).toHaveBeenCalledOnce();
+    const [next] = requestsOf(send).slice(1);
+    expect(next.parts).toEqual([
+      expect.objectContaining({
+        functionResponse: expect.objectContaining({ id: 'r1' }),
+      }),
+      { text: 'after the replay' },
+    ]);
+    expect(JSON.stringify(next.parts)).toContain('was already handled');
+    expect(next.options).toMatchObject({
+      type: SendMessageType.ToolResult,
+      steerInput: [{ text: 'after the replay' }],
+    });
+    expect(recordMidTurnUserMessage).toHaveBeenCalledOnce();
+    expect(restoreSteering).not.toHaveBeenCalled();
+  });
+
+  it.each(['stops', 'is cancelled', 'restores before stopping'])(
+    'restores only carried steering input when the next round %s',
+    async (outcome) => {
+      atMocks.result = { processedQuery: null, shouldProceed: false };
+      const controller = new AbortController();
+      let sends = 0;
+      const send = vi.fn(function* (...args: unknown[]) {
+        if (++sends === 1) {
+          yield call('t1');
+          return;
+        }
+        if (outcome === 'is cancelled') {
+          controller.abort();
+          return;
+        }
+        if (outcome === 'restores before stopping')
+          (args[3] as SendMessageOptions).steerInput?.restore();
+        yield { type: 'max_session_turns' };
+      });
+      const recordMidTurnUserMessage = vi.fn();
+      const config = shared(
+        createFakeConfig(send, undefined, undefined, {
+          recordMidTurnUserMessage,
+        }),
+      );
+      const restoreSteering = vi.fn();
+      const onAcceptedSteering = vi.fn();
+      await drain(
+        livePromptEvents(config, 'start', controller.signal, {
+          drainSteering: () => steering('steer me', '@declined.ts'),
+          restoreSteering,
+          onAcceptedSteering,
+        }),
+      );
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(atMocks.calls).toEqual(['@declined.ts']);
+      expect(requestsOf(send)[1].options.steerInput).toEqual([
+        { text: 'steer me' },
+      ]);
+      expect(restoreSteering).toHaveBeenCalledExactlyOnceWith(
+        steering('steer me'),
+      );
+      expect(onAcceptedSteering).not.toHaveBeenCalled();
+      expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { stop: 'a tool ends the turn', args: { __terminate: true } },
+    { stop: 'Esc cancels the batch', args: { __cancelled: true } },
+  ])('leaves the steering input queued when $stop', async ({ args }) => {
+    const send = batchStream([{ callId: 't1', name: 'test_tool', args }]);
+    const config = shared(createFakeConfig(send));
+    const drainSteering = vi.fn(() => steering('next turn'));
+    await drain(
+      livePromptEvents(config, 'start', undefined, { drainSteering }),
+    );
+    expect(send).toHaveBeenCalledOnce();
+    expect(drainSteering).not.toHaveBeenCalled();
+    expect(config.getGeminiClient().addHistory).toHaveBeenCalledOnce();
+  });
+
+  it('leaves the steering input queued when the model replays an answered call again', async () => {
+    let sends = 0;
+    const send = vi.fn(function* (...args: unknown[]) {
+      sends++;
+      if (sends > 2) return;
+      if (sends === 2) (args[3] as SendMessageOptions).steerInput?.accept();
+      yield {
+        type: 'tool_call_request',
+        value: {
+          callId: `r${sends}`,
+          providerCallId: 'p-old',
+          name: 'test_tool',
+          args: {},
+        },
+      };
+    });
+    const config = shared(
+      createFakeConfig(send, undefined, undefined, {
+        recordMidTurnUserMessage: vi.fn(),
+      }),
+      new Map([['p-old', getToolCallFingerprint('test_tool', {})]]),
+    );
+    const drainSteering = vi
+      .fn()
+      .mockReturnValueOnce(steering('with the answer'))
+      .mockReturnValue(steering('next turn'));
+    const restoreSteering = vi.fn();
+    await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering,
+        restoreSteering,
+      }),
+    );
+    expect(send).toHaveBeenCalledTimes(2);
+    // Taken once, after the first batch; the loop stop takes nothing.
+    expect(drainSteering).toHaveBeenCalledOnce();
+    expect(restoreSteering).not.toHaveBeenCalled();
   });
 });
