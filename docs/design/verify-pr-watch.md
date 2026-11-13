@@ -49,11 +49,21 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   `autofix-pr-<n>-gate.json` or `autofix-pr-<n>-state.json`: one cursor serves
   one consumer, so a second watch on the same PR would take the head moves and
   `stop` the first one needs.
-- Dedupe lives in a state file (`.qwen/tmp/verify-pr-watch-<n>.json`): the last
-  sha this session verified, plus an in-flight marker. A fire for a sha already
-  verified, or while a round is in flight, is ignored without a model turn.
-  Write the sha **before** starting the round, so a round that dies still does
-  not replay the same head.
+- Dedupe lives in a state file (`.qwen/tmp/verify-pr-watch-<n>.json`), owned
+  by `scripts/verify-pr-watch-state.mjs` (`--start` / `--complete`) since
+  PR #17185 — rounds no longer hand-write the JSON, whose completion write
+  two consecutive rounds on PR #16866 skipped, leaving the file two heads
+  stale. The file holds the last sha this session verified plus a single
+  in-flight marker. Dedup is **per head**: a fire for a sha already verified,
+  or for the sha whose round is in flight, is ignored without a model turn;
+  a fire for a _new_ head starts its own round even while another head's
+  round is running, because per-head dedup guarantees every head gets a
+  round where global suppression can strand one. That start takes the single
+  in-flight slot, and `--complete` clears the marker only when it belongs to
+  the completing head, so completing Y never wipes X's still-running marker
+  — the bound-delivery design dedupes redelivered head-change events against
+  it. `--start` writes the sha **before** the round begins, so a round that
+  dies still does not replay the same head.
 
 ## Design decisions
 

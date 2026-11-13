@@ -8171,6 +8171,10 @@ describe('qwen-triage verify publish fidelity', () => {
             report: `merge-ready · 10 passed · 0 failed · 10 total · ${'b'.repeat(40)}\n\n# Report\n`,
             verdict: 'merge-ready\n',
             assertions: f.text,
+            boundary: JSON.stringify({
+              mode: 'container',
+              detail: 'CI verify lane (credential-free container)',
+            }),
           },
         });
         const gatesError = result.errors.some((e) =>

@@ -752,10 +752,10 @@ describe('local container recipe pins', () => {
     expect(checkerCalls.length).toBeGreaterThanOrEqual(3);
     for (const prefix of checkerCalls) expect(prefix).toBe('<trusted-clone>');
     expect(skill).not.toMatch(
-      /node <pr-clone>\/scripts\/verify-pr-(prepare|check|model-proxy|guard)/,
+      /node <pr-clone>\/scripts\/verify-pr-(prepare|check|model-proxy|guard|watch-state|watch-gate)/,
     );
     expect(skill).not.toMatch(
-      /node scripts\/verify-pr-(prepare|check|model-proxy|guard)\.mjs/,
+      /node scripts\/verify-pr-(prepare|check|model-proxy|guard|watch-state|watch-gate)\.mjs/,
     );
   });
 

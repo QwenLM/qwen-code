@@ -209,6 +209,32 @@ describe('completeRound', () => {
       inFlight: false,
     });
   });
+
+  // The bound-delivery design dedupes redelivered head-change events against
+  // the in-flight marker, so completing one head must not wipe another
+  // head's still-running marker.
+  it('keeps a foreign in-flight marker when completing another head', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
+    startRound(root, { pr: 1, head: PREV, round: 11, artifactDir: 'r11' });
+    completeRound(root, { pr: 1, head: HEAD, round: 10, verdict: 'findings' });
+    expect(readState(root, 1)).toMatchObject({
+      verifiedHead: HEAD,
+      inFlight: true,
+      inFlightHead: PREV,
+    });
+    completeRound(root, {
+      pr: 1,
+      head: PREV,
+      round: 11,
+      verdict: 'merge-ready',
+    });
+    expect(readState(root, 1)).toMatchObject({
+      verifiedHead: PREV,
+      inFlight: false,
+      inFlightHead: null,
+    });
+  });
 });
 
 describe('duplicateHead', () => {

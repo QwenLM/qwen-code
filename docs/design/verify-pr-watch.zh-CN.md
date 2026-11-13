@@ -22,7 +22,7 @@ Status: implementing with this change.
 - 任务形态：cron 每 2 分钟；gate = `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --repo <owner>/<repo> --cli <绝对路径 qwen>`；`recurring: true`、`durable: true`、`sessionMode: "current"`。包装脚本只转发 `resync`（head 移动）与 `stop`；评论或 CI 失败是 `action: "fix"`，会被丢弃——调度器只要看到非空输出就开一轮，prompt 无法"取消"已经开始的那一轮。
 - prompt 消费包装转发的输出：`head_moved_externally` → 对该 sha 开一轮；`stop`（merged/closed）→ 删除任务并停止。
 - 包装脚本的 `--check` 在 `.qwen/tmp` 已存在 `autofix-pr-<n>-gate.json` 或 `autofix-pr-<n>-state.json` 时拒绝安装：一个游标只服务一个消费者，第二个 watch 会抢走第一个需要的 head 移动与 `stop`。
-- 去重写在状态文件（`.qwen/tmp/verify-pr-watch-<n>.json`）：本会话已验过的 sha，加一个 in-flight 标记。同一 sha 的重复 fire、或一轮还在跑时的 fire，都不产生模型 turn。**先写 sha 再开轮次**，这样中途死掉的轮次不会重放同一个 head。
+- 去重写在状态文件（`.qwen/tmp/verify-pr-watch-<n>.json`），自 PR #17185 起由 `scripts/verify-pr-watch-state.mjs`（`--start` / `--complete`）接管——轮次不再手写 JSON：PR #16866 的连续两个轮次跳过了手写完成写入，让文件落后了两个 head。文件保存本会话已验过的 sha 加一个 in-flight 标记。去重**按 head**：已验过的 sha、或正在跑的那个 sha 的重复 fire，都不产生模型 turn；_新_ head 的 fire 即使另一个 head 的轮次还在跑也会开出自己的一轮——按 head 去重保证每个 head 都有一轮，全局抑制可能让某个 head 永远验不到。该 start 占用唯一的 in-flight 槽位，而 `--complete` 只在标记属于完成的 head 时才清除，因此完成 Y 绝不会抹掉 X 仍在跑的标记——绑定投递设计正是用它对重投递的 head-change 事件去重。`--start` **先写 sha 再开轮次**，这样中途死掉的轮次不会重放同一个 head。
 
 ## 设计决策
 

@@ -24,10 +24,13 @@
  *     [--state-root <dir>]
  *
  * `--start` exits 3 when the file already records the head as verified or
- * in flight: that round answers instead of a duplicate. `--complete` records
- * the head as verified and rotates the previous verified head into
- * `previousHead`. The state root defaults to the clone's main worktree, the
- * same place the watch gate keeps its cursor.
+ * in flight: that round answers instead of a duplicate. Dedup is per head:
+ * a new head starts its own round even while another head's round is in
+ * flight, and that start takes the single in-flight slot. `--complete`
+ * records the head as verified, rotates the previous verified head into
+ * `previousHead`, and clears the in-flight marker only when it belongs to
+ * the completing head. The state root defaults to the clone's main
+ * worktree, the same place the watch gate keeps its cursor.
  *
  * Exit codes: 0 written, 1 I/O error, 2 usage, 3 duplicate head.
  */
@@ -126,6 +129,15 @@ export function completeRound(
     existing?.verifiedHead && !sameCommit(existing.verifiedHead, head)
       ? existing.verifiedHead
       : (existing?.previousHead ?? null);
+  // A completion only clears its own head's marker. The single in-flight
+  // slot belongs to the most recent start, and a redelivered head-change
+  // event dedupes against it (the bound-delivery design leans on this file
+  // for at-least-once safety), so completing Y must not wipe X's marker
+  // while X's round is still running.
+  const keepsForeignMarker =
+    !!existing?.inFlight &&
+    typeof existing?.inFlightHead === 'string' &&
+    !sameCommit(existing.inFlightHead, head);
   const state = {
     ...(existing ?? {}),
     pr,
@@ -135,8 +147,8 @@ export function completeRound(
     verdict,
     commentId: commentId ?? null,
     artifactDir: artifactDir ?? existing?.artifactDir ?? null,
-    inFlightHead: null,
-    inFlight: false,
+    inFlightHead: keepsForeignMarker ? existing.inFlightHead : null,
+    inFlight: keepsForeignMarker,
     completedAt: now.toISOString(),
   };
   return { path: writeState(stateRoot, pr, state), state };
