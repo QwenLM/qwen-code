@@ -1254,6 +1254,7 @@ export async function* livePromptEvents(
     // chunks are mapped to neutral events and yielded WHILE the tools run.
     const live = createEventQueue<OpenTuiStreamEvent>();
     const taskStarted = new Set<string>();
+    const runningTurnTasks = new Set<string>();
     const taskToolsSeen = new Map<string, Set<string>>();
     const mapOutputChunk = (
       callId: string,
@@ -1289,6 +1290,12 @@ export async function* livePromptEvents(
             id: callId,
             line: `↳ ${tc.description || tc.name}`,
           });
+        }
+        // A background agent is still owned by this turn until it detaches.
+        if (agent.status === 'running') {
+          runningTurnTasks.add(callId);
+        } else {
+          runningTurnTasks.delete(callId);
         }
         if (agent.status !== 'running' && agent.status !== 'background') {
           out.push({ type: 'task-end', id: callId });
@@ -1760,6 +1767,9 @@ export async function* livePromptEvents(
     }
     await scheduled;
     const shared = batch ? await batch : undefined;
+    if (shared?.stop === 'cancelled' && isCurrentSession()) {
+      for (const id of runningTurnTasks) yield { type: 'task-end', id };
+    }
     if (shared?.stop === 'duplicate_provider_call') {
       // The batch ran nothing: the model repeated a call id it was already
       // answered for, which stops the turn as a loop, as Ink does.

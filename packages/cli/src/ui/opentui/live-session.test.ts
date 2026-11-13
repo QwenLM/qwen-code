@@ -242,6 +242,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
           return;
         }
         if (calls.some((c) => (c.args as { __heldMod?: boolean })?.__heldMod)) {
+          for (const call of calls) {
+            const chunks = (call.args as { __liveChunks?: unknown[] })
+              .__liveChunks;
+            for (const chunk of chunks ?? [])
+              this.opts.outputUpdateHandler?.(call.callId, chunk);
+          }
           schedulerControl.finish = async () => {
             const request = calls[0];
             const completed = {
@@ -4836,14 +4842,61 @@ describe.each([false, true])(
     });
 
     it.skipIf(!kernel)(
-      'settles OpenTUI cards and drops native observations at the cancellation cap',
+      'settles tool cards and tasks owned by the turn at the cancellation cap',
       async () => {
         vi.useFakeTimers();
         try {
           schedulerControl.finish = null;
           const abort = new AbortController();
+          const running = {
+            type: 'task_execution',
+            subagentName: 'worker',
+            taskDescription: 'Run a task',
+            taskPrompt: 'Run a task',
+            executionMode: 'foreground',
+            status: 'running',
+          };
           const send = batchStream([
-            { callId: 't1', name: 'test_tool', args: { __heldMod: true } },
+            {
+              callId: 'foreground',
+              name: 'agent',
+              args: { __heldMod: true, __liveChunks: [running] },
+            },
+            {
+              callId: 'completed',
+              name: 'agent',
+              args: {
+                __liveChunks: [running, { ...running, status: 'completed' }],
+              },
+            },
+            {
+              callId: 'background',
+              name: 'agent',
+              args: {
+                __liveChunks: [
+                  { ...running, executionMode: 'background' },
+                  {
+                    ...running,
+                    executionMode: 'background',
+                    status: 'background',
+                  },
+                ],
+              },
+            },
+            {
+              callId: 'starting-background',
+              name: 'agent',
+              args: {
+                __liveChunks: [{ ...running, executionMode: 'background' }],
+              },
+            },
+            {
+              callId: 'starting-teammate',
+              name: 'agent',
+              args: {
+                __liveChunks: [{ ...running, executionMode: undefined }],
+              },
+            },
           ]);
           const config = shared(createFakeConfig(send));
           const recordCompletedToolCall = vi.fn();
@@ -4868,15 +4921,33 @@ describe.each([false, true])(
             [],
           );
           expect(rows.find((row) => row.kind === 'tool')).toMatchObject({
-            id: 't1',
+            id: 'foreground',
             done: true,
             success: false,
             summary: 'cancelled',
             canonicalPending: false,
             canonicalHistoryItem: {
-              tools: [{ callId: 't1', status: ToolCallStatus.Canceled }],
+              tools: [
+                'foreground',
+                'completed',
+                'background',
+                'starting-background',
+                'starting-teammate',
+              ].map((callId) => ({
+                callId,
+                status: ToolCallStatus.Canceled,
+              })),
             },
           });
+          expect(events.filter((ev) => ev.type === 'task-end')).toEqual([
+            { type: 'task-end', id: 'completed' },
+            { type: 'task-end', id: 'foreground' },
+            { type: 'task-end', id: 'starting-background' },
+            { type: 'task-end', id: 'starting-teammate' },
+          ]);
+          expect(
+            rows.filter((row) => row.kind === 'task').map((row) => row.id),
+          ).toEqual(['background']);
           await schedulerControl.finish!();
           expect(recordCompletedToolCall).not.toHaveBeenCalled();
           expect(send).toHaveBeenCalledOnce();
