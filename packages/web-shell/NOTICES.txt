@@ -11187,7 +11187,7 @@ terms above.
 
 
 ============================================================
-dompurify@3.4.14
+dompurify@3.4.17
 (git://github.com/cure53/DOMPurify.git)
 
 

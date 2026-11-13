@@ -37,7 +37,7 @@ export class ConversationHandler {
     );
   }
 
-  private handle(event: AnyBusEvent): void {
+  private async handle(event: AnyBusEvent): Promise<void> {
     const state = this.store.get(event.runId);
     if (!state || state.finished) return;
     const host = state.input.host ?? {};
@@ -59,10 +59,14 @@ export class ConversationHandler {
         const round = currentRound(state, event.round);
         const model = state.model;
         if (round === undefined || !model) return;
-        host.onRoundEnd?.(round);
+        const hostStop = await host.onRoundEnd?.(round, {
+          calls: model.calls,
+          ...(model.stop ? { stop: model.stop } : {}),
+        });
+        const stop = model.stop ?? hostStop;
         const rounds = round + 1;
-        if (model.stop) {
-          this.finish(state, { reason: model.stop, rounds, turn: model.turn });
+        if (stop) {
+          this.finish(state, { reason: stop, rounds, turn: model.turn });
           return;
         }
         if (model.calls.length === 0) {
@@ -84,12 +88,14 @@ export class ConversationHandler {
         if (round === undefined || !batch) return;
         const rounds = round + 1;
         const turn = state.model?.turn;
+        const { parts, responses } = batch;
         if (batch.stop) {
           this.finish(state, {
             reason: batch.stop,
             rounds,
             turn,
-            parts: batch.parts,
+            parts,
+            responses,
           });
           return;
         }
@@ -99,12 +105,13 @@ export class ConversationHandler {
             reason: 'next_round',
             rounds,
             turn,
-            parts: batch.parts,
+            parts,
+            responses,
           });
           return;
         }
-        const next = host.nextRound?.(rounds, batch.parts) ?? {
-          parts: batch.parts,
+        const next = host.nextRound?.(rounds, parts, responses) ?? {
+          parts,
           promptId: state.current.promptId,
           options: { type: SendMessageType.ToolResult },
         };

@@ -164,7 +164,8 @@ public final class ApiModels {
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean approvalModeChange,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename, boolean contextCompression,
-            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents, boolean btw, boolean recap) {
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents, boolean btw, boolean recap,
+            boolean clientFiles) {
         @JsonProperty("diagnostics")
         public boolean diagnostics() {
             return tasks;
