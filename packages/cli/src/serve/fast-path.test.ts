@@ -2429,6 +2429,27 @@ describe('serve fast path environment bootstrap', () => {
     },
   );
 
+  it.each([{}, { featureEnabled: true }])(
+    'keeps a nested folder-trust object ahead of the feature alias: %j',
+    (folderTrust) => {
+      const qwenHome = useTempQwenHome();
+      tempWorkspace = realpathSync(
+        mkdtempSync(join(os.tmpdir(), 'qws-fast-path-nested-trust-')),
+      );
+      writeFileSync(
+        join(qwenHome, 'settings.json'),
+        JSON.stringify({
+          security: { folderTrust },
+          folderTrustFeature: true,
+        }),
+      );
+
+      expect(
+        loadServeFastPathSettings(tempWorkspace).security?.folderTrust?.enabled,
+      ).toBeUndefined();
+    },
+  );
+
   it('ignores a non-boolean legacy feature alias during bootstrap', async () => {
     delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     const qwenHome = useTempQwenHome();

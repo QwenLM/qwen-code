@@ -581,7 +581,7 @@ function pickFastPathSettings(
     : 'folderTrustFeature';
   if (
     useLegacyKeys &&
-    out.security === undefined &&
+    !(isPlainObject(security) && isPlainObject(security['folderTrust'])) &&
     Object.hasOwn(value, legacyFolderTrustKey)
   ) {
     const legacyFolderTrust = value[legacyFolderTrustKey];
