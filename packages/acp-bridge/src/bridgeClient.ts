@@ -2719,9 +2719,11 @@ export class BridgeClient implements Client {
       if (!entry || !this.ownsSession(sessionId)) return;
       const reason = params['reason'];
       const source = params['source'];
-      // A malformed Goal terminal must not pin future loads to live replay.
+      // A malformed Goal terminal must not pin future loads to live replay
+      // or strand the queue when its turn_complete cannot be published.
       if (source === 'goal') {
         entry.goalTurnActive = false;
+        this.onAutomaticTurnEnded?.(sessionId);
       }
       if (
         typeof reason !== 'string' ||
@@ -2732,9 +2734,6 @@ export class BridgeClient implements Client {
         return;
       }
       if (source === 'goal') {
-        // Before the promptId validation below: a malformed id costs the
-        // session its `turn_complete`, but the queue must still be settled.
-        this.onAutomaticTurnEnded?.(sessionId);
         const promptId = params['promptId'];
         if (
           typeof promptId !== 'string' ||
