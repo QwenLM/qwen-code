@@ -100,6 +100,7 @@ export function WorkspaceSelector({
   const menuOpenRef = useRef(false);
   const suppressTooltipRef = useRef(false);
   const pointerDismissedRef = useRef(false);
+  const filterInputRef = useRef<HTMLInputElement>(null);
   const selected = workspaces.find((workspace) =>
     selectedWorkspaceCwd
       ? workspace.cwd === selectedWorkspaceCwd
@@ -203,8 +204,29 @@ export function WorkspaceSelector({
           onPointerDownCapture={() => {
             pointerDismissedRef.current = true;
           }}
-          onKeyDownCapture={() => {
+          onKeyDownCapture={(event) => {
             pointerDismissedRef.current = false;
+            // There is no item above the first one, so ArrowUp on the first
+            // enabled item goes back to the filter field.
+            if (event.key === 'ArrowUp') {
+              const content = event.currentTarget;
+              const items = Array.from(
+                content.querySelectorAll<HTMLElement>(
+                  '[role="menuitem"], [role="menuitemradio"]',
+                ),
+              ).filter((item) => !item.hasAttribute('data-disabled'));
+              const target =
+                event.target instanceof Element
+                  ? event.target.closest(
+                      '[role="menuitem"], [role="menuitemradio"]',
+                    )
+                  : null;
+              if (items.length > 0 && target === items[0]) {
+                event.preventDefault();
+                event.stopPropagation();
+                filterInputRef.current?.focus();
+              }
+            }
           }}
           onPointerDownOutside={() => {
             pointerDismissedRef.current = true;
@@ -217,6 +239,7 @@ export function WorkspaceSelector({
           <div data-web-shell-ws-filter className="p-1.5">
             <input
               type="text"
+              ref={filterInputRef}
               value={filterQuery}
               onChange={(event) => setFilterQuery(event.target.value)}
               onPointerDown={(event) => event.stopPropagation()}
