@@ -70,6 +70,7 @@ beforeEach(() => {
     error: false,
   });
   settings.setEnabled.mockReset().mockResolvedValue(undefined);
+  settings.requestPermissionOnce.mockClear();
   vi.mocked(useBrowserNotificationSettings).mockReturnValue(settings);
   container = document.createElement('div');
   document.body.append(container);
@@ -80,6 +81,64 @@ afterEach(() => {
   container.remove();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+it.each([false, true])(
+  'requests first-panel permission only outside the desktop shell (desktop=%s)',
+  (desktop) => {
+    if (desktop) vi.stubGlobal('__TAURI__', { core: { invoke: vi.fn() } });
+    settings.permission = 'default';
+    settings.enabled = false;
+    render();
+    expect(settings.requestPermissionOnce).toHaveBeenCalledTimes(
+      desktop ? 0 : 1,
+    );
+    hover();
+    const allow = document.querySelector<HTMLButtonElement>(`${popup} button`)!;
+    expect(allow.textContent).toBe('Allow notifications');
+    expect(allow.disabled).toBe(false);
+    act(() => allow.click());
+    expect(settings.setEnabled).toHaveBeenCalledWith(true);
+  },
+);
+
+it.each(['denied', 'unavailable'] as const)(
+  'explains desktop %s permission without an unusable authorization button',
+  (permission) => {
+    vi.stubGlobal('__TAURI__', { core: { invoke: vi.fn() } });
+    settings.permission = permission;
+    settings.enabled = false;
+    render();
+    hover();
+    const help = document.querySelector(popup)!;
+    expect(help.querySelector('[role="status"]')?.textContent).toContain(
+      'Run qwen serve --port 4170 --open',
+    );
+    expect(help.querySelector('[role="status"]')?.textContent).not.toContain(
+      'browser site settings',
+    );
+    expect(help.querySelector('button')).toBeNull();
+  },
+);
+
+it('keeps browser recovery guidance for denied permission', () => {
+  settings.permission = 'denied';
+  settings.enabled = false;
+  render();
+  hover();
+  expect(document.querySelector(`${popup} [role="status"]`)?.textContent).toBe(
+    'Notifications are blocked. Allow them in your browser site settings.',
+  );
+});
+
+it('preserves enabled notifications in a desktop shell with permission', () => {
+  vi.stubGlobal('__TAURI__', { core: { invoke: vi.fn() } });
+  render();
+  hover();
+  expect(document.querySelector(`${popup} [role="status"]`)?.textContent).toBe(
+    'Enabled for this site.',
+  );
 });
 
 it('describes a help popup rather than a settings toggle', () => {

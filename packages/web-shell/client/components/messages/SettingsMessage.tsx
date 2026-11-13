@@ -32,6 +32,7 @@ import {
   type WebShellLanguage,
 } from '../../i18n';
 import { useBrowserNotificationSettings } from '../../browser-turn-notifications';
+import { isDesktopShell } from '../../utils/externalOpen';
 import { LiveVoiceSettingsCard } from '../../live/LiveVoiceSettingsCard';
 import type { UseLiveVoiceSetupResult } from '../../live/useLiveVoiceSetup';
 import {
@@ -1245,19 +1246,26 @@ export function SettingsMessage({
                           ) {
                             const unavailable =
                               notifications.permission === 'unavailable';
-                            const status = unavailable
-                              ? 'unavailable'
-                              : notifications.pending
-                                ? 'requesting'
-                                : notifications.permission === 'denied'
-                                  ? 'denied'
-                                  : notifications.error
-                                    ? 'error'
-                                    : notifications.enabled
-                                      ? notifications.permission === 'granted'
-                                        ? 'enabled'
-                                        : 'waiting'
-                                      : 'disabled';
+                            const cannotEnable =
+                              unavailable ||
+                              notifications.permission === 'denied';
+                            const status =
+                              cannotEnable && isDesktopShell()
+                                ? 'desktopUnavailable'
+                                : unavailable
+                                  ? 'unavailable'
+                                  : notifications.pending
+                                    ? 'requesting'
+                                    : notifications.permission === 'denied'
+                                      ? 'denied'
+                                      : notifications.error
+                                        ? 'error'
+                                        : notifications.enabled
+                                          ? notifications.permission ===
+                                            'granted'
+                                            ? 'enabled'
+                                            : 'waiting'
+                                          : 'disabled';
                             return (
                               <div key={item.localKey}>
                                 {separator}
@@ -1295,7 +1303,7 @@ export function SettingsMessage({
                                         checked={notifications.enabled}
                                         disabled={
                                           notifications.pending ||
-                                          (unavailable &&
+                                          (cannotEnable &&
                                             !notifications.enabled)
                                         }
                                         onCheckedChange={(enabled) =>
