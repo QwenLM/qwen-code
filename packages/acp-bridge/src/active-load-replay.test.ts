@@ -17,7 +17,7 @@ function deferred<T>() {
 }
 
 describe('active session paged replay', () => {
-  it.each(['foreground', 'background'] as const)(
+  it.each(['foreground', 'background', 'goal'] as const)(
     'serves concurrent loads from memory without transcript reads during a %s turn',
     async (kind) => {
       const promptGate = deferred<void>();
@@ -40,6 +40,11 @@ describe('active session paged replay', () => {
           await vi.waitFor(() =>
             expect(handle.agent.promptCalls).toHaveLength(1),
           );
+        } else if (kind === 'goal') {
+          await handle.agentConnection.extNotification('_qwencode/start_turn', {
+            sessionId: session.sessionId,
+            source: 'goal',
+          });
         } else {
           await expect(
             handle.agentConnection.extMethod('_qwencode/start_turn', {
@@ -98,8 +103,10 @@ describe('active session paged replay', () => {
   it.each([
     { kind: 'foreground', emptyPage: false },
     { kind: 'background', emptyPage: false },
+    { kind: 'goal', emptyPage: false },
     { kind: 'foreground', emptyPage: true },
     { kind: 'background', emptyPage: true },
+    { kind: 'goal', emptyPage: true },
   ] as const)(
     'stops reading when a $kind turn starts during a transcript read (empty page: $emptyPage)',
     async ({ kind, emptyPage }) => {
@@ -151,6 +158,11 @@ describe('active session paged replay', () => {
           await vi.waitFor(() =>
             expect(handle.agent.promptCalls).toHaveLength(1),
           );
+        } else if (kind === 'goal') {
+          await handle.agentConnection.extNotification('_qwencode/start_turn', {
+            sessionId: session.sessionId,
+            source: 'goal',
+          });
         } else {
           await expect(
             handle.agentConnection.extMethod('_qwencode/start_turn', {
@@ -195,4 +207,54 @@ describe('active session paged replay', () => {
       }
     },
   );
+
+  it('keeps the memory replay when a Goal turn starts during a read without publishing an event', async () => {
+    const pageGate = deferred<Record<string, unknown>>();
+    const persistedPage = {
+      v: 1,
+      events: [
+        {
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'stale persisted response' },
+          },
+        },
+      ],
+      hasMore: false,
+    };
+    let transcriptReads = 0;
+    const handle = makeChannel({
+      extMethodImpl: () => {
+        transcriptReads++;
+        return pageGate.promise;
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const load = bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        clientId: session.clientId,
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+      await vi.waitFor(() => expect(transcriptReads).toBe(1));
+      await handle.agentConnection.extNotification('_qwencode/start_turn', {
+        sessionId: session.sessionId,
+        source: 'goal',
+      });
+      pageGate.resolve(persistedPage);
+
+      expect(JSON.stringify(await load)).not.toContain(
+        'stale persisted response',
+      );
+      expect(transcriptReads).toBe(1);
+    } finally {
+      pageGate.resolve(persistedPage);
+      await bridge.shutdown();
+    }
+  });
 });

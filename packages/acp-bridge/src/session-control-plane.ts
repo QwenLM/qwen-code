@@ -8252,6 +8252,7 @@ export function createSessionControlPlane(
           // retry after activity started while the previous read was pending.
           if (
             entry.promptActive ||
+            entry.goalTurnActive === true ||
             entry.backgroundTurn ||
             entry.pendingInteractions.size > 0
           ) {
@@ -8289,6 +8290,7 @@ export function createSessionControlPlane(
         if (
           byId.get(entry.sessionId) === entry &&
           !entry.promptActive &&
+          !entry.goalTurnActive &&
           !entry.backgroundTurn &&
           entry.events.epoch === eventEpoch &&
           entry.events.lastEventId === lastEventId &&

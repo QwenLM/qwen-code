@@ -274,7 +274,7 @@ entries were dropped, `liveJournal[0]` carries a `history_truncated` marker
 with `scope: 'live_journal'`. Its retained and truncated counts describe source events, not replay entries. The full persisted transcript remains on
 disk and is not exposed by this bridge response.
 
-A paged load skips persisted-page refresh while a foreground or background turn is active or an interaction is pending, serving the available in-memory replay instead. If activity starts during a read, the bridge keeps the live replay and avoids further refresh reads, including traversal through empty pages. Pagination-anchor backfills for a truncated replay window remain separate from this refresh.
+A paged load skips persisted-page refresh while a foreground, background, or Goal turn is active or an interaction is pending, serving the available in-memory replay instead. If activity starts during a read, the bridge keeps the live replay and avoids further refresh reads, including traversal through empty pages. Pagination-anchor backfills for a truncated replay window remain separate from this refresh.
 
 `BridgeClientRequestContext` is the request context threaded through bridge
 calls; it carries `clientId`, `fromLoopback: boolean`, and `promptId`.
