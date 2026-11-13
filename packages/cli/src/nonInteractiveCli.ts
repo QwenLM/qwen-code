@@ -208,6 +208,7 @@ import {
 import { LoopReason } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import {
   USAGE_STATISTICS_NOTICE_SUBTYPE,
+  recordUsageStatisticsNoticeShown,
   takeUsageStatisticsNotice,
 } from './nonInteractive/usage-statistics-notice.js';
 import { formatLoopDetectedMessage } from './utils/loop-detected-message.js';
@@ -1231,12 +1232,29 @@ export async function runNonInteractive(
       process.on('SIGINT', shutdownHandler);
       process.on('SIGTERM', shutdownHandler);
 
+      // Headless runs render no auth dialog, so they never see the privacy
+      // notice link. The entry path decided before `config.initialize()`
+      // whether to disclose default-on usage statistics; text mode already
+      // printed it there, and the JSON modes deliver it right after `init`,
+      // on both the success and the failure path below.
+      const usageStatisticsNotice = takeUsageStatisticsNotice();
+      const emitUsageStatisticsNotice = () => {
+        if (!usageStatisticsNotice) return;
+        emitNotice(USAGE_STATISTICS_NOTICE_SUBTYPE, usageStatisticsNotice);
+        // Stream-JSON writes each message at once; buffered JSON records it
+        // when the document is written.
+        if (outputFormat !== OutputFormat.JSON) {
+          recordUsageStatisticsNoticeShown();
+        }
+      };
+
       try {
         await modSession?.initialize(abortController.signal);
       } catch (error) {
         adapter.emitMessage(
           await buildSystemMessage(config, sessionId, permissionMode, settings),
         );
+        emitUsageStatisticsNotice();
         modSession?.flushLogs();
         throw error;
       }
@@ -1276,14 +1294,7 @@ export async function runNonInteractive(
       adapter.emitMessage(systemMessage);
       modSession?.flushLogs();
 
-      // Headless runs render no auth dialog, so they never see the privacy
-      // notice link. The entry path decided before `config.initialize()`
-      // whether to disclose default-on usage statistics; text mode already
-      // printed it there, and the JSON modes deliver it right after `init`.
-      const usageStatisticsNotice = takeUsageStatisticsNotice();
-      if (usageStatisticsNotice) {
-        emitNotice(USAGE_STATISTICS_NOTICE_SUBTYPE, usageStatisticsNotice);
-      }
+      emitUsageStatisticsNotice();
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {

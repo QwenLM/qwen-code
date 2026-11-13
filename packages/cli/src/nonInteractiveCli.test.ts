@@ -1262,6 +1262,42 @@ describe('runNonInteractive', () => {
       );
     });
 
+    it('emits the notice before the error result when Mod startup fails', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+      mockTakeUsageStatisticsNotice.mockReturnValueOnce(notice);
+      vi.spyOn(ModSession, 'create').mockReturnValue({
+        initialize: vi.fn().mockRejectedValue(new Error('mod startup failed')),
+        close: vi.fn().mockResolvedValue(undefined),
+        flushOutput: vi.fn().mockResolvedValue(undefined),
+        flushLogs: vi.fn(),
+        syncSession: vi.fn().mockResolvedValue(undefined),
+        hasToolHooks: false,
+        toolCall: () => undefined,
+        takeSubmittedPrompt: () => undefined,
+        discardSubmittedPrompts: () => {},
+        notePersonPrompt: vi.fn(),
+      } as unknown as ModSession);
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'test',
+        'notice-mod-fail',
+      ).catch(() => undefined);
+
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages: Array<{ type?: string; subtype?: string }> =
+        JSON.parse(stdout);
+      const types = messages.map((m) => `${m.type}/${m.subtype ?? ''}`);
+      expect(types[0]).toBe('system/init');
+      const noticeIndex = types.indexOf('system/usage_statistics_notice');
+      const resultIndex = types.findIndex((t) => t.startsWith('result/'));
+      expect(noticeIndex).toBeGreaterThan(0);
+      expect(resultIndex).toBeGreaterThan(noticeIndex);
+    });
+
     it('writes the notice to stderr in text mode', async () => {
       mockTakeUsageStatisticsNotice.mockReturnValueOnce(notice);
       await runNonInteractive(mockConfig, mockSettings, 'test', 'notice-text');

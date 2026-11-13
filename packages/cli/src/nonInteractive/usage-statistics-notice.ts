@@ -89,6 +89,7 @@ export function operatorUsageStatisticsSetting(scopes: {
 
 let decided = false;
 let pendingMarkerPath: string | undefined;
+let deliveredMarkerPath: string | undefined;
 
 function defaultMarkerPath(): string {
   return path.join(Storage.getGlobalQwenDir(), NOTICE_MARKER_FILE);
@@ -115,7 +116,10 @@ export function prepareUsageStatisticsNotice(
   ) {
     return false;
   }
-  if (input.operatorSettingsValue !== undefined) return false;
+  // Only an explicit opt-in suppresses it: an operator `false` that is in
+  // effect already returned above, and one a trusted workspace overrode
+  // leaves collection on, so it still needs the disclosure.
+  if (input.operatorSettingsValue === true) return false;
 
   const markerPath = input.markerPath ?? defaultMarkerPath();
   // existsSync returns false rather than throwing, so an unreadable marker
@@ -127,14 +131,27 @@ export function prepareUsageStatisticsNotice(
 }
 
 /**
- * Returns the pending notice once and records that it was shown, so later
- * runs stay quiet. A marker that cannot be written never suppresses the
- * notice: showing it again beats never showing it.
+ * Hands the pending notice to the caller once. The caller writes it and then
+ * calls `recordUsageStatisticsNoticeShown`; until then, the exit fallback
+ * still prints it.
  */
 export function takeUsageStatisticsNotice(): string | null {
   const markerPath = pendingMarkerPath;
   if (markerPath === undefined) return null;
   pendingMarkerPath = undefined;
+  deliveredMarkerPath = markerPath;
+  return USAGE_STATISTICS_NOTICE;
+}
+
+/**
+ * Records that a taken notice reached the output, so later runs stay quiet.
+ * A marker that cannot be written never suppresses the notice: showing it
+ * again beats never showing it.
+ */
+export function recordUsageStatisticsNoticeShown(): void {
+  const markerPath = deliveredMarkerPath;
+  if (markerPath === undefined) return;
+  deliveredMarkerPath = undefined;
   try {
     fs.mkdirSync(path.dirname(markerPath), { recursive: true });
     atomicWriteFileSync(markerPath, `${new Date().toISOString()}\n`, {
@@ -143,12 +160,17 @@ export function takeUsageStatisticsNotice(): string | null {
   } catch {
     // Read-only home or sandbox: the notice will show again next run.
   }
-  return USAGE_STATISTICS_NOTICE;
 }
 
 function writePendingNoticeToStderr(): void {
-  const notice = takeUsageStatisticsNotice();
-  if (notice) writeStderrLine(notice);
+  // A notice taken for buffered JSON output that was never written counts
+  // as undelivered too.
+  const notice =
+    takeUsageStatisticsNotice() ??
+    (deliveredMarkerPath !== undefined ? USAGE_STATISTICS_NOTICE : null);
+  if (!notice) return;
+  writeStderrLine(notice);
+  recordUsageStatisticsNoticeShown();
 }
 
 export interface HeadlessNoticeConfig {
@@ -188,5 +210,6 @@ export function discloseUsageStatisticsForHeadlessRun(
 export function resetUsageStatisticsNoticeForTesting(): void {
   decided = false;
   pendingMarkerPath = undefined;
+  deliveredMarkerPath = undefined;
   process.removeListener('exit', writePendingNoticeToStderr);
 }

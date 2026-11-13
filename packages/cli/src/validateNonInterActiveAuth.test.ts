@@ -496,10 +496,12 @@ describe('validateNonInterActiveAuth', () => {
 
   describe('STREAM_JSON output mode', () => {
     let emitResultMock: ReturnType<typeof vi.fn>;
+    let emitSystemMessageMock: ReturnType<typeof vi.fn>;
     let runExitCleanupMock: ReturnType<typeof vi.fn>;
 
     beforeEach(() => {
       emitResultMock = vi.fn();
+      emitSystemMessageMock = vi.fn();
       runExitCleanupMock = vi.fn().mockResolvedValue(undefined);
       vi.spyOn(
         StreamJsonOutputAdapterModule,
@@ -508,10 +510,40 @@ describe('validateNonInterActiveAuth', () => {
         () =>
           ({
             emitResult: emitResultMock,
+            emitSystemMessage: emitSystemMessageMock,
           }) as unknown as StreamJsonOutputAdapterModule.StreamJsonOutputAdapter,
       );
       vi.spyOn(cleanupModule, 'runExitCleanup').mockImplementation(
         runExitCleanupMock,
+      );
+    });
+
+    it('emits a pending usage statistics notice before the error result', async () => {
+      mockTakeUsageStatisticsNotice.mockReturnValueOnce('notice text');
+      const nonInteractiveConfig = createMockConfig({
+        refreshAuth: refreshAuthMock,
+        getOutputFormat: vi.fn().mockReturnValue(OutputFormat.STREAM_JSON),
+        getIncludePartialMessages: vi.fn().mockReturnValue(false),
+        getModelsConfig: vi.fn().mockReturnValue({
+          getModel: vi.fn().mockReturnValue('default-model'),
+          getCurrentAuthType: vi.fn().mockReturnValue(undefined),
+        }),
+      });
+
+      await expect(
+        validateNonInteractiveAuth(
+          undefined,
+          nonInteractiveConfig,
+          mockSettings,
+        ),
+      ).rejects.toThrow('process.exit(1) called');
+
+      expect(emitSystemMessageMock).toHaveBeenCalledWith(
+        'usage_statistics_notice',
+        { notice: 'notice text' },
+      );
+      expect(emitSystemMessageMock.mock.invocationCallOrder[0]).toBeLessThan(
+        emitResultMock.mock.invocationCallOrder[0],
       );
     });
 

@@ -12,6 +12,7 @@ import { JsonOutputAdapter } from './nonInteractive/io/JsonOutputAdapter.js';
 import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAdapter.js';
 import {
   USAGE_STATISTICS_NOTICE_SUBTYPE,
+  recordUsageStatisticsNoticeShown,
   takeUsageStatisticsNotice,
 } from './nonInteractive/usage-statistics-notice.js';
 import { runExitCleanup } from './utils/cleanup.js';
@@ -84,6 +85,7 @@ export async function validateNonInteractiveAuth(
         numTurns: 0,
         usage: undefined,
       });
+      recordUsageStatisticsNoticeShown();
       await runExitCleanup();
       process.exit(1);
     }

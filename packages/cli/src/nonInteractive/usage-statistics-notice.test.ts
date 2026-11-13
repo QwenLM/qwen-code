@@ -14,6 +14,7 @@ import {
   discloseUsageStatisticsForHeadlessRun,
   operatorUsageStatisticsSetting,
   prepareUsageStatisticsNotice,
+  recordUsageStatisticsNoticeShown,
   resetUsageStatisticsNoticeForTesting,
   takeUsageStatisticsNotice,
   type UsageStatisticsNoticeInput,
@@ -22,6 +23,11 @@ import {
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
+}));
+
+const mockIsFileSourcedEnvKey = vi.hoisted(() => vi.fn(() => false));
+vi.mock('../config/environment.js', () => ({
+  isFileSourcedEnvKey: mockIsFileSourcedEnvKey,
 }));
 
 const notFileSourced = (_key: string) => false;
@@ -52,9 +58,13 @@ describe('usage statistics notice', () => {
     markerPath,
   });
 
-  /** Prepares, then delivers, as one headless run would. */
-  const showOnce = (input = defaults()) =>
-    prepareUsageStatisticsNotice(input) ? takeUsageStatisticsNotice() : null;
+  /** Prepares, takes, and records, as one headless run that writes it would. */
+  const showOnce = (input = defaults()) => {
+    if (!prepareUsageStatisticsNotice(input)) return null;
+    const notice = takeUsageStatisticsNotice();
+    recordUsageStatisticsNoticeShown();
+    return notice;
+  };
 
   it('names the collection host and the opt-out', () => {
     expect(USAGE_STATISTICS_NOTICE).toContain(
@@ -77,13 +87,22 @@ describe('usage statistics notice', () => {
     expect(showOnce()).toBeNull();
   });
 
-  it('records the marker only when the notice is delivered', () => {
+  it('records the marker only once the notice has been written', () => {
     expect(prepareUsageStatisticsNotice(defaults())).toBe(true);
     expect(fs.existsSync(markerPath)).toBe(false);
+    // Taken for buffered output that never reached stdout.
+    expect(takeUsageStatisticsNotice()).toBe(USAGE_STATISTICS_NOTICE);
+    expect(fs.existsSync(markerPath)).toBe(false);
 
-    // A run that exits before delivery shows the notice next time.
+    // A run that exits before writing it shows the notice next time.
     resetUsageStatisticsNoticeForTesting();
-    expect(showOnce()).toBe(USAGE_STATISTICS_NOTICE);
+    expect(prepareUsageStatisticsNotice(defaults())).toBe(true);
+  });
+
+  it('records nothing when no notice was taken', () => {
+    expect(prepareUsageStatisticsNotice(defaults())).toBe(true);
+    recordUsageStatisticsNoticeShown();
+    expect(fs.existsSync(markerPath)).toBe(false);
   });
 
   it('delivers at most once per process even without a marker', () => {
@@ -136,6 +155,25 @@ describe('usage statistics notice', () => {
 
   it('is skipped when the operator setting is explicitly true', () => {
     expect(showOnce({ ...defaults(), operatorSettingsValue: true })).toBeNull();
+  });
+
+  it('still shows when an operator false was overridden and collection is on', () => {
+    // User settings say false, a trusted workspace says true: the merged
+    // value keeps collection on, so the opt-out must not hide the notice.
+    expect(showOnce({ ...defaults(), operatorSettingsValue: false })).toBe(
+      USAGE_STATISTICS_NOTICE,
+    );
+  });
+
+  it('checks env provenance with the loader by default', () => {
+    mockIsFileSourcedEnvKey.mockReturnValueOnce(true);
+    const { isEnvFileSourced: _seam, ...rest } = defaults();
+    expect(
+      showOnce({ ...rest, env: { QWEN_USAGE_STATISTICS_ENABLED: 'true' } }),
+    ).toBe(USAGE_STATISTICS_NOTICE);
+    expect(mockIsFileSourcedEnvKey).toHaveBeenCalledWith(
+      'QWEN_USAGE_STATISTICS_ENABLED',
+    );
   });
 
   it('still shows when the marker cannot be written', () => {
@@ -269,6 +307,22 @@ describe('discloseUsageStatisticsForHeadlessRun', () => {
     },
   );
 
+  it('prints at exit when the notice was taken but never written', () => {
+    const once = vi.spyOn(process, 'once');
+    discloseUsageStatisticsForHeadlessRun(
+      config(OutputFormat.JSON),
+      noSettings,
+      { env: {}, isEnvFileSourced: notFileSourced, markerPath },
+    );
+    // Buffered into a JSON document that was never written.
+    expect(takeUsageStatisticsNotice()).toBe(USAGE_STATISTICS_NOTICE);
+
+    const exitCall = once.mock.calls.find(([event]) => event === 'exit');
+    (exitCall![1] as () => void)();
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(USAGE_STATISTICS_NOTICE);
+    expect(fs.existsSync(markerPath)).toBe(true);
+  });
+
   it('does not print at exit once the JSON output delivered the notice', () => {
     const once = vi.spyOn(process, 'once');
     discloseUsageStatisticsForHeadlessRun(
@@ -277,6 +331,7 @@ describe('discloseUsageStatisticsForHeadlessRun', () => {
       { env: {}, isEnvFileSourced: notFileSourced, markerPath },
     );
     expect(takeUsageStatisticsNotice()).toBe(USAGE_STATISTICS_NOTICE);
+    recordUsageStatisticsNoticeShown();
 
     const exitCall = once.mock.calls.find(([event]) => event === 'exit');
     (exitCall![1] as () => void)();

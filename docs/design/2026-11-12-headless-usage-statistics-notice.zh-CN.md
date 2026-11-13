@@ -12,7 +12,7 @@
 
 沿用现有的无界面提示约定：文本模式下在初始化之前立即将提示写入 stderr，使 stdout 对脚本保持干净。JSON 与 stream-JSON 模式下先将提示挂起，在会话初始化消息之后立即发出子类型为 `usage_statistics_notice`、带 `data.notice` 的系统消息；若运行在该消息之前失败（例如在认证检查处），则在错误 result 之前发出；若进程在两者之前退出，则由退出处理器写入 stderr。提前判断，正是让在提示词之前就停止的运行（例如 #17052 中抓到的未认证运行）也能完成披露的关键。若在 JSON 模式下跳过，最需要披露的自动化运行反而看不到；忽略未知系统子类型的消费者不受影响。
 
-仅向依赖默认值的用户显示：使用统计已关闭，或操作者已将 `QWEN_USAGE_STATISTICS_ENABLED` 或 `privacy.usageStatisticsEnabled` 设置为任意值时跳过，因为显式开启本身已是知情选择。只有操作者设定的值才算数：环境变量必须来自启动环境（由 `.env` 文件或设置中 `env` 块写入的值可能来自克隆的仓库，此处通过 `isFileSourcedEnvKey` 将其忽略）；设置只从 user、system 与 system defaults 作用域读取，从不读取 workspace 作用域。因此仓库仍可关闭收集，但无法在收集开启时隐藏提示。提示送达后，在全局 Qwen 目录（`$QWEN_HOME`，通常为 `~/.qwen`）中、安装 ID 旁记录 `usage-statistics-notice-shown`。在送达前退出的运行不会记录任何内容，标记文件无法写入时也绝不抑制提示；两种情况下次运行都会再次显示。同一进程内最多显示一次，因此运行多轮的持久 stream-JSON 会话不会重复显示。
+仅向依赖默认值的用户显示：使用统计已关闭，或操作者已显式开启——`QWEN_USAGE_STATISTICS_ENABLED` 设置为任意值，或 `privacy.usageStatisticsEnabled` 设置为 `true`——时跳过，因为显式开启本身已是知情选择。操作者设置的 `false` 本身不抑制任何内容：要么它生效、收集已关闭，要么被受信任的 workspace 覆盖、收集仍开启，此时仍需披露。只有操作者设定的值才算数：环境变量必须来自启动环境（由 `.env` 文件或设置中 `env` 块写入的值可能来自克隆的仓库，此处通过 `isFileSourcedEnvKey` 将其忽略）；设置只从 user、system 与 system defaults 作用域读取，从不读取 workspace 作用域。因此仓库仍可关闭收集，但无法在收集开启时隐藏提示。提示写入输出后（文本与 stream-JSON 模式立即写入，缓冲的 JSON 模式在整个文档写出时），在全局 Qwen 目录（`$QWEN_HOME`，通常为 `~/.qwen`）中、安装 ID 旁记录 `usage-statistics-notice-shown`。在写出前退出的运行会在退出时把提示写入 stderr，之后才记录，标记文件无法写入时也绝不抑制提示；两种情况下次运行都会再次显示。同一进程内最多显示一次，因此运行多轮的持久 stream-JSON 会话不会重复显示。
 
 ## 范围与风险
 
@@ -20,4 +20,4 @@
 
 ## 验证
 
-单元测试覆盖：仅显示一次且仅在送达时写入标记、同进程仅显示一次、使用统计关闭或通过启动环境或操作者设置显式配置时跳过、环境变量来自文件或设置仅在 workspace 中时仍然显示、默认环境与默认标记位置、标记无法写入时再次显示、文本模式立即输出到 stderr，以及 JSON 模式下退出时回退到 stderr。入口测试验证即使随后认证检查失败，提示也在 `config.initialize()` 之前判断；认证校验测试验证挂起的提示先于 JSON 错误 result 发出；无界面测试覆盖 JSON 与 stream-JSON 模式下在 `init` 之后发出 `usage_statistics_notice` 系统消息。
+单元测试覆盖：仅显示一次且仅在送达时写入标记、同进程仅显示一次、使用统计关闭或通过启动环境或操作者设置显式配置时跳过、环境变量来自文件或设置仅在 workspace 中时仍然显示、默认环境与默认标记位置、标记无法写入时再次显示、文本模式立即输出到 stderr，以及 JSON 模式下退出时回退到 stderr。入口测试验证即使随后认证检查失败，提示也在 `config.initialize()` 之前判断；认证校验测试验证挂起的提示在 JSON 与 stream-JSON 下均先于错误 result 发出；无界面测试验证 Mod 启动在 `init` 之后失败时提示同样先于错误 result；适配器测试验证缓冲的 JSON 只在文档写出后才记录标记；被 workspace 覆盖的操作者 `false` 仍会显示提示；无界面测试覆盖 JSON 与 stream-JSON 模式下在 `init` 之后发出 `usage_statistics_notice` 系统消息。
