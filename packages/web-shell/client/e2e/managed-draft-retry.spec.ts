@@ -229,6 +229,9 @@ test('a foreign pending keeps its composer editable and resolves through its own
     await expect(editor).toBeVisible();
   };
 
+  // The foreign-pending banner only restacks below the 640px breakpoint, so
+  // pin a narrow composer instead of the 1280px default this suite inherits.
+  await page.setViewportSize({ width: 480, height: 800 });
   await page.goto('/e2e/fixtures/managed-usability.html');
   await choose('B');
   await editor.fill('Unrelated B draft');
@@ -253,12 +256,37 @@ test('a foreign pending keeps its composer editable and resolves through its own
   await expect(send).toBeDisabled();
   await editor.fill('Unrelated B draft, edited');
   await expect(editor).toContainText('Unrelated B draft, edited');
-  for (const name of [
+  const actions = [
     'Retry the same request',
     'Discard this request',
     'Open the original conversation',
-  ])
-    await expect(page.getByRole('button', { name })).toBeVisible();
+  ].map((name) => page.getByRole('button', { name }));
+  for (const action of actions) {
+    await expect(action).toBeVisible();
+    await expect(action).toBeEnabled();
+    // Narrow composers stack the notice above the action row; a one-row
+    // layout would push these buttons past the viewport edge.
+    const box = (await action.boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(480);
+  }
+  await expect
+    .poll(async () => {
+      const noticeBox = (await foreignNotice.boundingBox())!;
+      const actionBox = (await actions[0].boundingBox())!;
+      return actionBox.y - (noticeBox.y + noticeBox.height);
+    })
+    .toBeGreaterThan(0);
+
+  // Only submission is gated: Enter reaches no submit and keeps the draft.
+  // The unit harness swallows `submitDisabled`, so this is the only level
+  // where a regression in the composer's submit guard turns red.
+  await editor.focus();
+  await editor.press('Enter');
+  await expect.poll(() => requests.length).toBe(1);
+  await expect(editor).toHaveText('Unrelated B draft, edited');
+  await expect(editor).toHaveAttribute('contenteditable', 'true');
+  await expect(send).toBeDisabled();
 
   // Discard resolves in the owner, restoring the draft that only A can hold.
   await page.getByRole('button', { name: 'Discard this request' }).click();
@@ -268,7 +296,9 @@ test('a foreign pending keeps its composer editable and resolves through its own
   await expect(editor).toContainText('For session A only');
   await expect(foreignNotice).toHaveCount(0);
   await choose('B');
-  await expect(editor).toContainText('Unrelated B draft');
+  // The edit made before Discard must survive it: asserting the pre-edit
+  // draft would pass even if Discard rolled the foreign composer back.
+  await expect(editor).toHaveText('Unrelated B draft, edited');
 
   expect(requests).toHaveLength(1);
   expect(unexpected).toEqual([]);
