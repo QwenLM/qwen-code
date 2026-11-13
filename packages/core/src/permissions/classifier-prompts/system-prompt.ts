@@ -335,3 +335,8 @@ export const STAGE2_SUFFIX = `\nStage 1 flagged this as potentially unsafe. \
 Review carefully — false positives hurt user experience. Use the thinking \
 field to reason about it. If safe, set shouldBlock=false. If unsafe, set \
 shouldBlock=true and provide one short sentence in reason.`;
+
+export const MAIN_MODEL_SUFFIX = `\nThe fast classifier timed out without producing a verdict. \
+Independently evaluate the pending action using the rules above. Use the thinking \
+field to reason about it. If safe, set shouldBlock=false. If unsafe, set \
+shouldBlock=true and provide one short sentence in reason.`;
