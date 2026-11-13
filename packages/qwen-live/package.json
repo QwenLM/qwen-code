@@ -39,7 +39,7 @@
   "scripts": {
     "build": "node build.mjs",
     "build:ts": "tsc --build tsconfig.build.json",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo tsconfig.build.tsbuildinfo",
+    "clean": "node -e \"for (const p of ['dist','tsconfig.tsbuildinfo','tsconfig.build.tsbuildinfo']) require('node:fs').rmSync(p,{recursive:true,force:true})\"",
     "test": "vitest run",
     "test:ci": "vitest run",
     "typecheck": "tsc --noEmit",
