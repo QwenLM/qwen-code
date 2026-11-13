@@ -254,8 +254,17 @@ function folderTrustSetting(
       ),
     };
   }
-  if (!('enabled' in folderTrust)) return {};
-  const enabled = (folderTrust as Record<string, unknown>)['enabled'];
+  const record = folderTrust as Record<string, unknown>;
+  if (!('enabled' in record)) {
+    // Files a V1 file was migrated into before the dead target was known to be
+    // wrong carry `featureEnabled` and are already stamped at the current
+    // version, so the version-gated chain above never rewrites them. Read the
+    // leftover key here too: this snapshot is taken before `loadSettings`
+    // repairs the file, and answering "disabled" admits every workspace.
+    const legacy = record['featureEnabled'];
+    return typeof legacy === 'boolean' ? { value: legacy } : {};
+  }
+  const enabled = record['enabled'];
   if (typeof enabled === 'boolean') return { value: enabled };
   return {
     error: policyError(
