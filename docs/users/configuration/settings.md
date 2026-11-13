@@ -442,8 +442,6 @@ The bridge-availability and missing-bridge warning rules below describe direct t
 >
 > **Migrating from `tools.core` / `tools.exclude` / `tools.allowed`:** These legacy settings are **deprecated** but are not automatically migrated; they continue to work at startup. Migrate `tools.allowed` and `tools.exclude` manually to `permissions.allow` and `permissions.deny`. `tools.core` has no exact replacement; see the table below.
 
-With `tools.todoWrite.enabled`, repeating an unchanged task list does not reset the terminal's task panel or bring back tasks from a previous user turn.
-
 #### memory
 
 | Setting                          | Type    | Description                                                                                                                                                                                                                                                                                                                                         | Default |
