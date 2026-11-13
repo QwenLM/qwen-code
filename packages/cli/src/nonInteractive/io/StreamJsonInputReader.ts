@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createInterface } from 'node:readline/promises';
+import { createInterface, type Interface } from 'node:readline/promises';
 import type { Readable } from 'node:stream';
 import process from 'node:process';
 import type {
@@ -24,17 +24,23 @@ export class StreamJsonParseError extends Error {}
 
 export class StreamJsonInputReader {
   private readonly input: Readable;
+  private active: Interface | null = null;
+  private closed = false;
 
   constructor(input: Readable = process.stdin) {
     this.input = input;
   }
 
   async *read(): AsyncGenerator<StreamJsonInputMessage> {
+    if (this.closed) {
+      return;
+    }
     const rl = createInterface({
       input: this.input,
       crlfDelay: Number.POSITIVE_INFINITY,
       terminal: false,
     });
+    this.active = rl;
 
     try {
       for await (const rawLine of rl) {
@@ -46,8 +52,18 @@ export class StreamJsonInputReader {
         yield this.parse(line);
       }
     } finally {
+      this.active = null;
       rl.close();
     }
+  }
+
+  /**
+   * End {@link read} as if the input had reached EOF, so a shutdown signal can
+   * stop a session that is idle waiting for the next message.
+   */
+  close(): void {
+    this.closed = true;
+    this.active?.close();
   }
 
   private parse(line: string): StreamJsonInputMessage {
