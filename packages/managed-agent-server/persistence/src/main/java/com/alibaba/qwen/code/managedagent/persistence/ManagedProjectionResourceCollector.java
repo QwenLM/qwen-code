@@ -53,7 +53,10 @@ final class ManagedProjectionResourceCollector {
     private boolean collect(String tenant, String session, String key) {
         JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
                 jdbc, tenant, JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-        if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
+        // A current read, not the consistent fast path: this transaction's first
+        // plain read would fix its REPEATABLE READ view before lockSessionHead,
+        // hiding a lease committed while it waits on the head lock (R2-1).
+        if (ManagedLegacySessionGuard.isPrivateCurrentRead(jdbc, tenant, session)) {
             return false;
         }
         ToolPublicationRetentionStore.lockSessionHead(jdbc, tenant, session);
