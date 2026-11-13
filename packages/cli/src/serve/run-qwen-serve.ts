@@ -7776,6 +7776,12 @@ async function runQwenServeImpl(
                         skipLoadEnvironment: true,
                         skipWorkspaceSettings: !runtime.trusted,
                         workspaceTrusted: runtime.trusted,
+                        // This runs on a background timer, so it must never
+                        // rewrite the user's file: without this an invalid
+                        // settings.json takes the corruption-recovery path and
+                        // is moved aside. Every other read-only load in the
+                        // daemon passes it too.
+                        preserveInvalidWorkspaceSettings: true,
                       },
                     );
                     merged = webhookRuntime.loadChannelsConfig(

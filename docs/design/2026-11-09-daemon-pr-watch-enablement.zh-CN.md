@@ -121,13 +121,14 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 | `packages/cli/src/serve/server/pr-watch-drain.ts`                 | drain state 上的 `idle()` 落定信号，以及 `stopPrWatch`（停止、等待、再释放）                                                                               |
 | `packages/cli/src/serve/server/pr-watch-store.ts`                 | `releaseOwnedPrWatchSync`：只释放本进程持有的记录                                                                                                          |
 | `packages/cli/src/serve/server/pr-watch-gh-hosts.ts`（新）        | 枚举 daemon 的 `gh` 已配置 hosts                                                                                                                           |
-| `packages/cli/src/serve/server/pr-watch-deps.ts`（新）            | 构建观测与 drain 的 deps：hosts、准入、restore 映射、账本（已落地）                                                                                        |
+| `packages/cli/src/serve/server/pr-watch-deps.ts`（新）            | 构建观测与 drain 的 deps：hosts、准入、restore 映射、账本（随本片 §2 与 §4 落地）                                                                          |
 | `packages/cli/src/serve/run-qwen-serve.ts`                        | 经 late-bound getter 填充两个接缝（hosted channel 变化时重建）；注册关停 drain 与 resume 钩子                                                              |
 | `packages/cli/src/serve/server.ts`                                | 把路由的 session-id 准入与 live-conversation materialize 共享给进程内 wake                                                                                 |
 | `packages/cli/src/serve/process-env-guard.test.ts`                | 登记 deps 模块那处 process-scoped 的 `gh` 配置读取                                                                                                         |
 | `packages/cli/src/serve/server/pr-watch-deps.test.ts`（新）       | 逐接缝用例：允许集、wake 映射、release、准入与账本                                                                                                         |
-| `packages/cli/src/serve/server/session-pr-refresh.test.ts`        | `drainNow` 用例：覆盖声明、关闭开关、信任过滤、惰性                                                                                                        |
-| `packages/cli/src/serve/run-qwen-serve.pr-watch-shutdown.test.ts` | timer 替身补上 `drainNow`；断言不变                                                                                                                        |
+| `packages/cli/src/serve/server/session-pr-refresh.test.ts`        | `drainNow` 用例：覆盖声明、关闭开关、信任过滤、惰性、owner 记录交还、按 session id 清除 `Gone`、以及另一 workspace 的 leader 保持优先                      |
+| `packages/cli/src/serve/run-qwen-serve.pr-watch-shutdown.test.ts` | 真实 daemon 启动：有序停止、托管 channel 的 settings 加载及其信任/env 退出项、带锁承接的重建、serve 根对 drain local 的安装                                |
+| `packages/cli/src/serve/multi-workspace-sessions.test.ts`         | 路由侧钩子对着真正成功的 restore：带 workspace 与 session id 触发；在核心内部失败的 restore 不调度；永不落定的 drain 不阻塞                                |
 | `packages/cli/src/serve/serve-app-lifecycle.ts`                   | 形状不变；新 drain 经既有 `addAppDrain` 注册                                                                                                               |
 | `packages/cli/src/serve/server/pr-watch-observation.ts`           | 按 workspace 把 listing 的键带进轮转决策的 tick 选项（已落地）                                                                                             |
 | `packages/cli/src/serve/server/session-pr-refresh.ts`             | listing→watch 写入与 `listedKeys`（#16847）；`stopWatch` 与 tick 落定信号（#16732）；`drainNow` 受同一开关与信任过滤门控（§2）。无需 `partial` 透传，见 §5 |

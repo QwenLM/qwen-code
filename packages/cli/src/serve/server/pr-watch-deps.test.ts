@@ -442,6 +442,17 @@ describe('createPrWatchDeps', () => {
     expect(drain.resolveRuntime(CWD)).toBe(primary);
   });
 
+  it('resolves the recipient by workspace cwd, not by registry order', async () => {
+    // Every other fixture registers one runtime, so the cwd half of the
+    // predicate was never exercised: returning the first entry would pass.
+    const other = runtime({ workspaceCwd: '/other-ws', workspaceId: 'other' });
+    const target = runtime();
+    const { drain } = build({ runtimes: [other, target] });
+    expect(drain.resolveRuntime(CWD)).toBe(target);
+    expect(drain.resolveRuntime('/other-ws')).toBe(other);
+    expect(drain.resolveRuntime('/absent-ws')).toBeUndefined();
+  });
+
   describe('readPushedHeads', () => {
     const recipient = { sessionId: SESSION, workspaceCwd: CWD, url: URL };
 
@@ -605,6 +616,23 @@ describe('createPrWatchDeps', () => {
       cloneWorktreesOfMock.mockRejectedValue(new Error('git failed'));
       const { drain } = build();
       expect(await drain.readPushedHeads(recipient)).toBeUndefined();
+    });
+
+    it('skips an unreadable root and still reads the next one', async () => {
+      // A directory where the state file belongs makes readState throw. The
+      // per-root catch must continue the scan: a rethrow would abort the seam
+      // and lose the ledger a later root does hold.
+      const bad = path.join(dir, 'bad');
+      const good = path.join(dir, 'good');
+      await fs.mkdir(bad, { recursive: true });
+      await fs.mkdir(good, { recursive: true });
+      await fs.mkdir(autofixPrPaths(bad, 42).statePath, { recursive: true });
+      await seedState(good);
+      cloneWorktreesOfMock.mockResolvedValue([bad, good]);
+      const { drain } = build();
+      expect(await drain.readPushedHeads(recipient)).toEqual(
+        new Set(['b'.repeat(40)]),
+      );
     });
   });
 });

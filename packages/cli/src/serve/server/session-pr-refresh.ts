@@ -1003,7 +1003,18 @@ export function startSessionPrRefreshTimer(deps: {
       // filtering the recipient out until the rejoin horizon expires, and the
       // resume this hook exists for delivers nothing.
       if (sessionId !== undefined) prDrainState.gone.delete(sessionId);
-      await runPrWatchDrainTick([runtime], drainDeps, prDrainState, true);
+      // Recipient selection and the persisted `delivered` ring are global across
+      // workspaces, and coveragePartial gates only the delete/drop branches —
+      // never the delivery decision. Driving this with the resumed workspace
+      // alone would hide a more recent binder in another workspace, deliver to
+      // a lower-priority one, and record the key as delivered, permanently
+      // consuming the transition the leader is owed. So the rows must be as
+      // complete as the periodic tick's, while the trust gate above still
+      // decides whether this resume may drain at all.
+      const watched = deps.workspaceRegistry
+        .listAll()
+        .filter((candidate) => candidate.trusted || candidate.primary);
+      await runPrWatchDrainTick(watched, drainDeps, prDrainState, true);
     },
   };
 }

@@ -2833,7 +2833,10 @@ describe('startSessionPrRefreshTimer', () => {
     const watchDir = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-secondary-'),
     );
-    const scanBindings = vi.fn(async () => ({ bindings: [], partial: false }));
+    const scanBindings = vi.fn(async (_runtime: WorkspaceRuntime) => ({
+      bindings: [],
+      partial: false,
+    }));
     const handle = startSessionPrRefreshTimer({
       workspaceRegistry: registry,
       env: {},
@@ -2851,7 +2854,13 @@ describe('startSessionPrRefreshTimer', () => {
     });
     try {
       await handle?.drainNow(secondaryCwd);
-      expect(scanBindings).toHaveBeenCalledTimes(1);
+      // The trusted non-primary workspace is scanned. The drain now scans every
+      // watched workspace, so assert this one was reached rather than a count.
+      expect(
+        scanBindings.mock.calls.some(
+          ([runtime]) => runtime.workspaceCwd === secondaryCwd,
+        ),
+      ).toBe(true);
       await expect(
         fsp.access(prWatchOwnerPath(watchDir)),
       ).resolves.toBeUndefined();
@@ -2948,6 +2957,117 @@ describe('startSessionPrRefreshTimer', () => {
     } finally {
       handle?.dispose();
       await removeTempTree(watchDir);
+    }
+  });
+
+  it('drainNow keeps a leader in another workspace ahead of a live local binder', async () => {
+    // Recipient choice and the persisted delivered ring are global, while
+    // coveragePartial gates only delete/drop. Scanning just the resumed
+    // workspace would hide the more recent binder, deliver to the local one,
+    // and record the key — consuming the transition the leader is owed.
+    const cwdA = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-leader-a-'),
+    );
+    const cwdB = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-leader-b-'),
+    );
+    const runtimeA = timerRuntime('ws-a', cwdA, true);
+    const runtimeB = timerRuntime('ws-b', cwdB, true, false);
+    const registry = createWorkspaceRegistry([runtimeA, runtimeB]);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-leader-dir-'),
+    );
+    const clock = Date.parse('2026-11-08T00:00:00.000Z');
+    const identity = { host: 'github.com', repo: 'o/r', number: 42 };
+    const key = 'k-leader-other-workspace';
+    writePrWatchStateSync(watchDir, identity, {
+      pr: identity,
+      observedAt: new Date(clock).toISOString(),
+      state: 'open',
+      headSha: 'a'.repeat(40),
+      checks: 'passing',
+      pending: [
+        {
+          type: 'ci_failure',
+          key,
+          summary: 'CI failing',
+          detectedAt: new Date(clock).toISOString(),
+        },
+      ],
+    });
+    const prs = [{ number: 42, url: 'https://github.com/o/r/pull/42' }];
+    const wakeSession = vi.fn(async () => ({
+      kind: 'restored' as const,
+      release: async () => {},
+    }));
+    const admitPrompt = vi.fn(
+      async (
+        _runtime: WorkspaceRuntime,
+        _sessionId: string,
+        _text: string,
+        _key: string,
+      ) => ({ deduplicated: false }),
+    );
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      now: () => clock,
+      observationEnabled: true,
+      getPrDrainDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        scanBindings: async (runtime: WorkspaceRuntime) => ({
+          bindings:
+            runtime.workspaceCwd === cwdA
+              ? [
+                  {
+                    sessionId: 'S_alt',
+                    workspaceCwd: cwdA,
+                    updatedAt: new Date(clock - 60_000).toISOString(),
+                    prs,
+                  },
+                ]
+              : [
+                  {
+                    sessionId: 'S_leader',
+                    workspaceCwd: cwdB,
+                    updatedAt: new Date(clock).toISOString(),
+                    prs,
+                  },
+                ],
+          partial: false,
+        }),
+        resolveRuntime: (cwd: string) => (cwd === cwdA ? runtimeA : runtimeB),
+        // The leader is dormant, the local binder is live: only the complete
+        // row set keeps the drain from preferring the live one.
+        isSessionLive: (_runtime: WorkspaceRuntime, sessionId: string) =>
+          sessionId === 'S_alt',
+        wakeSession,
+        admitPrompt,
+        readPushedHeads: async () => undefined,
+        now: () => clock,
+      }),
+    });
+    try {
+      await handle?.drainNow(cwdA);
+      for (let i = 0; i < 20; i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      // The transition goes to the leader, not to the live local binder. With
+      // a one-workspace row set the leader is invisible and this admission
+      // would name S_alt instead, consuming what the leader is owed.
+      expect(wakeSession).toHaveBeenCalledWith('S_leader', cwdB);
+      expect(admitPrompt).toHaveBeenCalledTimes(1);
+      expect(admitPrompt.mock.calls[0]?.[1]).toBe('S_leader');
+      const after = readPrWatchStateSync(watchDir, identity);
+      expect(after.kind).toBe('state');
+      if (after.kind !== 'state') throw new Error('unreachable');
+      expect(after.state.delivered ?? []).toContain(key);
+    } finally {
+      handle?.dispose();
+      await removeTempTree(watchDir);
+      await removeTempTree(cwdA);
+      await removeTempTree(cwdB);
     }
   });
 

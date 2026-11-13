@@ -2260,6 +2260,26 @@ describe('multi-workspace session dispatch', () => {
     expect(scheduled).toBe(true);
   });
 
+  it('still answers the resume when the scheduled drain throws', async () => {
+    // The hook fires after the response was written, so an escaping throw
+    // would reach sendBridgeError with headers already sent. The inner
+    // try/catch is what keeps a broken drain from corrupting the answer.
+    const { app } = makeHarness();
+    (
+      app.locals as {
+        prWatchDrainNow?: (workspaceCwd: string, sessionId?: string) => void;
+      }
+    ).prWatchDrainNow = () => {
+      throw new Error('drain local blew up');
+    };
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+    expect(res.status).toBe(200);
+    expect(res.body.sessionId).toBe('22222222-2222-4222-a222-222222222222');
+  });
+
   it('restores cold Live load and resume sessions into their server-derived conversation directories', async () => {
     await withStoredLiveCoordinators(
       [LIVE_COLD_LOAD_ID, LIVE_COLD_RESUME_ID],
