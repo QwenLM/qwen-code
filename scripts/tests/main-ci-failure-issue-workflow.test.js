@@ -10,6 +10,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -124,8 +125,12 @@ describe('main CI failure issue workflow', () => {
       'workflows',
     ]);
     expect(workflow).toContain("github.repository == 'QwenLM/qwen-code'");
+    // A job that hits its timeout is reported as a cancelled run, which is
+    // how #16214 went unreported for weeks; the gate has to admit it too — but
+    // only on main: the gate workflows cancel their own in-progress PR runs,
+    // so an unscoped `cancelled` reports a superseded run as a timeout.
     expect(workflow).toContain(
-      'contains(fromJSON(\'["failure","cancelled"]\'), github.event.workflow_run.conclusion)',
+      "github.event.workflow_run.conclusion == 'cancelled'",
     );
     expect(workflow).toContain(
       "github.event.workflow_run.head_branch == 'main'",
@@ -134,13 +139,17 @@ describe('main CI failure issue workflow', () => {
     // that would admit unrelated contributor-triggered runs.
     expect(jobs.analyze.if).toBe(
       "${{ github.repository == 'QwenLM/qwen-code' && " +
-        'contains(fromJSON(\'["failure","cancelled"]\'), github.event.workflow_run.conclusion) && ' +
         "((github.event.workflow_run.head_branch == 'main' && " +
+        "(github.event.workflow_run.conclusion == 'failure' || " +
+        "github.event.workflow_run.conclusion == 'cancelled') && " +
         "(github.event.workflow_run.event == 'push' || " +
         "(github.event.workflow_run.event == 'schedule' && " +
         'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks","tui-parity"]\'), github.event.workflow.name)))) || ' +
-        "(github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') || " +
-        "(github.event.workflow.name == 'Managed Agent gate' && " +
+        "((github.event.workflow_run.conclusion == 'failure' || " +
+        "github.event.workflow_run.conclusion == 'cancelled') && " +
+        "github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') || " +
+        "(github.event.workflow_run.conclusion == 'failure' && " +
+        "github.event.workflow.name == 'Managed Agent gate' && " +
         'contains(fromJSON(\'["pull_request","pull_request_review"]\'), github.event.workflow_run.event))) }}',
     );
     // Only a watched workflow ever raises the event, so a schedule-arm name
@@ -164,12 +173,14 @@ describe('main CI failure issue workflow', () => {
   it.each([
     ['SDK Java', 'workflow_dispatch', 'main', 'failure', true],
     ['SDK Java', 'workflow_dispatch', 'feature', 'failure', true],
+    // A hand-dispatched SDK Java run that hits its cap concludes `cancelled`,
+    // and a dispatch is not superseded by a newer push, so it must be admitted.
+    ['SDK Java', 'workflow_dispatch', 'main', 'cancelled', true],
     ['SDK Python', 'workflow_dispatch', 'main', 'failure', false],
     ['SDK Java', 'schedule', 'main', 'failure', true],
     ['tui-parity', 'schedule', 'main', 'failure', true],
     ['tui-parity', 'schedule', 'main', 'success', false],
     ['tui-parity', 'schedule', 'main', 'cancelled', true],
-    ['E2E Tests', 'push', 'main', 'cancelled', true],
     ['tui-parity', 'schedule', 'main', 'skipped', false],
     ['tui-parity', 'schedule', 'main', 'timed_out', false],
     ['tui-parity', 'schedule', 'feature', 'failure', false],
@@ -270,7 +281,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
 
     it('reports an approval failure with no workflow_run pull_requests association', () => {
       const resolved = resolve([pr()]);
-      expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
+      expect(resolved.output).toBe(
+        'pr_number=14472\nfile_issue=false\nrerun_pending=false\n',
+      );
       expect(resolved.stdout).not.toContain('::warning::');
       expect(resolved.args).toContain('state=all');
       expect(resolved.args).toContain('--paginate');
@@ -289,7 +302,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
           },
         }),
       ]);
-      expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
+      expect(resolved.output).toBe(
+        'pr_number=14472\nfile_issue=false\nrerun_pending=false\n',
+      );
     });
     it('passes the attempt to the destination guard', () => {
       // Without this wiring the guard reads an empty attempt and every
@@ -310,7 +325,7 @@ cat "\${RUNNER_TEMP}/pulls.json"
     });
     it('also files an issue when the failed PR already merged', () => {
       expect(resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })]).output).toBe(
-        'pr_number=14472\nfile_issue=true\n',
+        'pr_number=14472\nfile_issue=true\nrerun_pending=false\n',
       );
     });
     it.each(['pull_request', 'pull_request_review'])(
@@ -325,7 +340,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
           EVENT_NAME: eventName,
           RUN_ATTEMPT: '2',
         });
-        expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
+        expect(resolved.output).toBe(
+          'pr_number=14472\nfile_issue=false\nrerun_pending=false\n',
+        );
         expect(resolved.stdout).toContain(
           "Attempt 2 of the PR's pre-merge workflow",
         );
@@ -339,7 +356,7 @@ cat "\${RUNNER_TEMP}/pulls.json"
           EVENT_NAME: 'workflow_dispatch',
           HEAD_BRANCH: 'ci/java',
         }).output,
-      ).toBe('pr_number=14472\nfile_issue=true\n');
+      ).toBe('pr_number=14472\nfile_issue=true\nrerun_pending=false\n');
     });
 
     it('files a rerun of a fresh dispatch on a merged PR branch', () => {
@@ -352,7 +369,7 @@ cat "\${RUNNER_TEMP}/pulls.json"
           HEAD_BRANCH: 'ci/java',
           RUN_ATTEMPT: '2',
         }).output,
-      ).toBe('pr_number=14472\nfile_issue=true\n');
+      ).toBe('pr_number=14472\nfile_issue=true\nrerun_pending=false\n');
     });
     it('falls back to filing when the attempt is unreadable', () => {
       // The guard must not turn a missing payload field into silence: before
@@ -361,7 +378,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
       const resolved = resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })], {
         RUN_ATTEMPT: '',
       });
-      expect(resolved.output).toBe('pr_number=14472\nfile_issue=true\n');
+      expect(resolved.output).toBe(
+        'pr_number=14472\nfile_issue=true\nrerun_pending=false\n',
+      );
       expect(resolved.stdout).toContain(
         'No run_attempt in the workflow_run payload',
       );
@@ -374,7 +393,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
         const resolved = resolve([
           pr({ head: { sha: 'new-head', repo: { full_name: repo } } }),
         ]);
-        expect(resolved.output).toBe('pr_number=\nfile_issue=false\n');
+        expect(resolved.output).toBe(
+          'pr_number=\nfile_issue=false\nrerun_pending=false\n',
+        );
         expect(resolved.stdout).toContain('::warning::');
       }
     });
@@ -383,12 +404,14 @@ cat "\${RUNNER_TEMP}/pulls.json"
       // closed-unmerged PR satisfies every other term but must not be handed
       // a permanent bot comment.
       const closed = resolve([pr({ state: 'closed' })]);
-      expect(closed.output).toBe('pr_number=\nfile_issue=false\n');
+      expect(closed.output).toBe(
+        'pr_number=\nfile_issue=false\nrerun_pending=false\n',
+      );
       expect(closed.stdout).toContain('::warning::');
       expect(
         resolve([pr({ state: 'closed', merged_at: '2026-10-17T16:15:57Z' })])
           .output,
-      ).toBe('pr_number=14472\nfile_issue=true\n');
+      ).toBe('pr_number=14472\nfile_issue=true\nrerun_pending=false\n');
     });
     it('never files an issue for a contributor-triggered run, even on a main-named branch', () => {
       // A fork PR can be opened from the contributor's own main branch
@@ -410,7 +433,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
           HEAD_REPO: 'someone/qwen-code',
         },
       );
-      expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
+      expect(resolved.output).toBe(
+        'pr_number=14472\nfile_issue=false\nrerun_pending=false\n',
+      );
     });
     it.each(['workflow_dispatch', 'schedule'])(
       'files a main %s failure without a PR',
@@ -419,7 +444,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
           EVENT_NAME: event,
           HEAD_BRANCH: 'main',
         });
-        expect(resolved.output).toBe('pr_number=\nfile_issue=true\n');
+        expect(resolved.output).toBe(
+          'pr_number=\nfile_issue=true\nrerun_pending=false\n',
+        );
         expect(resolved.args).toBe('');
         expect(resolved.stdout).not.toContain('::warning::');
       },
@@ -434,7 +461,7 @@ cat "\${RUNNER_TEMP}/pulls.json"
           HEAD_BRANCH: 'main',
           RUN_ATTEMPT: '2',
         }).output,
-      ).toBe('pr_number=\nfile_issue=true\n');
+      ).toBe('pr_number=\nfile_issue=true\nrerun_pending=false\n');
     });
     it('warns and reports nothing when the run resolves to no destination', () => {
       // A manual dispatch on a branch with no open PR is admitted and then
@@ -444,9 +471,252 @@ cat "\${RUNNER_TEMP}/pulls.json"
         EVENT_NAME: 'workflow_dispatch',
         HEAD_BRANCH: 'ci/java-experiment',
       });
-      expect(resolved.output).toBe('pr_number=\nfile_issue=false\n');
+      expect(resolved.output).toBe(
+        'pr_number=\nfile_issue=false\nrerun_pending=false\n',
+      );
       expect(resolved.stdout).toContain('::warning::');
     });
+    it('dispatches a timed-out run it does not yet file', () => {
+      // The destination clears `file_issue` for exactly the timeout that still
+      // has reruns left. Gating the dispatch on that same flag skipped the
+      // rerun as well, so the run was neither re-executed nor filed and the
+      // timeout disappeared (#16214). `rerun_pending` carries the dispatch.
+      const resolved = resolve([], {
+        EVENT_NAME: 'push',
+        HEAD_BRANCH: 'main',
+        HEAD_SHA: 'tested-head',
+        CANCELLATION_KIND: 'timeout',
+        TIMEOUT_ATTEMPTS_EXHAUSTED: 'false',
+        TIMEOUT_ANNOTATIONS_READABLE: 'true',
+      });
+
+      expect(resolved.output).toContain('file_issue=false');
+      expect(resolved.output).toContain('rerun_pending=true');
+      const evaluate = (condition, needs) =>
+        new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
+          needs,
+          () => true,
+        );
+      const needs = {
+        analyze: {
+          result: 'success',
+          outputs: {
+            infra_only: 'false',
+            file_issue: 'false',
+            rerun_pending: 'true',
+            cancellation_kind: 'timeout',
+            timeout_attempts_exhausted: 'false',
+            provisional: 'false',
+            // A main push writes `pr_number=` and a never-written output is
+            // `''` to Actions, so the fixture models the empty string the
+            // workflow actually sees rather than an absent key.
+            pr_number: '',
+          },
+        },
+        // The dispatch the `if:` above admits has succeeded, which is the
+        // only state in which the rerun owns the outcome.
+        rerun_infra: { result: 'success' },
+      };
+      expect(evaluate(String(jobs.rerun_infra.if), needs)).toBe(true);
+      expect(evaluate(String(jobs.file_issue.if), needs)).toBe(false);
+      // The rerun owns the outcome, so no PR comment may claim a failure now:
+      // a green rerun is rejected by the analyze gate and there is no DELETE
+      // path, so the red comment would stay for a run whose last attempt passed.
+      expect(evaluate(String(jobs.report_pr.if), needs)).toBe(false);
+      // A rerun that never dispatched leaves `file_issue` false too, so the
+      // comment is the only record of the timeout and must still post.
+      // A rerun that never dispatched leaves `file_issue` false too, so the
+      // comment is the only record of the timeout and must still post. That
+      // needs a PR to post on: a main push writes `pr_number=` and files the
+      // issue instead, so this models a merged PR's dispatch, where the
+      // workflow's own comment says both writers run.
+      expect(
+        evaluate(String(jobs.report_pr.if), {
+          ...needs,
+          analyze: {
+            ...needs.analyze,
+            outputs: {
+              ...needs.analyze.outputs,
+              comment_body: '### x failed',
+              pr_number: '14472',
+            },
+          },
+          rerun_infra: { result: 'failure' },
+        }),
+      ).toBe(true);
+    });
+
+    it('files a provisional timeout instead of deferring to a rerun that never runs', () => {
+      // A provisional report and a timeout deferral cancel each other out:
+      // `rerun_infra` refuses a provisional run, and `file_issue` refuses a
+      // rerun_pending one, so the occurrence was neither rerun nor filed. The
+      // head is already replaced, so the report is the only record of it.
+      const resolved = resolve([], {
+        EVENT_NAME: 'push',
+        HEAD_BRANCH: 'main',
+        HEAD_SHA: 'tested-head',
+        CANCELLATION_KIND: 'timeout',
+        TIMEOUT_ATTEMPTS_EXHAUSTED: 'false',
+        TIMEOUT_ANNOTATIONS_READABLE: 'true',
+        PROVISIONAL: 'true',
+      });
+
+      expect(resolved.output).toContain('file_issue=true');
+      expect(resolved.output).toContain('rerun_pending=false');
+      const evaluate = (condition, needs) =>
+        new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
+          needs,
+          () => true,
+        );
+      const needs = {
+        analyze: {
+          result: 'success',
+          outputs: {
+            infra_only: 'false',
+            file_issue: 'true',
+            rerun_pending: 'false',
+            cancellation_kind: 'timeout',
+            timeout_attempts_exhausted: 'false',
+            provisional: 'true',
+          },
+        },
+        rerun_infra: { result: 'skipped' },
+      };
+      expect(evaluate(String(jobs.rerun_infra.if), needs)).toBe(false);
+      expect(evaluate(String(jobs.file_issue.if), needs)).toBe(true);
+    });
+
+    it('files rather than reruns a timeout it only guessed at', () => {
+      // The annotation read failed, so the timeout classification is a guess.
+      // Reporting it is right; buying a whole-matrix rerun on a guess is not,
+      // because the run it would replay may be a superseded one.
+      const resolved = resolve([], {
+        EVENT_NAME: 'push',
+        HEAD_BRANCH: 'main',
+        HEAD_SHA: 'tested-head',
+        CANCELLATION_KIND: 'timeout',
+        TIMEOUT_ATTEMPTS_EXHAUSTED: 'false',
+        TIMEOUT_ANNOTATIONS_READABLE: 'false',
+      });
+
+      expect(resolved.output).toContain('file_issue=true');
+      expect(resolved.output).toContain('rerun_pending=false');
+      expect(resolved.stdout).toContain(
+        'Timeout inferred from an unreadable annotation list',
+      );
+    });
+    it('does not file a timed-out run that resolves to no filing destination', () => {
+      // A `workflow_dispatch` of SDK Java on a branch with an open unmerged PR
+      // is admitted for `cancelled`, and the destination resolves pr_number
+      // with file_issue=false. Forcing file_issue here would file a
+      // main-regression issue for an unmerged head — what the allow-list
+      // exists to prevent — and would buy `actions: write` for a destination
+      // that files nothing.
+      const resolved = resolve([pr({ head: { sha: 'tested-head' } })], {
+        EVENT_NAME: 'workflow_dispatch',
+        HEAD_BRANCH: 'ci/java',
+        HEAD_SHA: 'tested-head',
+        CANCELLATION_KIND: 'timeout',
+        TIMEOUT_ATTEMPTS_EXHAUSTED: 'false',
+        TIMEOUT_ANNOTATIONS_READABLE: 'true',
+      });
+
+      expect(resolved.output).toContain('pr_number=14472');
+      expect(resolved.output).toContain('file_issue=false');
+      expect(resolved.output).toContain('rerun_pending=false');
+      expect(resolved.stdout).toContain('no filing destination');
+
+      // That combination has no other writer: no rerun, no issue. The summary
+      // step must still build the body, or report_pr has nothing to post and
+      // the timeout disappears entirely.
+      const summary = jobs.analyze.steps.find((step) => step.id === 'summary');
+      const evaluateSummary = (steps) =>
+        new Function(
+          'steps',
+          'success',
+          `return (${String(summary.if).slice(3, -2)});`,
+        )(steps, () => true);
+      const destinationOutputs = () => ({
+        pr_number: '14472',
+        file_issue: 'false',
+        rerun_pending: 'false',
+      });
+      expect(
+        evaluateSummary({
+          destination: { outputs: destinationOutputs() },
+          live: { outputs: { cancellation_kind: 'timeout' } },
+        }),
+      ).toBe(true);
+      // A superseded run resolves to no destination at all — the destination
+      // step is gated on `superseded != 'true'`, so it writes `pr_number=` —
+      // and must not start building a comment.
+      expect(
+        evaluateSummary({
+          destination: {
+            outputs: {
+              pr_number: '',
+              file_issue: 'false',
+              rerun_pending: 'false',
+            },
+          },
+          live: { outputs: { cancellation_kind: 'superseded' } },
+        }),
+      ).toBe(false);
+    });
+
+    it('files when the rerun it deferred to could not be dispatched', () => {
+      // The destination leaves file_issue false for exactly the timeout whose
+      // filing the rerun inherits. If that dispatch then dies (5xx, 403/409,
+      // a secondary rate limit) the run leaves no issue, no comment and no
+      // rerun — the #16214 silence this workflow exists to end.
+      const evaluate = (condition, needs) =>
+        new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
+          needs,
+          () => true,
+        );
+      const needs = {
+        analyze: {
+          result: 'success',
+          outputs: {
+            infra_only: 'false',
+            file_issue: 'false',
+            rerun_pending: 'true',
+            cancellation_kind: 'timeout',
+            timeout_attempts_exhausted: 'false',
+            provisional: 'false',
+          },
+        },
+        rerun_infra: { result: 'failure' },
+      };
+      expect(evaluate(String(jobs.file_issue.if), needs)).toBe(true);
+    });
+
+    it('does not double-file when the rerun was skipped rather than attempted', () => {
+      // A skipped rerun is a provisional or unreadable-annotation run, and
+      // both file through their own destination path. `!= 'success'` here
+      // would file every one of them a second time.
+      const evaluate = (condition, needs) =>
+        new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
+          needs,
+          () => true,
+        );
+      const needs = {
+        analyze: {
+          result: 'success',
+          outputs: {
+            infra_only: 'false',
+            file_issue: 'false',
+            rerun_pending: 'true',
+            cancellation_kind: 'timeout',
+            timeout_attempts_exhausted: 'false',
+            provisional: 'false',
+          },
+        },
+        rerun_infra: { result: 'skipped' },
+      };
+      expect(evaluate(String(jobs.file_issue.if), needs)).toBe(false);
+    });
+
     it('degrades to no destination when the PR listing fails', () => {
       // The lookup must fail soft like its neighbouring reads: a transient
       // API error aborting this step would fail the analyze job and lose
@@ -454,7 +724,9 @@ cat "\${RUNNER_TEMP}/pulls.json"
       for (const body of ['{"message": "Bad credentials"}', '']) {
         const gh = `#!/usr/bin/env bash\nprintf '%s' '${body}'\nexit 1\n`;
         const resolved = resolve([], {}, gh);
-        expect(resolved.output).toBe('pr_number=\nfile_issue=false\n');
+        expect(resolved.output).toBe(
+          'pr_number=\nfile_issue=false\nrerun_pending=false\n',
+        );
         expect(resolved.stdout).toContain('::warning::');
       }
     });
@@ -587,7 +859,9 @@ printf '%s\\n' '1'
       const resolved = classifyCancel([
         'The job has exceeded the maximum execution time of 1h0m0s',
       ]);
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('execution-time timeout');
     });
 
@@ -596,7 +870,9 @@ printf '%s\\n' '1'
         'The job has exceeded the maximum execution time of 1h0m0s',
         'The runner has received a shutdown signal.',
       ]);
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('execution-time timeout');
     });
 
@@ -658,13 +934,17 @@ printf '%s\\n' '1'
         { RUN_CONCLUSION: 'cancelled' },
         { ghScript },
       );
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('failing open');
     });
 
     it('fails open and reports an unclassifiable cancellation annotation', () => {
       const resolved = classifyCancel(['Some unrelated annotation.']);
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('failing open');
     });
 
@@ -734,7 +1014,9 @@ printf '%s\\n' '1'
         { RUN_CONCLUSION: 'cancelled' },
         { ghScript },
       );
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('failing open');
     });
 
@@ -755,7 +1037,9 @@ printf '%s\\n' '1'
         { RUN_CONCLUSION: 'cancelled' },
         { ghScript },
       );
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('failing open');
     });
 
@@ -774,7 +1058,9 @@ printf '%s\\n' '1'
         },
         { mainTip: 'new-head' },
       );
-      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('::warning::');
       expect(resolved.stdout).not.toContain('main is now');
       expect(resolved.calls).not.toContain('commits/main');
@@ -805,22 +1091,28 @@ printf '%s\\n' '1'
       );
     });
     it('reports the attempt that is still the latest', () => {
-      expect(detect('1').output).toBe('superseded=false\nprovisional=false\n');
+      expect(detect('1').output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(detect('2', { RUN_ATTEMPT: '2' }).output).toBe(
-        'superseded=false\nprovisional=false\n',
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
       // Stale-attempt supersession is independent of the tip comparison:
       // a bare event never reaches the push arm, and the nightly schedule
       // arm is exempt from it. Folding the attempt check inside that arm
       // would file an issue for an already-green rerun (#14768's shape).
-      expect(detect('2').output).toBe('superseded=true\nprovisional=false\n');
+      expect(detect('2').output).toBe(
+        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(
         detect('2', {
           EVENT_NAME: 'schedule',
           HEAD_BRANCH: 'main',
           HEAD_SHA: 'old-head',
         }).output,
-      ).toBe('superseded=true\nprovisional=false\n');
+      ).toBe(
+        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
     });
     it('skips a push run when main has advanced past its head', () => {
       // Run 39777472391's push run tested 06e59666, main moved on to
@@ -837,7 +1129,9 @@ printf '%s\\n' '1'
         },
         { mainTip: '3d65e23cf62e00da033dccb8f60f9cfdd9c1b76e' },
       );
-      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain(
         'main is now 3d65e23cf62e00da033dccb8f60f9cfdd9c1b76e',
       );
@@ -864,7 +1158,9 @@ printf '%s\\n' '1'
         },
         { mainTip: 'new-head', successor: 'none' },
       );
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('no newer push run');
       expect(resolved.calls).toContain(
         'actions/workflows/12345/runs?event=push&branch=main&head_sha=new-head&per_page=1',
@@ -883,7 +1179,9 @@ printf '%s\\n' '1'
         },
         { mainTip: 'new-head', successor: 'completed skipped' },
       );
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('completed skipped');
       expect(resolved.stdout).toContain('does not own this result');
       expect(resolved.summary).toBe('');
@@ -908,7 +1206,9 @@ printf '%s\\n' '1'
         { EVENT_NAME: 'push', HEAD_BRANCH: 'main', HEAD_SHA: 'old-head' },
         { ghScript },
       );
-      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('the newer push run owns its result');
     });
     it('lets a fail-open cancelled successor own the result (no duplicate)', () => {
@@ -933,7 +1233,9 @@ printf '%s\\n' '1'
         { EVENT_NAME: 'push', HEAD_BRANCH: 'main', HEAD_SHA: 'old-head' },
         { ghScript },
       );
-      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('the newer push run owns its result');
     });
     it('evaluates the successor jq projection end to end, including the id and attempt fields', () => {
@@ -969,7 +1271,9 @@ exit 1
         { EVENT_NAME: 'push', HEAD_BRANCH: 'main', HEAD_SHA: 'old-head' },
         { ghScript },
       );
-      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('the newer push run owns its result');
       // Shape pin on the projection itself: both fields the deferral binds
       // must survive any edit to the jq expression.
@@ -997,7 +1301,9 @@ printf '%s\\n' '1'
         { EVENT_NAME: 'push', HEAD_BRANCH: 'main', HEAD_SHA: 'old-head' },
         { ghScript },
       );
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('does not own this result');
     });
     it('does not let a concurrency-cancelled successor swallow the report', () => {
@@ -1022,7 +1328,9 @@ printf '%s\\n' '1'
         { EVENT_NAME: 'push', HEAD_BRANCH: 'main', HEAD_SHA: 'old-head' },
         { ghScript },
       );
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('does not own this result');
     });
     it('reports a push run whose successor has not settled, flagged provisional', () => {
@@ -1051,7 +1359,9 @@ printf '%s\\n' '1'
           },
           { mainTip: 'new-head', successor },
         );
-        expect(resolved.output).toBe('superseded=false\nprovisional=true\n');
+        expect(resolved.output).toBe(
+          'superseded=false\nprovisional=true\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+        );
         expect(resolved.stdout).toContain(
           `${successor}, so this report is provisional`,
         );
@@ -1068,7 +1378,9 @@ printf '%s\\n' '1'
         },
         { mainTip: 'new-head', failCall: 'newer-runs' },
       );
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain(
         'Could not list the newer runs of workflow 12345',
       );
@@ -1087,7 +1399,9 @@ printf '%s\\n' '1'
         },
         { mainTip: 'new-head', successor: 'completed failure' },
       );
-      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('main is now new-head');
       expect(resolved.calls).toContain('commits/main');
     });
@@ -1105,7 +1419,9 @@ printf '%s\\n' '1'
         },
         { mainTip: 'new-head', successor: 'none' },
       );
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('no newer push run');
       expect(resolved.calls).toContain('commits/main');
     });
@@ -1119,7 +1435,9 @@ printf '%s\\n' '1'
         },
         { mainTip: 'tested-head' },
       );
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).not.toContain('::warning::');
       expect(resolved.calls).toContain('commits/main');
     });
@@ -1135,7 +1453,9 @@ printf '%s\\n' '1'
         },
         { mainTip: '' },
       );
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
     });
     it('does not compare a scheduled run with the tip of main', () => {
       // A schedule runs at its own head and is the only signal macOS and
@@ -1150,7 +1470,9 @@ printf '%s\\n' '1'
         },
         { mainTip: 'new-head' },
       );
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.calls).not.toContain('commits/main');
     });
     it.each([['pull_request'], ['pull_request_review'], ['workflow_dispatch']])(
@@ -1169,7 +1491,9 @@ printf '%s\\n' '1'
           },
           { mainTip: 'new-head' },
         );
-        expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+        expect(resolved.output).toBe(
+          'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+        );
         expect(resolved.calls).not.toContain('commits/main');
       },
     );
@@ -1183,7 +1507,9 @@ printf '%s\\n' '1'
         },
         { mainTip: 'new-head', failCall: 'tip' },
       );
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('Could not read the tip of main');
       expect(resolved.calls).toContain('commits/main');
     });
@@ -1199,7 +1525,9 @@ printf '%s\\n' '1'
         },
         { mainTip: 'new-head' },
       );
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.calls).not.toContain('commits/main');
     });
     it('fails open when the live run cannot be read', () => {
@@ -1207,7 +1535,9 @@ printf '%s\\n' '1'
       // for a real failure beats silently dropping it.
       const gh = `#!/usr/bin/env bash\nprintf '%s' '{"message":"Bad credentials"}'\nexit 1\n`;
       const resolved = detect('', {}, { ghScript: gh });
-      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
       expect(resolved.stdout).toContain('::warning::');
       expect(resolved.stdout).toContain('Could not read run 39237270547');
     });
@@ -1215,9 +1545,153 @@ printf '%s\\n' '1'
       // -gt coerces an empty operand to 0, so a field-less event would read
       // as superseded and suppress every report.
       expect(detect('2', { RUN_ATTEMPT: '' }).output).toBe(
-        'superseded=false\nprovisional=false\n',
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
       );
     });
+
+    describe('cancelled runs', () => {
+      const cancelledGh = (annotations) => `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/calls.log"
+case "$*" in
+  *attempts/*jobs*)
+    printf '%s' '{"jobs":[{"conclusion":"cancelled","check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}]}'
+    ;;
+  *check-runs/*annotations*)
+    printf '%s' '${annotations}'
+    ;;
+  *commits/main*)
+    printf '%s\\n' 'head'
+    ;;
+  *actions/workflows/*/runs*)
+    printf '%s\\n' 'completed success'
+    ;;
+  *)
+    printf '%s\\n' '1'
+    ;;
+esac
+`;
+
+      it('reports a run cancelled by a job timeout', () => {
+        // #16214: the sandbox:docker shard hit its 60-minute cap on cold
+        // hosts, GitHub concluded the run `cancelled`, and the failure
+        // tracker ignored it for weeks.
+        const resolved = detect(
+          '1',
+          { CONCLUSION: 'cancelled', EVENT_NAME: 'push', HEAD_BRANCH: 'main' },
+          {
+            ghScript: cancelledGh(
+              'The job has exceeded the maximum execution time of 1h0m0s',
+            ),
+          },
+        );
+        expect(resolved.output).toBe(
+          'superseded=false\nprovisional=false\ncancellation_kind=timeout\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=true\n',
+        );
+        expect(resolved.stdout).toContain('cancelled by a job timeout');
+      });
+
+      it('skips a run a concurrent run superseded', () => {
+        // Same conclusion, opposite meaning: no job timed out, the newer run
+        // owns the result. Reporting it would file an issue per supersede.
+        const resolved = detect(
+          '1',
+          { CONCLUSION: 'cancelled', EVENT_NAME: 'push', HEAD_BRANCH: 'main' },
+          { ghScript: cancelledGh('The operation was canceled.') },
+        );
+        expect(resolved.output).toBe(
+          'superseded=true\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+        );
+        expect(resolved.stdout).toContain('superseded it and owns the result');
+      });
+
+      it('fails open when the cancelled job list cannot be read', () => {
+        const gh = `#!/usr/bin/env bash\nprintf '%s' '{"message":"Bad credentials"}'\nexit 1\n`;
+        const resolved = detect(
+          '1',
+          { CONCLUSION: 'cancelled', EVENT_NAME: 'push', HEAD_BRANCH: 'main' },
+          { ghScript: gh },
+        );
+        expect(resolved.output).toBe(
+          'superseded=false\nprovisional=false\ncancellation_kind=timeout\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+        );
+        expect(resolved.stdout).toContain('::warning::');
+      });
+
+      it('stops rerunning a timed-out run once its attempts are spent', () => {
+        // Each attempt of a run that keeps exceeding a lane's `timeout-minutes`
+        // reruns the whole matrix, and its completion re-enters here, so
+        // without a bound the loop never ends.
+        const resolved = detect(
+          '3',
+          {
+            CONCLUSION: 'cancelled',
+            EVENT_NAME: 'push',
+            HEAD_BRANCH: 'main',
+            RUN_ATTEMPT: '3',
+          },
+          {
+            ghScript: cancelledGh(
+              'The job has exceeded the maximum execution time of 1h0m0s',
+            ),
+          },
+        );
+        expect(resolved.output).toContain('timeout_attempts_exhausted=true');
+        expect(resolved.stdout).toContain('filing instead of rerunning');
+        // The gate that dispatches the rerun must refuse once exhausted, or
+        // the writer's decision never reaches it. `rerun_pending` is the
+        // destination's answer to exactly this question: it stays false once
+        // the attempt budget is spent, and is the flag a timeout dispatches on.
+        expect(String(jobs.rerun_infra.if)).toContain(
+          "needs.analyze.outputs.rerun_pending == 'true'",
+        );
+        // The exhausted run files through `file_issue`, which the destination
+        // leaves true because `timeout_pending_rerun` is false past the limit.
+        // The gate must not also require `timeout_attempts_exhausted`: that
+        // flag is set only at `RUN_ATTEMPT >= 3` while `infra_only` is set
+        // only at attempt 1, so requiring both makes the disjunct dead.
+        const evaluate = (condition, needs) =>
+          new Function(
+            'needs',
+            'always',
+            `return (${condition.slice(3, -2)});`,
+          )(needs, () => true);
+        expect(
+          evaluate(String(jobs.file_issue.if), {
+            analyze: {
+              result: 'success',
+              outputs: {
+                file_issue: 'true',
+                rerun_pending: 'false',
+                infra_only: 'false',
+                timeout_attempts_exhausted: 'true',
+                provisional: 'false',
+              },
+            },
+            rerun_infra: { result: 'skipped' },
+          }),
+        ).toBe(true);
+      });
+
+      it('keeps rerunning a timed-out run below the attempt limit', () => {
+        const resolved = detect(
+          '2',
+          {
+            CONCLUSION: 'cancelled',
+            EVENT_NAME: 'push',
+            HEAD_BRANCH: 'main',
+            RUN_ATTEMPT: '2',
+          },
+          {
+            ghScript: cancelledGh(
+              'The job has exceeded the maximum execution time of 1h0m0s',
+            ),
+          },
+        );
+        expect(resolved.output).toContain('timeout_attempts_exhausted=false');
+        expect(resolved.stdout).not.toContain('filing instead of rerunning');
+      });
+    });
+
     it('gates every failure reader on the supersession check', () => {
       // Without this wiring the check would run and still file the issue; the
       // order matters too, because a gate reading an empty output is a no-op.
@@ -2394,13 +2868,24 @@ fi
       'actions/runs/${run_id}/attempts/${attempt}/jobs?per_page=100"',
     );
     expect(classifierScript).toContain('--paginate > "${pages}"');
+    // This workflow still classifies inline rather than through
+    // classify-cancelled-run.sh, so it owns two reads: the classifier's (which
+    // must work before it knows this is a timeout) and the download's. The
+    // pattern admits both spellings of the attempt variable, because matching
+    // only the literal left the count reading 1 against two real reads.
+    const jobReads = (
+      workflow.match(
+        /actions\/runs\/\$\{WORKFLOW_RUN_ID\}\/attempts\/\$\{RUN_ATTEMPT(?::-1)?\}\/jobs/g,
+      ) ?? []
+    ).length;
+    expect(jobReads).toBe(2);
     // The ids projection is bound to the array the download loop iterates and to
     // the payload the fetch wrote. Swapping it with the TSV projection below
     // hands the reader whole TSV lines so every log download 404s. Renaming
     // the array on one side loses failing-test details while the job/step
     // summary still renders.
     expect(download).toContain(
-      'job_ids=() while IFS= read -r job_id; do job_ids+=("${job_id}") done < <( jq -r \'.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .id\' "${jobs_json}" 2>/dev/null )',
+      'job_ids=() while IFS= read -r job_id; do job_ids+=("${job_id}") done < <( jq -r \'.jobs[] | select(.conclusion == "failure") | .id\' "${jobs_json}" 2>/dev/null cat "${timed_out_job_ids}" )',
     );
     expect(download).toContain(
       'for job_id in ${job_ids[@]+"${job_ids[@]}"}; do',
@@ -2410,8 +2895,9 @@ fi
     // before a failure summary is rendered, and the `2>/dev/null` that keeps the
     // resulting jq parse error out of the log.
     expect(download).toContain(
-      'jq -r \'.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | [.name] + [.steps[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .name] | @tsv\' "${jobs_json}" 2>/dev/null > "${RUNNER_TEMP}/failed-jobs.tsv" || true',
+      'jq -r \'.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure" or .conclusion == "cancelled") | .name] | @tsv\' "${jobs_json}" 2>/dev/null',
     );
+    expect(download).toContain('> "${RUNNER_TEMP}/failed-jobs.tsv" || true');
     // Keep the TSV job details in the analysis payload. The span ends at the
     // first analysis redirect, so the later comment invocation cannot satisfy it.
     const analyzeInvocation = summary.match(
@@ -2420,6 +2906,68 @@ fi
     expect(analyzeInvocation, 'the analyze invocation').toContain(
       '--jobs "${RUNNER_TEMP}/failed-jobs.tsv"',
     );
+  });
+
+  it('counts only the cancelled job that timed out, not its siblings', () => {
+    // A job timeout cancels the whole run, so GitHub concludes every in-flight
+    // sibling `cancelled` as well. Admitting all of them reports one failure
+    // per shard for the single lane that exceeded its cap and downloads every
+    // sibling's log inside this job's ten-minute budget.
+    const step = jobs.analyze.steps.find(
+      (candidate) => candidate.name === 'Download failed job logs',
+    );
+    const tmp = mkdtempSync(join(tmpdir(), 'java-ci-download-'));
+    try {
+      writeFileSync(
+        join(tmp, 'gh'),
+        `#!/usr/bin/env bash
+case "$*" in
+  *"/jobs?per_page"*)
+    printf '%s\n' '{"jobs":[
+      {"id":101,"name":"shard 1","conclusion":"cancelled","check_run_url":"https://api.github.com/repos/o/r/check-runs/9001"},
+      {"id":102,"name":"shard 2","conclusion":"cancelled","check_run_url":"https://api.github.com/repos/o/r/check-runs/9002"}
+    ],"total_count":2}'
+    ;;
+  *"jobs/101/logs"*)
+    printf '%s\n' 'shard 1 log'
+    ;;
+  *"check-runs/9001/annotations"*)
+    printf '%s\n' '[{"message":"The job has exceeded the maximum execution time of 1h0m0s"}]'
+    ;;
+  *"check-runs/9002/annotations"*)
+    printf '%s\n' '[{"message":"The job was cancelled."}]'
+    ;;
+  *)
+    printf '%s\n' ''
+    ;;
+esac
+`,
+      );
+      chmodSync(join(tmp, 'gh'), 0o755);
+      const result = spawnSync('bash', ['-eo', 'pipefail', '-c', step.run], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${tmp}:${process.env.PATH}`,
+          RUNNER_TEMP: tmp,
+          REPO: 'QwenLM/qwen-code',
+          WORKFLOW_RUN_ID: '39237270547',
+          RUN_ATTEMPT: '1',
+          CANCELLATION_KIND: 'timeout',
+          GITHUB_OUTPUT: join(tmp, 'output'),
+        },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const downloaded = existsSync(join(tmp, 'failed-logs'))
+        ? readdirSync(join(tmp, 'failed-logs'))
+        : [];
+      expect(downloaded).toEqual(['101.log']);
+      const tsv = readFileSync(join(tmp, 'failed-jobs.tsv'), 'utf8');
+      expect(tsv).toContain('shard 1');
+      expect(tsv).not.toContain('shard 2');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   it('reads the jobs of the event attempt, not the latest attempt', () => {
@@ -2593,6 +3141,106 @@ printf '%s\\n' '{"jobs":[]}'
     expect(workflow).toContain('echo "body<<${delim}"');
     expect(workflow).toContain('echo "${delim}"');
     expect(workflow).not.toContain('body<<QWEN_MAIN_CI_FAILURE_BODY\n');
+  });
+
+  describe('timeout rendering', () => {
+    const renderWith = (jobs, timedOutJobIds) =>
+      renderFailureComment({
+        analysis: { workflow: 'E2E Tests', tests: [] },
+        occurrence: {
+          sha: 'abc123456789',
+          runId: '42227747366',
+          runUrl:
+            'https://github.com/QwenLM/qwen-code/actions/runs/42227747366',
+        },
+        jobs,
+        cancellationKind: 'timeout',
+        ...(timedOutJobIds === undefined ? {} : { timedOutJobIds }),
+      });
+
+    // Run 42227747366 has both shapes: the lane that hit its cap carries a
+    // failed step before the cancel, and its siblings carry none.
+    const shard = (n, steps) => ({
+      id: 100 + n,
+      name: `E2E Test (Linux) - sandbox:docker - shard ${n}/5`,
+      conclusion: 'cancelled',
+      html_url: `https://github.com/QwenLM/qwen-code/runs/${100 + n}`,
+      steps,
+    });
+    const timedOutLane = shard(1, [
+      { name: 'Run E2E tests', conclusion: 'failure' },
+    ]);
+    const collateral = [2, 3, 4, 5].map((n) =>
+      shard(n, [{ name: 'Set up Docker', conclusion: 'cancelled' }]),
+    );
+
+    it('names only the lane whose annotation named the timeout', () => {
+      // The step-shape heuristic alone cannot do this: a sibling cancelled
+      // mid-step looks the same as the lane that timed out, so the filed
+      // issue named five broken lanes for the one that hit its cap.
+      const body = renderWith(
+        [timedOutLane, ...collateral],
+        [String(timedOutLane.id)],
+      );
+      expect(body).toContain('shard 1/5');
+      for (const n of [2, 3, 4, 5]) {
+        expect(body).not.toContain(`shard ${n}/5`);
+      }
+    });
+
+    it('names a timed-out sibling whose own steps show no failure', () => {
+      // The timed-out job's conclusion is `cancelled`, so reverting to
+      // failure-only would drop it from the report entirely.
+      const quiet = shard(2, [
+        { name: 'Run E2E tests', conclusion: 'cancelled' },
+      ]);
+      const body = renderWith([quiet], [String(quiet.id)]);
+      expect(body).toContain('shard 2/5');
+    });
+
+    it('still renders without an explicit timed-out set', () => {
+      // The workflow passes the set; a caller that has none keeps the older
+      // step-shape heuristic rather than rendering an empty report.
+      const body = renderWith([timedOutLane, ...collateral]);
+      expect(body).toContain('shard 1/5');
+      // A trailing shard still queued when the cap cancelled the matrix has
+      // no steps at all, so it cannot be the lane that hit its cap.
+      expect(body).not.toContain('shard 4/5');
+    });
+
+    it('names a cancelled job only on a timeout path', () => {
+      // An ordinary failure run concludes `failure`, never `cancelled`, so
+      // every cancelled job on it is collateral — a sibling a concurrent push
+      // or a fail-fast took down. Naming one reports a lane that did not
+      // break (run 42381463939: a capped shard buried under a real failure).
+      const failed = {
+        id: 201,
+        name: 'E2E Test - macOS - shard 1/1',
+        conclusion: 'failure',
+        html_url: 'https://github.com/QwenLM/qwen-code/runs/201',
+        steps: [{ name: 'Run E2E tests', conclusion: 'failure' }],
+      };
+      const capped = {
+        id: 202,
+        name: 'E2E Test (Linux) - sandbox:docker - shard 1/1',
+        conclusion: 'cancelled',
+        html_url: 'https://github.com/QwenLM/qwen-code/runs/202',
+        steps: [{ name: 'Run E2E tests', conclusion: 'cancelled' }],
+      };
+      const body = renderFailureComment({
+        analysis: { workflow: 'E2E Tests', tests: [] },
+        occurrence: {
+          sha: 'abc123456789',
+          runId: '42381463939',
+          runUrl:
+            'https://github.com/QwenLM/qwen-code/actions/runs/42381463939',
+        },
+        jobs: [failed, capped],
+        cancellationKind: 'none',
+      });
+      expect(body).toContain('E2E Test - macOS - shard 1/1');
+      expect(body).not.toContain('sandbox:docker - shard 1/1');
+    });
   });
 
   describe('infrastructure-only failures', () => {
@@ -3074,6 +3722,25 @@ printf '%s\\n' '{"jobs":[]}'
       );
     });
 
+    it('reruns a timed-out run whole, since it has no failed job to re-select', () => {
+      // A job that hits its timeout caps the run as cancelled with no
+      // `failure` conclusion anywhere, so rerun-failed-jobs has nothing to
+      // select. The whole-run rerun re-enters this workflow on completion,
+      // and the timeout is classified again if it repeats.
+      const rendered = oneLine(rerunJob.steps[0].run);
+      expect(rendered).toContain(
+        'gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun"',
+      );
+      expect(rerunJob.steps[0].env.CANCELLATION_KIND).toBe(
+        '${{ needs.analyze.outputs.cancellation_kind }}',
+      );
+      // The dispatch gate has to admit a timed-out run; otherwise the rerun
+      // this step exists for never starts and the timeout is never reported.
+      expect(String(rerunJob.if)).toContain(
+        "needs.analyze.outputs.cancellation_kind == 'timeout'",
+      );
+    });
+
     it('files the issue unless the infra rerun actually ran', () => {
       // rerun_infra is SKIPPED on the ordinary path, and a skipped need is
       // not a success — without always() the file job would silently never
@@ -3085,8 +3752,137 @@ printf '%s\\n' '{"jobs":[]}'
       expect(condition).toContain("needs.analyze.outputs.file_issue == 'true'");
       expect(condition).toContain("needs.analyze.outputs.infra_only != 'true'");
       // A rerun that could not be dispatched must not swallow the report:
-      // the issue is then the only record of a red main.
+      // the issue is then the only record of a red main. It has to be
+      // `!= 'success'` rather than `== 'failure'`: `rerun_infra` skips itself
+      // for a provisional report, and a provisional infrastructure-only main
+      // failure would otherwise reach no filing job at all. A skipped rerun
+      // cannot double-file — nothing was dispatched.
       expect(condition).toContain("needs.rerun_infra.result != 'success'");
+      expect(condition).not.toContain(
+        "needs.analyze.outputs.timeout_attempts_exhausted == 'true'",
+      );
+    });
+
+    it('files a provisional infra-only main failure whose rerun was skipped', () => {
+      // `rerun_infra` refuses a provisional report, so the rerun is `skipped`
+      // and this gate is the only thing left that can record the occurrence.
+      // The PR's earlier `== 'failure'` operator excluded it, so a red main
+      // was neither rerun nor filed.
+      const evaluate = (condition, needs) =>
+        new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
+          needs,
+          () => true,
+        );
+      const needs = {
+        analyze: {
+          result: 'success',
+          outputs: {
+            file_issue: 'true',
+            rerun_pending: 'false',
+            infra_only: 'true',
+            timeout_attempts_exhausted: 'false',
+            provisional: 'true',
+          },
+        },
+        rerun_infra: { result: 'skipped' },
+      };
+      expect(evaluate(String(jobs.rerun_infra.if), needs)).toBe(false);
+      expect(evaluate(String(jobs.file_issue.if), needs)).toBe(true);
+      // The deferred-timeout case the `== 'failure'` operator existed for: a
+      // dispatch that died must still file. It reaches the gate on its own
+      // `rerun_pending` arm, so nothing regressed by restoring the operator.
+      expect(
+        evaluate(String(jobs.file_issue.if), {
+          ...needs,
+          analyze: {
+            ...needs.analyze,
+            outputs: {
+              ...needs.analyze.outputs,
+              infra_only: 'false',
+              rerun_pending: 'true',
+              provisional: 'false',
+            },
+          },
+          rerun_infra: { result: 'failure' },
+        }),
+      ).toBe(true);
+    });
+
+    it('pins the timeout wiring each step depends on', () => {
+      // Each of these is the only thing carrying the timeout classification
+      // into its step, and each deletion leaves the suite green otherwise:
+      // without the download mapping the per-cancelled-job annotation loop
+      // never runs, and without the summary mapping every timeout report
+      // loses the paragraph that explains the cancellation.
+      const downloadStep = jobs.analyze.steps.find(
+        (step) => step.id === 'download',
+      );
+      const summaryStep = jobs.analyze.steps.find(
+        (step) => step.id === 'summary',
+      );
+      const destinationStep = jobs.analyze.steps.find(
+        (step) => step.id === 'destination',
+      );
+      for (const step of [downloadStep, summaryStep, destinationStep]) {
+        expect(step.env.CANCELLATION_KIND).toBe(
+          '${{ steps.live.outputs.cancellation_kind }}',
+        );
+      }
+      // The whole rerun policy rides these two: without the first the attempt
+      // bound never fires, without the second a readable timeout is guessed at
+      // and never rerun.
+      expect(destinationStep.env.TIMEOUT_ATTEMPTS_EXHAUSTED).toBe(
+        '${{ steps.live.outputs.timeout_attempts_exhausted }}',
+      );
+      expect(destinationStep.env.TIMEOUT_ANNOTATIONS_READABLE).toBe(
+        '${{ steps.live.outputs.timeout_annotations_readable }}',
+      );
+      // The renderer needs the curated set, not just the classification: the
+      // full run-jobs.json cannot tell a collateral cancel from the lane that
+      // timed out.
+      expect(summaryStep.run).toContain(
+        '--timed-out-job-ids "${RUNNER_TEMP}/timed-out-job-ids"',
+      );
+    });
+
+    it('says so when a cancelled job could not be inspected', () => {
+      // The download loop drops a cancelled job whose annotation read failed;
+      // that is unavoidable, but a silent drop makes the report imply a whole
+      // set of cancelled jobs when it has a subset.
+      const downloadStep = jobs.analyze.steps.find(
+        (step) => step.id === 'download',
+      );
+      const summaryStep = jobs.analyze.steps.find(
+        (step) => step.id === 'summary',
+      );
+      // Assert the assignment, not just the echo: the echo alone survives
+      // deleting the `=true`, which is exactly the silent-drop mutation.
+      expect(downloadStep.run).toContain('timed_out_annotations_missing=true');
+      expect(downloadStep.run).toContain(
+        'timed_out_annotations_missing=${timed_out_annotations_missing}',
+      );
+      expect(summaryStep.env.TIMED_OUT_ANNOTATIONS_MISSING).toBe(
+        '${{ steps.download.outputs.timed_out_annotations_missing }}',
+      );
+      expect(summaryStep.run).toContain(
+        "TIMED_OUT_ANNOTATIONS_MISSING}\" == 'true'",
+      );
+    });
+
+    it('documents the timeout path in both design docs', () => {
+      // The design doc is what the next change to this workflow reads. Both
+      // languages have to carry the cancelled-run admission, the attempt
+      // bound and the curated render set, or the doc silently describes a
+      // workflow that no longer exists.
+      for (const file of [
+        'docs/design/2026-10-18-java-ci-failure-reporting.md',
+        'docs/design/2026-10-18-java-ci-failure-reporting.zh-CN.md',
+      ]) {
+        const text = readFileSync(file, 'utf8');
+        expect(text).toContain('timeout-minutes');
+        expect(text).toContain('rerun_pending');
+        expect(text).toMatch(/attempt 3|第 3 次 attempt/);
+      }
     });
 
     it('reports an open PR infra-only run without rerunning or filing', () => {
@@ -3519,6 +4315,42 @@ fi
       'pull-requests': 'read',
     });
     expect(privilegedJobs[0][1].needs).toEqual(['analyze', 'rerun_infra']);
+  });
+});
+
+describe('timeout classification wiring', () => {
+  const yml = parse(
+    readFileSync('.github/workflows/main-ci-failure-issue.yml', 'utf8'),
+  );
+  const stepEnv = (jobId, stepId) =>
+    yml.jobs[jobId].steps.find((step) => step.id === stepId).env;
+  const OUTPUTS = {
+    CANCELLATION_KIND: '${{ steps.live.outputs.cancellation_kind }}',
+    TIMEOUT_ATTEMPTS_EXHAUSTED:
+      '${{ steps.live.outputs.timeout_attempts_exhausted }}',
+    TIMEOUT_ANNOTATIONS_READABLE:
+      '${{ steps.live.outputs.timeout_annotations_readable }}',
+    PROVISIONAL: '${{ steps.live.outputs.provisional }}',
+  };
+
+  // Each of these mappings is the only path from the classifier to the step
+  // that acts on it. The step tests spawn the script with the value already in
+  // its environment, so deleting a mapping here keeps them green while the
+  // behaviour it wires disappears from the workflow.
+  it('feeds the classifier outputs to the destination step', () => {
+    expect(stepEnv('analyze', 'destination')).toMatchObject(OUTPUTS);
+  });
+
+  it('feeds the cancellation kind to the summary step', () => {
+    expect(stepEnv('analyze', 'summary').CANCELLATION_KIND).toBe(
+      '${{ steps.live.outputs.cancellation_kind }}',
+    );
+  });
+
+  it('feeds the cancellation kind to the download step', () => {
+    expect(stepEnv('analyze', 'download').CANCELLATION_KIND).toBe(
+      '${{ steps.live.outputs.cancellation_kind }}',
+    );
   });
 });
 

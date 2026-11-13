@@ -73,6 +73,10 @@ test('names a timed-out (cancelled) job even when no job concluded failure', () 
       runId: '41743539611',
       runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/41743539611',
     },
+    // This branch names a cancelled job only when the classifier called the
+    // run a timeout; main named every cancelled job (#16272 chose the
+    // narrower read so five shards cannot bury the one that hit its cap).
+    cancellationKind: 'timeout',
     jobs: [
       {
         name: 'E2E Test (Linux) - sandbox:docker - shard 1/1',
@@ -1483,4 +1487,120 @@ test('runCli plan renders the named job into the filed body', () => {
   assert.deepEqual(planned.searchMarkers, [
     `${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha}`,
   ]);
+});
+
+test('names the cancelled job of a run a job timeout ended', () => {
+  // A timeout cancels the run, so no job in it concludes `failure` — the
+  // comment has to name the cancelled job or it names nothing at all. The
+  // kind is set because a cancelled job on any other path is collateral: the
+  // workflow classifies every cancelled run before this point, and returns
+  // early for a superseded one.
+  const comment = renderFailureComment({
+    analysis: { workflow: 'E2E Tests', tests: [] },
+    occurrence: {
+      sha: 'abc123456789',
+      runId: '41743539611',
+      runUrl: 'https://example.com/run',
+    },
+    cancellationKind: 'timeout',
+    jobs: [
+      {
+        name: 'E2E Test (Linux) - sandbox:docker - shard 1/1',
+        conclusion: 'cancelled',
+        html_url: 'https://example.com/job',
+        steps: [
+          { name: 'Run E2E tests', conclusion: 'cancelled' },
+          { name: 'Set up Docker', conclusion: 'skipped' },
+        ],
+      },
+    ],
+  });
+  assert.match(comment, /sandbox:docker - shard 1\/1/);
+  assert.match(comment, /Run E2E tests/);
+  assert.doesNotMatch(comment, /Set up Docker/);
+});
+
+test('names only the timed-out lane, not every sibling the timeout cancelled', () => {
+  // A job timeout ends the whole run, so every sibling shard concludes
+  // `cancelled`. Naming them all reports five failures for the one lane that
+  // exceeded its cap and buries the timeout line.
+  const comment = renderFailureComment({
+    analysis: { workflow: 'E2E Tests', tests: [] },
+    occurrence: {
+      sha: 'abc123456789',
+      runId: '41743539611',
+      runUrl: 'https://example.com/run',
+    },
+    cancellationKind: 'timeout',
+    jobs: [
+      {
+        name: 'E2E Test - sandbox:docker - shard 1/5',
+        conclusion: 'cancelled',
+        html_url: 'https://example.com/job/1',
+        steps: [
+          { name: 'Set up job', conclusion: 'success' },
+          // The step that blew its cap, concluded `failure` before the job
+          // was cancelled; this is what distinguishes the lane from its
+          // siblings.
+          { name: 'Run E2E tests', conclusion: 'failure' },
+          { name: 'Upload artifacts', conclusion: 'cancelled' },
+        ],
+      },
+      // The real shape (run 42227747366): a sibling the timeout killed has one
+      // step concluded `cancelled` and every other step `skipped`, so a filter
+      // that only drops success/skipped/pending still admits it.
+      ...[2, 3, 4, 5].map((shard) => ({
+        name: `E2E Test - sandbox:docker - shard ${shard}/5`,
+        conclusion: 'cancelled',
+        html_url: `https://example.com/job/${shard}`,
+        steps: [
+          { name: 'Set up job', conclusion: 'success' },
+          { name: 'Run E2E tests', conclusion: 'cancelled' },
+          { name: 'Upload artifacts', conclusion: 'skipped' },
+        ],
+      })),
+    ],
+  });
+  assert.match(comment, /shard 1\/5/);
+  assert.doesNotMatch(comment, /shard [2-5]\/5/);
+});
+
+test('falls back to the step shape when the curated timeout set is empty', () => {
+  // `download` creates the timed-out-jobs file unconditionally, so a failed
+  // read reaches the renderer as `[]`, not `undefined`. Treating an empty set
+  // as authoritative drops every cancelled job and the report names no lane.
+  const comment = renderFailureComment({
+    analysis: { workflow: 'E2E Tests', tests: [] },
+    occurrence: {
+      sha: 'abc123456789',
+      runId: '41743539611',
+      runUrl: 'https://example.com/run',
+    },
+    cancellationKind: 'timeout',
+    timedOutJobIds: [],
+    jobs: [
+      {
+        name: 'E2E Test - sandbox:docker - shard 1/5',
+        conclusion: 'cancelled',
+        html_url: 'https://example.com/job/1',
+        steps: [
+          { name: 'Set up job', conclusion: 'success' },
+          { name: 'Run E2E tests', conclusion: 'failure' },
+          { name: 'Upload artifacts', conclusion: 'cancelled' },
+        ],
+      },
+      {
+        name: 'E2E Test - sandbox:docker - shard 2/5',
+        conclusion: 'cancelled',
+        html_url: 'https://example.com/job/2',
+        steps: [
+          { name: 'Set up job', conclusion: 'success' },
+          { name: 'Run E2E tests', conclusion: 'cancelled' },
+          { name: 'Upload artifacts', conclusion: 'skipped' },
+        ],
+      },
+    ],
+  });
+  assert.match(comment, /shard 1\/5/);
+  assert.doesNotMatch(comment, /shard 2\/5/);
 });
