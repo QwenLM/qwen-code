@@ -92,10 +92,117 @@ describe.each(['acp-http', 'acp-ws'] as const)(
         );
       },
     );
+
+    describe.each([
+      { shape: 'primary', route: '/workspace' },
+      {
+        shape: 'qualified',
+        route: '/workspaces/%2Frepo%20with%20space',
+      },
+    ])('$shape client Skill toggles', ({ shape, route }) => {
+      it('toggles one Skill through REST with its encoded name and client ID', async () => {
+        const { client, restFetch, translatedFetch } = setup(kind);
+        const scoped =
+          shape === 'qualified'
+            ? client.workspaceByCwd('/repo with space')
+            : client;
+        const result = {
+          skillName: 'review/strict',
+          enabled: false,
+          changed: true,
+          activation: 'applied',
+          sessionsRefreshed: 1,
+          sessionsFailed: 0,
+        };
+        restFetch.mockResolvedValue(Response.json(result));
+
+        await expect(
+          scoped.setWorkspaceSkillEnabled('review/strict', false, {
+            clientId: 'skill-client',
+          }),
+        ).resolves.toEqual(result);
+
+        expect(translatedFetch).not.toHaveBeenCalled();
+        expect(restFetch).toHaveBeenCalledTimes(1);
+        const [url, init] = restFetch.mock.calls[0];
+        expect(url).toBe(`${baseUrl}${route}/skills/review%2Fstrict/enable`);
+        expect(init?.method).toBe('POST');
+        expect(JSON.parse(init?.body as string)).toEqual({ enabled: false });
+        const headers = new Headers(init?.headers);
+        expect(headers.get('authorization')).toBe('Bearer secret');
+        expect(headers.get('content-type')).toBe('application/json');
+        expect(headers.get('x-qwen-client-id')).toBe('skill-client');
+      });
+
+      it('toggles a Skill batch through REST with its body and client ID', async () => {
+        const { client, restFetch, translatedFetch } = setup(kind);
+        const scoped =
+          shape === 'qualified'
+            ? client.workspaceByCwd('/repo with space')
+            : client;
+        const skillNames = ['review/strict', 'deploy skill'];
+        const result = {
+          enabled: true,
+          activation: 'applied',
+          sessionsRefreshed: 1,
+          sessionsFailed: 0,
+          results: skillNames.map((skillName) => ({
+            skillName,
+            enabled: true,
+            changed: true,
+          })),
+          errors: [],
+        };
+        restFetch.mockResolvedValue(Response.json(result));
+
+        await expect(
+          scoped.setWorkspaceSkillsEnabled(skillNames, true, {
+            clientId: 'skill-client',
+          }),
+        ).resolves.toEqual(result);
+
+        expect(translatedFetch).not.toHaveBeenCalled();
+        expect(restFetch).toHaveBeenCalledTimes(1);
+        const [url, init] = restFetch.mock.calls[0];
+        expect(url).toBe(`${baseUrl}${route}/skills/enable`);
+        expect(init?.method).toBe('POST');
+        expect(JSON.parse(init?.body as string)).toEqual({
+          skillNames,
+          enabled: true,
+        });
+        const headers = new Headers(init?.headers);
+        expect(headers.get('authorization')).toBe('Bearer secret');
+        expect(headers.get('content-type')).toBe('application/json');
+        expect(headers.get('x-qwen-client-id')).toBe('skill-client');
+      });
+    });
   },
 );
 
 describe('workspace Skill mutation REST errors and fetch injection', () => {
+  it.each([
+    { qualified: false, batch: false },
+    { qualified: false, batch: true },
+    { qualified: true, batch: false },
+    { qualified: true, batch: true },
+  ])(
+    'propagates a toggle error (qualified=$qualified, batch=$batch)',
+    async ({ qualified, batch }) => {
+      const { client, restFetch, translatedFetch } = setup('acp-http');
+      const scoped = qualified ? client.workspaceByCwd('/repo') : client;
+      const body = { error: 'Skill is locked', code: 'skill_locked' };
+      restFetch.mockResolvedValue(Response.json(body, { status: 409 }));
+
+      const pending = batch
+        ? scoped.setWorkspaceSkillsEnabled(['review'], false)
+        : scoped.setWorkspaceSkillEnabled('review', false);
+
+      await expect(pending).rejects.toMatchObject({ status: 409, body });
+      expect(restFetch).toHaveBeenCalledTimes(1);
+      expect(translatedFetch).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(['install', 'delete'] as const)(
     'propagates a daemon error from %s instead of reporting success',
     async (operation) => {
