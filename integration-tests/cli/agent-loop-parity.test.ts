@@ -12,7 +12,8 @@
  */
 
 import { spawn } from 'node:child_process';
-import { join } from 'node:path';
+import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CONTAINER_SANDBOX_NO_PROXY,
@@ -44,8 +45,24 @@ interface Scenario {
   approve?: boolean;
   /** The exit code both runs must end with; defaults to 0. */
   exitCode?: number;
-  /** The model's reply to a streaming request, from its message history. */
-  reply: (messages: JsonObject[], dir: string) => FakeOpenAIResponse;
+  /**
+   * The model's reply to a streaming request, from its message history.
+   * `subagentRequest` is the one-based request number for the subagent,
+   * including continuations.
+   */
+  reply: (
+    messages: JsonObject[],
+    dir: string,
+    subagentRequest: number | undefined,
+  ) => FakeOpenAIResponse;
+  /**
+   * The model rounds the scenario's subagents send; with the setting on each
+   * goes out on the shared loop's round, which the debug log records.
+   */
+  subagentRounds?: number;
+  /** The tool batches the subagents run on the shared loop with it on. */
+  subagentBatches?: number;
+  subagentRecovery?: { requests: number; answer: string };
 }
 
 interface Run {
@@ -55,6 +72,77 @@ interface Run {
   stderr: string;
   /** The `tool_use_id` of each `can_use_tool` request, in order. */
   approvals: string[];
+  /** Subagent model rounds sent on the shared agent loop. */
+  sharedSubagentRounds: number;
+  /** Subagent tool batches run on the shared agent loop. */
+  sharedSubagentBatches: number;
+  /** Subagent rounds run on the shared loop's event-bus kernel. */
+  kernelSubagentRounds: number;
+  subagentRequests: number;
+}
+
+/** The debug-log line of a subagent round on the shared agent loop. */
+const SHARED_SUBAGENT_ROUND =
+  /subagent \S+ round \d+ on the shared agent loop/g;
+
+/** The debug-log line of a subagent round on the event-bus kernel. */
+const KERNEL_SUBAGENT_ROUND =
+  /subagent \S+ round \d+ on the shared agent loop on the event bus/g;
+
+/** The debug-log line of a subagent tool batch on the shared agent loop. */
+const SHARED_SUBAGENT_BATCH =
+  /subagent \S+ round \d+ tool batch on the shared loop/g;
+
+/** The system prompt of the scenarios' subagent. */
+const SUBAGENT_MARKER = 'PARITY_SUBAGENT_PROMPT';
+
+/** Whether a request comes from the scenarios' subagent. */
+const fromSubagent = (messages: JsonObject[]) =>
+  messages.some(
+    (message) =>
+      message['role'] === 'system' &&
+      JSON.stringify(message['content']).includes(SUBAGENT_MARKER),
+  );
+
+/** A project subagent that may read files, with an optional turn limit. */
+function createSubagent(rig: TestRig, maxTurns?: number) {
+  rig.mkdir('.qwen/agents');
+  rig.createFile(
+    '.qwen/agents/parity-reader.md',
+    `---
+name: parity-reader
+description: Reads files for the agent loop parity suite
+${maxTurns !== undefined ? `maxTurns: ${maxTurns}\n` : ''}tools:
+  - read_file
+---
+${SUBAGENT_MARKER}
+`,
+  );
+}
+
+/** The main session's call of the parity subagent. */
+const runSubagent = (id: string) =>
+  fakeToolCall(
+    'agent',
+    {
+      description: 'Read the notes',
+      prompt: 'Read notes.txt and report what it says.',
+      subagent_type: 'parity-reader',
+      run_in_background: false,
+    },
+    id,
+  );
+
+function debugLog(runtimeDir: string): string {
+  const debugDir = join(runtimeDir, 'debug');
+  if (!existsSync(debugDir)) return '';
+  return (
+    readdirSync(debugDir, { recursive: true, withFileTypes: true })
+      // `latest` points at the session's own log.
+      .filter((entry) => entry.isFile() && basename(entry.name) !== 'latest')
+      .map((entry) => readFileSync(join(entry.parentPath, entry.name), 'utf8'))
+      .join('')
+  );
 }
 
 const toolResults = (messages: JsonObject[]) =>
@@ -159,6 +247,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     vi.stubEnv('NO_PROXY', noProxy);
     vi.stubEnv('no_proxy', noProxy);
     vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+    vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
   });
 
   afterEach(async () => {
@@ -168,24 +257,35 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     await rig?.cleanup();
   });
 
-  async function run(scenario: Scenario, shared: boolean): Promise<Run> {
+  async function run(
+    scenario: Scenario,
+    shared: boolean,
+    kernel = false,
+  ): Promise<Run> {
     await server?.close();
     rig = new TestRig();
     await rig.setup(`agent-loop-parity ${scenario.name}`, {
       settings: {
         ...scenario.settings,
-        experimental: { unifiedAgentLoop: shared },
+        experimental: { unifiedAgentLoop: shared, eventBusAgentLoop: kernel },
       },
     });
     const dir = rig.testDir!;
     scenario.prepare?.(rig);
-    server = await startFakeOpenAIServer(
-      ({ body }) =>
-        body['stream'] === true
-          ? scenario.reply((body['messages'] ?? []) as JsonObject[], dir)
-          : { content: '{"selected_memories":[]}' },
-      fakeServerHostOptions(),
-    );
+    let subagentRequests = 0;
+    server = await startFakeOpenAIServer(({ body }) => {
+      if (body['stream'] !== true)
+        return { content: '{"selected_memories":[]}' };
+      const messages = (body['messages'] ?? []) as JsonObject[];
+      const subagentRequest = fromSubagent(messages)
+        ? ++subagentRequests
+        : undefined;
+      return scenario.reply(messages, dir, subagentRequest);
+    }, fakeServerHostOptions());
+    // Outside the project, so the folder structure in the requests does not
+    // list the session's debug log.
+    const runtimeDir = `${dir}-runtime`;
+    rmSync(runtimeDir, { recursive: true, force: true });
     const args = [
       rig.bundlePath,
       '--no-chat-recording',
@@ -206,7 +306,14 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     const child = spawn('node', args, {
       cwd: dir,
       stdio: 'pipe',
-      env: process.env,
+      env:
+        scenario.subagentRounds === undefined
+          ? process.env
+          : {
+              ...process.env,
+              QWEN_DEBUG_LOG_FILE: '1',
+              QWEN_RUNTIME_DIR: runtimeDir,
+            },
     });
     const messages = [...(scenario.messages ?? [])];
     const sendNext = () => {
@@ -266,6 +373,13 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       frames: streamFrames(stdout, dir),
       stderr,
       approvals,
+      subagentRequests,
+      sharedSubagentRounds:
+        debugLog(runtimeDir).match(SHARED_SUBAGENT_ROUND)?.length ?? 0,
+      sharedSubagentBatches:
+        debugLog(runtimeDir).match(SHARED_SUBAGENT_BATCH)?.length ?? 0,
+      kernelSubagentRounds:
+        debugLog(runtimeDir).match(KERNEL_SUBAGENT_ROUND)?.length ?? 0,
     };
   }
 
@@ -464,6 +578,97 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
             }
           : { content: 'Done.' },
     },
+    {
+      name: 'a subagent that reads a file',
+      prompt: 'Have the reader read the notes.',
+      prepare: (r) => {
+        createSubagent(r);
+        r.createFile('notes.txt', 'the notes\n');
+      },
+      subagentRounds: 2,
+      subagentBatches: 1,
+      reply: (messages, dir) =>
+        fromSubagent(messages)
+          ? toolResults(messages) === 0
+            ? { toolCalls: [read(join(dir, 'notes.txt'), 'call_notes')] }
+            : { content: 'The notes say: the notes.' }
+          : toolResults(messages) === 0
+            ? { toolCalls: [runSubagent('call_agent')] }
+            : { content: 'Done.' },
+    },
+    {
+      name: "a subagent's stream that drops and is retried",
+      prompt: 'Have the reader answer.',
+      prepare: (r) => createSubagent(r),
+      subagentRounds: 1,
+      subagentRecovery: { requests: 2, answer: 'A reader answers.' },
+      reply: (messages, _dir, subagentRequest) =>
+        subagentRequest !== undefined
+          ? subagentRequest === 1
+            ? {
+                contentChunks: ['A reader ', 'answers.'],
+                disconnectAfterContentChunks: 1,
+              }
+            : { contentChunks: ['A reader ', 'answers.'] }
+          : toolResults(messages) === 0
+            ? { toolCalls: [runSubagent('call_agent')] }
+            : { content: 'Done.' },
+    },
+    {
+      name: 'a subagent stopped at its turn limit',
+      prompt: 'Have the reader read the notes.',
+      prepare: (r) => {
+        createSubagent(r, 1);
+        r.createFile('notes.txt', 'the notes\n');
+      },
+      subagentRounds: 1,
+      subagentBatches: 1,
+      reply: (messages, dir) =>
+        fromSubagent(messages)
+          ? { toolCalls: [read(join(dir, 'notes.txt'), 'call_notes')] }
+          : toolResults(messages) === 0
+            ? { toolCalls: [runSubagent('call_agent')] }
+            : { content: 'Done.' },
+    },
+    {
+      name: 'a subagent call of a tool it may not use, beside one it may',
+      prompt: 'Have the reader read the notes.',
+      prepare: (r) => {
+        createSubagent(r);
+        r.createFile('notes.txt', 'the notes\n');
+      },
+      subagentRounds: 2,
+      subagentBatches: 1,
+      reply: (messages, dir) =>
+        fromSubagent(messages)
+          ? toolResults(messages) === 0
+            ? {
+                toolCalls: [
+                  fakeToolCall(
+                    'write_file',
+                    { file_path: join(dir, 'out.txt'), content: 'x' },
+                    'call_write',
+                  ),
+                  read(join(dir, 'notes.txt'), 'call_notes'),
+                ],
+              }
+            : { content: 'The notes say: the notes.' }
+          : toolResults(messages) === 0
+            ? { toolCalls: [runSubagent('call_agent')] }
+            : { content: 'Done.' },
+    },
+    {
+      name: 'a subagent whose model fails',
+      prompt: 'Have the reader answer.',
+      prepare: (r) => createSubagent(r),
+      subagentRounds: 1,
+      reply: (messages) =>
+        fromSubagent(messages)
+          ? { errorContent: 'upstream exploded' }
+          : toolResults(messages) === 0
+            ? { toolCalls: [runSubagent('call_agent')] }
+            : { content: 'Done.' },
+    },
   ];
 
   it.each(scenarios.map((scenario) => [scenario.name, scenario] as const))(
@@ -475,6 +680,42 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       expect(shared.exitCode).toBe(current.exitCode);
       expect(shared.requests).toEqual(current.requests);
       expect(shared.frames).toEqual(current.frames);
+      // Only the run with the setting on sends its subagent rounds on the
+      // shared loop.
+      expect(current.sharedSubagentRounds).toBe(0);
+      expect(shared.sharedSubagentRounds).toBe(scenario.subagentRounds ?? 0);
+      expect(current.sharedSubagentBatches).toBe(0);
+      expect(shared.sharedSubagentBatches).toBe(scenario.subagentBatches ?? 0);
+      expect(shared.kernelSubagentRounds).toBe(0);
+      // A subagent scenario also runs on the event-bus kernel, which must
+      // send and print what the shared loop does.
+      if (scenario.subagentRounds !== undefined) {
+        const kernel = await run(scenario, true, true);
+        expect(kernel.exitCode).toBe(shared.exitCode);
+        expect(kernel.requests).toEqual(shared.requests);
+        expect(kernel.frames).toEqual(shared.frames);
+        expect(kernel.kernelSubagentRounds).toBe(scenario.subagentRounds);
+        expect(kernel.sharedSubagentBatches).toBe(
+          scenario.subagentBatches ?? 0,
+        );
+      }
+      const recovery = scenario.subagentRecovery;
+      if (recovery) {
+        for (const run of [current, shared]) {
+          expect(run.subagentRequests).toBe(recovery.requests);
+          expect(run.frames).toContainEqual({
+            type: 'user',
+            content: expect.arrayContaining([
+              expect.objectContaining({
+                type: 'tool_result',
+                tool_use_id: 'call_agent',
+                is_error: false,
+                content: expect.stringContaining(recovery.answer),
+              }),
+            ]),
+          });
+        }
+      }
     },
     120_000,
   );

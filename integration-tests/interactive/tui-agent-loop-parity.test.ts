@@ -8,8 +8,10 @@
  * The TUI that `QWEN_E2E_RENDERER` selects, Ink or OpenTUI, runs each
  * scripted scenario twice, with
  * `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` unset and set, and the two runs must
- * send the model the same requests and record the same session. The screen is
- * not compared: it repaints on timers, and what it shows comes from the same
+ * send the model the same requests and record the same session. OpenTUI runs
+ * each scenario a third time with `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` set
+ * as well, which must match the run on the shared loop. The screen is not
+ * compared: it repaints on timers, and what it shows comes from the same
  * events the session records.
  */
 
@@ -47,7 +49,15 @@ interface Scenario {
   /** The approval mode; YOLO by default. */
   approvalMode?: 'default';
   /** Answers each tool approval the prompt asks for, in order. */
-  approvals?: Array<'allow' | 'deny'>;
+  approvals?: Array<{
+    answer: 'allow' | 'deny';
+    /**
+     * Evidence the answer took effect, in place of watching the dialog
+     * close: a renderer that paints the close and the next approval's
+     * entrance in one frame never shows the gap between them.
+     */
+    settled?: (workspace: string) => boolean;
+  }>;
   /** Presses Esc once this text is on screen. */
   cancelOn?: string;
   /** Disconnects the first response once this text is visible. */
@@ -88,6 +98,8 @@ interface Scenario {
   rounds: number;
   /** The tool batches the TUI runs, one per round that calls tools. */
   batches: number;
+  /** The tool batches its subagents run. */
+  subagentBatches?: number;
   /**
    * Text both runs must show at the end, for a scenario that sends and
    * records nothing.
@@ -131,6 +143,10 @@ interface Run {
   sharedRounds: number;
   /** How many tool batches the debug log says ran on the shared loop. */
   sharedBatches: number;
+  /** How many subagent tool batches the debug log says ran on it. */
+  sharedSubagentBatches: number;
+  /** How many model rounds the debug log says ran on the event-bus kernel. */
+  kernelRounds: number;
 }
 
 /**
@@ -141,11 +157,30 @@ const PARITY_CASE_OPTIONS = { retry: 0, timeout: 240_000 };
 
 /** What the TUI logs for each model round it sends on the shared loop. */
 const SHARED_ROUND_LOG = 'model round on the shared agent loop';
+/** Match the adapter's execution marker against prompt IDs owned by OpenTUI. */
+function countOpenTuiKernelRounds(debugLog: string): number {
+  const promptIds = new Set(
+    Array.from(
+      debugLog.matchAll(
+        /\[OPENTUI_LIVE\][^\n]* model round on the shared agent loop \(prompt ([^)]+)\)/g,
+      ),
+      ([, promptId]) => promptId,
+    ),
+  );
+  return Array.from(
+    debugLog.matchAll(
+      /\[EVENT_BUS\][^\n]* runAgentLoopOnBus started \S+ \(prompt ([^)]+)\)/g,
+    ),
+  ).filter(([, promptId]) => promptIds.has(promptId)).length;
+}
 /** The first option of a tool approval. */
 const APPROVAL_PROMPT = 'Yes, allow once';
 
 /** What the TUI logs for each tool batch it runs on the shared loop. */
 const SHARED_BATCH_LOG = 'tool batch on the shared agent loop';
+/** What a subagent logs for each tool batch it runs on the shared loop. */
+const SHARED_SUBAGENT_BATCH_LOG =
+  /subagent \S+ round \d+ tool batch on the shared loop/g;
 
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 
@@ -153,10 +188,12 @@ async function until(
   check: () => boolean | Promise<boolean>,
   reason: string,
   timeout = 30_000,
+  context?: () => Promise<string>,
 ) {
   const deadline = Date.now() + timeout;
   while (!(await check())) {
-    if (Date.now() > deadline) throw new Error(reason);
+    if (Date.now() > deadline)
+      throw new Error(context ? `${reason}\n${await context()}` : reason);
     await sleep(100);
   }
 }
@@ -170,6 +207,11 @@ function files(directory: string): string[] {
 
 const RANDOM_ID =
   /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+
+// The startup context's date, in `formatDateForContext`'s format. Runs that
+// straddle midnight render it a day apart.
+const CONTEXT_DATE =
+  /\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (?:January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}\b/g;
 
 // Fields that differ between two runs of the same scenario.
 const VOLATILE_KEYS = new Set([
@@ -231,6 +273,7 @@ function normalize(
         .split(scratch)
         .join('<SCRATCH>')
         .replace(RANDOM_ID, '<ID>')
+        .replace(CONTEXT_DATE, '<DATE>')
         // A shell command's result names its process group.
         .replace(/Process Group PGID: \d+/g, 'Process Group PGID: <PGID>'),
     ),
@@ -254,6 +297,37 @@ function normalize(
   };
   return strip(replaced);
 }
+
+describe('normalize', () => {
+  const startupContext = (today: string) => ({
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            text: `<system-reminder>\nThis is the Qwen Code. We are setting up the context for our chat.\nToday's date is ${today}.\n</system-reminder>`,
+          },
+        ],
+      },
+    ],
+  });
+
+  it('normalizes the date the startup context renders', () => {
+    expect(
+      normalize(
+        startupContext('Wednesday, November 11, 2026'),
+        '/workspace',
+        '/scratch',
+      ),
+    ).toEqual(
+      normalize(
+        startupContext('Thursday, November 12, 2026'),
+        '/workspace',
+        '/scratch',
+      ),
+    );
+  });
+});
 
 /**
  * Each request body as the client sent it, without the date reminder: every
@@ -360,7 +434,11 @@ describeTui(SUITE, () => {
     scratch = undefined;
   });
 
-  async function run(scenario: Scenario, shared: boolean): Promise<Run> {
+  async function run(
+    scenario: Scenario,
+    shared: boolean,
+    kernel = false,
+  ): Promise<Run> {
     await session?.close();
     await server?.close();
     if (scratch) rmSync(scratch, { recursive: true, force: true });
@@ -444,6 +522,7 @@ describeTui(SUITE, () => {
         no_proxy: 'localhost,127.0.0.1',
         ...scenario.env,
         ...(shared ? { QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: '1' } : {}),
+        QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP: kernel ? '1' : '0',
       },
       args: [
         '--auth-type',
@@ -490,18 +569,25 @@ describeTui(SUITE, () => {
           firstChunkRead.resolve();
         }
       }
-      for (const answer of scenario.approvals ?? []) {
+      for (const { answer, settled } of scenario.approvals ?? []) {
         // The viewport, not the whole output, which still holds the
         // previous approval.
         await until(
           async () => (await session!.viewport()).includes(APPROVAL_PROMPT),
           'the approval opens',
+          30_000,
+          () => session!.viewport(),
         );
         await session.idle(500, 10_000);
         session.pressKey(answer === 'allow' ? '\r' : '\x1b');
         await until(
-          async () => !(await session!.viewport()).includes(APPROVAL_PROMPT),
+          settled
+            ? () => settled(workspace)
+            : async () =>
+                !(await session!.viewport()).includes(APPROVAL_PROMPT),
           'the approval closes',
+          30_000,
+          () => session!.viewport(),
         );
       }
       if (scenario.cancelOn) {
@@ -564,6 +650,9 @@ describeTui(SUITE, () => {
       screen,
       sharedRounds: debugLog.split(SHARED_ROUND_LOG).length - 1,
       sharedBatches: debugLog.split(SHARED_BATCH_LOG).length - 1,
+      sharedSubagentBatches:
+        debugLog.match(SHARED_SUBAGENT_BATCH_LOG)?.length ?? 0,
+      kernelRounds: countOpenTuiKernelRounds(debugLog),
     };
   }
 
@@ -695,7 +784,15 @@ describeTui(SUITE, () => {
       rounds: 2,
       batches: 2,
       approvalMode: 'default',
-      approvals: ['allow', 'deny'],
+      approvals: [
+        {
+          answer: 'allow',
+          settled: (dir) =>
+            existsSync(join(dir, 'a.txt')) &&
+            readFileSync(join(dir, 'a.txt'), 'utf8') === 'a body\n',
+        },
+        { answer: 'deny' },
+      ],
       prompts: ['Write a, then b.'],
       recorded: 'a body',
       reply: (messages, dir) =>
@@ -706,6 +803,48 @@ describeTui(SUITE, () => {
                 toolCalls: [write(join(dir, 'b.txt'), 'b body\n', 'call_b')],
               }
             : { content: 'Should not be asked.' },
+    },
+    {
+      // A foreground subagent's write waits for approval; the TUI answers it
+      // from outside the subagent's frames, which the approval restores.
+      name: "a subagent's write approved in the TUI",
+      requests: 4,
+      rounds: 2,
+      batches: 1,
+      subagentBatches: 1,
+      approvalMode: 'default',
+      approvals: [
+        {
+          answer: 'allow',
+          settled: (dir) =>
+            existsSync(join(dir, 'a.txt')) &&
+            readFileSync(join(dir, 'a.txt'), 'utf8') === 'a body\n',
+        },
+      ],
+      prompts: ['Have a helper write a.'],
+      agent: (messages) => (isHelper(messages) ? 'helper' : 'leader'),
+      recorded: 'The helper wrote a.',
+      reply: (messages, dir) =>
+        isHelper(messages)
+          ? toolResults(messages) === 0
+            ? { toolCalls: [write(join(dir, 'a.txt'), 'a body\n', 'call_a')] }
+            : { content: 'Wrote a.' }
+          : toolResults(messages) === 0
+            ? {
+                toolCalls: [
+                  fakeToolCall(
+                    'agent',
+                    {
+                      subagent_type: 'general-purpose',
+                      description: 'Write a',
+                      prompt: `${HELPER_TASK} Write a.`,
+                      run_in_background: false,
+                    },
+                    'call_helper',
+                  ),
+                ],
+              }
+            : { content: 'The helper wrote a.' },
     },
     {
       // Esc while the command runs cancels it and ends the turn.
@@ -1088,6 +1227,21 @@ describeTui(SUITE, () => {
     expect(shared.sharedRounds).toBe(scenario.rounds);
     expect(current.sharedBatches).toBe(0);
     expect(shared.sharedBatches).toBe(scenario.batches);
+    expect(current.sharedSubagentBatches).toBe(0);
+    expect(shared.sharedSubagentBatches).toBe(scenario.subagentBatches ?? 0);
+    expect(current.kernelRounds).toBe(0);
+    expect(shared.kernelRounds).toBe(0);
+    // OpenTUI also runs each round on the event-bus kernel, which must send
+    // and record what the shared loop does.
+    if (renderer === 'opentui') {
+      const kernel = await run(scenario, true, true);
+      expect(kernel.kernelRounds).toBe(scenario.rounds);
+      expect(kernel.sharedRounds).toBe(shared.sharedRounds);
+      expect(kernel.sharedBatches).toBe(shared.sharedBatches);
+      expect(kernel.requests).toEqual(shared.requests);
+      expect(kernel.sideRequests).toEqual(shared.sideRequests);
+      expect(kernel.records).toEqual(shared.records);
+    }
     for (const run of [current, shared]) {
       expect(run.requests).toHaveLength(scenario.requests);
       if (scenario.sideRequests !== undefined)
