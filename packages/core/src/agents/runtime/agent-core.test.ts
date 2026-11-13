@@ -861,6 +861,7 @@ describe.each(LOOPS)(
       const config = {
         getToolRegistry: vi.fn().mockReturnValue({
           getTool: vi.fn(),
+          getAllToolNames: vi.fn().mockReturnValue([]),
         }),
         getDebugLogger: vi
           .fn()
@@ -1128,6 +1129,7 @@ describe.each(LOOPS)(
               available && toolName === name
                 ? { serverName: 'catalog', serverToolName: 'lookup' }
                 : undefined,
+            getAllToolNames: () => [],
           }),
           getSkipLoopDetection: () => true,
           getMaxToolCallsPerTurn: () => 100,
