@@ -246,7 +246,8 @@ export async function readHostedApprovalContinuation(
     );
     if (
       definition.publicChildAgentsVersion !== 1 ||
-      definition.toolProfile !== 'hosted-workspace-shell/1'
+      (definition.toolProfile !== 'hosted-workspace-shell/1' &&
+        definition.toolProfile !== 'hosted-workspace-shell/3')
     )
       throw new Error('Public child recovery profile changed.');
   }

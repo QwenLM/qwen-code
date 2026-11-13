@@ -46,6 +46,11 @@ interface Scenario {
   /** The exit code both runs must end with; defaults to 0. */
   exitCode?: number;
   /**
+   * The main session's model rounds; defaults to one per main-session
+   * request. A round that resends its request counts once.
+   */
+  mainRounds?: number;
+  /**
    * The model's reply to a streaming request, from its message history.
    * `subagentRequest` is the one-based request number for the subagent,
    * including continuations.
@@ -60,6 +65,8 @@ interface Scenario {
    * goes out on the shared loop's round, which the debug log records.
    */
   subagentRounds?: number;
+  /** The tool batches the subagents run on the shared loop with it on. */
+  subagentBatches?: number;
   subagentRecovery?: { requests: number; answer: string };
 }
 
@@ -72,12 +79,29 @@ interface Run {
   approvals: string[];
   /** Subagent model rounds sent on the shared agent loop. */
   sharedSubagentRounds: number;
+  /** Subagent tool batches run on the shared agent loop. */
+  sharedSubagentBatches: number;
+  /** Subagent rounds run on the shared loop's event-bus kernel. */
+  kernelSubagentRounds: number;
+  /** Main-session rounds run on the shared loop's event-bus kernel. */
+  kernelMainRounds: number;
   subagentRequests: number;
 }
 
 /** The debug-log line of a subagent round on the shared agent loop. */
 const SHARED_SUBAGENT_ROUND =
   /subagent \S+ round \d+ on the shared agent loop/g;
+
+/** The debug-log line of a subagent round on the event-bus kernel. */
+const KERNEL_SUBAGENT_ROUND =
+  /subagent \S+ round \d+ on the shared agent loop on the event bus/g;
+
+/** The debug-log line of each `runAgentLoop` call on the event-bus kernel. */
+const KERNEL_RUN = /runAgentLoopOnBus started/g;
+
+/** The debug-log line of a subagent tool batch on the shared agent loop. */
+const SHARED_SUBAGENT_BATCH =
+  /subagent \S+ round \d+ tool batch on the shared loop/g;
 
 /** The system prompt of the scenarios' subagent. */
 const SUBAGENT_MARKER = 'PARITY_SUBAGENT_PROMPT';
@@ -233,6 +257,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     vi.stubEnv('NO_PROXY', noProxy);
     vi.stubEnv('no_proxy', noProxy);
     vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+    vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
   });
 
   afterEach(async () => {
@@ -242,13 +267,17 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     await rig?.cleanup();
   });
 
-  async function run(scenario: Scenario, shared: boolean): Promise<Run> {
+  async function run(
+    scenario: Scenario,
+    shared: boolean,
+    kernel = false,
+  ): Promise<Run> {
     await server?.close();
     rig = new TestRig();
     await rig.setup(`agent-loop-parity ${scenario.name}`, {
       settings: {
         ...scenario.settings,
-        experimental: { unifiedAgentLoop: shared },
+        experimental: { unifiedAgentLoop: shared, eventBusAgentLoop: kernel },
       },
     });
     const dir = rig.testDir!;
@@ -287,14 +316,11 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     const child = spawn('node', args, {
       cwd: dir,
       stdio: 'pipe',
-      env:
-        scenario.subagentRounds === undefined
-          ? process.env
-          : {
-              ...process.env,
-              QWEN_DEBUG_LOG_FILE: '1',
-              QWEN_RUNTIME_DIR: runtimeDir,
-            },
+      env: {
+        ...process.env,
+        QWEN_DEBUG_LOG_FILE: '1',
+        QWEN_RUNTIME_DIR: runtimeDir,
+      },
     });
     const messages = [...(scenario.messages ?? [])];
     const sendNext = () => {
@@ -348,6 +374,10 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     const exitCode = await new Promise<number | null>((resolve) =>
       child.on('close', resolve),
     );
+    const log = debugLog(runtimeDir);
+    const count = (line: RegExp) => log.match(line)?.length ?? 0;
+    // AgentCore's rounds on the kernel are `runAgentLoop` calls too.
+    const kernelSubagentRounds = count(KERNEL_SUBAGENT_ROUND);
     return {
       exitCode,
       requests: modelRequests(server, dir),
@@ -355,15 +385,25 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       stderr,
       approvals,
       subagentRequests,
-      sharedSubagentRounds:
-        debugLog(runtimeDir).match(SHARED_SUBAGENT_ROUND)?.length ?? 0,
+      sharedSubagentRounds: count(SHARED_SUBAGENT_ROUND),
+      sharedSubagentBatches: count(SHARED_SUBAGENT_BATCH),
+      kernelSubagentRounds,
+      kernelMainRounds: count(KERNEL_RUN) - kernelSubagentRounds,
     };
   }
 
-  async function both(scenario: Scenario) {
+  /** The current loop, the shared loop, and the shared loop on the kernel. */
+  async function arms(scenario: Scenario) {
     const current = await run(scenario, false);
     const shared = await run(scenario, true);
-    return { current, shared };
+    const kernel = await run(scenario, true, true);
+    expect(current.kernelMainRounds + current.kernelSubagentRounds).toBe(0);
+    expect(shared.kernelMainRounds + shared.kernelSubagentRounds).toBe(0);
+    // The main session runs each round in its own `runAgentLoop` call.
+    expect(kernel.kernelMainRounds).toBe(
+      scenario.mainRounds ?? kernel.requests.length - kernel.subagentRequests,
+    );
+    return { current, shared, kernel };
   }
 
   const read = (file: string, id: string) =>
@@ -451,6 +491,8 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     {
       name: 'cut-off edit',
       prompt: 'Write the notes.',
+      // The cut-off reply is resent with a higher output limit.
+      mainRounds: 2,
       reply: (messages, dir) =>
         toolResults(messages) === 0
           ? {
@@ -563,6 +605,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
         r.createFile('notes.txt', 'the notes\n');
       },
       subagentRounds: 2,
+      subagentBatches: 1,
       reply: (messages, dir) =>
         fromSubagent(messages)
           ? toolResults(messages) === 0
@@ -598,9 +641,37 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
         r.createFile('notes.txt', 'the notes\n');
       },
       subagentRounds: 1,
+      subagentBatches: 1,
       reply: (messages, dir) =>
         fromSubagent(messages)
           ? { toolCalls: [read(join(dir, 'notes.txt'), 'call_notes')] }
+          : toolResults(messages) === 0
+            ? { toolCalls: [runSubagent('call_agent')] }
+            : { content: 'Done.' },
+    },
+    {
+      name: 'a subagent call of a tool it may not use, beside one it may',
+      prompt: 'Have the reader read the notes.',
+      prepare: (r) => {
+        createSubagent(r);
+        r.createFile('notes.txt', 'the notes\n');
+      },
+      subagentRounds: 2,
+      subagentBatches: 1,
+      reply: (messages, dir) =>
+        fromSubagent(messages)
+          ? toolResults(messages) === 0
+            ? {
+                toolCalls: [
+                  fakeToolCall(
+                    'write_file',
+                    { file_path: join(dir, 'out.txt'), content: 'x' },
+                    'call_write',
+                  ),
+                  read(join(dir, 'notes.txt'), 'call_notes'),
+                ],
+              }
+            : { content: 'The notes say: the notes.' }
           : toolResults(messages) === 0
             ? { toolCalls: [runSubagent('call_agent')] }
             : { content: 'Done.' },
@@ -622,19 +693,27 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
   it.each(scenarios.map((scenario) => [scenario.name, scenario] as const))(
     '%s: same requests and output',
     async (_name, scenario) => {
-      const { current, shared } = await both(scenario);
+      const { current, shared, kernel } = await arms(scenario);
 
       expect(current.exitCode).toBe(scenario.exitCode ?? 0);
       expect(shared.exitCode).toBe(current.exitCode);
       expect(shared.requests).toEqual(current.requests);
       expect(shared.frames).toEqual(current.frames);
+      // The kernel must send and print what the shared loop does.
+      expect(kernel.exitCode).toBe(shared.exitCode);
+      expect(kernel.requests).toEqual(shared.requests);
+      expect(kernel.frames).toEqual(shared.frames);
       // Only the run with the setting on sends its subagent rounds on the
       // shared loop.
       expect(current.sharedSubagentRounds).toBe(0);
       expect(shared.sharedSubagentRounds).toBe(scenario.subagentRounds ?? 0);
+      expect(current.sharedSubagentBatches).toBe(0);
+      expect(shared.sharedSubagentBatches).toBe(scenario.subagentBatches ?? 0);
+      expect(kernel.kernelSubagentRounds).toBe(scenario.subagentRounds ?? 0);
+      expect(kernel.sharedSubagentBatches).toBe(scenario.subagentBatches ?? 0);
       const recovery = scenario.subagentRecovery;
       if (recovery) {
-        for (const run of [current, shared]) {
+        for (const run of [current, shared, kernel]) {
           expect(run.subagentRequests).toBe(recovery.requests);
           expect(run.frames).toContainEqual({
             type: 'user',
@@ -661,7 +740,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       reply: (messages) => ({ content: `answer ${userTurns(messages)}` }),
     };
 
-    const { current, shared } = await both(scenario);
+    const { current, shared, kernel } = await arms(scenario);
     const results = (frames: unknown[]) =>
       frames.filter((frame) => (frame as JsonObject)['type'] === 'result');
 
@@ -681,6 +760,10 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       { is_error: false, result: 'answer 1' },
     ]);
     expect(shared.stderr).toContain('Reached max session turns');
+    expect(kernel.exitCode).toBe(shared.exitCode);
+    expect(kernel.requests).toEqual(shared.requests);
+    expect(kernel.frames).toEqual(shared.frames);
+    expect(kernel.stderr).toContain('Reached max session turns');
   }, 120_000);
 
   it('asks for approval of a whole batch before the tool budget stops it', async () => {
@@ -708,7 +791,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
           : { content: 'Both written.' },
     };
 
-    const { current, shared } = await both(scenario);
+    const { current, shared, kernel } = await arms(scenario);
     const output = (frames: unknown[]) =>
       frames.filter(
         (frame) => (frame as JsonObject)['type'] !== 'control_request',
@@ -723,5 +806,9 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     // first, and the budget then stops the second call before it runs.
     expect(current.approvals).toEqual(['call_one']);
     expect(shared.approvals).toEqual(['call_one', 'call_two']);
+    expect(kernel.exitCode).toBe(shared.exitCode);
+    expect(kernel.requests).toEqual(shared.requests);
+    expect(output(kernel.frames)).toEqual(output(shared.frames));
+    expect(kernel.approvals).toEqual(shared.approvals);
   }, 120_000);
 });

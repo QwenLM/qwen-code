@@ -61,6 +61,7 @@ let session: ManagedSession;
 let compression: HostedContextCompression;
 let busy = false;
 let pendingHooks = false;
+let onCompactionCommitted: ReturnType<typeof vi.fn>;
 
 const candidate: ChatCompressionCandidate = {
   newHistory: [
@@ -80,6 +81,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   busy = false;
   pendingHooks = false;
+  onCompactionCommitted = vi.fn();
   vi.mocked(loadCliConfig).mockResolvedValue(config as never);
   root = await mkdtemp(path.join(os.tmpdir(), 'qwen-hosted-compression-'));
   const sessionKey = {
@@ -141,6 +143,7 @@ beforeEach(async () => {
     instructions: async () => 'instructions',
     busy: () => busy,
     hasPendingHooks: () => pendingHooks,
+    onCompactionCommitted,
   });
 });
 
@@ -186,6 +189,7 @@ async function reopen() {
     instructions: async () => 'instructions',
     busy: () => busy,
     hasPendingHooks: () => pendingHooks,
+    onCompactionCommitted,
   });
 }
 
@@ -347,6 +351,21 @@ describe('Hosted context compression', () => {
     expect(await compression.admit(request)).toEqual(result);
     await compression.wait();
     expect(summarize).toHaveBeenCalledOnce();
+  });
+
+  it('notifies the loop resolver seam when a route-driven compaction commits', async () => {
+    engine();
+    const request = intent();
+    expect(onCompactionCommitted).not.toHaveBeenCalled();
+    await compression.admit(request);
+    await compression.wait();
+    expect(compression.status(request.operationId)).toMatchObject({
+      status: 'completed',
+      outcome: 'compressed',
+    });
+    // A committed compaction is fresh context: the loop resolver must reset
+    // so the next fire re-delivers the full guidance, not a dangling reminder.
+    expect(onCompactionCommitted).toHaveBeenCalledOnce();
   });
 
   it('refuses busy and stale requests before invoking the model', async () => {

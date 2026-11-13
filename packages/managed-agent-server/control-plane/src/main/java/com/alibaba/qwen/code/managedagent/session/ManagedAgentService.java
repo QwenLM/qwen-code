@@ -134,6 +134,23 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 && sideQueriesEnabled.getAsBoolean();
     }
 
+    private BooleanSupplier clientFilesEnabled = () -> false;
+
+    @Autowired
+    void configureClientFiles(ManagedAgentSettings properties) {
+        clientFilesEnabled = () -> properties.getClientFiles().isEnabled()
+                && harness.supportsClientFiles();
+    }
+
+    private boolean supportsClientFiles(SessionRecord session) {
+        return session.deletedAt() == null && "ACTIVE".equals(session.status())
+                && clientFilesEnabled.getAsBoolean()
+                // Ask the same question the register route answers: a
+                // foregroundOnly or profile-less Session is always refused, so
+                // the capability must not advertise it there.
+                && harness.supportsClientFiles(session);
+    }
+
     @Autowired(required = false)
     void setRuntimeWarmer(RuntimeWarmer runtimeWarmer) {
         this.runtimeWarmer = runtimeWarmer;
@@ -568,7 +585,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
         Admission admission;
         Set<String> extensionLifecycleProfiles = extensionPins == null ? Set.of()
-                : java.util.stream.Stream.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP)
+                : java.util.stream.Stream.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.SHELL_V3, WorkspaceToolProfiles.MCP)
                         .filter(harness::supportsLifecycle).collect(java.util.stream.Collectors.toSet());
         if (worktree != null && sessionWorktrees == null) {
             throw new ManagedAgentException(409, "worktree_unavailable", "Session worktrees are unavailable.");
@@ -1000,10 +1017,17 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         StoreModels.SyncRename result = store.settleRenameSync(tenantId,
                 idempotencyKey, renameDigest(sessionId, title), sessionId,
                 effectiveTitle, actorId);
-        if (!result.replayed()) {
+        // Notify only when this call settled a new revision. A pure COMPLETED
+        // replay returns revision 0; a legacy FAILED/PENDING receipt re-settles
+        // under a new revision even though it reports replayed, and that fresh
+        // settlement must still notify.
+        if (result.revision() > 0) {
             try {
                 if (harness.supportsFencedTitles()) {
                     harness.rename(tenantId, sessionId, effectiveTitle, result.revision());
+                } else {
+                    LOG.debug("Session title journal notification skipped (unsupported) tenant={} session={}",
+                            tenantId, sessionId);
                 }
             } catch (RuntimeException error) {
                 // A lost notification only lags the transcript copy until a
@@ -1419,6 +1443,9 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         var compressions = store.contextCompressionStates(tenantId, boundIds);
         Map<String, WebShellModelContext> modelContexts = store.findModelContexts(tenantId, boundIds);
         boolean modelSelectionSupported = !store.modelOptions().isEmpty() && harness.supportsModelSelection();
+        // Deliberately Harness-bound: the advertisement reports whether the
+        // journal copy can stay in sync, not whether the SQL rename can succeed
+        // (it succeeds offline too). Do not relax this to always-true.
         boolean renameSupported = harness.isAvailable() && harness.supportsFencedTitles();
         Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
         boolean compressionSupported = harness.supportsContextCompression();
@@ -1544,7 +1571,11 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         visible && approvalExecutable && compressionSupported && compression.available(),
                         childAgentsCapability(session, worktree),
                         (session.workspace() == null || maySubmit) && supportsSideQueries(session),
-                        (session.workspace() == null || maySubmit) && supportsSideQueries(session)),
+                        (session.workspace() == null || maySubmit) && supportsSideQueries(session),
+                        // Registration refuses a Workspace-less Session (mayExecute
+                        // requires a bound Workspace), so the capability must not
+                        // advertise it there.
+                        session.workspace() != null && maySubmit && supportsClientFiles(session)),
                 session.workspace() != null || session.agentDefinitionDigest() != null
                         ? approvalSelection == null ? session.approvalMode() : approvalSelection.mode() : null,
                 modelContext, modelSelection, approvalSelection == null ? null : approvalSelection.revision(),

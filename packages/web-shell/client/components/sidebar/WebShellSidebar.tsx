@@ -119,6 +119,10 @@ import {
   PopoverTrigger,
 } from '../ui/popover';
 import { formatDateTime } from '../../utils/formatDateTime';
+import {
+  BindSessionPrDialog,
+  type BindSessionPrPayload,
+} from '../dialogs/BindSessionPrDialog';
 import { DialogShell } from '../dialogs/DialogShell';
 import { useWorkspaceRemoval } from '../workspaces/useWorkspaceRemoval';
 import {
@@ -424,6 +428,7 @@ export const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[]
 export type WebShellSidebarSessionActionItem =
   | 'details'
   | 'rename'
+  | 'bindPr'
   | 'group'
   | 'export'
   | 'delete'
@@ -457,7 +462,17 @@ export interface WebShellSidebarSessionActionsOptions {
 }
 
 export const DEFAULT_SESSION_ACTION_ITEMS: readonly WebShellSidebarSessionActionItem[] =
-  ['details', 'rename', 'group', 'export', 'delete', 'pin', 'archive', 'split'];
+  [
+    'details',
+    'rename',
+    'bindPr',
+    'group',
+    'export',
+    'delete',
+    'pin',
+    'archive',
+    'split',
+  ];
 
 const DEFAULT_INLINE_ACTION_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
   ['pin'];
@@ -1808,6 +1823,10 @@ export function WebShellSidebar({
   );
   const [deleteCandidate, setDeleteCandidate] =
     useState<DaemonSessionSummary | null>(null);
+  const [bindPrCandidate, setBindPrCandidate] =
+    useState<DaemonSessionSummary | null>(null);
+  const [bindPrSubmitting, setBindPrSubmitting] = useState(false);
+  const [bindPrError, setBindPrError] = useState<string | undefined>();
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedSessions, setSelectedSessions] = useState(
     () => new Map<string, DaemonSessionSummary>(),
@@ -2833,9 +2852,10 @@ export function WebShellSidebar({
     getIdentityForSession,
     workspace.client,
   ]);
-  const canRenameSession = useCallback(
+  // The metadata-mutation capability, independent of any one menu item, so
+  // Bind PR can gate on its own `bindPr` key rather than riding on `rename`.
+  const canMutateSessionMetadata = useCallback(
     (session: DaemonSessionSummary) => {
-      if (!sessionActionItems.has('rename')) return false;
       const scope = resolveSessionWorkspaceScope(session);
       if (isCurrentSession(session) && isMutableSessionScope(scope)) {
         return true;
@@ -2850,9 +2870,13 @@ export function WebShellSidebar({
       isCurrentSession,
       isMutableSessionScope,
       resolveSessionWorkspaceScope,
-      sessionActionItems,
       workspaceSessionMetadataEnabled,
     ],
+  );
+  const canRenameSession = useCallback(
+    (session: DaemonSessionSummary) =>
+      sessionActionItems.has('rename') && canMutateSessionMetadata(session),
+    [canMutateSessionMetadata, sessionActionItems],
   );
   const canShowDeleteSession = useCallback(
     (session: DaemonSessionSummary) =>
@@ -3980,6 +4004,82 @@ export function WebShellSidebar({
       onError,
       sessionCatalogController,
       setSessionBusy,
+      t,
+      workspace.client,
+    ],
+  );
+
+  const handleBindPrFromMenu = useCallback((session: DaemonSessionSummary) => {
+    setBindPrError(undefined);
+    // A write left in flight by a dismissed dialog must not render the newly
+    // opened form dead; invalidate it and reset the flag for the new request.
+    bindPrRequestRef.current++;
+    setBindPrSubmitting(false);
+    setBindPrCandidate(session);
+  }, []);
+
+  // Supplementary PR registration — mirrors saveRename's workspace routing
+  // (current session → own session actions; other sessions → the owning
+  // workspace's metadata route; cwd-less rows → the global route). Unlike
+  // saveRename there is no standalone branch: standalone rows (including
+  // recents rows) never show the item, since their metadata route only
+  // accepts displayName.
+  // A monotonically increasing request token scopes the submitting flag and
+  // the settle-time writes to the request that owns them. Closing or reopening
+  // the dialog bumps it, so a write left in flight by a dismissed dialog can
+  // neither render a newly opened form dead nor close/error it when it settles
+  // (even if the same session is reopened). The catalog refresh still runs:
+  // the binding was persisted regardless of the dialog's fate.
+  const bindPrRequestRef = useRef(0);
+  const submitBindPr = useCallback(
+    (pr: BindSessionPrPayload) => {
+      const session = bindPrCandidate;
+      if (!session || bindPrSubmitting) return;
+      const request = ++bindPrRequestRef.current;
+      const sessionId = session.sessionId;
+      const workspaceCwd = getSessionWorkspaceCwd(session);
+      setBindPrSubmitting(true);
+      setBindPrError(undefined);
+      const bind = isCurrentSession(session)
+        ? actions.bindSessionPr(pr)
+        : workspaceCwd
+          ? workspace.client
+              .workspaceByCwd(workspaceCwd)
+              .updateSessionMetadata(sessionId, { pr })
+          : workspace.client.updateSessionMetadata(sessionId, { pr });
+      bind
+        .then(() => {
+          if (workspaceCwd) {
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
+          }
+          bumpWorkspaceReload();
+          if (bindPrRequestRef.current !== request) return;
+          setBindPrCandidate(null);
+          setBindPrSubmitting(false);
+        })
+        .catch((err: unknown) => {
+          if (workspaceCwd) {
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
+          }
+          // Only surface the error on the still-open dialog; if the user
+          // dismissed it mid-write the failure is dropped (they cancelled).
+          if (bindPrRequestRef.current !== request) return;
+          setBindPrError(
+            err instanceof Error
+              ? `${t('sessionsOverview.bindPrFailed')}: ${err.message}`
+              : t('sessionsOverview.bindPrFailed'),
+          );
+          setBindPrSubmitting(false);
+        });
+    },
+    [
+      actions,
+      bindPrCandidate,
+      bindPrSubmitting,
+      bumpWorkspaceReload,
+      getSessionWorkspaceCwd,
+      isCurrentSession,
+      sessionCatalogController,
       t,
       workspace.client,
     ],
@@ -5705,6 +5805,15 @@ export function WebShellSidebar({
       const showRename = standalone
         ? sessionActionItems.has('rename')
         : canRenameSession(session);
+      // PR binding gates on the metadata-mutation capability and its own
+      // `bindPr` item (not rename's); standalone sessions — including recents
+      // rows, where the `standalone` adapter param is undefined — are excluded
+      // because their metadata route only accepts displayName.
+      const showBindPr =
+        !standalone &&
+        !recent?.isStandalone &&
+        sessionActionItems.has('bindPr') &&
+        canMutateSessionMetadata(session);
       const activeExportScope = getActiveExportScope(session);
       const showExport = standalone
         ? sessionActionItems.has('export')
@@ -5763,6 +5872,7 @@ export function WebShellSidebar({
         (showPin && !inlineActionItems.has('pin')) ||
         showArchive ||
         (showRename && !inlineActionItems.has('rename')) ||
+        showBindPr ||
         showGroup ||
         (showExport && !inlineActionItems.has('export')) ||
         (showDelete && !inlineActionItems.has('delete'));
@@ -5772,6 +5882,7 @@ export function WebShellSidebar({
           showPin ||
           showArchive ||
           showRename ||
+          showBindPr ||
           showExport ||
           showDelete ||
           showGroup);
@@ -6143,6 +6254,15 @@ export function WebShellSidebar({
                                 {t('sidebar.rename')}
                               </DropdownMenuItem>
                             )}
+                            {showBindPr && (
+                              <DropdownMenuItem
+                                disabled={busy}
+                                onSelect={() => handleBindPrFromMenu(session)}
+                              >
+                                <GitPullRequestIcon />
+                                {t('sessionsOverview.bindPr')}
+                              </DropdownMenuItem>
+                            )}
                             {showGroup && (
                               <DropdownMenuItem
                                 disabled={busy}
@@ -6206,6 +6326,7 @@ export function WebShellSidebar({
       canShowDeleteSession,
       canOrganizeSession,
       canRenameSession,
+      canMutateSessionMetadata,
       canUnarchiveSession,
       canMutateSessionArchive,
       canOpenSplitView,
@@ -6220,6 +6341,7 @@ export function WebShellSidebar({
       getIdentityForSession,
       getSessionWorkspaceCwd,
       handleArchive,
+      handleBindPrFromMenu,
       handleDeleteSession,
       handleExportSession,
       handleLoadSession,
@@ -7390,6 +7512,20 @@ export function WebShellSidebar({
               </div>
             </div>
           </DialogShell>
+        )}
+        {bindPrCandidate && (
+          <BindSessionPrDialog
+            workspaceCwd={getSessionWorkspaceCwd(bindPrCandidate) ?? ''}
+            busy={bindPrSubmitting}
+            error={bindPrError}
+            onSubmit={submitBindPr}
+            onClose={() => {
+              bindPrRequestRef.current++;
+              setBindPrCandidate(null);
+              setBindPrSubmitting(false);
+              setBindPrError(undefined);
+            }}
+          />
         )}
         {workspaceRenameCandidate && (
           <WorkspaceRenameDialog

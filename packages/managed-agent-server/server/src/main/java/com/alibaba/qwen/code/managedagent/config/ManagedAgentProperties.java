@@ -64,9 +64,11 @@ public class ManagedAgentProperties
 
     private final Harness harness = new Harness();
     private final SessionStore sessionStore = new SessionStore();
+    private final ClientFiles clientFiles = new ClientFiles();
     private final Memory memory = new Memory();
     private final ToolPublication toolPublication = new ToolPublication();
     private final SessionResources sessionResources = new SessionResources();
+    private final ObjectStorage objectStorage = new ObjectStorage();
     private final Artifacts artifacts = new Artifacts();
     private final Extensions extensions = new Extensions();
     private final ManagedExtensions managedExtensions = new ManagedExtensions();
@@ -311,6 +313,40 @@ public class ManagedAgentProperties
         }
     }
 
+    // The Harness reaches the relay MCP endpoint on this server's internal
+    // listener, so the relay URL derives from it the way the store URL does.
+    // Enabling the feature with no derivable URL fails the boot rather than
+    // answering 503 on every registration with no diagnostic.
+    private void applyClientFilesDefaults() {
+        if (!clientFiles.isEnabled()) {
+            return;
+        }
+        // Range-check the numeric settings at boot: a zero queue-depth would
+        // otherwise refuse every admission and silently disable the feature,
+        // and a non-positive TTL or payload bound breaks the relay's lifecycle.
+        if (clientFiles.getQueueDepth() < 1) {
+            throw new IllegalStateException("client-files.queue-depth must be at least 1");
+        }
+        if (clientFiles.getMaxPayloadBytes() < 1) {
+            throw new IllegalStateException("client-files.max-payload-bytes must be at least 1");
+        }
+        if (clientFiles.getRequestTtl() == null || clientFiles.getRequestTtl().isNegative()
+                || clientFiles.getRequestTtl().isZero()) {
+            throw new IllegalStateException("client-files.request-ttl must be positive");
+        }
+        if (clientFiles.getBindingTtl() == null || clientFiles.getBindingTtl().isNegative()
+                || clientFiles.getBindingTtl().isZero()) {
+            throw new IllegalStateException("client-files.binding-ttl must be positive");
+        }
+        if (StringUtils.isBlank(clientFiles.getRelayUrl()) && environment != null) {
+            clientFiles.setRelayUrl(localStoreBaseUrl());
+        }
+        if (StringUtils.isBlank(clientFiles.getRelayUrl())) {
+            throw new IllegalStateException("client-files.enabled requires client-files.relay-url"
+                    + " (or an internal listener to derive it from)");
+        }
+    }
+
     private String localStoreBaseUrl() {
         boolean internal = internalServer.getPort() > 0;
         int port = internal ? internalServer.getPort()
@@ -333,6 +369,7 @@ public class ManagedAgentProperties
     @PostConstruct
     void validateWorkspaceFiles() {
         applySessionStoreDefaults();
+        applyClientFilesDefaults();
         applyHarnessCredentialsFile();
         // The sweep runs first, so a bare milliseconds-style override
         // warns with the unit hint before the range check below fails the
@@ -706,6 +743,23 @@ public class ManagedAgentProperties
 
     @Getter
     @Setter
+    public static class ClientFiles
+            implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+                    .ClientFiles {
+        private boolean enabled;
+        private int queueDepth = 32;
+        @DurationUnit(ChronoUnit.SECONDS)
+        private Duration requestTtl = Duration.ofSeconds(25);
+        @DurationUnit(ChronoUnit.SECONDS)
+        private Duration bindingTtl = Duration.ofHours(8);
+        // A literal (not 60 * 1024) so the configuration-metadata processor
+        // carries the default into the generated reference page.
+        private int maxPayloadBytes = 61440;
+        private String relayUrl = "";
+    }
+
+    @Getter
+    @Setter
     public static class Auth {
         private String mode = "auto";
         private String signingKey = "";
@@ -775,6 +829,12 @@ public class ManagedAgentProperties
         private int packMaxTransactions = 4096;
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration deletionGrace = Duration.ofHours(72);
+    }
+
+    @Getter
+    @Setter
+    public static class ObjectStorage {
+        private boolean enabled;
     }
 
     @Getter
