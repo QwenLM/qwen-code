@@ -67,6 +67,7 @@ import {
   HOSTED_CRON_CREATE_TOOL,
   HOSTED_CRON_LIST_TOOL,
   HOSTED_CRON_DELETE_TOOL,
+  cronExecutionId,
   HOSTED_MEMBER_PLAN_TOOL,
   HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
   HOSTED_SEND_MESSAGE_TO_PARENT_TOOL,
@@ -2281,7 +2282,19 @@ it('cron_create/list/delete drive the automation union on shell/4', async () => 
     });
     expect(createdResp?.['executionStatus']).toBe('success');
     expect(created).toHaveLength(1);
-    expect(created[0]?.key).toBe('loop:call-cron_create:create');
+    // The key is scoped to the Session + turn + call identity (a bounded hash),
+    // not the bare model call id, so two Sessions cannot collide on it.
+    const scopedKey = (callId: string, verb: string) =>
+      'loop:' +
+      createHash('sha256')
+        .update(
+          `${session.authority.sessionHeader.sessionKey.sessionId}\u0000prompt\u0000${callId}`,
+          'utf8',
+        )
+        .digest('hex') +
+      `:${verb}`;
+    expect(created[0]?.key).toBe(scopedKey('call-cron_create', 'create'));
+    expect(created[0]?.key).not.toBe('loop:call-cron_create:create');
     // The union lists the definition plus a pending wakeup.
     await drive('loop_wakeup', { delaySeconds: 60, prompt: '/loop tick' });
     const listed = await drive('cron_list', {});
@@ -2293,7 +2306,7 @@ it('cron_create/list/delete drive the automation union on shell/4', async () => 
     const del = await drive('cron_delete', { id: 'asch_x' });
     expect(del?.['retired']).toBe(true);
     expect(retired).toEqual([
-      { id: 'asch_x', key: 'loop:call-cron_delete:retire' },
+      { id: 'asch_x', key: scopedKey('call-cron_delete', 'retire') },
     ]);
     // A one-shot is refused with a typed tool error, not a store call.
     const oneShot = await drive('cron_create', {
@@ -2511,6 +2524,26 @@ it('cron_list stays within the inline bound at full capacity with large goals', 
   for (const definition of listed) {
     expect(definition).not.toHaveProperty('goal');
   }
+});
+
+it('scopes the cron idempotency identity to Session, turn and call', () => {
+  // A re-drive of the same call reuses the identity.
+  expect(cronExecutionId('session-a', 'turn-1', 'call_qwen_1')).toBe(
+    cronExecutionId('session-a', 'turn-1', 'call_qwen_1'),
+  );
+  // Two Sessions in a tenant sharing a model call id must not collide: the
+  // control plane's idempotency scope is tenant + key, not Session + key.
+  expect(cronExecutionId('session-a', 'turn-1', 'call_qwen_1')).not.toBe(
+    cronExecutionId('session-b', 'turn-1', 'call_qwen_1'),
+  );
+  // A different turn with the same call id is a different execution.
+  expect(cronExecutionId('session-a', 'turn-1', 'call_qwen_1')).not.toBe(
+    cronExecutionId('session-a', 'turn-2', 'call_qwen_1'),
+  );
+  // The derived key stays within the 1-128 printable-ASCII idempotency bound.
+  const key = `loop:${cronExecutionId('session-a', 'turn-1', 'call_qwen_1')}:create`;
+  expect(key.length).toBeLessThanOrEqual(128);
+  expect(key).toMatch(/^loop:[0-9a-f]{64}:create$/u);
 });
 
 it('a lone loop_wakeup batch acquires no Runtime mount', async () => {

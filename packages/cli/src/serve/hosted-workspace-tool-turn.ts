@@ -2021,6 +2021,21 @@ function isTerminalCronError(cause: unknown): boolean {
   return false;
 }
 
+// The model's call id is only deduped within one Session's history (and can
+// restart at call_qwen_1), while the control plane's idempotency scope is
+// tenant + key. Derive the cron key from the Session, turn and call identity
+// so two Sessions in a tenant cannot collide on the same key, and a re-drive
+// of the same call reuses it. The sha256 hex keeps the derived key bounded.
+export function cronExecutionId(
+  sessionId: string,
+  promptId: string,
+  callId: string,
+): string {
+  return createHash('sha256')
+    .update(`${sessionId}\u0000${promptId}\u0000${callId}`, 'utf8')
+    .digest('hex');
+}
+
 const diagnosticResults = new WeakMap<object, 'success'>();
 function convertToFunctionResponse(
   ...args: Parameters<typeof baseFunctionResponse>
@@ -6572,7 +6587,11 @@ export class HostedWorkspaceToolTurn {
                 timezone: request.input['timezone'] as string | undefined,
                 gate: request.input['gate'] as string | undefined,
               },
-              request.call.callId,
+              cronExecutionId(
+                this.session.authority.sessionHeader.sessionKey.sessionId,
+                this.promptId,
+                request.call.callId,
+              ),
             );
             converted = convertToFunctionResponse(
               request.call.name,
@@ -6682,7 +6701,14 @@ export class HostedWorkspaceToolTurn {
           let converted: Part[];
           try {
             const outcome = this.crons
-              ? await this.crons.delete(id, request.call.callId)
+              ? await this.crons.delete(
+                  id,
+                  cronExecutionId(
+                    this.session.authority.sessionHeader.sessionKey.sessionId,
+                    this.promptId,
+                    request.call.callId,
+                  ),
+                )
               : {
                   kind: 'wakeup' as const,
                   cancelled: await this.loops!.cancel(id),
