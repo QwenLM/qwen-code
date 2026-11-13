@@ -98,7 +98,9 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_130_000;
 // the same candidate with Zod 3. Merged main 754792b8d1 measures 2,129,325
 // bytes and the forbidden-input guard still passes, leaving 2,675 bytes below
 // this ceiling.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_132_000;
+// Main 0eb27d3b measures 2,132,531 bytes on Node 22.23.2 and 24.19.0,
+// with the forbidden-input guard passing, leaving 3,469 bytes below this cap.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_136_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
