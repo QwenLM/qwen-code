@@ -80,20 +80,6 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /github\.event_name == 'workflow_dispatch'/,
       String(eventName === 'workflow_dispatch'),
     ],
-    [/github\.event_name == 'schedule'/, String(eventName === 'schedule')],
-    [
-      /github\.event_name == 'issue_comment'/,
-      String(eventName === 'issue_comment'),
-    ],
-    [
-      /github\.event_name == 'pull_request_review_comment'/,
-      String(eventName === 'pull_request_review_comment'),
-    ],
-    [
-      /github\.event_name == 'pull_request_review'/,
-      String(eventName === 'pull_request_review'),
-    ],
-    [/github\.event_name == 'issues'/, String(eventName === 'issues')],
     // Longest term first as a convention; both patterns are quote-anchored
     // (the closing quote is part of each regex), so neither can match
     // inside the other and the substitution order is behaviorally inert.
@@ -113,15 +99,6 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /github\.event_name == 'pull_request'/,
       String(eventName === 'pull_request'),
     ],
-    // Bare github.event.pull_request (truthy for pull_request /
-    // pull_request_target, empty otherwise). Must come after the
-    // .head.repo.full_name substitutions so those match first.
-    [
-      /github\.event\.pull_request(?!\.)/,
-      String(
-        eventName === 'pull_request' || eventName === 'pull_request_target',
-      ),
-    ],
     [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
     [
       /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
@@ -135,26 +112,9 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.pull_request\.author_association\)/,
       String(TRUSTED.includes(assoc)),
     ],
-    [
-      /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.comment\.author_association\)/,
-      String(TRUSTED.includes(assoc)),
-    ],
-    [
-      /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.review\.author_association\)/,
-      String(TRUSTED.includes(assoc)),
-    ],
-    [
-      /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.issue\.author_association\)/,
-      String(TRUSTED.includes(assoc)),
-    ],
     [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
   ];
   let expr = expression.replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '');
-  // Plain string runs-on (e.g. 'ubuntu-latest') — no expression to evaluate.
-  if (!expr.startsWith('(') && !expr.includes('&&') && !expr.includes('||')) {
-    const trimmed = expr.replace(/^['"]|['"]$/g, '');
-    return [trimmed];
-  }
   for (const [term, value] of substitutions) {
     expr = expr.replace(term, value);
   }
@@ -2006,12 +1966,8 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
 });
 
 describe('control-plane jobs moved off the hosted queue', () => {
-  // These jobs check out only the default branch and run no PR code, but an
-  // untrusted comment or review must not trigger execution on a shared runner.
-  // auto-minimize-spam is forced to ubuntu-latest (it only fires for untrusted
-  // authors). qwen-code-pr-review delay-automatic-review and assign-issue-owner
-  // require trusted author / same-repo for self-hosted; untrusted triggers fall
-  // back to hosted. The kill-switch wins for everyone.
+  // None of these checks out or runs PR code, so each reaches the pool on
+  // every trigger, fork-raised events included; the kill-switch wins.
   const ECS_LABELS = ['self-hosted', 'linux', 'x64', 'ecs-qwen'];
   const HOSTED_LABELS = ['ubuntu-latest'];
   const jobs = [
@@ -2019,14 +1975,8 @@ describe('control-plane jobs moved off the hosted queue', () => {
       'qwen-code-pr-review.yml',
       'delay-automatic-review',
       ['pull_request_target'],
-      true, // has fork protection
     ],
-    [
-      'assign-issue-owner.yml',
-      'assign',
-      ['issues', 'workflow_dispatch'],
-      false,
-    ],
+    ['assign-issue-owner.yml', 'assign', ['issues', 'workflow_dispatch']],
     [
       'auto-minimize-spam.yml',
       'minimize',
@@ -2037,11 +1987,10 @@ describe('control-plane jobs moved off the hosted queue', () => {
         'push',
         'workflow_dispatch',
       ],
-      'always-hosted', // forced to ubuntu-latest
     ],
   ];
 
-  for (const [file, jobName, events, protection] of jobs) {
+  for (const [file, jobName, events] of jobs) {
     const job = parse(readFileSync(join(workflowsDir, file), 'utf8')).jobs[
       jobName
     ];
@@ -2052,39 +2001,14 @@ describe('control-plane jobs moved off the hosted queue', () => {
       String(s.uses || '').startsWith('actions/checkout'),
     );
 
-    if (protection === 'always-hosted') {
-      it(`${file} ${jobName}: always runs on hosted (untrusted-only job)`, () => {
-        assert.equal(runsOn, 'ubuntu-latest');
-        for (const eventName of events) {
-          for (const assoc of ASSOCIATIONS) {
-            assert.deepEqual(route(eventName, assoc), HOSTED_LABELS, eventName);
-          }
+    it(`${file} ${jobName}: every trigger reaches the pool, forks included`, () => {
+      assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
+      for (const eventName of events) {
+        for (const assoc of ASSOCIATIONS) {
+          assert.deepEqual(route(eventName, assoc), ECS_LABELS, eventName);
         }
-      });
-    } else if (protection) {
-      it(`${file} ${jobName}: trusted triggers reach the pool, untrusted stay hosted`, () => {
-        assert.match(runsOn, /author_association/);
-        for (const eventName of events) {
-          for (const assoc of ASSOCIATIONS) {
-            const isTrusted = TRUSTED.includes(assoc);
-            assert.deepEqual(
-              route(eventName, assoc),
-              isTrusted ? ECS_LABELS : HOSTED_LABELS,
-              `${eventName} assoc=${assoc}`,
-            );
-          }
-        }
-      });
-    } else {
-      it(`${file} ${jobName}: every trigger reaches the pool, forks included`, () => {
-        assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
-        for (const eventName of events) {
-          for (const assoc of ASSOCIATIONS) {
-            assert.deepEqual(route(eventName, assoc), ECS_LABELS, eventName);
-          }
-        }
-      });
-    }
+      }
+    });
 
     it(`${file} ${jobName}: the kill-switch wins on every event`, () => {
       for (const eventName of events) {
