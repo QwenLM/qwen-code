@@ -23,7 +23,7 @@ encoding, query parameters or fragment.
 
 ## Configure a Channel
 
-Configure this integration with the CLI or `settings.json`. Web Shell's Channels
+Configure this integration in `settings.json`. Web Shell's Channels
 page does not currently list Feishu Webhook instances or offer a create entry.
 
 Add a named instance to the workspace's Channel settings:
