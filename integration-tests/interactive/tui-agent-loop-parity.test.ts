@@ -237,6 +237,25 @@ const VOLATILE_KEYS = new Set([
 // Timings, such as the telemetry recorded with each response.
 const TIMING_KEY = /(_ms|Ms)$/;
 
+// The background shell scenario's launch text names its task id, its process,
+// the project's runtime directory, and the sizes of that text. The sizes are
+// the one piece normalize() cannot recover from the normalized text: the
+// kernel picks the process id's width, which sets them. The token estimates
+// are ceilings of the same lengths, so they step with it too.
+const BACKGROUND_SHELL_VOLATILE: Volatile = {
+  keys: [
+    'content_length',
+    'raw_content_length',
+    'processed_estimated_tokens',
+    'raw_estimated_tokens',
+  ],
+  text: [
+    [/\bbg_[0-9a-f]{8}\b/g, 'bg_<ID>'],
+    [/(pid: |pid |<pid>)\d+/g, '$1<PID>'],
+    [/\/tmp\/[0-9a-f]{64}\//g, '/tmp/<HASH>/'],
+  ],
+};
+
 const DATE_REMINDER =
   /^<system-reminder>\n(?:Today's date is |The date has changed since earlier in this conversation\. )/;
 
@@ -325,6 +344,104 @@ describe('normalize', () => {
         '/workspace',
         '/scratch',
       ),
+    );
+  });
+
+  // The background shell's launch text names its process, whose width the
+  // kernel picks, so the telemetry record's byte and token counts of that text
+  // differ between the two parity runs even after the pid text is normalized.
+  // The recorded failure sat where both ceilings coincide; a pid one digit
+  // wider diverges only when the shorter text's length is a multiple of four.
+  it('normalizes a byte count derived from a process id', () => {
+    const launchText = (pid: number) =>
+      'Background shell started.\n' +
+      'id: bg_0123abcd\n' +
+      `pid: ${pid}\n` +
+      'output file: /tmp/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/bg_0123abcd.output\n' +
+      'status file: /tmp/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/bg_0123abcd.status\n' +
+      'To inspect: /tasks';
+    const record = (pid: number, output = 'The job is done.') => {
+      const text = launchText(pid);
+      return {
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'tool_call',
+            call_id: 'call_job',
+            content_length: text.length,
+            raw_content_length: text.length,
+            raw_estimated_tokens: Math.ceil(text.length / 4),
+            processed_estimated_tokens: Math.ceil((text.length + 64) / 4),
+          },
+        },
+        message: {
+          role: 'user',
+          content: [
+            {
+              text:
+                `<task-notification>\nBackground shell bg_0123abcd (pid ${pid}) completed.\n` +
+                `${output}\n</task-notification>`,
+            },
+          ],
+        },
+      };
+    };
+    const launchRecord = (pid: number) => ({
+      type: 'tool_result',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call_job',
+              name: 'run_shell_command',
+              response: { output: launchText(pid) },
+            },
+          },
+        ],
+      },
+    });
+    const normalized = (pid: number, output?: string) =>
+      normalize(
+        [record(pid, output), launchRecord(pid)],
+        '/workspace',
+        '/scratch',
+        BACKGROUND_SHELL_VOLATILE,
+      );
+
+    // Both ceilings step only when the shorter text is a multiple of four.
+    expect(launchText(99).length % 4).toBe(0);
+    expect(normalized(99)).toEqual(normalized(100));
+    // The notification and the answer the scenario asserts still compare.
+    const [message] = normalized(99) as Array<{
+      message: { content: Array<{ text: string }> };
+    }>;
+    expect(message.message.content[0].text).toContain(
+      'Background shell bg_<ID> (pid <PID>) completed.\nThe job is done.',
+    );
+    // The runtime directory stays a directory in the launch text's paths.
+    expect(JSON.stringify(normalized(99))).toContain(
+      '/tmp/<HASH>/bg_<ID>.output',
+    );
+    // A real content difference still compares unequal.
+    expect(normalized(99)).not.toEqual(normalized(100, 'The job failed.'));
+    // The counts stay comparable outside this scenario, where no launch text
+    // derives them from a pid.
+    const plain = normalize(record(99), '/workspace', '/scratch') as {
+      systemPayload: { uiEvent: JsonObject };
+    };
+    expect(plain.systemPayload.uiEvent['content_length']).toBe(
+      launchText(99).length,
+    );
+    expect(plain.systemPayload.uiEvent['raw_content_length']).toBe(
+      launchText(99).length,
+    );
+    expect(plain.systemPayload.uiEvent['raw_estimated_tokens']).toBe(
+      Math.ceil(launchText(99).length / 4),
+    );
+    expect(plain.systemPayload.uiEvent['processed_estimated_tokens']).toBe(
+      Math.ceil((launchText(99).length + 64) / 4),
     );
   });
 });
@@ -1042,15 +1159,9 @@ describeTui(SUITE, () => {
       files: { 'job.log': 'job log\n' },
       laterTurns: true,
       recorded: 'The job is done.',
-      // The job's task id, its process and the project's runtime directory,
-      // named by a hash of the workspace path.
-      volatile: {
-        text: [
-          [/\bbg_[0-9a-f]{8}\b/g, 'bg_<ID>'],
-          [/(pid: |pid |<pid>)\d+/g, '$1<PID>'],
-          [/\/tmp\/[0-9a-f]{64}\//g, '/tmp/<HASH>/'],
-        ],
-      },
+      // The job's task id, its process, the project's runtime directory and
+      // the launch text's byte counts, which the process id's width sets.
+      volatile: BACKGROUND_SHELL_VOLATILE,
       reply: (_messages, dir, index) =>
         index === 0
           ? {
@@ -1218,6 +1329,18 @@ describeTui(SUITE, () => {
   const scenarios = allScenarios.filter(
     (scenario) => renderer === 'ink' || !scenario.laterTurns,
   );
+
+  // The byte-count case pins the constant; this pins the scenario's use of
+  // it, which the parity run alone only notices when the two pids differ in
+  // width.
+  it('uses the normalizer the byte-count case pins', () => {
+    const scenario = allScenarios.find(
+      (candidate) =>
+        candidate.name ===
+        'a background shell whose result starts a notification turn',
+    );
+    expect(scenario?.volatile).toBe(BACKGROUND_SHELL_VOLATILE);
+  });
 
   it.each(scenarios)('$name', PARITY_CASE_OPTIONS, async (scenario) => {
     const current = await run(scenario, false);
