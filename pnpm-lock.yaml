@@ -529,6 +529,9 @@ importers:
       '@qwen-code/channel-base':
         specifier: workspace:*
         version: link:../base
+      undici:
+        specifier: ^7.28.0
+        version: 7.29.0
     devDependencies:
       typescript:
         specifier: 5.8.3
