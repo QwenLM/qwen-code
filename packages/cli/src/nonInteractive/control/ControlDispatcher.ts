@@ -108,12 +108,18 @@ export class ControlDispatcher implements IPendingRequestRegistry {
   }
 
   /**
-   * Routes an incoming request to the appropriate controller and sends response
+   * Routes an incoming request to the appropriate controller and sends response.
+   *
+   * `deferResponse` leaves the reply to the caller, which must then send it with
+   * `sendSuccess` or `sendError`. Use it when the response is a readiness signal
+   * for work the caller performs after the controller has run. With it, a
+   * failure is only surfaced to the caller when `propagateError` is set.
    */
   async dispatch(
     request: CLIControlRequest,
     propagateError = false,
-  ): Promise<void> {
+    deferResponse = false,
+  ): Promise<Record<string, unknown> | undefined> {
     const { request_id, request: payload } = request;
 
     try {
@@ -122,14 +128,26 @@ export class ControlDispatcher implements IPendingRequestRegistry {
       const response = await controller.handleRequest(payload, request_id);
 
       // Send success response
-      this.sendSuccessResponse(request_id, response);
+      if (!deferResponse) this.sendSuccessResponse(request_id, response);
+      return response;
     } catch (error) {
       // Send error response
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      this.sendErrorResponse(request_id, errorMessage);
+      if (!deferResponse) this.sendErrorResponse(request_id, errorMessage);
       if (propagateError) throw error;
+      return undefined;
     }
+  }
+
+  /** Sends a success reply for a request handled with `deferResponse`. */
+  sendSuccess(requestId: string, response: Record<string, unknown>): void {
+    this.sendSuccessResponse(requestId, response);
+  }
+
+  /** Sends an error reply for a request handled with `deferResponse`. */
+  sendError(requestId: string, error: string): void {
+    this.sendErrorResponse(requestId, error);
   }
 
   /**
