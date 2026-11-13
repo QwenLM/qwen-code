@@ -2820,6 +2820,48 @@ describe('startSessionPrRefreshTimer', () => {
     }
   });
 
+  it('drainNow serves a trusted non-primary workspace', async () => {
+    // Every other positive case lets primary default to trusted, so the trusted
+    // half of the filter was never exercised on its own. The scan call is the
+    // positive evidence that the drain tick actually ran.
+    const secondaryCwd = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-secondary-'),
+    );
+    const primary = timerRuntime('primary', trustedCwd, true);
+    const secondary = timerRuntime('secondary', secondaryCwd, true, false);
+    const registry = createWorkspaceRegistry([primary, secondary]);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-secondary-'),
+    );
+    const scanBindings = vi.fn(async () => ({ bindings: [], partial: false }));
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      observationEnabled: true,
+      getPrDrainDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        scanBindings,
+        resolveRuntime: () => secondary,
+        isSessionLive: () => false,
+        wakeSession: async () => ({ kind: 'unavailable' as const }),
+        admitPrompt: async () => ({ deduplicated: false }),
+        readPushedHeads: async () => undefined,
+      }),
+    });
+    try {
+      await handle?.drainNow(secondaryCwd);
+      expect(scanBindings).toHaveBeenCalledTimes(1);
+      await expect(
+        fsp.access(prWatchOwnerPath(watchDir)),
+      ).resolves.toBeUndefined();
+    } finally {
+      handle?.dispose();
+      await removeTempTree(watchDir);
+      await removeTempTree(secondaryCwd);
+    }
+  });
+
   it('threads the watch log into the listing write seam', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);

@@ -3659,10 +3659,12 @@ export function createServeApp(
     requestedSessionIdAdmission,
     // Late-bound: the refresh timer is started before this app exists, so the
     // serve root installs the hook on locals and it is read per restore.
-    onSessionRestored: ({ workspaceCwd }) => {
+    onSessionRestored: ({ workspaceCwd, sessionId }) => {
       (
-        app.locals as { prWatchDrainNow?: (cwd: string) => void }
-      ).prWatchDrainNow?.(workspaceCwd);
+        app.locals as {
+          prWatchDrainNow?: (cwd: string, sessionId?: string) => void;
+        }
+      ).prWatchDrainNow?.(workspaceCwd, sessionId);
     },
     mutate,
     sendBridgeError,

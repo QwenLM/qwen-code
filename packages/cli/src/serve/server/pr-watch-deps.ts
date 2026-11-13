@@ -85,7 +85,12 @@ export interface PrWatchDepsSources {
   hostedChannelBaseUrls: () => readonly unknown[];
   daemonLog?: DaemonLogger;
   log?: (message: string) => void;
-  now?: () => number;
+  /**
+   * The operator's server-wide prompt deadline. A relayed prompt is raced
+   * against it exactly like a route-admitted one; omitting it would let the
+   * watch bypass the cap every other admission honours.
+   */
+  promptDeadlineMs?: number;
   /**
    * Reuse an existing registry when rebuilding after the hosted channels
    * change. A fresh one would give the observation and the drain different
@@ -177,6 +182,9 @@ export function createPrWatchDeps(sources: PrWatchDepsSources): PrWatchDeps {
     return {
       archiveCoordinator,
       ...(sources.daemonLog ? { daemonLog: sources.daemonLog } : {}),
+      ...(sources.promptDeadlineMs !== undefined
+        ? { promptDeadlineMs: sources.promptDeadlineMs }
+        : {}),
     };
   };
 
@@ -197,7 +205,6 @@ export function createPrWatchDeps(sources: PrWatchDepsSources): PrWatchDeps {
     locks,
     allowedHosts,
     log,
-    ...(sources.now ? { now: sources.now } : {}),
   };
 
   const drain: PrWatchDrainDeps = {
@@ -288,8 +295,15 @@ export function createPrWatchDeps(sources: PrWatchDepsSources): PrWatchDeps {
       if (!identity) return undefined;
       const slash = identity.repo.indexOf('/');
       if (slash <= 0) return undefined;
+      // The ledger keeps a non-default port on purpose — a GHE instance on
+      // :8443 serves its pages there — and sameRepository preserves it.
+      // identity.host comes from URL.hostname, which drops the port, so using
+      // it here would never match such a ledger and self-push suppression
+      // would silently fail. URL.host keeps a non-default port and omits the
+      // default one, which is the spelling the ledger normalizes to. A
+      // non-undefined identity already proves the URL parsed.
       const coordinate = {
-        host: identity.host,
+        host: new URL(recipient.url).host,
         owner: identity.repo.slice(0, slash),
         repo: identity.repo.slice(slash + 1),
       };
@@ -302,7 +316,16 @@ export function createPrWatchDeps(sources: PrWatchDepsSources): PrWatchDeps {
       } catch {
         return undefined;
       }
-      for (const root of vouchedScanRoots(roots)) {
+      // vouchedScanRoots orders main first, and the first matching ledger wins,
+      // so a stale state file in main would shadow the live watch worktree's
+      // current one. Put the session's own worktree first and keep the vouched
+      // order for the rest.
+      const vouched = vouchedScanRoots(roots);
+      const ordered = [
+        ...vouched.filter((root) => root === clone),
+        ...vouched.filter((root) => root !== clone),
+      ];
+      for (const root of ordered) {
         let state: ReturnType<typeof readState>;
         try {
           state = readState(autofixPrPaths(root, identity.number).statePath);
@@ -311,6 +334,10 @@ export function createPrWatchDeps(sources: PrWatchDepsSources): PrWatchDeps {
         }
         if (!state) continue;
         if (state.sessionId !== recipient.sessionId) continue;
+        // The path is keyed by PR number, so this is a consistency check on the
+        // file's own contents: a state file that describes another PR must not
+        // be read as this PR's push ledger.
+        if (state.prNumber !== identity.number) continue;
         if (
           !sameRepository(coordinate, {
             host: state.host,
@@ -325,7 +352,6 @@ export function createPrWatchDeps(sources: PrWatchDepsSources): PrWatchDeps {
       return undefined;
     },
     log,
-    ...(sources.now ? { now: sources.now } : {}),
   };
 
   return { watch, drain };

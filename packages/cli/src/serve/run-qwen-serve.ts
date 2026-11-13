@@ -4917,7 +4917,7 @@ async function runQwenServeImpl(
     | {
         dispose(): void;
         stopWatch(): Promise<void>;
-        drainNow(workspaceCwd: string): Promise<void>;
+        drainNow(workspaceCwd: string, sessionId?: string): Promise<void>;
       }
     | undefined;
   let sessionPrRefreshGeneration = 0;
@@ -7743,6 +7743,11 @@ async function runQwenServeImpl(
                 },
                 daemonLog,
                 log: (message) => daemonLog.warn(message),
+                // The same operator cap the routes pass to their admissions, so
+                // a relayed prompt cannot outlive a route-admitted one.
+                ...(opts.promptDeadlineMs !== undefined
+                  ? { promptDeadlineMs: opts.promptDeadlineMs }
+                  : {}),
               };
               // Only the groups the channel grouping already attributed to a
               // trusted workspace, so an untrusted workspace's settings never
@@ -7780,7 +7785,17 @@ async function runQwenServeImpl(
                   } catch {
                     continue;
                   }
-                  for (const entry of Object.values(merged)) {
+                  // Only the channels this group actually hosts. The grouping
+                  // keys the merged config by channel name, so the selection
+                  // names are the same keys; without this every github entry
+                  // in the workspace would widen the allowed set, including
+                  // channels this daemon was never asked to host.
+                  const selected =
+                    group.selection.mode === 'all'
+                      ? undefined
+                      : new Set(group.selection.names);
+                  for (const [name, entry] of Object.entries(merged)) {
+                    if (selected && !selected.has(name)) continue;
                     if (!entry || typeof entry !== 'object') continue;
                     const config = entry as Record<string, unknown>;
                     if (config['type'] !== 'github') continue;
@@ -7818,10 +7833,12 @@ async function runQwenServeImpl(
           // time so a re-entry that replaced it is honoured, and never await —
           // the watch's per-PR lock is not re-entrant.
           (
-            app.locals as { prWatchDrainNow?: (cwd: string) => void }
-          ).prWatchDrainNow = (workspaceCwd) => {
+            app.locals as {
+              prWatchDrainNow?: (cwd: string, sessionId?: string) => void;
+            }
+          ).prWatchDrainNow = (workspaceCwd, sessionId) => {
             void sessionPrRefreshTimer
-              ?.drainNow(workspaceCwd)
+              ?.drainNow(workspaceCwd, sessionId)
               .catch((error: unknown) => {
                 daemonLog.warn(
                   `PR watch resume drain failed: ${

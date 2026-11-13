@@ -2203,7 +2203,12 @@ describe('multi-workspace session dispatch', () => {
       .send({ cwd: SECONDARY_CWD });
     expect(ok.status).toBe(200);
     expect(drainNow).toHaveBeenCalledTimes(1);
-    expect(drainNow).toHaveBeenCalledWith(SECONDARY_CWD);
+    // The session id rides along so the drain can clear a stale Gone mark for
+    // the session that was just restored.
+    expect(drainNow).toHaveBeenCalledWith(
+      SECONDARY_CWD,
+      '22222222-2222-4222-a222-222222222222',
+    );
 
     // A restore that never succeeded must not schedule a drain: the hook sits
     // after the response, so every failure exit skips it. An untrusted

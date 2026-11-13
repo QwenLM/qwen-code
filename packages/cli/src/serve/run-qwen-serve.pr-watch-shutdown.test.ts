@@ -142,18 +142,21 @@ describe('runQwenServe PR-watch shutdown wiring', () => {
     );
     const workspace = path.join(tmpDir, 'project');
     fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
-    // The github entry is the positive control: its host can enter the allowed
-    // set only if the hosted-URL loop really ran and really read this
-    // workspace's settings. Without it every assertion below could hold just
-    // because the group list was empty.
+    // The selected github entry is the positive control: its host can enter the
+    // allowed set only if the hosted-URL loop really ran and really read this
+    // workspace's settings. The unselected one must NOT enter it — the daemon
+    // was never asked to host that channel.
     fs.writeFileSync(
       path.join(workspace, '.qwen', 'settings.json'),
       JSON.stringify({
         channels: {
-          telegram: { type: 'telegram' },
           github: {
             type: 'github',
             baseUrl: 'https://ghe.fixture.example.com',
+          },
+          'github-unselected': {
+            type: 'github',
+            baseUrl: 'https://unselected.fixture.example.com',
           },
         },
       }),
@@ -178,7 +181,7 @@ describe('runQwenServe PR-watch shutdown wiring', () => {
       enabled: true,
       state: 'running',
       pid: 1234,
-      channels: ['telegram'],
+      channels: ['github'],
     };
     const worker = {
       start: vi.fn(),
@@ -220,7 +223,7 @@ describe('runQwenServe PR-watch shutdown wiring', () => {
         maxSessions: 1,
         token: 'secret-token',
         serveWebShell: false,
-        channelSelection: { mode: 'names', names: ['telegram'] },
+        channelSelection: { mode: 'names', names: ['github'] },
       },
       {
         resolveOnListen: true,
@@ -276,5 +279,139 @@ describe('runQwenServe PR-watch shutdown wiring', () => {
     // Positive control: the hosted github entry really reached the allowed
     // set, so the loop ran instead of iterating an empty group list.
     expect(allowedHosts?.has('ghe.fixture.example.com')).toBe(true);
+    // Only the selected channel contributes. The workspace also configures a
+    // github channel this daemon was never asked to host; its host must not
+    // widen the allowed set.
+    expect(allowedHosts?.has('unselected.fixture.example.com')).toBe(false);
+  });
+
+  it('rebuilds the watch deps when a hosted channel changes, keeping the locks', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pr-watch-rebuild-')),
+    );
+    const workspace = path.join(tmpDir, 'project');
+    fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+    const settingsPath = path.join(workspace, '.qwen', 'settings.json');
+    const writeChannels = (baseUrl: string): void => {
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify({
+          channels: { github: { type: 'github', baseUrl } },
+        }),
+      );
+    };
+    writeChannels('https://first.fixture.example.com');
+
+    const snapshot: ChannelWorkerSnapshot = {
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['github'],
+    };
+    const worker = {
+      start: vi.fn(),
+      stop: vi.fn().mockResolvedValue(undefined),
+      restart: vi.fn().mockResolvedValue(snapshot),
+      killAllSync: vi.fn(),
+      snapshot: vi.fn(() => snapshot),
+      enqueueWebhookTask: vi.fn(),
+      deliverChannelMessage: vi.fn(),
+    };
+    const factory = vi.fn((opts: CreateChannelWorkerSupervisorOptions) => {
+      worker.start.mockImplementation(async () => {
+        opts.onReady?.(worker.snapshot());
+      });
+      return worker;
+    });
+    let timerOptions:
+      | Parameters<typeof refreshModule.startSessionPrRefreshTimer>[0]
+      | undefined;
+    vi.spyOn(refreshModule, 'startSessionPrRefreshTimer').mockImplementation(
+      (options) => {
+        timerOptions = options;
+        return {
+          dispose: vi.fn(),
+          stopWatch: vi.fn(async () => {}),
+          drainNow: vi.fn(async () => {}),
+        };
+      },
+    );
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(
+      () => bridge() as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        maxSessions: 1,
+        token: 'secret-token',
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['github'] },
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+        trustedWorkspace: true,
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: {
+          readServiceInfo: vi.fn(() => null),
+          writeServeServiceInfo: vi.fn(),
+          reserveServeServiceInfo: vi.fn(),
+          removeServiceInfo: vi.fn(),
+          removeServeServiceInfo: vi.fn(() => true),
+        },
+      },
+    );
+    await fetch(`${handle.url}/health`, {
+      headers: { authorization: 'Bearer secret-token' },
+    });
+    await expect(handle.runtimeReady).resolves.toBeUndefined();
+    await vi.waitFor(() => expect(timerOptions).toBeDefined(), {
+      timeout: 15_000,
+    });
+
+    type WatchDeps = NonNullable<
+      ReturnType<
+        NonNullable<NonNullable<typeof timerOptions>['getPrWatchDeps']>
+      >
+    >;
+    let first: WatchDeps | undefined;
+    await vi.waitFor(
+      () => {
+        first = timerOptions?.getPrWatchDeps?.();
+        expect(first).toBeDefined();
+      },
+      { timeout: 15_000 },
+    );
+    expect(first?.allowedHosts.has('first.fixture.example.com')).toBe(true);
+
+    // Unchanged config: the same build is reused, so the observation and the
+    // drain keep sharing one lock registry.
+    expect(timerOptions?.getPrWatchDeps?.()).toBe(first);
+
+    // A channel committing later must reach the allowed set — the deps are
+    // built before the channels commit at listen, so a one-shot build would
+    // freeze the set empty.
+    writeChannels('https://second.fixture.example.com');
+    let rebuilt: WatchDeps | undefined;
+    await vi.waitFor(
+      () => {
+        rebuilt = timerOptions?.getPrWatchDeps?.();
+        expect(rebuilt?.allowedHosts.has('second.fixture.example.com')).toBe(
+          true,
+        );
+      },
+      { timeout: 15_000 },
+    );
+    expect(rebuilt).not.toBe(first);
+    // The rebuild must carry the registry over: a fresh one would hand the
+    // observation and the drain different in-process locks for the same files
+    // if a rebuild landed between their two reads.
+    expect(rebuilt?.locks).toBe(first?.locks);
+    const drainDeps = timerOptions?.getPrDrainDeps?.();
+    expect(drainDeps?.locks).toBe(rebuilt?.locks);
   });
 });

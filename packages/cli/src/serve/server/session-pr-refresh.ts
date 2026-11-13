@@ -742,7 +742,7 @@ export function startSessionPrRefreshTimer(deps: {
   | {
       dispose(): void;
       stopWatch(): Promise<void>;
-      drainNow(workspaceCwd: string): Promise<void>;
+      drainNow(workspaceCwd: string, sessionId?: string): Promise<void>;
     }
   | undefined {
   const intervalMs = resolveSessionPrRefreshIntervalMs(deps.env ?? process.env);
@@ -970,9 +970,12 @@ export function startSessionPrRefreshTimer(deps: {
      *
      * Coverage is declared partial on purpose. Only one workspace is scanned,
      * so every other workspace's bindings are absent from the rows — a complete
-     * scan would let the drain delete their watch files as unbound.
+     * scan would let the drain delete their watch files as unbound. Partial
+     * suppresses that unbound-delete branch only: the stale age-out still runs,
+     * but its window is seven days while the full tick refreshes `lastBoundAt`
+     * every interval, so it cannot fire for a workspace the tick still sees.
      */
-    async drainNow(workspaceCwd: string): Promise<void> {
+    async drainNow(workspaceCwd: string, sessionId?: string): Promise<void> {
       // Same gate as the tick: with the switch off the watch is inert, and a
       // resume must not deliver from watch files a previous owner left behind.
       if (!(deps.observationEnabled ?? SESSION_PR_WATCH_OBSERVATION_ENABLED)) {
@@ -995,6 +998,11 @@ export function startSessionPrRefreshTimer(deps: {
       // dies. No await separates the latch check from the assignment.
       if (stopped) return;
       activeWatchDir = drainDeps.watchDir;
+      // This session was just restored, so a Gone mark an earlier archive or
+      // worktree loss left for it is stale. Without clearing it the drain keeps
+      // filtering the recipient out until the rejoin horizon expires, and the
+      // resume this hook exists for delivers nothing.
+      if (sessionId !== undefined) prDrainState.gone.delete(sessionId);
       await runPrWatchDrainTick([runtime], drainDeps, prDrainState, true);
     },
   };

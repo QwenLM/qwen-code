@@ -13,6 +13,7 @@ const readGhConfiguredHostsMock = vi.hoisted(() => vi.fn());
 const scanWorkspaceBindingsMock = vi.hoisted(() => vi.fn());
 const admitSessionPromptMock = vi.hoisted(() => vi.fn());
 const cloneWorktreesOfMock = vi.hoisted(() => vi.fn());
+const vouchedScanRootsMock = vi.hoisted(() => vi.fn());
 
 vi.mock('./pr-watch-gh-hosts.js', () => ({
   readGhConfiguredHosts: readGhConfiguredHostsMock,
@@ -25,6 +26,14 @@ vi.mock('../routes/session-prompt-admission.js', () => ({
 }));
 vi.mock('../routes/autofix-pr-watches.js', () => ({
   cloneWorktreesOf: cloneWorktreesOfMock,
+}));
+// Only the vouching is isolated; autofixPrPaths and readState stay real so the
+// ledger cases still read genuine state files. Vouching needs a real git
+// worktree anchor and otherwise keeps just the first root, which would hide the
+// ordering this suite pins. It has its own coverage in the state suite.
+vi.mock('../../commands/autofix-pr/state.js', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  vouchedScanRoots: vouchedScanRootsMock,
 }));
 
 import { createPrWatchDeps } from './pr-watch-deps.js';
@@ -117,6 +126,9 @@ describe('createPrWatchDeps', () => {
     readGhConfiguredHostsMock.mockReturnValue(new Set<string>());
     scanWorkspaceBindingsMock.mockResolvedValue(false);
     cloneWorktreesOfMock.mockResolvedValue([]);
+    // Identity: for the single-root fixtures this matches the real fallback,
+    // which keeps only the first root when no git anchor can be established.
+    vouchedScanRootsMock.mockImplementation((roots: string[]) => roots);
     restore = vi.fn(
       async () => ({ kind: 'cancelled' }) as SessionRestoreResult,
     );
@@ -132,6 +144,7 @@ describe('createPrWatchDeps', () => {
       hosted?: readonly unknown[];
       withCoordinator?: boolean;
       activity?: ConversationRuntimeActivityGate;
+      deadline?: number;
     } = {},
   ) {
     const runtimes = overrides.runtimes ?? [runtime()];
@@ -142,6 +155,9 @@ describe('createPrWatchDeps', () => {
       conversationRuntimeActivity: () => overrides.activity,
       restore: restore as never,
       hostedChannelBaseUrls: () => overrides.hosted ?? [],
+      ...(overrides.deadline !== undefined
+        ? { promptDeadlineMs: overrides.deadline }
+        : {}),
     });
   }
 
@@ -368,6 +384,27 @@ describe('createPrWatchDeps', () => {
     expect(admitSessionPromptMock).not.toHaveBeenCalled();
   });
 
+  it('refuses to admit when no archive coordinator is available', async () => {
+    // The only guard that stops a delivery being recorded when no prompt was
+    // admitted at all.
+    const { drain } = build({ withCoordinator: false });
+    await expect(
+      drain.admitPrompt(runtime(), SESSION, 'text', 'key-1'),
+    ).rejects.toThrow('no archive coordinator');
+    expect(admitSessionPromptMock).not.toHaveBeenCalled();
+  });
+
+  it('races a relayed prompt against the operator prompt deadline', async () => {
+    admitSessionPromptMock.mockReturnValue({ deduplicated: false });
+    const { drain } = build({ deadline: 4321 });
+    await drain.admitPrompt(runtime(), SESSION, 'text', 'key-1');
+    const [deps] = admitSessionPromptMock.mock.calls[0] as [
+      { promptDeadlineMs?: number },
+      unknown,
+    ];
+    expect(deps.promptDeadlineMs).toBe(4321);
+  });
+
   it('refuses an untrusted non-primary recipient on every seam', async () => {
     // Trust revocation makes the tick partial, and a partial tick keeps the
     // retained rows — so the recipient can still arrive here after the
@@ -437,6 +474,79 @@ describe('createPrWatchDeps', () => {
       cloneWorktreesOfMock.mockResolvedValue([root]);
       const { drain } = build();
       expect(await drain.readPushedHeads(recipient)).toBeUndefined();
+    });
+
+    it('matches a ledger whose host carries a non-default port', async () => {
+      // The ledger keeps :8443 on purpose and sameRepository preserves it, so a
+      // coordinate built from URL.hostname (no port) would never match and the
+      // session's own push would be delivered back to it.
+      const root = path.join(dir, 'clone');
+      await fs.mkdir(root, { recursive: true });
+      await seedState(root, { host: 'ghe.example.com:8443' });
+      cloneWorktreesOfMock.mockResolvedValue([root]);
+      const { drain } = build();
+      expect(
+        await drain.readPushedHeads({
+          sessionId: SESSION,
+          workspaceCwd: CWD,
+          url: 'https://ghe.example.com:8443/o/r/pull/42',
+        }),
+      ).toEqual(new Set(['b'.repeat(40)]));
+    });
+
+    it('refuses a state file that describes another PR', async () => {
+      const root = path.join(dir, 'clone');
+      await fs.mkdir(root, { recursive: true });
+      // Written under PR 42's path but describing PR 43.
+      await seedState(root, { prNumber: 43 });
+      cloneWorktreesOfMock.mockResolvedValue([root]);
+      const { drain } = build();
+      expect(await drain.readPushedHeads(recipient)).toBeUndefined();
+    });
+
+    it('prefers the session worktree ledger over a stale one in main', async () => {
+      const main = path.join(dir, 'main');
+      const live = path.join(dir, 'live');
+      await fs.mkdir(main, { recursive: true });
+      await fs.mkdir(live, { recursive: true });
+      await seedState(main, { pushedShas: ['c'.repeat(40)] });
+      await seedState(live, { pushedShas: ['d'.repeat(40)] });
+      const target = runtime();
+      (
+        target.bridge.listWorkspaceSessions as ReturnType<typeof vi.fn>
+      ).mockReturnValue([{ sessionId: SESSION, worktree: { path: live } }]);
+      // Vouched order is main first; the live worktree must still win.
+      cloneWorktreesOfMock.mockResolvedValue([main, live]);
+      const { drain } = build({ runtimes: [target] });
+      expect(await drain.readPushedHeads(recipient)).toEqual(
+        new Set(['d'.repeat(40)]),
+      );
+    });
+
+    it('enumerates worktrees from the live worktree when there is one', async () => {
+      const live = path.join(dir, 'live');
+      await fs.mkdir(live, { recursive: true });
+      await seedState(live);
+      const target = runtime();
+      (
+        target.bridge.listWorkspaceSessions as ReturnType<typeof vi.fn>
+      ).mockReturnValue([{ sessionId: SESSION, worktree: { path: live } }]);
+      cloneWorktreesOfMock.mockResolvedValue([live]);
+      const { drain } = build({ runtimes: [target] });
+      expect(await drain.readPushedHeads(recipient)).toEqual(
+        new Set(['b'.repeat(40)]),
+      );
+      expect(cloneWorktreesOfMock).toHaveBeenCalledWith(live);
+    });
+
+    it('falls back to the binding cwd without a live worktree', async () => {
+      const root = path.join(dir, 'clone');
+      await fs.mkdir(root, { recursive: true });
+      await seedState(root);
+      cloneWorktreesOfMock.mockResolvedValue([root]);
+      const { drain } = build();
+      await drain.readPushedHeads(recipient);
+      expect(cloneWorktreesOfMock).toHaveBeenCalledWith(CWD);
     });
 
     it('runs no git in an untrusted primary checkout', async () => {
