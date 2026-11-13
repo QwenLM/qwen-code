@@ -63,6 +63,9 @@ const two = 2;
       [String.raw`\\u4f60\u4f60\u4f60`, '你你'],
       [String.raw`\u4f60\u597d\u518d`, '你好\\'],
       [String.raw`\u4f60\u4f60`, '60你'],
+      [String.raw`a\x41\u4f60\u597d`, '41你好'],
+      [String.raw`a\x41\u4f60\u597d`, '1你好'],
+      [String.raw`a\u{4f60}\u4f60\u597d`, 'f60}你好'],
       ['你好\\\\', String.raw`\u4f60\u597d` + '\\'],
       ['你好', String.raw`\u4f6\u597d`],
       ['你好', String.raw`\u{4f60}\u{597d}`],
@@ -85,26 +88,44 @@ const two = 2;
       expect(countOccurrences('你好\n你好', result.oldString)).toBe(2);
     });
 
-    it.each(['n', 't', 'r', 'b', 'f', 'v', '0', '"', "'", '/', '\\'])(
-      'refuses recovery inside a backslash-%s escape',
-      (escape) => {
-        for (const [disk, old] of [
-          [`a\\${escape}${String.raw`\u4f60\u597d`}`, `${escape}你好`],
-          [`${String.raw`\u4f60\u597d`}\\${escape}`, '你好\\'],
-        ]) {
-          expect(normalizeEditStrings(disk, old, 'X')).toEqual({
-            oldString: old,
-            newString: 'X',
-          });
-        }
-      },
-    );
+    it.each([
+      'n',
+      't',
+      'r',
+      'b',
+      'f',
+      'v',
+      '0',
+      '"',
+      "'",
+      '/',
+      '\\',
+      'x',
+      's',
+      'd',
+      'w',
+      'q',
+    ])('refuses recovery inside a backslash-%s escape', (escape) => {
+      for (const [disk, old] of [
+        [`a\\${escape}${String.raw`\u4f60\u597d`}`, `${escape}你好`],
+        [`${String.raw`\u4f60\u597d`}\\${escape}`, '你好\\'],
+      ]) {
+        expect(normalizeEditStrings(disk, old, 'X')).toEqual({
+          oldString: old,
+          newString: 'X',
+        });
+      }
+    });
 
     it.each([
       [String.raw`p = "\u4f60\u597d";`, '你好', 'C:\\路径'],
       [String.raw`{"a": "\u4f60\u597d\n"}`, '你好', 'X\\'],
       [String.raw`\u4f60\u597d`, '你', 'C:\\'],
       [String.raw`\u4f60;\u4f60\n`, '你', 'X\\'],
+      [String.raw`{"a": "\u4f60"}`, '你', 'C:\\'],
+      [String.raw`x = \u4f60north;`, '你', 'X\\'],
+      [String.raw`\u4f60test`, '你', 'X\\'],
+      ['你north', String.raw`\u4f60`, 'X\\'],
     ])('refuses replacement escape fusion in %j', (disk, old, next) => {
       expect(normalizeEditStrings(disk, old, next)).toEqual({
         oldString: old,
@@ -121,6 +142,28 @@ const two = 2;
       expect(normalizeEditStrings(disk, '你好', next)).toEqual({
         oldString: String.raw`\u4f60\u597d`,
         newString: expected,
+      });
+    });
+
+    it.each([
+      [String.raw`\s`, String.raw`\d`],
+      [String.raw`\x41`, String.raw`\x42`],
+      [String.raw`\u{4f60}`, String.raw`\u{597d}`],
+    ])('preserves complete %j tokens in recovered slices', (before, after) => {
+      const disk = before + String.raw`\u4f60\u597d`;
+      expect(
+        normalizeEditStrings(disk, before + '你好', after + '再见'),
+      ).toEqual({
+        oldString: disk,
+        newString: after + String.raw`\u518d\u89c1`,
+      });
+    });
+
+    it('allows a trailing replacement backslash at end of file', () => {
+      const disk = String.raw`\u4f60`;
+      expect(normalizeEditStrings(disk, '你', 'X\\')).toEqual({
+        oldString: disk,
+        newString: 'X\\',
       });
     });
 

@@ -312,6 +312,10 @@ describe('EditTool', () => {
       ['你好\\\\', String.raw`\u4f60\u597d` + '\\'],
       [String.raw`a\n\u4f60\u597d`, 'n你好'],
       [String.raw`\u4f60\u597d\t`, '你好\\'],
+      [String.raw`/\s\u4f60\u597d/`, 's你好'],
+      [String.raw`a\x41\u4f60\u597d`, '41你好'],
+      [String.raw`x = "\u4f60\x41";`, '你\\'],
+      [String.raw`a\u{4f60}\u4f60\u597d`, 'f60}你好'],
     ])('refuses recovery that splits an escape in %j', async (content, old) => {
       const filePath = path.join(rootDir, 'partial-escape.txt');
       seedFile(filePath, content);
@@ -333,6 +337,9 @@ describe('EditTool', () => {
       [String.raw`{"a": "\u4f60\u597d\n"}`, '你好', 'X\\'],
       [String.raw`\u4f60\u597d`, '你', 'C:\\'],
       [String.raw`\u4f60;\u4f60\n`, '你', 'X\\'],
+      [String.raw`{"a": "\u4f60"}`, '你', 'C:\\'],
+      [String.raw`x = \u4f60north;`, '你', 'X\\'],
+      [String.raw`\u4f60test`, '你', 'X\\'],
     ])(
       'refuses replacement escape fusion in %j',
       async (content, old, next) => {
