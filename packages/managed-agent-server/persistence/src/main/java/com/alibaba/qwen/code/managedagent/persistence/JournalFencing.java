@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiActivationAdmission;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.springframework.dao.DeadlockLoserDataAccessException;
 import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.dao.QueryTimeoutException;
@@ -28,17 +29,20 @@ final class JournalFencing {
     private final JournalEventTransport journalEventTransport;
     private final WriterCredentialPolicy credentials;
     private final JdbcRuntimeBindingRepository csiBindings;
+    private final JdbcJournalPacks packs;
 
     JournalFencing(JournalStoreRows storeRows,
             JdbcTemplate jdbc,
             JournalEventTransport journalEventTransport,
             WriterCredentialPolicy credentials,
-            JdbcRuntimeBindingRepository csiBindings) {
+            JdbcRuntimeBindingRepository csiBindings,
+            JdbcJournalPacks packs) {
         this.storeRows = storeRows;
         this.jdbc = jdbc;
         this.journalEventTransport = journalEventTransport;
         this.credentials = credentials;
         this.csiBindings = csiBindings;
+        this.packs = packs;
     }
 
     // Hot paths touch the tenant-wide guard rows only on admission, and
@@ -222,8 +226,8 @@ final class JournalFencing {
                         "SELECT phase FROM ma_session_head WHERE phase <> 'OPEN' AND tenant_key = ?"
                             + " AND harness_key = ? AND tenant_id = ? AND harness_session_id = ?"
                             + " FOR UPDATE",
-                        JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                        RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                        RuntimeAdmissionFences.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId)
                 .isEmpty();
@@ -234,8 +238,8 @@ final class JournalFencing {
                         "SELECT operation_id FROM ma_session_head WHERE tenant_key = ? AND"
                             + " harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND"
                             + " operation_id IS NOT NULL FOR UPDATE",
-                        JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                        RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                        RuntimeAdmissionFences.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId)
                 .isEmpty();
@@ -493,7 +497,7 @@ final class JournalFencing {
             jdbc.execute(
                     (org.springframework.jdbc.core.ConnectionCallback<Void>)
                             connection -> {
-                                JdbcCsiActivationAdmission.lockNativeHead(connection, original);
+                                JdbcCsiActivationAdmission.lockNativeHead(connection, original, packs);
                                 return null;
                             });
         }

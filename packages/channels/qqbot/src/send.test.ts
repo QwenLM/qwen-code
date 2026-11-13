@@ -107,6 +107,7 @@ vi.mock('./accounts.js', () => ({
 
 vi.mock('./login.js', () => ({
   qrCodeLogin: vi.fn(),
+  startQrLogin: vi.fn(),
 }));
 
 vi.mock('@qwen-code/channel-base', async () => {

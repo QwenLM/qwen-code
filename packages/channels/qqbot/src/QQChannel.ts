@@ -1303,6 +1303,12 @@ export class QQChannel extends ChannelBase {
     return !isGroup || this.groupActiveMsgEnabled.get(target.chatId) !== false;
   }
 
+  protected override canDeliverBackgroundWorkflow(
+    target: SessionTarget,
+  ): boolean {
+    return this.supportsProactiveTarget(target);
+  }
+
   async sendMessage(chatId: string, text: string): Promise<void> {
     const inboundContext = this.inboundReplyContext.getStore();
     const latest = this.replyMsgId.get(chatId);
@@ -5659,10 +5665,21 @@ export class QQChannel extends ChannelBase {
     const safeName = this.name.replace(/[^A-Za-z0-9_-]/g, '_');
     const credsFile = getCredsFilePath(safeName);
 
+    // Only a daemon worker has no operator watching. A stream cannot tell
+    // "piped to a human-visible tee" from "piped to a worker" — both are
+    // pipes — so key on the explicit context the supervisor stamps on every
+    // child it spawns (QWEN_CODE_SERVE=1, set in
+    // cli/src/serve/channel-worker-supervisor.ts and not scrubbed).
+    const daemonWorker = process.env['QWEN_CODE_SERVE'] === '1';
+
     let appID = this.qqConfig.appID;
     let appSecret = this.qqConfig.appSecret;
 
-    if (!appID || !appSecret) {
+    // The credentials file is keyed by channel name under one shared QWEN_HOME,
+    // so in a daemon it can hold a bot bound by a different workspace. The
+    // workspace channel config is the daemon's only source of truth; adopting
+    // that file would connect this workspace to someone else's bot.
+    if (!daemonWorker && (!appID || !appSecret)) {
       const saved = loadCredentials(credsFile);
       if (saved) {
         appID = saved.appId;
@@ -5673,6 +5690,11 @@ export class QQChannel extends ChannelBase {
     }
 
     if (!appID || !appSecret) {
+      if (daemonWorker) {
+        throw new Error(
+          `QQ channel "${this.name}" has no appID/appSecret. Bind it by QR from the channel management UI, or set appID and appSecret in the channel config.`,
+        );
+      }
       process.stderr.write(
         `[QQ:${this.name}] No credentials, scan QR code with QQ...\n`,
       );

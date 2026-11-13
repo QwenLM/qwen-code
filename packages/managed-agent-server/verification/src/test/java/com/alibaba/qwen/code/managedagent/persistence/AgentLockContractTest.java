@@ -57,6 +57,8 @@ class AgentLockContractTest extends RecoverySettlementStoreTest {
         invoke(route, OWNER);
         trace.assertSessionBeforeTurn(TENANT, sessionId);
         trace.assertOneTransaction(TENANT, sessionId);
+        // Same exclusion as StoreLockTrace.root(): pin-index probes are not
+        // root locks; the legacy guard's primary-key current read is one.
         var locks = trace.successful(TENANT, sessionId).stream()
                 .filter(event -> event.sql().contains("for update") && !event.sql().contains("is_csi_guard = true"))
                 .map(event -> event.root() ? "root" : event.turn() ? "turn" : "stream").toList();
