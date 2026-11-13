@@ -586,6 +586,7 @@ function pickFastPathSettings(
   ) {
     const legacyFolderTrust = value[legacyFolderTrustKey];
     if (
+      legacyFolderTrustKey === 'folderTrust' &&
       legacyFolderTrust !== undefined &&
       typeof legacyFolderTrust !== 'boolean'
     ) {
@@ -593,7 +594,7 @@ function pickFastPathSettings(
         `Serve fast path settings ${legacyFolderTrustKey} must be a boolean.`,
       );
     }
-    if (legacyFolderTrust !== undefined) {
+    if (typeof legacyFolderTrust === 'boolean') {
       out.security = { folderTrust: { enabled: legacyFolderTrust } };
     }
   }

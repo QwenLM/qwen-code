@@ -2429,6 +2429,43 @@ describe('serve fast path environment bootstrap', () => {
     },
   );
 
+  it('ignores a non-boolean legacy feature alias during bootstrap', async () => {
+    delete process.env['FAST_PATH_REFERENCED_TOKEN'];
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-invalid-feature-trust-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ folderTrustFeature: 'false' }),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      'FAST_PATH_REFERENCED_TOKEN=workspace-env\n',
+    );
+
+    const settings = await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    expect(settings?.security?.folderTrust?.enabled).toBeUndefined();
+    expect(process.env['FAST_PATH_REFERENCED_TOKEN']).toBe('workspace-env');
+  });
+
+  it('still rejects a non-boolean legacy folderTrust value before the alias', () => {
+    const qwenHome = useTempQwenHome();
+    const workspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-invalid-legacy-trust-')),
+    );
+    tempWorkspace = workspace;
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ folderTrust: 'false', folderTrustFeature: true }),
+    );
+
+    expect(() => loadServeFastPathSettings(workspace)).toThrow(
+      'folderTrust must be a boolean',
+    );
+  });
+
   it('caches trusted folders during a single fast-path bootstrap', () => {
     delete process.env['FAST_PATH_REFERENCED_TOKEN'];
     const qwenHome = useTempQwenHome();
