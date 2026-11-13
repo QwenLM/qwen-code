@@ -473,6 +473,7 @@ it.each([
           { values: z.array(z.number()).refine(parsed) },
           handler,
         ),
+        defineTool('text', 'Accept text', { text: z.string() }, handler),
       ],
     }).instance;
     const client = new Client({ name: 'input-budget-test', version: '1' });
@@ -504,6 +505,13 @@ it.each([
         arguments: { values: [1] },
       });
       expect(textOf(healthy)).toBe('accepted');
+      expect(handler).toHaveBeenCalledOnce();
+      handler.mockClear();
+      const longText = await client.callTool({
+        name: 'text',
+        arguments: { text: 'x'.repeat(100_001) },
+      });
+      expect(textOf(longText)).toBe('accepted');
       expect(handler).toHaveBeenCalledOnce();
     } finally {
       await client.close();

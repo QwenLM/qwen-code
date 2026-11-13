@@ -52,27 +52,37 @@ it('keeps the JSON parser alive after trailing compressed data', async () => {
       Buffer.from([0]),
       Buffer.alloc(100 * 1024, 0x58),
     ]);
-    await new Promise<void>((resolve) => {
-      const req = http.request(
-        `${origin}/echo`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Content-Encoding': 'gzip',
-            'Content-Length': body.length,
+    const malformed = await new Promise<{ status: number; body: string }>(
+      (resolve, reject) => {
+        const req = http.request(
+          `${origin}/echo`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Encoding': 'gzip',
+              'Content-Length': body.length,
+            },
           },
-        },
-        (res) => {
-          res.resume();
-          res.on('end', resolve);
-          res.on('error', () => resolve());
-        },
-      );
-      req.setTimeout(3_000, () => req.destroy());
-      req.on('error', () => resolve());
-      req.end(body);
-    });
+          (res) => {
+            let responseBody = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk) => (responseBody += chunk));
+            res.on('end', () =>
+              resolve({ status: res.statusCode ?? 0, body: responseBody }),
+            );
+            res.on('error', reject);
+          },
+        );
+        req.setTimeout(3_000, () =>
+          req.destroy(new Error('Compressed request timed out')),
+        );
+        req.on('error', reject);
+        req.end(body);
+      },
+    );
+    expect(malformed.status).toBe(200);
+    expect(JSON.parse(malformed.body)).toEqual({ safe: true });
     await setTimeout(200);
     expect(child.exitCode).toBeNull();
     expect((await fetch(`${origin}/health`)).status).toBe(200);

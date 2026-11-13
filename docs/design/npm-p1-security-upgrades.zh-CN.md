@@ -22,7 +22,8 @@ daemon 退出；MCP 客户端可能跨来源转发凭据。DOMPurify 报告中�
   确保 Mermaid 内嵌清洗器也使用修复版本重新构建。
 - 对 Express 5 依赖路径同步增加 body-parser 2.4.0 npm/pnpm overrides，
   保留压缩请求支持和既有请求体大小限制。
-- 全部自建 MCP 服务构造点（包括示例）启用 `maxToolInputElements: 100_000`。
+- 全部自建生产 MCP 服务构造点（包括可运行示例）启用
+  `maxToolInputElements: 100_000`，隔离测试夹具除外。
   SDK 修复默认没有启用此上限。Schema 解析前累计对象成员和数组元素，超限
   调用返回参数无效错误，不执行 handler。这是元素数量限制，不是字节数、
   字符串长度或进程总内存限制。固定且较宽松的上限兼顾普通标量参数和批量

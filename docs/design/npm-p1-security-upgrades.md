@@ -23,8 +23,9 @@ advisory reconciliation, and unrelated P2 findings remain separate work.
   overrides so Mermaid's bundled sanitizer is also rebuilt with a fixed copy.
 - Add matching body-parser 2.4.0 overrides for the Express 5 dependency paths.
   Keep compressed request support and the existing request-size limits.
-- Enable `maxToolInputElements: 100_000` at every owned MCP server constructor,
-  including examples. The SDK fix leaves the limit disabled by default. Count
+- Enable `maxToolInputElements: 100_000` at every owned production MCP server
+  constructor, including runnable examples; isolated test fixtures are excluded.
+  The SDK fix leaves the limit disabled by default. Count
   object members and array elements before schema parsing; over-budget calls
   return an invalid-parameters error without invoking the handler. This is an
   element limit, not a byte, string-length, or total-process-memory limit.
