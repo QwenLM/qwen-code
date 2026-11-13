@@ -130,12 +130,20 @@ jobs:
     # Throughput policy, not a trust boundary: a pull_request run executes the
     # PR's own YAML. The policy is stated once in
     # docs/design/2026-10-31-lint-static-ecs-routing.md. Dispatch follows
-    # pick_runner's `linux_runner`; the arm64 option is a residual the job's
-    # `timeout-minutes` bounds.
+    # pick_runner's `linux_runner` for hosted vs self-hosted. The arm64 option
+    # is a residual with NO bound here: the gate has no arm64 labels, so an
+    # arm64 dispatch asks the x64 pool and, with no x64 runner online, queues —
+    # and `timeout-minutes` cannot cover that, because it starts only once a
+    # runner picks the job up (a REQUIRED context queued 110 minutes with no
+    # runner, job 128729488158; see `test_ubuntu` below and
+    # docs/design/windows-ecs-ci-validation.md). Because classify_pr is the
+    # `needs` prerequisite of every Linux lane, that state is a run showing a
+    # queued job with no failing check — not a timeout.
     runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.repository == ''QwenLM/qwen-code'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association) || github.event_name == ''merge_group'' || github.event_name == ''push'' || (github.event_name == ''workflow_dispatch'' && github.event.inputs.linux_runner != ''hosted''))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # Bounds the one divergence the gate cannot express: on dispatch it follows
-    # pick_runner's `linux_runner` for hosted vs self-hosted, but the arm64
-    # choice has no gate labels, so an arm64 dispatch runs the gate on x64.
+    # Bounds a started-and-stalled classify (1 → 10 minutes), not the queue
+    # wait above: on dispatch the gate follows pick_runner's `linux_runner` for
+    # hosted vs self-hosted, and the arm64 choice has no gate labels, so an
+    # arm64 dispatch runs the gate on x64.
     timeout-minutes: 10
     continue-on-error: true
     permissions:

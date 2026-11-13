@@ -195,9 +195,13 @@ a strictly larger surface than the vitest side lane.
   unreviewed forks off the persistent pool. The risk acceptance is unchanged —
   the pool already executes fork code in the lint and no-AK lanes, and the
   association gate remains throughput policy, not an enforceable boundary (a
-  fork rewrites the workflow YAML). Dispatch routing is unchanged vs the
-  unconditional gate (ECS → ECS); only untrusted-fork classify moves
-  ECS → hosted.
+  fork rewrites the workflow YAML). Dispatch routing is no longer unconditional:
+  the gate follows the `linux_runner` input, so `hosted` resolves to
+  `ubuntu-latest` while `self-hosted` and `self-hosted-arm64` resolve to
+  `ecs-qwen`. That is a behaviour change this amendment records — the
+  unconditional gate carried no event terms and sent every dispatch to
+  `ecs-qwen` — so the dispatch edge moves too, not only untrusted-fork classify
+  (ECS → hosted).
 - The PR's own CI exercises the routing plumbing on the pool (the author is a
   collaborator, so both outputs agree on that run); the fork divergence is
   proven by the routing battery, and its first live end-to-end witness is the

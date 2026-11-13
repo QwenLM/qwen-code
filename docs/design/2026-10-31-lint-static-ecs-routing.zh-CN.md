@@ -156,8 +156,10 @@ lane。
   轻量，hosted 排队延迟可以接受，且默认路由应把未评审 fork 挡在持久池外。
   风险接受不变——池已在 lint 与 no-AK 车道执行 fork 代码，association 门禁
   仍是吞吐策略、不是可强制边界（fork 会改写 workflow YAML）。dispatch 路由
-  相对无条件门禁不变（ECS → ECS）；只有不可信 fork 的 classify 从 ECS 移到
-  hosted。
+  不再无条件：门禁改为跟随 `linux_runner` 输入，`hosted` 落 `ubuntu-latest`，
+  `self-hosted` 与 `self-hosted-arm64` 落 `ecs-qwen`。这是本次修订记录的行为
+  变化——无条件门禁不带任何 event 子句、一律送 `ecs-qwen`——所以移动的不只是
+  不可信 fork 的 classify，dispatch 这条边也一并变了（ECS → hosted）。
 - PR 自身 CI 在池上验证路由管道（作者是 collaborator，该运行中两个输出一致）；
   fork 分歧由路由回归矩阵证明，其首个线上端到端见证是下一个不可信 fork PR。
 - 另行拥有的后续：per-run HOME 下恢复热共享 pnpm store（no-AK 车道现在与 lint 同付已接受的冷装成本）（如通过 `XDG_DATA_HOME`
