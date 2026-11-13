@@ -1892,6 +1892,7 @@ class HostedHarnessClientTest {
                 .capabilityDigest(DIGEST)
                 .heartbeatInterval(Duration.ofMinutes(1))
                 .build()) {
+            assertTrue(client.scheduler().getRemoveOnCancelPolicy());
             Field schedulerField = HostedHarnessClient.class.getDeclaredField("scheduler");
             schedulerField.setAccessible(true);
             client.scheduler().shutdownNow();
@@ -1918,6 +1919,36 @@ class HostedHarnessClientTest {
             scheduler.release.countDown();
             caller.shutdownNow();
             scheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    void removesHeartbeatFromProductionSchedulerAfterDeletion() {
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID, exchange -> {
+            assertEquals("DELETE", exchange.getRequestMethod());
+            assertPrivateHeaders(exchange, false);
+            exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+            exchange.getResponseHeaders().set("Connection", "close");
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        try (HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ofMinutes(1))
+                .build()) {
+            ScheduledThreadPoolExecutor scheduler = client.scheduler();
+            createSession(client);
+            assertEquals(1, scheduler.getQueue().size());
+            ScheduledFuture<?> task = (ScheduledFuture<?>) scheduler.getQueue().peek();
+
+            client.closeSession(SESSION_ID);
+
+            assertTrue(task.isCancelled());
+            assertTrue(scheduler.getQueue().isEmpty(),
+                    "The production scheduler must release the cancelled heartbeat before client close");
         }
     }
 
