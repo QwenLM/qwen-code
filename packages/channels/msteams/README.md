@@ -1,6 +1,7 @@
 # Microsoft Teams channel
 
 This package connects Microsoft Teams to a Qwen Code `ChannelAgentBridge`.
+It requires Node.js 22.12.0 or newer.
 It supports commercial-cloud, single-tenant bots, personal messages, explicit
 bot mentions in group chats, and channel posts with thread replies. It sends
 final plain text, split into ordered UTF-8 chunks. Attachments, Graph history,
