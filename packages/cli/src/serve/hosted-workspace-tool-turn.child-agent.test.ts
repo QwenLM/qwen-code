@@ -150,7 +150,7 @@ function createTurn(
   launchEnabled: () => boolean = () => true,
   extensionExtras: Pick<
     NonNullable<ConstructorParameters<typeof HostedWorkspaceToolTurn>[9]>,
-    'extensionAgents' | 'extensionConfig' | 'mcp' | 'hooks'
+    'extensionAgents' | 'extensionConfig' | 'mcp' | 'hooks' | 'clientFiles'
   > = {},
 ): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
@@ -1785,6 +1785,123 @@ it.each([
     }
   },
 );
+
+it('keeps generation-scoped client-files names out of the durable extension launch pin', async () => {
+  // The launch pin is compared with isDeepStrictEqual on every re-drive; a
+  // generation-scoped client-files tool name must not enter it, or a reconnect
+  // that rotates the generation would change the descriptor and throw
+  // stale-config. Pin both the exclusion and the cross-generation stability.
+  broker.capabilityDigest = MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST;
+  const pin = {
+    extensionId: 'review',
+    packageRevision: 1,
+    packageDigest: 'a'.repeat(64),
+  };
+  const descriptor = {
+    configRevision: 1,
+    bundleRef: await session.resources.publish(
+      'managed-extension-config-bundle',
+      Buffer.from('{}'),
+    ),
+    pin,
+    contributionsRef: await session.resources.publish(
+      'managed-extension-contributions',
+      Buffer.from('{}'),
+    ),
+    agentName: 'review:auditor',
+    toolNames: [],
+  };
+  let cfToolName = 'mcp_' + '1'.repeat(32);
+  const clientFiles = {
+    tools: () => [
+      {
+        name: cfToolName,
+        description: 'MCP tool: "read_file"',
+        parametersJsonSchema: { type: 'object' },
+      },
+    ],
+    catalogs: () => [
+      {
+        serverId: 'local-files',
+        generation: 1,
+        tools: [{ name: 'read_file', inputSchema: {} }],
+      },
+    ],
+    resolve: (name: string) =>
+      name === cfToolName ? { name: 'read_file', inputSchema: {} } : undefined,
+    invoke: vi.fn(async () => ({ content: [] })),
+  } as unknown as import('./hosted-client-files-session.js').HostedClientFilesSession;
+  const extensionExtras = {
+    extensionAgents: [{ name: descriptor.agentName, descriptor }],
+    extensionConfig: {
+      revision: 1,
+      packages: [{ pin, assetRoot: 'extension://review/' }],
+    },
+    clientFiles,
+  };
+  const launchToolNames = async (callId: string) => {
+    const turn = createTurn(
+      0,
+      undefined,
+      'prompt',
+      true,
+      false,
+      true,
+      undefined,
+      'hosted-workspace-shell/1',
+      false,
+      true,
+      () => true,
+      extensionExtras,
+    );
+    turn.setChildModelRoute('model', {
+      authType: 'openai',
+      endpointDigest: 'a'.repeat(64),
+      providerPin: 'b'.repeat(64),
+    });
+    const running = executeAgent(
+      turn,
+      call(
+        {
+          description: 'extension audit',
+          prompt: 'review the package',
+          subagent_type: descriptor.agentName,
+          run_in_background: false,
+        },
+        callId,
+      ),
+    );
+    await vi.waitFor(
+      () => expect(children.record(`prompt:${callId}`)).toBeDefined(),
+      { timeout: 10_000 },
+    );
+    const launch = await children.publicLaunchSnapshot(`prompt:${callId}`);
+    expect(launch?.version).toBe(2);
+    const toolNames =
+      launch?.version === 2 ? launch.extensionAgent?.toolNames : undefined;
+    await children.dispatchStarted(`prompt:${callId}`, {
+      dispatchId: `dispatch-${callId}`,
+      runtime: { runtimeBindingId: `binding-${callId}`, generation: '1' },
+    });
+    await children.attach(`prompt:${callId}`, randomUUID());
+    await children.settleCompleted(`prompt:${callId}`, {
+      result: Buffer.from('extension child result'),
+      receipt: Buffer.from('{"outcome":"settled"}'),
+    });
+    await children.accept(`prompt:${callId}`);
+    await running;
+    return toolNames;
+  };
+  const first = await launchToolNames('call-1');
+  expect(first).toContain('read_file');
+  expect(first).not.toContain(cfToolName);
+  // Rotate the registration's generation: the advertised tool name changes,
+  // but the durable pin must be identical (no ephemeral name, no stale-config).
+  cfToolName = 'mcp_' + '2'.repeat(32);
+  const second = await launchToolNames('call-2');
+  expect(second).not.toContain(cfToolName);
+  expect(second).toEqual(first);
+});
 
 // The wake-turn id already embeds its commissioning run id
 // (`<childRunId>:accept:notify`); using it verbatim as the launch base
