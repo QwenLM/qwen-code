@@ -58,7 +58,13 @@ export interface MessageState {
    * Number of content blocks already delivered for this message id. Block
    * types cannot share one snapshot, so a type change closes the snapshot
    * and starts a new one under the SAME id: the next block's stream index is
-   * this count, not 0, so consumers can key blocks by `(message.id, index)`.
+   * this count, not 0.
+   *
+   * The `(message.id, index)` promise describes the `content_block_*` frames,
+   * whose index is turn-global. A snapshot's `message.content` holds only that
+   * fragment's blocks and carries no base offset, so the same index addresses
+   * the fragment-local block there; consumers concatenate snapshots rather
+   * than replacing by index.
    */
   emittedBlockCount: number;
   openBlocks: Set<number>;

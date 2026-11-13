@@ -261,6 +261,17 @@ bytes after JSON string serialization. Oversized values become deterministic
 head/tail previews; the event type and field schema are unchanged. This is a
 field limit, not a universal JSONL frame-size limit.
 
+Protocol version 3 makes one model response one `message.id`. A response whose
+block types change (for example thinking, then text) is still delivered as
+several `assistant` snapshots, because a snapshot holds a single block type —
+but every snapshot of that response carries the same `message.id`, and the
+`content_block_*` indexes continue across the transition instead of restarting
+at 0. Concatenate a message's snapshots rather than replacing one with the next:
+each snapshot's `message.content` holds only its own fragment and carries no
+base offset, so an index addresses the turn's stream on `content_block_*`
+frames and the fragment-local block inside a snapshot. The rule covers the main
+agent; subagent snapshots still mint a fresh id per tool call.
+
 The first event on the channel is always `system` / `session_start`, emitted
 when the bridge is constructed. Use it to correlate the channel with a
 session id before any other event arrives.
@@ -539,8 +550,11 @@ rl.on('line', (line) => {
     }
   }
   if (ev.type === 'assistant') {
+    // Since protocol v3 one model response can span several snapshots that
+    // share a message.id; the turn ends when the response's final snapshot
+    // has arrived, not on the first `assistant` record.
     console.log(
-      '[embedder] assistant turn ended, tokens =',
+      '[embedder] assistant snapshot, tokens =',
       ev.message.usage?.output_tokens,
     );
   }
