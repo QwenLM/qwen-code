@@ -35,6 +35,15 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.s
  * semantics.
  */
 final class TerminalHolds {
+    /**
+     * The turn kind of a terminal's derived Runtime Session. It marks the
+     * Session's purpose in the persisted record so the MCP owner page can
+     * exclude it: a terminal is a second Runtime Session under the same
+     * Harness Session, but never a second MCP owner. Drain and release still
+     * enumerate it (they do not filter by turn kind).
+     */
+    public static final String TERMINAL_TURN_KIND = "terminal";
+
     private final RuntimeBrokerService broker;
     private final RuntimeBindingRegistry bindingRegistry;
     private final RuntimeBindingRepository bindingRepository;
@@ -87,7 +96,7 @@ final class TerminalHolds {
             if (base != null) {
                 requireTerminalHoldOwner(base, harness, runtime);
             }
-            return broker.acquire(harness, runtime, "bootstrap", null, null)
+            return broker.acquire(harness, runtime, TERMINAL_TURN_KIND, null, null)
                     .thenCompose(ignored -> bindingRegistry.requireReadySession(harness, runtime))
                     .thenApply(context -> {
                         context.lock();
@@ -183,7 +192,7 @@ final class TerminalHolds {
                 BrokerValues.requireId(terminalId, "terminalId"), "terminalId");
         String callId = BrokerValues.requireId(executionCallId, "executionCallId");
         String runtime = "terminal-" + DigestUtils.sha256Hex(harness + ":" + terminal);
-        return mapStoreFailure(safeStage(() -> broker.acquire(harness, runtime, "bootstrap", null, null)
+        return mapStoreFailure(safeStage(() -> broker.acquire(harness, runtime, TERMINAL_TURN_KIND, null, null)
                 .thenCompose(ignored -> bindingRegistry.requireReadySession(harness, runtime))
                 .thenCompose(context -> {
                     ToolExecutionRecord settled;

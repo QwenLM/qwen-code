@@ -369,7 +369,13 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 throw conflict("managed_mcp_owner_unavailable", "The original MCP owner is unavailable.");
             }
             if (owner == null) {
-                var active = sessionRepository.findActiveByHarnessSession(scope.getTenantId(), harnessId, null, 2);
+                // A terminal's derived Runtime Session shares the Harness
+                // Session but is not a second MCP owner; exclude it by its
+                // persisted turn kind so opening a terminal does not make the
+                // owner ambiguous. The size() > 1 guard still catches two
+                // genuine Runtime Sessions.
+                var active = sessionRepository.findActiveByHarnessSession(scope.getTenantId(), harnessId, null, 2,
+                        TerminalHolds.TERMINAL_TURN_KIND);
                 if (active.size() > 1) {
                     throw conflict("managed_mcp_owner_unavailable", "The original MCP owner is ambiguous.");
                 }

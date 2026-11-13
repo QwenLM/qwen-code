@@ -45,9 +45,10 @@ function admissionRefused(error: unknown): boolean {
   // next try once the host refreshes — never a terminal condition (the same
   // contract isAuthFailure documents in managed-request-error.ts).
   if (status === 401) return false;
-  // 403 is a permanent role refusal (only a Workspace operator may open a
-  // terminal) and 404 a gone Session/terminal; both are terminal.
-  if (status === 403 || status === 404) return true;
+  // 400 is a malformed identity (invalid Session/terminal id) and 403 a
+  // permanent role refusal (only a Workspace operator may open a terminal),
+  // 404 a gone Session/terminal; all are terminal — retrying cannot fix them.
+  if (status === 400 || status === 403 || status === 404) return true;
   // 409 workspace_unavailable is deliberately retryable: it also answers a
   // binding that is not READY yet (bootstrapping or being replaced), which is
   // transient. Any other 409 (e.g. session_operation_active on a closed
@@ -125,6 +126,7 @@ function ManagedTerminalSurface({
     let ticketRequest: AbortController | undefined;
     let releaseRequested = false;
     let releaseFallbackStarted = false;
+    let connectStarted = false;
 
     function writeNotice(message: string, color: '31' | '33') {
       term.writeln(`\r\n\x1b[${color}m[${message}]\x1b[0m`);
@@ -266,6 +268,11 @@ function ManagedTerminalSurface({
             replay: ctrl.replay,
             handlesPrimaryDa: ctrl.handlesPrimaryDa,
           };
+          // A delivered snapshot proves the worker is responsive; only now
+          // reset the backoff. Resetting on mere socket open would let a peer
+          // that accepts and immediately closes reconnect at the initial
+          // interval forever.
+          reconnectDelay = RECONNECT_INITIAL_MS;
           return true;
         } else if (ctrl.type === 'exit') {
           ended = true;
@@ -320,6 +327,7 @@ function ManagedTerminalSurface({
 
     async function connect() {
       if (disposed || ended) return;
+      connectStarted = true;
       const ticketRequestController = new AbortController();
       ticketRequest = ticketRequestController;
       let ticket: string;
@@ -368,7 +376,6 @@ function ManagedTerminalSurface({
         }
         awaitingSnapshot = true;
         snapshot = undefined;
-        reconnectDelay = RECONNECT_INITIAL_MS;
         noticeWritten = false;
         ws.send(
           CONTROL_FRAME_PREFIX +
@@ -451,17 +458,26 @@ function ManagedTerminalSurface({
       resizeObserver.disconnect();
       disposable.dispose();
       restoring?.term.dispose();
-      releaseRequested = true;
+      releaseRequested = !ended;
       const ws = wsRef.current;
-      if (ws?.readyState === WebSocket.OPEN) {
+      if (ended) {
+        // The PTY already exited; there is nothing to release. A release
+        // connection would re-create a fresh PTY under the reused terminal
+        // id only to kill it again.
+        ws?.close();
+      } else if (ws?.readyState === WebSocket.OPEN) {
         ws.send(CONTROL_FRAME_PREFIX + JSON.stringify({ type: 'release' }));
         ws.close();
       } else if (!ws || ws.readyState !== WebSocket.CONNECTING) {
         // No live socket can carry the release frame (ticket still in
         // flight, reconnect backoff, or an already-closed socket). A plain
         // close only detaches the worker's listeners, so the dedicated
-        // connection must deliver the release instead.
-        startReleaseFallback();
+        // connection must deliver the release instead — but only for a
+        // terminal that actually began connecting: a StrictMode mount that
+        // never connected must not release the id the surviving mount uses.
+        if (connectStarted) {
+          startReleaseFallback();
+        }
       }
       // A CONNECTING socket is deliberately left open: closing it would
       // abort the handshake, and its onopen delivers the release instead.

@@ -2236,6 +2236,32 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void terminalHoldDoesNotAmbiguateTheMcpOwner() throws Exception {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            // The Session's own Runtime Session is the MCP owner.
+            RuntimeSessionRecord owner = join(fixture.service.acquire(
+                    "harness", "runtime", "bootstrap"));
+            // Opening a terminal admits a second, derived Runtime Session
+            // under the same Harness Session. Before the fix the MCP owner
+            // page counted it and answered 409 (ambiguous owner).
+            TerminalHoldAdmission admission = join(fixture.service.admitTerminalHold(
+                    "harness", "term-1"));
+            assertTrue(admission.created());
+            assertEquals("terminal-" + TERMINAL_KEY,
+                    admission.hold().getRuntimeSessionId());
+            String tenant = owner.getSession().getScope().getTenantId();
+            assertEquals(2, fixture.sessionRepository.findActiveByHarnessSession(
+                    tenant, "harness", null, 10).size());
+            // The owner page excludes the terminal's persisted turn kind, so
+            // MCP listing still resolves the original owner's server list.
+            List<Map<String, Object>> servers = List.of(Map.of("name", "owner-server"));
+            fixture.transport.mcpDefinitionsResult =
+                    CompletableFuture.completedFuture(servers);
+            assertEquals(servers, join(fixture.service.mcpDefinitions("harness", null)));
+        }
+    }
+
+    @Test
     void unprovenProcessStatusKeepsItsHold() throws Exception {
         String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
         String digest = "sha256:" + HexFormat.of().formatHex(
@@ -7849,6 +7875,14 @@ class RuntimeBrokerServiceTest {
             return delegate.findActiveByHarnessSession(tenantId,
                     harnessSessionId, after, limit);
         }
+
+        @Override
+        public List<RuntimeSessionRecord> findActiveByHarnessSession(
+                String tenantId, String harnessSessionId,
+                RuntimeSessionRecord after, int limit, String excludeTurnKind) {
+            return delegate.findActiveByHarnessSession(tenantId,
+                    harnessSessionId, after, limit, excludeTurnKind);
+        }
     }
 
     private static final class FakeResolver
@@ -7980,6 +8014,14 @@ class RuntimeBrokerServiceTest {
         final AtomicInteger reclaimMountCalls = new AtomicInteger();
         volatile CompletableFuture<Boolean> releaseMountResult =
                 CompletableFuture.completedFuture(true);
+        volatile CompletableFuture<List<Map<String, Object>>> mcpDefinitionsResult =
+                CompletableFuture.completedFuture(List.of());
+
+        @Override
+        public CompletionStage<List<Map<String, Object>>> mcpDefinitions(
+                RuntimeBindingRecord runtime) {
+            return mcpDefinitionsResult;
+        }
 
         @Override
         public CompletionStage<Void> acquire(RuntimeLease lease,

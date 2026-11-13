@@ -611,4 +611,88 @@ describe('ManagedTerminalPanel', () => {
       terminalMock.write.mockImplementation(syncWrite);
     }
   });
+
+  it('ends on a definite 400 instead of retrying forever', async () => {
+    const ticketFn = vi
+      .fn()
+      .mockRejectedValue(Object.assign(new Error('bad id'), { status: 400 }));
+    await render(ticketFn);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(terminalMock.writeln).toHaveBeenCalledWith(
+      expect.stringContaining('This terminal is no longer available.'),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(ticketFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not release a terminal that already ended on unmount', async () => {
+    const ticketFn = vi
+      .fn()
+      .mockResolvedValue({ ticket: 'ticket-one', expiresInSeconds: 30 });
+    await render(ticketFn);
+    const ws = FakeWebSocket.instances[0]!;
+    ws.open();
+    act(() => {
+      ws.onmessage?.({
+        data: '\x00{"type":"exit","exitCode":0}',
+      } as MessageEvent);
+    });
+    act(() => ws.closeWith(4000));
+    const current = root;
+    act(() => current!.unmount());
+    root = undefined;
+    await flush();
+    // The PTY already exited; a release connection would re-create a fresh
+    // PTY under the reused id only to kill it. No second socket may appear.
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(ticketFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not release a terminal that never began connecting', async () => {
+    // A StrictMode mount whose connect frame never ran must not release the
+    // terminal id the surviving mount attaches to.
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn(() => 1),
+    );
+    const ticketFn = vi
+      .fn()
+      .mockResolvedValue({ ticket: 'ticket-one', expiresInSeconds: 30 });
+    await render(ticketFn);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    const current = root;
+    act(() => current!.unmount());
+    root = undefined;
+    await flush();
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(ticketFn).not.toHaveBeenCalled();
+  });
+
+  it('grows the reconnect backoff when a peer opens and closes without a snapshot', async () => {
+    const ticketFn = vi
+      .fn()
+      .mockResolvedValue({ ticket: 'ticket-one', expiresInSeconds: 30 });
+    await render(ticketFn);
+    const first = FakeWebSocket.instances[0]!;
+    first.open();
+    first.closeWith(1006);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    const second = FakeWebSocket.instances[1]!;
+    // A mere open (no snapshot) must not reset the backoff.
+    second.open();
+    second.closeWith(1006);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(3);
+  });
 });
