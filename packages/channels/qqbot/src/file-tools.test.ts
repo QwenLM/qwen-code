@@ -34,12 +34,16 @@ const OUTSIDE_PATH =
 const fsHooks = vi.hoisted(() => ({
   realOpenSync: undefined as typeof import('node:fs').openSync | undefined,
   realFstatSync: undefined as typeof import('node:fs').fstatSync | undefined,
+  realLstatSync: undefined as typeof import('node:fs').lstatSync | undefined,
   realReadlinkSync: undefined as
     | typeof import('node:fs').readlinkSync
     | undefined,
   realExistsSync: undefined as typeof import('node:fs').existsSync | undefined,
+  realConstants: undefined as typeof import('node:fs').constants | undefined,
+  constants: undefined as typeof import('node:fs').constants | undefined,
   openSync: vi.fn(),
   fstatSync: vi.fn(),
+  lstatSync: vi.fn(),
   readlinkSync: vi.fn(),
   existsSync: vi.fn(),
 }));
@@ -48,12 +52,25 @@ vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   fsHooks.realOpenSync = actual.openSync;
   fsHooks.realFstatSync = actual.fstatSync;
+  fsHooks.realLstatSync = actual.lstatSync;
   fsHooks.realReadlinkSync = actual.readlinkSync;
   fsHooks.realExistsSync = actual.existsSync;
+  fsHooks.realConstants = actual.constants;
+  fsHooks.constants = actual.constants;
+  // `constants` is read at call time through the proxy, so a test can present
+  // the flag set of a platform without `O_NOFOLLOW`.
+  const constantsProxy = new Proxy({} as typeof actual.constants, {
+    get: (_target, property) =>
+      (fsHooks.constants as unknown as Record<PropertyKey, unknown>)[
+        property
+      ] as never,
+  });
   return {
     ...actual,
+    constants: constantsProxy,
     openSync: fsHooks.openSync,
     fstatSync: fsHooks.fstatSync,
+    lstatSync: fsHooks.lstatSync,
     readlinkSync: fsHooks.readlinkSync,
     existsSync: fsHooks.existsSync,
   };
@@ -77,10 +94,13 @@ beforeEach(() => {
   fsHooks.openSync.mockImplementation(fsHooks.realOpenSync as never);
   fsHooks.fstatSync.mockReset();
   fsHooks.fstatSync.mockImplementation(fsHooks.realFstatSync as never);
+  fsHooks.lstatSync.mockReset();
+  fsHooks.lstatSync.mockImplementation(fsHooks.realLstatSync as never);
   fsHooks.readlinkSync.mockReset();
   fsHooks.readlinkSync.mockImplementation(fsHooks.realReadlinkSync as never);
   fsHooks.existsSync.mockReset();
   fsHooks.existsSync.mockImplementation(fsHooks.realExistsSync as never);
+  fsHooks.constants = fsHooks.realConstants;
   osHooks.tmpdir.mockReset();
   osHooks.tmpdir.mockImplementation(osHooks.realTmpdir as never);
 });
@@ -253,6 +273,65 @@ describe('readOutboundFile', () => {
     constants.O_NOFOLLOW === undefined || constants.O_NONBLOCK === undefined
       ? it.skip
       : it;
+
+  /** Run with the flag set of a platform that has no `O_NOFOLLOW`. */
+  const withoutNoFollowFlags = <T>(run: () => T): T => {
+    const previous = fsHooks.constants;
+    fsHooks.constants = {
+      ...(fsHooks.realConstants as unknown as Record<string, unknown>),
+      O_NOFOLLOW: undefined,
+      O_NONBLOCK: undefined,
+    } as unknown as typeof import('node:fs').constants;
+    try {
+      return run();
+    } finally {
+      fsHooks.constants = previous;
+    }
+  };
+
+  it('proves the opened identity where O_NOFOLLOW is unavailable', () => {
+    const path = join(workspace, 'report.txt');
+    const other = join(workspace, 'other.txt');
+    writeFileSync(path, 'hello');
+    writeFileSync(other, 'other');
+    // The open lands on a different file than the pre-open lstat saw, as it
+    // would on a platform whose open cannot refuse a swapped symlink.
+    const realOpen = fsHooks.realOpenSync!;
+    fsHooks.openSync.mockImplementation(((p: string, flags: number) =>
+      realOpen(other, flags)) as never);
+
+    expect(() =>
+      withoutNoFollowFlags(() => readOutboundFile(path, workspace)),
+    ).toThrow(/changed between the check and the open/);
+  });
+
+  it('refuses a symlink resurfacing where O_NOFOLLOW is unavailable', () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'hello');
+    fsHooks.lstatSync.mockImplementationOnce((() => ({
+      isSymbolicLink: () => true,
+      dev: 1n,
+      ino: 1n,
+    })) as never);
+
+    expect(() =>
+      withoutNoFollowFlags(() => readOutboundFile(path, workspace)),
+    ).toThrow(/replaced by a symlink/);
+  });
+
+  it('refuses an unprovable identity where O_NOFOLLOW is unavailable', () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'hello');
+    fsHooks.lstatSync.mockImplementationOnce((() => ({
+      isSymbolicLink: () => false,
+      dev: 1n,
+      ino: 0n,
+    })) as never);
+
+    expect(() =>
+      withoutNoFollowFlags(() => readOutboundFile(path, workspace)),
+    ).toThrow(/identity cannot be verified/);
+  });
 
   itPosixOpenFlags('opens with O_NOFOLLOW and O_NONBLOCK', () => {
     const path = join(workspace, 'report.txt');

@@ -20,6 +20,7 @@ import {
   constants,
   existsSync,
   fstatSync,
+  lstatSync,
   openSync,
   readlinkSync,
   readSync,
@@ -216,9 +217,12 @@ function makeHandler(deps: QQFileToolDeps, spec: OutboundMediaSpec) {
  * workspace or the temporary directory.
  *
  * `realpathSync` resolves symlinks before the root check, so a link inside the
- * workspace cannot smuggle an outside file, and `O_NOFOLLOW` refuses a final
- * component swapped to a symlink after that check. Two further guards close the
- * ways a path check alone is blind: a file with more than one hard link is
+ * workspace cannot smuggle an outside file, and the read-only open refuses a
+ * final component swapped to a symlink after that check — with `O_NOFOLLOW`
+ * where the platform exposes it, and with an `lstat` → `open` → `fstat`
+ * identity check where it does not (Windows), the same compensation
+ * `packages/core/src/utils/no-follow-open.ts` applies. Two further guards close
+ * the ways a path check alone is blind: a file with more than one hard link is
  * refused (a hard link has no target to resolve, so the check would otherwise
  * read the linked contents), and where the platform exposes `/proc/self/fd` the
  * path the kernel records for the descriptor is compared after opening, which
@@ -260,10 +264,7 @@ export function readOutboundFile(
     );
   }
 
-  const fd = openSync(
-    resolved,
-    constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
-  );
+  const fd = openReadOnlyNoFollow(resolved);
   try {
     const before = fstatSync(fd);
     if (!before.isFile()) {
@@ -423,6 +424,53 @@ function descriptorPath(fd: number): string | 'unavailable' {
       'the file could not be identified after opening.',
     );
   }
+}
+
+/**
+ * Open a file read-only without following a symlink in the final component.
+ *
+ * `O_NOFOLLOW` carries that guarantee on POSIX. Windows exposes neither
+ * `O_NOFOLLOW` nor `O_NONBLOCK`, so OR-ing those flags in degrades to a plain
+ * open that follows a symlink swapped in after the pre-open check. There the
+ * compensation is the one `packages/core/src/utils/no-follow-open.ts` applies:
+ * refuse a symlink up front, then prove the opened handle still refers to the
+ * file that was checked (inode 0 means it never can be proven, so it is
+ * refused). The core helper is not a dependency of the channel packages, so
+ * this keeps the same posture locally.
+ */
+function openReadOnlyNoFollow(filePath: string): number {
+  const noFollow = constants.O_NOFOLLOW;
+  if (typeof noFollow === 'number') {
+    return openSync(
+      filePath,
+      constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | noFollow,
+    );
+  }
+
+  const before = lstatSync(filePath, { bigint: true });
+  if (before.isSymbolicLink()) {
+    throw new QQOutboundFileError(
+      'the file was replaced by a symlink before it was opened.',
+    );
+  }
+  if (before.ino === 0n) {
+    throw new QQOutboundFileError(
+      'the file identity cannot be verified on this filesystem.',
+    );
+  }
+  const fd = openSync(filePath, constants.O_RDONLY);
+  try {
+    const after = fstatSync(fd, { bigint: true });
+    if (before.dev !== after.dev || before.ino !== after.ino) {
+      throw new QQOutboundFileError(
+        'the file changed between the check and the open; try again.',
+      );
+    }
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
+  return fd;
 }
 
 /**
