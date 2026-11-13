@@ -80,10 +80,7 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /github\.event_name == 'workflow_dispatch'/,
       String(eventName === 'workflow_dispatch'),
     ],
-    [
-      /github\.event_name == 'schedule'/,
-      String(eventName === 'schedule'),
-    ],
+    [/github\.event_name == 'schedule'/, String(eventName === 'schedule')],
     [
       /github\.event_name == 'issue_comment'/,
       String(eventName === 'issue_comment'),
@@ -96,10 +93,7 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /github\.event_name == 'pull_request_review'/,
       String(eventName === 'pull_request_review'),
     ],
-    [
-      /github\.event_name == 'issues'/,
-      String(eventName === 'issues'),
-    ],
+    [/github\.event_name == 'issues'/, String(eventName === 'issues')],
     // Longest term first as a convention; both patterns are quote-anchored
     // (the closing quote is part of each regex), so neither can match
     // inside the other and the substitution order is behaviorally inert.
@@ -2027,7 +2021,12 @@ describe('control-plane jobs moved off the hosted queue', () => {
       ['pull_request_target'],
       true, // has fork protection
     ],
-    ['assign-issue-owner.yml', 'assign', ['issues', 'workflow_dispatch'], false],
+    [
+      'assign-issue-owner.yml',
+      'assign',
+      ['issues', 'workflow_dispatch'],
+      false,
+    ],
     [
       'auto-minimize-spam.yml',
       'minimize',
