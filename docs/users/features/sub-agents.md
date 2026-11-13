@@ -270,6 +270,12 @@ Use the optional `model` frontmatter field to control which model a subagent use
 - `openai:gpt-4o`: Use an explicit provider and model ID. This is useful when a
   subagent should run on a model registered under a different auth type from the
   main conversation.
+- `<providerId>:<modelId>`: Use a model declared by a custom provider registered
+  under `modelProviders` in `settings.json`. The provider must declare the bare
+  model ID; Qwen Code then sends the provider only that bare ID. This form also
+  disambiguates when two providers on different auth types declare the same
+  model ID; two providers sharing one auth type still resolve to the first
+  registered one.
 
 For example:
 
