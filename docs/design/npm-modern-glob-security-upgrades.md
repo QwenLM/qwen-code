@@ -82,7 +82,7 @@ Compare production audit results against the parent and inspect clean CLI/Core
 package consumers: workspace overrides are not inherited by published packages.
 
 Acceptance requires these checks and a normal frozen install at fixed versions.
-This document records a proposed migration, not completed verification.
+Local verification is recorded below; remote checks and merge remain separate.
 
 ## Current verification
 
@@ -92,12 +92,35 @@ TypeScript ESLint project-selection probes. Its lint still reports 6,374 errors;
 an isolated parent-commit installation reports exactly the same diagnostic
 files and messages, so it is a baseline failure, not a passing lint result.
 
-The three added regression tests were run against explicit old/new candidate
-glob modules: two budget checks fail with glob 10, and all three pass with
-glob 14. This is not yet verification of the workspace's installed dependencies.
-Fresh-cache strict pnpm policy verification rejects only glob 14.0.6's 24-hour
-age. No external exemption remains; complete workspace tests, artifact checks,
-notices and consumer validation remain pending normal installation.
+After the normal 24-hour age elapsed, fresh-cache strict pnpm verification
+accepted all 2,208 lock entries without an external exemption. The frozen
+workspace install, prepare build, bundle, full typecheck and lint passed.
+The actual installed tree passes 575 targeted Core tests and 309 CLI tests,
+including all three new budget/ordinary-name regressions. Actual Core/CLI
+glob parents resolve 14.0.6 with minimatch 11.0.8.
+
+Three old worker assertions depended on the vulnerable matcher staying slow.
+An independent same-source comparison measured the new worker correctly
+returning no matches in 28–45 ms while the old one reached the 500 ms deadline.
+The tests now verify the normal results and separately exercise a controlled
+idle real Worker for the existing 500 ms deadline and 300 ms cancellation,
+then verify subsequent ordinary searches. Production worker code is unchanged.
+Independent verification passes all seven worker tests.
+
+Actual-parent ts-morph, test-exclude, TypeScript ESLint, archiver-utils 5 and
+cacache 19 controls pass, as do VSCE file selection and a real temporary VSIX.
+Generated notices were independently reproduced exactly for 849 dependencies.
+A clean Core tarball consumer without root overrides resolves minimatch through
+glob to 11.0.8 and passes bounded/ordinary searches and npm tree validation.
+The prepared release CLI tarball installs in another clean consumer and starts
+with version/help on Node 22.23.2 and 24.19.0; npm tree validation passes.
+The raw development CLI workspace tarball has local workspace references and
+is not treated as the release package.
+
+Same-time production audits against the P3 dependency baseline decrease from
+60 to 58 findings, removing the minimatch optimization and glob cancellation
+advisories with no added advisory keys. Other legacy findings remain. These
+results do not certify publication or replace downstream lock refreshes.
 
 ## Remaining work
 
