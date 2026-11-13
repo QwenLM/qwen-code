@@ -460,10 +460,15 @@ async function printBootstrapVersion(): Promise<void> {
 }
 
 async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
-  let argv: readonly string[] = normalizeMcpFastPathArgv(
-    normalizeServeFastPathArgv(rawArgv),
-  );
-  if (argv[1]?.startsWith('-') && argv[1] !== '--help' && argv[1] !== '-h') {
+  const normalized = normalizeServeFastPathArgv(rawArgv);
+  const hasSeparator = normalized[1] === '--';
+  let argv: readonly string[] = normalizeMcpFastPathArgv(normalized);
+  if (
+    !hasSeparator &&
+    argv[1]?.startsWith('-') &&
+    argv[1] !== '--help' &&
+    argv[1] !== '-h'
+  ) {
     const { default: yargsInstance } = await import('yargs');
     let invalidPrefix = false;
     // Parse only the prefix: root options must not consume MCP server args.

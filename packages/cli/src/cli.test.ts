@@ -189,18 +189,6 @@ describe('resolveBootstrapRoute', () => {
     ).toBe('mcp');
   });
 
-  it.each([
-    ['mcp', '--debug', 'list'],
-    ['mcp', '-d', 'add', 'server', 'command'],
-    ['mcp', '--safe-mode', 'list'],
-    ['mcp', '--model', 'test-model', 'list'],
-  ])(
-    'keeps options before an MCP subcommand on the MCP route: %j',
-    (...argv) => {
-      expect(resolveBootstrapRoute(argv)).toBe('mcp');
-    },
-  );
-
   it('falls back to the default route for normal interactive startup', async () => {
     expect(resolveBootstrapRoute([])).toBe('default');
     expect(resolveBootstrapRoute(['--model', 'gpt-4', 'Hello'])).toBe(
@@ -1057,6 +1045,15 @@ describe('runCliEntry', () => {
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
   });
 
+  it('does not interpret positional tokens after mcp -- as global options', async () => {
+    await runCliEntry(['mcp', '--', '--safe-mode', 'remove', 'victim']);
+
+    expect(mocks.mcpRemoveHandler).not.toHaveBeenCalled();
+    expect(stdout.join('')).toContain('Usage: qwen mcp');
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(process.exitCode).toBeUndefined();
+  });
+
   it.each([
     { prefix: [] },
     { prefix: ['--debug'] },
@@ -1118,17 +1115,20 @@ describe('runCliEntry', () => {
   );
 
   it.each([
-    ['mcp', '--debug'],
-    ['mcp', '--debug', '--help'],
-    ['mcp', '--debug', '--help', 'add', 'server', 'command'],
-  ])('prints MCP help without executing a subcommand: %j', async (...argv) => {
-    await runCliEntry(argv);
+    { argv: ['mcp', '--debug'] },
+    { argv: ['mcp', '--debug', '--help'] },
+    { argv: ['mcp', '--debug', '--help', 'add', 'server', 'command'] },
+  ])(
+    'prints MCP help without executing a subcommand: $argv',
+    async ({ argv }) => {
+      await runCliEntry(argv);
 
-    expect(stdout.join('')).toContain('Usage: qwen mcp');
-    expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
-    expect(mocks.main).not.toHaveBeenCalled();
-    expect(process.exitCode).toBeUndefined();
-  });
+      expect(stdout.join('')).toContain('Usage: qwen mcp');
+      expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBeUndefined();
+    },
+  );
 
   it('keeps a global option value separate from the MCP command', async () => {
     await runCliEntry(['mcp', '--proxy', 'list', 'add', 'server', 'command']);
@@ -1144,6 +1144,15 @@ describe('runCliEntry', () => {
 
     expect(process.exitCode).toBe(1);
     expect(stderr.join('')).toContain('Unknown argument: unknown');
+    expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('rejects default-command options before an MCP subcommand', async () => {
+    await runCliEntry(['mcp', '--model', 'test-model', 'list']);
+
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join('')).toContain('Unknown argument: model');
     expect(mocks.mcpListHandler).not.toHaveBeenCalled();
     expect(mocks.main).not.toHaveBeenCalled();
   });
