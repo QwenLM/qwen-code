@@ -518,6 +518,42 @@ describe('runAgentLoop event-bus parity', () => {
     expect(bus.log).not.toContain('tool:c1:executed');
   });
 
+  it("gives onRoundEnd the round's calls and stop on both paths", async () => {
+    const rounds = [
+      [{ type: LlmEventType.ToolCallRequest, value: call('c1') }],
+      [
+        { type: LlmEventType.ToolCallRequest, value: call('c2') },
+        { type: LlmEventType.MaxSessionTurns },
+      ],
+    ] as ServerLlmStreamEvent[][];
+    const run = async (useEventBus: boolean) => {
+      const seen: unknown[] = [];
+      const result = await runAgentLoop({
+        ...options(rounds, {
+          onRoundEnd: (round, model) => {
+            seen.push({
+              round,
+              calls: model.calls.map(({ callId }) => callId),
+              stop: model.stop,
+            });
+          },
+        }),
+        useEventBus,
+      });
+      return { seen, reason: result.reason };
+    };
+    const procedural = await run(false);
+    const bus = await run(true);
+    expect(bus).toEqual(procedural);
+    expect(bus).toEqual({
+      seen: [
+        { round: 0, calls: ['c1'], stop: undefined },
+        { round: 1, calls: ['c2'], stop: 'max_session_turns' },
+      ],
+      reason: 'max_session_turns',
+    });
+  });
+
   it('matches on the batch options and returns each call result', async () => {
     const calls = [call('c1'), call('c2')];
     const round = calls.map((value) => ({

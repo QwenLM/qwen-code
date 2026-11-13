@@ -42,7 +42,11 @@ export async function runAgentLoopOnBus(
   const runId = randomUUID();
   // Execution marker: with QWEN_DEBUG_LOG_FILE on, this line proves a run
   // took the bus path rather than the procedural loop.
-  debugLogger.debug('runAgentLoopOnBus started', runId);
+  debugLogger.debug(
+    'runAgentLoopOnBus started',
+    runId,
+    `(prompt ${options.first.promptId})`,
+  );
   const runtime = createLoopEventRuntime();
   const state = runtime.store.create({
     runId,
