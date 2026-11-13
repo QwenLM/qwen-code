@@ -172,6 +172,7 @@ import {
 } from './hosted-shell-input.js';
 import { MANAGED_WORKSPACE_CONTEXT_FILES } from './managed-runtime-provider-protocol.js';
 import type { HostedMcpSession } from './hosted-mcp-session.js';
+import type { HostedClientFilesSession } from './hosted-client-files-session.js';
 import type {
   HostedHookSession,
   HostedPromptHookRunner,
@@ -1905,6 +1906,7 @@ interface HostedPreparedRequest {
   isShell: boolean;
   inputDigest?: string;
   mcp: boolean;
+  clientFiles?: boolean;
   payloadJson: string;
   inputBytes: Buffer;
   digest: string;
@@ -1945,7 +1947,8 @@ function skipsRuntimeBroker(request: HostedPreparedRequest): boolean {
       request.cronList ||
       request.cronDelete ||
       request.memory ||
-      request.workflow,
+      request.workflow ||
+      request.clientFiles,
   );
 }
 
@@ -1955,6 +1958,35 @@ function convertToFunctionResponse(
 ): ReturnType<typeof baseFunctionResponse> {
   const parts = baseFunctionResponse(...args);
   for (const part of parts) diagnosticResults.set(part, 'success');
+  return parts;
+}
+
+/** Converts an MCP tool result's content array into model response parts. */
+function clientFilesResultParts(result: { content?: unknown[] }): Part[] {
+  const parts: Part[] = [];
+  for (const item of result.content ?? []) {
+    if (!item || typeof item !== 'object') continue;
+    const entry = item as {
+      type?: string;
+      text?: string;
+      data?: string;
+      mimeType?: string;
+    };
+    if (entry.type === 'text' && typeof entry.text === 'string') {
+      parts.push({ text: entry.text });
+    } else if (
+      entry.type === 'image' &&
+      typeof entry.data === 'string' &&
+      typeof entry.mimeType === 'string'
+    ) {
+      parts.push({
+        inlineData: { mimeType: entry.mimeType, data: entry.data },
+      });
+    } else {
+      parts.push({ text: JSON.stringify(item) });
+    }
+  }
+  if (parts.length === 0) parts.push({ text: '' });
   return parts;
 }
 
@@ -2043,6 +2075,11 @@ export class HostedWorkspaceToolTurn {
   // Calls a PermissionRequest Hook allowed, which the mode then never asks.
   private readonly hookAllowed = new Set<string>();
   private readonly mcp?: HostedMcpSession;
+  private readonly clientFiles?: HostedClientFilesSession;
+  // Client-files tool names captured when declarations were built, so a call
+  // to a since-revoked registration is refused even though resolve() now
+  // returns nothing (the declarations snapshot still advertises the name).
+  private clientFilesDeclaredNames: ReadonlySet<string> = new Set();
   private readonly hooks?: HostedHookSession;
   private readonly profile?: string;
   private readonly context?: HostedWorkspaceContextSlot;
@@ -2131,6 +2168,7 @@ export class HostedWorkspaceToolTurn {
       memory?: HostedMemorySession;
       memoryOnly?: boolean;
       mcp?: HostedMcpSession;
+      clientFiles?: HostedClientFilesSession;
       hooks?: HostedHookSession;
       profile?: string;
       context?: HostedWorkspaceContextSlot;
@@ -2188,6 +2226,7 @@ export class HostedWorkspaceToolTurn {
     this.extensionConfig = extras?.extensionConfig;
     this.foregroundOnly = extras?.foregroundOnly === true;
     this.mcp = this.foregroundOnly ? undefined : extras?.mcp;
+    this.clientFiles = this.foregroundOnly ? undefined : extras?.clientFiles;
     this.hooks = this.foregroundOnly ? undefined : extras?.hooks;
     this.profile = extras?.profile;
     this.context = extras?.context;
@@ -2348,7 +2387,7 @@ export class HostedWorkspaceToolTurn {
 
   diagnosticMcpToolNames(): ReadonlySet<string> {
     return new Set(
-      (this.mcp?.tools() ?? [])
+      [...(this.mcp?.tools() ?? []), ...(this.clientFiles?.tools() ?? [])]
         .map((tool) => tool.name)
         .filter((name): name is string => Boolean(name)),
     );
@@ -2401,6 +2440,19 @@ export class HostedWorkspaceToolTurn {
     );
   }
 
+  // The client-files declarations plus the revoked-name bookkeeping, decided in
+  // one place so every profile branch that advertises tools stays consistent
+  // with a registration the harness already admitted.
+  private clientFilesDeclarations(): FunctionDeclaration[] {
+    const tools = this.clientFiles?.tools() ?? [];
+    this.clientFilesDeclaredNames = new Set(
+      tools
+        .map((tool) => tool.name)
+        .filter((name): name is string => Boolean(name)),
+    );
+    return tools;
+  }
+
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
     await this.memory?.ready();
@@ -2450,6 +2502,9 @@ export class HostedWorkspaceToolTurn {
       );
       if (this.memory) this.advertised.push(...hostedMemoryDeclarations());
       if (this.publicPlanMode) this.advertised.push(HOSTED_PUBLIC_PLAN_TOOL);
+      // A registration the harness admitted must reach the model on this
+      // profile too, or the panel reports connected for tools never handed out.
+      this.advertised.push(...this.clientFilesDeclarations());
       return this.planning
         ? this.advertised.filter(
             (tool) =>
@@ -2464,6 +2519,7 @@ export class HostedWorkspaceToolTurn {
     // Session has; the refusal of every other call rests on this alone.
     if (isHostedWorkspaceReadProfile(this.profile)) {
       this.advertised = [...HOSTED_WORKSPACE_READ_TOOLS];
+      this.advertised.push(...this.clientFilesDeclarations());
       return this.advertised;
     }
     if (this.mcp) await waitForTurn(this.mcp.refresh(signal), signal);
@@ -2473,6 +2529,7 @@ export class HostedWorkspaceToolTurn {
     const memberCommands = await this.memberCommandsDeclared();
     const skill = this.skills?.declaration();
     const todoTool = this.declaresTodoTool();
+    const clientFilesTools = this.clientFilesDeclarations();
     const loopTool = this.declaresLoopTool();
     const cronTools = this.declaresCronTools();
     this.advertised = [
@@ -2513,6 +2570,7 @@ export class HostedWorkspaceToolTurn {
         }),
       ...(this.memory ? hostedMemoryDeclarations() : []),
       ...(this.mcp?.tools() ?? []),
+      ...clientFilesTools,
       ...(skill ? [skill] : []),
       // H4b: the Agent tool joins the declaration set only on a
       // Shell-laned Session whose own child orchestrator exists (never in
@@ -3431,6 +3489,15 @@ export class HostedWorkspaceToolTurn {
             callId: call.callId,
           })) ||
         intents.some((entry) => entry.payload['ordinal'] === ordinal) ||
+        // A client-files call commits its own durable tool_result on the
+        // harness-local accept path (no broker dispatch). The accept path
+        // stamps executionStatus on that result, so its presence — not the
+        // declared name alone — is the dispatch evidence: a call denied at
+        // approval never reaches the accept path and carries no
+        // executionStatus, so it must not fire an outcome hook. Not gated on
+        // success, so an executed-but-failed call fires PostToolUseFailure.
+        (this.clientFilesDeclaredNames.has(call.name) &&
+          response?.['executionStatus'] !== undefined) ||
         // A team tool commits only to the journal and answers a refusal as
         // its error, so its committed answer is its own dispatch evidence.
         (((call.name === 'skill' && this.skills !== undefined) ||
@@ -4355,6 +4422,10 @@ export class HostedWorkspaceToolTurn {
           call.args,
           runtimeCallId,
         );
+        const clientFilesTool =
+          mcpInput === undefined
+            ? this.clientFiles?.resolve(call.name)
+            : undefined;
         const isShell = call.name === 'run_shell_command';
         const skill =
           mcpInput === undefined &&
@@ -4461,6 +4532,18 @@ export class HostedWorkspaceToolTurn {
           input = { ...call.args };
         } else if (mcpInput) {
           input = { ...mcpInput.input };
+        } else if (clientFilesTool) {
+          input = { ...call.args };
+        } else if (this.clientFilesDeclaredNames.has(call.name)) {
+          // The declarations snapshot still advertises this client-files tool,
+          // but the registration was revoked before the call ran. Refuse it
+          // here instead of letting it fall through to the Workspace file-tool
+          // arm (which would tell the model to retry with file_path and then
+          // dispatch it through the broker).
+          validationError = denied(
+            'The client filesystem registration is no longer active.',
+          );
+          input = { ...call.args };
         } else if (skill) {
           validationError = source.some((other) => other.name !== 'skill')
             ? HOSTED_SKILL_BATCH_REFUSAL
@@ -5164,6 +5247,7 @@ export class HostedWorkspaceToolTurn {
           isShell,
           inputDigest,
           mcp: mcpInput !== undefined,
+          clientFiles: clientFilesTool !== undefined,
           ...encoded,
           argsDigest,
           publicationId:
@@ -5213,7 +5297,8 @@ export class HostedWorkspaceToolTurn {
             (tool) => tool.name === call.name,
           ) &&
           !(this.memory && isHostedMemoryTool(call.name)) &&
-          !(this.publicPlanMode && call.name === 'exit_plan_mode'),
+          !(this.publicPlanMode && call.name === 'exit_plan_mode') &&
+          !this.clientFiles?.resolve(call.name),
       )
     ) {
       return this.refuseBatch(
@@ -5221,9 +5306,12 @@ export class HostedWorkspaceToolTurn {
         calls.map((call) =>
           HOSTED_WORKSPACE_FILE_TOOLS.some((tool) => tool.name === call.name) ||
           (this.memory && isHostedMemoryTool(call.name)) ||
-          (this.publicPlanMode && call.name === 'exit_plan_mode')
+          (this.publicPlanMode && call.name === 'exit_plan_mode') ||
+          this.clientFiles?.resolve(call.name)
             ? undefined
-            : 'Resident Workspace supports only read_file, write_file and edit.',
+            : this.clientFilesDeclaredNames.has(call.name)
+              ? 'The client filesystem registration is no longer active.'
+              : 'Resident Workspace supports only read_file, write_file and edit.',
         ),
         calls.map(() => 'denied'),
         parts,
@@ -5293,6 +5381,7 @@ export class HostedWorkspaceToolTurn {
           !request.skill &&
           !request.todo &&
           !request.memory &&
+          !request.clientFiles &&
           !request.loop &&
           !request.cronList &&
           !request.cronDelete,
@@ -5320,6 +5409,7 @@ export class HostedWorkspaceToolTurn {
           !request.skill &&
           !request.todo &&
           !request.memory &&
+          request.clientFiles !== true &&
           !request.loop &&
           !request.cronList &&
           !request.cronDelete,
@@ -6417,6 +6507,12 @@ export class HostedWorkspaceToolTurn {
               signal,
               messageId,
             )),
+          );
+          continue;
+        }
+        if (request.clientFiles) {
+          responses.push(
+            ...(await this.acceptClientFiles(request, model, signal)),
           );
           continue;
         }
@@ -7680,6 +7776,12 @@ export class HostedWorkspaceToolTurn {
       : this.childModelRoute;
     if (extensionAgent?.model && !childModel)
       throw new Error('Extension agent model is unavailable.');
+    // Client-files tool names are generation-scoped and vanish with the
+    // registration (a reconnect, an unregister or a harness restart), so they
+    // are deliberately not admitted into the durable launch pin: they are
+    // re-derived from the live catalog on every drive, and the strict snapshot
+    // comparison must fingerprint only the stable tool set or an ephemeral
+    // name would trigger a false recovery.
     const allowed = (this.advertised ?? [])
       .map((tool) => tool.name!)
       .filter(
@@ -7693,7 +7795,10 @@ export class HostedWorkspaceToolTurn {
           !extensionAgent?.disallowedTools?.includes(name),
       );
     const descriptor = extensionAgent
-      ? { ...extensionAgent.descriptor, toolNames: allowed }
+      ? {
+          ...extensionAgent.descriptor,
+          toolNames: allowed,
+        }
       : undefined;
     const publicLaunch = this.publicChildren
       ? ((await children.publicLaunchSnapshot(childRunId)) ??
@@ -10048,6 +10153,90 @@ export class HostedWorkspaceToolTurn {
     return APPROVAL_REFUSALS.expired;
   }
 
+  /**
+   * Executes one client filesystem tool in the harness (the relay MCP client
+   * is harness-local, never the worker) and commits its result through the
+   * normal durable tool-result path. A dropped registration or a failed call
+   * becomes the call's error response, never a Turn failure.
+   */
+  private async acceptClientFiles(
+    request: HostedPreparedRequest,
+    model: string,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    const tool = this.clientFiles?.resolve(request.call.name);
+    let parts: Part[];
+    let executionStatus: 'success' | 'error' = 'error';
+    if (!tool) {
+      parts = convertToFunctionErrorResponse(
+        request.call.name,
+        request.call.callId,
+        [],
+        'The client filesystem registration is no longer active.',
+      );
+    } else {
+      try {
+        signal.throwIfAborted();
+        const result = (await this.clientFiles!.invoke(
+          tool,
+          request.input,
+          signal,
+        )) as {
+          content?: unknown[];
+          isError?: boolean;
+        };
+        // A cancellation that landed while the browser round trip was in flight
+        // must not be journalled as a tool result: re-check after the await and
+        // let the abort propagate instead of committing a bogus failure.
+        signal.throwIfAborted();
+        const converted = clientFilesResultParts(result);
+        if (result.isError) {
+          parts = convertToFunctionErrorResponse(
+            request.call.name,
+            request.call.callId,
+            converted,
+            'The client files tool reported an error.',
+          );
+        } else {
+          parts = convertToFunctionResponse(
+            request.call.name,
+            request.call.callId,
+            converted,
+          );
+          executionStatus = 'success';
+        }
+      } catch (cause) {
+        if (signal.aborted) throw cause;
+        parts = convertToFunctionErrorResponse(
+          request.call.name,
+          request.call.callId,
+          [],
+          cause instanceof Error
+            ? cause.message
+            : 'The client files tool failed.',
+        );
+      }
+    }
+    // Stamp the accept-path outcome like the memory/todo/shell accept paths do.
+    // It is the durable dispatch evidence completeHookResults reads: a call
+    // denied at approval never reaches this accept path, so its refusal
+    // response carries no executionStatus and must not fire an outcome hook.
+    for (const part of parts) {
+      if (part.functionResponse) {
+        part.functionResponse.response = {
+          ...part.functionResponse.response,
+          executionStatus,
+        };
+      }
+    }
+    if (!this.messageFitsInline('tool_result', parts, model))
+      throw new Error(
+        'Hosted client files result exceeds the inline Session Store limit.',
+      );
+    await this.commit('tool_result', parts, model);
+    return parts;
+  }
+
   private async permissionDecision(
     request: HostedPreparedRequest,
     settings?: HostedApprovalSettings,
@@ -10057,17 +10246,32 @@ export class HostedWorkspaceToolTurn {
     const input = request.mcp
       ? (request.input as unknown as import('@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js').ManagedMcpInvoke)
       : undefined;
+    const clientFilesTool = request.clientFiles
+      ? this.clientFiles?.resolve(request.call.name)
+      : undefined;
     const identity =
       input?.request.kind === 'tool_call'
         ? { serverName: input.serverId, serverToolName: input.request.name }
-        : undefined;
-    const identities =
-      this.mcp?.getCatalogs().flatMap((catalog) =>
+        : clientFilesTool
+          ? {
+              serverName: this.clientFiles!.catalogs()[0].serverId,
+              serverToolName: clientFilesTool.name,
+            }
+          : undefined;
+    const identities = [
+      ...(this.mcp?.getCatalogs().flatMap((catalog) =>
         catalog.tools.map((tool) => ({
           serverName: catalog.serverId,
           serverToolName: tool.name,
         })),
-      ) ?? [];
+      ) ?? []),
+      ...(this.clientFiles?.catalogs().flatMap((catalog) =>
+        catalog.tools.map((tool) => ({
+          serverName: catalog.serverId,
+          serverToolName: tool.name,
+        })),
+      ) ?? []),
+    ];
     return evaluateHostedPermissionRules(
       selected.permissionRules,
       {

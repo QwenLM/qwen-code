@@ -251,8 +251,9 @@ final class AgentSessionCommands {
      */
     SyncRename settleRenameSync(String tenantId, String key, String digest,
             String sessionId, String title, String actorId) {
-        // Empty operation ranges can share an InnoDB gap even across Session scopes.
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        // No tenant guard, as in changeSessionModel: settlement writes no delivery row, so no
+        // operation range is locked. The Session lock comes first, so the replay probe's snapshot
+        // follows it; a racing Session reusing the key loses on the receipt's unique key.
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
         if (previous.isPresent() && sessionId.equals(previous.get().sessionId())) {
