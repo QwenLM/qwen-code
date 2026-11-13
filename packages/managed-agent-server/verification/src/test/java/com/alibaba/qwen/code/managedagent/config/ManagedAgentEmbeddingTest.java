@@ -94,6 +94,23 @@ class ManagedAgentEmbeddingTest {
     }
 
     @Test
+    void dedicatedSchedulersAreNotDefaultCandidates() {
+        runner().withPropertyValues("qwen.managed-agent.datasource.url=" + url()).run(context -> {
+            assertThat(context).hasNotFailed();
+            // Every managed scheduler binds by name (@Scheduled(scheduler = ...)); none
+            // may compete for the host's by-type TaskScheduler injection in embedded mode.
+            for (String name : new String[] {"journalCompactionScheduler", "wakeRecoveryScheduler",
+                    "childWorkspaceScheduler", "sessionWorktreeScheduler", "messageMaterializerScheduler"}) {
+                var definition = (org.springframework.beans.factory.support.AbstractBeanDefinition)
+                        context.getBeanFactory().getBeanDefinition(name);
+                assertThat(definition.isDefaultCandidate())
+                        .as("scheduler %s must not be a default candidate in embedded mode", name)
+                        .isFalse();
+            }
+        });
+    }
+
+    @Test
     void cleanupDebtStoreQueriesTheDedicatedDatabaseNotTheHostOne() {
         runner().withPropertyValues("qwen.managed-agent.datasource.url=" + url()).run(context -> {
             assertThat(context).hasNotFailed();
