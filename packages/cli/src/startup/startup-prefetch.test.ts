@@ -490,7 +490,7 @@ describe('startupPrefetch', () => {
     await settle();
 
     expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-failed', {
-      message: `Update check skipped (registry did not respond within ${Math.round(FETCH_TIMEOUT_MS / 1000)}s) — run /update to retry.`,
+      message: `Update check skipped (timed out after ${Math.round(FETCH_TIMEOUT_MS / 1000)}s) — run /update to retry.`,
       severity: 'warning',
     });
   });
