@@ -5004,7 +5004,7 @@ export const AppContainer = (props: AppContainerProps) => {
         setPressedOnce(true);
         timerRef.current = setTimeout(() => {
           setPressedOnce(false);
-        }, 500);
+        }, CTRL_EXIT_PROMPT_DURATION_MS);
         return;
       }
 
