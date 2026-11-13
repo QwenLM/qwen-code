@@ -661,18 +661,63 @@ describeTui(SUITE, () => {
       async () => !(await session!.viewport()).includes('Initializing...'),
       'initialization completes',
     );
+    // Ink loads slash commands and skills asynchronously after the prompt
+    // renders; probing `/` ensures both CommandService and input focus are
+    // ready before the first prompt is typed (#16787, #17131).
+    session.pressKey('/');
+    await until(
+      async () => (await session!.viewport()).includes('/about'),
+      'slash commands load',
+      30_000,
+      () => session!.viewport(),
+    );
+    session.pressKey('\x7f');
+    await until(
+      async () => (await session!.viewport()).includes('Type your message'),
+      'input clears',
+      30_000,
+      () => session!.viewport(),
+    );
     await session.idle(300, 5_000);
 
-    // A turn is over once the spinner stops and no request is in flight.
-    const turnEnds = async () => {
+    const streamingCount = () =>
+      server!.requests.filter((request) => request.body['stream'] === true)
+        .length;
+    const sideCount = () =>
+      server!.requests.filter((request) => request.body['stream'] !== true)
+        .length;
+
+    // A turn is over once its expected requests have completed and the
+    // spinner stops (#16787, #16947, #17131).
+    const turnEnds = async (minStreamingRequests: number) => {
       await sleep(500);
+      if (scenario.shows) {
+        await until(
+          async () => (await session!.screen()).includes(scenario.shows!),
+          'expected screen text',
+          30_000,
+          () => session!.viewport(),
+        );
+      }
+      await until(
+        () =>
+          streamingCount() >= minStreamingRequests &&
+          server!.requests.every(
+            (request) => request.transport.closedAt !== undefined,
+          ),
+        'model requests complete',
+        90_000,
+        () => session!.viewport(),
+      );
       await session!.idle(2_000, 90_000);
       await until(
         () =>
           server!.requests.every(
             (request) => request.transport.closedAt !== undefined,
           ),
-        'model requests complete',
+        'model requests settle',
+        30_000,
+        () => session!.viewport(),
       );
       await session!.idle(1_000, 30_000);
     };
@@ -727,21 +772,43 @@ describeTui(SUITE, () => {
         await sleep(1_000);
         await session.send(scenario.queue.input);
       }
-      await turnEnds();
+      const expectedAfterPrompt =
+        scenario.requests === 0
+          ? 0
+          : scenario.laterTurns || scenario.retries
+            ? index + 1
+            : index === scenario.prompts.length - 1
+              ? scenario.requests
+              : index + 1;
+      await turnEnds(expectedAfterPrompt);
       for (let retry = 0; retry < (scenario.retries ?? 0); retry++) {
+        await until(
+          async () =>
+            (await session!.viewport()).includes('Press Ctrl+Y to retry'),
+          'the failed turn is ready to retry',
+          30_000,
+          () => session!.viewport(),
+        );
+        const before = streamingCount();
         session.pressKey('\x19');
-        await turnEnds();
+        const expectedAfterRetry =
+          retry === (scenario.retries ?? 0) - 1
+            ? scenario.requests
+            : before + 1;
+        await turnEnds(expectedAfterRetry);
       }
     }
     if (scenario.laterTurns) {
       await until(
         () =>
-          server!.requests.filter((request) => request.body['stream'] === true)
-            .length >= scenario.requests,
+          streamingCount() >= scenario.requests &&
+          (scenario.sideRequests === undefined ||
+            sideCount() >= scenario.sideRequests),
         'the session starts its later turns',
         90_000,
+        () => session!.viewport(),
       );
-      await turnEnds();
+      await turnEnds(scenario.requests);
     }
 
     const screen = await session.screen();
