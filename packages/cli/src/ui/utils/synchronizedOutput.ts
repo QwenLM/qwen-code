@@ -10,11 +10,36 @@ export const BEGIN_SYNCHRONIZED_UPDATE = '\u001B[?2026h';
 export const END_SYNCHRONIZED_UPDATE = '\u001B[?2026l';
 
 /**
- * DECSET 2026 shipped in Windows Terminal 1.23. Before it the host advertises
- * WT_SESSION but silently drops the mode, so emitting the wrappers there only
- * adds bytes to frames the terminal still paints non-atomically.
+ * DECSET 2026 shipped in Windows Terminal 1.23, and Windows Terminal publishes
+ * no variable carrying its version. The Windows OS build is not a substitute:
+ * the terminal installs from the Store and updates on its own, so a 1.12 host
+ * and a 1.24 host run on the same build (the reporter on #11929 upgraded
+ * 1.12.10983 to 1.24.11911 on Windows 11 build 22631).
+ *
+ * WSL is the same story from the other side: a session inside it carries
+ * `WSL_DISTRO_NAME` but no `WT_SESSION` on a stock setup, and the kernel is a
+ * real Linux one whose release carries no Windows build at all. There is
+ * therefore no signal on that path to gate on, so WSL2 keeps the legacy path
+ * and reaches the wrappers through QWEN_CODE_FORCE_SYNCHRONIZED_OUTPUT.
+ *
+ * What is left is native Windows: `os.release()` there does track the OS, and
+ * Windows Terminal has shipped inbox with Windows since 11 22H2, so a host at
+ * or above build 26100 always has a Windows Terminal that implements the mode.
+ * Older hosts are not excluded — the terminal may have been upgraded past 1.23
+ * independently — they just are not detected without the override.
  */
-const WINDOWS_TERMINAL_SYNCHRONIZED_OUTPUT_MIN_BUILD = 26100;
+const WINDOWS_BUILD_WITH_INBOX_TERMINAL_1_23 = 26100;
+
+/**
+ * `TERM_PROGRAM` is set by whichever Windows cosole host launched the process,
+ * and applications started from a Windows Terminal tab inherit that tab's
+ * `WT_SESSION`. Only the environment's own host label names the terminal that
+ * actually paints the frames, so the build gate applies to that label alone.
+ */
+const WINDOWS_TERMINAL_TERM_PROGRAMS = new Set([
+  'Windows Terminal',
+  'WindowsTerminal',
+]);
 
 export interface SynchronizedOutputStatsSnapshot {
   synchronizedOutputFrameCount: number;
@@ -41,23 +66,18 @@ export function resetSynchronizedOutputStats(): void {
 }
 
 /**
- * Windows Terminal publishes no variable carrying its own version. Two signals
- * stand in for it:
- * - native (`win32`): the Windows build in `os.release()` (`10.0.26100`).
- * - WSL: the host build embedded in the kernel release
- *   (`4.4.0-26100-Microsoft`). WSL1 kernels (`4.19.104-microsoft-standard`)
- *   carry no build number and stay undetected.
- * Anything older than the cutoff keeps the legacy path.
+ * Reads the Windows build from an `os.release()` string. Only the native
+ * release carries it: a WSL kernel reports a real Linux version, so there is
+ * nothing to read there and the caller stays undetected.
  */
 export function windowsBuildNumber(
   osRelease: string,
   platform: NodeJS.Platform = process.platform,
 ): number | undefined {
-  const release = osRelease.trim();
-  const raw =
-    platform === 'win32'
-      ? /^\d+\.\d+\.(\d+)(?:\.|$)/.exec(release)?.[1]
-      : /^\d+\.\d+\.\d+-(\d+)-[a-z]/i.exec(release)?.[1];
+  if (platform !== 'win32') {
+    return undefined;
+  }
+  const raw = /^\d+\.\d+\.(\d+)(?:\.|$)/.exec(osRelease.trim())?.[1];
   if (raw === undefined) {
     return undefined;
   }
@@ -90,19 +110,21 @@ export function terminalSupportsSynchronizedOutput(
     return false;
   }
 
-  // Windows Terminal publishes no version variable; the host build comes from
-  // os.release() on both the native and WSL paths.
-  if (env['WT_SESSION']) {
+  const termProgram = env['TERM_PROGRAM'];
+
+  // Windows Terminal is the one host whose support cannot be read from the
+  // environment alone: WT_SESSION is present on every version it ever shipped.
+  // The build number is a lower bound on what that host always has, not a
+  // statement about the terminal version — see the constant's comment.
+  if (WINDOWS_TERMINAL_TERM_PROGRAMS.has(termProgram ?? '')) {
     const build = osRelease
       ? windowsBuildNumber(osRelease, platform)
       : undefined;
     return (
-      build !== undefined &&
-      build >= WINDOWS_TERMINAL_SYNCHRONIZED_OUTPUT_MIN_BUILD
+      build !== undefined && build >= WINDOWS_BUILD_WITH_INBOX_TERMINAL_1_23
     );
   }
 
-  const termProgram = env['TERM_PROGRAM'];
   // Warp's DECRQM 2026 probe answers status 2 (recognized, reset), so
   // synchronized updates are available there; without them Warp renders the
   // erase-then-rewrite pattern as flicker (issue #8557). Ghostty implements
@@ -124,10 +146,13 @@ export function installSynchronizedOutput(
   stdout: NodeJS.WriteStream = process.stdout,
   env: NodeJS.ProcessEnv = process.env,
 ): () => void {
-  // The Windows build (native release or WSL host kernel) is only consulted for
-  // Windows Terminal; other terminals skip the syscall.
+  // The OS build is only consulted for Windows Terminal; other terminals skip
+  // the syscall.
   const osRelease =
-    env['WT_SESSION'] && !env['TMUX'] ? os.release() : undefined;
+    WINDOWS_TERMINAL_TERM_PROGRAMS.has(env['TERM_PROGRAM'] ?? '') &&
+    !env['TMUX']
+      ? os.release()
+      : undefined;
   if (
     installed ||
     !stdout.isTTY ||
