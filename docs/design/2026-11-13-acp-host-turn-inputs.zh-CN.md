@@ -24,7 +24,8 @@
 type UserTurnInput = {
   promptId: string;
   todoWorkChain?: { promptId: string };
-  // 宿主已完成该回合的快照阶段时存在。
+  // 宿主执行过该回合的快照阶段时存在：已拍快照、为 restore 主动跳过、
+  // 或尝试过但失败。Core 不会自行拍快照，也不会重试失败的那次。
   fileHistory?: { promptId: string };
 };
 ```

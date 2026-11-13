@@ -347,8 +347,10 @@ export interface UserTurnInput {
   promptId: string;
   todoWorkChain?: { promptId: string };
   /**
-   * Present when the host completed the snapshot phase for this turn, whether
-   * it took the snapshot or skipped it for a restore.
+   * Present when the host ran the snapshot phase for this turn, in any of its
+   * three outcomes: the snapshot was taken, it was deliberately skipped for a
+   * restore, or it was attempted and failed. Core records no snapshot of its
+   * own either way and does not retry a failed one.
    */
   fileHistory?: { promptId: string };
 }
@@ -383,8 +385,13 @@ export function recordUserTurn(config: Config, record: UserTurnRecord): void {
         recorder?.recordNotification(record.message, record.displayText);
       }
       break;
-    default:
-      throw new Error('Unsupported user turn record');
+    default: {
+      // A new kind without a case has to fail HERE, at compile time. This runs
+      // outside the caller's `try` (Session.ts), so a runtime throw escapes the
+      // turn handler instead of being turned into a turn error.
+      const _exhaustive: never = record;
+      void _exhaustive;
+    }
   }
 }
 
@@ -451,6 +458,16 @@ export interface SendMessageOptions {
    * the Stop hook let the response stop.
    */
   stopPolicies?: readonly StopPolicy[];
+  /**
+   * The host owns this span: it starts and ends it, and owns its attributes.
+   * Passing it here does NOT hand the lifecycle to core — this client never
+   * starts or ends the span, never writes the input-message or
+   * resolved-request attributes, and only records activity on it. This is the
+   * one field that turns core's own span bookkeeping off
+   * (`startInteractionSpan`, `addAgentInputMessageAttributes`,
+   * `addUserPromptAttributes`, and `endCurrentInteraction` all step aside), so
+   * a caller that passes a span it does not own gets no lifecycle at all.
+   */
   interactionSpan?: Span;
   /**
    * The host runs its own tool-call guards and exploration budget and builds

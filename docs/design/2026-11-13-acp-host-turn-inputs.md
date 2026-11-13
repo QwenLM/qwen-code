@@ -24,7 +24,9 @@ Out of scope: other ACP tool batches, a full per-round `runAgentLoop` migration,
 type UserTurnInput = {
   promptId: string;
   todoWorkChain?: { promptId: string };
-  // Present when the host completed the snapshot phase for this turn.
+  // Present when the host ran the snapshot phase for this turn: taken,
+  // deliberately skipped for a restore, or attempted and failed. Core never
+  // snapshots on its own and never retries a failed one.
   fileHistory?: { promptId: string };
 };
 ```
