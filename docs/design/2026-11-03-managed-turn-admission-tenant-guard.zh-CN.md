@@ -59,7 +59,8 @@ Turn 准入在同一事务内按以下顺序加锁：
 命令（改名、修改模型与审批、MCP 与扩展管理、cwd 变更、任务取消、上下文压缩、Session
 与子会话插入、actions）、用户消息队列的 `startNext`（它在通过同一路径提交前仍获取
 guard）、生命周期操作、Journal 写者以及发布。它们都需要先完成同样的审计，才能去掉
-guard。
+guard。[Session 命令审计](2026-11-03-managed-session-commands-tenant-guard.zh-CN.md)
+后来已去掉其中大多数命令（包括改名）的 guard。
 
 ## 风险
 

@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedUserMessageStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore.Command;
 import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore.Snapshot;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -13,9 +13,9 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 public class UserMessageController {
-    private final ManagedUserMessageStore messages;
+    private final JdbcManagedUserMessageStore messages;
 
-    public UserMessageController(ManagedUserMessageStore messages) { this.messages = messages; }
+    public UserMessageController(JdbcManagedUserMessageStore messages) { this.messages = messages; }
 
     public record Query(String sessionId) { }
     public record WebCommand(String sessionId, String idempotencyKey, Command command) { }

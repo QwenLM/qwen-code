@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
@@ -846,3 +846,657 @@ test('edits GitHub bound-session action templates on demand and toggles fullscre
   };
   expect(secondBody.config['boundSessionActions']).toBeUndefined();
 });
+
+test('configures a WeChat channel with in-browser QR login', async ({
+  page,
+}, testInfo) => {
+  const workspaceCwd = '/tmp/qwen-web-shell-e2e';
+  const scenario = createWebShellDaemonScenario({
+    workspaceCwd,
+    capabilities: {
+      features: [
+        'session_events',
+        'permission_vote',
+        'session_permission_vote',
+        'session_scope_override',
+        'session_source_metadata',
+        'channel_management',
+      ],
+    },
+    channelTypes: [
+      {
+        type: 'weixin',
+        displayName: 'WeChat',
+        manageable: true,
+        fields: [
+          {
+            key: 'groupPolicy',
+            label: 'Group Policy',
+            kind: 'enum',
+            required: true,
+            default: 'disabled',
+            options: [{ value: 'disabled', label: 'Disabled' }],
+          },
+          {
+            key: 'privatePolicy',
+            label: 'Private Policy',
+            kind: 'enum',
+            required: true,
+            default: 'pairing',
+            options: [
+              { value: 'disabled', label: 'Disabled' },
+              { value: 'pairing', label: 'Pairing' },
+              { value: 'allowlist', label: 'Allowlist' },
+              { value: 'open', label: 'Open' },
+            ],
+          },
+          {
+            key: 'sessionScope',
+            label: 'Session Scope',
+            kind: 'enum',
+            required: true,
+            default: 'user',
+            options: [
+              { value: 'user', label: 'Per user and chat' },
+              { value: 'single', label: 'One shared session' },
+            ],
+          },
+        ],
+      },
+    ],
+    channels: { revision: '1', instances: {} },
+    sessions: [
+      {
+        workspaceCwd,
+        sessionId: 'task-session',
+        displayName: 'Web Shell task',
+        sourceType: 'default',
+      },
+    ],
+  });
+  await page.addInitScript(() => {
+    window.sessionStorage.setItem('qwen-daemon-token', 'e2e-token');
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+
+  // The WeChat login routes are process-global, so the workspace mock daemon
+  // does not serve them. Registered after installMockDaemon so this handler
+  // takes precedence; anything else falls through to the shared mock.
+  let configured = false;
+  let flowStatus: 'waiting' | 'scanned' | 'ready' = 'waiting';
+  let revokes = 0;
+  let cancels = 0;
+  await page.route('**/auth/weixin**', async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    const method = request.method();
+    if (path === '/auth/weixin' && method === 'GET') {
+      await route.fulfill({
+        json: {
+          enabled: true,
+          configured,
+          ...(configured ? { userId: 'wx-user-1' } : {}),
+        },
+      });
+      return;
+    }
+    if (path === '/auth/weixin/flows' && method === 'POST') {
+      flowStatus = 'waiting';
+      await route.fulfill({
+        status: 201,
+        json: {
+          id: 'flow-1',
+          status: 'waiting',
+          qrText: '▄▀▄▀',
+          qrcodeUrl: 'https://scan.example/qr-1',
+        },
+      });
+      return;
+    }
+    if (path === '/auth/weixin/flows/flow-1' && method === 'DELETE') {
+      // The panel drops a live flow when the editor closes; the daemon would
+      // keep polling the upstream otherwise. Answer it like the real route.
+      cancels += 1;
+      await route.fulfill({ status: 204 });
+      return;
+    }
+    if (path === '/auth/weixin/flows/flow-1' && method === 'GET') {
+      const status = flowStatus;
+      if (flowStatus === 'waiting') flowStatus = 'scanned';
+      else if (flowStatus === 'scanned') {
+        flowStatus = 'ready';
+        configured = true;
+      }
+      await route.fulfill({
+        json: {
+          id: 'flow-1',
+          status,
+          ...(status === 'ready' ? {} : { qrText: '▄▀▄▀' }),
+        },
+      });
+      return;
+    }
+    if (path === '/auth/weixin/revoke' && method === 'POST') {
+      revokes += 1;
+      configured = false;
+      await route.fulfill({ status: 204 });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
+  const connection = await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: connection.sessionId }),
+  );
+  await expect(page.getByText('Loading...')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Channels', exact: true }).click();
+  // The platform must be offered at all — before this feature weixin was
+  // filtered out of the Web Shell allowlist.
+  await page.getByRole('button', { name: 'Configure WeChat' }).click();
+  const editor = page.getByRole('dialog');
+  await expect(
+    editor.getByRole('heading', { name: 'Configure WeChat' }),
+  ).toBeVisible();
+
+  const panel = editor.getByTestId('weixin-login-panel');
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText('Not logged in');
+  // No credential input: the token comes from the QR login, not the form.
+  await expect(editor.locator('input[type="password"]')).toHaveCount(0);
+
+  await panel.getByRole('button', { name: 'Log in with QR code' }).click();
+  await expect(panel.locator('pre')).toHaveText('▄▀▄▀');
+  await expect(panel).toContainText('Scan the QR code with WeChat.');
+  await expect(panel).toContainText('Scanned. Confirm on your phone.');
+  await expect(panel).toContainText('WeChat connected.');
+  await expect(panel).toContainText('Logged in');
+  await expect(panel).toContainText('User ID: wx-user-1');
+  // The QR is gone once the flow is terminal.
+  await expect(panel.locator('pre')).toHaveCount(0);
+
+  await panel.getByRole('button', { name: 'Log out' }).click();
+  await expect.poll(() => revokes).toBe(1);
+  await expect(panel).toContainText('Not logged in');
+
+  // Saving must not require being logged in.
+  await editor.getByLabel('Instance name').fill('my-weixin');
+  await editor.getByRole('button', { name: 'Save' }).click();
+  const upserts = () =>
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'PUT' &&
+        request.path.endsWith('/channels/my-weixin'),
+    );
+  await expect.poll(() => upserts().length).toBe(1);
+  expect(upserts()[0]?.body).toEqual(
+    expect.objectContaining({
+      config: expect.objectContaining({
+        type: 'weixin',
+        groupPolicy: 'disabled',
+      }),
+    }),
+  );
+  // Closing the editor drops a *live* flow, never a finished one — cancelling
+  // here would delete the retained terminal view for no reason.
+  expect(cancels).toBe(0);
+});
+
+test('lists a configured Email channel and hides its inert group controls @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: [
+        'session_events',
+        'permission_vote',
+        'session_permission_vote',
+        'session_scope_override',
+        'session_source_metadata',
+        'channel_management',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/qwen-web-shell-e2e',
+          displayName: 'Main workspace',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    },
+    channelTypes: [
+      {
+        type: 'email',
+        displayName: 'Email',
+        manageable: true,
+        fields: [
+          {
+            key: 'address',
+            label: 'address',
+            kind: 'string',
+            required: true,
+            envResolvable: true,
+          },
+          {
+            key: 'imapHost',
+            label: 'imapHost',
+            kind: 'string',
+            required: true,
+            envResolvable: true,
+          },
+          {
+            key: 'imapPassword',
+            label: 'imapPassword',
+            kind: 'secret',
+            required: true,
+            envResolvable: true,
+          },
+          {
+            key: 'smtpPassword',
+            label: 'smtpPassword',
+            kind: 'secret',
+            required: true,
+            envResolvable: true,
+          },
+          {
+            key: 'privatePolicy',
+            label: 'Private Policy',
+            kind: 'enum',
+            required: true,
+            default: 'allowlist',
+            options: [
+              { value: 'disabled', label: 'Disabled' },
+              { value: 'allowlist', label: 'Allowlist' },
+              { value: 'open', label: 'Open' },
+            ],
+          },
+          {
+            key: 'allowedUsers',
+            label: 'Allowed Users',
+            kind: 'string-list',
+          },
+          // Injected by the registry because the plugin does not declare it.
+          // Email builds every envelope with isGroup:false, so it is inert.
+          {
+            key: 'groupPolicy',
+            label: 'Group Policy',
+            kind: 'enum',
+            required: true,
+            default: 'disabled',
+            options: [
+              { value: 'disabled', label: 'Disabled' },
+              { value: 'pairing', label: 'Pairing' },
+              { value: 'allowlist', label: 'Allowlist' },
+              { value: 'open', label: 'Open' },
+            ],
+          },
+        ],
+      },
+    ],
+    channels: {
+      revision: '1',
+      instances: {
+        'agent-mail': {
+          name: 'agent-mail',
+          config: {
+            type: 'email',
+            address: 'agent@example.com',
+            imapHost: 'imap.example.com',
+            privatePolicy: 'allowlist',
+          },
+          secrets: {
+            imapPassword: { present: true, source: 'environment' },
+            smtpPassword: { present: true, source: 'environment' },
+          },
+          startsWithServe: false,
+          runtime: { state: 'connected' },
+        },
+      },
+    },
+  });
+  await page.addInitScript(() => {
+    window.sessionStorage.setItem('qwen-daemon-token', 'e2e-token');
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+
+  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
+  const connection = await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: connection.sessionId }),
+  );
+  await expect(page.getByText('Loading...')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Channels', exact: true }).click();
+
+  // The instance list filtered on the same allowlist as the picker, so a
+  // running Email channel used to be absent from the page entirely.
+  await expect(
+    page.getByRole('button', { name: 'Edit agent-mail' }),
+  ).toBeVisible();
+
+  await page.getByRole('button', { name: 'Configure Email' }).click();
+  const editor = page.getByRole('dialog');
+  await expect(
+    editor.getByRole('heading', { name: 'Configure Email' }),
+  ).toBeVisible();
+  // Locate by role and accessible name, not by label text: FieldShell appends
+  // an aria-hidden "*" to every required label, so the label's text is
+  // "IMAP Host*" and an exact getByLabel matches nothing. The accessible name
+  // skips aria-hidden content, so an exact role name matches the control.
+  await expect(
+    editor.getByRole('textbox', { name: 'IMAP Host', exact: true }),
+  ).toBeVisible();
+  await expect(
+    editor.getByRole('textbox', { name: 'Mailbox Address', exact: true }),
+  ).toBeVisible();
+  await expect(
+    editor.getByRole('combobox', {
+      name: 'Direct message policy',
+      exact: true,
+    }),
+  ).toBeVisible();
+  // Substring name matchers on purpose: an exact matcher would also miss a
+  // rendered "Group policy*", letting this guard pass while the control it
+  // forbids is on screen. Cover the whole group axis, not just the policy.
+  await expect(
+    editor.getByRole('combobox', { name: /Group policy/ }),
+  ).toHaveCount(0);
+  await expect(
+    editor.getByRole('textbox', { name: /Allowed group IDs/ }),
+  ).toHaveCount(0);
+  await expect(
+    editor.getByRole('combobox', { name: /Who can talk in groups/ }),
+  ).toHaveCount(0);
+});
+
+async function configureWebhook(
+  page: Page,
+  testInfo: TestInfo,
+  platform: { type: 'dingtalk' | 'feishu'; displayName: string },
+) {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text());
+  });
+  const webhookType = `${platform.type}-webhook`;
+  const webhookUrl = `$${platform.type.toUpperCase()}_WEBHOOK_URL`;
+  const signingSecret = `$${platform.type.toUpperCase()}_SIGNING_SECRET`;
+  const primaryWorkspaceCwd = '/tmp/qwen-web-shell-e2e';
+  const workspaceCwd = '/tmp/qwen-outbound-webhook-secondary';
+  const scenario = createWebShellDaemonScenario({
+    channels: { revision: '7', instances: {} },
+    capabilities: {
+      features: [
+        'session_events',
+        'session_source_metadata',
+        'channel_management',
+        'channel_delivery',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: primaryWorkspaceCwd,
+          displayName: 'Main workspace',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: workspaceCwd,
+          displayName: 'Notification workspace',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    },
+    channelTypes: [
+      {
+        type: platform.type,
+        displayName: platform.displayName,
+        manageable: true,
+        fields: [],
+      },
+      {
+        type: webhookType,
+        displayName: `${platform.displayName} Webhook`,
+        manageable: true,
+        outboundOnly: true,
+        defaultDeliveryTarget: {
+          type: 'chat',
+          id: 'default',
+          label: 'Configured group',
+        },
+        fields: [
+          {
+            key: 'webhookUrl',
+            label: 'Webhook URL',
+            kind: 'secret',
+            required: true,
+            envResolvable: true,
+          },
+          {
+            key: 'signingSecret',
+            label: 'Signing secret',
+            kind: 'secret',
+            envResolvable: true,
+          },
+        ],
+      },
+    ],
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  await page.route('**/workspace/models', (route) =>
+    route.fulfill({ json: { models: [] } }),
+  );
+  await page.addInitScript(() => {
+    window.sessionStorage.setItem('qwen-daemon-token', 'e2e-token');
+  });
+  let primarySnapshotRequests = 0;
+  await page.route(
+    (url) =>
+      url.pathname ===
+      `/workspaces/${encodeURIComponent(primaryWorkspaceCwd)}/channels`,
+    async (route) => {
+      if (route.request().method() !== 'GET') {
+        await route.fallback();
+        return;
+      }
+      primarySnapshotRequests += 1;
+      await route.fulfill({ json: { revision: '1', instances: {} } });
+    },
+  );
+  await page.route(
+    /\/workspaces\/[^/]+\/channels\/notices\/(start|stop)$/,
+    async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      expect(path).toMatch(
+        new RegExp(
+          `^/workspaces/${encodeURIComponent(workspaceCwd)}/channels/notices/(start|stop)$`,
+        ),
+      );
+      const instance = scenario.channels.instances['notices'];
+      instance.runtime = {
+        state: path.endsWith('/start') ? 'connected' : 'stopped',
+      };
+      await route.fulfill({ json: { snapshot: scenario.channels, instance } });
+    },
+  );
+
+  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  await expect(page).toHaveTitle('Qwen Code Web chat');
+  await expect(page).toHaveURL(new RegExp(`/session/${scenario.sessionId}$`));
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
+  const connection = await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: connection.sessionId }),
+  );
+  await expect(page.getByText('Loading...')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Channels', exact: true }).click();
+  await expect(
+    page.getByTestId(`channel-platform-${platform.type}`),
+  ).toBeVisible();
+  await expect.poll(() => primarySnapshotRequests).toBeGreaterThan(0);
+  await expect(page.getByTestId(`channel-platform-${webhookType}`)).toHaveCount(
+    0,
+  );
+  await page
+    .getByRole('button', {
+      name: `Configure ${platform.displayName}`,
+      exact: true,
+    })
+    .click();
+  const methodDialog = page.getByRole('dialog');
+  const methodTitle = `Choose a ${platform.displayName} connection`;
+  await expect(methodDialog).toHaveAccessibleName(methodTitle);
+  await expect(methodDialog.getByRole('heading')).toHaveText(methodTitle);
+  await expect(methodDialog).toHaveAccessibleDescription(
+    `Choose how this Channel connects to ${platform.displayName}.`,
+  );
+  await expect(
+    methodDialog.getByRole('button', { name: /^Application bot/ }),
+  ).toBeVisible();
+  await methodDialog
+    .getByRole('button', { name: /^Webhook \(send only\)/ })
+    .click();
+  const editor = page.getByRole('dialog');
+  await expect(
+    editor.getByRole('heading', {
+      name: `Configure ${platform.displayName} Webhook`,
+    }),
+  ).toBeVisible();
+  await expect(editor.getByText('Access control', { exact: true })).toHaveCount(
+    0,
+  );
+  await expect(
+    editor.getByText('Conversation management', { exact: true }),
+  ).toHaveCount(0);
+  await expect(editor.getByText('Pairing', { exact: true })).toHaveCount(0);
+  await editor.getByLabel('Workspace').click();
+  await page.getByRole('option', { name: 'Notification workspace' }).click();
+  await expect(editor.getByLabel('Workspace')).toContainText(
+    'Notification workspace',
+  );
+  await editor.getByLabel('Instance name').fill('notices');
+  await editor.getByLabel('Webhook URL', { exact: false }).fill(webhookUrl);
+  await editor
+    .getByLabel('Signing secret', { exact: false })
+    .fill(signingSecret);
+  await page.screenshot({
+    path: testInfo.outputPath('outbound-channel-editor.png'),
+  });
+  await editor.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  const upsert = daemon.requests.find(
+    (request) =>
+      request.method === 'PUT' && request.path.endsWith('/channels/notices'),
+  );
+  expect(upsert?.path).toBe(
+    `/workspaces/${encodeURIComponent(workspaceCwd)}/channels/notices`,
+  );
+  expect(upsert?.body).toEqual({
+    expectedRevision: '7',
+    config: { type: webhookType },
+    secrets: {
+      webhookUrl: { operation: 'replace', value: webhookUrl },
+      signingSecret: {
+        operation: 'replace',
+        value: signingSecret,
+      },
+    },
+  });
+  const card = page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.getByText('notices', { exact: true }) });
+  await card.getByRole('button', { name: 'Edit notices', exact: true }).click();
+  await expect(editor.getByLabel('Webhook URL', { exact: false })).toHaveCount(
+    0,
+  );
+  await expect(
+    editor.getByLabel('Signing secret', { exact: false }),
+  ).toHaveCount(0);
+  await editor.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  const updates = () =>
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'PUT' && request.path.endsWith('/channels/notices'),
+    );
+  expect(updates().at(-1)?.body).toMatchObject({
+    config: { type: webhookType },
+    secrets: {
+      webhookUrl: { operation: 'preserve' },
+      signingSecret: { operation: 'preserve' },
+    },
+  });
+  await card.getByRole('button', { name: 'Edit notices', exact: true }).click();
+  await editor
+    .getByRole('button', { name: 'Replace', exact: true })
+    .first()
+    .click();
+  await editor
+    .getByLabel('Webhook URL', { exact: false })
+    .fill(`${webhookUrl}_V2`);
+  await editor.getByRole('button', { name: 'Clear', exact: true }).click();
+  await editor.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  expect(updates().at(-1)?.body).toMatchObject({
+    config: { type: webhookType },
+    secrets: {
+      webhookUrl: { operation: 'replace', value: `${webhookUrl}_V2` },
+      signingSecret: { operation: 'clear' },
+    },
+  });
+  await card.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(card.getByText('Ready to send', { exact: true })).toBeVisible();
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'POST' &&
+        /\/session$|\/standalone\/sessions$|\/prompt$/.test(request.path),
+    ),
+  ).toHaveLength(0);
+  await page.screenshot({
+    path: testInfo.outputPath('outbound-channel-ready.png'),
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await card.scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: testInfo.outputPath('outbound-channel-mobile.png'),
+  });
+  await card.getByRole('button', { name: 'Stop', exact: true }).click();
+  await expect(
+    card.getByText('Not ready to send notifications.', { exact: true }),
+  ).toBeVisible();
+  await expect(card.getByText('Ready to send', { exact: true })).toHaveCount(0);
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0);
+  expect(errors).toEqual([]);
+}
+
+for (const platform of [
+  { type: 'dingtalk', displayName: 'DingTalk' },
+  { type: 'feishu', displayName: 'Feishu' },
+] as const) {
+  test(`configures and starts a ${platform.displayName} webhook method in the selected workspace`, async ({
+    page,
+  }, testInfo) => {
+    await configureWebhook(page, testInfo, platform);
+  });
+}

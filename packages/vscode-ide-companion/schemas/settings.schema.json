@@ -1735,6 +1735,11 @@
           "type": "boolean",
           "default": false
         },
+        "lspEnabled": {
+          "description": "Experimental. Enable the LSP code-intelligence service without the `--experimental-lsp` flag: go-to-definition, find-references, hover, symbols, diagnostics and code actions. Off by default. Servers come from a workspace `.lsp.json` or an enabled extension and run with your permissions; a workspace-declared server needs an explicitly trusted folder — `security.folderTrust.enabled` with the folder trusted, or an IDE that reports the workspace as trusted — and is skipped otherwise. Refused at startup when `tools.executionSandbox` is set; `--safe-mode`, `QWEN_CODE_SAFE_MODE=1` and `--bare` start without LSP. `QWEN_CODE_ENABLE_LSP=1` / `QWEN_CODE_DISABLE_LSP=1` override the setting (disable wins); a project `.env` or `settings.env` cannot set them.",
+          "type": "boolean",
+          "default": false
+        },
         "workflowSizeGuideline": {
           "description": "Advisory size guideline for the dynamic workflows the model writes: \"small\" aims for fewer than 5 agents, \"medium\" (the default) fewer than 15, \"large\" fewer than 50, and \"unrestricted\" sends no guideline. It is a guideline, not an enforced limit. It also sets the agent count at which a running workflow is flagged as large (QWEN_CODE_WORKFLOW_SIZE_WARNING_AGENTS overrides that threshold). A change takes effect from your next message. Options: small, medium, large, unrestricted",
           "enum": [
@@ -1987,6 +1992,11 @@
           "items": {
             "type": "string"
           }
+        },
+        "defaultBackground": {
+          "description": "Run top-level regular subagents in the background by default. Set to false to return their results inline in the foreground. The explicit run_in_background argument and agent-definition background field take precedence over this setting.",
+          "type": "boolean",
+          "default": true
         },
         "maxParallelAgents": {
           "type": "integer",
@@ -4717,7 +4727,12 @@
           "default": false
         },
         "unifiedAgentLoop": {
-          "description": "Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The Ink TUI sends its model requests and runs its tool batches through it, while its turn continuation, OpenTUI and subagents keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.",
+          "description": "Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The Ink TUI and OpenTUI run their turns on it, and subagents send their model requests and run their tool calls through it. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.",
+          "type": "boolean",
+          "default": false
+        },
+        "eventBusAgentLoop": {
+          "description": "Run the shared agent loop on the event-bus architecture (experimental). When experimental.unifiedAgentLoop is also enabled, this applies to headless sessions (`-p` and stream-json), the Ink TUI, OpenTUI, and subagents. Can also be enabled via QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1 environment variable.",
           "type": "boolean",
           "default": false
         },

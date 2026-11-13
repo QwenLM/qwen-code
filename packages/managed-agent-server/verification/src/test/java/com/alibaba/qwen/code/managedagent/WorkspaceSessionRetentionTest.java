@@ -13,19 +13,21 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionSkills;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -78,12 +80,12 @@ class WorkspaceSessionRetentionTest {
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper mapper;
     @Autowired ManagedAgentStore store;
-    @Autowired ManagedSessionStore journal;
+    @Autowired JdbcManagedSessionStore journal;
     @Autowired @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired OnceCloseRuntime runtime;
     @Autowired PlatformTransactionManager transactions;
     @Autowired SessionLifecycleCoordinator lifecycle;
-    @Autowired ManagedWorkspaceRegistry registry;
+    @Autowired JdbcManagedWorkspaceRegistry registry;
     @Autowired HarnessConnector harness;
     @Autowired com.alibaba.qwen.code.managedagent.session.HarnessCoordinator coordinator;
 
@@ -305,13 +307,13 @@ class WorkspaceSessionRetentionTest {
         // while the fresh key meets the same 404 every other read gets.
         String fence = UUID.randomUUID().toString();
         if (jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE tenant_key = ? AND storage_key = ?",
-                fence, JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                JdbcRuntimeBindingRepository.storageFenceKey("storage")) == 0) {
+                fence, RuntimeAdmissionFences.storageFenceKey(tenant),
+                RuntimeAdmissionFences.storageFenceKey("storage")) == 0) {
             jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id,"
                             + " fence_operation_id) VALUES (?, ?, ?, ?, 'storage', ?)",
-                    JdbcRuntimeBindingRepository.storageAliasKey(tenant, "storage"),
-                    JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                    JdbcRuntimeBindingRepository.storageFenceKey("storage"), tenant, fence);
+                    RuntimeAdmissionFences.storageAliasKey(tenant, "storage"),
+                    RuntimeAdmissionFences.storageFenceKey(tenant),
+                    RuntimeAdmissionFences.storageFenceKey("storage"), tenant, fence);
         }
         // Replay-first, like every other mutation path: the recorded
         // success answers its body with the Session as last visible
@@ -429,7 +431,7 @@ class WorkspaceSessionRetentionTest {
                 + " actor_digest, idempotency_key, request_digest, state, admission_stage, delivery_state,"
                 + " session_status_before, available_at, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'SESSION', ?, ?, '{}', 'RECOVERY_BLOCKED', ?, ?, ?, 'CLOSE', '', 'blocked', 'digest', 'RECOVERY_BLOCKED', 'JAVA_DURABLE',"
-                + " 'BLOCKED', 'ACTIVE', ?, 0, 0)", ManagedSchemaKeys.key("blocked", tenant, session), com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), ManagedSchemaKeys.key(session), session, tenant, session, "op_" + UUID.randomUUID(), Long.MAX_VALUE);
+                + " 'BLOCKED', 'ACTIVE', ?, 0, 0)", ManagedSchemaKeys.key("blocked", tenant, session), ManagedSessionStore.sessionScopeKey(tenant, session), ManagedSchemaKeys.key(session), session, tenant, session, "op_" + UUID.randomUUID(), Long.MAX_VALUE);
         web("archive", tenant, session, "owner", "fresh").andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("session_operation_active"));
         web("delete", tenant, session, "owner", "fresh").andExpect(status().isConflict())
@@ -523,11 +525,11 @@ class WorkspaceSessionRetentionTest {
         }
         @Bean @Primary OnceCloseRuntime retentionRuntime() { return new OnceCloseRuntime(); }
         @Bean @Primary ManagedAgentStore retentionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
-                ObjectMapper mapper, ManagedWorkspaceRegistry registry,
-                WorktreeFiles worktreeFiles, ManagedSessionSkills skills, ExtensionPackages extensions,
-                @Nullable WorkspaceLifecycleStore lifecycle, @Nullable ManagedAgentDefinitionStore definitions,
-                @Nullable SessionWorktreeStore worktrees, @Nullable JournalEventTransport transport,
-                @Lazy @Nullable ManagedExtensionRecordStore records) {
+                ObjectMapper mapper, JdbcManagedWorkspaceRegistry registry,
+                WorktreeFiles worktreeFiles, JdbcManagedSessionSkills skills, ExtensionPackages extensions,
+                @Nullable JdbcWorkspaceLifecycleStore lifecycle, @Nullable JdbcManagedAgentDefinitionStore definitions,
+                @Nullable JdbcSessionWorktreeStore worktrees, @Nullable JournalEventTransport transport,
+                @Lazy @Nullable JdbcManagedExtensionRecordStore records) {
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
             return new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry,

@@ -15,6 +15,7 @@ import {
 } from './index-budget.js';
 import {
   buildManagedAutoMemoryPrompt,
+  buildResidentAutoMemoryPrompt,
   buildStructuredAutoMemoryPrompt,
   buildAutoMemoryIndexContext,
   MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
@@ -1244,5 +1245,66 @@ describe('managed auto-memory prompt helpers', () => {
     expect(result.trimEnd().endsWith('</system-reminder>')).toBe(true);
     expect(result).not.toContain('</system-reminder> early');
     expect(result).toContain('<\\/system-reminder>');
+  });
+});
+
+describe("the main session's resident auto-memory policy", () => {
+  const PROJECT_DIR = '/home/user/.qwen/projects/app/memory';
+  const USER = { memoryDir: '/home/user/.qwen/memories' };
+  const TEAM = { memoryDir: '/repo/.qwen/team-memory' };
+  const resident = buildResidentAutoMemoryPrompt(PROJECT_DIR, USER, TEAM);
+
+  // What a session must have to save and use memories correctly; the full
+  // guidance stays with the background agents' prompts.
+  it.each([
+    ['the user tier', 'USER memory (cross-project'],
+    ['the project tier', 'PROJECT memory (this project only'],
+    ['the team tier', 'TEAM memory (this project, shared'],
+    ['remember and forget', 'If the user explicitly asks you to remember'],
+    ['the user type and its scope', '`user` — the user'],
+    ['the feedback scope', 'PROJECT only for a project-wide convention'],
+    ['absolute dates', 'Convert relative dates to absolute ones'],
+    ['the reference scope', '`reference` — where to find information'],
+    ['the body structure', '**Why:** line and a **How to apply:** line'],
+    ['secrets stay out of TEAM', 'You MUST NOT save API keys, tokens'],
+    ['the generated team index', 'never edit it by hand'],
+    ['what not to save', 'not even when the user asks'],
+    ['the frontmatter template', 'usage_scenarios:'],
+    ['the category list', '`category` is exactly one of: basic_information'],
+    ['the same-directory index', 'lives in the SAME directory you wrote to'],
+    ['no frontmatter in the index', 'The index has no frontmatter'],
+    ['the index line limit', 'will be truncated, so keep every index concise'],
+    ['no content in the index', 'Never write memory content directly'],
+    ['deduplication', 'should be updated instead'],
+    ['when to read memory', 'always when they ask you to check, recall'],
+    ['ignoring memory', 'If the user says to *ignore*'],
+    ['the drift caveat', 'A memory records what was true when it was written'],
+    ['verifying before recommending', 'check the current state'],
+  ])('keeps %s', (_what, anchor) => {
+    expect(resident).toContain(anchor);
+  });
+
+  it('leaves out the detailed type guidance', () => {
+    expect(resident).not.toContain('<types>');
+    expect(resident).not.toMatch(/\bskill\b/);
+  });
+
+  // The per-request price of the policy: 4,451 characters with these paths
+  // and no team, against 15,868 for the full prompt. Raising the budget is a
+  // decision about what every request of every session carries.
+  it('stays within its budget', () => {
+    const solo = buildResidentAutoMemoryPrompt(PROJECT_DIR, USER, undefined);
+    const full = buildManagedAutoMemoryPrompt(
+      PROJECT_DIR,
+      null,
+      USER,
+      undefined,
+      {
+        includeIndexes: false,
+      },
+    );
+
+    expect(solo.length).toBeLessThanOrEqual(4_600);
+    expect(solo.length).toBeLessThan(full.length / 3);
   });
 });

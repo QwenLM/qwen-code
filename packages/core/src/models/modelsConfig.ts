@@ -54,7 +54,14 @@ const debugLogger = createDebugLogger('ModelsConfig');
 export type OnModelChangeCallback = (
   authType: AuthType,
   requiresRefresh: boolean,
+  initializeIfNeeded?: boolean,
 ) => Promise<void>;
+
+export interface ModelSwitchOptions {
+  requireCachedCredentials?: boolean;
+  baseUrl?: string;
+  initializeIfNeeded?: boolean;
+}
 
 /**
  * Options for creating ModelsConfig
@@ -294,9 +301,16 @@ export class ModelsConfig {
 
   async refreshSubscriptionModels(
     signal?: AbortSignal,
+    cliVersion?: string,
   ): Promise<{ models: string[]; cached: boolean }> {
-    const result = await new QwenSubscriptionSession().getModels(signal);
-    this.modelRegistry.setSubscriptionModels(result.models);
+    const result = await new QwenSubscriptionSession().getModels(
+      signal,
+      cliVersion,
+    );
+    this.modelRegistry.setSubscriptionModels(
+      result.models,
+      result.modelMetadata,
+    );
     return result;
   }
 
@@ -533,12 +547,15 @@ export class ModelsConfig {
   async switchModel(
     authType: AuthType,
     modelId: string,
-    options?: { requireCachedCredentials?: boolean; baseUrl?: string },
+    options?: ModelSwitchOptions,
   ): Promise<void> {
     // Check if this is a RuntimeModelSnapshot reference
     const runtimeModelSnapshotId = this.extractRuntimeModelSnapshotId(modelId);
     if (runtimeModelSnapshotId) {
-      await this.switchToRuntimeModel(runtimeModelSnapshotId);
+      await this.switchToRuntimeModel(
+        runtimeModelSnapshotId,
+        options?.initializeIfNeeded,
+      );
       return;
     }
 
@@ -625,7 +642,11 @@ export class ModelsConfig {
         : this.checkRequiresRefresh(previousModelId);
 
       if (this.onModelChange) {
-        await this.onModelChange(authType, requiresRefresh);
+        await this.onModelChange(
+          authType,
+          requiresRefresh,
+          options?.initializeIfNeeded,
+        );
       }
     } catch (error) {
       // Rollback on error
@@ -1375,7 +1396,10 @@ export class ModelsConfig {
    *
    * @param snapshotId - The ID of the RuntimeModelSnapshot to switch to
    */
-  async switchToRuntimeModel(snapshotId: string): Promise<void> {
+  async switchToRuntimeModel(
+    snapshotId: string,
+    initializeIfNeeded?: boolean,
+  ): Promise<void> {
     const runtimeModelSnapshot = this.runtimeModelSnapshots.get(snapshotId);
     if (!runtimeModelSnapshot) {
       throw new Error(`Runtime model snapshot '${snapshotId}' not found`);
@@ -1438,6 +1462,7 @@ export class ModelsConfig {
         await this.onModelChange(
           runtimeModelSnapshot.authType,
           requiresRefresh,
+          initializeIfNeeded,
         );
       }
     } catch (error) {

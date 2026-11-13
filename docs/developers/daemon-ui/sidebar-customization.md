@@ -233,6 +233,7 @@ the header row with its action buttons and the session search bar are removed.
 type WebShellSidebarSessionActionItem =
   | 'details' // 📝 Details (dropdown sub-menu)
   | 'rename' // ✏️ Rename (inline button by default; dropdown when excluded from inlineItems)
+  | 'bindPr' // 🔗 Bind a GitHub PR (dropdown menu)
   | 'group' // 📁 Group/Move to folder (dropdown menu)
   | 'export' // 📤 Export chat history (dropdown menu)
   | 'delete' // 🗑 Delete session (dropdown menu)
@@ -256,7 +257,8 @@ interface WebShellSidebarSessionActionsOptions {
 Controls which action buttons appear on session rows:
 
 - **`items`**: Master control for all actions (both inline and dropdown). If an item is not in `items`, it's hidden everywhere.
-- **`inlineItems`**: Controls which items appear as **inline buttons** (on hover) on standard session rows. Defaults to `['pin', 'rename']`. Only items with working inline handlers can be used: `'pin'`, `'rename'`, `'export'`, `'delete'`. `'details'`, `'group'`, `'archive'`, and `'split'` are dropdown-only on standard rows.
+- **`inlineItems`**: Controls which items appear as **inline buttons** (on hover) on standard session rows. Defaults to `['pin', 'rename']`. Only items with working inline handlers can be used: `'pin'`, `'rename'`, `'export'`, `'delete'`. `'details'`, `'bindPr'`, `'group'`, `'archive'`, and `'split'` are dropdown-only on standard rows.
+- **`bindPr` built-in condition**: shown only when the session supports metadata mutation — the current session in a primary or locked workspace, or any other session with the `workspace_session_metadata` capability (plus `workspace_qualified_rest_core` when that session is in a locked or restricted secondary workspace) — and the row is not a standalone session (including recents rows) — standalone metadata routes only accept a display name. It is independent of the `rename` item: a host may whitelist `bindPr` without `rename`.
 
 When `rename` is available for a session, its row can take keyboard focus (active sessions; archived rows are not focusable), and the row is not busy with another action, pressing **F2** on the focused row also starts a rename, regardless of `inlineItems`. F2 is ignored while another row action is in flight, matching the disabled inline Rename button, and F2 with Ctrl, Alt or Meta held is left for the host. Workspace rows open the inline rename editor; standalone (No workspace) rows open their rename dialog instead. Rows in the Recent sessions list have no rename affordance, so F2 does nothing there. A pinned session can render twice (Pinned section and its group or workspace list); while the Pinned section is expanded it alone hosts the editor, so F2 on the other copy opens the editor on the Pinned row and focus follows it.
 

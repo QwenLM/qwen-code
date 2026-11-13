@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, onTestFinished, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
@@ -82,6 +82,7 @@ import type {
   BridgeTelemetry,
 } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
+import { createTranscriptHookLifecycleUpdate } from './transcript-replay.js';
 import {
   EventBus,
   DEFAULT_RING_MAX_BYTES,
@@ -968,6 +969,17 @@ describe('createAcpSessionBridge', () => {
           hasRunningBackgroundTasks: true,
         },
       ]);
+      // R1-10/R1-11 pinning (#11768): seq 3 is the headline state — background
+      // tasks running while the session holds nothing. Background activity is
+      // reported through `hasRunningBackgroundTasks` alone; it must not fold
+      // into the holds-derived active-work predicates, the active-work state,
+      // or the busy surface. A guard that suppressed a reported `true` when
+      // `holds` is empty, or a fold of the flag into `entryHasActiveWork` /
+      // `entryHasLocalWork`, would flip these.
+      expect(summary().hasRunningBackgroundTasks).toBe(true);
+      expect(summary().hasActivePrompt).toBe(false);
+      expect(summary().activeWorkState).toBe('idle');
+      expect(bridge.activeWork).toBe(false);
       await sendActiveWorkSnapshot(handle, 4, []);
       expect(summary().hasRunningBackgroundTasks).toBe(false);
       await sendActiveWorkSnapshot(handle, 5, [
@@ -7120,6 +7132,7 @@ describe('createAcpSessionBridge', () => {
       compactedReplay: [],
       liveJournal: [],
       lastEventId: 0,
+      replayProjectionWatermark: 0,
       eventEpoch: expect.any(String),
     });
     expect(handles[0]?.agent.loadSessionCalls).toEqual([
@@ -7858,9 +7871,14 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it.each([1, 1025])(
-    'supplements a persisted page with %i unpersisted lifecycle frames',
-    async (count) => {
+  it.each([
+    [1, 'executionLifecycle'],
+    [1025, 'executionLifecycle'],
+    [1, 'hookLifecycle'],
+    [1025, 'hookLifecycle'],
+  ] as const)(
+    'supplements a persisted page with %i unpersisted %s frames',
+    async (count, metaKey) => {
       const handle = makeChannel({
         extMethodImpl: (method, params) => {
           if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript)
@@ -7886,9 +7904,9 @@ describe('createAcpSessionBridge', () => {
                 text: 'body must not enter lifecycle supplement',
               },
               _meta: {
-                executionLifecycle: {
+                [metaKey]: {
                   v: 1,
-                  kind: 'request',
+                  kind: metaKey === 'hookLifecycle' ? 'hook' : 'request',
                   executionId: `execution-${index}`,
                   sessionId: session.sessionId,
                   promptId: 'prompt',
@@ -7925,7 +7943,7 @@ describe('createAcpSessionBridge', () => {
         );
         expect(refreshed.lifecycleReplay?.at(-1)?.data).toMatchObject({
           _meta: {
-            executionLifecycle: { executionId: `execution-${count - 1}` },
+            [metaKey]: { executionId: `execution-${count - 1}` },
           },
         });
       } finally {
@@ -9323,13 +9341,14 @@ describe('createAcpSessionBridge', () => {
     'current_mode_update',
     'session_info_update',
     'config_option_update',
+    'hookLifecycle',
   ] as const)(
     'keeps the turn error on refresh when an idle %s session_update lands after it',
     async (subtype) => {
       // Latest-wins state snapshots fan out to idle sessions (a workspace
       // skills/settings refresh, an approval-mode change). They carry no
       // turn content for the persisted transcript and must not defeat the
-      // refresh-append of the terminal.
+      // refresh-append of the terminal. Late Hook diagnostics do not either.
       const handle = makeChannel({
         promptImpl: () => {
           throw new RequestError(-32603, 'Loop protection stopped this turn', {
@@ -9386,7 +9405,8 @@ describe('createAcpSessionBridge', () => {
           if (
             event.type === 'session_update' &&
             (event.data as { update?: { sessionUpdate?: string } })?.update
-              ?.sessionUpdate === subtype
+              ?.sessionUpdate ===
+              (subtype === 'hookLifecycle' ? 'agent_message_chunk' : subtype)
           ) {
             return;
           }
@@ -9406,7 +9426,27 @@ describe('createAcpSessionBridge', () => {
               ? { sessionUpdate: subtype, currentModeId: 'plan' }
               : subtype === 'config_option_update'
                 ? { sessionUpdate: subtype, configOptions: [] }
-                : { sessionUpdate: subtype, title: 'Durable title' },
+                : subtype === 'hookLifecycle'
+                  ? createTranscriptHookLifecycleUpdate({
+                      v: 1,
+                      kind: 'hook',
+                      executionId: 'late-hook',
+                      runtimeId: 'runtime',
+                      sessionId: session.sessionId,
+                      promptId: 'prompt-loop',
+                      agentId: null,
+                      eventName: 'StopFailure',
+                      name: 'late hook',
+                      hookType: 'command',
+                      source: 'project',
+                      startedAt: 100,
+                      phase: 'ended',
+                      endedAt: 120,
+                      durationMs: 20,
+                      outcome: 'error',
+                      exitCode: 1,
+                    })
+                  : { sessionUpdate: subtype, title: 'Durable title' },
       });
       await sawIdleUpdate;
 
@@ -12609,88 +12649,113 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('lets a summary load coalesce onto an in-flight full restore', async () => {
-    const load = deferred<LoadSessionResponse>();
-    const handle = makeChannel({ loadSessionImpl: () => load.promise });
-    const bridge = makeBridge({
-      channelFactory: async () => handle.channel,
-      maxJournalEvents: 2,
-    });
+  it.each([undefined, 10])(
+    'lets a summary load coalesce onto an in-flight full restore with page size %s',
+    async (historyPageSize) => {
+      const load = deferred<LoadSessionResponse>();
+      const handle = makeChannel({
+        loadSessionImpl: () => load.promise,
+        extMethodImpl: (_method, params) => ({
+          v: 1,
+          sessionId: params['sessionId'],
+          events: ['root-before', 'root-after'].map((text) => ({
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text },
+            },
+          })),
+          hasMore: false,
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        maxJournalEvents: 2,
+      });
 
-    const first = bridge.loadSession({
-      sessionId: 'coalesce-live-replay-mode',
-      workspaceCwd: WS_A,
-      historyReplay: 'response',
-      liveReplayMode: 'full',
-    });
-    await vi.waitFor(() => {
-      expect(handle.agent.loadSessionCalls).toHaveLength(1);
-    });
+      const first = bridge.loadSession({
+        sessionId: 'coalesce-live-replay-mode',
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+        liveReplayMode: 'full',
+        historyPageSize,
+      });
+      await vi.waitFor(() => {
+        expect(handle.agent.loadSessionCalls).toHaveLength(1);
+      });
 
-    // Flood the in-flight restore's journals past the two-entry cap: root
-    // frames around a burst of nested subagent chunks. The full journal
-    // truncates and evicts the early root frame; the summary journal keeps
-    // both root frames marker-free.
-    await handle.agentConnection.sessionUpdate({
-      sessionId: 'coalesce-live-replay-mode',
-      update: {
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'root-before' },
-      },
-    });
-    for (const text of ['nested-a', 'nested-b', 'nested-c']) {
+      // Flood the in-flight restore's journals past the two-entry cap: root
+      // frames around a burst of nested subagent chunks. The full journal
+      // truncates and evicts the early root frame; the summary journal keeps
+      // both root frames marker-free.
       await handle.agentConnection.sessionUpdate({
         sessionId: 'coalesce-live-replay-mode',
         update: {
           sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text },
-          _meta: { parentToolCallId: 'agent-1' },
+          content: { type: 'text', text: 'root-before' },
         },
       });
-    }
-    await handle.agentConnection.sessionUpdate({
-      sessionId: 'coalesce-live-replay-mode',
-      update: {
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'root-after' },
-      },
-    });
+      for (const text of ['nested-a', 'nested-b', 'nested-c']) {
+        await handle.agentConnection.sessionUpdate({
+          sessionId: 'coalesce-live-replay-mode',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text },
+            _meta: { parentToolCallId: 'agent-1' },
+          },
+        });
+      }
+      await handle.agentConnection.sessionUpdate({
+        sessionId: 'coalesce-live-replay-mode',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'root-after' },
+        },
+      });
 
-    // The two journals can diverge under cap pressure (each evicts
-    // independently against the shared caps), so the summary waiter shares
-    // the in-flight full restore only because once the restore settles the
-    // bridge recomputes the waiter's own-mode replay fields from the
-    // registered entry — the owner's projected fields are never reused or
-    // filtered down for a waiter of a different mode.
-    const second = bridge.loadSession({
-      sessionId: 'coalesce-live-replay-mode',
-      workspaceCwd: WS_A,
-      historyReplay: 'response',
-      liveReplayMode: 'summary',
-    });
+      // The two journals can diverge under cap pressure (each evicts
+      // independently against the shared caps), so the summary waiter shares
+      // the in-flight full restore only because once the restore settles the
+      // bridge recomputes the waiter's own-mode replay fields from the
+      // registered entry — the owner's projected fields are never reused or
+      // filtered down for a waiter of a different mode.
+      const second = bridge.loadSession({
+        sessionId: 'coalesce-live-replay-mode',
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+        liveReplayMode: 'summary',
+        historyPageSize,
+      });
 
-    load.resolve({});
-    const [r1, r2] = await Promise.all([first, second]);
-    expect(r1.attached).toBe(false);
-    expect(r2.attached).toBe(true);
-    expect(handle.agent.loadSessionCalls).toHaveLength(1);
+      load.resolve({});
+      const [r1, r2] = await Promise.all([first, second]);
+      expect(r1.attached).toBe(false);
+      expect(r2.attached).toBe(true);
+      expect(r1.replayProjectionWatermark).toBe(0);
+      expect(r2).not.toHaveProperty('replayProjectionWatermark');
+      expect(handle.agent.loadSessionCalls).toHaveLength(1);
 
-    // The owner's full-mode view carries the truncation marker; the
-    // coalesced summary waiter must NOT inherit it — its re-projected
-    // journal retains the root frames, excludes the nested frames, and
-    // never truncated.
-    expect(r1.liveJournal).toContainEqual(
-      expect.objectContaining({ type: 'history_truncated' }),
-    );
-    expect(r2.liveJournal).not.toContainEqual(
-      expect.objectContaining({ type: 'history_truncated' }),
-    );
-    const waiterJournal = JSON.stringify(r2.liveJournal);
-    expect(waiterJournal).toContain('root-before');
-    expect(waiterJournal).toContain('root-after');
-    expect(waiterJournal).not.toContain('nested-');
-    await bridge.shutdown();
-  });
+      // The owner's full-mode view carries the truncation marker; the
+      // coalesced summary waiter must NOT inherit it — its re-projected
+      // journal retains the root frames, excludes the nested frames, and
+      // never truncated.
+      expect(r1.liveJournal).toContainEqual(
+        expect.objectContaining({ type: 'history_truncated' }),
+      );
+      expect(r2.liveJournal).not.toContainEqual(
+        expect.objectContaining({ type: 'history_truncated' }),
+      );
+      const waiterReplay = JSON.stringify(
+        historyPageSize === undefined ? r2.liveJournal : r2.compactedReplay,
+      );
+      expect(waiterReplay).toContain('root-before');
+      expect(waiterReplay).toContain('root-after');
+      expect(waiterReplay).not.toContain('nested-');
+      if (historyPageSize !== undefined) expect(r2.liveJournal).toEqual([]);
+      await bridge.shutdown();
+    },
+  );
 
   it('rejects a full load joining an in-flight summary restore', async () => {
     const load = deferred<LoadSessionResponse>();
@@ -24735,12 +24800,14 @@ describe('createAcpSessionBridge', () => {
     /** Spin up a bridge with a hand-driven channel; returns the bridge,
      *  session, and a function the test uses to call `requestPermission`
      *  from the agent side. */
-    async function setupForPermission(opts: Partial<BridgeOptions> = {}) {
+    async function setupForPermission(
+      opts: Partial<BridgeOptions> = {},
+      fakeAgent = new FakeAgent(),
+    ) {
       let capturedConn: AgentSideConnection | undefined;
       const handles: Array<{ killed: boolean }> = [];
       const factory: ChannelFactory = async () => {
         const { clientStream, agentStream } = createInMemoryChannel();
-        const fakeAgent = new FakeAgent();
         // The agent side gets an AgentSideConnection; that exposes a
         // ClientSideConnection-equivalent on its `agent` callback. We need
         // to drive `requestPermission` from the agent direction — for that
@@ -25760,6 +25827,324 @@ describe('createAcpSessionBridge', () => {
       subAbort.abort();
       await bridge.shutdown();
     });
+
+    it('keeps a detached workflow approval when a later prompt is cancelled', async () => {
+      const started = deferred<void>();
+      const finished = deferred<PromptResponse>();
+      const { bridge, session, conn } = await setupForPermission(
+        { permissionPolicy: 'designated' },
+        new FakeAgent({
+          promptImpl: () => {
+            started.resolve();
+            return finished.promise;
+          },
+          cancelImpl: () => finished.resolve({ stopReason: 'cancelled' }),
+        }),
+      );
+      const { sessionId, clientId } = session;
+      const signal = new AbortController();
+      try {
+        const events = bridge.subscribeEvents(sessionId, {
+          signal: signal.signal,
+        });
+        const followUp = bridge.sendPrompt(
+          sessionId,
+          { sessionId, prompt: [{ type: 'text', text: 'Follow-up' }] },
+          undefined,
+          { promptId: 'follow-up' },
+        );
+        void followUp.catch(() => {});
+        await started.promise;
+
+        const options = [
+          { optionId: 'allow', name: 'Allow', kind: 'allow_once' as const },
+        ];
+        const foreground = conn.requestPermission({
+          sessionId,
+          toolCall: { toolCallId: 'foreground', title: 'Foreground tool' },
+          options,
+        });
+        const workflowToolCallId = `workflow:${sessionId}:wf_1:wfap_1`;
+        const workflowMeta = {
+          workflowApproval: true,
+          backgroundWorkflowApproval: true,
+        };
+        const detached = conn.requestPermission({
+          sessionId,
+          _meta: { workflowOriginatorClientId: clientId },
+          toolCall: {
+            toolCallId: workflowToolCallId,
+            title: 'Workflow tool',
+            _meta: workflowMeta,
+          },
+          options,
+        });
+        const requests: BridgeEvent[] = [];
+        for await (const event of events) {
+          if (event.type !== 'permission_request') continue;
+          requests.push(event);
+          if (requests.length === 2) break;
+        }
+        expect(requests[0]?.promptId).toBe('follow-up');
+        expect(requests[1]?.promptId).toBeUndefined();
+        expect(requests[1]?.originatorClientId).toBe(clientId);
+
+        await bridge.cancelSession(sessionId);
+        await expect(foreground).resolves.toMatchObject({
+          outcome: { outcome: 'cancelled' },
+        });
+        await followUp;
+        expect(bridge.pendingPermissionCount).toBe(1);
+        expect(
+          bridge.getSessionSummary(sessionId)?.pendingInteractionCount,
+        ).toBe(1);
+
+        await conn.sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: workflowToolCallId,
+            status: 'failed',
+            _meta: workflowMeta,
+          },
+        });
+        await expect(detached).resolves.toMatchObject({
+          outcome: { outcome: 'cancelled' },
+        });
+        expect(bridge.pendingPermissionCount).toBe(0);
+      } finally {
+        signal.abort();
+        finished.resolve({ stopReason: 'end_turn' });
+        await bridge.shutdown();
+      }
+    });
+
+    const requestDetachedWorkflowApproval = (
+      conn: AgentSideConnection,
+      sessionId: string,
+      clientId: string | undefined,
+      toolCallId: string,
+    ) =>
+      conn.requestPermission({
+        sessionId,
+        _meta: { workflowOriginatorClientId: clientId },
+        toolCall: {
+          toolCallId,
+          title: 'Workflow tool',
+          _meta: {
+            workflowApproval: true,
+            backgroundWorkflowApproval: true,
+          },
+        },
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      });
+
+    // One client can hold a suspension per connection binding; releasing
+    // one must not lift another that is still live.
+    it('keeps detached workflow approvals suspended until every suspension of the client is released', async () => {
+      const { bridge, session, conn } = await setupForPermission({
+        permissionPolicy: 'designated',
+      });
+      const { sessionId, clientId } = session;
+      const request = (toolCallId: string) =>
+        requestDetachedWorkflowApproval(conn, sessionId, clientId, toolCallId);
+      try {
+        const resumeA = bridge.suspendClientWorkflowApprovals(
+          sessionId,
+          clientId!,
+        )!;
+        const resumeB = bridge.suspendClientWorkflowApprovals(
+          sessionId,
+          clientId!,
+        )!;
+
+        resumeA();
+        resumeA();
+        const stderrSpy = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        try {
+          await expect(request('workflow-one-left')).resolves.toMatchObject({
+            outcome: { outcome: 'cancelled' },
+          });
+          // No permission_request is published, so the drop leaves a line.
+          expect(stderrSpy).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `cancelled a background workflow approval: its launching client ${JSON.stringify(clientId)} is not connected`,
+            ),
+          );
+        } finally {
+          stderrSpy.mockRestore();
+        }
+        expect(bridge.pendingPermissionCount).toBe(0);
+
+        resumeB();
+        const delivered = request('workflow-all-released');
+        await vi.waitFor(() => expect(bridge.pendingPermissionCount).toBe(1));
+        const requestId =
+          bridge.getSessionSummary(sessionId)?.pendingInteractions?.[0]
+            ?.requestId;
+        const outcome = { outcome: 'selected' as const, optionId: 'allow' };
+        expect(
+          bridge.respondToSessionPermission(
+            sessionId,
+            requestId!,
+            { outcome },
+            { clientId },
+          ),
+        ).toBe(true);
+        await expect(delivered).resolves.toMatchObject({ outcome });
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
+    it('keeps a foreground prompt while its detached ACP workflow approvals are suspended', async () => {
+      const started = deferred<void>();
+      const finished = deferred<PromptResponse>();
+      const { bridge, session, conn } = await setupForPermission(
+        { permissionPolicy: 'designated' },
+        new FakeAgent({
+          promptImpl: () => {
+            started.resolve();
+            return finished.promise;
+          },
+        }),
+      );
+      const { sessionId, clientId } = session;
+      const request = (toolCallId: string) =>
+        requestDetachedWorkflowApproval(conn, sessionId, clientId, toolCallId);
+      try {
+        const followUp = bridge.sendPrompt(
+          sessionId,
+          { sessionId, prompt: [{ type: 'text', text: 'Follow-up' }] },
+          undefined,
+          { clientId },
+        );
+        void followUp.catch(() => {});
+        await started.promise;
+
+        const resume = bridge.suspendClientWorkflowApprovals(
+          sessionId,
+          clientId!,
+        )!;
+        const lastEventId = bridge.getSessionLastEventId(sessionId);
+        await expect(request('workflow-late')).resolves.toMatchObject({
+          outcome: { outcome: 'cancelled' },
+        });
+        expect(bridge.getSessionLastEventId(sessionId)).toBe(lastEventId);
+        expect(bridge.pendingPermissionCount).toBe(0);
+
+        const pollingClient = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          clientId,
+        });
+        expect(pollingClient.clientId).toBe(clientId);
+        const pending = request('workflow-polling');
+        await vi.waitFor(() => expect(bridge.pendingPermissionCount).toBe(1));
+
+        await bridge.detachClient(sessionId, pollingClient.clientId);
+        await expect(pending).resolves.toMatchObject({
+          outcome: { outcome: 'cancelled' },
+        });
+        expect(bridge.pendingPermissionCount).toBe(0);
+        expect(bridge.getSessionSummary(sessionId)?.hasActivePrompt).toBe(true);
+
+        resume();
+        const resumed = request('workflow-reconnected');
+        await vi.waitFor(() => expect(bridge.pendingPermissionCount).toBe(1));
+        const requestId =
+          bridge.getSessionSummary(sessionId)?.pendingInteractions?.[0]
+            ?.requestId;
+        const outcome = { outcome: 'selected' as const, optionId: 'allow' };
+        expect(
+          bridge.respondToSessionPermission(
+            sessionId,
+            requestId!,
+            { outcome },
+            { clientId },
+          ),
+        ).toBe(true);
+        await expect(resumed).resolves.toMatchObject({ outcome });
+        finished.resolve({ stopReason: 'end_turn' });
+        await expect(followUp).resolves.toMatchObject({
+          stopReason: 'end_turn',
+        });
+      } finally {
+        finished.resolve({ stopReason: 'end_turn' });
+        await bridge.shutdown();
+      }
+    });
+
+    it.each(['designated', 'first-responder'] as const)(
+      'handles detached workflow approvals when the originator detaches under %s',
+      async (permissionPolicy) => {
+        const { bridge, session, conn } = await setupForPermission({
+          permissionPolicy,
+        });
+        const { sessionId, clientId } = session;
+        try {
+          const secondRegistration = await bridge.spawnOrAttach({
+            workspaceCwd: WS_A,
+            clientId,
+          });
+          const other = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+          expect(secondRegistration.clientId).toBe(clientId);
+          expect(other.sessionId).toBe(sessionId);
+          expect(other.clientId).not.toBe(clientId);
+
+          const requestWorkflowApproval = (toolCallId: string) =>
+            requestDetachedWorkflowApproval(
+              conn,
+              sessionId,
+              clientId,
+              toolCallId,
+            );
+          const pending = requestWorkflowApproval('workflow-first');
+          await vi.waitFor(() => expect(bridge.pendingPermissionCount).toBe(1));
+
+          await bridge.detachClient(sessionId, clientId);
+          expect(bridge.pendingPermissionCount).toBe(1);
+          await bridge.detachClient(sessionId, clientId);
+
+          if (permissionPolicy === 'designated') {
+            await expect(pending).resolves.toMatchObject({
+              outcome: { outcome: 'cancelled' },
+            });
+            expect(bridge.pendingPermissionCount).toBe(0);
+            const reopened = await bridge.spawnOrAttach({
+              workspaceCwd: WS_A,
+              clientId,
+            });
+            expect(reopened.clientId).not.toBe(clientId);
+            const lastEventId = bridge.getSessionLastEventId(sessionId);
+            await expect(
+              requestWorkflowApproval('workflow-late'),
+            ).resolves.toMatchObject({ outcome: { outcome: 'cancelled' } });
+            expect(bridge.getSessionLastEventId(sessionId)).toBe(lastEventId);
+            expect(bridge.pendingPermissionCount).toBe(0);
+          } else {
+            expect(bridge.pendingPermissionCount).toBe(1);
+            const requestId =
+              bridge.getSessionSummary(sessionId)?.pendingInteractions?.[0]
+                ?.requestId;
+            expect(
+              bridge.respondToSessionPermission(
+                sessionId,
+                requestId!,
+                { outcome: { outcome: 'selected', optionId: 'allow' } },
+                { clientId: other.clientId },
+              ),
+            ).toBe(true);
+            await expect(pending).resolves.toEqual({
+              outcome: { outcome: 'selected', optionId: 'allow' },
+            });
+          }
+        } finally {
+          await bridge.shutdown();
+        }
+      },
+    );
 
     it('shutdown resolves outstanding permissions as cancelled', async () => {
       const { bridge, session, conn } = await setupForPermission();
@@ -43476,6 +43861,11 @@ describe('background notification admission', () => {
           bridge.setSessionResetPending!(session.sessionId);
         }
         const admission = vi.spyOn(BridgeClient.prototype, 'extMethod');
+        // The prototype spy must not outlive this test: without a restore it
+        // keeps recording every later child→bridge extMethod call into
+        // `admission.mock.calls` for the rest of this 40k-line file (#11768
+        // R1-12).
+        onTestFinished(() => admission.mockRestore());
         const start = handle.agentConnection.extMethod('_qwencode/start_turn', {
           sessionId: session.sessionId,
           source: 'background_notification',
@@ -44132,6 +44522,7 @@ describe('background admission ownership boundaries', () => {
     const bridge = makeBridge({ channelFactory: async () => handle.channel });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
     const startHandler = vi.spyOn(BridgeClient.prototype, 'extMethod');
+    onTestFinished(() => startHandler.mockRestore());
     let rpc: Promise<unknown> | undefined;
     try {
       rpc = bridge.sendPrompt(
