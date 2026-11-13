@@ -317,6 +317,26 @@ class TerminalRelayHandlerTest {
     }
 
     @Test
+    void boundsThePostAttachChainByEntryCountNotOnlyBytes() throws Exception {
+        WebSocket worker = mock(WebSocket.class);
+        // A send that never completes keeps every chained entry pending, so a
+        // flood of 1-byte frames piles up entries far below the 8 MiB byte
+        // ceiling — the attached path must bound the entry count too.
+        when(worker.sendBinary(any(ByteBuffer.class), eq(true)))
+                .thenReturn(new CompletableFuture<>());
+        Attached attached = attach(worker);
+        for (int i = 0; i < 8192; i++) {
+            attached.handler.handleBinaryMessage(attached.browser,
+                    new BinaryMessage(new byte[] {1}));
+        }
+        verify(attached.browser, never()).close(any(CloseStatus.class));
+        attached.handler.handleBinaryMessage(attached.browser,
+                new BinaryMessage(new byte[] {1}));
+        verify(attached.browser).close(argThat(status ->
+                status.getCode() == CloseStatus.TOO_BIG_TO_PROCESS.getCode()));
+    }
+
+    @Test
     void forwardsTheWorkerCloseCodeToTheBrowser() throws Exception {
         WebSocket worker = mock(WebSocket.class);
         Attached attached = attach(worker);

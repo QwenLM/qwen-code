@@ -252,6 +252,11 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
         private final AtomicReference<WebSocket> worker = new AtomicReference<>();
         private final java.util.concurrent.atomic.AtomicLong pendingBytes =
                 new java.util.concurrent.atomic.AtomicLong();
+        // The byte ceiling alone lets a flood of 1-byte frames pile up ~124x
+        // their bytes in chained-send entries once the worker is attached;
+        // bound the live chain's entry count too, not just the pre-attach list.
+        private final java.util.concurrent.atomic.AtomicInteger chainedEntries =
+                new java.util.concurrent.atomic.AtomicInteger();
         // The JDK listener may deliver one worker message across several
         // callbacks; reassemble to the message boundary before the browser
         // decodes it, or a multibyte character split across callbacks corrupts.
@@ -437,12 +442,24 @@ public final class TerminalRelayHandler extends AbstractWebSocketHandler
         private void chainSend(WebSocket webSocket,
                 java.util.function.Function<WebSocket, CompletionStage<WebSocket>> op,
                 int bytes) {
+            if (failed) {
+                return;
+            }
+            if (chainedEntries.incrementAndGet() > MAX_PENDING_ENTRIES) {
+                chainedEntries.decrementAndGet();
+                pendingBytes.addAndGet(-bytes);
+                fail();
+                closeWorker();
+                closeQuietly(browser, CloseStatus.TOO_BIG_TO_PROCESS);
+                return;
+            }
             sendTail = sendTail.thenCompose(ignored -> {
                 if (failed) {
                     return CompletableFuture.completedFuture(webSocket);
                 }
                 return op.apply(webSocket);
             }).whenComplete((ignored, error) -> {
+                chainedEntries.decrementAndGet();
                 pendingBytes.addAndGet(-bytes);
                 if (error != null) {
                     fail();

@@ -2210,6 +2210,30 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void terminalHoldAbandonSparesAHoldAnotherAttachReused() throws Exception {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            // Relay A creates the hold; relay B re-admits the same live row
+            // (created=false) and attaches a PTY on it.
+            TerminalHoldAdmission a = join(fixture.service.admitTerminalHold(
+                    "harness", "term-1"));
+            assertTrue(a.created());
+            TerminalHoldAdmission b = join(fixture.service.admitTerminalHold(
+                    "harness", "term-1"));
+            assertFalse(b.created());
+            assertEquals(a.hold().getExecutionCallId(), b.hold().getExecutionCallId());
+            // A's worker connect then fails. Its abandon must not settle the
+            // hold B's running PTY still depends on.
+            assertNull(join(fixture.service.abandonTerminalHold(
+                    "harness", "term-1", a.hold().getExecutionCallId())));
+            assertEquals(ToolExecutionRecord.State.PREPARED,
+                    fixture.executionRepository.findByExecutionCallId(
+                            a.hold().getExecutionCallId()).getState());
+            assertEquals("runtime_session_held",
+                    failure(fixture.service.release("harness", "terminal-" + TERMINAL_KEY)).getCode());
+        }
+    }
+
+    @Test
     void terminalHoldStopProvesExitWithTerminalKinds() throws Exception {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.admitTerminalHold("harness", "term-1"));
