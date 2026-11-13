@@ -109,6 +109,30 @@ describe('useDaemonResource', () => {
     expect(result?.data).toBeUndefined();
   });
 
+  it.each([
+    { enabled: false, availability: 'available' },
+    { enabled: true, availability: 'unavailable' },
+  ])(
+    'distinguishes an unavailable reload from supersession: %o',
+    async (state) => {
+      availability.state = state.availability;
+      const load = vi.fn().mockResolvedValue('hello');
+      let result: ReturnType<typeof useDaemonResource<string>> | undefined;
+      function TestComponent() {
+        result = useDaemonResource(load, { enabled: state.enabled });
+        return null;
+      }
+      await act(async () => root.render(<TestComponent />));
+
+      await expect(result!.reloadWithOutcome()).resolves.toEqual({
+        data: undefined,
+        superseded: false,
+      });
+      expect(load).not.toHaveBeenCalled();
+      expect(result?.error).toBeUndefined();
+    },
+  );
+
   it('reports error on load failure', async () => {
     const load = vi.fn().mockRejectedValue(new Error('network error'));
     let result: ReturnType<typeof useDaemonResource<string>> | undefined;

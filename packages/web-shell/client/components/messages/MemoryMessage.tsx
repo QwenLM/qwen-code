@@ -11,7 +11,6 @@ type MemoryMode = 'view' | 'edit';
 type MemoryScope = 'global' | 'workspace';
 
 interface MemoryMessageProps {
-  refreshSignal?: number;
   addSignal?: number;
   addScope?: DaemonContextFileScope;
   onMessage?: (message: string, type?: 'status' | 'error') => void;
@@ -40,18 +39,26 @@ function scopeLabel(
 }
 
 export function MemoryMessage({
-  refreshSignal = 0,
   addSignal = 0,
   addScope = 'workspace',
   onMessage,
 }: MemoryMessageProps) {
   const { t } = useI18n();
-  const { files, status, loading, error, readMemoryFile, reload, writeMemory } =
-    useMemory({
-      autoLoad: true,
-    });
+  const {
+    files,
+    status,
+    loading,
+    error,
+    readMemoryFile,
+    reload,
+    reloadWithOutcome,
+    writeMemory,
+  } = useMemory({
+    autoLoad: true,
+  });
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const loadSeqRef = useRef(0);
+  const refreshSeqRef = useRef(0);
   const [selectedScope, setSelectedScope] = useState<MemoryScope>('workspace');
   const [mode, setMode] = useState<MemoryMode>('view');
   const [content, setContent] = useState('');
@@ -64,7 +71,9 @@ export function MemoryMessage({
   const [editable, setEditable] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const handledAddSignalRef = useRef(0);
-  const handledRefreshSignalRef = useRef(refreshSignal);
+  const pendingRefreshRef = useRef<
+    (MemoryEntry & { refreshSeq: number }) | undefined
+  >(undefined);
 
   const entries = useMemo<MemoryEntry[]>(() => {
     const globalFile = fileForScope(files, 'global');
@@ -99,7 +108,11 @@ export function MemoryMessage({
   const canReplace = editable && status !== undefined;
 
   const loadContent = useCallback(
-    (entry: MemoryEntry | undefined, nextMode?: MemoryMode) => {
+    (
+      entry: MemoryEntry | undefined,
+      nextMode?: MemoryMode,
+      refreshSeq?: number,
+    ) => {
       const loadSeq = ++loadSeqRef.current;
       if (nextMode !== undefined) setMode(nextMode);
       setMessage(null);
@@ -108,6 +121,9 @@ export function MemoryMessage({
       setEditable(true);
       if (!entry?.file) {
         setContentLoading(false);
+        if (refreshSeq === refreshSeqRef.current) {
+          setMessage(t('memory.refreshed'));
+        }
         if (nextMode === 'edit') {
           requestAnimationFrame(() => editorRef.current?.focus());
         }
@@ -125,6 +141,9 @@ export function MemoryMessage({
             return;
           }
           setDraft(result.content);
+          if (refreshSeq === refreshSeqRef.current) {
+            setMessage(t('memory.refreshed'));
+          }
           requestAnimationFrame(() => editorRef.current?.focus());
         })
         .catch((readError: unknown) => {
@@ -149,7 +168,16 @@ export function MemoryMessage({
 
   useEffect(() => {
     if (!selectedEntry) return;
-    loadContent(selectedEntry, mode);
+    const refreshed = pendingRefreshRef.current;
+    pendingRefreshRef.current = undefined;
+    loadContent(
+      selectedEntry,
+      mode,
+      refreshed?.scope === selectedEntry.scope &&
+        refreshed.file?.path === selectedEntry.file?.path
+        ? refreshed.refreshSeq
+        : undefined,
+    );
     // Only reload when the selected file changes. Mode changes are explicit
     // button actions that call loadContent directly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -161,18 +189,40 @@ export function MemoryMessage({
 
   const handleRefresh = useCallback(() => {
     if (!selectedEntry) return;
+    const refreshSeq = ++refreshSeqRef.current;
     const loadSeq = loadSeqRef.current;
-    reload()
-      .then((nextStatus) => {
-        if (!nextStatus || loadSeq !== loadSeqRef.current) return;
-        loadContent({
+    reloadWithOutcome()
+      .then(({ data: nextStatus, superseded }) => {
+        if (
+          superseded ||
+          refreshSeq !== refreshSeqRef.current ||
+          loadSeq !== loadSeqRef.current
+        ) {
+          return;
+        }
+        if (!nextStatus) {
+          const text = t('memory.refreshFailed');
+          setMessage(text);
+          onMessage?.(text, 'error');
+          return;
+        }
+        const nextEntry = {
           ...selectedEntry,
           file: fileForScope(nextStatus.files, selectedEntry.scope),
-        });
-        setMessage(t('memory.refreshed'));
+        };
+        if (nextEntry.file?.path === selectedEntry.file?.path) {
+          loadContent(nextEntry, undefined, refreshSeq);
+        } else {
+          pendingRefreshRef.current = { ...nextEntry, refreshSeq };
+        }
       })
       .catch((refreshError: unknown) => {
-        if (loadSeq !== loadSeqRef.current) return;
+        if (
+          refreshSeq !== refreshSeqRef.current ||
+          loadSeq !== loadSeqRef.current
+        ) {
+          return;
+        }
         const text =
           refreshError instanceof Error
             ? refreshError.message
@@ -180,14 +230,7 @@ export function MemoryMessage({
         setMessage(text);
         onMessage?.(text, 'error');
       });
-  }, [loadContent, onMessage, reload, selectedEntry, t]);
-
-  useEffect(() => {
-    if (refreshSignal <= 0) return;
-    if (handledRefreshSignalRef.current === refreshSignal) return;
-    handledRefreshSignalRef.current = refreshSignal;
-    handleRefresh();
-  }, [handleRefresh, refreshSignal]);
+  }, [loadContent, onMessage, reloadWithOutcome, selectedEntry, t]);
 
   useEffect(() => {
     if (addSignal <= 0) return;

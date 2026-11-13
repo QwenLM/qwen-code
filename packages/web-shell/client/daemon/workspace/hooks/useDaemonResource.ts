@@ -20,7 +20,12 @@ import type {
 export function useDaemonResource<T>(
   load: () => Promise<T>,
   options: DaemonResourceOptions,
-): ResourceResult<T> {
+): ResourceResult<T> & {
+  reloadWithOutcome: () => Promise<{
+    data: T | undefined;
+    superseded: boolean;
+  }>;
+} {
   const { autoLoad = false, enabled = true } = options;
   const available = useDaemonAvailability() === 'available';
   const controller = useDaemonAvailabilityController();
@@ -69,6 +74,13 @@ export function useDaemonResource<T>(
     }
   }, [available, controller, enabled, load]);
 
+  const reloadWithOutcome = useCallback(async () => {
+    const pending = reload();
+    const requestSeq = requestSeqRef.current;
+    const data = await pending;
+    return { data, superseded: requestSeq !== requestSeqRef.current };
+  }, [reload]);
+
   useEffect(() => {
     if (!autoLoad || !enabled) return;
     void reload();
@@ -77,5 +89,6 @@ export function useDaemonResource<T>(
   return {
     ...state,
     reload,
+    reloadWithOutcome,
   };
 }

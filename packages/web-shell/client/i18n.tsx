@@ -3599,6 +3599,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'memory.refresh': 'Refresh',
   'memory.refresh.desc': 'Reload memory file information',
   'memory.refreshed': 'Memory refreshed.',
+  'memory.refreshFailed': 'Could not refresh memory. Please try again.',
   'memory.save': 'Save Memory',
   'memory.savedIn': (v) => `Saved in ${v?.path ?? ''}`,
   'memory.saved': (v) =>
@@ -8615,6 +8616,7 @@ const ZH: Messages = {
   'memory.refresh': '刷新',
   'memory.refresh.desc': '重新加载 memory 文件信息',
   'memory.refreshed': 'Memory 已刷新。',
+  'memory.refreshFailed': '无法刷新 Memory，请重试。',
   'memory.save': '保存 Memory',
   'memory.savedIn': (v) => `Saved in ${v?.path ?? ''}`,
   'memory.saved': (v) =>

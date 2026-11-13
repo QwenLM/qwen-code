@@ -27,21 +27,31 @@ const memory = vi.hoisted(() => ({
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
+  const { useCallback, useReducer } = await import('react');
   const actual =
     await importOriginal<
       typeof import('@qwen-code/web-shell/daemon-react-sdk')
     >();
   return {
     ...actual,
-    useMemory: () => ({
-      files: memory.files,
-      status: memory.status,
-      loading: false,
-      error: undefined,
-      readMemoryFile: memory.readMemoryFile,
-      reload: memory.reload,
-      writeMemory: memory.writeMemory,
-    }),
+    useMemory: () => {
+      const [, rerender] = useReducer((version) => version + 1, 0);
+      const reloadWithOutcome = useCallback(async () => {
+        const data = await memory.reload();
+        rerender();
+        return { data, superseded: false };
+      }, []);
+      return {
+        files: memory.files,
+        status: memory.status,
+        loading: false,
+        error: undefined,
+        readMemoryFile: memory.readMemoryFile,
+        reload: memory.reload,
+        reloadWithOutcome,
+        writeMemory: memory.writeMemory,
+      };
+    },
   };
 });
 
@@ -56,14 +66,14 @@ async function flush() {
   });
 }
 
-async function mountPanel(refreshSignal = 0) {
+async function mountPanel() {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <MemoryMessage refreshSignal={refreshSignal} />
+        <MemoryMessage />
       </I18nProvider>,
     );
   });
@@ -152,7 +162,7 @@ describe('MemoryMessage', () => {
     expect(memory.writeMemory).not.toHaveBeenCalled();
   });
 
-  it('does not replay a persisted refresh counter when the panel reopens', async () => {
+  it('reads the selected file once each time the panel opens', async () => {
     memory.readMemoryFile.mockResolvedValue({
       content: 'existing memory\n',
       truncated: false,
@@ -169,10 +179,17 @@ describe('MemoryMessage', () => {
     ];
     memory.status = { ...memory.status!, files: memory.files };
 
-    await mountPanel(3);
+    await mountPanel();
 
     expect(memory.reload).not.toHaveBeenCalled();
     expect(memory.readMemoryFile).toHaveBeenCalledTimes(1);
+
+    act(() => root.unmount());
+    container.remove();
+    await mountPanel();
+
+    expect(memory.reload).not.toHaveBeenCalled();
+    expect(memory.readMemoryFile).toHaveBeenCalledTimes(2);
   });
 
   it('keeps a refreshed truncated file read-only', async () => {
@@ -189,6 +206,7 @@ describe('MemoryMessage', () => {
     await refreshMemory();
 
     expect(container.textContent).toContain('partial');
+    expect(container.textContent).not.toContain('Memory refreshed.');
     expect(button('Edit').disabled).toBe(true);
     expect(container.querySelector('textarea')).toBeNull();
     expect(memory.writeMemory).not.toHaveBeenCalled();
@@ -208,6 +226,9 @@ describe('MemoryMessage', () => {
     expect(memory.readMemoryFile).toHaveBeenCalledTimes(readsBeforeRefresh);
     expect(button('Edit').disabled).toBe(true);
     expect(container.textContent).not.toContain('Memory refreshed');
+    expect(container.textContent).toContain(
+      'Could not refresh memory. Please try again.',
+    );
     expect(memory.writeMemory).not.toHaveBeenCalled();
   });
 
@@ -223,6 +244,7 @@ describe('MemoryMessage', () => {
     await refreshMemory();
 
     expect(container.textContent).not.toContain('Loading memory file');
+    expect(container.textContent).toContain('Memory refreshed.');
     expect(button('Edit').disabled).toBe(false);
     act(() => button('Edit').click());
     await flush();
