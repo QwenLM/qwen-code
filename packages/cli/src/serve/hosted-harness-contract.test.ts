@@ -71,6 +71,7 @@ describe('Hosted Harness private contract', () => {
         'session-skills/2',
         'workspace-shell-mcp/1',
         'session-mcp-management/1',
+        'client-files/1',
         'session-extension-packages/1',
         'managed-package-preparation/1',
         'managed-runtime-skill-import/1',
@@ -91,6 +92,12 @@ describe('Hosted Harness private contract', () => {
       createHostedHarnessContract(DIGEST, BOOT_ID, ['hosted-workspace-shell/1'])
         .lifecycleV2Profiles,
     ).toEqual(['hosted-workspace-shell/1']);
+    // shell/3 (the self-paced loop revision) is a supported lifecycle-v2
+    // profile; the retired shell/2 below must stay refused.
+    expect(
+      createHostedHarnessContract(DIGEST, BOOT_ID, ['hosted-workspace-shell/3'])
+        .lifecycleV2Profiles,
+    ).toEqual(['hosted-workspace-shell/3']);
     expect(() =>
       createHostedHarnessContract(DIGEST, BOOT_ID, [
         'hosted-workspace-shell/2',

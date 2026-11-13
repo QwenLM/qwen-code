@@ -251,8 +251,9 @@ final class AgentSessionCommands {
      */
     SyncRename settleRenameSync(String tenantId, String key, String digest,
             String sessionId, String title, String actorId) {
-        // Empty operation ranges can share an InnoDB gap even across Session scopes.
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        // No tenant guard, as in changeSessionModel: settlement writes no delivery row, so no
+        // operation range is locked. The Session lock comes first, so the replay probe's snapshot
+        // follows it; a racing Session reusing the key loses on the receipt's unique key.
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
         if (previous.isPresent() && sessionId.equals(previous.get().sessionId())) {
@@ -646,22 +647,22 @@ final class AgentSessionCommands {
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-files/3')"
                         + " THEN COALESCE(selected_approval_mode, approval_mode) ELSE NULL END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-files/3')"
                         + " THEN approval_revision ELSE NULL END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-files/3')"
                         + " THEN is_plan_enabled ELSE NULL END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-files/3')"
                         + " THEN permission_rules_json ELSE NULL END"
                         + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId, turnId, promptId, storeRows.writeJson(input),
