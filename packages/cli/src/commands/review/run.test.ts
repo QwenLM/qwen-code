@@ -34,8 +34,12 @@ import { join } from 'node:path';
 import yargs from 'yargs';
 import {
   captureDeadline,
+  COMPOSE_FLOOR_ENV,
   DEADLINE_ENV,
+  DEFAULT_ROUND_SECONDS,
+  RESERVE_ENV,
   resolveReviewDeadline,
+  reverseAuditBudgetExhausted,
 } from './lib/deadline.js';
 
 const spawnMock = vi.hoisted(() => vi.fn());
@@ -452,6 +456,95 @@ describe('review run (handler)', () => {
     afterEach(() => vi.unstubAllEnvs());
 
     it.each([
+      [120, undefined, '2400'],
+      [100, undefined, '2000'],
+      [600, 100, '2000'],
+      [1, undefined, '1200'],
+      [600, undefined, '4800'],
+    ] as const)(
+      'scales the reserve for a %s minute run with inherited wall %s',
+      async (minutes, inheritedMinutes, expectedReserve) => {
+        vi.useFakeTimers();
+        vi.setSystemTime(start);
+        vi.stubEnv(RESERVE_ENV, undefined);
+        vi.stubEnv(COMPOSE_FLOOR_ENV, undefined);
+        vi.stubEnv(
+          DEADLINE_ENV,
+          inheritedMinutes === undefined
+            ? undefined
+            : String(start / 1000 + inheritedMinutes * 60),
+        );
+        const child = new FakeChild();
+        spawnMock.mockReturnValue(child);
+
+        const done = runHandler({ 'timeout-minutes': minutes });
+        const env = spawnMock.mock.calls[0][2].env;
+        child.emit('close', 0, null);
+        await done;
+
+        expect(env[RESERVE_ENV]).toBe(expectedReserve);
+        expect(process.env[RESERVE_ENV]).toBeUndefined();
+      },
+    );
+
+    it('keeps an audit round admissible after eleven minutes of an explicit two-hour run', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(start);
+      vi.stubEnv(DEADLINE_ENV, undefined);
+      vi.stubEnv(RESERVE_ENV, undefined);
+      vi.stubEnv(COMPOSE_FLOOR_ENV, undefined);
+      const child = new FakeChild();
+      spawnMock.mockReturnValue(child);
+
+      const done = runHandler({ 'timeout-minutes': 120 });
+      const env = spawnMock.mock.calls[0][2].env;
+      child.emit('close', 0, null);
+      await done;
+
+      expect(
+        reverseAuditBudgetExhausted(
+          env,
+          DEFAULT_ROUND_SECONDS,
+          start + 11 * 60_000,
+        ),
+      ).toBeNull();
+    });
+
+    it.each(['0', '1800', 'invalid'])(
+      'preserves the inherited reserve %s',
+      async (reserve) => {
+        vi.useFakeTimers();
+        vi.setSystemTime(start);
+        vi.stubEnv(DEADLINE_ENV, undefined);
+        vi.stubEnv(RESERVE_ENV, reserve);
+        const child = new FakeChild();
+        spawnMock.mockReturnValue(child);
+        const done = runHandler({ 'timeout-minutes': 120 });
+        const env = spawnMock.mock.calls[0][2].env;
+        child.emit('close', 0, null);
+        await done;
+
+        expect(env[RESERVE_ENV]).toBe(reserve);
+      },
+    );
+
+    it('keeps the exported reserve above a raised compose floor', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(start);
+      vi.stubEnv(DEADLINE_ENV, undefined);
+      vi.stubEnv(RESERVE_ENV, undefined);
+      vi.stubEnv(COMPOSE_FLOOR_ENV, '3600');
+      const child = new FakeChild();
+      spawnMock.mockReturnValue(child);
+      const done = runHandler({ 'timeout-minutes': 120 });
+      const env = spawnMock.mock.calls[0][2].env;
+      child.emit('close', 0, null);
+      await done;
+
+      expect(env[RESERVE_ENV]).toBe('3600');
+    });
+
+    it.each([
       ['no inherited deadline', undefined, 600],
       ['shorter inherited deadline', 300, 300],
       ['longer inherited deadline', 900, 600],
@@ -521,6 +614,8 @@ describe('review run (handler)', () => {
         vi.useFakeTimers();
         vi.setSystemTime(start);
         vi.stubEnv(DEADLINE_ENV, undefined);
+        vi.stubEnv(RESERVE_ENV, undefined);
+        vi.stubEnv(COMPOSE_FLOOR_ENV, undefined);
         const argv = await yargs()
           .command({ ...runCommand, handler: () => {} })
           .exitProcess(false)
@@ -547,6 +642,13 @@ describe('review run (handler)', () => {
             ? undefined
             : String(start / 1000 + Math.max(1, Number(minutes)) * 60),
         );
+        expect(env[RESERVE_ENV]).toBe(
+          minutes === undefined
+            ? undefined
+            : minutes === '120'
+              ? '2400'
+              : '1200',
+        );
         expect(
           captureDeadline(env, undefined, {
             srcDiffLines: 9000,
@@ -567,6 +669,9 @@ describe('review run (handler)', () => {
       });
 
       const done = runHandler({ 'timeout-minutes': 1 });
+      expect(spawnMock.mock.calls[0][2].env[DEADLINE_ENV]).toBe(
+        String(start / 1000 + 60),
+      );
       await vi.advanceTimersByTimeAsync(55_999);
       expect(processKill).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);

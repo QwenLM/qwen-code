@@ -42,7 +42,12 @@ import { REVIEW_TMP_DIR, REVIEWS_DIR, repoRelativeOf } from './lib/paths.js';
 import { safeTarget } from '../../utils/paths.js';
 import { gitOpt } from './lib/git.js';
 import { EFFORT_LEVELS, parseReviewArgs } from './parse-args.js';
-import { DEADLINE_ENV, resolveReviewDeadline } from './lib/deadline.js';
+import {
+  DEADLINE_ENV,
+  RESERVE_ENV,
+  planReserveSeconds,
+  resolveReviewDeadline,
+} from './lib/deadline.js';
 
 export interface RunReviewArgs {
   target?: string;
@@ -546,14 +551,25 @@ export function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
  * `isUnusableScriptEntry`, preserving the bare-`qwen` fallback instead of a
  * stamp that dies on exit 126.
  */
-function childEnv(runId: string, deadlineEpoch?: number): NodeJS.ProcessEnv {
+function childEnv(
+  runId: string,
+  deadline?: { startMs: number; timeoutAtMs: number },
+): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  if (deadlineEpoch !== undefined) {
+  if (deadline !== undefined) {
+    const deadlineEpoch = deadline.timeoutAtMs / 1000;
     const inheritedDeadline = resolveReviewDeadline(env)?.epochSeconds;
     // The child's gates must not outlive either this run or an earlier CI wall.
-    env[DEADLINE_ENV] = String(
-      Math.min(deadlineEpoch, inheritedDeadline ?? deadlineEpoch),
+    const effectiveDeadline = Math.min(
+      deadlineEpoch,
+      inheritedDeadline ?? deadlineEpoch,
     );
+    env[DEADLINE_ENV] = String(effectiveDeadline);
+    if (env[RESERVE_ENV] === undefined) {
+      env[RESERVE_ENV] = String(
+        planReserveSeconds(effectiveDeadline - deadline.startMs / 1000, env),
+      );
+    }
   }
   // Ties every artifact this run's child writes back to THIS run. The stop
   // sidecar is verdict-bearing — it decides `completed` and can carry a
@@ -621,7 +637,7 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     {
       env: childEnv(
         runId,
-        args.timeoutExplicit ? timeoutAtMs / 1000 : undefined,
+        args.timeoutExplicit ? { startMs, timeoutAtMs } : undefined,
       ),
       // stdin CLOSED, not inherited: piped input would be prepended to the
       // prompt and the leading `/` would no longer be the first character —
@@ -918,7 +934,7 @@ export const runCommand: CommandModule = {
         type: 'number',
         defaultDescription: '120',
         describe:
-          'Terminate the review after this long without a verdict (exit 1)',
+          'Terminate the review after this long without a verdict (exit 1). An explicit value also sets the soft deadline and tail reserve; huge reviews use at most 3 audit rounds, and budget stops cap the verdict at Comment.',
       })
       .option('approval-mode', {
         type: 'string',
