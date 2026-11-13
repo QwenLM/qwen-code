@@ -478,6 +478,7 @@ export function GitDialog({
       commitMsg,
       commitBusy,
       prBusy,
+      commitListComplete,
       commitPathList,
       refreshCommitFiles,
       t,
