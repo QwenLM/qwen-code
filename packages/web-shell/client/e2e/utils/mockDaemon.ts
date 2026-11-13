@@ -888,6 +888,8 @@ function isDaemonPath(path: string): boolean {
     ) ||
     path === '/goals' ||
     /^\/file\/?$/.test(path) ||
+    /^\/session\/[^/]+\/metadata\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/session\/[^/]+\/metadata\/?$/.test(path) ||
     /^\/session\/[^/]+\/artifacts\/?$/.test(path) ||
     /^\/session\/[^/]+\/transcript\/?$/.test(path) ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
@@ -1099,6 +1101,13 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (
     method === 'PATCH' &&
     /^\/standalone\/sessions\/[^/]+\/metadata\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    method === 'PATCH' &&
+    (/^\/session\/[^/]+\/metadata\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/session\/[^/]+\/metadata\/?$/.test(path))
   ) {
     return true;
   }
@@ -2220,6 +2229,141 @@ async function handleDaemonRoute(
       });
       return;
     }
+  }
+  const sessionMetadataMatch =
+    path.match(/^\/session\/([^/]+)\/metadata\/?$/) ??
+    path.match(/^\/workspaces\/([^/]+)\/session\/([^/]+)\/metadata\/?$/);
+  if (method === 'PATCH' && sessionMetadataMatch) {
+    // The workspace-scoped route resolves the session INSIDE the named
+    // workspace; mirror that ownership rule so a wrong-workspace write
+    // fails here like it does in production. A workspace segment that
+    // cannot be decoded fails closed (workspace_mismatch), not as an
+    // unscoped route.
+    const isWorkspaceRoute = sessionMetadataMatch[2] !== undefined;
+    const workspaceSegment = isWorkspaceRoute
+      ? decodeRouteSegment(sessionMetadataMatch[1])
+      : undefined;
+    const sessionId = decodeRouteSegment(
+      sessionMetadataMatch[2] ?? sessionMetadataMatch[1],
+    );
+    const index =
+      sessionId === undefined
+        ? -1
+        : scenario.sessions.findIndex(
+            (session) => session.sessionId === sessionId,
+          );
+    if (index < 0) {
+      await json(
+        route,
+        {
+          code: 'session_not_found',
+          message: `Session ${sessionId ?? ''} was not found.`,
+        },
+        404,
+      );
+      return;
+    }
+    if (
+      isWorkspaceRoute &&
+      (workspaceSegment === undefined ||
+        scenario.sessions[index].workspaceCwd !== workspaceSegment)
+    ) {
+      await json(
+        route,
+        {
+          code: 'workspace_mismatch',
+          message: `Session ${sessionId} does not belong to the named workspace.`,
+        },
+        400,
+      );
+      return;
+    }
+    const summary = scenario.sessions[index];
+    const displayName = readStringField(body, 'displayName');
+    const prInput = getRecordValue(body, 'pr');
+    let prs = summary.prs ?? [];
+    if (prInput !== undefined) {
+      // Mirror the real route's parseSessionPrBody: an invalid pr is a 400
+      // invalid_metadata, not a payload the mock silently accepts.
+      const pr = isRecord(prInput) ? prInput : null;
+      const number = pr?.['number'];
+      const url = pr?.['url'];
+      const state = pr?.['state'];
+      const role = pr?.['role'];
+      if (
+        pr === null ||
+        typeof number !== 'number' ||
+        !Number.isInteger(number) ||
+        number <= 0 ||
+        typeof url !== 'string' ||
+        url.length > 2048 ||
+        !/^https?:\/\//i.test(url) ||
+        Array.from(url).some((character) => {
+          const code = character.charCodeAt(0);
+          return code <= 31 || code === 127;
+        }) ||
+        (state !== undefined &&
+          state !== 'open' &&
+          state !== 'merged' &&
+          state !== 'closed') ||
+        (role !== undefined &&
+          role !== null &&
+          role !== 'review' &&
+          role !== 'verify' &&
+          role !== 'fix')
+      ) {
+        await json(
+          route,
+          {
+            // The real route answers { error, code, field } and the SDK reads
+            // `error` first; keep the same shape AND the route's verbatim text
+            // so a test asserting the production body is written against the
+            // route, not a fixture paraphrase.
+            error:
+              '`pr` must be an object with a positive integer `number` and an http(s) `url` of at most 2048 characters, without control characters, an optional `state` that is one of `open`, `merged`, or `closed`, and an optional `role` that is one of `review`, `verify`, `fix`, or null to clear',
+            code: 'invalid_metadata',
+            field: 'pr',
+          },
+          400,
+        );
+        return;
+      }
+      // Mirror upsertSessionPr's merge: an omitted state/role preserves the
+      // known entry's value (matched by number AND url), and role:null clears.
+      // The route matches on the canonical URL; the fixture uses exact equality
+      // because the bind URLs here are already canonical. A different URL is a
+      // different PR and carries nothing across (no known entry matches).
+      const known = prs.find((p) => p.number === number && p.url === url);
+      const mergedState =
+        state === 'open' || state === 'merged' || state === 'closed'
+          ? state
+          : known?.state;
+      const mergedRole =
+        role === undefined
+          ? known?.role
+          : role === 'review' || role === 'verify' || role === 'fix'
+            ? role
+            : undefined;
+      const entry = {
+        number,
+        url,
+        ...(mergedState ? { state: mergedState } : {}),
+        ...(mergedRole ? { role: mergedRole } : {}),
+      };
+      prs = [...prs.filter((p) => p.number !== number), entry];
+    }
+    scenario.sessions[index] = {
+      ...summary,
+      ...(displayName !== undefined ? { displayName } : {}),
+      prs,
+      updatedAt: now,
+    };
+    await json(route, {
+      sessionId,
+      ...(displayName !== undefined ? { displayName } : {}),
+      prs,
+    });
+    return;
   }
   if (method === 'POST' && path === '/session') {
     await json(route, sessionEnvelope(scenario, { attached: false }));
