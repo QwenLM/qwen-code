@@ -8880,6 +8880,9 @@ export class Session implements SessionContext {
    * turn around it runs the tool batch and decides what is sent next.
    */
   async #runSharedRound(round: SharedRound): Promise<SharedRoundResult> {
+    debugLogger.debug(
+      `[ACP] model round on the shared agent loop (prompt ${round.promptId})`,
+    );
     const {
       message,
       promptId,
@@ -15832,6 +15835,9 @@ export class Session implements SessionContext {
     toolLoopState: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<RunToolResult> {
+    debugLogger.debug(
+      `[ACP] tool batch on the shared agent loop (prompt ${promptId}, ${requests.length} call(s))`,
+    );
     promptIdContext.enterWith(promptId);
     todoWorkChainContext.enterWith(
       this.config.getActiveTodoWorkChainOwner(promptId),
