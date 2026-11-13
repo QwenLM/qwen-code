@@ -2318,6 +2318,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'terminal.notice.error': (v) => `Error: ${v?.message ?? ''}`,
   'terminal.notice.unknownError': 'Unknown error',
   'terminal.notice.reconnecting': 'Connection lost — reconnecting…',
+  'terminal.notice.lost': 'This terminal is no longer available.',
   'terminal.notice.protocolMismatch':
     'Terminal protocol changed; restart the daemon and reload this page.',
   'localFiles.title': 'Local files',
@@ -7462,6 +7463,7 @@ const ZH: Messages = {
   'terminal.notice.error': (v) => `错误：${v?.message ?? ''}`,
   'terminal.notice.unknownError': '未知错误',
   'terminal.notice.reconnecting': '连接已断开，正在重连…',
+  'terminal.notice.lost': '此终端已不可用。',
   'terminal.notice.protocolMismatch':
     '终端协议已更新，请重启 daemon 并刷新页面。',
   'localFiles.title': '本地文件',
@@ -10300,6 +10302,7 @@ const RU: Messages = {
   'goals.error.clearFailed': 'Не удалось снять цель',
   'goals.error.controlBusy':
     'Другое управление целью ещё выполняется. Повторите, когда оно завершится.',
+  'terminal.notice.lost': 'Этот терминал больше недоступен.',
 };
 
 const MESSAGES: Record<WebShellLanguage, Messages> = {
