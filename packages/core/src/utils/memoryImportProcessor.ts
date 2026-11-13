@@ -6,7 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { isSubpath } from './paths.js';
+import { isSubpath, realpathNearestExisting } from './paths.js';
 import { marked, type Token } from 'marked';
 import { createDebugLogger } from './debugLogger.js';
 import { findProjectRoot } from './projectRoot.js';
@@ -413,7 +413,7 @@ export async function processImports(
     }
     // Validate import path to prevent path traversal attacks
     if (!validateImportPath(importPath, basePath, [projectRoot || ''])) {
-      result += `<!-- Import failed: ${importPath} - Path traversal attempt -->`;
+      result += `<!-- Import failed: ${importPath} - Path is outside allowed directories -->`;
       continue;
     }
     const fullPath = path.resolve(basePath, importPath);
@@ -488,9 +488,23 @@ export function validateImportPath(
     return false;
   }
 
-  const resolvedPath = path.resolve(basePath, importPath);
-
-  return allowedDirectories.some((allowedDir) =>
-    isSubpath(allowedDir, resolvedPath),
+  // Canonicalize both sides before the containment check: a symlink entry can
+  // live inside an allowed directory while its target points outside of it.
+  const resolvedPath = realpathNearestExisting(
+    path.resolve(basePath, importPath),
   );
+  const canonicalAllowed = allowedDirectories.map(realpathNearestExisting);
+
+  if (
+    canonicalAllowed.some((allowedDir) => isSubpath(allowedDir, resolvedPath))
+  ) {
+    return true;
+  }
+
+  // Keep both canonical values in the debug log so a rejected symlink can be
+  // diagnosed without treating an out-of-root target as evidence of an attack.
+  logger.warn(
+    `Import rejected: ${importPath} -> ${resolvedPath} is outside ${canonicalAllowed.join(', ')}`,
+  );
+  return false;
 }
