@@ -1914,6 +1914,7 @@ export default {
   'User settings': '用户设置',
   'Saved in at ~/.qwen/settings.json': '保存在 ~/.qwen/settings.json',
   'Add a new rule…': '添加新规则…',
+  '(invalid: not applied)': '（无效：未应用）',
   'Add {{type}} permission rule': '添加 {{type}} permission rule',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
     'permission rules 是工具名称，可选地后跟括号中的限定符。',

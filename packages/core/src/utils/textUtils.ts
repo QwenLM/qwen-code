@@ -8,7 +8,7 @@ import { stripVTControlCharacters } from 'node:util';
 
 // C0/C1 control chars (incl. DEL) left behind after escape-sequence stripping.
 // eslint-disable-next-line no-control-regex
-const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f]/g;
+export const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f]/g;
 
 /**
  * Strips terminal escape/control sequences from untrusted text: removes ANSI/VT

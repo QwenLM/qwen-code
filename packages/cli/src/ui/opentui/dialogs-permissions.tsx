@@ -198,6 +198,7 @@ export interface PermissionRuleEntry {
   toolName: string;
   type: 'allow' | 'ask' | 'deny';
   scope: string;
+  invalid?: boolean;
 }
 
 /** The workspace-directory add validation, exactly as the ink dialog runs it. */
@@ -356,7 +357,9 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
   const ruleListItems = [
     { label: t('Add a new rule…'), key: '__add__', value: '__add__' },
     ...filteredRules.map((r) => ({
-      label: r.raw,
+      // Badge first, matching the ink dialog: rows clip from the tail, so a
+      // trailing badge is what a long rule loses.
+      label: r.invalid ? `${t('(invalid: not applied)')} ${r.raw}` : r.raw,
       value: r.raw,
       key: `${r.type}-${r.scope}-${r.raw}`,
     })),
@@ -1017,9 +1020,11 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
           <box height={1} />
           <box marginLeft={2} flexDirection="column">
             <text fg={C.text} attributes={1}>
-              {deleteTarget.raw}
+              {sanitizeTerminalLine(deleteTarget.raw)}
             </text>
-            <text fg={C.dim}>{describePermissionRule(deleteTarget.raw)}</text>
+            <text fg={C.dim}>
+              {sanitizeTerminalLine(describePermissionRule(deleteTarget.raw))}
+            </text>
             <text fg={C.dim}>{permissionScopeLabel(deleteTarget.scope)}</text>
           </box>
           <box height={1} />

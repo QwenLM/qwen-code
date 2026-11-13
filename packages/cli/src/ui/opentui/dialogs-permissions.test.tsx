@@ -152,6 +152,79 @@ describe('OpenTuiPermissionsDialog rule rows', () => {
     mocks.state.width = 100;
   });
 
+  it('marks malformed rules as not applied', () => {
+    const { container } = renderPermissions([
+      {
+        raw: 'Bash(docker *',
+        toolName: 'Bash',
+        type: 'deny',
+        scope: 'user',
+        invalid: true,
+      },
+    ]);
+
+    press('right');
+    press('right');
+    expect(container.textContent).toContain('Bash(docker *');
+    expect(container.textContent).toContain('(invalid: not applied)');
+  });
+
+  // Rows clip the label from the tail, so a badge that trails the rule is what
+  // a long rule loses. The ink twin pins the same thing; the two dialogs are a
+  // parity pair and must not drift on this.
+  it('keeps the badge on a rule too long for the row', () => {
+    const { container } = renderPermissions([
+      {
+        raw: `Bash(${'x'.repeat(300)}`,
+        toolName: 'Bash',
+        type: 'deny',
+        scope: 'user',
+        invalid: true,
+      },
+    ]);
+
+    press('right');
+    press('right');
+    expect(container.textContent).toContain('(invalid: not applied)');
+  });
+
+  it('sanitizes the delete-confirm rule without changing its raw value', () => {
+    const esc = String.fromCharCode(27);
+    const raw = `Bash(docker *${esc}[2J`;
+    const onDeleteRule = vi.fn();
+    const { container } = render(
+      <OpenTuiPermissionsDialog
+        rules={[
+          {
+            raw,
+            toolName: 'Bash',
+            type: 'deny',
+            scope: 'user',
+            invalid: true,
+          },
+        ]}
+        directories={[]}
+        initialDirectories={[]}
+        onAddRule={vi.fn()}
+        onDeleteRule={onDeleteRule}
+        onAddDirectory={vi.fn()}
+        onRemoveDirectory={vi.fn()}
+        onExit={vi.fn()}
+      />,
+    );
+
+    press('right');
+    press('right');
+    press('down');
+    press('return');
+
+    expect(screen.getByText(/Delete deny rule/)).toBeTruthy();
+    expect(container.textContent).toContain('Bash(docker *');
+    expect(container.textContent).not.toContain(esc);
+    press('return');
+    expect(onDeleteRule).toHaveBeenCalledWith(raw, 'deny');
+  });
+
   afterEach(() => {
     for (const directory of temporaryDirectories.splice(0)) {
       rmSync(directory, { recursive: true, force: true });

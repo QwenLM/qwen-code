@@ -2791,14 +2791,14 @@ describe('PermissionManager', () => {
       expect(sessionAllowRules(pm)).toHaveLength(1);
     });
 
-    it('malformed session allow rule is silently ignored', async () => {
+    it('malformed session allow rule does not match', async () => {
       pm.addSessionAllowRule('Bash(git commit');
       // 'git commit' is not readonly, so default is 'ask'.
       // The malformed rule must not act as catch-all allow.
       expect(await pm.evaluate(sh('git commit'))).toBe('ask');
     });
 
-    it('malformed session deny rule is silently ignored', async () => {
+    it('malformed session deny rule does not match', async () => {
       pm.addSessionDenyRule('Bash(rm -rf /)*');
       // Should NOT deny — the malformed rule must not act as catch-all
       expect(await pm.evaluate(sh('git status'))).not.toBe('deny');
@@ -2854,15 +2854,153 @@ describe('PermissionManager', () => {
       expect(sessionAllow?.rule.toolName).toBe('run_shell_command');
     });
 
-    it('excludes malformed rules from listing', async () => {
+    it('includes malformed rules in listing as not applied', async () => {
       pm = makePm({
         permissionsAllow: ['ReadFileTool'],
         permissionsDeny: ['Bash(rm -rf /)*'],
       });
 
       const rules = pm.listRules();
-      expect(rules.length).toBe(1);
-      expect(rules[0]!.rule.toolName).toBe('read_file');
+      expect(rules.length).toBe(2);
+      expect(rules[0]!.rule.toolName).toBe('run_shell_command');
+      expect(rules[0]!.rule.invalid).toBe(true);
+      expect(rules[1]!.rule.toolName).toBe('read_file');
+    });
+
+    it('removes a malformed persistent rule by its raw value', async () => {
+      const raw = 'Bash(rm -rf /)*';
+      pm = makePm({ permissionsDeny: [raw] });
+      expect(pm.listRules()).toHaveLength(1);
+
+      expect(pm.removePersistentRule(raw, 'deny')).toBe(true);
+      expect(pm.listRules()).toEqual([]);
+    });
+  });
+
+  describe('malformed rule warnings', () => {
+    // Owns its own manager: these must run standalone as well as in order,
+    // so nothing here may lean on a fixture a neighbouring test left behind.
+    it('warns on every malformed rule ingestion path', () => {
+      const manager = makePm();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        parseRules(['Bash(git *']);
+        manager.addSessionAllowRule('Bash(git *');
+        manager.addSessionDenyRule('Bash(git *');
+        manager.addSessionAskRule('Bash(git *');
+        manager.addPersistentRule('Bash(git *', 'deny');
+
+        expect(warn).toHaveBeenCalledTimes(5);
+        expect(warn.mock.calls.map(([message]) => message)).toEqual([
+          expect.stringContaining(
+            'malformed rule (unbalanced parentheses): Bash(git *',
+          ),
+          expect.stringContaining(
+            'malformed allow rule (unbalanced parentheses): Bash(git *',
+          ),
+          expect.stringContaining(
+            'malformed deny rule (unbalanced parentheses): Bash(git *',
+          ),
+          expect.stringContaining(
+            'malformed ask rule (unbalanced parentheses): Bash(git *',
+          ),
+          expect.stringContaining(
+            'malformed deny rule (unbalanced parentheses): Bash(git *',
+          ),
+        ]);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('writes one sanitized debug record per malformed ingestion', () => {
+      const manager = makePm();
+      const esc = String.fromCharCode(27);
+      const raw = `Bash(git *${esc}[2J`;
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      debugLoggerMock.warn.mockClear();
+      try {
+        parseRules([raw]);
+        manager.addSessionAllowRule(raw);
+        manager.addSessionDenyRule(raw);
+        manager.addSessionAskRule(raw);
+        manager.addPersistentRule(raw, 'deny');
+
+        expect(debugLoggerMock.warn).toHaveBeenCalledTimes(5);
+        for (const [message] of debugLoggerMock.warn.mock.calls) {
+          expect(String(message)).toContain('[permissions]');
+          expect(String(message)).not.toContain(esc);
+        }
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('escapes whitespace controls instead of dropping them', () => {
+      const rawWithControls = 'Bash(evil\n>\tspoof\r!';
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        parseRules([rawWithControls]);
+        expect(warn).toHaveBeenCalledTimes(1);
+        const [message] = warn.mock.calls[0]!;
+        expect(String(message)).toContain('evil\\n>\\tspoof\\r!');
+        expect(String(message)).not.toContain(rawWithControls);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    // `stripAnsiAndControl` covers C0/C1 but not the Unicode format
+    // characters that reorder a row. A deny rule carrying a trailing RLO is
+    // malformed, so this warning fires for exactly the rule the operator most
+    // needs to read straight, and with the override intact the printed tail
+    // renders reversed (#15775).
+    it('strips bidi overrides before printing', () => {
+      const rlo = String.fromCharCode(0x202e);
+      const lri = String.fromCharCode(0x2066);
+      const rawWithBidi = `Bash(rm -rf /${rlo})(${lri}`;
+      const manager = makePm();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        parseRules([rawWithBidi]);
+        manager.addSessionDenyRule(rawWithBidi);
+        for (const [message] of warn.mock.calls) {
+          expect(message).not.toContain(rlo);
+          expect(message).not.toContain(lri);
+          expect(message).toContain('Bash(rm -rf /');
+        }
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    // The raw rule reaches the operator's terminal through this warning, and
+    // it arrives from settings files and from tool calls, so escapes in it
+    // must not survive into the message.
+    it('strips terminal escapes before printing', () => {
+      // A raw rule the way a hostile settings file would carry it: unbalanced,
+      // with a screen-clear and a BEL riding along.
+      const esc = String.fromCharCode(27);
+      const bel = String.fromCharCode(7);
+      const rawWithEscapes = `Bash(git *${esc}[2J${bel}`;
+      const manager = makePm();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        // Both ingestion routes on purpose: the parser and the manager have to
+        // share one escaping printer rather than each rolling its own.
+        parseRules([rawWithEscapes]);
+        manager.addSessionDenyRule(rawWithEscapes);
+        expect(warn).toHaveBeenCalledTimes(2);
+        for (const [message] of warn.mock.calls) {
+          expect(String(message)).toContain('Bash(git *');
+          expect(String(message)).not.toContain(esc);
+          expect(String(message)).not.toContain(bel);
+          // eslint-disable-next-line no-control-regex
+          expect(String(message)).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+        }
+      } finally {
+        warn.mockRestore();
+      }
     });
   });
 

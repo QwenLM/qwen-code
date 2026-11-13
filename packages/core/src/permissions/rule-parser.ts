@@ -7,9 +7,12 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { stripVTControlCharacters } from 'node:util';
 import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { CONTROL_CHARS_RE } from '../utils/textUtils.js';
+import { stripBidiControls } from '../utils/terminalSafe.js';
 import {
   generateLegacyMcpToolName,
   normalizeMcpToolName,
@@ -576,14 +579,29 @@ export function parseRule(raw: string): PermissionRule {
  * rule merely fails closed. `debugLogger.warn` reaches a file that is off in
  * default runs, so the same reason `tools.eager` reports its unusable entries
  * applies here.
+ *
+ * The raw rule is stripped of ANSI/VT sequences and bidi formatting marks.
+ * Residual control characters are rendered as visible escapes so whitespace
+ * still identifies the original rule without reaching the operator's terminal.
  */
+
 export function warnDroppedPermissionRule(raw: string, kind?: string): void {
-  // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where a dropped rule would otherwise be invisible
-  console.warn(
-    `[permissions] ignoring malformed ${kind ? `${kind} ` : ''}rule ` +
-      `(unbalanced parentheses): ${raw} — it matches nothing, so it ` +
-      `protects nothing. Balance the parentheses to make it take effect.`,
+  const printable = stripBidiControls(stripVTControlCharacters(raw)).replace(
+    CONTROL_CHARS_RE,
+    (char) => {
+      if (char === '\n') return '\\n';
+      if (char === '\t') return '\\t';
+      if (char === '\r') return '\\r';
+      return `\\x${char.charCodeAt(0).toString(16).padStart(2, '0')}`;
+    },
   );
+  const message =
+    `[permissions] ignoring malformed ${kind ? `${kind} ` : ''}rule ` +
+    `(unbalanced parentheses): ${printable} — it matches nothing, so it ` +
+    `protects nothing. Balance the parentheses to make it take effect.`;
+  debugLogger.warn(message);
+  // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where a dropped rule would otherwise be invisible
+  console.warn(message);
 }
 
 /**
@@ -596,9 +614,6 @@ export function parseRules(raws: string[]): PermissionRule[] {
     .map(parseRule)
     .map((r) => {
       if (r.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed rule (unbalanced parentheses): ${r.raw}`,
-        );
         warnDroppedPermissionRule(r.raw);
       }
       return r;
