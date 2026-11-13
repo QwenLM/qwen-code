@@ -389,6 +389,7 @@ export async function buildFileRestorationBlocks(
   filePaths: string[],
   signal?: AbortSignal,
   tokenBudget = POST_COMPACT_TOKEN_BUDGET,
+  onEmbeddedFiles?: (count: number) => void,
 ): Promise<Content[]> {
   const references: string[] = [];
   const embeds: Array<{ path: string; content: string }> = [];
@@ -455,6 +456,7 @@ export async function buildFileRestorationBlocks(
     });
   }
 
+  onEmbeddedFiles?.(embeds.length);
   return blocks;
 }
 
@@ -616,8 +618,8 @@ export interface ComposePostCompactOptions {
   fileTokenBudget?: number;
   /** Per-image cost shared with compression token accounting. */
   imageTokenEstimate?: number;
-  /** Reports attached file/reference blocks plus the optional image block. */
-  onRestoredBlocks?: (count: number) => void;
+  /** Reports all restoration blocks and the subset containing file bodies or images. */
+  onRestoredBlocks?: (count: number, embeddedCount: number) => void;
   /**
    * Max recent images to restore. Defaults to
    * `POST_COMPACT_MAX_IMAGES_TO_RESTORE`. Configurable via
@@ -828,10 +830,14 @@ export async function composePostCompactHistory(
     isInsideWorkspace(p, workspaceRoot),
   );
   const images = extractRecentImages(history, maxImages);
+  let embeddedFileCount = 0;
   const fileBlocks = await buildFileRestorationBlocks(
     filePaths,
     signal,
     Math.max(0, fileTokenBudget - images.length * imageTokenEstimate),
+    (count) => {
+      embeddedFileCount = count;
+    },
   );
 
   const imageBlock = buildImageRestorationBlock(images);
@@ -894,6 +900,9 @@ export async function composePostCompactHistory(
     out.push({ role: 'model', parts: ackParts });
   }
 
-  options.onRestoredBlocks?.(fileBlocks.length + (imageBlock ? 1 : 0));
+  options.onRestoredBlocks?.(
+    fileBlocks.length + (imageBlock ? 1 : 0),
+    embeddedFileCount + (imageBlock ? 1 : 0),
+  );
   return out;
 }

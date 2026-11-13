@@ -28,7 +28,7 @@ import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
-  getFunctionResponseParts,
+  estimatePartChars,
   resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
@@ -148,19 +148,9 @@ export const MAX_CONSECUTIVE_FAILURES = 3;
 
 function estimatePostCompactCjkCorrection(contents: Content[]): number {
   const texts: string[] = [];
-  const parts = contents.flatMap((content) => content.parts ?? []);
-  for (const part of parts) {
-    if (part.inlineData || part.fileData) continue;
-    if (typeof part.text === 'string') {
-      texts.push(part.text);
-    } else if (part.functionResponse) {
-      const output = part.functionResponse.response?.['output'];
-      const error = part.functionResponse.response?.['error'];
-      if (typeof output === 'string') texts.push(output);
-      else if (typeof error === 'string') texts.push(error);
-      parts.push(...(getFunctionResponseParts(part) ?? []));
-    } else {
-      texts.push(JSON.stringify(part));
+  for (const content of contents) {
+    for (const part of content.parts ?? []) {
+      estimatePartChars(part, 0, (text) => texts.push(text));
     }
   }
   const text = texts.join('');
@@ -1296,10 +1286,15 @@ export class ChatCompressionService {
         restorationContextCeiling,
         config.getAutoCompactThreshold(),
       ).auto;
+      const restorationTarget = Math.min(
+        restorationThreshold,
+        Math.max(0, restorationContextCeiling - HARD_BUFFER),
+      );
 
       // Use the new composer — assembles summary + ack + file restores +
       // image restore. No tail preservation, no continuation bridge.
       let restoredBlockCount = 0;
+      let hasEmbeddedRestoration = false;
       try {
         extraHistory = await composePostCompactHistory(
           historyForCompose,
@@ -1326,8 +1321,9 @@ export class ChatCompressionService {
                 : tuning.maxRecentFiles,
             maxImages: opts.requestPayloadTooLarge ? 0 : tuning.maxRecentImages,
             imageTokenEstimate: slimmingConfig.imageTokenEstimate,
-            onRestoredBlocks: (count) => {
+            onRestoredBlocks: (count, embeddedCount) => {
               restoredBlockCount = count;
+              hasEmbeddedRestoration = embeddedCount > 0;
             },
             // Restore plan-mode reminder + running-subagent snapshot so the
             // post-compact agent does not lose either piece of mid-session
@@ -1387,6 +1383,7 @@ export class ChatCompressionService {
         restoredHistory,
         slimmingConfig.imageTokenEstimate,
       );
+      let summaryTokenCorrection = 0;
 
       // Best-effort token math using model-reported token counts when
       // available. Some OpenAI-compatible providers omit usage for the
@@ -1437,6 +1434,9 @@ export class ChatCompressionService {
         // post-compact size.
         newTokenCount += restorationTokenCount;
       } else {
+        summaryTokenCorrection = estimatePostCompactCjkCorrection(
+          extraHistory.slice(0, 2),
+        );
         const estimatedOriginalVisibleTokenCount = estimateContentTokens(
           curatedHistory,
           slimmingConfig.imageTokenEstimate,
@@ -1487,9 +1487,12 @@ export class ChatCompressionService {
         estimatePostCompactCjkCorrection(restoredHistory);
       if (
         canCalculateNewTokenCount &&
-        restoredBlockCount > 0 &&
-        newTokenCount + pendingTokenCorrection + restorationTokenCorrection >=
-          restorationThreshold
+        hasEmbeddedRestoration &&
+        newTokenCount +
+          pendingTokenCorrection +
+          restorationTokenCorrection +
+          summaryTokenCorrection >=
+          restorationTarget
       ) {
         // Zero attachment limits make this composition free of disk I/O.
         const withoutRestoration = await composePostCompactHistory(
@@ -1525,7 +1528,8 @@ export class ChatCompressionService {
             `[chat-compression] dropped restored files and images: ` +
               `${tokenCountBeforeDroppingRestoration} + ${pendingTokenCorrection} pending CJK correction ` +
               `+ ${restorationTokenCorrection} restoration CJK correction ` +
-              `reached the auto threshold ${restorationThreshold}; ` +
+              `+ ${summaryTokenCorrection} summary CJK correction ` +
+              `reached the restoration target ${restorationTarget}; ` +
               `removed ${restoredBlockCount} restoration blocks; ` +
               `post-compression count ${tokenCountBeforeDroppingRestoration} -> ${newTokenCount}`,
           );

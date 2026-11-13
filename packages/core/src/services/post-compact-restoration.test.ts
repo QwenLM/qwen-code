@@ -22,6 +22,7 @@ import {
 import {
   ChatCompressionService,
   computeThresholds,
+  HARD_BUFFER,
 } from './chatCompressionService.js';
 import { ApprovalMode } from '../config/config.js';
 import { buildFileRestorationBlocks } from './postCompactAttachments.js';
@@ -91,7 +92,15 @@ it('issue #15487: a successful 16K compaction must fit after restoring recent fi
     originalTokenCount: 18_000,
   });
   expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
-  expect(result.info.newTokenCount).toBeLessThan(16_000);
+  expect(result.info.newTokenCount).toBeLessThan(16_000 - HARD_BUFFER);
+  expect(
+    tokenEstimation.estimateContentTokens(result.newHistory!),
+  ).toBeLessThan(16_000 - HARD_BUFFER);
+  const restored = historyText(result.newHistory);
+  for (let index = 0; index < 5; index++) {
+    expect(restored).toContain(join(fixture, `file-${index}.txt`));
+    expect(restored.includes(`${index}`.repeat(8000))).toBe(index >= 3);
+  }
 });
 
 function restorationFixture(
@@ -154,6 +163,8 @@ it.each([
   [16_000, 2, 5, 8000],
   [32_000, 4, 5, 8000],
   [128_000, 5, 5, 8000],
+  [128_000, 6, 8, 20_000],
+  [200_000, 8, 8, 20_000],
   [200_000, 5, 5, 8000],
   [1_000_000, 10, 12, 20_000],
 ])(
@@ -170,7 +181,7 @@ it.each([
     vi.spyOn(sideQuery, 'runSideQuery').mockResolvedValue({
       text: '<state_snapshot>Completed file inspections.</state_snapshot>',
       usage: {
-        promptTokenCount: window === 1_000_000 ? 100_000 : 13_000,
+        promptTokenCount: fileChars === 20_000 ? 100_000 : 13_000,
         candidatesTokenCount: 100,
       },
     } as never);
@@ -179,7 +190,7 @@ it.each([
       force: true,
       config,
       consecutiveFailures: 0,
-      originalTokenCount: window === 1_000_000 ? 120_000 : 18_000,
+      originalTokenCount: fileChars === 20_000 ? 120_000 : 18_000,
     });
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
     const restored = historyText(result.newHistory);
@@ -387,6 +398,73 @@ function compressionFixture(
   return { files, history, config, logger, summary, run };
 }
 
+it('drops restored bodies below the auto threshold to leave request headroom', async () => {
+  const { files, logger, run } = compressionFixture();
+  const compose = vi.spyOn(postCompactAttachments, 'composePostCompactHistory');
+  const originalTokenCount = 21_000;
+  const result = await run({ originalTokenCount });
+  const initialHistory = await compose.mock.results[0].value;
+  const initialCount =
+    originalTokenCount -
+    (13_000 - 1000) +
+    100 +
+    tokenEstimation.estimateContentTokens(initialHistory.slice(2));
+  expect(initialCount).toBeGreaterThanOrEqual(16_000 - HARD_BUFFER);
+  expect(initialCount).toBeLessThan(computeThresholds(16_000).auto);
+  expect(
+    files.filter((file) => historyText(initialHistory).includes(file.body)),
+  ).toHaveLength(2);
+  expect(result.info.newTokenCount).toBeLessThan(16_000 - HARD_BUFFER);
+  expect(
+    tokenEstimation.estimateContentTokens(result.newHistory!) + HARD_BUFFER,
+  ).toBeLessThan(16_000);
+  for (const file of files) expect(result.text).not.toContain(file.body);
+  expect(logger.debug).toHaveBeenCalledWith(
+    expect.stringContaining('reached the restoration target 13000'),
+  );
+});
+
+it.each([false, true])(
+  'corrects a CJK summary only when estimated locally (usage=%s)',
+  async (withUsage) => {
+    const { history, files, summary, run } = compressionFixture();
+    const originalTokenCount =
+      tokenEstimation.estimateContentTokens(history) + 7500;
+    const text = `<state_snapshot>${'中'.repeat(3000)}</state_snapshot>`;
+    summary.mockResolvedValue({
+      text,
+      ...(withUsage && {
+        usage: {
+          promptTokenCount:
+            tokenEstimation.estimateContentTokens(history) + 1000,
+          candidatesTokenCount: 800,
+        },
+      }),
+    } as never);
+    const compose = vi.spyOn(
+      postCompactAttachments,
+      'composePostCompactHistory',
+    );
+    const result = await run({ originalTokenCount });
+    const initialHistory = await compose.mock.results[0].value;
+    const initialCount =
+      7500 + tokenEstimation.estimateContentTokens(initialHistory);
+    expect(initialCount).toBeLessThan(16_000 - HARD_BUFFER);
+    expect(initialCount + 3750).toBeGreaterThan(16_000 - HARD_BUFFER);
+    expect(
+      files.filter((file) => result.text.includes(file.body)),
+    ).toHaveLength(withUsage ? 2 : 0);
+    expect(compose).toHaveBeenCalledTimes(withUsage ? 1 : 2);
+    expect(result.text).toContain('中'.repeat(3000));
+    const expectedCount = withUsage
+      ? 7500 +
+        800 +
+        tokenEstimation.estimateContentTokens(result.newHistory!.slice(2))
+      : 7500 + tokenEstimation.estimateContentTokens(result.newHistory!);
+    expect(result.info.newTokenCount).toBe(expectedCount);
+  },
+);
+
 it('estimates the restored-content base once', async () => {
   const estimate = vi.spyOn(tokenEstimation, 'estimateContentTokens');
   const { run } = compressionFixture();
@@ -446,7 +524,7 @@ it.each([
   },
 );
 
-it('drops a references-only block while preserving reminders and a pending call', async () => {
+it('keeps a references-only block with reminders and a pending call', async () => {
   const { files, history, config, logger, run } = compressionFixture(
     16_000,
     5,
@@ -456,13 +534,13 @@ it('drops a references-only block while preserving reminders and a pending call'
   history.push(content('model', fnCall('pending_tool', {}, 'pending-call')));
   const compose = vi.spyOn(postCompactAttachments, 'composePostCompactHistory');
   const result = await run({ originalTokenCount: 40_000, trigger: 'auto' });
-  expect(compose).toHaveBeenCalledTimes(2);
+  expect(compose).toHaveBeenCalledTimes(1);
   const initialHistory = await compose.mock.results[0].value;
   const initialText = historyText(initialHistory);
   for (const file of files) {
     expect(initialText).toContain(file.path);
     expect(initialText).not.toContain(file.body);
-    expect(result.text).not.toContain(file.path);
+    expect(result.text).toContain(file.path);
   }
   expect(result.text).toContain('<plan-mode-active>');
   expect(result.newHistory?.at(-1)?.parts).toContainEqual(
@@ -470,8 +548,8 @@ it('drops a references-only block while preserving reminders and a pending call'
       functionCall: expect.objectContaining({ id: 'pending-call' }),
     }),
   );
-  expect(logger.debug).toHaveBeenCalledWith(
-    expect.stringContaining('removed 1 restoration blocks'),
+  expect(logger.debug).not.toHaveBeenCalledWith(
+    expect.stringContaining('dropped restored files and images'),
   );
 });
 
@@ -723,7 +801,7 @@ it('logs the threshold, pending correction, and counts on attachment removal', a
     ),
   });
   expect(logger.debug).toHaveBeenCalledWith(
-    expect.stringContaining('reached the auto threshold 13600'),
+    expect.stringContaining('reached the restoration target 13000'),
   );
   expect(logger.debug).toHaveBeenCalledWith(
     expect.stringContaining('removed 3 restoration blocks'),
