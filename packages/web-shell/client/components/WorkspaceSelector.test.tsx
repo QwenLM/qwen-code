@@ -441,6 +441,136 @@ describe('WorkspaceSelector', () => {
     expect(document.activeElement).not.toBe(items[0]);
   });
 
+  it('hands ArrowDown from the filter to the first enabled item', async () => {
+    const element = renderSelector();
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.focus();
+    });
+    // The menu only moves keyboard focus between items; typeahead covers
+    // character keys — so the selector itself hands ArrowDown to the first
+    // enabled item (the disabled "locked" entry is skipped).
+    act(() => {
+      filter.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    const primary = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ].find((entry) => entry.textContent?.includes('primary'))!;
+    expect(document.activeElement).toBe(primary);
+  });
+
+  it('hands ArrowUp from the filter to the last enabled item', async () => {
+    const element = renderSelector({
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/primary',
+          label: 'primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'second',
+          cwd: '/second',
+          label: 'second',
+          primary: false,
+          trusted: true,
+        },
+      ],
+      scratchSupported: false,
+      existingFolderSupported: false,
+    });
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.focus();
+    });
+    act(() => {
+      filter.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowUp',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    const items = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ];
+    expect(items.length).toBe(2);
+    const second = items.find((entry) =>
+      entry.textContent?.includes('second'),
+    )!;
+    expect(document.activeElement).toBe(second);
+  });
+
+  it('selects the focused item with Enter after arrow navigation', async () => {
+    const onSelectWorkspace = vi.fn();
+    const element = renderSelector({
+      workspaces: [
+        {
+          id: 'first',
+          cwd: '/first',
+          label: 'first',
+          primary: false,
+          trusted: true,
+        },
+        {
+          id: 'second',
+          cwd: '/second',
+          label: 'second',
+          primary: false,
+          trusted: true,
+        },
+      ],
+      scratchSupported: false,
+      existingFolderSupported: false,
+      onSelectWorkspace,
+    });
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.focus();
+    });
+    act(() => {
+      filter.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    const first = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ].find((entry) => entry.textContent?.includes('first'))!;
+    expect(document.activeElement).toBe(first);
+    await act(async () => {
+      first.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(onSelectWorkspace).toHaveBeenCalledExactlyOnceWith('/first');
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+  });
+
   it('keeps matching host groups and drops empty ones while filtering', async () => {
     const element = renderSelector({
       workspaces: [
