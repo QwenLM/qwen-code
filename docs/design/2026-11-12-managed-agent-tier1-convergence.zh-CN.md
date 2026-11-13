@@ -51,6 +51,10 @@ K1 provisioner；修复 `sessionWorktreeScheduler` 默认候选；在各 managed
   `retriesTransientGetAndRechecksTheOriginalGuard` 断言一次重试读取中 guard 执行
   三次：versioning 探针前一次、两次 `getObject` 尝试前各一次。去除读探针后该计数
   变为两次。
+- `verification/.../persistence/AliyunToolPublicationReadRetryTest`
+  `transientReadsRecoverWithTheRealSdk` 的 versioning 行期望三次 `versioning`
+  请求：构造器探针失败及其重试，加上 `open` 的复探测。去除读探针后该计数变为
+  两次。
 - `verification/.../persistence/O4OssGate.java` 委托真实 store，不计数探针；其
   受限身份跳过 `validateConfiguration`，因为探针本身即一次存储操作。保留删除探针
   可保住其断言的 `ACCESS_DENIED` 语义。
@@ -188,8 +192,10 @@ K1 provisioner；修复 `sessionWorktreeScheduler` 默认候选；在各 managed
 
 guarded read loop 仍在每次 `getObject` 尝试与重试前运行 guard，因此接口契约
 「在每次新存储请求（含实现重试）前检查授权」得以保留。更新
-`retriesTransientGetAndRechecksTheOriginalGuard`，期望两次 guard 运行而非三次。
-`deletionRejectsVersioningEnabledAfterConstruction` 与所有请求计数测试保持绿。
+`retriesTransientGetAndRechecksTheOriginalGuard`，期望两次 guard 运行而非三次；
+并将 `AliyunToolPublicationReadRetryTest` `transientReadsRecoverWithTheRealSdk`
+的 versioning 行改为期望两次 versioning 请求而非三次。
+`deletionRejectsVersioningEnabledAfterConstruction` 与其余请求计数测试保持绿。
 构造后版本控制漂移的 bucket 上的读取，在下一次校验、GC 页或删除时被发现；每次
 外部读取仍校验长度与 SHA-256 并在不匹配时 fail-closed。
 
@@ -376,7 +382,8 @@ acceptance 处于 pending。
 ## 验收标准
 
 - `open`/`openRange` 不再发每调用 `getBucketVersioning`；`putIfAbsent`/
-  `deleteIfPresent` 仍拒绝版本控制 bucket；删除回归测试绿；guard 计数测试期望两次。
+  `deleteIfPresent` 仍拒绝版本控制 bucket；删除回归测试绿；guard 计数与
+  versioning 请求计数测试期望两次。
 - `object-storage.enabled=true` 且 `tool-publication.enabled=false` 产出 store bean
   且无发布 bean；现有 tool-publication 部署经跟随默认无需变更即可工作。
 - K1 provisioner 及其仅测试用 fixture 已删除；全模块编译；`KubernetesRuntimeClient`
