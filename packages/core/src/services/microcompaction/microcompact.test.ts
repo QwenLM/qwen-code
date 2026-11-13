@@ -993,6 +993,30 @@ the last characters`;
     ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
   });
 
+  it('counts a persisted-output stub in the size trigger even though it is never cleared', () => {
+    const stub = makePersistedOutputStub();
+    // Only the stub is compactable here, and it is over the threshold on its
+    // own. Reporting it as zero characters would make `totalChars` 0, the
+    // trigger would never fire, and the resident preview would sit outside the
+    // accounting the setting describes.
+    const history: Content[] = [
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', stub),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), {
+      toolResultsThresholdMinutes: 60,
+      toolResultsNumToKeep: 0,
+      toolResultsTotalCharsThreshold: 100,
+    });
+
+    expect(result.meta).toMatchObject({ triggerReason: 'size' });
+    expect(result.meta!.toolResultCharsBefore).toBe(stub.length);
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(stub);
+  });
+
   it('does not spend a keepRecent slot on a persisted-output stub', () => {
     const stub = makePersistedOutputStub();
     const history: Content[] = [

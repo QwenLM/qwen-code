@@ -480,13 +480,6 @@ function getPart(history: Content[], ref: PartRef): Part | undefined {
   return history[ref.contentIndex]?.parts?.[ref.partIndex];
 }
 
-function getToolOutputChars(
-  part: Part | undefined,
-  callIdentityById: ToolCallIdentityById,
-): number {
-  return getClearableToolOutput(part, callIdentityById).chars;
-}
-
 /**
  * The text output of a tool result this module may clear, with the reason it
  * counts as zero characters when it may not. `persisted` separates a stub the
@@ -518,7 +511,11 @@ function getClearableToolOutput(
   // stay clearable. Both producers count: the `<persisted-output>` tag and the
   // `Tool output was too large...` envelope `run_shell_command` emits.
   if (isPersistedOutputStub(output)) {
-    return { chars: 0, persisted: true };
+    // It is not free, though: the preview its producer budgeted stays resident
+    // in the prompt. Counting it as zero would take the largest results out of
+    // the size trigger's total and let the valve go blind to them, so the
+    // resident length is reported here and only the *clearability* differs.
+    return { chars: output.length, persisted: true };
   }
   return { chars: output.length, persisted: false };
 }
@@ -683,16 +680,24 @@ function planSizeBasedClearing(
   const callIdentityById = buildToolCallIdentityById(virtualHistory);
   const { tool } = collectCompactablePartRefs(virtualHistory, callIdentityById);
   const charsByRef = new Map<string, number>();
+  const persistedRefs = new Set<string>();
   let totalChars = 0;
   let pendingChars = 0;
   for (const ref of tool) {
-    const chars = getToolOutputChars(
+    const { chars, persisted } = getClearableToolOutput(
       getPart(virtualHistory, ref),
       callIdentityById,
     );
     if (chars <= 0) continue;
-    charsByRef.set(refKey(ref), chars);
+    // A persisted-output stub occupies the prompt like any other result, so it
+    // joins the total the trigger reads; it just never joins `charsByRef`,
+    // which is the set the clearing loop can spend.
     totalChars += chars;
+    if (persisted) {
+      persistedRefs.add(refKey(ref));
+    } else {
+      charsByRef.set(refKey(ref), chars);
+    }
     if (ref.contentIndex >= history.length) {
       pendingChars += chars;
     }
@@ -896,15 +901,19 @@ export function microcompactHistory(
     clearRefs = allRefs.filter((r) => {
       if (keepRefs.has(refKey(r))) return false;
       const part = getPart(history, r);
-      // Zero-character non-media tool refs are never clearable (mirrors the
-      // size path's `chars <= 0` skip). They are excluded from keepRecent
-      // candidates above, so without this guard they would be blanked here.
-      if (
-        toolKeys.has(refKey(r)) &&
-        getToolOutputChars(part, callIdentityById) === 0 &&
-        !(part && hasNestedMedia(part))
-      ) {
-        return false;
+      // A persisted-output stub is resident but not reclaimable: clearing it
+      // would destroy the only reference to the saved bytes. Zero-character
+      // non-media tool refs are never clearable either (mirrors the size
+      // path's skip). Both are excluded from keepRecent candidates above, so
+      // without this guard they would be blanked here.
+      if (toolKeys.has(refKey(r)) && !(part && hasNestedMedia(part))) {
+        const { chars, persisted } = getClearableToolOutput(
+          part,
+          callIdentityById,
+        );
+        if (chars === 0 || persisted) {
+          return false;
+        }
       }
       return true;
     });
