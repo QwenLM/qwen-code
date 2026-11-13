@@ -192,6 +192,13 @@ export interface TranscriptToolCallResultOptions extends UpdateMetaOptions {
     depth: number;
     kind: 'subagent';
   };
+  /**
+   * Card metadata for a terminal frame whose call never had a start frame.
+   * Channel transports key their rendering on `kind` and cannot restore one
+   * they never saw, so such a frame must carry both on itself.
+   */
+  readonly title?: string;
+  readonly kind?: ToolKind;
 }
 
 export interface TranscriptTodoItem {
@@ -1043,6 +1050,8 @@ export function createTranscriptToolCallResultUpdate(
   };
   const rawOutput = getReplayRawOutput(resultDisplay);
   if (rawOutput !== undefined) update['rawOutput'] = rawOutput;
+  if (options.title !== undefined) update['title'] = options.title;
+  if (options.kind !== undefined) update['kind'] = options.kind;
   return update as unknown as SessionUpdate;
 }
 
@@ -1658,7 +1667,12 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     this.pendingToolCalls.delete(callId);
 
     const resultDisplay = result?.['resultDisplay'];
+    let todoWriteFailed = false;
     if (toolName === 'todo_write') {
+      todoWriteFailed =
+        result?.['status'] === undefined
+          ? Boolean(result?.['error'])
+          : result['status'] !== 'success';
       const plan = extractTranscriptTodoPlan(resultDisplay);
       if (plan) {
         yield emit(
@@ -1676,15 +1690,11 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
               : {}),
           }),
         );
-        return;
       }
-      const failed =
-        result?.['status'] === undefined
-          ? Boolean(result?.['error'])
-          : result['status'] !== 'success';
-      // A todo_write that changed no plan has no frame of its own; on failure
-      // fall through so replay surfaces it like the live path does.
-      if (!failed) return;
+      // A todo_write that changed no plan has no frame of its own; a failed
+      // one falls through in both cases so replay matches the live path,
+      // which emits the plan and then the failure frame.
+      if (!todoWriteFailed) return;
     }
 
     yield emit(
@@ -1698,6 +1708,15 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         errorMessage: extractErrorMessage(result?.['error']),
         message: record.message?.parts,
         resultDisplay,
+        // A todo_write never emits a tool_call start frame here (the assistant
+        // side skips it), so channel transports have no remembered kind and
+        // drop a kindless terminal frame.
+        ...(todoWriteFailed
+          ? {
+              title: this.resolveToolMetadata(toolName, {}, record.uuid).title,
+              kind: 'think' as const,
+            }
+          : {}),
         artifacts: Array.isArray(result?.['artifacts'])
           ? result['artifacts']
           : undefined,

@@ -438,6 +438,9 @@ export async function runAcpToolBatch(
           success: status === 'success',
           artifacts: response.artifacts,
           persistedOutputFiles: response.persistedOutputFiles,
+          ...(executed && state.cancelMessage
+            ? { cancelMessage: state.cancelMessage }
+            : {}),
         }),
       'tool result update',
     );

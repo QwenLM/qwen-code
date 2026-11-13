@@ -18,7 +18,6 @@ import type {
 } from '../types.js';
 import { hasFullSessionContext } from '../types.js';
 import type {
-  SessionUpdate,
   ToolCallContent,
   ToolCallLocation,
   ToolKind,
@@ -92,11 +91,14 @@ function stripBoundaryArtifactsFromRawOutput(resultDisplay: unknown): unknown {
   return changed ? { ...resultDisplay, toolCalls } : resultDisplay;
 }
 
-function todoWriteFailureText(resultDisplay: unknown): string {
+function todoWriteFailureText(
+  resultDisplay: unknown,
+  cancelMessage?: string,
+): string {
   if (typeof resultDisplay === 'string' && resultDisplay.trim()) {
     return resultDisplay;
   }
-  return 'todo_write failed';
+  return cancelMessage ?? 'todo_write failed';
 }
 
 /**
@@ -202,8 +204,7 @@ export class ToolCallEmitter extends BaseEmitter {
 
   /**
    * Emits a terminal frame when a prepared tool call is discarded before
-   * execution. TodoWrite has no card to update on a normal result, but a
-   * discarded preparation would otherwise leave no trace at all.
+   * execution. TodoWrite remains represented exclusively by plan updates.
    *
    * @param callId - ID of the prepared tool call
    * @param toolName - Name of the prepared tool
@@ -212,6 +213,8 @@ export class ToolCallEmitter extends BaseEmitter {
     callId: string,
     toolName: string,
   ): Promise<void> {
+    if (this.isTodoWriteTool(toolName)) return;
+
     this.preparedCallIds.delete(callId);
     const lifecycle = this.preparedLifecycles
       .get(callId)
@@ -223,7 +226,7 @@ export class ToolCallEmitter extends BaseEmitter {
       );
     }
     const provenance = ToolCallEmitter.resolveToolProvenance(toolName);
-    const update: SessionUpdate = {
+    await this.sendUpdate({
       sessionUpdate: 'tool_call_update',
       toolCallId: callId,
       status: 'failed',
@@ -235,15 +238,7 @@ export class ToolCallEmitter extends BaseEmitter {
         provenance: provenance.provenance,
         ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
       },
-    };
-    if (!this.isTodoWriteTool(toolName)) {
-      await this.sendUpdate(update);
-      return;
-    }
-    // `title` and `kind` make the client render this as a card instead of
-    // silently dropping an update for a block it never had.
-    const { title, kind } = this.resolveToolMetadata(toolName, undefined);
-    await this.sendUpdate({ ...update, title, kind });
+    });
   }
 
   /**
@@ -262,7 +257,10 @@ export class ToolCallEmitter extends BaseEmitter {
         await this.emitError(
           params.callId,
           params.toolName,
-          params.error ?? new Error(todoWriteFailureText(params.resultDisplay)),
+          params.error ??
+            new Error(
+              todoWriteFailureText(params.resultDisplay, params.cancelMessage),
+            ),
           params.subagentMeta,
           params.startedAt !== undefined && params.durationMs !== undefined
             ? { startedAt: params.startedAt, durationMs: params.durationMs }
@@ -347,20 +345,27 @@ export class ToolCallEmitter extends BaseEmitter {
       toolName,
       subagentMeta,
     );
-    await this.sendUpdate(
-      createTranscriptToolCallResultUpdate({
-        toolName,
-        callId,
-        success: false,
-        errorMessage: error.message,
-        extra: {
-          ...timing,
-          ...subagentMeta,
-          provenance: provenance.provenance,
-          ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
-        },
-      }),
-    );
+    const update = createTranscriptToolCallResultUpdate({
+      toolName,
+      callId,
+      success: false,
+      errorMessage: error.message,
+      extra: {
+        ...timing,
+        ...subagentMeta,
+        provenance: provenance.provenance,
+        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+      },
+    });
+    if (!this.isTodoWriteTool(toolName)) {
+      await this.sendUpdate(update);
+      return;
+    }
+    // A todo_write never emits a tool_call start frame, so channel transports
+    // have no remembered kind to fall back on and drop a kindless update.
+    // `think` matches the kind ACP receives for TodoWriteTool's `Kind.Think`.
+    const { title } = this.resolveToolMetadata(toolName, undefined);
+    await this.sendUpdate({ ...update, title, kind: 'think' });
   }
 
   /**

@@ -1119,12 +1119,55 @@ describe('HistoryReplayer', () => {
           sessionUpdate: 'tool_call_update',
           toolCallId: 'call-123',
           status: 'failed',
+          title: expect.any(String),
+          kind: 'think',
+        }),
+      );
+    });
+
+    it('should surface a TodoWrite recorded as failed despite a plan', async () => {
+      const record = createToolResultRecord('todo_write', {
+        type: 'todo_list',
+        todos: [{ id: '1', content: 'Ship it', status: 'pending' }],
+      });
+      record.toolCallResult!['status'] = 'cancelled';
+
+      await replayer.replay([record]);
+
+      const updates = sendUpdateSpy.mock.calls.map(([update]) => update);
+      expect(updates.some((update) => update['sessionUpdate'] === 'plan')).toBe(
+        true,
+      );
+      expect(
+        updates.some(
+          (update) =>
+            update['sessionUpdate'] === 'tool_call_update' &&
+            update['status'] === 'failed',
+        ),
+      ).toBe(true);
+    });
+
+    it('should surface a persisted record whose status says failure', async () => {
+      const record = createToolResultRecord(
+        'todo_write',
+        'Error writing todos',
+      );
+      record.toolCallResult!['status'] = 'error';
+
+      await replayer.replay([record]);
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-123',
+          status: 'failed',
         }),
       );
     });
 
     it('should not synthesize a tool update for a successful TodoWrite without a plan', async () => {
       const record = createToolResultRecord('todo_write', 'Some string result');
+      record.toolCallResult!['status'] = 'success';
 
       await replayer.replay([record]);
 

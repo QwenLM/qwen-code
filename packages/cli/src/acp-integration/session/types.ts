@@ -189,6 +189,11 @@ export interface ToolCallResultParams {
   timestamp?: string | number;
   startedAt?: number;
   durationMs?: number;
+  /**
+   * Text a batch settlement already chose for a call that never ran, so a
+   * failed `todo_write` reports the same cancellation its siblings do.
+   */
+  cancelMessage?: string;
 }
 
 /**

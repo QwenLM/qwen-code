@@ -426,25 +426,6 @@ describe('ToolCallEmitter', () => {
       expect(emitted).toBe(false);
       expect(sendUpdateSpy).not.toHaveBeenCalled();
     });
-
-    it('surfaces a discarded TodoWrite preparation as a failed card', async () => {
-      await emitter.emitPreparationDiscarded('call-todo', ToolNames.TODO_WRITE);
-
-      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
-      expect(sendUpdateSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          sessionUpdate: 'tool_call_update',
-          toolCallId: 'call-todo',
-          status: 'failed',
-          title: expect.any(String),
-          kind: expect.any(String),
-          _meta: expect.objectContaining({
-            toolName: ToolNames.TODO_WRITE,
-            preparationDiscarded: true,
-          }),
-        }),
-      );
-    });
   });
 
   describe('emitResult', () => {
@@ -964,6 +945,8 @@ describe('ToolCallEmitter', () => {
             sessionUpdate: 'tool_call_update',
             toolCallId: 'call-todo-failed',
             status: 'failed',
+            title: expect.any(String),
+            kind: 'think',
             content: [
               {
                 type: 'content',
@@ -974,6 +957,32 @@ describe('ToolCallEmitter', () => {
               },
             ],
             _meta: { toolName: ToolNames.TODO_WRITE, provenance: 'builtin' },
+          }),
+        );
+      });
+
+      it('reports the batch cancellation text when the call never ran', async () => {
+        await emitter.emitResult({
+          toolName: ToolNames.TODO_WRITE,
+          callId: 'call-todo-cancelled',
+          success: false,
+          message: [],
+          cancelMessage: 'Tool call was cancelled before execution.',
+        });
+
+        expect(sendUpdateSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            toolCallId: 'call-todo-cancelled',
+            status: 'failed',
+            content: [
+              {
+                type: 'content',
+                content: {
+                  type: 'text',
+                  text: 'Tool call was cancelled before execution.',
+                },
+              },
+            ],
           }),
         );
       });
@@ -992,6 +1001,8 @@ describe('ToolCallEmitter', () => {
           expect.objectContaining({
             toolCallId: 'call-todo-error',
             status: 'failed',
+            title: expect.any(String),
+            kind: 'think',
             content: [
               {
                 type: 'content',
