@@ -361,6 +361,13 @@ export class SessionApiHistoryAccumulator {
         }
         return;
       }
+      if (record.subtype === 'context_reminder') {
+        if (record.message?.role === 'user') {
+          this.history.push(copyContentForApiHistory(record.message));
+          this.systemNotificationFlags.push(false);
+        }
+        return;
+      }
       if (record.subtype === 'memory_catalog_snapshot') {
         const snapshot = record.message?.parts?.[0];
         if (

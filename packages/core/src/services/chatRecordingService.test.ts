@@ -395,6 +395,35 @@ describe('ChatRecordingService', () => {
       expect(modelRecord!.parentUuid).toBe(preludeRecord!.uuid);
       expect(userRecord!.parentUuid).toBe(modelRecord!.uuid);
     });
+
+    it('records a mid-session context reminder after the prelude, in order', async () => {
+      const reminder = {
+        role: 'user' as const,
+        parts: [
+          { text: '<system-reminder>\nlate MCP tools\n</system-reminder>' },
+        ],
+      };
+      svc.recordStartupContext({
+        role: 'user',
+        parts: [{ text: '<system-reminder>\nprelude\n</system-reminder>' }],
+      });
+      svc.recordContextReminder(reminder);
+      user('hello');
+
+      const [preludeRecord, reminderRecord, userRecord] = await flushedAll();
+      expect(subtypes([preludeRecord!, reminderRecord!, userRecord!])).toEqual([
+        'startup_context',
+        'context_reminder',
+        undefined,
+      ]);
+      expect(reminderRecord).toMatchObject({
+        type: 'system',
+        message: reminder,
+      });
+      expect(reminderRecord!.message).not.toBe(reminder);
+      expect(reminderRecord!.parentUuid).toBe(preludeRecord!.uuid);
+      expect(userRecord!.parentUuid).toBe(reminderRecord!.uuid);
+    });
   });
 
   describe('persisted last user prompt notifications', () => {

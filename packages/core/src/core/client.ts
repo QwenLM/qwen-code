@@ -2623,6 +2623,16 @@ export class LlmClient {
     }
   }
 
+  /**
+   * Appends a mid-session context reminder and records it, so a resumed
+   * session replays it where the model first saw it.
+   */
+  private addContextReminder(text: string): void {
+    const content: Content = { role: 'user', parts: [{ text }] };
+    this.getChat().addHistory(content);
+    this.config.getChatRecordingService()?.recordContextReminder?.(content);
+  }
+
   private drainPendingMcpServerInstructionsReminder(): void {
     if (this.pendingMcpServerInstructions.size === 0) {
       return;
@@ -2633,10 +2643,7 @@ export class LlmClient {
     if (!reminder) {
       return;
     }
-    this.getChat().addHistory({
-      role: 'user',
-      parts: [{ text: reminder }],
-    });
+    this.addContextReminder(reminder);
     for (const [serverName, text] of this.pendingMcpServerInstructions) {
       this.announcedMcpServerInstructions.set(serverName, text);
     }
@@ -2719,10 +2726,7 @@ export class LlmClient {
       return;
     }
 
-    this.getChat().addHistory({
-      role: 'user',
-      parts: [{ text: reminder }],
-    });
+    this.addContextReminder(reminder);
 
     for (const name of removedMcpToolNames) {
       this.announcedMcpToolNames.delete(name);
@@ -2830,10 +2834,7 @@ export class LlmClient {
     if (!reminder) {
       return;
     }
-    this.getChat().addHistory({
-      role: 'user',
-      parts: [{ text: reminder }],
-    });
+    this.addContextReminder(reminder);
   }
 
   private async drainAgentReminders(): Promise<void> {
@@ -2879,10 +2880,7 @@ export class LlmClient {
     if (!reminder) {
       return;
     }
-    this.getChat().addHistory({
-      role: 'user',
-      parts: [{ text: reminder }],
-    });
+    this.addContextReminder(reminder);
 
     for (const name of removedAgentNames) {
       this.announcedAgentReminderNames.delete(name);

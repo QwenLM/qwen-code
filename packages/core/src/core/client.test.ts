@@ -3561,6 +3561,16 @@ describe('Gemini Client (client.ts)', () => {
         .spyOn(client.getChat(), 'setSystemInstruction')
         .mockImplementation(() => {});
       const addHistorySpy = quietChat();
+      const recorderMethods: Record<
+        string | symbol,
+        ReturnType<typeof vi.fn>
+      > = {};
+      const recorder = new Proxy(recorderMethods, {
+        get: (methods, name) => (methods[name] ??= vi.fn()),
+      });
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+        recorder as unknown as ReturnType<Config['getChatRecordingService']>,
+      );
       vi.mocked(getCoreSystemPrompt).mockClear();
 
       await client.setTools();
@@ -3577,6 +3587,10 @@ describe('Gemini Client (client.ts)', () => {
         [],
       );
       expect(addHistorySpy).toHaveBeenCalledWith(
+        mcpReminder('mcp__addition-server__add', ''),
+      );
+      // Recorded too, so a resumed session replays it in place.
+      expect(recorderMethods['recordContextReminder']).toHaveBeenCalledWith(
         mcpReminder('mcp__addition-server__add', ''),
       );
     });

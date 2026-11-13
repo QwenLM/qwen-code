@@ -432,6 +432,7 @@ export interface ChatRecord {
     | 'chat_compression'
     | 'memory_catalog_snapshot'
     | 'startup_context'
+    | 'context_reminder'
     | 'slash_command'
     | 'ui_telemetry'
     | 'at_command'
@@ -3784,6 +3785,30 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving startup context record:', error);
+    }
+  }
+
+  /**
+   * Persists a mid-session context reminder (MCP tools or instructions,
+   * skills, or agent types that became available after startup) at the point
+   * the model saw it, so a resumed session replays it in place instead of
+   * re-announcing it later and diverging from the original prefix.
+   */
+  recordContextReminder(message: Content): void {
+    try {
+      this.appendRecord({
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'context_reminder',
+        message: {
+          ...message,
+          ...(message.parts
+            ? { parts: message.parts.map((part) => ({ ...part })) }
+            : {}),
+        },
+      });
+    } catch (error) {
+      debugLogger.error('Error saving context reminder record:', error);
     }
   }
 

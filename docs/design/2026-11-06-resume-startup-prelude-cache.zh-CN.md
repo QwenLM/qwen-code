@@ -36,6 +36,11 @@ user record 是真正的 prompt，**没有存 startup prelude**，所以 resume 
    时，直接返回存档历史，不再重建。
 4. `startChat()` 只在「这次有生成 prelude」时记录；resume 且已有存档 prelude
    时不重复写入。
+5. session 中途加入的 context reminder（启动后才可用的 MCP 工具或说明、skill、
+   agent 类型，例如在第一个 request 组好后才连上的 MCP server）在加入 history
+   时写成 `system` record：`subtype: 'context_reminder'`，还原时在原位重播。
+   否则 resume 后这段 reminder 会离开原位，第一条 user message 在 prelude 之后
+   就开始不同。
 
 保留最新一笔，让 `/compress` 或 auto-compaction 重建的 prelude 在下次 resume
 时取代压缩前的那笔。ACP resume 会跳过 replay 后的 refresh（新的 ACP session
@@ -75,6 +80,8 @@ user record 是真正的 prompt，**没有存 startup prelude**，所以 resume 
   告所有可用 skill/command。
 - 只记录 startup prelude 不会建立 transcript；prelude 会在第一条真实 record
   之前写入。
+- session 中途加入的 context reminder 会被记录，并在相同位置重播；MCP server
+  晚连上的 session 在 resume 后保持相同的 request 前缀。
 - 既有 image、compression、date-reminder、rewind 测试维持绿灯。
 
 ## 其他方案

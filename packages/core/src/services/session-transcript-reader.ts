@@ -3426,7 +3426,8 @@ export class SessionTranscriptReader {
           entry?.subtype === 'memory_catalog_snapshot' ||
           entry?.subtype === 'goal_turn_end' ||
           entry?.subtype === 'slash_command' ||
-          entry?.subtype === 'startup_context') &&
+          entry?.subtype === 'startup_context' ||
+          entry?.subtype === 'context_reminder') &&
           (compressionPosition < 0 || position > compressionPosition))
       ) {
         modelSet.add(uuid);

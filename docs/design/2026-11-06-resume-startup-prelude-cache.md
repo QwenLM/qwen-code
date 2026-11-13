@@ -40,6 +40,13 @@ Persist the exact prelude and replay it.
    another one.
 4. `startChat()` only records a prelude when it generated one. A resumed
    session that already has the saved prelude does not append a duplicate.
+5. Mid-session context reminders (MCP tools or instructions, skills, and
+   agent types that became available after startup, such as an MCP server
+   that connects after the first request is built) are recorded as `system`
+   records with `subtype: 'context_reminder'` when they are added to the
+   history, and recovery replays them in place. Without this, a resumed
+   session drops the reminder from its original position and the first
+   user message diverges right after the prelude.
 
 The latest record wins so a prelude rebuilt by `/compress` or auto-compaction
 replaces the pre-compaction one on the next resume. The post-replay ACP refresh
@@ -87,6 +94,9 @@ request actually used.
   first turn does not re-announce every available skill/command.
 - Recording a startup prelude alone does not create a transcript; the prelude
   is written ahead of the first real record.
+- A context reminder added mid-session is recorded and replayed at the same
+  position, so a session whose MCP server connected late resumes with the
+  same request prefix.
 - Existing image, compression, date-reminder, and rewind tests stay green.
 
 ## Alternatives considered

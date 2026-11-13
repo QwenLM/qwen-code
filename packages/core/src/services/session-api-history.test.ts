@@ -1401,4 +1401,23 @@ describe('startup context replay', () => {
       buildSessionHistoryFromConversation({ messages }).apiHistory,
     ).toEqual([prelude('new'), ...turns]);
   });
+
+  it('replays a context reminder where it was recorded', () => {
+    const reminder = prelude('late MCP tools');
+    const messages = [
+      systemRecord('start', prelude('start')),
+      {
+        ...systemRecord('late', reminder),
+        subtype: 'context_reminder' as const,
+      },
+      userRecord('u1', 'hello'),
+    ];
+    const [turn] = buildApiHistoryFromConversation({
+      messages: [messages[2]!],
+    });
+
+    expect(
+      buildSessionHistoryFromConversation({ messages }).apiHistory,
+    ).toEqual([prelude('start'), reminder, turn]);
+  });
 });
