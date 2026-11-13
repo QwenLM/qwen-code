@@ -9,7 +9,8 @@ workspace overrides. After P3, both still resolve minimatch 9/10 through their
 Electron build tooling; the fixture also resolves glob 10 through config-file-ts.
 P4's workspace migration cannot repair these separate installed trees.
 
-This batch stacks on P5 #17163 (`355b73e044`) after P4 #17149 and upgrades the modern matcher edges while preserving
+This batch follows merged P5 #17163 on main `97cc965012`, after P4 #17149,
+and upgrades the modern matcher edges while preserving
 the existing Electron, builder, ASAR and native application versions. These are
 development/build dependencies of private packages, not evidence of a reachable
 production application exploit. Publication and consumer rescan remain separate.
@@ -84,8 +85,8 @@ fixture with its preload bridge. Record untested platforms and native boundaries
 
 Complete workspace build, bundle, typecheck and applicable checks after its
 normal release-age policy passes; inspect notices/artifacts and audit changes.
-Keep this PR draft while its stack parents are open, update its base after their
-merges, then complete current-head CI/review. Original Snyk scan closure and
+After the parent merges, align with actual main and revalidate before opening
+current-head CI/review. Original Snyk scan closure and
 release/deployment are not established by these build-tool source upgrades.
 
 ### Local evidence (November 13, macOS)
@@ -132,4 +133,14 @@ tracked notices have no additional delta from the parent.
 Full workspace lint and lock/Playwright parity checks also pass. Independent
 local dependency review found no actionable defect, and final self-audit is
 clean. Status: local acceptance and stack alignment pass; current-head CI/review
-and merge remain pending. Keep this batch draft while its parents remain open.
+and merge remain pending.
+
+After P5 merged, this batch was aligned with actual main `97cc965012` while
+preserving all four independent manifest/lock contents byte-for-byte. Parent
+design conflicts were resolved to main's already reviewed documents. On this
+baseline, a fresh strict frozen install passes all 2199 policy entries and
+completes normal prepare full build/bundle. Full workspace typecheck, lint,
+lock/Playwright parity and ten worker/budget tests pass again. Actual installed
+parent, plist and native-selection controls also pass again. Earlier universal
+packaging and launch evidence applies to unchanged implementation contents;
+those complete package/launch runs were not repeated for this alignment.

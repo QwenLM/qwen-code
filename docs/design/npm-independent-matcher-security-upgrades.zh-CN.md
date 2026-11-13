@@ -6,7 +6,7 @@
 
 独立 Live Host 和 CUA Electron 夹具 npm 锁不继承工作区 overrides。P3 后两者仍经 Electron 构建工具解析 minimatch 9/10，夹具还经 config-file-ts 解析 glob 10。P4 的工作区迁移不能修复这些独立安装树。
 
-本批基于 P4 #17149 后的 P5 #17163（`355b73e044`）继续 stacked 开发，升级现代 matcher 父边，保留现有 Electron、builder、ASAR 和原生应用版本。这些是私有包的开发/构建依赖，不证明生产应用中的漏洞可达。发布和消费端复扫仍独立验收。
+本批接续已合并的 P5 #17163，基于 main `97cc965012`，此前 P4 #17149 也已合并。升级现代 matcher 父边，保留现有 Electron、builder、ASAR 和原生应用版本。这些是私有包的开发/构建依赖，不证明生产应用中的漏洞可达。发布和消费端复扫仍独立验收。
 
 ## 目标与消费者
 
@@ -42,7 +42,7 @@ config-file-ts 调用真实 glob.glob.sync API，要求返回数组，并用源�
 
 在正式安装树重复父级筛选、ASAR allowlist、配置编译和缓存控制，包括导入源码过期后的失效重编译。验证 plist/原生架构选择及可用的真实 macOS 打包。运行 Live Host 构建/类型检查/测试，启动带 preload bridge 的 staged CUA 夹具；记录未验证的平台与原生边界。
 
-工作区正常包龄门禁通过后，完成完整构建、bundle、类型检查及相关检查，核对 notices/制品和 audit 变化。Stack 父 PR 开放期间保留草稿，父 PR 合并后更新 base，再完成新 head 的 CI/评审。这些构建工具源码升级不能证明原 Snyk 复扫、发布或部署闭环。
+工作区正常包龄门禁通过后，完成完整构建、bundle、类型检查及相关检查，核对 notices/制品和 audit 变化。父 PR 合并后对齐实际 main 并复验，再开启当前 head 的 CI/评审。这些构建工具源码升级不能证明原 Snyk 复扫、发布或部署闭环。
 
 ### 本机证据（11 月 13 日，macOS）
 
@@ -58,4 +58,6 @@ npm 11.17 初次安装保留了待批准的生命周期脚本。本机原生引�
 
 最终 stack 已包含 P5 验证过的归档迁移。实际冻结工作区安装通过既有严格包龄策略，并完成正常 prepare 构建/bundle；完整工作区 typecheck 及父 worker/预算十项回归通过。对齐后实际独立父消费者及原生架构选择控制再次通过，受跟踪的生成 notices 相对父分支没有额外差异。
 
-完整工作区 lint 及锁/Playwright parity 检查也通过。独立本地依赖评审未发现可行动缺陷，最终自审干净。状态：本地验收及 stack 对齐通过；新 head CI/评审及合并仍待完成。父 PR 开放期间保持草稿。
+完整工作区 lint 及锁/Playwright parity 检查也通过。独立本地依赖评审未发现可行动缺陷，最终自审干净。状态：本地验收及 stack 对齐通过；新 head CI/评审及合并仍待完成。
+
+P5 合并后，本批已对齐实际 main `97cc965012`，四个独立声明/锁文件内容逐字节保留。父设计冲突采用 main 已评审的文档。本基线重新执行严格冻结安装，2199 项策略通过，正常 prepare 完整构建/bundle 完成；完整工作区 typecheck、lint、锁/Playwright parity 及十项 worker/预算测试再次通过。真实安装父消费者、plist 与原生架构选择控制也再次通过。先前 universal 打包和启动证据适用于未变的实现文件；本次对齐没有重复完整打包/启动。
