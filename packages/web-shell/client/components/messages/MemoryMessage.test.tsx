@@ -56,18 +56,22 @@ async function flush() {
   });
 }
 
-async function mountOnUserTab() {
+async function mountPanel(refreshSignal = 0) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <MemoryMessage />
+        <MemoryMessage refreshSignal={refreshSignal} />
       </I18nProvider>,
     );
   });
   await flush();
+}
+
+async function mountOnUserTab() {
+  await mountPanel();
   act(() => button('User').click());
   await flush();
 }
@@ -80,14 +84,8 @@ function button(label: string): HTMLButtonElement {
   return match;
 }
 
-async function refreshMemory(signal = 1) {
-  act(() => {
-    root.render(
-      <I18nProvider language="en">
-        <MemoryMessage refreshSignal={signal} />
-      </I18nProvider>,
-    );
-  });
+async function refreshMemory() {
+  act(() => button('Refresh').click());
   await flush();
 }
 
@@ -131,7 +129,7 @@ afterEach(() => {
 });
 
 describe('MemoryMessage', () => {
-  it('retries a failed content read when the unchanged file is refreshed', async () => {
+  it('retries a failed content read from the mounted panel refresh control', async () => {
     memory.readMemoryFile.mockRejectedValue(
       new Error('temporary read failure'),
     );
@@ -151,6 +149,48 @@ describe('MemoryMessage', () => {
     expect(memory.readMemoryFile).toHaveBeenCalledTimes(readsBeforeRefresh + 1);
     expect(container.textContent).toContain('recovered memory');
     expect(button('Edit').disabled).toBe(false);
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+  });
+
+  it('does not replay a persisted refresh counter when the panel reopens', async () => {
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'existing memory\n',
+      truncated: false,
+    });
+    memory.reload.mockResolvedValue(memory.status);
+
+    memory.files = [
+      {
+        kind: 'memory_file',
+        path: '/workspace/QWEN.md',
+        scope: 'workspace',
+        bytes: 42,
+      },
+    ];
+    memory.status = { ...memory.status!, files: memory.files };
+
+    await mountPanel(3);
+
+    expect(memory.reload).not.toHaveBeenCalled();
+    expect(memory.readMemoryFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a refreshed truncated file read-only', async () => {
+    memory.readMemoryFile.mockRejectedValue(
+      new Error('temporary read failure'),
+    );
+    await mountOnUserTab();
+    memory.reload.mockResolvedValue(memory.status);
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'partial',
+      truncated: true,
+    });
+
+    await refreshMemory();
+
+    expect(container.textContent).toContain('partial');
+    expect(button('Edit').disabled).toBe(true);
+    expect(container.querySelector('textarea')).toBeNull();
     expect(memory.writeMemory).not.toHaveBeenCalled();
   });
 
@@ -182,7 +222,7 @@ describe('MemoryMessage', () => {
 
     await refreshMemory();
 
-    expect(container.textContent).not.toContain('Loading file');
+    expect(container.textContent).not.toContain('Loading memory file');
     expect(button('Edit').disabled).toBe(false);
     act(() => button('Edit').click());
     await flush();
@@ -275,7 +315,7 @@ describe('MemoryMessage', () => {
       expect(container.querySelector('textarea')).toBeNull();
       expect(container.textContent).toContain('refreshed memory');
       expect(container.textContent).not.toContain('unsaved draft');
-      expect(container.textContent).not.toContain('Loading file');
+      expect(container.textContent).not.toContain('Loading memory file');
       expect(button('Edit').disabled).toBe(false);
       expect(memory.readMemoryFile).toHaveBeenCalledTimes(
         readsBeforeRefresh + 1,

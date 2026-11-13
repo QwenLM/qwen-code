@@ -64,7 +64,7 @@ export function MemoryMessage({
   const [editable, setEditable] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const handledAddSignalRef = useRef(0);
-  const handledRefreshSignalRef = useRef(0);
+  const handledRefreshSignalRef = useRef(refreshSignal);
 
   const entries = useMemo<MemoryEntry[]>(() => {
     const globalFile = fileForScope(files, 'global');
@@ -159,10 +159,8 @@ export function MemoryMessage({
     if (error) setMessage(error.message);
   }, [error]);
 
-  useEffect(() => {
-    if (refreshSignal <= 0 || !selectedEntry) return;
-    if (handledRefreshSignalRef.current === refreshSignal) return;
-    handledRefreshSignalRef.current = refreshSignal;
+  const handleRefresh = useCallback(() => {
+    if (!selectedEntry) return;
     const loadSeq = loadSeqRef.current;
     reload()
       .then((nextStatus) => {
@@ -174,6 +172,7 @@ export function MemoryMessage({
         setMessage(t('memory.refreshed'));
       })
       .catch((refreshError: unknown) => {
+        if (loadSeq !== loadSeqRef.current) return;
         const text =
           refreshError instanceof Error
             ? refreshError.message
@@ -181,7 +180,14 @@ export function MemoryMessage({
         setMessage(text);
         onMessage?.(text, 'error');
       });
-  }, [loadContent, onMessage, refreshSignal, reload, selectedEntry, t]);
+  }, [loadContent, onMessage, reload, selectedEntry, t]);
+
+  useEffect(() => {
+    if (refreshSignal <= 0) return;
+    if (handledRefreshSignalRef.current === refreshSignal) return;
+    handledRefreshSignalRef.current = refreshSignal;
+    handleRefresh();
+  }, [handleRefresh, refreshSignal]);
 
   useEffect(() => {
     if (addSignal <= 0) return;
@@ -274,6 +280,14 @@ export function MemoryMessage({
             <div className={styles.detailPath}>{path}</div>
           </div>
           <div className={styles.actions}>
+            <button
+              type="button"
+              className={styles.actionButton}
+              disabled={saving || loading}
+              onClick={handleRefresh}
+            >
+              {t('memory.refresh')}
+            </button>
             <button
               type="button"
               className={styles.actionButton}
