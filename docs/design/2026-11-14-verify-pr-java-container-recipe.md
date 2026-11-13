@@ -29,8 +29,9 @@ without `boundary.json`); this design removes the reason for it.
   (`.github/scripts/configure-maven-mirror.sh`). It is the runtime the local
   recipe should sample, per the skill's "live sample of the lane's own
   runtime" rule.
-- The local JS recipe runs `node:22-bookworm` with `--network none`, a
-  per-round bearer model proxy, and no host credentials mounted.
+- The local JS recipe runs `node:22-bookworm` with no host credentials
+  mounted, reaching a host-side per-round bearer model proxy over the
+  Docker bridge; its boundary is credential-free, not offline.
 - Local Java rounds today reuse a host-seeded per-arm Maven repository
   (`m2repo-head`, `m2repo-prev`) and the host's JDK 21 + Maven — fast, but
   outside any boundary.
@@ -65,9 +66,11 @@ A second recipe in the skill, selected when the delta touches
    repository with `mvn dependency:go-offline` against the PR head's poms,
    using the host's normal mirror settings. The container mounts that
    repository directory only — never `settings.xml`, which can carry mirror
-   credentials — and runs with `-Dmaven.repo.local=/m2 --network none`.
-   Offline resolution keeps the credential-free boundary intact: no network
-   means no exfiltration path and no mirror auth inside.
+   credentials. The battery container runs with
+   `-Dmaven.repo.local=/m2 --network none` — stricter than the JS recipe,
+   which keeps network for the model proxy, because the Java battery needs
+   no model access. Offline resolution keeps the credential-free boundary
+   intact: no network means no exfiltration path and no mirror auth inside.
 3. **Trusted scripts, PR clone, model proxy.** Same layout as the JS recipe:
    scripts come from the trusted clone, the round runs in a standalone PR
    clone, and any model-driven step goes through the host-side
@@ -83,7 +86,9 @@ A second recipe in the skill, selected when the delta touches
   sounds simpler, but egress allowlists are a second trust surface (DNS,
   redirects, mirror compromise) and the CI lane's mirror script is host-side
   configuration. A seeded repository plus `--network none` reuses the JS
-  recipe's already-reviewed boundary shape. Cost: a seed step per round
+  recipe's already-reviewed credential-free boundary shape and tightens it
+  to offline, which the model-proxy-dependent JS recipe cannot do. Cost: a
+  seed step per round
   (minutes, cached across rounds of the same PR by reusing the repository
   directory when the pom set is unchanged — the same reuse rule the skill
   already applies to installs and builds).

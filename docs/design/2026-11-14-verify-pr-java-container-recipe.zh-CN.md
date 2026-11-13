@@ -13,7 +13,7 @@
 ## 现状
 
 - CI 的 `SDK Java` 车道（`.github/workflows/sdk-java.yml`）跑在 Temurin JDK（矩阵 `java`）、Maven `3.9.11`、作业级 Maven 仓库（`-Dmaven.repo.local`）和配置好的镜像源（`.github/scripts/configure-maven-mirror.sh`）上。按 skill「容器是车道自身运行时的活样本」规则，它就是本地配方应当采样的运行时。
-- 本地 JS 配方以 `--network none` 跑 `node:22-bookworm`，配每轮一次性 bearer 模型代理，不挂载任何宿主凭据。
+- 本地 JS 配方跑 `node:22-bookworm`，不挂载任何宿主凭据，经 Docker 网桥访问宿主侧每轮一次性 bearer 模型代理；其边界是无凭据，而非离线。
 - 今天的本地 Java 轮次复用宿主预置的每臂 Maven 仓库（`m2repo-head`、`m2repo-prev`）以及宿主的 JDK 21 + Maven——快，但在任何边界之外。
 
 ## 目标
@@ -33,13 +33,13 @@
 在 skill 中增加第二份配方，当增量触及 `packages/managed-agent-server/` 时选用：
 
 1. **镜像。** 自带车道 Maven 与 JDK 的 Maven 镜像，如 `maven:3.9.11-eclipse-temurin-21`。实现时核实确切 tag 存在并按 digest 钉住，与 JS 配方钉 `node:22-bookworm` 一致。
-2. **离线 Maven 仓库。** 宿主（可信侧）用 PR head 的 pom 跑 `mvn dependency:go-offline` 预置每轮仓库，使用宿主正常的镜像源配置。容器只挂载该仓库目录——绝不挂 `settings.xml`（可能带镜像源凭据）——并以 `-Dmaven.repo.local=/m2 --network none` 运行。离线解析保住无凭据边界：无网络即无外泄路径，容器内也没有镜像源鉴权。
+2. **离线 Maven 仓库。** 宿主（可信侧）用 PR head 的 pom 跑 `mvn dependency:go-offline` 预置每轮仓库，使用宿主正常的镜像源配置。容器只挂载该仓库目录——绝不挂 `settings.xml`（可能带镜像源凭据）。电池容器以 `-Dmaven.repo.local=/m2 --network none` 运行——比 JS 配方更严（JS 配方为模型代理保留网络），因为 Java 电池不需要模型访问。离线解析保住无凭据边界：无网络即无外泄路径，容器内也没有镜像源鉴权。
 3. **可信脚本、PR 克隆、模型代理。** 与 JS 配方同一布局：脚本来自可信克隆，轮次跑在独立 PR 克隆里，任何模型驱动步骤走宿主侧 `verify-pr-model-proxy.mjs` 中继。Java 电池本身不需要模型访问。
 4. **声明。** 门禁通过后轮次写入 `{"mode":"container","detail":"maven:3.9.11-eclipse-temurin-21, --network none, offline m2, credential-free"}`。
 
 ## 设计决策与理由
 
-- **离线预置优先于受限出网。** 只放行 Maven 镜像源看似更简单，但出网白名单是第二信任面（DNS、重定向、镜像源被攻陷），且 CI 车道的镜像脚本是宿主侧配置。预置仓库加 `--network none` 复用 JS 配方已评审过的边界形状。代价：每轮一个预置步骤（分钟级；同一 PR 的轮次间在 pom 集合不变时复用仓库目录即可跨轮缓存——与 skill 对安装和构建已有的复用规则相同）。
+- **离线预置优先于受限出网。** 只放行 Maven 镜像源看似更简单，但出网白名单是第二信任面（DNS、重定向、镜像源被攻陷），且 CI 车道的镜像脚本是宿主侧配置。预置仓库加 `--network none` 复用 JS 配方已评审过的无凭据边界形状，并收紧为离线——依赖模型代理的 JS 配方做不到这一点。代价：每轮一个预置步骤（分钟级；同一 PR 的轮次间在 pom 集合不变时复用仓库目录即可跨轮缓存——与 skill 对安装和构建已有的复用规则相同）。
 - **自带镜像优先于 node 上加 JDK。** 在 `node:22-bookworm` 上叠 JDK 能让混合 PR 共用一个容器，但会偏离 CI 车道运行时，并增大轮次必须信任的镜像。混合轮次可以在 Java 镜像里跑 JS 套件（经钉住的安装带上 Node），或跑两个容器；该选择留给实现。
 
 ## 约束
