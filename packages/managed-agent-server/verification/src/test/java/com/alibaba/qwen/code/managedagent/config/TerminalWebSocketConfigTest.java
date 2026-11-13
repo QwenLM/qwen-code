@@ -75,4 +75,26 @@ class TerminalWebSocketConfigTest {
             assertThat(ctx.getBean(TerminalTicketController.class)).isNotNull();
         }
     }
+
+    @Test
+    void raisesTheContainerBufferToTheSharedTerminalCeiling() {
+        try (AnnotationConfigWebApplicationContext ctx = terminalContext()) {
+            ctx.refresh();
+            // The browser leg must accept a whole paste as one message; the
+            // container ceiling is the worker's 8 MiB bound, not Tomcat's
+            // 8 KiB default. The factory bean applies these to the concrete
+            // container at startup; assert the configured values against the
+            // literal ceiling (not the shared constant, so halving the
+            // constant reds this assertion).
+            Object factory = ctx.getBean(
+                    org.springframework.web.socket.server.standard
+                            .ServletServerContainerFactoryBean.class);
+            assertThat(org.springframework.test.util.ReflectionTestUtils
+                    .getField(factory, "maxBinaryMessageBufferSize"))
+                    .isEqualTo(8 * 1024 * 1024);
+            assertThat(org.springframework.test.util.ReflectionTestUtils
+                    .getField(factory, "maxTextMessageBufferSize"))
+                    .isEqualTo(8 * 1024 * 1024);
+        }
+    }
 }

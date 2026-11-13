@@ -120,4 +120,20 @@ class TerminalRelayHandshakeInterceptorTest {
                 "term-1", null, new HashMap<>(), response)).isFalse();
         assertThat(response.getStatus()).isEqualTo(401);
     }
+
+    @Test
+    void admitsAMatrixParameterSpellingOfTheSessionPath() {
+        String ticket = mint("session-a", "term-1");
+        Map<String, Object> attributes = new HashMap<>();
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        // The router's normalized path strips matrix parameters, agreeing with
+        // the header filters' exemption. A hand-rolled getRequestURI derivation
+        // would capture "session-a;v=1", fail the path-safe check and refuse a
+        // upgrade the filters exempted.
+        assertThat(handshake(
+                "/api/agent/web-shell/v1/sessions/session-a;v=1/terminal",
+                "term-1", ticket, attributes, response)).isTrue();
+        assertThat(attributes.get(TerminalRelayHandshakeInterceptor.SESSION_ATTRIBUTE))
+                .isEqualTo("session-a");
+    }
 }

@@ -123,10 +123,17 @@ describe('ManagedTerminalPanel', () => {
     root = createRoot(container);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     if (root) {
       const current = root;
       act(() => current.unmount());
+      // Unmount can start the post-unmount release fallback (an async ticket
+      // request plus bounded retry timers). Drain it under the fake clock
+      // before restoring real timers, or its continuation lands in the next
+      // test and pushes a stray FakeWebSocket into that test's reset array.
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
     }
     root = undefined;
     container.remove();
@@ -516,6 +523,46 @@ describe('ManagedTerminalPanel', () => {
       await vi.advanceTimersByTimeAsync(60_000);
     });
     expect(ticketFn).toHaveBeenCalledTimes(3);
+  });
+
+  it('stops the dedicated release after three failed attempts', async () => {
+    // The retry chain is bounded: three non-confirmation closes must not
+    // spawn a fourth connection (an unbounded loop would leak sockets and
+    // tickets for a worker that never confirms).
+    const ticketFn = vi
+      .fn()
+      .mockResolvedValueOnce({ ticket: 'ticket-one', expiresInSeconds: 30 })
+      .mockResolvedValueOnce({ ticket: 'release-1', expiresInSeconds: 30 })
+      .mockResolvedValueOnce({ ticket: 'release-2', expiresInSeconds: 30 })
+      .mockResolvedValueOnce({ ticket: 'release-3', expiresInSeconds: 30 });
+    await render(ticketFn);
+    const first = FakeWebSocket.instances[0]!;
+    first.open();
+    first.closeWith(1006);
+    const current = root;
+    act(() => current!.unmount());
+    root = undefined;
+    await flush();
+    for (const index of [1, 2, 3]) {
+      const attempt = FakeWebSocket.instances[index]!;
+      act(() => attempt.open());
+      expect(attempt.send).toHaveBeenCalledWith('\x00{"type":"release"}');
+      act(() => attempt.closeWith(1006));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500);
+      });
+    }
+    // Three release attempts (instances 1-3) plus the original; no fourth.
+    expect(FakeWebSocket.instances).toHaveLength(4);
+    expect(FakeWebSocket.instances[3]!.protocols).toEqual([
+      'qwen-ws',
+      'qwen-bearer.release-3',
+    ]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(4);
+    expect(ticketFn).toHaveBeenCalledTimes(4);
   });
 
   it('keeps the replayed screen and exit notice when the worker closes right after the replay', async () => {

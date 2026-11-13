@@ -6,7 +6,7 @@
 
 import { createServer, type Server } from 'node:http';
 import { connect as netConnect, type AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 import {
   ManagedRuntimeTerminals,
@@ -307,6 +307,25 @@ describe('ManagedRuntimeTerminals', () => {
     const replayed = waitForOutput(second, 'mwt-echo-ok');
     // The snapshot replay carries the earlier output without new input.
     await replayed;
+  });
+
+  it('admission reads lifecycle state without joining the scrollback', async () => {
+    const port = await start();
+    const registry = (terminals as unknown as { registry: WebTerminalRegistry })
+      .registry;
+    // Settle the first connection fully (echo proves its replay readSnapshot
+    // already ran) before spying, so the spy only sees the refused upgrade.
+    const first = await attachAndEcho(port, 'readstate-pin', WORKSPACE_CWD);
+    const readSnapshot = vi.spyOn(registry, 'readSnapshot');
+    // A conflicting selector is refused at admission (409) before the
+    // connection handler ever runs, so the replay readSnapshot must not be
+    // touched: admission uses readState. Reverting it to readSnapshot would
+    // join the buffer here and red this assertion.
+    await expect(
+      connect(port, 'readstate-pin', '/another/cwd'),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(readSnapshot).not.toHaveBeenCalled();
+    first.close();
   });
 });
 
