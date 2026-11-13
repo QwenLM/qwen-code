@@ -226,6 +226,94 @@ describe('GitWorktreeService.setupWorktrees() — .worktreeinclude', () => {
     expect(await read(path.join(wt, 'README.md'))).toBe('hi\n');
   });
 
+  it('skips an ignored symlink instead of materialising its target', async () => {
+    const outside = path.join(repoParent, 'outside-secret.txt');
+    await fs.writeFile(outside, 'OUT_OF_REPO\n');
+    await fs.symlink(outside, path.join(repoRoot, '.env'));
+    await fs.writeFile(path.join(repoRoot, WORKTREE_INCLUDE_FILE), '.env\n');
+    gitIn(repoRoot, 'add', '-f', WORKTREE_INCLUDE_FILE);
+    gitIn(repoRoot, 'commit', '-q', '-m', 'include list', '--no-verify');
+
+    const wt = await setup();
+
+    // The docs promise a copy of files inside the repo; dereferencing a link
+    // to the outside would make an out-of-repo secret agent-readable.
+    expect(await exists(path.join(wt, '.env'))).toBe(false);
+  });
+
+  it('does not overwrite a path the destination revision tracks', async () => {
+    // `tracks-it` commits `appsettings.json`; the branch the worktree is cut
+    // from ignores it and holds a local secret under the same name.
+    await fs.writeFile(
+      path.join(repoRoot, 'appsettings.json'),
+      '{"committed":true}\n',
+    );
+    gitIn(repoRoot, 'add', '-f', 'appsettings.json');
+    gitIn(repoRoot, 'commit', '-q', '-m', 'track settings', '--no-verify');
+    gitIn(repoRoot, 'checkout', '-q', '-b', 'tracks-it');
+    gitIn(repoRoot, 'checkout', '-q', 'main');
+    // Now untracked and ignored on the working branch, with a local edit.
+    gitIn(repoRoot, 'rm', '-q', '--cached', 'appsettings.json');
+    await fs.writeFile(
+      path.join(repoRoot, '.gitignore'),
+      '.env\n.local/\nsecrets/*.json\nappsettings.json\n',
+    );
+    await fs.writeFile(
+      path.join(repoRoot, 'appsettings.json'),
+      '{"secret":"LOCAL"}\n',
+    );
+    gitIn(repoRoot, 'add', '.gitignore');
+    gitIn(repoRoot, 'commit', '-q', '-m', 'untrack settings', '--no-verify');
+    await fs.writeFile(
+      path.join(repoRoot, WORKTREE_INCLUDE_FILE),
+      'appsettings.json\n',
+    );
+    gitIn(repoRoot, 'add', '-f', WORKTREE_INCLUDE_FILE);
+    gitIn(repoRoot, 'commit', '-q', '-m', 'include list', '--no-verify');
+
+    const service = new GitWorktreeService(repoRoot, baseDir);
+    const result = await service.setupWorktrees({
+      sessionId: 's2',
+      sourceRepoPath: repoRoot,
+      worktreeNames: ['two'],
+      baseBranch: 'tracks-it',
+    });
+    expect(result.success).toBe(true);
+    const wt = result.worktrees[0].path;
+
+    // Overwriting would put the local secret onto a revision that tracks the
+    // file, and a routine `git add -A` there would commit it.
+    expect(await read(path.join(wt, 'appsettings.json'))).toBe(
+      '{"committed":true}\n',
+    );
+  });
+
+  it('reads the include file from the repository root, not the launch subdirectory', async () => {
+    await fs.mkdir(path.join(repoRoot, 'pkg'), { recursive: true });
+    await fs.writeFile(path.join(repoRoot, 'pkg', 'keep.txt'), 'x\n');
+    gitIn(repoRoot, 'add', '.');
+    gitIn(repoRoot, 'commit', '-q', '-m', 'pkg', '--no-verify');
+    await fs.writeFile(path.join(repoRoot, '.env'), 'TOKEN=abc\n');
+    await fs.writeFile(path.join(repoRoot, WORKTREE_INCLUDE_FILE), '.env\n');
+    gitIn(repoRoot, 'add', '-f', WORKTREE_INCLUDE_FILE);
+    gitIn(repoRoot, 'commit', '-q', '-m', 'include list', '--no-verify');
+
+    // Service constructed from the subdirectory, while the session's source
+    // repository is the root — a monorepo launch from `pkg/`.
+    const sub = path.join(repoRoot, 'pkg');
+    const service = new GitWorktreeService(sub, baseDir);
+    const result = await service.setupWorktrees({
+      sessionId: 's3',
+      sourceRepoPath: repoRoot,
+      worktreeNames: ['three'],
+    });
+    expect(result.success).toBe(true);
+
+    expect(await read(path.join(result.worktrees[0].path, '.env'))).toBe(
+      'TOKEN=abc\n',
+    );
+  });
+
   it('ignores a file over the size cap', async () => {
     await writeIgnoredFixtures();
     await fs.writeFile(
