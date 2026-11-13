@@ -997,6 +997,37 @@ describe('gitCommit', () => {
     expect(git(dir, 'status', '--porcelain').trim()).toBe('');
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'commits a file whose name contains a newline',
+    async () => {
+      const dir = makeRepo();
+      write(dir, { 'line1\nline2.txt': 'fresh\n' });
+
+      await gitCommit(dir, 'add a newline name', {
+        paths: ['line1\nline2.txt'],
+      });
+
+      expect(
+        git(dir, 'show', '--name-only', '-z', '--format=', 'HEAD')
+          .split('\0')
+          .filter(Boolean),
+      ).toEqual(['line1\nline2.txt']);
+    },
+  );
+
+  it('names an emptied selection instead of forwarding git did not match', async () => {
+    const dir = makeRepo();
+    commitFile(dir, 'dir/a.txt', 'one\n', 'add a');
+    // Status reports the pair against `dir`; the rename filter drops both
+    // halves because neither equals the selected path, so the resolver hands
+    // staging an empty selection.
+    git(dir, 'mv', 'dir/a.txt', 'dir/b.txt');
+
+    await expect(
+      gitCommit(dir, 'commit dir', { paths: ['dir'] }),
+    ).rejects.toThrow('cannot commit: none of the selected paths have changes');
+  });
+
   it('rejects a selection that escapes the repository', async () => {
     const dir = makeRepo();
     write(dir, { 'a.txt': 'two\n' });
@@ -1009,19 +1040,23 @@ describe('gitCommit', () => {
     ).rejects.toThrow('invalid commit path');
   });
 
-  it('treats glob metacharacters in a selected name literally', async () => {
-    const dir = makeRepo();
-    commitFile(dir, 'ab.txt', 'one\n', 'add ab');
-    // Two files, one literal `*` in its name and one the glob would match.
-    write(dir, { 'a*.txt': 'fresh\n', 'ab.txt': 'two\n' });
+  it.skipIf(process.platform === 'win32')(
+    'treats glob metacharacters in a selected name literally',
+    async () => {
+      const dir = makeRepo();
+      commitFile(dir, 'ab.txt', 'one\n', 'add ab');
+      // Two files, one literal `*` in its name and one the glob would match.
+      // NTFS rejects `*` in a filename, so this fixture cannot be created there.
+      write(dir, { 'a*.txt': 'fresh\n', 'ab.txt': 'two\n' });
 
-    await gitCommit(dir, 'commit the starred file', { paths: ['a*.txt'] });
+      await gitCommit(dir, 'commit the starred file', { paths: ['a*.txt'] });
 
-    expect(git(dir, 'show', '--name-only', '--format=', 'HEAD').trim()).toBe(
-      'a*.txt',
-    );
-    expect(git(dir, 'status', '--porcelain').trim()).toBe('M ab.txt');
-  });
+      expect(git(dir, 'show', '--name-only', '--format=', 'HEAD').trim()).toBe(
+        'a*.txt',
+      );
+      expect(git(dir, 'status', '--porcelain').trim()).toBe('M ab.txt');
+    },
+  );
 
   it('creates a non-ASCII path', async () => {
     const dir = makeRepo();

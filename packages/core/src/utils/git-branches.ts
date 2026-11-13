@@ -1369,8 +1369,10 @@ function normalizeCommitPaths(paths: readonly string[]): string[] {
     }
     if (
       !raw ||
+      // A newline is legal in a POSIX filename and the diff listing offers
+      // such files preselected; the pathspec is passed as one argv element, so
+      // it survives. `\0` cannot, because argv is NUL-terminated.
       raw.includes('\0') ||
-      raw.includes('\n') ||
       raw.startsWith('/') ||
       /^[a-zA-Z]:/.test(raw)
     ) {
@@ -1559,13 +1561,20 @@ export async function gitCommit(
         stageable.split('\0').filter((line) => line !== ''),
       );
       const existing = selection.filter((p) => known.has(p));
-      if (existing.length > 0) {
-        await runGit(
-          cwd,
-          ['add', '-A', '--', ...literalPathspecs(existing)],
-          env,
+      // `resolveCommitPaths` ran before staging, and staging is what can empty
+      // the selection — a rename whose halves the resolver dropped, or a path
+      // that only differs by case on a case-insensitive filesystem. Committing
+      // with an empty `existing` would hand git a path with nothing to commit.
+      if (existing.length === 0) {
+        throw new Error(
+          'cannot commit: none of the selected paths have changes',
         );
       }
+      await runGit(
+        cwd,
+        ['add', '-A', '--', ...literalPathspecs(existing)],
+        env,
+      );
       await runGit(
         cwd,
         ['commit', '-m', message, '--', ...literalPathspecs(selection)],

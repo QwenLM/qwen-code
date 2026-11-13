@@ -168,6 +168,19 @@ describe('web-shell i18n catalog', () => {
     );
   });
 
+  it('labels the commit checklist states the way the diff tab does', () => {
+    const zh = getTranslator('zh-CN');
+
+    // The commit checklist and the diff tab name the same file state inside one
+    // dialog, so the checklist has to use the state form rather than the
+    // imperative verb the bare labels had.
+    expect(zh('gitCommit.fileAdded')).toBe('已新增');
+    expect(zh('gitCommit.fileDeleted')).toBe(zh('gitDiff.deleted'));
+    expect(zh('gitCommit.fileDeleted')).toBe('已删除');
+    expect(zh('gitCommit.fileRenamed')).toBe('已重命名');
+    expect(zh('gitCommit.fileModified')).toBe('已修改');
+  });
+
   it('keeps the outbound Channel translations in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');
