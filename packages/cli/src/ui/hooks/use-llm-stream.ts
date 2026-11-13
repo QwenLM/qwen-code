@@ -93,12 +93,11 @@ import {
   getApiHistoryPromptId,
 } from '@qwen-code/qwen-code-core';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
-import {
-  runModelRound,
-  runToolBatch,
-  type AgentLoopRound,
-  type AgentLoopStopReason,
+import type {
+  AgentLoopRound,
+  AgentLoopStopReason,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
+import { startSharedLoopRound } from './shared-loop-round.js';
 import type { InteractiveToolCall } from '../../services/interactive-mod-tool-scheduler.js';
 import { createInkToolExecutor } from './ink-tool-executor.js';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
@@ -509,11 +508,12 @@ interface SharedToolBatchHandle {
  */
 interface SharedToolBatch {
   calls: ToolCallRequestInfo[];
-  signal: AbortSignal;
   modelOverride: string | undefined;
   promptId: string | undefined;
   /** Provider call fingerprints: history's, then this turn's. */
   handled: Map<string, string>;
+  /** The round's loop call, whose batch waits for this one. */
+  loop: ReturnType<typeof startSharedLoopRound>;
 }
 
 /** A shared tool batch's results, for `handleCompletedTools`. */
@@ -590,14 +590,17 @@ function countedCallIds(calls: readonly InteractiveToolCall[]): Set<string> {
 }
 
 /**
- * A model round on the shared agent loop (`experimental.unifiedAgentLoop`):
- * `runModelRound` sends it, collects its tool calls and turns the client's
- * terminal events into a stop reason.
+ * A round on the shared agent loop (`experimental.unifiedAgentLoop`): the
+ * round and its tool batch run in one `runAgentLoop` call, which collects
+ * the round's tool calls and turns the client's terminal events into a stop
+ * reason. `loop` is the call once the processor started it; the caller
+ * closes it, so a processor that leaves without the batch skips it.
  */
 interface SharedModelRound {
   client: LlmClient;
   round: AgentLoopRound;
   signal: AbortSignal;
+  loop?: ReturnType<typeof startSharedLoopRound>;
 }
 
 /** Ends a shared model round from inside its event callback. */
@@ -3236,7 +3239,7 @@ export const useLlmStream = (
         0,
       );
       const sharedRound = 'round' in source;
-      // On the shared round, `runModelRound` collects the calls and drops
+      // On the shared round, the loop collects the calls and drops
       // those of an attempt a retry or fallback replaced; the processor's own
       // resets of `toolCallRequests` below matter only on the current path.
       let toolCallRequests: ToolCallRequestInfo[] = [];
@@ -3762,20 +3765,24 @@ export const useLlmStream = (
       dualOutput?.startAssistantMessage();
       try {
         if (sharedRound) {
+          const useEventBus = config.isEventBusAgentLoopEnabled?.() === true;
           debugLogger.debug(
             `[processLlmStreamEvents] model round on the shared agent loop (prompt ${source.round.promptId})`,
           );
-          const { calls, stop } = await runModelRound(
-            source.client,
-            source.round,
-            source.signal,
-            {
-              onModelEvent: (event) => {
-                const ended = handleStreamEvent(event);
-                if (ended) throw new StreamProcessingEnded(ended);
-              },
+          source.loop = startSharedLoopRound(source.client, source.round, {
+            config,
+            signal: source.signal,
+            // The batch's tools run under the turn's signal, as the
+            // scheduler's do.
+            toolSignal: signal,
+            responded: duplicateProviderToolCallResponseIdsRef.current,
+            useEventBus,
+            onModelEvent: (event) => {
+              const ended = handleStreamEvent(event);
+              if (ended) throw new StreamProcessingEnded(ended);
             },
-          );
+          });
+          const { calls, stop } = await source.loop.model;
           toolCallRequests = calls;
           roundStop = stop;
         } else {
@@ -3907,10 +3914,10 @@ export const useLlmStream = (
           const done = runSharedToolBatchRef.current(
             {
               calls: toolCallRequests,
-              signal,
               modelOverride: modelOverrideRef.current,
               promptId: toolCallRequests[0]?.prompt_id,
               handled: handledToolCallFingerprints,
+              loop: (source as SharedModelRound).loop!,
             },
             turn,
           );
@@ -4040,6 +4047,7 @@ export const useLlmStream = (
       registerToolBatch,
       scheduleToolCalls,
       llmClient,
+      config,
       handleChatCompressionEvent,
       handleFinishedEvent,
       handleMaxSessionTurnsEvent,
@@ -5060,34 +5068,45 @@ export const useLlmStream = (
                   }
                 : {}),
           };
-          const source = config.isUnifiedAgentLoopEnabled?.()
-            ? {
-                client: llmClient,
-                signal: providerSignal,
-                round: {
-                  parts: finalQueryToSend,
-                  promptId: prompt_id!,
-                  options: roundOptions,
-                },
-              }
-            : llmClient.sendMessageStream(
-                finalQueryToSend,
-                providerSignal,
-                prompt_id!,
-                roundOptions,
-              );
+          const sharedSource: SharedModelRound | undefined =
+            config.isUnifiedAgentLoopEnabled?.()
+              ? {
+                  client: llmClient,
+                  signal: providerSignal,
+                  round: {
+                    parts: finalQueryToSend,
+                    promptId: prompt_id!,
+                    options: roundOptions,
+                  },
+                }
+              : undefined;
+          const source =
+            sharedSource ??
+            llmClient.sendMessageStream(
+              finalQueryToSend,
+              providerSignal,
+              prompt_id!,
+              roundOptions,
+            );
           metadata?.onRequestStarted?.();
 
-          const processingResult = await processLlmStreamEvents(
-            source,
-            userMessageTimestamp,
-            processingSignal,
-            submitType,
-            turnAdmission,
-            prompt_id,
-            !allowConcurrentBtwDuringResponse,
-            toolContinuationOwner,
-          );
+          let processingResult: StreamProcessingResult;
+          try {
+            processingResult = await processLlmStreamEvents(
+              source,
+              userMessageTimestamp,
+              processingSignal,
+              submitType,
+              turnAdmission,
+              prompt_id,
+              !allowConcurrentBtwDuringResponse,
+              toolContinuationOwner,
+            );
+          } finally {
+            // The processor handed the batch its scheduler, or left without
+            // it: either way the loop call of a shared round ends.
+            void sharedSource?.loop?.close();
+          }
           if (
             !goalBinding &&
             turnAdmission &&
@@ -7640,39 +7659,27 @@ export const useLlmStream = (
       );
       let committed = false;
       try {
-        const result = await runToolBatch(batch.calls, {
-          config,
-          client: llmClient,
-          signal: batch.signal,
-          duplicates: {
-            handled: batch.handled,
-            responded: duplicateProviderToolCallResponseIdsRef.current,
-          },
+        // The batch of the round's loop call runs on this scheduler.
+        const result = await batch.loop.runBatch({
           executor,
-          // Esc keeps the results, which the TUI pairs into history.
-          keepCancelledResults: true,
-          // The TUI records only the results it sends, in its own session.
-          deferRecording: true,
-          host: {
-            onToolResult: ({ request, response, origin }) => {
-              if (origin !== 'executed') {
-                dualOutput?.emitToolResult(request, response);
-              }
-              if (
-                origin === 'executed' &&
-                launchedBackgroundAgent(request, response)
-              ) {
-                backgroundLaunchCallIds.add(request.callId);
-              }
-              // The TUI's stops end the batch: a quota model switch, or a
-              // background agent launch that spent the last background
-              // slot. The completion step checks both again when it sends.
-              return (
-                modelSwitchedFromQuotaErrorRef.current ||
-                (backgroundLaunchCallIds.size > 0 &&
-                  backgroundSlotsSpent(config))
-              );
-            },
+          handled: batch.handled,
+          onToolResult: ({ request, response, origin }) => {
+            if (origin !== 'executed') {
+              dualOutput?.emitToolResult(request, response);
+            }
+            if (
+              origin === 'executed' &&
+              launchedBackgroundAgent(request, response)
+            ) {
+              backgroundLaunchCallIds.add(request.callId);
+            }
+            // The TUI's stops end the batch: a quota model switch, or a
+            // background agent launch that spent the last background
+            // slot. The completion step checks both again when it sends.
+            return (
+              modelSwitchedFromQuotaErrorRef.current ||
+              (backgroundLaunchCallIds.size > 0 && backgroundSlotsSpent(config))
+            );
           },
         });
         if (settled.length === 0 || !owner) return undefined;
@@ -7763,7 +7770,6 @@ export const useLlmStream = (
       setSubmissionInFlight,
       retainSubmissionActivity,
       config,
-      llmClient,
       dualOutput,
       getToolBatchId,
       addCompletedToolGroup,
