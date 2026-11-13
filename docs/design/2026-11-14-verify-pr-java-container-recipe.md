@@ -60,8 +60,8 @@ A second recipe in the skill, selected when the delta touches
 
 1. **Image.** A Maven image bundling the lane's Maven and JDK, such as
    `maven:3.9.11-eclipse-temurin-21`. Verify the exact tag exists at
-   implementation time and pin by digest, as the JS recipe pins
-   `node:22-bookworm`.
+   implementation time and pin by digest (the JS recipe references
+   `node:22-bookworm` by tag; the Java recipe should be stricter).
 2. **Offline Maven repository.** The host (trusted side) seeds a per-round
    repository with `mvn dependency:go-offline` against the PR head's poms,
    using the host's normal mirror settings. The container mounts that
@@ -88,10 +88,9 @@ A second recipe in the skill, selected when the delta touches
   configuration. A seeded repository plus `--network none` reuses the JS
   recipe's already-reviewed credential-free boundary shape and tightens it
   to offline, which the model-proxy-dependent JS recipe cannot do. Cost: a
-  seed step per round
-  (minutes, cached across rounds of the same PR by reusing the repository
-  directory when the pom set is unchanged — the same reuse rule the skill
-  already applies to installs and builds).
+  seed step per round (minutes, cached across rounds of the same PR by
+  reusing the repository directory when the pom set is unchanged — the same
+  reuse rule the skill already applies to installs and builds).
 - **Bundled image over JDK-on-node.** Layering a JDK onto `node:22-bookworm`
   would serve mixed PRs in one container, but drifts from the CI lane's
   runtime and grows the image the round must trust. Mixed rounds can run the
@@ -119,8 +118,7 @@ A second recipe in the skill, selected when the delta touches
 - **Repository reuse staleness.** A reused repository built for another head
   can mask a dependency change. Mitigation: the skill's existing
   built-for-this-head reuse rule applies; pom diff decides.
-- **Image drift.** Digest pinning plus a documented refresh step, as with the
-  JS recipe.
+- **Image drift.** Digest pinning plus a documented refresh step.
 
 ## Validation plan
 
