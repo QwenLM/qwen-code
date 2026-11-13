@@ -630,6 +630,9 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'RUNTIME_NODE_LIST',
   // Loopback operator registration has no client capability.
   'EXTERNAL_STORAGE_REGISTER',
+  // Internal relay MCP leg the Hosted Harness connects back to, behind the
+  // relay credential, never a client capability.
+  'INTERNAL_CLIENT_FILES_MCP',
   // Internal writer and publication routes: between the control plane and its
   // own stores, behind writer credentials, never a client capability.
   'PUB_ADMISSION_PREPARE',
@@ -684,6 +687,11 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
  * Personal MemoryStore create/list differs from Workspace memory-file CRUD.
  */
 export const MANAGED_ONLY_REPORTED: readonly string[] = [
+  'CLIENT_FILES_REGISTER',
+  'CLIENT_FILES_RESPOND',
+  'CLIENT_FILES_STATUS',
+  'CLIENT_FILES_STREAM',
+  'CLIENT_FILES_UNREGISTER',
   'EXTENSION_ARCHIVE',
   'EXTENSION_CONFIG_APPLY',
   'EXTENSION_CONFIG_GET',
