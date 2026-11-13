@@ -13322,6 +13322,93 @@ describe('ACP WebSocket transport security', () => {
     }
   });
 
+  it('flushes a suppressed burst on dispose so the count is never lost', async () => {
+    await startServer();
+    const origin = 'chrome-extension://abcdefghijklmnop';
+    const rejections = () =>
+      stdioMocks.writeStderrLine.mock.calls.filter(([line]) =>
+        String(line).includes('WebSocket upgrade rejected'),
+      );
+    const before = rejections().length;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      for (let i = 0; i < 5; i++) {
+        expect((await wsConnectRaw('127.0.0.1', origin)).code).toBe(403);
+      }
+      // One line during the burst; the other four are only a count in memory.
+      expect(rejections().length - before).toBe(1);
+      acpHandle?.dispose();
+      const shutdown = rejections().at(-1)!;
+      expect(String(shutdown[0])).toContain('suppressed=4 ');
+      expect(String(shutdown[0])).toContain('at shutdown');
+      // Idempotent: a second dispose must not repeat the summary.
+      acpHandle?.dispose();
+      expect(rejections().length - before).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports how many distinct reasons a single key folded away', async () => {
+    await startServer();
+    const rejections = () =>
+      stdioMocks.writeStderrLine.mock.calls.filter(([line]) =>
+        String(line).includes('WebSocket upgrade rejected'),
+      );
+    const before = rejections().length;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      expect(
+        (await wsConnectRaw('127.0.0.1', 'chrome-extension://aaaa')).code,
+      ).toBe(403);
+      expect(
+        (await wsConnectRaw('127.0.0.1', 'https://attacker.example')).code,
+      ).toBe(403);
+      expect(rejections().length - before).toBe(1);
+
+      vi.setSystemTime(Date.now() + 61_000);
+      expect(
+        (await wsConnectRaw('127.0.0.1', 'chrome-extension://aaaa')).code,
+      ).toBe(403);
+      // The count says two reasons were folded in, so the one reason quoted
+      // on the line cannot be read as the only caller of that key.
+      expect(String(rejections().at(-1)![0])).toContain(
+        'suppressed=1 reasons=2 ',
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keys the throttle by listener so a LAN probe is not folded into primary', async () => {
+    await startServer({
+      token: 'runtime-token',
+      localControlToken: 'pairing-token-123',
+    });
+    const rejections = () =>
+      stdioMocks.writeStderrLine.mock.calls.filter(([line]) =>
+        String(line).includes('WebSocket upgrade rejected'),
+      );
+    const before = rejections().length;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      // A wrong runtime bearer on the primary listener, ...
+      expect(
+        (
+          await wsConnectRaw('127.0.0.1', `http://127.0.0.1:${port}`, {
+            Authorization: 'Bearer wrong',
+          })
+        ).code,
+      ).toBe(401);
+      // ...and a wrong pairing token on the LAN listener within the same
+      // window. One shared key would hide the second probe entirely.
+      expect((await wsConnectLocalControl('also-wrong')).code).toBe(401);
+      expect(rejections().length - before).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('logs an upgrade rejection again when the wall clock steps backwards', async () => {
     await startServer();
     const origin = 'chrome-extension://abcdefghijklmnop';

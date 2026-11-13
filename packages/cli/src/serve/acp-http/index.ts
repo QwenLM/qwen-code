@@ -428,8 +428,8 @@ const MAX_INFLIGHT_MCP_DISPATCH = 8;
  * A permanently-rejecting client — most often the Chrome extension retrying an
  * origin the daemon was never told to allow — reconnects forever, so one log
  * line per rejection buries the journal (#13966). Each distinct rejection
- * category and client address is logged once, then suppressed until this
- * window elapses; the line that does get written carries the full reason.
+ * category, listener and client address is logged once, then suppressed until
+ * this window elapses; the line that does get written carries the full reason.
  */
 const UPGRADE_REJECT_LOG_INTERVAL_MS = 60_000;
 
@@ -1573,15 +1573,16 @@ export function mountAcpHttp(
   let upgradeListener:
     | ((req: IncomingMessage, socket: Duplex, head: Buffer) => void)
     | undefined;
-  // Last time each `category@address` rejection was logged and how many of
-  // that key were dropped since, so a client stuck in a retry loop cannot
-  // flood the journal (see UPGRADE_REJECT_LOG_INTERVAL_MS) while the next
-  // line still tells an operator how hard it retried. The key is the category
-  // rather than the rendered reason: the reason embeds client-controlled text,
-  // which would otherwise mint a fresh key per attempt.
+  // Last time each `listener@category@address` rejection was logged, how many
+  // of that key were dropped since, and how many distinct reasons those
+  // dropped attempts carried, so a client stuck in a retry loop cannot flood
+  // the journal (see UPGRADE_REJECT_LOG_INTERVAL_MS) while the next line still
+  // tells an operator how hard it retried. The key is the category rather than
+  // the rendered reason: the reason embeds client-controlled text, which would
+  // otherwise mint a fresh key per attempt.
   const upgradeRejectLoggedAt = new Map<
     string,
-    { at: number; suppressed: number }
+    { at: number; suppressed: number; reasons: Set<string> }
   >();
   // A Set, not a single server: while Local Control is on, the same app is
   // served by both the primary listener and the LAN listener, and each needs
@@ -1637,9 +1638,13 @@ export function mountAcpHttp(
         // sites embed client-controlled text (path, Host, Origin, selector),
         // so a client that varies that detail would mint a fresh key per
         // attempt and never be throttled. The full reason still appears in
-        // the line that gets written.
+        // the line that gets written. The listener is part of the key because
+        // the primary and Local Control listeners have different credential
+        // sets, so one peer's `auth-mismatch` against each must not fold into
+        // one line — an operator watching for pairing-token guessing cannot
+        // tell which listener was probed otherwise.
         const category = reason.split(' ', 1)[0] || reason;
-        const key = `${category}@${rawAddr}`;
+        const key = `${listenerIdentityOfSocket(socket).kind}@${category}@${rawAddr}`;
         const now = Date.now();
         const last = upgradeRejectLoggedAt.get(key);
         if (
@@ -1648,12 +1653,17 @@ export function mountAcpHttp(
           now - last.at < UPGRADE_REJECT_LOG_INTERVAL_MS
         ) {
           last.suppressed += 1;
+          last.reasons.add(reason);
           return;
         }
         // Re-insert so the map stays in least-recently-logged order: a daemon
         // accumulating one entry per rejected client is otherwise unbounded.
         upgradeRejectLoggedAt.delete(key);
-        upgradeRejectLoggedAt.set(key, { at: now, suppressed: 0 });
+        upgradeRejectLoggedAt.set(key, {
+          at: now,
+          suppressed: 0,
+          reasons: new Set(),
+        });
         if (upgradeRejectLoggedAt.size > MAX_UPGRADE_REJECT_LOG_KEYS) {
           const oldest = upgradeRejectLoggedAt.keys().next().value;
           if (oldest !== undefined) upgradeRejectLoggedAt.delete(oldest);
@@ -1662,11 +1672,13 @@ export function mountAcpHttp(
         // the reason is rendered as a delimited field. The reason embeds
         // client-controlled header text, so anything shape-compatible with the
         // note inside it — `(99999 similar suppressed ...)` — must not read as
-        // the real count.
+        // the real count. `reasons=` counts the distinct reasons folded into
+        // this key, so the single reason shown cannot be read as the only one
+        // the count belongs to.
         const suppressedPrefix =
           last === undefined || last.suppressed === 0
             ? ''
-            : `suppressed=${last.suppressed} `;
+            : `suppressed=${last.suppressed} reasons=${1 + last.reasons.size} `;
         writeStderrLine(
           `qwen serve: WebSocket upgrade rejected ${suppressedPrefix}(${JSON.stringify(reason)}) from ${rawAddr}`,
         );
@@ -2642,6 +2654,17 @@ export function mountAcpHttp(
     dispose: () => {
       if (disposed) return;
       disposed = true;
+      // Drop the suppression state on the way out, but first write what was
+      // held back: a burst that stops right before shutdown otherwise leaves
+      // one line that reads like a single probe, and a journal alert keyed on
+      // rejection-line rate would miss the 999 attempts behind it.
+      for (const [key, entry] of upgradeRejectLoggedAt) {
+        if (entry.suppressed === 0) continue;
+        writeStderrLine(
+          `qwen serve: WebSocket upgrade rejected suppressed=${entry.suppressed} reasons=${1 + entry.reasons.size} (${JSON.stringify(key)}) at shutdown`,
+        );
+      }
+      upgradeRejectLoggedAt.clear();
       if (upgradeListener) {
         for (const server of upgradeServers) {
           server.removeListener('upgrade', upgradeListener);
