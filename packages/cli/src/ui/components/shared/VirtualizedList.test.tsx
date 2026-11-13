@@ -1433,9 +1433,9 @@ describe('<VirtualizedList /> zero-height host measurement', () => {
 
     const frame = lastFrame() ?? '';
     expect(frame).toMatch(/item-0/);
-    // With a 12-row box and 1-row items only a bounded prefix can be drawn.
-    // Without the measured-height fallback the root box sizes to content and
-    // the whole 500-row list renders.
+    // The host has never reported a positive height, so there is nothing to
+    // hold and the list falls back to its measured box: the 12-row parent, not
+    // the 500-row content.
     expect(frame).not.toMatch(/item-499/);
     expect(frame.split('\n').length).toBeLessThanOrEqual(13);
   });
@@ -1455,6 +1455,7 @@ describe('<VirtualizedList /> zero-height host measurement', () => {
           keyExtractor={keyExtractor}
           containerHeight={height}
           showScrollbar={false}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
         />
       </Box>
     );
@@ -1462,12 +1463,40 @@ describe('<VirtualizedList /> zero-height host measurement', () => {
     const { lastFrame, rerender } = render(list(10));
     expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(11);
 
+    // Anchored at the tail, so a hold that clamps to a constant or re-sticks
+    // the scroll to the top cannot pass: the same tail window must survive.
     rerender(list(0));
     const frame = lastFrame() ?? '';
-    expect(frame).toMatch(/item-0/);
+    expect(frame).toMatch(/item-199/);
     // Falling back to the measured box height would size the list to its
     // content and mount the whole 200-row history.
-    expect(frame).not.toMatch(/item-199/);
     expect(frame.split('\n').length).toBeLessThanOrEqual(11);
+
+    // Release: the host's live value wins again, not the held one.
+    rerender(list(3));
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(4);
+  });
+
+  // The host re-derives its height every frame, so the hold has to be the
+  // latest positive value, not the largest ever seen: after a legitimate
+  // shrink, a zero frame must not resurrect the old, larger viewport.
+  it('holds the latest constrained viewport, not the largest', () => {
+    const list = (height: number) => (
+      <Box flexDirection="column">
+        <VirtualizedList<Item>
+          data={makeItems(200)}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          containerHeight={height}
+          showScrollbar={false}
+        />
+      </Box>
+    );
+
+    const { lastFrame, rerender } = render(list(40));
+    rerender(list(12));
+    rerender(list(0));
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(13);
   });
 });
