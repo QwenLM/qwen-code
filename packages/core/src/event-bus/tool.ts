@@ -50,11 +50,13 @@ export class ToolHandler {
     calls: ToolCallRequestInfo[],
     round: number,
   ): Promise<void> {
-    const batch = await runToolBatch(
-      calls,
-      batchOptions(state.input, state.duplicates, state.executor),
-    );
-    if (this.store.get(state.runId) !== state || state.round !== round) return;
+    const isFinished = () =>
+      state.finished !== undefined || this.store.get(state.runId) !== state;
+    const batch = await runToolBatch(calls, {
+      ...batchOptions(state.input, state.duplicates, state.executor),
+      isFinished,
+    });
+    if (isFinished() || state.round !== round) return;
     state.batch = batch;
     publishFor(this.bus, state, 'tool.settled', { round }, round);
   }
