@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent.preflight;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.harness.QwenHostedHarnessConnector;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -309,7 +309,7 @@ class ResolvedConfigurationTest {
             try {
                 new QwenHostedHarnessConnector(properties,
                         mock(AgentStateStore.class),
-                        mock(WorkspaceExecutionStore.class)).close();
+                        mock(JdbcWorkspaceExecutionStore.class)).close();
                 built = true;
             } catch (IllegalArgumentException | IllegalStateException refused) {
                 built = false;

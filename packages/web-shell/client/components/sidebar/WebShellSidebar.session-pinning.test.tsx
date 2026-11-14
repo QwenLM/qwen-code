@@ -980,7 +980,7 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     });
   }
 
-  it('keeps the group section visible when search only matches pinned members', async () => {
+  it('finds pinned members in the dialog without changing sidebar groups', async () => {
     mockDesignGroupCatalog();
     const member = makeSession('pinned-member', {
       displayName: 'Pinned member',
@@ -1007,7 +1007,7 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
       searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flushSidebar();
-    const searchInput = container.querySelector<HTMLInputElement>(
+    const searchInput = document.querySelector<HTMLInputElement>(
       'input[aria-label="Search sessions"]',
     );
     expect(searchInput).not.toBeNull();
@@ -1021,9 +1021,12 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     });
     await flushSidebar();
 
-    // The only match is pinned, so the pinned-filtered flat list is empty;
-    // the body must still render the group section holding that member
-    // instead of the empty-state notice.
+    expect(document.querySelector('[role="listbox"]')?.textContent).toContain(
+      'Pinned member',
+    );
+    expect(
+      document.querySelector('[role="listbox"]')?.textContent,
+    ).not.toContain('Plain session');
     const group = container.querySelector<HTMLElement>(
       'section[aria-label="Design"]',
     );
@@ -1162,7 +1165,7 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     // One pinned member plus five unpinned: the bucket exceeds the preview
     // limit (5), so the pinned row must keep its catalog position (pinned
     // sorts first) instead of being appended after every unpinned member,
-    // which would hide it behind "Show all".
+    // which would hide it behind the expand button.
     const unpinnedMembers = [1, 2, 3, 4, 5].map((index) =>
       makeSession(`unpinned-${index}`, {
         displayName: `Unpinned ${index}`,
@@ -1187,12 +1190,12 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     ).map((node) => node.textContent ?? '');
     expect(rows).toHaveLength(5);
     expect(rows[0]).toBe('Pinned member');
-    expect(group?.textContent).toContain('Show all');
+    expect(group?.textContent).toContain('Show 1 more');
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
   });
 
-  it('drops a pinned member from its group when search only matches unpinned members', async () => {
+  it('filters dialog results without removing pinned members from sidebar groups', async () => {
     mockDesignGroupCatalog();
     const pinnedMember = makeSession('pinned-member', {
       displayName: 'Pinned member',
@@ -1222,7 +1225,7 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
       searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flushSidebar();
-    const searchInput = container.querySelector<HTMLInputElement>(
+    const searchInput = document.querySelector<HTMLInputElement>(
       'input[aria-label="Search sessions"]',
     );
     expect(searchInput).not.toBeNull();
@@ -1236,16 +1239,19 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     });
     await flushSidebar();
 
-    // The query matches only the unpinned member: the grouped bucket must
-    // read the search-filtered list, so the pinned member leaves the group
-    // instead of lingering as a stale row with a stale count.
+    expect(document.querySelector('[role="listbox"]')?.textContent).toContain(
+      'Active member',
+    );
+    expect(
+      document.querySelector('[role="listbox"]')?.textContent,
+    ).not.toContain('Pinned member');
     const group = container.querySelector<HTMLElement>(
       'section[aria-label="Design"]',
     );
     expect(group).not.toBeNull();
-    expect(group?.textContent).toContain('\u00b7 1');
+    expect(group?.textContent).toContain('\u00b7 2');
     expect(group?.textContent).toContain('Active member');
-    expect(group?.textContent ?? '').not.toContain('Pinned member');
+    expect(group?.textContent).toContain('Pinned member');
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
   });
@@ -1621,8 +1627,8 @@ describe('WebShellSidebar content-search ghosts', () => {
 
   function sessionRowCount(displayName: string): number {
     return Array.from(
-      container.querySelectorAll('[data-web-shell-session-title]'),
-    ).filter((node) => node.textContent?.startsWith(displayName)).length;
+      document.querySelectorAll('[role="listbox"] [role="option"]'),
+    ).filter((node) => node.textContent?.includes(displayName)).length;
   }
 
   async function typeSearchQuery(text: string): Promise<void> {
@@ -1634,7 +1640,7 @@ describe('WebShellSidebar content-search ghosts', () => {
       searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flushSidebar();
-    const searchInput = container.querySelector<HTMLInputElement>(
+    const searchInput = document.querySelector<HTMLInputElement>(
       'input[aria-label="Search sessions"]',
     );
     expect(searchInput).not.toBeNull();
@@ -1653,7 +1659,7 @@ describe('WebShellSidebar content-search ghosts', () => {
     await flushSidebar();
   }
 
-  it('renders a pinned ghost hit with its snippet in the flat list', async () => {
+  it('renders a pinned ghost hit with its snippet in the search dialog', async () => {
     connection.capabilities = { qwenCodeVersion: '1.2.3', features: [] };
     workspace.capabilities = connection.capabilities;
     workspace.client.searchWorkspaceSessions.mockResolvedValue({
@@ -1669,13 +1675,14 @@ describe('WebShellSidebar content-search ghosts', () => {
     await flushSidebar();
     await typeSearchQuery('qdrant');
 
-    // R2-2: the ghost is pinned, but no Pinned-section source carries it,
-    // so the pinned-row filters must not make it vanish (R3-2).
     expect(sessionRowCount('Ghost pinned')).toBe(1);
-    expect(container.textContent).toContain('qdrant excerpt');
+    expect(document.querySelector('[role="listbox"]')?.textContent).toContain(
+      'qdrant excerpt',
+    );
+    expect(container.textContent).not.toContain('Ghost pinned');
   });
 
-  it('renders a pinned ghost hit in the Ungrouped section when organization is enabled', async () => {
+  it('finds a pinned ghost with organization enabled without injecting it into sidebar groups', async () => {
     mockDesignGroupCatalog();
     // The group section must survive the query filter for the sectioned
     // renderer to exist at all (empty sections are hidden while searching),
@@ -1704,8 +1711,10 @@ describe('WebShellSidebar content-search ghosts', () => {
       'section[aria-label="Ungrouped"]',
     );
     expect(ungrouped).not.toBeNull();
-    expect(ungrouped?.textContent).toContain('Ghost pinned');
-    expect(ungrouped?.textContent).toContain('qdrant excerpt');
+    expect(ungrouped?.textContent).not.toContain('Ghost pinned');
+    expect(document.querySelector('[role="listbox"]')?.textContent).toContain(
+      'qdrant excerpt',
+    );
     expect(sessionRowCount('Ghost pinned')).toBe(1);
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
@@ -1733,8 +1742,7 @@ describe('WebShellSidebar content-search ghosts', () => {
       pinnedListTitles().some((title) => title.startsWith('Ghost pinned')),
     ).toBe(true);
 
-    // Inverse arm: the pinned page settles WITHOUT the session — the ghost
-    // exemption keeps it visible, exactly once, in the main list.
+    // A sidebar catalog refresh must not duplicate or drop the search hit.
     pinned.sessions = [];
     pinned.data = pinned.sessions;
     renderSidebar();
@@ -1743,7 +1751,7 @@ describe('WebShellSidebar content-search ghosts', () => {
     expect(sessionRowCount('Ghost pinned')).toBe(1);
   });
 
-  it('mounts the rename form for a pinned ghost row in the org section renderer', async () => {
+  it('opens a pinned ghost result without exposing sidebar editing actions', async () => {
     mockDesignGroupCatalog();
     // The group section must survive the query filter for the sectioned
     // renderer to exist at all (empty sections are hidden while searching),
@@ -1771,25 +1779,19 @@ describe('WebShellSidebar content-search ghosts', () => {
     await flushSidebar();
     await typeSearchQuery('qdrant');
 
-    const ungrouped = container.querySelector<HTMLElement>(
-      'section[aria-label="Ungrouped"]',
-    );
-    expect(ungrouped).not.toBeNull();
     const ghostRow = Array.from(
-      ungrouped!.querySelectorAll<HTMLElement>('[role="button"]'),
+      document.querySelectorAll<HTMLElement>(
+        '[role="listbox"] [role="option"]',
+      ),
     ).find((element) => element.textContent?.includes('Ghost pinned'));
     expect(ghostRow).not.toBeUndefined();
+    expect(ghostRow!.querySelector('button, input')).toBeNull();
     act(() => {
-      ghostRow!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      ghostRow!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flushSidebar();
 
-    // R4-2: the ghost never renders in the Pinned section, so the section
-    // renderer's renameFormDisabled must not suppress the form here.
-    expect(
-      container.querySelectorAll('input[aria-label="Rename: Ghost pinned"]')
-        .length,
-    ).toBe(1);
+    expect(document.querySelector('[data-slot="dialog-content"]')).toBeNull();
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
   });
