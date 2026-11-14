@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { EXTRACT_NOOP_SKIP_TURNS_ENV } from '@qwen-code/qwen-code-core/memory/extract-cadence.js';
+import { EXTRACT_STABLE_WINDOW_ENV } from '@qwen-code/qwen-code-core/memory/extract-window.js';
 import {
   acquireInheritedLoaderEnvScrub,
   clearLoaderKeyRejectionReporterIfCurrent,
@@ -72,6 +73,15 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   it('keeps the extraction-cadence experiment operator-owned', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       EXTRACT_NOOP_SKIP_TURNS_ENV,
+    );
+  });
+
+  // The stable extraction-window experiment (#15493) is in the same class: a
+  // repo-shipped .env must not change the extractor's input shape for every
+  // session in that repository without an operator opt-in.
+  it('keeps the stable extraction-window experiment operator-owned', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      EXTRACT_STABLE_WINDOW_ENV,
     );
   });
 
