@@ -461,13 +461,15 @@ describe('shared-pool test timeout', () => {
     }
   });
 
-  it('keys the cli hook ceiling on the macOS runner, not the host platform', async () => {
-    // cli gives the contended macOS nightly hosts the pool's hook ceiling.
-    // Sample the runner signal against the host platform in both directions
-    // so this reads the config's logic on any host: dropping, inverting or
-    // flattening the arm fails here, and so does keying it on
-    // process.platform, which cannot tell a 3-core nightly runner from an
-    // idle laptop. The ECS arm stays pinned by `autofix gate load clamps`.
+  it('keys the cli hook and test ceilings on the macOS runner, not the host platform', async () => {
+    // cli gives the contended macOS nightly hosts the pool's hook AND test
+    // ceilings (the test ceiling moved here from a runtime vi.setConfig so it
+    // cannot outrank the autofix gate's --testTimeout; R4-1). Sample the
+    // runner signal against the host platform in both directions so this
+    // reads the config's logic on any host: dropping, inverting or flattening
+    // either arm fails here, and so does keying it on process.platform, which
+    // cannot tell a 3-core nightly runner from an idle laptop. The ECS arm
+    // stays pinned by `autofix gate load clamps`.
     const originalPlatform = process.platform;
     const setPlatform = (platform: NodeJS.Platform) =>
       Object.defineProperty(process, 'platform', {
@@ -477,10 +479,10 @@ describe('shared-pool test timeout', () => {
       });
     vi.stubEnv('RUNNER_NAME', undefined);
     try {
-      for (const [runnerOs, platform, hookTimeout] of [
-        ['macOS', 'linux', 60_000],
-        ['Linux', 'darwin', undefined],
-        [undefined, 'darwin', undefined],
+      for (const [runnerOs, platform, hookTimeout, testTimeout] of [
+        ['macOS', 'linux', 60_000, 60_000],
+        ['Linux', 'darwin', undefined, 15_000],
+        [undefined, 'darwin', undefined, 15_000],
       ] as const) {
         vi.stubEnv('RUNNER_OS', runnerOs);
         setPlatform(platform);
@@ -488,8 +490,7 @@ describe('shared-pool test timeout', () => {
         const cli = await configModules['packages/cli']!();
         const label = `RUNNER_OS=${runnerOs} platform=${platform}`;
         expect(cli.default.test?.hookTimeout, label).toBe(hookTimeout);
-        // Hooks only: the per-test ceiling keeps its off-pool value.
-        expect(cli.default.test?.testTimeout, label).toBe(15_000);
+        expect(cli.default.test?.testTimeout, label).toBe(testTimeout);
       }
     } finally {
       setPlatform(originalPlatform);
@@ -753,5 +754,32 @@ describe('scripts suite timeout', () => {
       readFileSync(join(tests, 'qwen-autofix-workflow.test.js'), 'utf8'),
       'the deferred-findings harness bounds its subprocess with its own figure',
     ).toContain('QWEN_SCRIPTS_TEST_TIMEOUT_MS');
+  });
+});
+
+describe('autofix-gate per-file ceiling floor', () => {
+  // The autofix verification gate launches every changed workspace with
+  // --testTimeout=60000 through an env -i allowlist that drops RUNNER_NAME,
+  // so a runtime vi.setConfig keyed on the slow-host helper resolves to its
+  // fast arm and OUTRANKS the flag — the suite then gets 15s inside the gate
+  // instead of the 60s it provisions (R4-1). The suites this PR tunes must
+  // therefore own no runtime testTimeout: the config layer holds the ceiling
+  // (cli keys it on the macOS runner) and the describe ceilings leave their
+  // fast arm undefined so it inherits whatever the lane grants. Scoped to
+  // these files on purpose — the other runtime-setConfig suites are the
+  // gate's documented residual, closed in a separate slice.
+  const root = fileURLToPath(new URL('../../', import.meta.url));
+  const guarded = [
+    'packages/cli/src/ui/auth/SubscriptionDialog.test.tsx',
+    'packages/cli/src/serve/server/session-pr-refresh.test.ts',
+    'packages/core/src/hooks/file-changed-watcher.test.ts',
+  ];
+  it('keeps the tuned suites from overriding the granted testTimeout', () => {
+    for (const file of guarded) {
+      expect(
+        readFileSync(join(root, file), 'utf8'),
+        `${file} overrides the testTimeout the lane grants`,
+      ).not.toMatch(/vi\.setConfig\(\{[^}]*testTimeout/);
+    }
   });
 });

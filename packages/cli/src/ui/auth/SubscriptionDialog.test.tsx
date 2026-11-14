@@ -15,14 +15,16 @@ import { SubscriptionDialog } from './SubscriptionDialog.js';
 // canCheckAgain=true keyboard case failed three of four nights). 5s still
 // timed out under the extreme contention of dispatch 43574338804 (cli 2/3,
 // 734s of test time across workers), so raise to 15s on a slow host via the
-// repo's slowHostBudgetMs helper (idle hosts keep the fast budget). The case
-// ceiling below keeps the chained waits under it.
+// repo's slowHostBudgetMs helper (idle hosts keep the fast budget).
 const WAIT_FOR_TIMEOUT = slowHostBudgetMs(5_000, 15_000);
-// Keep the chained per-wait budgets under the case ceiling: the off-ECS
-// lane default is 15s and the purchase-polling case chains three waits, so
-// vitest would otherwise decide the outcome before the last wait's own
-// timer (same rule as packages/core/src/test-utils/latency-budget.ts).
-vi.setConfig({ testTimeout: slowHostBudgetMs(15_000, 60_000) });
+// The keyboard case's Enter-to-activation wait gets a larger slow-host
+// budget: a starved keypress is delivered late, not discarded, so the wait
+// absorbs the latency with a single press instead of re-sending (a re-send
+// loop would mask a swallowed first press and could double-fire; R3-2).
+// The case ceiling is owned by packages/cli/vitest.config.ts (60s on the
+// macOS runner), which keeps the chained waits under it without a runtime
+// vi.setConfig that would outrank the autofix gate's --testTimeout (R4-1).
+const ENTER_WAIT_TIMEOUT = slowHostBudgetMs(5_000, 40_000);
 
 const flow = vi.hoisted(() => ({
   state: { status: 'waiting' } as SubscriptionState,
@@ -159,30 +161,22 @@ it.each([false, true])(
         { timeout: WAIT_FOR_TIMEOUT },
       );
       // Let the input handler's closure pick up the new selection, then land
-      // Enter. Under the extreme macOS nightly load a single keypress can be
-      // starved or its escape sequence split across stdin reads (dispatch
-      // 43584714730 cli 2/3: spy 0 calls after 15s). Re-send Enter until the
-      // handler fires, with a real settle between attempts so an in-flight
-      // keypress is processed before the next; stop the instant it fires so
-      // the exactly-once assertion below stays meaningful.
+      // a single Enter. A starved keypress is delivered late, not discarded,
+      // so the wait's budget absorbs the latency; re-sending would mask a
+      // swallowed first press (the "one press activates the selection"
+      // property this case exists to pin) and could double-fire when two
+      // presses are in flight (R3-2).
       await settle(150);
-      for (
-        let i = 0;
-        i < 30 && flow.switchAccount.mock.calls.length === 0;
-        i++
-      ) {
-        ui.stdin.write('\u001b[13u');
-        await settle(500);
-      }
+      ui.stdin.write('\u001b[13u');
       await vi.waitFor(
         () => expect(flow.switchAccount).toHaveBeenCalledOnce(),
-        { timeout: WAIT_FOR_TIMEOUT },
+        { timeout: ENTER_WAIT_TIMEOUT },
       );
       expect(onBack).not.toHaveBeenCalled();
       expect(flow.cancel).not.toHaveBeenCalled();
-      // The re-send loop above must not mask a mis-routed press: pin that no
-      // OTHER menu item was activated (a regression that lands Enter on the
-      // stale selection would fire one of these instead of switchAccount).
+      // A mis-routed press must not pass silently: pin that no OTHER menu
+      // item was activated (a regression that lands Enter on the stale
+      // selection would fire one of these instead of switchAccount).
       expect(flow.openPlans).not.toHaveBeenCalled();
       expect(flow.checkAgain).not.toHaveBeenCalled();
       expect(onSwitchProvider).not.toHaveBeenCalled();

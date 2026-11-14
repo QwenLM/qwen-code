@@ -30,10 +30,12 @@ const waitOptions = { timeout: SLOW_HOST ? 15_000 : 5_000, interval: 25 };
 // (packages/core/src/test-utils/latency-budget.ts). The multi-wait cases
 // chain three to four waits, so the ceiling is lifted above them rather
 // than the config ternary (same shape as AuthDialog.test.tsx's
-// describe-level timeout). Both arms scale with the wait budget: the fast
-// arm covers four 5s waits plus the FSEvents settles, the slow arm four
-// 15s waits.
-const CEILING_MS = SLOW_HOST ? 90_000 : 30_000;
+// describe-level timeout). The slow arm covers four 15s waits; the fast arm
+// is left undefined so it inherits whatever the lane grants (the 15s off-ECS
+// default, or the autofix gate's --testTimeout=60000) instead of outranking
+// it with a lower per-file figure (R4-1) — on an idle host the waits resolve
+// in milliseconds, so the inherited ceiling is ample.
+const CEILING_MS = SLOW_HOST ? 90_000 : undefined;
 describe('FileChangedWatcher with real files', { timeout: CEILING_MS }, () => {
   let root: string;
   let watcher: FileChangedWatcher;

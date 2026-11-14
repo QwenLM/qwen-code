@@ -53,7 +53,10 @@ import {
   startSessionPrRefreshTimer,
 } from './session-pr-refresh.js';
 import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
-import { slowHostBudgetMs } from '../../test-utils/slow-test-host.js';
+import {
+  isSlowTestHost,
+  slowHostBudgetMs,
+} from '../../test-utils/slow-test-host.js';
 
 // The timer ceiling above is derived, so the waits under it have to be too:
 // a 15s fast ceiling cannot contain a hardcoded 10s + 10s + 30s chain, or
@@ -343,12 +346,12 @@ describe('refreshWorkspaceSessionPrStates', () => {
   });
 
   // The real-git origin probe runs under the test-generous budget above
-  // (15s today); the ceiling keeps probe + seeded git + refresh tail inside
-  // the lane budget on contended hosts, where the 15s off-ECS default would
-  // otherwise decide the outcome before the value assertions. The fast arm
-  // is 30s rather than the lane default because it must stay above that
-  // probe budget even on an idle host.
-  const AONE_CEILING_MS = slowHostBudgetMs(30_000, 60_000);
+  // (GIT_ORIGIN_TIMEOUT_MS * 3 = 15s); the ceiling keeps probe + seeded git +
+  // refresh tail inside the lane budget on contended hosts. The arm is raised
+  // to a flat 60s — never below the probe budget on an idle host, and never
+  // below the 60s the autofix verification gate grants via --testTimeout
+  // (a lower per-file ceiling would outrank that flag; see R4-1).
+  const AONE_CEILING_MS = 60_000;
   describe('on an Aone workspace', { timeout: AONE_CEILING_MS }, () => {
     const AONE_URL =
       'https://code.alibaba-inc.com/jspt/agentic_coding/codereview/26430560';
@@ -2680,9 +2683,11 @@ describe('refreshWorkspaceSessionPrStates', () => {
 // real-git origin probe; the 15s off-ECS default would let the runner decide
 // the outcome before those waits on a contended host. vi.waitFor measures
 // real time even under vi.useFakeTimers(), so the fake clock does not renew
-// it. Both ceiling and waits are derived, so an idle host keeps the lane
-// default and a saturated one gets 120s of headroom for the nightly load.
-const TIMER_CEILING_MS = slowHostBudgetMs(15_000, 120_000);
+// it. The waits are derived; the ceiling's fast arm is left undefined so it
+// inherits whatever the lane grants (15s off-ECS, or the autofix gate's
+// --testTimeout=60000) instead of outranking it with a lower per-file figure
+// (R4-1); a saturated host gets 120s of headroom for the nightly load.
+const TIMER_CEILING_MS = isSlowTestHost() ? 120_000 : undefined;
 describe('startSessionPrRefreshTimer', { timeout: TIMER_CEILING_MS }, () => {
   let baseDir: string;
   let trustedCwd: string;
