@@ -47,6 +47,7 @@ import {
   type PendingPost,
 } from './state.js';
 import { assertNoFixInFlight, fixSnapshotPath } from './fix.js';
+import { AutofixPrRefusal } from './refusal.js';
 
 /** GitHub refuses a comment body longer than this. */
 const MAX_BODY_CHARS = 65_536;
@@ -57,7 +58,8 @@ const MAX_NEEDS_HUMAN_CHARS = 300;
 export interface ReplyPlan {
   /** Replies to review threads, by the thread's first comment. */
   replies?: Array<{ replyTo: number; body: string; handled: string[] }>;
-  /** The round's PR comment: what the push addressed and how it was verified. */
+  /** The round's PR comment: what the push addressed and how it was
+   * verified, or — with nothing pushed — what blocks it and needs a person. */
   summary?: { body: string; handled?: string[] } | null;
   /** Comments handled without a reply of their own. */
   handled?: string[];
@@ -331,8 +333,37 @@ export interface ReplyArgs {
   task?: string;
 }
 
+/** The plan at `path`: one that cannot be read, is no JSON, or is not
+ * shaped as a plan is the plan's to fix (`plan_invalid`). */
+function readPlan(path: string): Required<ReplyPlan> {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (err) {
+    // Not there, or not a file: the write of the plan failed.
+    throw new AutofixPrRefusal(
+      'plan_invalid',
+      `the reply plan cannot be read: ${(err as Error).message}`,
+    );
+  }
+  try {
+    return parsePlan(JSON.parse(text));
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      throw new AutofixPrRefusal(
+        'plan_invalid',
+        `the reply plan is not JSON: ${err.message}`,
+      );
+    }
+    if (err instanceof TypeError) {
+      throw new AutofixPrRefusal('plan_invalid', err.message);
+    }
+    throw err;
+  }
+}
+
 export function runReply(args: ReplyArgs): ReplyOutcome {
-  const plan = parsePlan(JSON.parse(readFileSync(args.planPath, 'utf8')));
+  const plan = readPlan(args.planPath);
   const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   return withWatchLock(paths, args.pr, () => replyLocked(args, plan, paths));
 }
@@ -348,7 +379,8 @@ function replyLocked(
   // The option the watch was started with holds for its rounds, whatever
   // a round's turn remembers of it; a `--once` round has options of its own.
   if (args.post && args.task !== undefined && state.watch?.reply === false) {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'plan_invalid',
       `PR #${args.pr}'s watch was started with --no-reply: run reply with --no-post.`,
     );
   }
@@ -359,7 +391,8 @@ function replyLocked(
   // rather than fail the replies to the rest.
   const { pr } = fetchPrData(state, roundReplyCheck(state, false));
   if (pr.state !== 'OPEN') {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'pr_closed',
       `PR #${args.pr} is ${pr.state.toLowerCase()}; nothing is posted on it.`,
     );
   }
@@ -380,6 +413,7 @@ function replyLocked(
     const postedIds: string[] = [];
     const handledIds: string[] = [];
     let summarized: string | null = null;
+    let summarizedBlocked: string[] | null = null;
     for (const intent of state.pendingPosts ?? []) {
       const nodes =
         intent.where === 'summary'
@@ -397,7 +431,12 @@ function replyLocked(
       handledIds.push(...intent.handled);
       // The head the summary reported, not the current one: a later push
       // still needs a summary of its own.
-      if (intent.where === 'summary') summarized = intent.sha;
+      if (intent.where === 'summary') {
+        summarized = intent.sha;
+        // What that summary reported, from its own intent: a later plan's
+        // items are not covered by it.
+        summarizedBlocked = intent.needsHuman ?? [];
+      }
       adopted += 1;
     }
     record({
@@ -407,6 +446,25 @@ function replyLocked(
       ],
       pendingPosts: [],
       ...(summarized ? { summarizedSha: summarized } : {}),
+      ...(summarized !== null && summarizedBlocked !== null
+        ? {
+            reportedNeedsHuman: {
+              sha: summarized,
+              // A union, not a replacement: an earlier round may already have
+              // reported other items on this head, and adopting this summary
+              // must not make those reportable again. Another head's record
+              // is not merged — it is superseded.
+              texts: [
+                ...new Set([
+                  ...(state.reportedNeedsHuman?.sha === summarized
+                    ? state.reportedNeedsHuman.texts
+                    : []),
+                  ...summarizedBlocked,
+                ]),
+              ],
+            },
+          }
+        : {}),
     });
   }
 
@@ -427,14 +485,16 @@ function replyLocked(
     }
     const thread = offer.threads.get(reply.replyTo);
     if (!thread) {
-      throw new Error(
+      throw new AutofixPrRefusal(
+        'plan_invalid',
         `thread ${reply.replyTo} has no new comment from a trusted author on PR #${args.pr}; ` +
           `autofix replies only to the threads snapshot reports.`,
       );
     }
     const foreign = open.filter((id) => !thread.has(id));
     if (foreign.length > 0) {
-      throw new Error(
+      throw new AutofixPrRefusal(
+        'plan_invalid',
         `replies to thread ${reply.replyTo} name comments outside it or not actionable: ${foreign.join(', ')}`,
       );
     }
@@ -443,7 +503,8 @@ function replyLocked(
   const otherHandled = [...(plan.summary?.handled ?? []), ...plan.handled];
   for (const id of otherHandled) {
     if (done.has(id) || offer.comments.has(id)) continue;
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'plan_invalid',
       offer.untrusted.has(id)
         ? `${id} is from an author autofix does not act on; it is listed, never handled.`
         : `${id} is not a new comment from a trusted author on PR #${args.pr}.`,
@@ -467,7 +528,8 @@ function replyLocked(
     // Not a key at all — a gate key, a check name — would otherwise pass for
     // one of another head and be dropped while the round counts it handled.
     if (keyHead(key) === null) {
-      throw new Error(
+      throw new AutofixPrRefusal(
+        'plan_invalid',
         `${key} is not the \`key\` of a ci_failed event (<check>@<head>@<attempt>).`,
       );
     }
@@ -478,7 +540,8 @@ function replyLocked(
     if (knownChecks.has(key)) continue;
     if (!offer.checks.has(key)) {
       if (!roundChecks.has(key)) {
-        throw new Error(
+        throw new AutofixPrRefusal(
+          'plan_invalid',
           `${key} is not a failure snapshot reports on the PR head; pass the \`key\` of a ci_failed event.`,
         );
       }
@@ -500,19 +563,34 @@ function replyLocked(
   // comments handled at once, and a round after a later failure would not
   // see them again.
   const now = new Date().toISOString();
+  const freshNeedsHuman = [...new Set(plan.needsHuman)].filter(
+    (text) =>
+      text !== '' &&
+      !(state.needsHuman ?? []).some(
+        (item) => item.sha === head && item.text === text,
+      ),
+  );
   const needsHuman = [
     ...(state.needsHuman ?? []),
-    ...[...new Set(plan.needsHuman)]
-      .filter(
-        (text) =>
-          text !== '' &&
-          !(state.needsHuman ?? []).some(
-            (item) => item.sha === head && item.text === text,
-          ),
-      )
-      .map((text) => ({ sha: head, at: now, text })),
+    ...freshNeedsHuman.map((text) => ({ sha: head, at: now, text })),
   ].slice(-MAX_NEEDS_HUMAN);
   if (needsHuman.length > 0) record({ needsHuman });
+
+  // What this plan asks to report, against what a summary that reached the PR
+  // already reported on this head. Deliberately not `freshNeedsHuman`: the
+  // record above consumes that before any POST, so a run whose summary never
+  // arrived would find nothing left to report when it is run again.
+  const planNeedsHuman = [...new Set(plan.needsHuman)].filter(
+    (text) => text !== '',
+  );
+  const reportedBlocked = new Set(
+    state.reportedNeedsHuman?.sha === head
+      ? state.reportedNeedsHuman.texts
+      : [],
+  );
+  const unreportedNeedsHuman = planNeedsHuman.filter(
+    (text) => !reportedBlocked.has(text),
+  );
 
   const outcome: ReplyOutcome = {
     posted: [],
@@ -537,12 +615,16 @@ function replyLocked(
     handled: string[],
     path: string,
     body: string,
+    needsHuman?: string[],
   ) => {
     const intent: PendingPost = {
       where,
       handled,
       bodyHash: bodyHash(body),
       sha: head,
+      // What a summary reports, so a run that finds it on the PR after losing
+      // its answer marks exactly these as reported.
+      ...(needsHuman && needsHuman.length > 0 ? { needsHuman } : {}),
     };
     record({ pendingPosts: [...(state.pendingPosts ?? []), intent] });
     const posted = postComment(path, body);
@@ -582,7 +664,11 @@ function replyLocked(
   }
 
   // A summary is posted once: one that handles comments, while any of them
-  // is still open; one that only reports a push, once per head.
+  // is still open; one that answers none, once per head. A round that leaves
+  // something for a person which no delivered summary has reported gets one
+  // whatever was posted on this head before, so a blocked round is not silent
+  // where an earlier one already reported — and a report that never reached
+  // the PR is still due when the plan is run again.
   const summary = plan.summary;
   const summaryHandled = (summary?.handled ?? []).filter((id) => !done.has(id));
   // A head this watch pushed and has not summarized needs its summary even
@@ -591,9 +677,10 @@ function replyLocked(
     state.pushedShas.includes(head) && state.summarizedSha !== head;
   const summaryDue =
     summary !== null &&
-    ((summary.handled ?? []).length > 0
-      ? summaryHandled.length > 0 || pushUnsummarized
-      : state.summarizedSha !== head);
+    (unreportedNeedsHuman.length > 0 ||
+      ((summary.handled ?? []).length > 0
+        ? summaryHandled.length > 0 || pushUnsummarized
+        : state.summarizedSha !== head));
   if (summary && summaryDue) {
     // Its comments are recorded with it. `--no-post` records the same,
     // posting nothing.
@@ -603,6 +690,7 @@ function replyLocked(
           summaryHandled,
           `${base}/issues/${args.pr}/comments`,
           summary.body,
+          planNeedsHuman,
         )
       : null;
     record({
@@ -614,6 +702,17 @@ function replyLocked(
         ...addHandled(summaryHandled),
       ],
       summarizedSha: head,
+      // Only now, with the summary posted (or recorded for a watch that posts
+      // nothing), are its items reported: a failed POST above leaves this
+      // untouched, so the next run still owes the PR its report.
+      ...(planNeedsHuman.length > 0
+        ? {
+            reportedNeedsHuman: {
+              sha: head,
+              texts: [...new Set([...reportedBlocked, ...planNeedsHuman])],
+            },
+          }
+        : {}),
       ...(result ? { pendingPosts: result.settled } : {}),
     });
     if (result) outcome.posted.push({ kind: 'summary', ...result.posted });

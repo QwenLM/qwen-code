@@ -96,6 +96,7 @@ vi.mock('./accounts.js', () => ({
 
 vi.mock('./login.js', () => ({
   qrCodeLogin: vi.fn(),
+  startQrLogin: vi.fn(),
 }));
 
 vi.mock('@qwen-code/channel-base', async () => {
@@ -132,6 +133,9 @@ vi.mock('@qwen-code/channel-base', async () => {
       }
       protected getResponseSourceLabel(_sessionId: string): undefined {
         return undefined;
+      }
+      protected disableLoopJobsForChat(_chatId: string): Promise<number> {
+        return Promise.resolve(0);
       }
       protected formatMarkdownAttributedText(
         text: string,

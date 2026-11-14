@@ -17,9 +17,12 @@ import type { HostedModelRequest } from './hosted-model-recovery.js';
 import type { HostedModelSelection } from './hosted-model-selection.js';
 import type { PublicChildModelRoute } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import { HOSTED_MODEL_REQUEST_BYTES } from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
+import { captureManagedContext } from '@qwen-code/qwen-code-core/managed-runtime/managed-context-snapshot.js';
 
 import type { Content, Part } from '@google/genai';
 import { classifyAction } from '@qwen-code/qwen-code-core/permissions/classifier.js';
+import type { ClassifierResult } from '@qwen-code/qwen-code-core/permissions/classifier.js';
+import type { HostedLoopClassifier } from './hosted-loop-session.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   runWithRuntimeContentGenerator,
@@ -36,7 +39,10 @@ import type {
 import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
 import { buildSessionHistoryFromConversation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
+import type { HostedMemorySession } from './hosted-memory-session.js';
+import type { HostedModelConfigReader } from './hosted-model-config.js';
 import { loadSettings } from '../config/settings.js';
+import { getSeparatedHookSettings } from '../config/hook-approvals.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
 import {
@@ -250,12 +256,136 @@ export function hostedToolOutputBudget(cwd: string): number {
   );
 }
 
+/**
+ * A fire-time classifier for loop sentinel re-review (decision 5). The
+ * arm-time classifier reviewed the sentinel constant, not the resolved file
+ * text, so a full (first/changed) fire is re-reviewed before it runs. Unlike
+ * the arm-time review there is no active turn at delivery time, so this
+ * builds a short-lived Hosted config (the same trust-pinned construction the
+ * model turn uses) per fire, classifies the resolved content as a
+ * `loop_wakeup` continuation, and shuts the config down. Loop fires are
+ * clamped to >= 60 s, so the per-fire config cost is bounded. Fail closed: an
+ * unavailable classifier reports `unavailable`, and the fire delivers a no-op
+ * re-arm tick (withholding the unreviewed guidance) rather than running it;
+ * only an explicit denial settles the loop dead.
+ */
+export function createHostedLoopFireClassifier(deps: {
+  cwd: string;
+  sessionId: string;
+  modelConfig?: HostedModelConfigReader;
+  /** The Session's definition model pin, used when there is no
+   * modelConfigDigest — the same fallback the model turn resolves (R9-1). */
+  model?: HostedAgentDefinition['model'];
+}): HostedLoopClassifier {
+  return async ({ delaySeconds, prompt, reason }) => {
+    let config: Awaited<ReturnType<typeof loadCliConfig>> | undefined;
+    try {
+      // Wire the Session's own model, exactly as the model turn does, so the
+      // re-review classifies with the model the Session actually runs rather
+      // than an ambient default that may have no credentials.
+      const sessionModelConfig = await deps.modelConfig?.();
+      const settings = loadSettings(deps.cwd, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: true,
+        workspaceTrusted: false,
+      });
+      const argv = {
+        acp: true,
+        safeMode: true,
+        chatRecording: false,
+        sessionId: deps.sessionId,
+        sessionIdGenerated: true,
+      } as CliArgs;
+      config = await loadCliConfig(
+        settings.merged,
+        argv,
+        deps.cwd,
+        undefined,
+        getSeparatedHookSettings(settings),
+        undefined,
+        undefined,
+        undefined,
+        true,
+        {
+          toolInvocationGuard: () => ({ allowed: false }),
+          lspDisabled: true,
+          ...(sessionModelConfig
+            ? { modelConfiguration: sessionModelConfig }
+            : {}),
+        },
+      );
+      // With no digest the turn falls back to the definition model pin; the
+      // fire must pin the same model, not leave the ambient default (R9-1).
+      if (!sessionModelConfig) await applyHostedModelPin(config, deps.model);
+      // loadCliConfig only constructs the Config; the classifier's side query
+      // reads config.getBaseLlmClient(), whose content generator is created
+      // only by initialize()+refreshAuth() (D1). Without them every fire
+      // reported unavailable and the loop never delivered guidance. Mirror the
+      // model turn's trust-pinned sequence so the re-review actually runs.
+      const fireAbort = new AbortController();
+      await config.initialize({
+        signal: fireAbort.signal,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+        lenientToolWarmup: true,
+      });
+      const authType = config.getModelsConfig().getCurrentAuthType();
+      if (!authType) {
+        throw new Error(
+          'Loop fire-time classifier authentication is unavailable.',
+        );
+      }
+      await config.refreshAuth(authType, true);
+      const result = await classifyAction({
+        toolName: 'loop_wakeup',
+        toolParams: { delaySeconds, prompt, reason },
+        messages: [{ role: 'user', parts: [{ text: prompt }] }],
+        config,
+        signal: fireAbort.signal,
+      });
+      return {
+        allowed: !result.shouldBlock && !result.unavailable,
+        reason: result.reason || null,
+        // A transient outage is not a denial: the fire delivers a no-op re-arm
+        // tick and the loop survives to retry, instead of settling dead.
+        unavailable: result.unavailable,
+      };
+    } catch (cause) {
+      // Fail closed without throwing into the pump's pick, but treat a
+      // classifier that cannot be built as a transient outage (no-op re-arm),
+      // not a permanent denial that would end the loop. Surface the cause so a
+      // persistent config/auth failure is diagnosable instead of silently
+      // looping on no-op ticks (N-3).
+      writeStderrLineSafe(
+        'qwen serve: Loop fire-time classifier unavailable for Session ' +
+          deps.sessionId +
+          ': ' +
+          String(cause),
+      );
+      return {
+        allowed: false,
+        unavailable: true,
+        reason: 'Loop fire-time classifier unavailable.',
+      };
+    } finally {
+      await config
+        ?.shutdown({ shutdownTelemetry: false })
+        .catch(() => undefined);
+    }
+  };
+}
+
 export async function runHostedHarnessTextTurn(input: {
   sessionId: string;
   cwd: string;
   history: readonly ChatRecord[];
   excludedPromptIds?: ReadonlySet<string>;
   classifierUserText?: () => Promise<ReadonlyMap<string, string>>;
+  /** Publishes this turn's permission classifier, adapted for loop arming,
+   * to the Session; cleared when the turn ends. */
+  setLoopClassifier?: (classify: HostedLoopClassifier | undefined) => void;
   commitCompression?: (payload: ChatCompressionRecordPayload) => Promise<void>;
   prompt: string;
   attachmentParts?: readonly Part[];
@@ -306,11 +436,15 @@ export async function runHostedHarnessTextTurn(input: {
         | 'setChildModelResolver'
         | 'planModeInstructions'
         | 'todoInstructions'
+        | 'diagnosticMcpToolNames'
       >
     >;
   workspaceContext?: { read(): string | undefined };
   agentDefinition?: HostedAgentDefinition;
   modelSelection?: HostedModelSelection;
+  modelConfig?: HostedModelConfigReader;
+  memory?: Pick<HostedMemorySession, 'recall'>;
+  recallUserInput?: boolean;
   publicChildModelRoute?: PublicChildModelRoute;
   agentInstructions?: string;
   extensionInstructions?: string;
@@ -323,6 +457,14 @@ export async function runHostedHarnessTextTurn(input: {
     model: string,
   ) => Promise<void>;
 }): Promise<HostedHarnessModelResult> {
+  const sessionModelConfig = await input.modelConfig?.();
+  if (
+    sessionModelConfig &&
+    input.modelSelection &&
+    sessionModelConfig.model !== input.modelSelection.modelId
+  ) {
+    throw new HostedModelUnavailableError();
+  }
   const settings = loadSettings(input.cwd, {
     skipLoadEnvironment: true,
     skipWorkspaceSettings: true,
@@ -341,19 +483,25 @@ export async function runHostedHarnessTextTurn(input: {
     argv,
     input.cwd,
     undefined,
-    undefined,
+    getSeparatedHookSettings(settings),
     undefined,
     undefined,
     undefined,
     true,
-    { toolInvocationGuard: () => ({ allowed: false }) },
+    {
+      toolInvocationGuard: () => ({ allowed: false }),
+      lspDisabled: true,
+      ...(sessionModelConfig ? { modelConfiguration: sessionModelConfig } : {}),
+    },
   );
   const outputBudget = config.getToolOutputBatchBudget?.();
   if (outputBudget !== undefined)
     input.toolTurn?.setToolOutputBudget?.(outputBudget);
-  const model = input.modelSelection
-    ? { id: input.modelSelection.modelId }
-    : input.agentDefinition?.model;
+  const model = sessionModelConfig
+    ? { id: sessionModelConfig.model }
+    : input.modelSelection
+      ? { id: input.modelSelection.modelId }
+      : input.agentDefinition?.model;
   if (input.publicChildModelRoute)
     await applyHostedPublicChildModelPin(
       config,
@@ -362,7 +510,7 @@ export async function runHostedHarnessTextTurn(input: {
         : model,
       input.publicChildModelRoute.origin ?? input.publicChildModelRoute,
     );
-  else await applyHostedModelPin(config, model);
+  else if (!sessionModelConfig) await applyHostedModelPin(config, model);
   if (input.publicChildModelRoute?.origin) {
     // Config falls back to its own generator until authentication fills this frame.
     const view = {} as RuntimeContentGeneratorView;
@@ -648,14 +796,19 @@ async function runPreparedHostedHarnessTextTurn(
               .update(selected.baseUrl ?? '')
               .digest('hex'),
             providerPin: llmPreparedProviderPin(selected),
-            origin: {
-              modelId: config.getModel(),
-              authType: active.authType!,
-              endpointDigest: createHash('sha256')
-                .update(active.baseUrl ?? '')
-                .digest('hex'),
-              providerPin: llmPreparedProviderPin(active),
-            },
+            ...(!input.modelConfig ||
+            llmPreparedProviderPin(selected) !== llmPreparedProviderPin(active)
+              ? {
+                  origin: {
+                    modelId: config.getModel(),
+                    authType: active.authType!,
+                    endpointDigest: createHash('sha256')
+                      .update(active.baseUrl ?? '')
+                      .digest('hex'),
+                    providerPin: llmPreparedProviderPin(active),
+                  },
+                }
+              : {}),
           },
         };
       });
@@ -721,6 +874,19 @@ async function runPreparedHostedHarnessTextTurn(
           queued.signal,
         );
     }
+    if (
+      input.memory &&
+      input.recallUserInput &&
+      !input.resumeFromToolResults &&
+      !input.resumeModel
+    ) {
+      const memoryContext = await input.memory.recall(
+        input.promptId,
+        input.prompt,
+        input.signal,
+      );
+      if (memoryContext) effectivePrompt += `\n${memoryContext}`;
+    }
     const textDeltas = input.hooks
       ?.getCatalog()
       ?.hooks.some(
@@ -741,7 +907,10 @@ async function runPreparedHostedHarnessTextTurn(
     }
     let originalUserText: Promise<ReadonlyMap<string, string>> | undefined;
     const classifierActions: Content[] = [];
-    input.toolTurn?.setPermissionClassifier?.(async (call, signal) => {
+    const permissionClassifier = async (
+      call: ToolCallRequestInfo,
+      signal: AbortSignal,
+    ): Promise<ClassifierResult> => {
       originalUserText ??=
         input.classifierUserText?.() ??
         Promise.resolve(new Map([[input.promptId, input.prompt]]));
@@ -806,6 +975,26 @@ async function runPreparedHostedHarnessTextTurn(
         ],
       });
       return result;
+    };
+    input.toolTurn?.setPermissionClassifier?.(permissionClassifier);
+    // Loop arming rides the same classifier: a wakeup is future model input,
+    // so it is vetted like the turn's other side-effectful tools. Fail closed
+    // when the classifier blocks or is unavailable.
+    input.setLoopClassifier?.(async ({ delaySeconds, prompt, reason }) => {
+      const result = await permissionClassifier(
+        {
+          callId: randomUUID(),
+          name: 'loop_wakeup',
+          args: { delaySeconds, prompt, reason },
+          isClientInitiated: false,
+          prompt_id: input.promptId,
+        },
+        input.signal,
+      );
+      return {
+        allowed: !result.shouldBlock && !result.unavailable,
+        reason: result.reason || null,
+      };
     });
     // Safe mode stays on; the Session's Workspace instructions arrive through
     // the context slot instead of the Harness host's filesystem. The loop below
@@ -951,7 +1140,14 @@ async function runPreparedHostedHarnessTextTurn(
         if (submit?.shouldStopExecution() || submit?.isBlockingDecision())
           throw new Error('Hook blocked queued user input.');
         const updated = submit?.hookSpecificOutput?.['updatedPrompt'];
-        const context = submit?.getAdditionalContext();
+        const memoryContext = await input.memory?.recall(
+          message.id,
+          message.text,
+          input.signal,
+        );
+        const context = [submit?.getAdditionalContext(), memoryContext]
+          .filter(Boolean)
+          .join('\n');
         if (typeof updated === 'string' || context) {
           parts = [
             {
@@ -1035,9 +1231,10 @@ async function runPreparedHostedHarnessTextTurn(
       let modelFailure = true;
       let completeAttempt:
         | Awaited<ReturnType<ManagedHookModelScope['beginMainAttempt']>>
-        | undefined = input.prepareModel
-        ? undefined
-        : await input.modelScope?.beginMainAttempt(config.getModel());
+        | undefined =
+        input.prepareModel || input.modelScope?.diagnosticsEnabled
+          ? undefined
+          : await input.modelScope?.beginMainAttempt(config.getModel());
       let modelOccurrence =
         completeAttempt?.attemptId ?? `${input.promptId}:${round}`;
       let contextWindowSize =
@@ -1046,12 +1243,61 @@ async function runPreparedHostedHarnessTextTurn(
         prepared,
         captureUnsupported,
       ) => {
-        await captureChildRoute(prepared);
         const activeConfig = config.getContentGeneratorConfig();
         contextWindowSize =
           prepared.providerPin === llmPreparedProviderPin(activeConfig)
             ? activeConfig?.contextWindowSize
             : undefined;
+        const contextSnapshot = input.modelScope?.diagnosticsEnabled
+          ? captureManagedContext({
+              prepared,
+              turnId: input.promptId,
+              contextWindowSize,
+              autoCompactThreshold: config.getAutoCompactThreshold(),
+              mcpToolNames:
+                input.toolTurn?.diagnosticMcpToolNames?.() ?? new Set(),
+              origins: [
+                {
+                  category: 'instructionFiles',
+                  name: 'Agent instructions',
+                  text: input.agentInstructions
+                    ? `# Agent instructions\n\n${input.agentInstructions}`
+                    : undefined,
+                },
+                {
+                  category: 'instructionFiles',
+                  name: 'Extension instructions',
+                  text: input.extensionInstructions,
+                },
+                {
+                  category: 'instructionFiles',
+                  name: 'Workspace instructions',
+                  text: input.workspaceContext?.read(),
+                },
+                {
+                  category: 'skills',
+                  name: 'Skill catalog',
+                  text: input.skills?.instructions(),
+                },
+                {
+                  category: 'startupContext',
+                  name: 'Plan instructions',
+                  text: input.toolTurn?.planModeInstructions?.(),
+                },
+                {
+                  category: 'startupContext',
+                  name: 'Todo context',
+                  text: todoContext,
+                },
+                {
+                  category: 'memoryFiles',
+                  name: 'Auto memory',
+                  text: config.getAutoMemoryPrompt(),
+                },
+              ],
+            })
+          : undefined;
+        await captureChildRoute(prepared);
         if (completeAttempt) {
           const previous = completeAttempt;
           completeAttempt = undefined;
@@ -1067,12 +1313,18 @@ async function runPreparedHostedHarnessTextTurn(
         completeAttempt = await input.modelScope?.beginMainAttempt(
           prepared.request.model,
           recoveryRef,
+          ...(contextSnapshot ? ([contextSnapshot] as const) : []),
         );
         modelOccurrence = completeAttempt?.attemptId ?? modelOccurrence;
         finished = false;
         usage.length = 0;
       };
-      prepare.maxSnapshotBytes = HOSTED_MODEL_REQUEST_BYTES;
+      prepare.maxSnapshotBytes =
+        input.prepareModel ||
+        input.publicChildModelRoute ||
+        input.toolTurn?.capturesChildModelRoute?.()
+          ? HOSTED_MODEL_REQUEST_BYTES
+          : 0;
       const usage: unknown[] = [];
       let finalOutputHandled = false;
       try {
@@ -1100,6 +1352,7 @@ async function runPreparedHostedHarnessTextTurn(
               // handling below retracts the orphaned prefix (#13319).
               retractDeliveredOutputOnRetry: true,
               ...(input.prepareModel ||
+              input.modelScope?.diagnosticsEnabled ||
               input.publicChildModelRoute ||
               input.toolTurn?.capturesChildModelRoute?.()
                 ? { onPreparedRequest: prepare }
@@ -1327,6 +1580,10 @@ async function runPreparedHostedHarnessTextTurn(
     throw cause;
   } finally {
     input.hooks?.setMessagesProvider(undefined);
+    // The loop classifier is only valid for this turn; clear it so a later
+    // turn cannot arm against a finished turn's closure (and the funnel's
+    // "no active classifier" refusal stays reachable).
+    input.setLoopClassifier?.(undefined);
     try {
       await config.shutdown({
         shutdownTelemetry: false,

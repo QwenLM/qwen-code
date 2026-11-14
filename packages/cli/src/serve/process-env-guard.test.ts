@@ -68,11 +68,35 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/hosted-loop-session.ts',
+    {
+      reason:
+        'The loop arming gate is a process-scoped deployment contract fixed when the Harness starts; it gates arming only and defaults off until the acceptance evidence lands. The fire-time resolver also reads QWEN_HOME to locate the user-owned global loop.md, mirroring the interactive resolver’s QWEN_HOME-aware home candidate.',
+      accesses: {
+        'key:QWEN_MANAGED_AGENT_LOOP_ENABLED': 1,
+        'key:QWEN_HOME': 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/hosted-harness-session.ts',
     {
       reason:
-        'The packaged load-reply-lost E2E arm sets QWEN_E2E_DROP_LOAD_REPLY=<sessionId> on the replacement Harness only; the session bridge reads it once at construction to lose exactly the first load attach reply for that Session as fault injection. It is a process-scoped test switch, never set in production.',
-      accesses: { 'key:QWEN_E2E_DROP_LOAD_REPLY': 1 },
+        'Packaged E2E fault arms set process-scoped test switches on a single Harness generation, never in production. The load-reply-lost arm sets QWEN_E2E_DROP_LOAD_REPLY=<sessionId> on the replacement so the session bridge loses exactly the first load attach reply for that Session; the finished-before-commit arm sets QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT=<sessionId> on the generation that must crash so the turn holds after its stream Finished marker is durable but before the assistant output commits. Each is read once and fires once.',
+      accesses: {
+        'key:QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT': 1,
+        'key:QWEN_E2E_DROP_LOAD_REPLY': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/hosted-workspace-tool-turn.ts',
+    {
+      reason:
+        'The packaged A3 mixed-sibling fault arm sets QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL=<sessionId> on the single replacement generation that must crash, so the turn holds the first sibling approval it asks (the pending sibling after an earlier decided one) once its durable wait is committed. Test-gated, never set in production; read once and fires once.',
+      accesses: {
+        'key:QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL': 1,
+      },
     },
   ],
   [
@@ -323,8 +347,8 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/managed-runtime-attestation-worker.ts',
     {
       reason:
-        'The Runtime worker scrubs the loader variables that only started its own process, so the commands it runs do not inherit them.',
-      accesses: { whole: 1 },
+        'The Runtime worker scrubs the loader variables that only started its own process, so the commands it runs do not inherit them, and passes its environment to the terminal host that spawns PTY sessions.',
+      accesses: { whole: 2 },
     },
   ],
   [
@@ -464,13 +488,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'The sandbox launcher assembles the sandboxed child environment: ' +
         'it passes through the process environment, forwards provider keys, ' +
         'proxy settings, and debug switches, and reads the SANDBOX_* control ' +
-        'variables. It entered the scanned serve/ layer via the #9146 ' +
-        'leaf-layer move.',
+        'variables. Every debugger decision funnels through one ' +
+        '`isDebugEnabled()` read of DEBUG. It entered the scanned serve/ ' +
+        'layer via the #9146 leaf-layer move.',
       accesses: {
         'computed:envVar': 2,
         'key:BUILD_SANDBOX': 2,
         'key:COLORTERM': 2,
-        'key:DEBUG': 5,
+        'key:DEBUG': 1,
         'key:DEBUG_MODE': 1,
         'key:DEBUG_PORT': 2,
         'key:GEMINI_API_KEY': 2,
@@ -492,6 +517,8 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:PATH': 2,
         'key:PYTHONPATH': 2,
         'key:QWEN_CODE_INTEGRATION_TEST': 1,
+        'key:QWEN_CODE_HOOK_APPROVALS_PATH': 2,
+        'key:QWEN_CODE_TRUSTED_FOLDERS_PATH': 2,
         'key:QWEN_CODE_MCP_APPROVALS_PATH': 2,
         'key:QWEN_CODE_WARNINGS_FILE': 2,
         'key:QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE': 1,
@@ -582,6 +609,17 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'The PR-state refresh interval (QWEN_SESSION_PR_REFRESH_MINUTES) is a ' +
         'process-scoped operator switch; embedded callers may omit the ' +
         'environment argument.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/server/pr-watch-deps.ts',
+    {
+      reason:
+        'The watch reads the daemon’s own gh configuration, whose directory ' +
+        'precedence (GH_CONFIG_DIR, XDG_CONFIG_HOME, APPDATA, HOME) is ' +
+        'process-scoped: it describes the daemon’s gh login, not any one ' +
+        'workspace’s overlay.',
       accesses: { whole: 1 },
     },
   ],

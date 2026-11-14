@@ -162,6 +162,37 @@ describe('forkCommand', () => {
     );
   });
 
+  it('does not launch a fork when its command was already cancelled', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const context = { ...mockContext, abortSignal: controller.signal };
+
+    expect(await forkCommand.action!(context, 'do something')).toBeUndefined();
+    expect(mockBuild).not.toHaveBeenCalled();
+    expect(mockAddHistory).not.toHaveBeenCalled();
+  });
+
+  it('passes cancellation through to a waiting launch without recording it', async () => {
+    const controller = new AbortController();
+    mockExecute.mockImplementation((signal: AbortSignal) => {
+      expect(signal).toBe(controller.signal);
+      return new Promise((_, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), {
+          once: true,
+        });
+      });
+    });
+
+    const result = forkCommand.action!(
+      { ...mockContext, abortSignal: controller.signal },
+      'do something',
+    );
+    controller.abort();
+
+    await expect(result).resolves.toBeUndefined();
+    expect(mockAddHistory).not.toHaveBeenCalled();
+  });
+
   it('launches a background fork via the Agent tool and returns immediately', async () => {
     const result = await forkCommand.action!(
       mockContext,

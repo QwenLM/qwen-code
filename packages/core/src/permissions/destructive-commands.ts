@@ -21,6 +21,8 @@
 import type { Content, Part } from '@google/genai';
 import { execSync } from 'node:child_process';
 
+import { shellWords } from './shell-semantics.js';
+
 /**
  * Destructive git commands that discard local work.
  * These are blocked unless the user explicitly mentions discarding work.
@@ -32,12 +34,8 @@ const DESTRUCTIVE_GIT_PATTERNS: readonly RegExp[] = Object.freeze([
   /\bgit\s+stash\s+drop\b/,
 ]);
 
-/**
- * `git commit --amend` is blocked unless the target commit was made by the
- * agent in this session. Session tracking is managed externally via
- * {@link registerSessionCommit} and {@link isAmendOfSessionCommit}.
- */
-const GIT_AMEND_PATTERN = /\bgit\s+commit\s+--amend\b/;
+const GIT_AMEND_MENTION =
+  /\bgit(?:\.exe)?\s+commit\s+--am(?:e(?:n(?:d)?)?)?\b/i;
 
 /**
  * IaC destroy commands that tear down infrastructure.
@@ -144,16 +142,43 @@ export function getSessionCommitGeneration(): number {
 
 /**
  * Register a commit SHA made by the agent during this session.
- * Used to allow `git commit --amend` when the target commit was made
- * by the agent in the current session.
+ *
+ * @deprecated No longer read: every amend asks for approval (#13570), because
+ * the target repository is not knowable from the command text. Kept as a
+ * published export together with its shell/config wiring; removal is a
+ * separate follow-up.
  */
 export function registerSessionCommit(sha: string): void {
   sessionCommitShas.add(sha.trim());
 }
 
 /**
+ * Whether a command mentioning `git commit --amend` must be confirmed by a
+ * human instead of hard-blocked (#13570).
+ *
+ * Two mechanical readings, both fail-closed on a *mention*: the raw text, and
+ * the same text with quotes removed. The second is what keeps a quote-split
+ * spelling (`git com''mit --amend`) visible — the raw text does not contain
+ * `commit` there, and dropping this arm would let such an amend run unattended
+ * under an AUTO allow rule.
+ *
+ * Whether a mention is inert (a grep pattern, a commit message, a heredoc
+ * body) is not answerable without parsing bash, so an inert mention asks too.
+ * Encoded commands, git aliases and renamed binaries never spell the phrase
+ * and stay outside the contract. Deciding inertness from a real parse is
+ * #16604.
+ */
+export function amendNeedsApproval(command: string): boolean {
+  return (
+    GIT_AMEND_MENTION.test(command) ||
+    GIT_AMEND_MENTION.test(shellWords(command).join(' '))
+  );
+}
+
+/**
  * Check whether a `git commit --amend` targets a commit made this session.
- * Reads the current HEAD commit SHA and checks against registered session commits.
+ *
+ * @deprecated No longer read; see {@link registerSessionCommit}.
  */
 export function isAmendOfSessionCommit(cwd: string): boolean {
   if (sessionCommitShas.size === 0) return false;
@@ -174,6 +199,8 @@ export function isAmendOfSessionCommit(cwd: string): boolean {
  * Clear all session commit tracking. Called on session end or mode switch.
  * Also bumps the generation counter, which is how a deferred writer
  * learns that the registry it decided against no longer exists.
+ *
+ * @deprecated No longer read; see {@link registerSessionCommit}.
  */
 export function clearSessionCommits(): void {
   sessionCommitShas.clear();
@@ -191,13 +218,11 @@ export function clearSessionCommits(): void {
  *
  * @param command - The raw shell command string
  * @param userPrompt - The user's most recent prompt text
- * @param cwd - Working directory for git operations (amend check)
  * @returns Block result if the command is destructive, null otherwise
  */
 export function isDestructiveCommand(
   command: string,
   userPrompt: string,
-  cwd: string = process.cwd(),
 ): DestructiveCommandResult | null {
   const expanded = command + ' ' + stripShellQuotes(command);
 
@@ -214,14 +239,6 @@ export function isDestructiveCommand(
         reason: `Blocked destructive git command: "${matched}". To proceed, explicitly mention discarding local work in your prompt.`,
       };
     }
-  }
-
-  if (GIT_AMEND_PATTERN.test(expanded) && !isAmendOfSessionCommit(cwd)) {
-    return {
-      blocked: true,
-      reason:
-        'Blocked "git commit --amend": the target commit was not made by the agent in this session. To proceed, use manual approval.',
-    };
   }
 
   for (const pattern of IAC_DESTROY_PATTERNS) {

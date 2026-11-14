@@ -194,14 +194,8 @@ describe('projectSummary', () => {
 });
 
 /**
- * Pins the producer's arithmetic on a fixture, so editing one row cannot leave
- * behind a payload no producer can emit (#12235 R2-7). `ui/types.ts` documents
- * both identities: the category rows — including the `unattributed` residual,
- * excluding `cachedTokens`, which is an annotation spanning several categories
- * — account for the request, and `freeSpace` is what is left of the window
- * after that content and the autocompact buffer. With no provider total the
- * estimated rows are themselves the content total, so the free-space identity
- * keys on the rows instead of on `totalTokens`.
+ * Capacity uses the reported total when available and local category estimates
+ * otherwise. Legacy residuals and cached-prefix annotations are not categories.
  */
 function expectCoherentBreakdown(item: {
   totalTokens: number;
@@ -213,15 +207,12 @@ function expectCoherentBreakdown(item: {
     (breakdown.systemPrompt ?? 0) +
     (breakdown.builtinTools ?? 0) +
     (breakdown.mcpTools ?? 0) +
+    (breakdown.instructionFiles ?? 0) +
     (breakdown.memoryFiles ?? 0) +
     (breakdown.skills ?? 0) +
     (breakdown.startupContext ?? 0) +
-    (breakdown.messages ?? 0) +
-    (breakdown.unattributed ?? 0);
+    (breakdown.messages ?? 0);
   const hasProviderTotal = item.totalTokens > 0;
-  if (hasProviderTotal) {
-    expect(rows).toBe(item.totalTokens);
-  }
   // The producer clamps at 0, so an over-full window reports no free space.
   expect(breakdown.freeSpace).toBe(
     Math.max(
@@ -234,6 +225,35 @@ function expectCoherentBreakdown(item: {
 }
 
 describe('projectContextUsage', () => {
+  it('shows a million-token context window in millions', () => {
+    const withWindow = (contextWindowSize: number) => {
+      const item = {
+        modelName: 'coder-model',
+        totalTokens: 5000,
+        contextWindowSize,
+        breakdown: {
+          systemPrompt: 1000,
+          builtinTools: 800,
+          mcpTools: 0,
+          memoryFiles: 200,
+          skills: 0,
+          messages: 3000,
+          freeSpace: contextWindowSize - 5000 - 1000,
+          autocompactBuffer: 1000,
+        },
+        isEstimated: false,
+        showDetails: false,
+      };
+      expectCoherentBreakdown(item);
+      return projectContextUsage(item);
+    };
+
+    expect(withWindow(2_000_000)).toContain('Context window: 2.0m tokens');
+    expect(withWindow(1_000_000)).toContain('Context window: 1.0m tokens');
+    expect(withWindow(999_950)).toContain('Context window: 1.0m tokens');
+    expect(withWindow(999_949)).toContain('Context window: 999.9k tokens');
+  });
+
   it('prints the usage table with categories', () => {
     const item = {
       modelName: 'qwen3-max',
@@ -261,18 +281,13 @@ describe('projectContextUsage', () => {
     expect(text).toContain('Run /context detail for per-item breakdown.');
     // MCP tools row is skipped at zero.
     expect(text).not.toContain('MCP tools');
-    // Parity with views/ContextUsage (#12033): the three optional rows are
-    // absent from this breakdown, so none of them may render. `totalTokens` is
-    // nonzero on purpose — `Cached prefix` and `Unattributed` are total-gated,
-    // so at 0 they cannot render with or without their own guard, and only the
-    // widened `startupContext` skip would be witnessed. This is also the shape
-    // of an older daemon payload; the pre-first-turn view is pinned below.
+    // Optional startup and cached-prefix rows remain absent in legacy payloads.
     expect(text).not.toContain('Cached prefix');
     expect(text).not.toContain('Startup context');
     expect(text).not.toContain('Unattributed');
   });
 
-  it('prints the cached prefix, startup context and unattributed rows when present (#12033)', () => {
+  it('prints cached prefix and startup context while ignoring legacy residuals', () => {
     const item = {
       modelName: 'qwen3-max',
       totalTokens: 5000,
@@ -283,8 +298,7 @@ describe('projectContextUsage', () => {
         mcpTools: 0,
         memoryFiles: 200,
         skills: 0,
-        // Rows sum to totalTokens, freeSpace is window − total − buffer, and
-        // the cached prefix is part of the total (ui/types.ts invariant).
+        // Category estimates do not need to add up to totalTokens.
         messages: 900,
         freeSpace: 94000,
         autocompactBuffer: 1000,
@@ -299,7 +313,7 @@ describe('projectContextUsage', () => {
     expectCoherentBreakdown(item);
     expect(text).toContain('█ Cached prefix 3.0k tokens (3.0%)');
     expect(text).toContain('█ Startup context 1.2k tokens (1.2%)');
-    expect(text).toContain('█ Unattributed 900 tokens (0.9%)');
+    expect(text).not.toContain('Unattributed');
   });
 
   it('renders the pre-first-turn estimate: startup context shown, no messages yet (#12235)', () => {
@@ -420,7 +434,54 @@ describe('projectContextUsage', () => {
     expect(text).toContain('Current tier warn');
   });
 
+  it.each([false, true])(
+    'preserves the combined memory category in legacy OpenTUI snapshots (details: %s)',
+    (showDetails) => {
+      const item = {
+        modelName: 'legacy-model',
+        totalTokens: 200,
+        contextWindowSize: 1000,
+        breakdown: {
+          memoryFiles: 200,
+          freeSpace: 800,
+          autocompactBuffer: 0,
+        },
+        memoryFiles: [{ path: 'QWEN.md', tokens: 200 }],
+        showDetails,
+      };
+      expectCoherentBreakdown(item);
+      const text = projectContextUsage(item);
+      expect(text).toContain('█ Memory files 200 tokens (20.0%)');
+      expect(text).not.toContain('Instruction files');
+      expect(text).not.toContain('Auto memory');
+      expect(text.includes('QWEN.md')).toBe(showDetails);
+    },
+  );
+
   it('renders per-item detail sections when showDetails is on (ytahdn-3)', () => {
+    const item = {
+      modelName: 'm',
+      totalTokens: 30,
+      contextWindowSize: 100,
+      breakdown: {
+        instructionFiles: 20,
+        memoryFiles: 10,
+        freeSpace: 70,
+        autocompactBuffer: 0,
+      },
+      showDetails: true,
+      instructionFiles: [{ path: 'QWEN.md', tokens: 20 }],
+      memoryFiles: [{ path: 'auto memory', tokens: 10 }],
+    };
+    expectCoherentBreakdown(item);
+    const split = projectContextUsage(item);
+    expect(split).toContain('█ Instruction files 20 tokens (20.0%)');
+    expect(split).toContain('█ Auto memory 10 tokens (10.0%)');
+    const summary = projectContextUsage({ ...item, showDetails: false });
+    expect(summary).toContain('█ Instruction files 20 tokens (20.0%)');
+    expect(summary).toContain('█ Auto memory 10 tokens (10.0%)');
+    expect(split).toContain('QWEN.md');
+    expect(split).not.toContain('Memory files');
     const text = projectContextUsage({
       modelName: 'm',
       totalTokens: 5000,
@@ -759,6 +820,17 @@ describe('projectMcpStatus line spellings (R1-86)', () => {
   });
 });
 
+describe('projectAbout authentication', () => {
+  it.each([
+    ['qwen-subscription', 'Qwen Subscription'],
+    ['qwen-oauth', 'Qwen OAuth'],
+    ['openai', 'API Key - openai'],
+  ])('displays %s as %s', (selectedAuthType, label) => {
+    const text = projectAbout({ selectedAuthType });
+    expect(text.split('\n')).toContain(`Auth: ${label}`);
+  });
+});
+
 describe('projectAbout proxy redaction (R1-6)', () => {
   it('masks credentials in parseable proxy URLs', () => {
     const text = projectAbout({
@@ -1068,13 +1140,24 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
       { type: 'gemini_thought', text: 'g' },
       { type: 'gemini_thought_content', text: 'g' },
       { type: 'help', timestamp: new Date() },
-      { type: 'notification', text: 'n' },
       { type: 'tool_use_summary', text: 't' },
       { type: 'diff_stats', text: 'd' },
     ] as unknown as HistoryItemWithoutId[];
     for (const item of noOps) {
       expect(projectItemToStreamEvent(item, ctx)).toBeNull();
     }
+  });
+
+  it('draws a notice as an info row, as ink does', () => {
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'notification',
+          text: 'Mod followup-mod: List the TODOs',
+        },
+        ctx,
+      ),
+    ).toEqual({ type: 'info', text: 'Mod followup-mod: List the TODOs' });
   });
 
   it('carries the user_shell command row structurally (U-33)', () => {

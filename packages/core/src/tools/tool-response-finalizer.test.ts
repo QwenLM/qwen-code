@@ -92,6 +92,37 @@ describe('tool response finalization', () => {
     }));
   });
 
+  it('starts no more persistence after the owning loop settles', async () => {
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => (release = resolve));
+    persist.mockImplementationOnce(async (_callId, _toolName, content) => {
+      await waiting;
+      return { content, outputFile: '/tmp/first.txt', bytesWritten: 5000 };
+    });
+    const entries = ['first', 'second'].map((id) =>
+      entry(id, [fnResponse('shell', { output: 'x'.repeat(5000) }, id)]),
+    );
+    let finished = false;
+    const finalized = finalizeToolResponses(
+      config(1000),
+      entries,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => finished,
+    );
+    expect(persist).toHaveBeenCalledOnce();
+    finished = true;
+    release();
+    await finalized;
+    expect(persist).toHaveBeenCalledOnce();
+    expect(logToolResultSize).not.toHaveBeenCalled();
+  });
+
   it.each(['send_guard', 'batch'] as const)(
     'preserves %s attribution and suppresses only send-boundary size telemetry',
     async (source) => {

@@ -36,7 +36,7 @@ export interface NodeReplServerContext {
 const JS_DESCRIPTION =
   'Execute JavaScript in a persistent Node.js session with top-level await. ' +
   'The first call preloads global cua and displays runtime documentation. ' +
-  'Use cua.getApp(name) to start Computer Use, or cua.rewriteDocumentation() ' +
+  'On the first invocation, call only cua.getState() or cua.getApp(name), then read the returned documentation before continuing. Use cua.rewriteDocumentation() ' +
   'after context compaction. Use nodeRepl.write(value) for explicit output.';
 
 export const NODE_REPL_INSTRUCTIONS =
@@ -86,7 +86,7 @@ export function createNodeReplMcpServer(context: NodeReplServerContext): {
 
   const server = new McpServer(
     { name: 'node-repl', version: resolvePackageVersion() },
-    { instructions: NODE_REPL_INSTRUCTIONS },
+    { instructions: NODE_REPL_INSTRUCTIONS, maxToolInputElements: 100_000 },
   );
 
   server.registerTool(

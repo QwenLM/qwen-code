@@ -7,7 +7,7 @@
 import { getEventListeners } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GenerateContentParameters } from '@google/genai';
-import { FinishReason, GenerateContentResponse } from '@google/genai';
+import { FinishReason, GenerateContentResponse, Type } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import { isRateLimitError } from '../../utils/rateLimit.js';
 import {
@@ -191,9 +191,10 @@ const messageDelta = (
   stop_reason: string,
   output_tokens: number,
   usage: object = {},
+  stop_details?: object,
 ): SseEvent => ({
   type: 'message_delta',
-  delta: { stop_reason },
+  delta: { stop_reason, ...(stop_details ? { stop_details } : {}) },
   usage: { output_tokens, ...usage },
 });
 // Yields `events`, then fails with `error`.
@@ -743,6 +744,32 @@ describe('AnthropicContentGenerator', () => {
         expect(body.thinking).not.toHaveProperty('block_binding');
         expect(options.headers['anthropic-beta']).not.toContain(BINDING_BETA);
       }
+    });
+
+    it('returns a block-binding rejection on a single attempt', async () => {
+      const { retryContext } = await import('../../utils/retryContext.js');
+      createImpl
+        .mockRejectedValueOnce(status400(BINDING_REJECTION))
+        .mockResolvedValue(reply('claude-opus-5-5'));
+      const generator = await newGenerator(opus55Proxy());
+      const context = {
+        attempt: 1,
+        retryTotalDelayMs: 0,
+        requestSetupMs: 0,
+        singleAttempt: true,
+      };
+
+      await expect(
+        retryContext.run(context, () => generator.generateContent(opus55Hi())),
+      ).rejects.toThrow(BINDING_REJECTION);
+      expect(createImpl).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          thinking: expect.objectContaining({
+            block_binding: expect.anything(),
+          }),
+        }),
+        expect.objectContaining({ maxRetries: 0 }),
+      );
     });
 
     it('does not retry an unrelated proxy 400', async () => {
@@ -1660,7 +1687,9 @@ describe('AnthropicContentGenerator', () => {
     });
   });
 
-  describe('Anthropic-compatible proxy thinking history', () => {
+  describe('Anthropic thinking history', () => {
+    afterEach(() => vi.unstubAllEnvs());
+
     const unsignedThinkingConversation = [
       userText('First'),
       content(
@@ -1689,16 +1718,227 @@ describe('AnthropicContentGenerator', () => {
       });
     });
 
-    it('does not rewrite unsigned history for the native Anthropic API', async () => {
-      const request = await sendWithBaseUrl(NATIVE);
+    it.each(
+      ['claude-opus-4-5', 'claude-opus-4-6', 'claude-opus-5-5'].flatMap(
+        (model) =>
+          [true, false].map((includeThoughts) => ({ model, includeThoughts })),
+      ),
+    )(
+      'cleans native history for $model with includeThoughts=$includeThoughts',
+      async ({ model, includeThoughts }) => {
+        const { req } = await send(
+          maxCfg(64_000, {
+            model,
+            baseUrl: NATIVE,
+            reasoning: { effort: 'medium' },
+          }),
+          {
+            contents: [
+              userText('First'),
+              content(
+                'model',
+                { text: 'unsigned reasoning', thought: true },
+                {
+                  text: 'empty signature',
+                  thought: true,
+                  thoughtSignature: '',
+                },
+                {
+                  text: 'signed reasoning',
+                  thought: true,
+                  thoughtSignature: 'native-signature',
+                },
+                { text: 'Visible answer' },
+              ),
+              userText('Second'),
+            ],
+            config: { thinkingConfig: { includeThoughts } },
+          },
+        );
 
-      expect(request.messages[1]).toEqual({
-        role: 'assistant',
-        content: [
-          { type: 'thinking', thinking: 'unsigned reasoning' },
+        expect(req.messages[1]).toEqual({
+          role: 'assistant',
+          content: [
+            {
+              type: 'thinking',
+              thinking: 'signed reasoning',
+              signature: 'native-signature',
+            },
+            { type: 'text', text: 'Visible answer' },
+          ],
+        });
+        if (includeThoughts) expect(req.thinking).toBeDefined();
+        else expect(req.thinking).toBeUndefined();
+      },
+    );
+
+    it('cleans native history when reasoning is disabled in model configuration', async () => {
+      const { req } = await send(
+        nativeCfg('claude-opus-5-5', { reasoning: false }),
+        { contents: unsignedThinkingConversation },
+      );
+
+      expect(req.thinking).toBeUndefined();
+      expect(req.messages[1].content).toEqual([
+        { type: 'text', text: 'Visible answer' },
+      ]);
+    });
+
+    it.each(['default', 'environment'])(
+      'cleans history when the native endpoint comes from the SDK %s',
+      async (source) => {
+        vi.stubEnv(
+          'ANTHROPIC_BASE_URL',
+          source === 'environment' ? NATIVE : undefined,
+        );
+        const { req } = await send(cfg({ model: 'claude-opus-5-5' }), {
+          contents: unsignedThinkingConversation,
+        });
+
+        expect(req.messages[1].content).toEqual([
           { type: 'text', text: 'Visible answer' },
+        ]);
+      },
+    );
+
+    it.each([NATIVE, PROXY])(
+      'demotes foreign reasoning only for an adaptive proxy at %s',
+      async (baseUrl) => {
+        const { req } = await send(nativeCfg('claude-opus-4-6', { baseUrl }), {
+          contents: [
+            userText('First'),
+            content(
+              'model',
+              {
+                text: 'Foreign reasoning summary',
+                thought: true,
+                thoughtSignature: JSON.stringify({
+                  id: 'rs_1',
+                  encrypted_content: 'opaque',
+                }),
+              },
+              { text: 'Visible answer' },
+            ),
+            userText('Second'),
+          ],
+        });
+
+        expect(req.messages[1].content).toEqual([
+          ...(baseUrl === NATIVE
+            ? []
+            : [{ type: 'text', text: 'Foreign reasoning summary' }]),
+          { type: 'text', text: 'Visible answer' },
+        ]);
+      },
+    );
+
+    it('removes a native thinking-only turn without changing the stored history', async () => {
+      const contents = [
+        userText('First'),
+        content('model', { text: 'unsigned reasoning', thought: true }),
+        userText('Second'),
+      ];
+      const original = structuredClone(contents);
+      const { req } = await send(
+        nativeCfg('claude-opus-5-5', { enableCacheControl: false }),
+        { contents },
+      );
+
+      expect(req.messages).toHaveLength(1);
+      expect(req.messages[0].content).toEqual([
+        { type: 'text', text: 'First' },
+        { type: 'text', text: 'Second' },
+      ]);
+      expect(contents).toEqual(original);
+    });
+
+    it('keeps sanitized native history stable when replaying the next signed response', async () => {
+      const contents = structuredClone(unsignedThinkingConversation);
+      const original = structuredClone(contents);
+      const { req, generator } = await send(
+        nativeCfg('claude-opus-5-5', {
+          enableCacheControl: false,
+        }),
+        { contents },
+      );
+      const firstMessages = structuredClone(req.messages);
+
+      await generator.generateContent(
+        hello({
+          contents: [
+            ...contents,
+            content(
+              'model',
+              { text: '', thought: true, thoughtSignature: 'next-signature' },
+              { text: 'Second answer' },
+            ),
+            userText('Third'),
+          ],
+        }),
+      );
+
+      const next = lastCall().req;
+      expect(next.messages.slice(0, firstMessages.length)).toEqual(
+        firstMessages,
+      );
+      expect(next.messages[3].content).toEqual([
+        { type: 'thinking', thinking: '', signature: 'next-signature' },
+        { type: 'text', text: 'Second answer' },
+      ]);
+      expect(next.thinking).toEqual(
+        expect.objectContaining({
+          block_binding: { prefix_mismatch_behavior: 'drop_block' },
+        }),
+      );
+      expect(contents).toEqual(original);
+    });
+
+    it('cleans a completed native tool turn while preserving its tool exchange', async () => {
+      const { req } = await send(nativeCfg('claude-opus-5-5'), {
+        contents: [
+          userText('Run tool'),
+          content(
+            'model',
+            { text: 'unsigned reasoning', thought: true },
+            fnCall('tool', {}, 't1'),
+          ),
+          content('user', fnResponse('tool', { output: 'ok' }, 't1')),
+          modelText('Finished'),
+          userText('Next'),
         ],
       });
+
+      expect(req.messages[1].content).toEqual([
+        { type: 'tool_use', id: 't1', name: 'tool', input: {} },
+      ]);
+      expect(req.messages[2].content).toEqual([
+        expect.objectContaining({ type: 'tool_result', tool_use_id: 't1' }),
+      ]);
+    });
+
+    it('rejects an unsigned earlier step in a native tool loop before empty-block cleanup', async () => {
+      await expect(
+        sendWithBaseUrl(NATIVE, [
+          userText('Run tools'),
+          content(
+            'model',
+            { text: '', thought: true },
+            fnCall('first', {}, 't1'),
+          ),
+          content('user', fnResponse('first', { output: 'ok' }, 't1')),
+          content(
+            'model',
+            {
+              text: 'signed reasoning',
+              thought: true,
+              thoughtSignature: 'sig',
+            },
+            fnCall('second', {}, 't2'),
+          ),
+          content('user', fnResponse('second', { output: 'ok' }, 't2')),
+        ]),
+      ).rejects.toThrow('thinking signature');
+      expect(createImpl).not.toHaveBeenCalled();
     });
 
     it('fills an empty signature for unsigned history through a strict non-4.6 proxy', async () => {
@@ -1707,7 +1947,7 @@ describe('AnthropicContentGenerator', () => {
       // expected to behave the same but untested) accepts an empty
       // signature, so we fill `signature: ''` instead of shipping a
       // `thinking` block with no `signature` field (HTTP 400). Unlike 4.6+
-      // the block is NOT dropped, and unlike the native API it IS rewritten.
+      // the block is filled rather than dropped.
       // https://github.com/QwenLM/qwen-code/issues/11772
       const request = (
         await send(
@@ -1786,25 +2026,25 @@ describe('AnthropicContentGenerator', () => {
       });
     });
 
-    it('fails before sending an unsigned tool-use turn through a proxy', async () => {
-      const toolUseConversation = [
-        userText('Run tool'),
-        content(
-          'model',
-          { text: 'unsigned reasoning', thought: true },
-          fnCall('tool', {}, 't1'),
-        ),
-        content('user', fnResponse('tool', { output: 'ok' }, 't1')),
-      ];
+    it.each([NATIVE, PROXY])(
+      'fails before sending an unsigned tool-use turn at %s',
+      async (baseUrl) => {
+        const toolUseConversation = [
+          userText('Run tool'),
+          content(
+            'model',
+            { text: 'unsigned reasoning', thought: true },
+            fnCall('tool', {}, 't1'),
+          ),
+          content('user', fnResponse('tool', { output: 'ok' }, 't1')),
+        ];
 
-      await expect(
-        sendWithBaseUrl(
-          'https://internal-proxy.example/anthropic',
-          toolUseConversation,
-        ),
-      ).rejects.toThrow('proxy omitted the thinking signature');
-      expect(createImpl).not.toHaveBeenCalled();
-    });
+        await expect(
+          sendWithBaseUrl(baseUrl, toolUseConversation),
+        ).rejects.toThrow('thinking signature');
+        expect(createImpl).not.toHaveBeenCalled();
+      },
+    );
   });
 
   // Regression: Anthropic rejects a thinking-enabled tool loop whose final
@@ -1917,6 +2157,28 @@ describe('AnthropicContentGenerator', () => {
           request,
         )
       ).req;
+
+    it('preserves unsigned reasoning and fills its signature instead of dropping it', async () => {
+      const req = await sendDeepSeek(
+        {},
+        {
+          contents: [
+            userText('First'),
+            content(
+              'model',
+              { text: 'DeepSeek reasoning', thought: true },
+              { text: 'Answer' },
+            ),
+            userText('Second'),
+          ],
+        },
+      );
+
+      expect(req.messages[1].content).toEqual([
+        { type: 'thinking', thinking: 'DeepSeek reasoning', signature: '' },
+        { type: 'text', text: 'Answer' },
+      ]);
+    });
 
     it.each([
       [
@@ -2450,6 +2712,27 @@ describe('AnthropicContentGenerator', () => {
       expect(error).toBeUndefined();
       expect(fnCalls(chunks)).toEqual([]);
       expect(lastFinish(chunks)).toBe(FinishReason.STOP);
+    });
+
+    it('surfaces a refusal stop-details category', async () => {
+      const { chunks, error } = await collectEvents(
+        messageDelta(
+          'refusal',
+          1,
+          {},
+          {
+            type: 'refusal',
+            category: 'cyber',
+            explanation: 'Provider-authored explanation',
+          },
+        ),
+      );
+
+      expect(error).toBeUndefined();
+      expect(lastFinish(chunks)).toBe(FinishReason.SAFETY);
+      expect(
+        chunks.flatMap((chunk) => chunk.candidates ?? []).at(-1)?.finishMessage,
+      ).toBe('Response refused due to cyber-related safety policy.');
     });
 
     it.each([
@@ -3309,6 +3592,201 @@ describe('AnthropicContentGenerator', () => {
     ])('%s', async (_title, mode, hasTools, expected) => {
       const req = await sendWithToolConfig(mode, hasTools);
       expect(req['tool_choice']).toEqual(expected);
+    });
+
+    const schemaTools = (
+      names: string[] = ['respond_in_schema'],
+    ): NonNullable<GenerateContentParameters['config']>['tools'] => [
+      {
+        functionDeclarations: names.map((name) => ({
+          name,
+          description: 'test',
+          parameters: {
+            type: Type.OBJECT,
+            properties: { title: { type: Type.STRING } },
+            required: ['title'],
+          },
+        })),
+      },
+    ];
+
+    const sendToolMode = async (
+      model: string,
+      mode: string | undefined,
+      options: {
+        tools?: NonNullable<GenerateContentParameters['config']>['tools'];
+        allowedFunctionNames?: string[];
+      } = {},
+    ) => {
+      const { req } = await send(nativeCfg(model), {
+        contents: [userText('Provide the title Local result.')],
+        config: {
+          ...(options.tools !== undefined
+            ? { tools: options.tools }
+            : { tools: schemaTools() }),
+          ...(mode !== undefined && {
+            toolConfig: {
+              functionCallingConfig: {
+                mode,
+                ...(options.allowedFunctionNames
+                  ? { allowedFunctionNames: options.allowedFunctionNames }
+                  : {}),
+              },
+            },
+          }),
+        },
+      });
+      return req;
+    };
+
+    const messageText = (req: SentRequest) =>
+      req.messages
+        .flatMap((message) => message.content)
+        .map((block) => block.text ?? '')
+        .join('\n');
+
+    const SCHEMA_INSTRUCTION = "matching that tool's input schema";
+
+    it.each([
+      'claude-opus-5-5',
+      'claude-sonnet-5-5',
+      'claude-fable-5-1',
+      'claude-mythos-5-1',
+      'claude-opus-5.5',
+      'claude-sonnet-5.5',
+      'claude-fable-5.1',
+      'claude-mythos-5.1',
+      'bedrock/claude-opus-5-5',
+      'vertex_ai/claude-sonnet-5.5',
+      'idealab:claude-fable-5-1',
+      'anthropic.claude-mythos-5-1',
+      'claude-opus-5-5-20260101',
+    ])(
+      'uses tool_choice=auto and names the schema tool for %s',
+      async (model) => {
+        const req = await sendToolMode(model, 'ANY');
+        expect(req['tool_choice']).toEqual({ type: 'auto' });
+        expect(messageText(req)).toContain('respond_in_schema');
+        expect(messageText(req)).toContain(SCHEMA_INSTRUCTION);
+        expect(messageText(req)).toContain('JSON object');
+        expect(messageText(req)).toContain('no Markdown fences or prose');
+        expect(req['tools']).toHaveLength(1);
+      },
+    );
+
+    it.each([
+      'claude-haiku-5-5',
+      'claude-haiku-5.5',
+      'claude-opus-5',
+      'claude-sonnet-5',
+      'claude-opus-4-6',
+      'claude-sonnet-4-5',
+      'claude-opus-4-5',
+      'vertex_ai/claude-sonnet-4.5',
+      'claude-fable-5',
+      'claude-mythos-5',
+      'claude-opus-5-6',
+      'claude-sonnet-5-6',
+      'claude-fable-5-2',
+      'claude-mythos-5-0',
+      'custom-schema-model',
+      'bedrock/claude-haiku-5-5',
+    ])('keeps tool_choice=any for %s', async (model) => {
+      const req = await sendToolMode(model, 'ANY');
+      expect(req['tool_choice']).toEqual({ type: 'any' });
+      expect(messageText(req)).not.toContain(SCHEMA_INSTRUCTION);
+    });
+
+    it.each(['AUTO', 'NONE', undefined])(
+      'does not add a schema instruction when mode is %s on Sonnet 5.5',
+      async (mode) => {
+        const req = await sendToolMode('claude-sonnet-5-5', mode);
+        expect(req['tool_choice']).toBeUndefined();
+        expect(messageText(req)).not.toContain(SCHEMA_INSTRUCTION);
+      },
+    );
+
+    it('omits tool_choice and the instruction when there are no tools', async () => {
+      const req = await sendToolMode('claude-sonnet-5-5', 'ANY', {
+        tools: [],
+      });
+      expect(req['tool_choice']).toBeUndefined();
+      expect(messageText(req)).not.toContain(SCHEMA_INSTRUCTION);
+    });
+
+    it('appends the instruction only to the last turn and preserves user text', async () => {
+      const contents = [
+        userText('older turn'),
+        modelText('earlier answer'),
+        userText('Provide the title Local result.'),
+      ];
+      const originalContents = structuredClone(contents);
+      const { req } = await send(nativeCfg('claude-opus-5-5'), {
+        contents,
+        config: {
+          tools: schemaTools(),
+          toolConfig: { functionCallingConfig: { mode: 'ANY' } },
+        },
+      });
+      expect(req.messages).toHaveLength(3);
+      const texts = req.messages.map((message) =>
+        message.content.map((block) => block.text ?? '').join('\n'),
+      );
+      expect(texts[0]).toBe('older turn');
+      expect(texts[1]).toBe('earlier answer');
+      expect(texts[2]).toContain('Provide the title Local result.');
+      expect(texts[2]).toContain(SCHEMA_INSTRUCTION);
+      expect(contents).toEqual(originalContents);
+    });
+
+    it('includes the schema instruction in streaming requests', async () => {
+      createImpl.mockResolvedValue(streamOf(messageDelta('end_turn', 1)));
+      const stream = await openStream(nativeCfg('claude-opus-5-5'), {
+        contents: [userText('Provide the title Local result.')],
+        config: {
+          tools: schemaTools(),
+          toolConfig: { functionCallingConfig: { mode: 'ANY' } },
+        },
+      });
+      const { req } = lastCall();
+      expect(req['tool_choice']).toEqual({ type: 'auto' });
+      expect(messageText(req)).toContain('Provide the title Local result.');
+      expect(messageText(req)).toContain(SCHEMA_INSTRUCTION);
+      await drain(stream);
+    });
+
+    it('does not offer JSON text instead of calling an ordinary tool', async () => {
+      const req = await sendToolMode('claude-opus-5-5', 'ANY', {
+        tools: schemaTools(['run_action']),
+      });
+      expect(req['tool_choice']).toEqual({ type: 'auto' });
+      expect(messageText(req)).toContain('run_action');
+      expect(messageText(req)).not.toContain('If you do not call a tool');
+    });
+
+    it('does not instruct the model to call an undeclared allowed tool', async () => {
+      const req = await sendToolMode('claude-opus-5-5', 'ANY', {
+        tools: schemaTools(['respond_in_schema']),
+        allowedFunctionNames: ['missing_tool'],
+      });
+      expect(req['tool_choice']).toEqual({ type: 'auto' });
+      expect(messageText(req)).toBe('Provide the title Local result.');
+    });
+
+    it('names only allowedFunctionNames in the fallback instruction', async () => {
+      const req = await sendToolMode('claude-opus-5-5', 'ANY', {
+        tools: schemaTools(['respond_in_schema', 'other_tool']),
+        allowedFunctionNames: ['respond_in_schema'],
+      });
+      expect(req['tool_choice']).toEqual({ type: 'auto' });
+      const text = messageText(req);
+      expect(text).toContain('respond_in_schema');
+      expect(text).not.toContain('other_tool');
+      const tools = req['tools'] as Array<{ name?: string }>;
+      expect(tools.map((tool) => tool.name)).toEqual([
+        'respond_in_schema',
+        'other_tool',
+      ]);
     });
   });
 });

@@ -8,6 +8,8 @@ import {
 } from 'react';
 import {
   useDaemonSessionOwnerGuard,
+  useActions,
+  useConnection,
   useWorkspaceActions,
   type DaemonAuthProviderBaseUrlOption,
   type DaemonAuthProviderCatalog,
@@ -16,6 +18,9 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
+import { isDesktopShell, openExternalUrl } from '../../utils/externalOpen';
+import { QwenSubscriptionFlow } from './QwenSubscriptionPanel';
+import { DialogShell } from '../dialogs/DialogShell';
 import { Checkbox } from '../ui/checkbox';
 import {
   Field,
@@ -35,6 +40,7 @@ import {
 import { isVoiceModelId } from '../../voice/voiceModels';
 import { Switch } from '../ui/switch';
 import styles from './AuthMessage.module.css';
+import { QwenSubscriptionEntry } from './QwenSubscriptionEntry';
 
 const TOS_PRIVACY_URL =
   'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/';
@@ -54,8 +60,18 @@ type AuthStep =
   | 'advancedConfig';
 
 interface AuthMessageProps {
+  dialog?: boolean;
+  standalone?: boolean;
   allowAdd?: boolean;
   onMessage: (text: string, type?: 'status' | 'error') => void;
+  onModelActivated?: (modelId: string) => void;
+  onChatProviderConfigured?: () => void;
+  getWorkspaceCwd?: () => string | undefined;
+  activateSessionSubscriptionModel: (
+    workspaceCwd: string | undefined,
+    sessionId: string,
+    modelId: string,
+  ) => Promise<void>;
   onClose: () => void;
 }
 
@@ -146,8 +162,14 @@ function normalizeModelIds(value: string): string[] {
 
 export function AuthMessage({
   onMessage,
+  onModelActivated,
+  onChatProviderConfigured,
+  getWorkspaceCwd,
+  activateSessionSubscriptionModel,
   onClose,
   allowAdd = true,
+  dialog = false,
+  standalone = false,
 }: AuthMessageProps) {
   const allowAddRef = useRef(allowAdd);
   allowAddRef.current = allowAdd;
@@ -155,17 +177,77 @@ export function AuthMessage({
   const fieldId = useId();
   const openExternalLink = useExternalLinkOpener();
   const workspaceActions = useWorkspaceActions();
+  const sessionActions = useActions();
+  const connection = useConnection();
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
+  const connectionRef = useRef(connection);
+  connectionRef.current = connection;
   const ownerRef = useRef(sessionOwnerGuard.capture());
   const ownerChanged = !ownerRef.current.isCurrent();
   if (ownerChanged) ownerRef.current = sessionOwnerGuard.capture();
   const saveOperationRef = useRef(0);
+  const [catalog, setCatalog] = useState<DaemonAuthProviderCatalog>();
+  const [subscriptionTarget, setSubscriptionTarget] = useState<{
+    workspaceCwd: string | undefined;
+    sessionId: string | undefined;
+    sessionWorkspaceCwd: string | undefined;
+    standalone: boolean;
+  }>();
+  const getSubscriptionContext = useCallback(() => {
+    const current = connectionRef.current;
+    const workspaceCwd = standalone
+      ? undefined
+      : getWorkspaceCwd
+        ? getWorkspaceCwd()
+        : current.workspaceCwd;
+    const sessionId =
+      (standalone && current.sessionContext?.kind === 'standalone') ||
+      (!standalone && workspaceCwd === current.workspaceCwd)
+        ? current.sessionId
+        : undefined;
+    return {
+      workspaceCwd,
+      sessionId,
+      sessionWorkspaceCwd: sessionId ? current.workspaceCwd : undefined,
+      standalone,
+    };
+  }, [getWorkspaceCwd, standalone]);
+  const {
+    workspaceCwd: subscriptionWorkspace,
+    sessionId: subscriptionSession,
+    sessionWorkspaceCwd: subscriptionSessionWorkspace,
+  } = getSubscriptionContext();
+  const subscriptionTargetChanged =
+    subscriptionTarget !== undefined &&
+    (subscriptionTarget.workspaceCwd !== subscriptionWorkspace ||
+      subscriptionTarget.sessionId !== subscriptionSession ||
+      subscriptionTarget.sessionWorkspaceCwd !== subscriptionSessionWorkspace ||
+      subscriptionTarget.standalone !== standalone);
+  useEffect(() => {
+    if (subscriptionTargetChanged) setSubscriptionTarget(undefined);
+  }, [subscriptionTargetChanged]);
+  const startSubscription = useCallback(() => {
+    setSubscriptionTarget(getSubscriptionContext());
+  }, [getSubscriptionContext]);
+  const [subscriptionEnabled, setSubscriptionEnabled] = useState(false);
+  useEffect(() => {
+    const abort = new AbortController();
+    const owner = sessionOwnerGuard.capture();
+    setSubscriptionEnabled(false);
+    void workspaceActions
+      .getSubscriptionConfig({ signal: abort.signal })
+      .then((config) => {
+        if (!abort.signal.aborted && owner.isCurrent())
+          setSubscriptionEnabled(config.enabled);
+      })
+      .catch(() => undefined);
+    return () => abort.abort();
+  }, [workspaceActions, sessionOwnerGuard, ownerChanged]);
   const [view, setView] = useState<AuthView>('groups');
   const [groupIndex, setGroupIndex] = useState(0);
   const [providerIndex, setProviderIndex] = useState(0);
   const [setupBackView, setSetupBackView] = useState<AuthView>('providers');
   const [stepIndex, setStepIndex] = useState(0);
-  const [catalog, setCatalog] = useState<DaemonAuthProviderCatalog>();
   const [groupId, setGroupId] = useState<AuthGroupId>('qwencloud');
   const [provider, setProvider] = useState<DaemonAuthProviderDescriptor | null>(
     null,
@@ -187,6 +269,7 @@ export function AuthMessage({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     workspaceActions
@@ -202,6 +285,8 @@ export function AuthMessage({
   }, [workspaceActions]);
 
   const groups = useMemo(() => catalog?.groups ?? [], [catalog]);
+  const hasSubscriptionEntry = allowAdd && subscriptionEnabled;
+  const groupOffset = hasSubscriptionEntry ? 1 : 0;
   const providers = useMemo(() => {
     const ids =
       groups.find((group: AuthGroup) => group.id === groupId)?.providerIds ??
@@ -247,6 +332,27 @@ export function AuthMessage({
     (currentStep === 'baseUrl' && !Array.isArray(provider?.baseUrl));
 
   const [optionIndex, setOptionIndex] = useState(0);
+
+  useEffect(() => {
+    const index =
+      view === 'groups'
+        ? groupIndex
+        : view === 'providers'
+          ? providerIndex
+          : optionIndex;
+    bodyRef.current
+      ?.querySelectorAll<HTMLButtonElement>('[data-web-shell-auth-option]')
+      [index]?.focus({ preventScroll: true });
+  }, [
+    view,
+    groupIndex,
+    providerIndex,
+    optionIndex,
+    currentStep,
+    loading,
+    hasSubscriptionEntry,
+    subscriptionTarget,
+  ]);
 
   useEffect(() => {
     if (currentStep === 'wireApi') {
@@ -452,10 +558,22 @@ export function AuthMessage({
         modelIds: normalizeModelIds(models),
         advancedConfig,
       })
-      .then((result) => {
+      .then(async (result) => {
         if (!isCurrent()) return;
+        let syncFailed = result.runtimeSync?.status === 'failed';
+        if (!syncFailed) {
+          try {
+            await sessionActions.refreshModels(undefined, {
+              reloadProviders: false,
+            });
+          } catch {
+            syncFailed = true;
+          }
+        }
+        if (!isCurrent()) return;
+        if (!syncFailed && purpose === 'chat') onChatProviderConfigured?.();
         onMessage(
-          result.runtimeSync?.status === 'failed'
+          syncFailed
             ? `${result.message}\n\n${t('settings.models.runtimeSyncFailed')}`
             : result.message,
         );
@@ -477,11 +595,14 @@ export function AuthMessage({
     advancedConfig,
     validateAdvanced,
     models,
+    onChatProviderConfigured,
     onClose,
     onMessage,
     protocol,
     provider,
+    purpose,
     saving,
+    sessionActions,
     t,
     workspaceActions,
   ]);
@@ -539,7 +660,11 @@ export function AuthMessage({
 
   const activate = useCallback(() => {
     if (view === 'groups') {
-      const group = groups[groupIndex];
+      if (hasSubscriptionEntry && groupIndex === 0) {
+        startSubscription();
+        return;
+      }
+      const group = groups[groupIndex - groupOffset];
       if (!group) return;
       if (group.id === 'custom') {
         const customProvider = group.providerIds
@@ -610,6 +735,9 @@ export function AuthMessage({
     currentStep,
     catalog,
     goNext,
+    hasSubscriptionEntry,
+    startSubscription,
+    groupOffset,
     groupIndex,
     groups,
     optionIndex,
@@ -715,8 +843,10 @@ export function AuthMessage({
         <button
           type="button"
           key={option.value}
+          data-web-shell-auth-option
           disabled={saving}
           className={`${styles.option} ${selected === index ? styles.optionActive : ''}`}
+          onFocus={() => onSelect(index)}
           onClick={() => {
             onSelect(index);
             activateAtIndex(index);
@@ -1134,14 +1264,24 @@ export function AuthMessage({
     if (view === 'groups') {
       return (
         <>
+          {hasSubscriptionEntry && (
+            <QwenSubscriptionEntry
+              selected={groupIndex === 0}
+              onFocus={() => setGroupIndex(0)}
+              onClick={() => {
+                setGroupIndex(0);
+                startSubscription();
+              }}
+            />
+          )}
           {renderOptions(
             groups.map((group: AuthGroup) => ({
               value: group.id,
               label: t(group.label),
               description: t(group.description),
             })),
-            groupIndex,
-            setGroupIndex,
+            groupIndex - groupOffset,
+            (index) => setGroupIndex(index + groupOffset),
           )}
           <div className={styles.terms}>
             <div>{t('auth.termsTitle')}:</div>
@@ -1205,8 +1345,173 @@ export function AuthMessage({
     activate();
   };
 
-  return (
-    <div className={styles.panel}>
+  if (subscriptionTarget && !subscriptionTargetChanged)
+    return (
+      <QwenSubscriptionFlow
+        dialog={dialog}
+        desktopSuccess={dialog && isDesktopShell()}
+        transport={workspaceActions}
+        onActivate={async (signal, onSettingsSaved) => {
+          const { workspaceCwd, sessionId, sessionWorkspaceCwd, standalone } =
+            subscriptionTarget;
+          const assertTarget = () => {
+            signal.throwIfAborted();
+            const current = getSubscriptionContext();
+            if (
+              current.workspaceCwd !== workspaceCwd ||
+              current.sessionId !== sessionId ||
+              current.sessionWorkspaceCwd !== sessionWorkspaceCwd ||
+              current.standalone !== standalone
+            )
+              throw new DOMException(
+                'Subscription target changed.',
+                'AbortError',
+              );
+          };
+          assertTarget();
+          const desktop = isDesktopShell();
+          if (standalone) {
+            const { modelId, runtimeSync } =
+              await workspaceActions.getSubscriptionDefaultModel({
+                signal,
+                ...(desktop ? { settingsScope: 'provider' } : {}),
+              });
+            assertTarget();
+            if (desktop) {
+              onSettingsSaved();
+              if (runtimeSync?.status === 'failed')
+                throw new Error('Subscription runtime activation failed.');
+            }
+            const selector = `${modelId}(qwen-subscription)`;
+            if (sessionId) {
+              await activateSessionSubscriptionModel(
+                sessionWorkspaceCwd,
+                sessionId,
+                selector,
+              );
+              assertTarget();
+            } else {
+              onModelActivated?.(selector);
+            }
+            return modelId;
+          }
+          if (!workspaceCwd)
+            throw new Error('Subscription activation requires a workspace.');
+          const result = await workspaceActions.activateSubscription({
+            workspaceCwd,
+            signal,
+            ...(desktop ? { settingsScope: 'provider' } : {}),
+          });
+          assertTarget();
+          onSettingsSaved();
+          if (result.runtimeSync.status === 'failed')
+            throw new Error('Subscription runtime activation failed.');
+          const modelId = `${result.modelId}(qwen-subscription)`;
+          if (sessionId) {
+            await activateSessionSubscriptionModel(
+              sessionWorkspaceCwd,
+              sessionId,
+              modelId,
+            );
+            assertTarget();
+            return result.modelId;
+          }
+          if (
+            connectionRef.current.status === 'connected' &&
+            connectionRef.current.workspaceCwd === workspaceCwd
+          ) {
+            await sessionActions.refreshModels(
+              (target) => {
+                if (target.sessionId || target.workspaceCwd !== workspaceCwd)
+                  throw new Error('Workspace changed.');
+              },
+              { reloadProviders: false },
+            );
+            assertTarget();
+          }
+          onModelActivated?.(modelId);
+          return result.modelId;
+        }}
+        onActivated={(message) => {
+          if (message) onMessage(message);
+          onClose();
+        }}
+        onModelsUnavailable={onClose}
+        onClose={() => setSubscriptionTarget(undefined)}
+        onOtherProviders={() => {
+          setSubscriptionTarget(undefined);
+          setView('groups');
+        }}
+        onOpenExternal={(url) => {
+          if (isDesktopShell()) {
+            return openExternalUrl(url);
+          } else {
+            window.open(url, '_blank', 'noopener,noreferrer');
+          }
+        }}
+      />
+    );
+
+  const content = (
+    <div
+      className={styles.panel}
+      onKeyDown={(event) => {
+        if (
+          loading ||
+          saving ||
+          event.defaultPrevented ||
+          event.nativeEvent.isComposing ||
+          event.nativeEvent.keyCode === 229 ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.altKey ||
+          event.shiftKey
+        )
+          return;
+        const options = Array.from(
+          bodyRef.current?.querySelectorAll<HTMLButtonElement>(
+            '[data-web-shell-auth-option]',
+          ) ?? [],
+        );
+        if (options.length === 0) return;
+        const target = event.target as HTMLElement;
+        const focusedOption = target.closest<HTMLButtonElement>(
+          '[data-web-shell-auth-option]',
+        );
+        if (
+          !focusedOption &&
+          target.closest('button, a, input, textarea, select')
+        )
+          return;
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          event.stopPropagation();
+          if (focusedOption) focusedOption.click();
+          else activate();
+        } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          event.stopPropagation();
+          const current =
+            view === 'groups'
+              ? groupIndex
+              : view === 'providers'
+                ? providerIndex
+                : optionIndex;
+          const index = Math.max(
+            0,
+            Math.min(
+              options.length - 1,
+              current + (event.key === 'ArrowDown' ? 1 : -1),
+            ),
+          );
+          if (view === 'groups') setGroupIndex(index);
+          else if (view === 'providers') setProviderIndex(index);
+          else setOptionIndex(index);
+          options[index]?.focus({ preventScroll: true });
+          options[index]?.scrollIntoView({ block: 'nearest' });
+        }
+      }}
+    >
       <div className={styles.steps}>
         {stepItems.map((label, index) => {
           const stepNumber = index + 1;
@@ -1223,7 +1528,9 @@ export function AuthMessage({
           );
         })}
       </div>
-      <div className={styles.body}>{body}</div>
+      <div ref={bodyRef} className={styles.body}>
+        {body}
+      </div>
       {error && (
         <div className={styles.error} role="alert">
           {error}
@@ -1252,5 +1559,12 @@ export function AuthMessage({
         </button>
       </div>
     </div>
+  );
+  return dialog ? (
+    <DialogShell title={t('auth.title')} size="lg" onClose={onClose}>
+      {content}
+    </DialogShell>
+  ) : (
+    content
   );
 }
