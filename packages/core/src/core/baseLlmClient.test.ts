@@ -2197,6 +2197,26 @@ describe('BaseLlmClient', () => {
         expect(sentBudget()).toBe(40_000);
       });
 
+      it('lets an installer-written samplingParams.max_completion_tokens outrank the override too', async () => {
+        // Provider setup writes the "Max output tokens" field as
+        // `max_completion_tokens` for GPT-5 / o-series ids, so that key has to
+        // be read as the user's ceiling exactly like `max_tokens`; a reader
+        // that only knew `max_tokens` would compare against the 2_000 override
+        // and emit nothing.
+        process.env[ENV_KEY] = '2000';
+        mockConfig.getModel.mockReturnValue('openai.gpt-5.5');
+        mockConfig.getContentGeneratorConfig.mockReturnValue({
+          model: 'openai.gpt-5.5',
+          authType: AuthType.USE_OPENAI,
+          contextWindowSize: 40_100,
+          samplingParams: { max_completion_tokens: 128_000 },
+        });
+
+        await askText('openai.gpt-5.5', 100);
+
+        expect(sentBudget()).toBe(40_000);
+      });
+
       it('does not let the override authorize a budget above the model output limit', async () => {
         // The override is an operator ceiling, not a licence to emit above the
         // model's own output maximum. Two wires apply no output clamp of their

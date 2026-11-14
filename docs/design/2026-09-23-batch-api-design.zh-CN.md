@@ -77,7 +77,7 @@ batch.ts：endpoint / 鉴权解析，CLI 命令注册
 - **同一任务同一时刻只有一个命令在跑。** 每个任务一个锁文件，记录 pid 和主机名。只有确定释放了才接管：锁写在本机、且那个 pid 已经不存在。另一台主机的锁永远不接管。旧锁恢复通过独占的 `lock.recover` 文件串行执行，删除前再次核对持有者。如果恢复本身崩溃，下一次旧锁恢复会拒绝执行；错误信息列出两个待清理文件，确认没有命令运行后才能删除。
 - **custom_id = `<itemId>#<attempt>`**，重试之后结果仍能准确对回条目。每个条目记下拥有它的 attempt，只有这个 attempt 的结果行能改变它：旧 attempt 的失败不会把条目重新打开、导致再付一次钱。
 - **交付不覆盖已有文件。** 目标文件已存在且内容不同就判为冲突（held）；内容相同算作已交付，因此重复 collect 是幂等的。写入前重新计算源文件哈希，提交后被改过的源文件会让结果 held。
-- **Batch 使用所选模型的设置。** `run` 把配置里的 `samplingParams` 和 `extra_body` 按实时路径的方式（原样发送、`extra_body` 最后合并）冻结进任务，每次重试都复用。关闭 reasoning 时按实时路径的 Qwen 写法冻结（分档模型用 `reasoning_effort: "none"`，其余用 `enable_thinking: false`），其他模型家族只报告不发送；输出上限写在冻结参数已使用的字段上（`max_completion_tokens` / `max_new_tokens`，否则 `max_tokens`）。
+- **Batch 使用所选模型的设置。** `run` 把配置里的 `samplingParams` 和 `extra_body` 按实时路径的方式（原样发送、`extra_body` 最后合并）冻结进任务，每次重试都复用。关闭 reasoning 时按实时路径的 Qwen 写法冻结（分档模型用 `reasoning_effort: "none"`，其余用 `enable_thinking: false`），其他模型家族只报告不发送；输出上限写在冻结参数已使用的字段上（`max_completion_tokens` / `max_new_tokens` / `max_tokens`），否则写在模型家族接受的字段上（GPT-5 / o 系列用 `max_completion_tokens`，其余用 `max_tokens`），与实时路径一致。
 - **没有单价就不给金额估算。** token 估算总会显示（粗略：拉丁文字约 4 字符/token，中日韩文字约 1.5 字符/token）。金额估算需要 `QWEN_BATCH_INPUT_PRICE_PER_1M_USD` / `QWEN_BATCH_OUTPUT_PRICE_PER_1M_USD`。估算不含 thinking token，并会注明。plan 的 `maxCostUsd` 按**请求上限下的最坏情况**执行（每条请求的输出上限加上 thinking 上限：关闭 thinking 时为 0，非分档 Qwen 模型可用 `thinking_budget`），从不按估算值判断；没有单价或算不出有限上限时拒绝提交。
 - **记账会说明自己的缺口。** 用量汇总所有 attempt 的结果文件；有结果行缺少用量时，总数标为不完整，绝不静默当作 0。会话里的准备开销执行器看不到，所有报告都会注明。Batch 的用量不计入会话的缓存统计。
 

@@ -35,6 +35,7 @@ import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
+import { outputBudgetWireKey } from './output-budget-key.js';
 import { markToolCallArgumentsIncomplete } from '../incomplete-tool-call-args.js';
 import {
   getGptReasoningCapabilities,
@@ -1813,16 +1814,31 @@ export class ContentGenerationPipeline {
         (hasProviderOutputBudgetKey(configSamplingParams)
           ? undefined
           : requestMaxTokens);
+      // A budget the user spelled out as a `max_tokens` number passes through
+      // verbatim (samplingParams is the source of truth). A budget we inject
+      // from the window clamp travels under the key the model family accepts,
+      // so a GPT-5 / o-series entry that only configures e.g. `temperature`
+      // does not get a `max_tokens` the endpoint rejects. `max_tokens: null`
+      // is "unset" here, as it is for reconcileMaxTokens and the escalation
+      // check in llm-chat.ts, and is not forwarded next to the family key.
+      const budgetKey =
+        typeof configSamplingParams.max_tokens === 'number'
+          ? 'max_tokens'
+          : outputBudgetWireKey(
+              request.model || this.contentGeneratorConfig.model,
+            );
+      const withBudget: { [key: string]: unknown } =
+        maxTokens !== undefined
+          ? { ...samplingParams, [budgetKey]: maxTokens }
+          : { ...samplingParams };
+      if (budgetKey !== 'max_tokens' && withBudget['max_tokens'] == null) {
+        delete withBudget['max_tokens'];
+      }
       // Single exit: whatever the branch decided about max_tokens, any
       // provider-specific output-budget key in the result is clamped to the
       // window too — a config carrying both max_tokens and e.g.
       // max_completion_tokens must not leak the provider key unclamped.
-      return clampProviderOutputBudgetKeys(
-        maxTokens !== undefined
-          ? { ...samplingParams, max_tokens: maxTokens }
-          : { ...samplingParams },
-        requestMaxTokens,
-      );
+      return clampProviderOutputBudgetKeys(withBudget, requestMaxTokens);
     }
 
     const params: Record<string, unknown> = {
@@ -1830,8 +1846,13 @@ export class ContentGenerationPipeline {
       ...addParameterIfDefined('temperature', 'temperature', 'temperature'),
       ...addParameterIfDefined('top_p', 'top_p', 'topP'),
 
-      // Max tokens (special case: different property names)
-      ...addParameterIfDefined('max_tokens', 'max_tokens', 'maxOutputTokens'),
+      // Max tokens (special case: different property names, and GPT-5 /
+      // o-series only accept the budget as `max_completion_tokens`)
+      ...addParameterIfDefined(
+        outputBudgetWireKey(request.model || this.contentGeneratorConfig.model),
+        'max_tokens',
+        'maxOutputTokens',
+      ),
 
       // Config-only parameters (no request fallback)
       ...addParameterIfDefined('top_k', 'top_k', 'topK'),

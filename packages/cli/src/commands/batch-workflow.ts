@@ -215,7 +215,7 @@ function assembleAttempt(
     // may think is bounded only by a thinking_budget, which the tiered
     // family does not honour.
     const body = request.line['body'] as Record<string, unknown>;
-    const cap = body[outputBudgetKey(body)];
+    const cap = body[outputBudgetKey(body, body['model'] as string)];
     const thinkingOff =
       body['enable_thinking'] === false || body['reasoning_effort'] === 'none';
     const budget = body['thinking_budget'];
@@ -368,7 +368,8 @@ function outputLimitOf(
   task: BatchTask,
   attemptLimit: number | undefined,
 ): number | undefined {
-  const frozen = task.request?.params[outputBudgetKey(task.request?.params)];
+  const frozen =
+    task.request?.params[outputBudgetKey(task.request?.params, task.model)];
   return (
     attemptLimit ??
     task.plan.maxOutputTokens ??
@@ -1382,7 +1383,10 @@ export async function checkReadiness(deps: WorkflowDeps): Promise<void> {
   const api = deps.api ?? liveApi;
   await api.probe(deps.ep);
   const request = freezeRequest(deps.ep.generationConfig, deps.ep.model);
-  const frozenLimit = request.params[outputBudgetKey(request.params)];
+  // The limit sits under whichever key the frozen params carry, else the
+  // model family's key (`max_completion_tokens` for GPT-5 / o-series).
+  const frozenLimit =
+    request.params[outputBudgetKey(request.params, deps.ep.model)];
   deps.out(
     `ready: ${new URL(deps.ep.baseUrl).host} accepts Batch requests with these credentials (nothing was billed)`,
   );

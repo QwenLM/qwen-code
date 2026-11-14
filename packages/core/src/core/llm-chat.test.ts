@@ -3171,6 +3171,61 @@ describe('LlmChat', async () => {
       expect(chat.getHistory().at(-1)).toEqual(modelText('(empty content)'));
     });
 
+    it('should not escalate thought-only MAX_TOKENS responses when the budget is configured as max_completion_tokens', async () => {
+      // Provider setup writes the "Max output tokens" field under
+      // `max_completion_tokens` for GPT-5 / o-series ids; that is the user's
+      // ceiling exactly like `max_tokens`, so the escalation gate must see it.
+      vi.useFakeTimers();
+      mockGeneratorConfig({
+        contextWindowSize: 400_000,
+        samplingParams: { max_completion_tokens: 1024 },
+      });
+      mockStreamsOnce(
+        needMoreTokens(),
+        streamOf(stopResponse([{ text: 'Finished the analysis.' }])),
+      );
+
+      const events = await collectToolResult(
+        5_000,
+        'prompt-id-tool-result-user-max-completion-tokens',
+        chat,
+        'openai.gpt-5.5',
+      );
+
+      expectStreamCalls(2);
+      expect(escalated(events)).toBe(false);
+      expect(mockLogContentRetry).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          error_type: 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS',
+          model: 'openai.gpt-5.5',
+        }),
+      );
+    });
+
+    it('honours a max_completion_tokens budget as the first-send output ceiling', async () => {
+      // 100_000 sits above defaultOutputCeiling('openai.gpt-5.5') (the
+      // unknown-model default), so a reader that only knew `max_tokens` would
+      // clamp the first send to the default and the pipeline would shrink the
+      // configured budget to match; the window (400K) leaves room for it.
+      vi.useFakeTimers();
+      mockGeneratorConfig({
+        contextWindowSize: 400_000,
+        samplingParams: { max_completion_tokens: 100_000 },
+      });
+      mockStreamsOnce(streamOf(stopResponse([{ text: 'done' }])));
+
+      await collectToolResult(
+        1_000,
+        'prompt-id-tool-result-max-completion-tokens-ceiling',
+        chat,
+        'openai.gpt-5.5',
+      );
+
+      expectStreamCalls(1);
+      expect(requestAt(0).config?.maxOutputTokens).toBe(100_000);
+    });
+
     it('should not escalate thought-only MAX_TOKENS responses when max tokens are user-set', async () => {
       vi.useFakeTimers();
       mockGeneratorConfig({ samplingParams: { max_tokens: 1024 } });

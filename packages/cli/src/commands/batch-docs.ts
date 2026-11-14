@@ -16,6 +16,7 @@ import {
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
 } from '@qwen-code/qwen-code-core/core/modalityDefaults.js';
+import { outputBudgetWireKey } from '@qwen-code/qwen-code-core/core/openaiContentGenerator/output-budget-key.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import type { BatchPlan, TaskItem } from './batch-task.js';
 import { customIdOf, targetProblem } from './batch-task.js';
@@ -78,10 +79,20 @@ export interface GenerationConfigLike {
 // alongside `max_tokens`, because some endpoints reject the pair.
 const PROVIDER_OUTPUT_BUDGET_KEYS = ['max_completion_tokens', 'max_new_tokens'];
 
-/** The body key an output limit is written under for these params. */
-export const outputBudgetKey = (params: Record<string, unknown> = {}) =>
-  PROVIDER_OUTPUT_BUDGET_KEYS.find((key) => params[key] !== undefined) ??
-  'max_tokens';
+/**
+ * The body key an output limit is written under for these params: the key
+ * the frozen params already carry, else the key the model family accepts on
+ * Chat Completions (`max_completion_tokens` for GPT-5 / o-series, which
+ * reject `max_tokens`; `max_tokens` otherwise) — the same choice realtime
+ * makes when the user named no budget.
+ */
+export const outputBudgetKey = (
+  params: Record<string, unknown> = {},
+  model?: string,
+) =>
+  [...PROVIDER_OUTPUT_BUDGET_KEYS, 'max_tokens'].find(
+    (key) => params[key] !== undefined,
+  ) ?? outputBudgetWireKey(model);
 
 /**
  * The Qwen-on-DashScope wire shape for "thinking off", as realtime emits it:
@@ -237,7 +248,7 @@ export function assembleRequests(
       messages,
     };
     if (plan.maxOutputTokens !== undefined) {
-      body[outputBudgetKey(request?.params)] = plan.maxOutputTokens;
+      body[outputBudgetKey(request?.params, model)] = plan.maxOutputTokens;
     }
     if (plan.enableThinking !== undefined) {
       setThinking(body, model, plan.enableThinking);
