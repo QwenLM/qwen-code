@@ -79,7 +79,10 @@ function splitModelBaseUrl(model: string): { model: string; baseUrl?: string } {
  * return and the compression service's route gate; a caller that resolves
  * the selector itself keeps its own unresolvable-selector fallback
  * (`resolveForModel` falls back to the main generator, the compression side
- * to the cold path).
+ * to the cold path). One semantic delta versus the raw gate this replaces:
+ * the selector is split with `splitModelBaseUrl`, so a trailing empty pin
+ * segment (`"model\0"`) counts as unpinned — the compression gate's own
+ * `split('\0')` produced `''` there and classified such selectors cold.
  */
 export function isMainRouteSelector(selector: string, config: Config): boolean {
   const { model, baseUrl: pin } = splitModelBaseUrl(selector);
