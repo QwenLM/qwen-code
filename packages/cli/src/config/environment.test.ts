@@ -816,6 +816,45 @@ describe('daemon registration capacity environment', () => {
   );
 });
 
+describe('PR watch operator-only environment overrides', () => {
+  it.each([
+    'QWEN_SESSION_PR_WATCH_EVENTS',
+    'QWEN_SESSION_PR_WATCH_WAKE_DORMANT',
+  ])('refuses %s from a project .env and .qwen/.env', (key) => {
+    const workspace = makeWorkspace();
+    fs.writeFileSync(path.join(workspace, '.env'), `${key}=from-project\n`);
+    fs.mkdirSync(path.join(workspace, SETTINGS_DIRECTORY_NAME), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(workspace, SETTINGS_DIRECTORY_NAME, '.env'),
+      `${key}=from-qwen-dir\n`,
+    );
+    delete process.env[key];
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env[key]).toBeUndefined();
+    reloadEnvironment(testSettings({}), workspace);
+    expect(process.env[key]).toBeUndefined();
+  });
+
+  it('still applies the override from a home .env', () => {
+    const homeEnv = path.join(os.homedir(), '.env');
+    const previous = fs.existsSync(homeEnv)
+      ? fs.readFileSync(homeEnv, 'utf-8')
+      : undefined;
+    try {
+      fs.writeFileSync(homeEnv, 'QWEN_SESSION_PR_WATCH_EVENTS=head_change\n');
+      delete process.env['QWEN_SESSION_PR_WATCH_EVENTS'];
+      loadEnvironment(testSettings({}), makeWorkspace());
+      expect(process.env['QWEN_SESSION_PR_WATCH_EVENTS']).toBe('head_change');
+    } finally {
+      if (previous === undefined) fs.rmSync(homeEnv, { force: true });
+      else fs.writeFileSync(homeEnv, previous);
+      delete process.env['QWEN_SESSION_PR_WATCH_EVENTS'];
+    }
+  });
+});
+
 describe('Conversations root environment', () => {
   beforeEach(() => {
     resetHomeEnvBootstrapForTesting();

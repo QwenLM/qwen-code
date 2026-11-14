@@ -316,6 +316,23 @@ describe('WeCom webhook delivery', () => {
     },
   );
 
+  it.each([200, 204])(
+    'rejects HTTP %s without a body as an unacknowledged delivery',
+    async (status) => {
+      const { channel } = make();
+      fetchMock.mockResolvedValueOnce(new Response(null, { status }));
+      await channel.connect();
+      const result = channel.deliverProactive(TARGET, 'message');
+      await expect(result).rejects.toMatchObject({
+        disposition: 'transient',
+        message:
+          'WeCom webhook request failed or returned an invalid response; delivery may have been accepted.',
+      });
+      await expect(result).rejects.not.toHaveProperty('cause');
+      expect(fetchMock).toHaveBeenCalledOnce();
+    },
+  );
+
   it('rejects a real redirect without following it or exposing its destination', async () => {
     const requests: string[] = [];
     const server = createServer((request, response) => {
