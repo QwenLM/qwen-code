@@ -167,6 +167,10 @@ export function mapAoneMrState(raw: string | undefined): SessionPrState {
 export async function resolveAoneWorkspaceRepo(
   workspaceCwd: string,
   env?: Readonly<Record<string, string | undefined>>,
+  // Test seam: the suites pass a generous probe budget so a saturated host
+  // cannot turn the origin spawn into a flake; production callers keep the
+  // GIT_ORIGIN_TIMEOUT_MS default.
+  originTimeoutMs: number = GIT_ORIGIN_TIMEOUT_MS,
 ): Promise<AoneWorkspaceRepo | undefined> {
   const gitRoot = findGitRoot(workspaceCwd);
   if (!gitRoot) return undefined;
@@ -177,7 +181,7 @@ export async function resolveAoneWorkspaceRepo(
       ['remote', 'get-url', 'origin'],
       {
         cwd: gitRoot,
-        timeout: GIT_ORIGIN_TIMEOUT_MS,
+        timeout: originTimeoutMs,
         encoding: 'utf8',
         windowsHide: true,
         // Same sanitization as every sibling git spawn in these paths —

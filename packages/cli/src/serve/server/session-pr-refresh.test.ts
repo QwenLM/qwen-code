@@ -68,18 +68,21 @@ const removeTempTree = (dir: string) =>
   });
 
 // Delegating spy: the Aone tests seed a real repository, so resolution must
-// really run — the spy only makes its per-sweep cost observable.
+// really run — the spy only makes its per-sweep cost observable. The probe
+// budget is test-generous (production keeps GIT_ORIGIN_TIMEOUT_MS = 5s): on
+// a saturated host the default 5s spawn can time out and degrade resolution
+// to undefined, trading the case's value assertion for a host artifact. A
+// single attempt with headroom keeps the assertion reading "resolution
+// succeeded" instead of "the second attempt succeeded".
 const aoneMocks = vi.hoisted(() => ({
   resolveAoneWorkspaceRepo: vi.fn(),
-  realResolveAoneWorkspaceRepo: undefined as
-    | undefined
-    | typeof import('./aone-mrs.js').resolveAoneWorkspaceRepo,
+  originProbeTimeoutMs: 12_000,
 }));
 vi.mock('./aone-mrs.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./aone-mrs.js')>();
-  aoneMocks.realResolveAoneWorkspaceRepo = actual.resolveAoneWorkspaceRepo;
   aoneMocks.resolveAoneWorkspaceRepo.mockImplementation(
-    actual.resolveAoneWorkspaceRepo,
+    (cwd: string, env?: Readonly<Record<string, string | undefined>>) =>
+      actual.resolveAoneWorkspaceRepo(cwd, env, aoneMocks.originProbeTimeoutMs),
   );
   return {
     ...actual,
@@ -317,7 +320,11 @@ describe('refreshWorkspaceSessionPrStates', () => {
     );
   });
 
-  describe('on an Aone workspace', () => {
+  // The real-git origin probe runs under the test-generous budget above;
+  // the lifted ceiling keeps probe + seeded git + refresh tail inside the
+  // lane budget on contended hosts (the 15s off-ECS default would otherwise
+  // decide the outcome before the value assertions).
+  describe('on an Aone workspace', { timeout: 60_000 }, () => {
     const AONE_URL =
       'https://code.alibaba-inc.com/jspt/agentic_coding/codereview/26430560';
 
@@ -326,24 +333,6 @@ describe('refreshWorkspaceSessionPrStates', () => {
       execSync(
         'git remote add origin git@gitlab.alibaba-inc.com:jspt/agentic_coding.git',
         { cwd: workspaceCwd, stdio: 'pipe' },
-      );
-      // The origin probe spawns real git under a 5s budget; on a contended
-      // macOS host that spawn can time out and resolution degrades to
-      // undefined even though the repo was just seeded. Retry the REAL
-      // resolution once inside the single spy call (the per-sweep
-      // call-count pins stay 1) so these cases test the refresh, not the
-      // host's git latency — the same retry-under-load shape removeTempTree
-      // uses for teardown.
-      const real = aoneMocks.realResolveAoneWorkspaceRepo!;
-      aoneMocks.resolveAoneWorkspaceRepo.mockImplementation(
-        async (...args: Parameters<typeof real>) =>
-          (await real(...args)) ?? real(...args),
-      );
-    });
-
-    afterEach(() => {
-      aoneMocks.resolveAoneWorkspaceRepo.mockImplementation(
-        aoneMocks.realResolveAoneWorkspaceRepo!,
       );
     });
 
@@ -2568,7 +2557,12 @@ describe('refreshWorkspaceSessionPrStates', () => {
   });
 });
 
-describe('startSessionPrRefreshTimer', () => {
+// The timer cases chain real-clock vi.waitFor budgets (the rotation case
+// declares 10s + 10s + 10s) and the Aone ones spawn the real-git origin
+// probe; the 15s off-ECS default would let the runner decide the outcome
+// before those waits on a contended host. vi.waitFor measures real time
+// even under vi.useFakeTimers(), so the fake clock does not renew it.
+describe('startSessionPrRefreshTimer', { timeout: 60_000 }, () => {
   let baseDir: string;
   let trustedCwd: string;
   let untrustedCwd: string;

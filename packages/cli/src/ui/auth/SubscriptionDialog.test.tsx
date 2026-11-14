@@ -14,6 +14,11 @@ import { SubscriptionDialog } from './SubscriptionDialog.js';
 // canCheckAgain=true keyboard case failed three of four nights). Match
 // AuthDialog.test.tsx's WAIT_FOR_TIMEOUT so the waits survive load.
 const WAIT_FOR_TIMEOUT = 5000;
+// Keep the chained per-wait budgets under the case ceiling: the off-ECS
+// lane default is 15s and the purchase-polling case chains three 5s waits,
+// so vitest would otherwise decide the outcome before the last wait's own
+// timer (same rule as packages/core/src/test-utils/latency-budget.ts).
+vi.setConfig({ testTimeout: 60_000 });
 
 const flow = vi.hoisted(() => ({
   state: { status: 'waiting' } as SubscriptionState,

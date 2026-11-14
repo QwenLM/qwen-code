@@ -19,7 +19,13 @@ import { FileChangedWatcher } from './file-changed-watcher.js';
 // 11-13 nightlies). 15s matches the repo's other contended-host waits.
 const waitOptions = { timeout: 15_000, interval: 25 };
 
-describe('FileChangedWatcher with real files', () => {
+// The per-wait budget must stay UNDER the case ceiling, or vitest decides
+// the outcome first and the diagnostic becomes an opaque runner timeout
+// (packages/core/src/test-utils/latency-budget.ts). The off-ECS lane default
+// is 15s — equal to a single wait — and the multi-wait cases chain three to
+// four of them, so lift the whole describe instead of the config ternary
+// (same shape as AuthDialog.test.tsx's describe-level timeout).
+describe('FileChangedWatcher with real files', { timeout: 90_000 }, () => {
   let root: string;
   let watcher: FileChangedWatcher;
 
