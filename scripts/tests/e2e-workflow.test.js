@@ -169,6 +169,37 @@ describe('TUI product evidence', () => {
       ['component', 'integration'],
     ],
     ['packages/cli/src/dualOutput/index.ts', ['component', 'integration']],
+    [
+      'packages/cli/src/ui/opentui/TrustDialog.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/opentui/opentui-dialog-mount.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/opentui/dialogs-misc.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/components/TrustDialog.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/hooks/useTrustModify.ts',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/commands/trustCommand.ts',
+      ['component', 'integration'],
+    ],
+    ['packages/cli/src/config/trustedFolders.ts', ['component', 'integration']],
+    ['packages/cli/src/utils/processUtils.ts', ['component', 'integration']],
+    ['packages/cli/src/utils/relaunch.ts', ['component', 'integration']],
+    [
+      'integration-tests/interactive/tui-trust-manager.test.ts',
+      ['component', 'integration'],
+    ],
     ['packages/core/src/core/coreToolScheduler.ts', lanes.slice(0, -1)],
     ['packages/core/src/core/client.ts', lanes.slice(0, -1)],
     ['packages/cli/src/ui/opentui/live-turn.ts', lanes.slice(0, -1)],
@@ -373,6 +404,7 @@ describe('TUI product evidence', () => {
       'tui-foreground-shell',
       'tui-extension-acquisition',
       'tui-dual-output',
+      'tui-trust-manager',
     ],
   };
   it.each(

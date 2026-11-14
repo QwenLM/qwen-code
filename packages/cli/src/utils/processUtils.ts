@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { runExitCleanup } from './cleanup.js';
 
 /**
@@ -59,6 +60,7 @@ export function getRelaunchExecArgv(): string[] {
  * Exits the process with a special code to signal that the parent process should relaunch it.
  */
 export async function relaunchApp(): Promise<void> {
+  prepareFileWatchersForProcessExit();
   await runExitCleanup();
   // Read loosely: some workspaces' @types/node predate process.execve.
   const proc = process as typeof process & {
