@@ -88,12 +88,18 @@ const WIRING_PIN =
   /^const MAX_DOCUMENT_DURATION_MS = documentExportBudgetMs\(\s*process\.env,?\s*\);/m;
 const CASE_CEILING_PIN = /^\s*MAX_DOCUMENT_DURATION_MS \+ 30_000,?\s*\);/m;
 // it.skip( / describe.skip( is the cheapest deflake rollback and leaves every
-// other line verbatim; pin the enabled openings, with the case title quoted
-// verbatim from the gate.
+// other line verbatim; pin the enabled opening through the callback and the
+// first body statement, with the case title quoted verbatim from the gate, so
+// an options-object skip, a curried it.skipIf(cond)(, or an early-return first
+// statement all break the pin.
 const CASE_OPENING_PIN =
-  /^\s*it\(\s*'opens, searches, copies, and prints the maximum document with its pinned npm runtime',?$/m;
+  /^\s*it\(\s*'opens, searches, copies, and prints the maximum document with its pinned npm runtime',?\n\s*async \(\) => \{\n {6}const exportDocument = createMaximumDocument\(\);/m;
 const DESCRIBE_OPENING_PIN =
   /^\s*describe\('ExportTranscriptDocument browser gate',/m;
+// vitest honours a { skip } options object as the second argument and silently
+// drops the trailing timeout, so the ceiling pin would keep matching a dead
+// literal; no case in the gate may carry such an options key.
+const CASE_OPTIONS_PIN = /\{\s*(?:skip|only|todo|skipIf|runIf)\s*:/;
 // The budget assertion is anchored to its immediate neighbours at the case
 // body's exact indentation, so relocating it, wrapping it in a block, or
 // re-indenting the whole block under a dead condition all break the pin.
@@ -174,8 +180,10 @@ describe('document export budgets', () => {
     // any line above.
     expect(gateCode).toMatch(WINDOW_START_PIN);
     expect(gateCode).toMatch(WINDOW_END_PIN);
-    // No focus/skip/todo modifier anywhere in the gate.
+    // No focus/skip/todo modifier anywhere in the gate, and no options-object
+    // skip/only/todo key on any case.
     expect(gateCode).not.toMatch(FOCUS_PIN);
+    expect(gateCode).not.toMatch(CASE_OPTIONS_PIN);
   });
 
   it('does not witness a commented-out revert of the wiring', () => {
@@ -229,7 +237,9 @@ describe('document export budgets', () => {
     const skippedCase = [
       '  it.skip(',
       "    'opens, searches, copies, and prints the maximum document with its pinned npm runtime',",
-      '    async () => {},',
+      '    async () => {',
+      '      const exportDocument = createMaximumDocument();',
+      '    },',
       '    MAX_DOCUMENT_DURATION_MS + 30_000,',
       '  );',
     ].join('\n');
@@ -239,6 +249,30 @@ describe('document export budgets', () => {
       "describe.skip('ExportTranscriptDocument browser gate', () => {});";
     expect(skippedDescribe).not.toMatch(DESCRIBE_OPENING_PIN);
 
+    // Options-object skip: vitest honours { skip } as the second argument and
+    // silently drops the trailing timeout; the negative options pin must see
+    // it, and the curried / early-return shapes must break the opening pin.
+    const optionsSkip = [
+      '  it(',
+      "    'opens, searches, copies, and prints the maximum document with its pinned npm runtime',",
+      "    { skip: process.env.RUNNER_ENVIRONMENT === 'self-hosted' },",
+      '    async () => {',
+      '      const exportDocument = createMaximumDocument();',
+      '    },',
+      '    MAX_DOCUMENT_DURATION_MS + 30_000,',
+      '  );',
+    ].join('\n');
+    expect(optionsSkip).toMatch(CASE_OPTIONS_PIN);
+    const curriedSkipIf = skippedCase.replace('it.skip(', 'it.skipIf(false)(');
+    expect(curriedSkipIf).not.toMatch(CASE_OPENING_PIN);
+    const earlyReturn = skippedCase
+      .replace('it.skip(', 'it(')
+      .replace(
+        '      const exportDocument = createMaximumDocument();',
+        '      if (!process.env.CI) return;\n      const exportDocument = createMaximumDocument();',
+      );
+    expect(earlyReturn).not.toMatch(CASE_OPENING_PIN);
+
     // Focus-marker shape: the negative gate assertion must see it.only( /
     // it.todo( on any case, not just the maximum-document case's opening.
     const focusedCase = "  it.only('a sibling case', async () => {});";
@@ -246,18 +280,29 @@ describe('document export budgets', () => {
     const todoCase = "  it.todo('a sibling case');";
     expect(todoCase).toMatch(FOCUS_PIN);
 
-    // Commented-out measured window: both ends must stop matching once
-    // blanked (the neighbourhood anchors also break on the marker lines).
-    const windowCommented = [
-      '/*',
+    // Commented-out measured window, trailing-opener shape: the block comment
+    // opens at the END of the preceding code line, so it is trailing trivia
+    // of that statement — the leading scan alone does not collect it. The raw
+    // fixture still matches each pin (the pinned lines stay consecutive);
+    // only blanking kills the match, so these fixtures witness the trailing
+    // half of blankComments, not just adjacency.
+    const windowStartTrailing = [
+      '      const html = renderExportTranscriptDocumentToHtml(exportDocument); /*',
+      '      const probe = await installNetworkAndCspProbe(page);',
       '      const startedAt = nodePerformance.now();',
+      '      const heapBefore = await page.evaluate(',
       '*/',
-      '/*',
+    ].join('\n');
+    expect(windowStartTrailing).toMatch(WINDOW_START_PIN);
+    expect(blankComments(windowStartTrailing)).not.toMatch(WINDOW_START_PIN);
+    const windowEndTrailing = [
+      '      const heapAfter = await readHeap(); /*',
+      '      );',
       '      const durationMs = nodePerformance.now() - startedAt;',
       '*/',
     ].join('\n');
-    expect(blankComments(windowCommented)).not.toMatch(WINDOW_START_PIN);
-    expect(blankComments(windowCommented)).not.toMatch(WINDOW_END_PIN);
+    expect(windowEndTrailing).toMatch(WINDOW_END_PIN);
+    expect(blankComments(windowEndTrailing)).not.toMatch(WINDOW_END_PIN);
 
     // Brace-wrapped / relocated assertion shapes: the neighbourhood anchor
     // must see the assertion only between its two neighbours at the case
@@ -344,7 +389,10 @@ describe('document export budgets', () => {
       '      expect(durationMs).toBeLessThan(MAX_DOCUMENT_DURATION_MS);';
     const title =
       "    'opens, searches, copies, and prints the maximum document with its pinned npm runtime',";
-    const caseOpening = '  it(\n' + title;
+    const caseOpening =
+      '  it(\n' +
+      title +
+      '\n    async () => {\n      const exportDocument = createMaximumDocument();';
     const describeOpening =
       "describe('ExportTranscriptDocument browser gate', () => {";
 
@@ -419,16 +467,29 @@ describe('document export budgets', () => {
       DESCRIBE_OPENING_PIN,
     );
 
-    // Measured window commented out in place: the budget assertion would
-    // read an undefined durationMs, and neither window end may keep matching.
-    const windowStart = '      const startedAt = nodePerformance.now();';
-    const windowEnd =
-      '      const durationMs = nodePerformance.now() - startedAt;';
+    // Measured window commented out via trailing openers: each block comment
+    // opens at the end of the preceding code line, so the pinned lines stay
+    // consecutive in the raw mutant (both pins still match) and only blanking
+    // kills the match — the same shape as the synthetic trailing fixtures.
     const windowRevert = replaceOnce(
-      replaceOnce(gateSource, windowStart, blockComment(windowStart)),
-      windowEnd,
-      blockComment(windowEnd),
+      replaceOnce(
+        replaceOnce(
+          replaceOnce(
+            gateSource,
+            '      const page = await browser.newPage();\n      const probe = await installNetworkAndCspProbe(page);\n      const startedAt = nodePerformance.now();',
+            '      const page = await browser.newPage(); /*\n      const probe = await installNetworkAndCspProbe(page);\n      const startedAt = nodePerformance.now();',
+          ),
+          '      const heapBefore = await page.evaluate(',
+          '      const heapBefore = await page.evaluate(\n*/',
+        ),
+        '          ).memory?.usedJSHeapSize ?? 0,\n      );\n      const durationMs = nodePerformance.now() - startedAt;',
+        '          ).memory?.usedJSHeapSize ?? 0, /*\n      );\n      const durationMs = nodePerformance.now() - startedAt;',
+      ),
+      '      const durationMs = nodePerformance.now() - startedAt;',
+      '      const durationMs = nodePerformance.now() - startedAt;\n*/',
     );
+    expect(windowRevert).toMatch(WINDOW_START_PIN);
+    expect(windowRevert).toMatch(WINDOW_END_PIN);
     expect(blankComments(windowRevert)).not.toMatch(WINDOW_START_PIN);
     expect(blankComments(windowRevert)).not.toMatch(WINDOW_END_PIN);
   });
