@@ -588,6 +588,76 @@ class HostedHarnessClientTest {
                 .flatMap(status -> Stream.of(true, false).map(replacement -> Arguments.of(byId, status, replacement))));
     }
 
+    @ParameterizedTest
+    @MethodSource("residentLifecycleDetachResponses")
+    void lifecycleDetachKeepsResidentReplacementHeartbeat(boolean byId, int status)
+            throws Exception {
+        createSessionRoute();
+        CountDownLatch detaching = new CountDownLatch(1);
+        CountDownLatch reply = new CountDownLatch(1);
+        server.createContext("/session/" + SESSION_ID + "/detach", exchange -> {
+            assertPrivateHeaders(exchange, !byId);
+            detaching.countDown();
+            try {
+                assertTrue(reply.await(5, TimeUnit.SECONDS));
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+                throw new IOException(error);
+            }
+            if (status == 204) {
+                sendSessionNoContent(exchange, !byId);
+            } else {
+                exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                sendJson(exchange, 404, "{\"code\":\"session_not_found\"}", false);
+            }
+        });
+        server.createContext("/session/" + SESSION_ID + "/load", exchange ->
+                sendSessionJson(exchange, 200, sessionJson()));
+        ExecutorService caller = Executors.newSingleThreadExecutor();
+        try (HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ofMinutes(1))
+                .build()) {
+            HarnessSessionRef original = createSession(client);
+            ScheduledThreadPoolExecutor scheduler = client.scheduler();
+            ScheduledFuture<?> originalTask = (ScheduledFuture<?>) scheduler.getQueue().peek();
+            var authority = Map.<String, Object>of("operationId", "detach", "claimGeneration", 1);
+            Future<?> detach = caller.submit(() -> {
+                if (byId) client.detachLifecycle(SESSION_ID, authority);
+                else client.detachLifecycle(original, authority);
+            });
+            assertTrue(detaching.await(5, TimeUnit.SECONDS));
+            HarnessSessionRef replacement = client.loadSession(new LoadHarnessSession(SESSION_ID,
+                    ManagedSessionStoreConnection.builder().baseUri(URI.create("https://store.example/"))
+                            .tenantId("tenant").workspaceId("workspace").writerId(BOOT_ID)
+                            .leaseDuration(Duration.ofSeconds(45)).build()));
+            assertEquals(original.getHarnessClientId(), replacement.getHarnessClientId());
+            assertTrue(originalTask.isCancelled());
+            assertEquals(1, scheduler.getQueue().size());
+            ScheduledFuture<?> replacementTask = (ScheduledFuture<?>) scheduler.getQueue().peek();
+
+            reply.countDown();
+            detach.get(5, TimeUnit.SECONDS);
+            assertFalse(replacementTask.isCancelled());
+            assertTrue(scheduler.getQueue().contains(replacementTask));
+
+            if (byId) client.detachLifecycle(SESSION_ID, authority);
+            else client.detachLifecycle(replacement, authority);
+            assertTrue(replacementTask.isCancelled());
+            assertTrue(scheduler.getQueue().isEmpty());
+        } finally {
+            reply.countDown();
+            caller.shutdownNow();
+        }
+    }
+
+    static Stream<Arguments> residentLifecycleDetachResponses() {
+        return Stream.of(true, false).flatMap(byId -> Stream.of(204, 404)
+                .map(status -> Arguments.of(byId, status)));
+    }
+
     @Test
     void lifecycleSettlementRetainsAttachmentAndDetachCarriesTheNewClaim() {
         server.removeContext("/capabilities");
