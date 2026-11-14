@@ -80,24 +80,22 @@ Local `gh` authentication requires an HTTPS `baseUrl` so the daemon host credent
 
 ## Configuration Options
 
-| Option                    | Default                  | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ------------------------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `token`                   | unset                    | Optional classic PAT with `notifications` scope; overrides local `gh` authentication                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `useLocalGh`              | `false`                  | Explicitly reuse the daemon host's account-wide GitHub CLI authentication                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `pollInterval`            | `60000`                  | Poll interval in ms. A steady-state poll is raised to the notifications endpoint's `X-Poll-Interval` when that is larger, which slows the PR watch too (both share one interval); at the default the header is also 60s, so nothing changes. A poll that ends in an error retries on the base backoff (2s doubling to 30s) instead, so the floor does not pace an error episode                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `groupPolicy`             | `"disabled"`             | Must be `"open"`, `"allowlist"` with the repo (`owner/repo`) listed in `groups`, or `"pairing"` with the repo approved for notifications to flow                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `repoFilterMode`          | `"off"`                  | Repository event filter: `"allowlist"` processes only the repositories listed in `repoFilter`, `"blocklist"` processes all except them, `"off"` processes everything. Applies to notification intake only                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `repoFilter`              | unset                    | `owner/repo` repository names used by `repoFilterMode`; required while the mode is `"allowlist"` or `"blocklist"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `deliverToBoundSessions`  | `false`                  | Deliver events for PRs bound to a live session into that session as a prompt instead of a channel-owned session (daemon-managed channels only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `requireBoundWatch`       | `false`                  | Only deliver bound events to `review`/`verify` sessions while the same session holds an active watch on that PR (an `/autofix-pr` watch or `/verify-pr <n> --watch`). One-shot `/review` and `/verify-pr` sessions stay bound but receive nothing; events with no eligible session retire privately, never as a public reply. `fix` and untyped bindings are unaffected, and an unknown watch state (detection failure) keeps delivering. Requires `deliverToBoundSessions`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `prCommentWatch`          | `true`                   | Poll same-account conversation and inline review comments on bound PRs and deliver each new one to every bound session that did not post it (comments posted under the channel's GitHub account by another session/agent). Other-account comments stay with the notification lanes. Set `false` to disable. Requires `deliverToBoundSessions`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `prWatchEvents`           | unset                    | Optional state transitions to watch for bound PRs: `ci_failure`, `merge_conflict`, `head_change`, `state_change`. Requires `deliverToBoundSessions`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `prWatchLimit`            | `30`                     | Maximum open bound PRs watched per poll, kept between 1 and 500. Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR still issues about one `pulls.get` per poll when state events are subscribed (~60 requests/hour at the 60s default), but an unchanged PR answers `304` and costs no primary rate limit, so the state watch is near-free while PRs are quiet. What still counts is the default-on comment watch's two list calls per ~2-minute re-check (~60 requests/hour/PR) and the periodic CI re-checks, which put a 5000/hour PAT budget at roughly 70–75 bound PRs. The ceiling moved from the state watch to the comment watch — it did not disappear, so do not read "near-free" as "unlimited"; over budget, every watch pass still aborts on rate limits. Raise `pollInterval` when raising this. Requires `deliverToBoundSessions` (with `prWatchEvents` and/or the default-on `prCommentWatch`) |
-| `prWatchBudgetReserve`    | `200`                    | REST requests held back for the interactive notification lane, kept between 0 and 5000. When the last known remaining budget is at or below this, the PR watch pass (state events and the comment watch) is skipped for that poll — and stopped mid-pass if a pass spends down to it — so a human mention is not starved by background polling; detection resumes once the budget recovers or its window resets. The default is ~4% of a 5000/hour PAT budget. Set `0` to disable the gate. Requires `deliverToBoundSessions`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `boundSessionActions`     | unset                    | Optional operator instruction templates for bound-session delivery, keyed by event class with optional role prefixes (`review:`, `verify:`, `fix:`). Enables role-aware fan-out. Requires `deliverToBoundSessions`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Option                    | Default                  | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `token`                   | unset                    | Optional classic PAT with `notifications` scope; overrides local `gh` authentication                                                                                                                                                                                                                                                                                                                                                                                        |
+| `useLocalGh`              | `false`                  | Explicitly reuse the daemon host's account-wide GitHub CLI authentication                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `pollInterval`            | `60000`                  | Poll interval in ms. A steady-state poll is raised to the notifications endpoint's `X-Poll-Interval` when that is larger, which slows the PR watch too (both share one interval); at the default the header is also 60s, so nothing changes. A poll that ends in an error retries on the base backoff (2s doubling to 30s) instead, so the floor does not pace an error episode                                                                                             |
+| `baseUrl`                 | `https://api.github.com` | API base URL (for GHE)                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `groupPolicy`             | `"disabled"`             | Must be `"open"`, `"allowlist"` with the repo (`owner/repo`) listed in `groups`, or `"pairing"` with the repo approved for notifications to flow                                                                                                                                                                                                                                                                                                                            |
+| `groups.*.requireMention` | `true`                   | Require @mentions for ordinary comments; directed notification reasons still run                                                                                                                                                                                                                                                                                                                                                                                            |
+| `reasonFilter`            | unset                    | Optional allowlist of GitHub notification reasons to process                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `repoFilterMode`          | `"off"`                  | Repository event filter: `"allowlist"` processes only the repositories listed in `repoFilter`, `"blocklist"` processes all except them, `"off"` processes everything. Applies to notification intake only                                                                                                                                                                                                                                                                   |
+| `repoFilter`              | unset                    | `owner/repo` repository names used by `repoFilterMode`; required while the mode is `"allowlist"` or `"blocklist"`                                                                                                                                                                                                                                                                                                                                                           |
+| `deliverToBoundSessions`  | `false`                  | Deliver events for PRs bound to a live session into that session as a prompt instead of a channel-owned session (daemon-managed channels only)                                                                                                                                                                                                                                                                                                                              |
+| `requireBoundWatch`       | `false`                  | Only deliver bound events to `review`/`verify` sessions while the same session holds an active watch on that PR (an `/autofix-pr` watch or `/verify-pr <n> --watch`). One-shot `/review` and `/verify-pr` sessions stay bound but receive nothing; events with no eligible session retire privately, never as a public reply. `fix` and untyped bindings are unaffected, and an unknown watch state (detection failure) keeps delivering. Requires `deliverToBoundSessions` |
+| `prCommentWatch`          | `true`                   | Poll same-account conversation and inline review comments on bound PRs and deliver each new one to every bound session that did not post it (comments posted under the channel's GitHub account by another session/agent). Other-account comments stay with the notification lanes. Set `false` to disable. Requires `deliverToBoundSessions`                                                                                                                               |
+| `prWatchEvents`           | unset                    | **Deprecated.** The daemon now detects PR-state transitions; configure `serve.sessionPrWatch` in the daemon settings (see the [settings reference](../../configuration/settings.md)). This channel no longer watches bound PRs for them. For one minor release the key is accepted and read as a per-host alias when that setting is unset, for PRs on this channel's web host. Requires `deliverToBoundSessions`                                                           |
+| `boundSessionActions`     | unset                    | Optional operator instruction templates for bound-session delivery, keyed by event class with optional role prefixes (`review:`, `verify:`, `fix:`). Enables role-aware fan-out. The `watch:*` keys are deprecated: configure `serve.sessionPrWatch.actions` for state transitions. Requires `deliverToBoundSessions`                                                                                                                                                       |
 
 Use `reasonFilter` to drop noisy notification classes such as `ci_activity` or `state_change`. Do not use `reasonFilter: ["mention"]` as a replacement for `groups.*.requireMention`: GitHub's `mention` reason is sticky at the thread level, so real new @mentions can arrive later under `comment`, `subscribed`, `author`, or other reasons and would be skipped.
 
@@ -119,7 +117,7 @@ Use `repoFilterMode` together with `repoFilter` to filter incoming notifications
 - `"allowlist"` processes only the listed repositories; `"blocklist"` processes every repository except the listed ones; `"off"` (the default) processes everything.
 - Repository names are matched case-insensitively and must be written as `owner/repo`. An active mode with an empty or malformed list is rejected at save time and at channel start.
 - While the mode is `"off"`, a stored list is ignored, so you can park a list without it affecting the channel.
-- The filter composes with `groupPolicy`: when both restrict repositories, only the intersection is processed. It applies to every incoming notification, including notifications about PRs bound to a live session (`deliverToBoundSessions`); only the PR state watch events (`prWatchEvents`) bypass it.
+- The filter composes with `groupPolicy`: when both restrict repositories, only the intersection is processed. It applies to every incoming notification, including notifications about PRs bound to a live session (`deliverToBoundSessions`). The daemon's PR-state watch is not a notification consumer: it reads the PRs bound to a session directly and is independent of this filter.
 - Filtered notifications are journaled as `repo_filter` skips in the Channel event timeline and do not hold the poll cursor. Like `reasonFilter` skips, they are marked read with the window and are not replayed when the filter changes.
 
 In the Web Shell editor, **Repository Filter** offers Off / Allowlist / Blocklist, and the **Filtered Repositories** list appears while a mode is active. You can paste repository or PR URLs there; they are shortened to `owner/repo` on save. Only URLs on the channel's own GitHub host are shortened — `github.com`, or the GitHub Enterprise host derived from the API base URL; URLs on any other host are rejected. On that host, URLs under known non-repository GitHub areas (`orgs/`, `apps/`, `settings/`, `trending/`, and similar) are also rejected instead of shortened. That area list is best-effort: a URL from a GitHub area not on the list can still be shortened, so check the saved `owner/repo` entries after pasting.
@@ -372,88 +370,57 @@ thread is re-read once the turn settles.
 - This feature requires a daemon-managed channel; standalone
   `qwen channel start` ignores the setting with a warning.
 
-With `prWatchEvents`, the channel additionally watches bound PRs for state
-transitions the Notifications API cannot deliver, inside its existing poll
-cycle: `ci_failure` (checks turn red on a head, once per head — including
-`startup_failure`), `merge_conflict` (`mergeable_state` becomes `dirty`,
-edge-triggered: `dirty → clean → dirty` fires again), `head_change` (new commits
-pushed, including a force-push revisit of a recent SHA), and `state_change`
-(PR merged or closed; close → reopen → close fires again). Detection is
-API-level and spends no model tokens until a transition fires. A quiet PR with
-settled CI costs one API call per poll; a PR whose CI is still pending is
-re-checked every 5 minutes until it settles, and settled heads are re-checked
-every 10 minutes (GitHub does not advance a PR's `updated_at` on check
-re-runs, so the periodic re-check is what catches a re-run turning red). At
-most `prWatchLimit` open bound PRs are actively polled (default 30), most
-recently bound first. Bindings already recorded as merged/closed drain in an
-additional slice outside that budget (20% of the limit, at least one, plus
-any leftover open budget) — each needs one final observation before it
-leaves the watch set, so dead bindings never crowd out live PRs and the
-drain still progresses when open PRs fill the limit. A binding the watch
-already observed closed is tiered as terminal even if the registry still
-says open. When the open budget cannot cover every open binding, the
-channel logs `PR watch cap exceeded` with the excluded list; raise
-`prWatchLimit` (and `pollInterval`) to cover more open PRs. Each watched PR
-still issues about one `pulls.get` per poll, but an unchanged PR answers `304`
-and costs no primary rate limit, so the state watch no longer sets the budget
-ceiling. The default-on comment watch does: its two list calls per ~2-minute
-re-check are ~60 requests/hour per PR, and with the periodic CI re-checks a
-5000/hour PAT budget lands at roughly 70–75 bound PRs. The ceiling moved, it
-did not disappear — an over-budget configuration still makes every watch pass
-abort on rate limits. A credential
-failure or rate limit (401/403/429) aborts the whole watch pass for that poll
-— one shared failure must not issue one doomed request per watched PR —
-while a per-PR permanent status (404/410/451) only skips that PR. A failing
-Checks endpoint never suppresses the other three detections: their data
-comes from `pulls.get`, and the last known CI aggregate stands until a fetch
-succeeds again.
-The watch runs before the notification lane each poll, so to keep a human
-mention from being starved by background polling the channel records the
-remaining REST budget from every successful response and skips the watch
-pass whenever that budget is at or below `prWatchBudgetReserve` (default
-200). The watch also re-checks the budget before each PR inside a pass, so
-a pass that spends down to the reserve yields mid-way rather than spending
-the whole reserve. Skipping delays detection: a transition that appears and
-reverts before the next watch pass is not observed. Baselines and pending
-queues are durable, so a state that persists is detected once the watch
-resumes — which happens when the budget recovers or its window resets. The
-skip and the recovery are recorded in the channel event timeline while the
-channel stays connected; a restart mid-episode leaves no recovery row. Set
-`prWatchBudgetReserve: 0` to disable this protection.
+With `prWatchEvents` (deprecated) and the `watch:*` keys of
+`boundSessionActions`, this channel used to watch bound PRs for state
+transitions. It no longer does. The daemon owns them now: configure
+`serve.sessionPrWatch` in the daemon settings (see the
+[settings reference](../../configuration/settings.md)), and the daemon's PR
+refresh delivers `ci_failure`, `merge_conflict`, `head_change` and
+`state_change` to the sessions bound to the PR. The daemon needs a `gh`
+credential that can read the PR. The transition rules are the same as this
+channel's were, with one deliberate difference: the daemon counts a cancelled
+or stale check as failing, because it uses core's rollup predicate. Superseded
+runs are cancelled routinely in this repository, so some `ci_failure` events
+will be noise.
 
-The two polling reads — the PR state watch's `pulls.get` and the notifications
+For one minor release this channel still accepts both deprecated surfaces and
+logs one warning naming `serve.sessionPrWatch`. When that setting is unset,
+the daemon reads each hosted channel's keys as a per-host alias: the channel's
+`prWatchEvents` are the event set for PRs on its web host, and its `watch:*`
+templates become the daemon's actions (`watch:<type>` → `<type>`,
+`<role>:watch:<type>` → `<role>:<type>`; `default` and `<role>:default` are
+kept). Two channels on one host take the union of their events; each type
+takes its actions from the first channel by name that can deliver it, with a
+logged conflict. An explicit `serve.sessionPrWatch` wins. The alias ends one
+minor release after this change, when the keys are rejected at `connect()`.
+
+One visible consequence: `%title%` in a comment template renders the last
+title the old state watch recorded and is no longer refreshed. A channel that
+never had a state subscription renders it empty, as before.
+
+To protect the interactive notification lane, the channel records the
+remaining REST budget from every successful response and skips the pass when
+it is at or below 200; it re-checks before each PR and yields mid-pass. Skipping
+delays delivery — a comment that appears and is deleted before the next pass is
+not seen — but the cursors are durable, so a new comment is fetched once the
+budget recovers or its window resets.
+
+The two polling reads — the comment watch's list calls and the notifications
 list — are **conditional requests**. The channel remembers each response's
-`ETag` and sends `If-None-Match` on the next read of the same URL. When nothing
-changed GitHub answers `304 Not Modified`, which does not count against the
-primary rate limit, and the channel reuses the retained body. The requests
-still go out at the same rate; what drops is the budget they consume, so the
-per-PR figures above are the worst case where every poll sees a change. The
-cache is in memory and per connection: a restart or reconnect re-reads once at
-full cost. It is sized to cover the largest watch fan-out — twice
-`prWatchLimit`'s ceiling of 500 — because a cache smaller than one sweep would
-not degrade gently: every miss would evict the entry the sweep is about to
-read, and the saving would be zero at exactly the high PR counts that need it.
-Bodies over 256 KiB are not cached, total retention is capped at 64 MiB, and a
-response with no `ETag` at all is passed through without taking a slot; an
-evicted, oversized or validator-less URL simply stays unconditional. Periodic
-CI re-checks are unaffected — GitHub does not
-advance a PR's `updated_at` on check activity, so a `304` is not evidence that
-CI is unchanged, and those timers keep firing on their own schedule.
+`ETag` and sends `If-None-Match` on the next read of the same URL. When
+nothing changed GitHub answers `304 Not Modified`, which does not count
+against the primary rate limit, and the channel reuses the retained body. The
+requests still go out at the same rate; what drops is the budget they consume.
+The cache is in memory and per connection: a restart or reconnect re-reads
+once at full cost. Bodies over 256 KiB are not cached, total retention is
+capped at 64 MiB, and a response with no `ETag` is passed through without
+taking a slot. The notifications endpoint also returns `X-Poll-Interval`, and
+a steady-state poll will not run faster than it; this paces the steady state
+only, because an error retries on the shared backoff.
 
-The notifications endpoint also returns `X-Poll-Interval`, and a steady-state
-poll will not run faster than it. Because one interval drives the whole poll
-and the watch runs first, this raises the watch interval too. At the default
-`pollInterval: 60000` the header is also 60 seconds and nothing changes; only
-a faster configured poll is slowed down. The result stays within the same
-one-day ceiling `pollInterval` itself is held to, so an implausibly large
-header cannot push the poll loop past the runtime's timer range. This paces
-the steady state only: a poll that ends in an error retries on the shared
-backoff (2 s doubling to 30 s), which other channels rely on for recovery, so
-an error episode can poll faster than the header asks.
-
-Transitions are persisted before delivery, so restarts do not re-fire them.
-A head move fires whoever pushed it, including the bound session itself —
-see Known Limitations.
+The comment watch's fetch is the only per-PR watch call. A rate-limited or
+credential answer fails fast and aborts the pass, so it never sleep-retries
+ahead of task recovery and notification intake.
 
 ### Bound PR Comment Watch
 
@@ -461,8 +428,9 @@ With `deliverToBoundSessions` on, the channel also polls each bound PR for new
 **conversation comments and inline review comments posted under the channel's
 own GitHub account** and delivers each one into every bound session that did
 **not** post it. This is default-on; set `prCommentWatch: false` to disable it.
-It is independent of `prWatchEvents`, so it works even when no state transition
-is subscribed.
+It is independent of the deprecated `prWatchEvents`: with bound delivery on it
+is always active, and the state-transition watch that used to share its pass
+has moved to the daemon.
 
 The watch closes the **same-account gap**: GitHub sends the channel account no
 notification for its own activity, so the notification-driven comment lanes
@@ -487,10 +455,9 @@ reaches no one in that group.
 
 Comments are fetched on a periodic re-check (about every 2 minutes), and the
 first observation baselines silently — comments that predate the watch are not
-replayed. A comment-only channel (no `prWatchEvents`) issues no per-poll
-`pulls.get`; the comment fetch is the only watch call. A rate-limited or credential answer
-fails fast and aborts the watch pass (the same rule as the state watch), so it
-never sleep-retries ahead of task recovery and notification intake. Delivery
+replayed. The channel issues no per-poll `pulls.get`; the comment fetch is the
+only watch call. A rate-limited or credential answer fails fast and aborts the
+pass, so it never sleep-retries ahead of task recovery and notification intake. Delivery
 reuses the bound-session contract: role-aware templates (`comment` /
 `fix:comment` / `default`), stable comment-id dedupe, backpressure and
 dead-letter, and dormant wake. The watch and the notification lanes are
@@ -530,18 +497,17 @@ without a role are _untyped_. A later command re-offer never overwrites an
 existing role.
 
 **Keys and resolution.** Each key is an event class, optionally prefixed with
-a role: `watch:head_change`, `comment`, `review:watch:head_change`,
-`verify:default`, or the catch-all `default`. The `watch:` prefix matters:
-`state_change` is both a watch transition and a notification reason — bare
-`state_change` matches the notification, `watch:state_change` the transition.
-For each role group the chain resolves `<role>:<event>` → `<role>:comment`
-(for comment events) → `<role>:default` → `<event>` → `comment` → `default`;
-**no match skips that role for the event** — the map is a per-role
-subscription. Comment events carry the thread's notification reason
-(`mention`, `subscribed`, `author`, ...), so `fix:comment` catches a comment
-delivered under any of those reasons, while a reason-specific key such as
-`fix:mention` still wins when configured. Untyped bindings resolve only the
-bare chain.
+a role: `comment`, `review:comment`, `verify:default`, or the catch-all
+`default`. The `watch:`-prefixed keys this section used to document are
+deprecated with the channel's state watch: configure
+`serve.sessionPrWatch.actions` for those, without the prefix. For each role
+group the chain resolves `<role>:<event>` → `<role>:comment` (for comment
+events) → `<role>:default` → `<event>` → `comment` → `default`; **no match
+skips that role for the event** — the map is a per-role subscription. Comment
+events carry the thread's notification reason (`mention`, `subscribed`,
+`author`, ...), so `fix:comment` catches a comment delivered under any of
+those reasons, while a reason-specific key such as `fix:mention` still wins
+when configured. Untyped bindings resolve only the bare chain.
 
 **Routing.** One winner per role (the most recently updated follower within
 the group), fan-out across matched roles — at most four deliveries per event
@@ -559,24 +525,39 @@ event.
 `%%` renders a literal `%`, and an unknown `%foo%` stays literal so typos are
 visible. Substituted GitHub values are sanitized, and `%title%` and
 `%sender%` are also capped at 200 code points with a visible marker. `%title%`
-comes from the last observed PR title, which the state watch records; on a
-comment-only channel (no `prWatchEvents`) no title is observed, so `%title%`
-renders empty there — subscribe a state event if a template needs the PR name.
+comes from the last PR title the old state watch observed; it is not refreshed
+any more, so it can be stale. A channel that never had a state subscription
+renders it empty, as before.
 The rendered instruction appears under an `[Operator instruction — trusted]`
 label and a `Source: this channel's configuration` line; the untrusted-data
-warning explicitly covers the substituted values. Example
-for a review / verify / fix split across three workspaces:
+warning explicitly covers the substituted values. The channel's comment
+templates look like this:
 
 ```json
 {
   "deliverToBoundSessions": true,
-  "prWatchEvents": ["head_change", "ci_failure", "merge_conflict"],
   "boundSessionActions": {
-    "review:watch:head_change": "The PR head advanced. Run /review %pr% --resume and report the delta since your last review.",
-    "verify:watch:head_change": "The PR head advanced. Run /verify-pr %pr% --publish.",
-    "fix:watch:ci_failure": "CI failed on the current head. Diagnose the failed checks named below and fix them.",
-    "fix:watch:merge_conflict": "The PR has a merge conflict. Resolve it.",
+    "review:comment": "New review comments arrived. Address the actionable ones.",
     "fix:comment": "New review comments arrived. Address the actionable ones."
+  }
+}
+```
+
+State transitions are configured on the daemon instead, in the same
+role-aware shape without the `watch:` prefix:
+
+```json
+{
+  "serve": {
+    "sessionPrWatch": {
+      "events": ["head_change", "ci_failure", "merge_conflict"],
+      "actions": {
+        "review:head_change": "The PR head advanced. Run /review %pr% --resume and report the delta since your last review.",
+        "verify:head_change": "The PR head advanced. Run /verify-pr %pr% --publish.",
+        "fix:ci_failure": "CI failed on the current head. Diagnose the failed checks named below and fix them.",
+        "fix:merge_conflict": "The PR has a merge conflict. Resolve it."
+      }
+    }
   }
 }
 ```
@@ -628,8 +609,7 @@ boundary; tool permissions remain the boundary.
 - **A late notification can miss its comment.** The cursor follows the newest notification, so a notification GitHub delivers after a newer one was marked read can name a comment from before the cursor. Comments created in the cursor's own second are still read when the cursor lists that second's comments (see [How It Works](#how-it-works)); earlier ones are not, and the user has to post again.
 - The notification lanes process only issue/PR conversation comments. The PR comment watch additionally enumerates same-account inline review comments, but review summary bodies are not enumerated by either, and other-account inline review comments reach no bound session.
 - The selected credential must support the Notifications API. Fine-grained PATs do not support it; use local `gh` authentication or a classic PAT with `notifications` scope.
-- **A bound session receives its own pushes.** `head_change` compares head SHAs and GitHub's PR object does not name the pusher, so the channel cannot tell a bound session's own push from someone else's. When the pushing session is the recipient, the event arrives as a queued turn attributed to `Author: GitHub`, with both SHAs in the summary.
-- **Breaking a push → event → push chain.** With `boundSessionActions`, a role whose template chain resolves nothing is skipped — keep `watch:head_change` and the catch-alls away from the role that pushes; the example above wakes review and verify, not fix. Without it, the single most recently active follower receives every subscribed transition, so drop `head_change` from `prWatchEvents` or have the session compare the summary's target SHA with the head it just pushed. `/verify-pr` re-runs for a head it has not verified, including one it pushed itself; `/autofix-pr` treats its own pushed heads as its own work. The other three transitions are never suppressed by authorship — a self-pushed head whose CI turns red still fires `ci_failure`.
+- **State transitions are the daemon's.** This channel no longer delivers `head_change`, `ci_failure`, `merge_conflict` or `state_change`; `serve.sessionPrWatch` does, from the daemon's PR refresh. The daemon's latency, its CI predicate (cancelled and stale checks count as failing), its self-push suppression per recipient and its per-workspace trust rules are documented in the [master design](../../../developers/daemon/17-configuration.md) and the settings reference. The channel's own watch is now the comment watch only.
 
 ## Starting the Channel
 
