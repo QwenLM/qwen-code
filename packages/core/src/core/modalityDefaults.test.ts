@@ -289,6 +289,8 @@ describe('defaultModalities', () => {
         'meta-llama/Llama-4-Scout-17B-16E-Instruct',
       ],
       ['llama4 (Ollama)', IMAGE, 'llama4:16x17b'],
+      ['llama4 scout tag (Ollama)', IMAGE, 'llama4:scout'],
+      ['llama4 maverick tag (Ollama)', IMAGE, 'llama4:maverick'],
       ['llava', IMAGE, 'llava:13b'],
       ['pixtral-12b', IMAGE],
       ['pixtral-large-latest', IMAGE],
