@@ -1349,7 +1349,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Show the native OpenTUI transcript scrollbar. Hidden by default so the conversation can use the extra column; enable and restart to restore the auto-hiding bar. Independent of ui.showScrollbar, which the OpenTUI renderer does not read.',
+          'Show the native OpenTUI transcript scrollbar. Hidden by default so the conversation can use the extra column; enable and restart to show the bar whenever the transcript overflows. Independent of ui.showScrollbar, which the OpenTUI renderer does not read.',
         showInDialog: true,
       },
       mouseTracking: {

@@ -79,6 +79,17 @@ describe('native clipboard bridge', () => {
     await expect(value.copyText('hello')).resolves.toBe(false);
   });
 
+  it.each([
+    ['failed', { code: 1, stdout: '', stderr: CLIPBOARD_BUSY_MESSAGE }],
+    ['timed out', { code: null, stdout: '', stderr: '' }],
+  ] as const)(
+    'reports a copy whose read-back %s, so the caller can fall back',
+    async (_label, readBack) => {
+      const { value } = copyBridge(readBack);
+      await expect(value.copyText('hello')).resolves.toBe(false);
+    },
+  );
+
   it('trusts the write when the read-back cannot run', async () => {
     const { value } = copyBridge(null);
     await expect(value.copyText('hello')).resolves.toBe(true);

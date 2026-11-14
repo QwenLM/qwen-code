@@ -11,7 +11,8 @@ export interface OpenTuiScrollbarOptions {
 /**
  * The OpenTUI transcript scrollbar is hidden by default to give the
  * conversation one more column. An explicit `ui.showOpenTuiScrollbar: true`
- * restores OpenTUI's normal auto-hiding bar (undefined lets the scrollbox use
+ * restores OpenTUI's default bar, drawn whenever the transcript overflows
+ * (undefined lets the scrollbox use
  * its own visibility logic).
  */
 export function openTuiScrollbarOptions(

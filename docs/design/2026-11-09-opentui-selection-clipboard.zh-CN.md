@@ -24,15 +24,17 @@ Ink 已有自己的选取与右键菜单；本变更定义 OpenTUI 的行为，�
 ## 目标
 
 - 任意 OpenTUI 区域完成的选取都会复制到剪贴板，并保持高亮。
-- 复制成功后，右下角短暂显示 `Copied N chars` 确认；在对话框或确认画面之后的复制
+- 复制成功后，右下角短暂显示 `Copied N chars` 确认；在对话框或确认画面打开时复制
   不显示确认。
 - 在 shell 任意位置右键、且存在属于 transcript 的选取时，清除该选取。
 - 在 shell 任意位置右键、且没有选取时，执行 composer 的 Ctrl+V 剪贴板路径，包括
-  图片优先处理与文字后备。
+  图片优先处理与文字后备；前台 shell 拥有焦点时，剪贴板文字改为写入该 shell。对话框、
+  工具确认或审批提示打开时，右键会被忽略。
 - PageUp/PageDown 每次滚动一个视口页；Ctrl+Home/Ctrl+End 跳到两端；不在底部时
   显示跳到底部提示。
 - 原生 OpenTUI transcript 滚动条默认隐藏。显式设置
-  `ui.showOpenTuiScrollbar: true` 可恢复 OpenTUI 原本的自动隐藏滚动条。
+  `ui.showOpenTuiScrollbar: true` 可恢复 OpenTUI 默认的滚动条：只要 transcript 内容
+  超出视口就会显示（闲置时不会淡出）。
 - 行为拆成带测试的小模块，而不是全部写在 app shell 里。
 
 ## 非目标
@@ -54,7 +56,7 @@ Ink 已有自己的选取与右键菜单；本变更定义 OpenTUI 的行为，�
 | `selection-auto-copy.ts`                   | `useSelectionAutoCopy()`：复制任何非空的 OpenTUI 选取并回报成功。                                                             |
 | `copy-notice.tsx`                          | 右下角暂时显示的 `Copied N chars` 确认；两秒后消失。                                                                          |
 | `transcript-mouse.ts`                      | `handleTranscriptRightClick()`：纯右键策略（清除选取或贴上）。                                                                |
-| `scrollbar-visibility.ts`                  | `openTuiScrollbarOptions()`：把设置映射为 `{ visible: false }` 或 `undefined`（OpenTUI 自动隐藏）。                           |
+| `scrollbar-visibility.ts`                  | `openTuiScrollbarOptions()`：把设置映射为 `{ visible: false }` 或 `undefined`（OpenTUI 默认）。                               |
 | `native-clipboard.ts`                      | 原生剪贴板桥接：写入与读取都在 Node 子进程执行；只有子进程无法运行时，读取才在进程内使用 addon。包含 Windows/macOS 文字读取。 |
 | `jump-to-bottom-hint.tsx`                  | 新增的底部判断与浮动提示。                                                                                                    |
 | `input-submission.ts` / `input-prompt.tsx` | composer handle 新增 `pasteClipboard()`，执行既有的 Ctrl+V 路径。                                                             |
@@ -72,7 +74,8 @@ Ink 已有自己的选取与右键菜单；本变更定义 OpenTUI 的行为，�
    中的一次点击只处理一次。若存在属于 transcript 且有非空文字的选取，
    `handleTranscriptRightClick()` 会清除它。单纯的左键点击会让 OpenTUI 留下一个长
    度为零的选取，其容器是被点击文字的父节点；这种选取不算数，所以下一次右键仍会贴
-   上。否则调用 `composerHandle.current.pasteClipboard()`。transcript 条目的点击处
+   上。否则调用 `composerHandle.current.pasteClipboard()`；若前台 shell 拥有输入焦点，
+   则读取剪贴板文字并写入该 shell，与终端贴到已聚焦 shell 的目的地相同。transcript 条目的点击处
    理函数（思考块、工具卡片）会检查是否为左键，避免对应的右键放开在贴上的同时切换
    卡片展开状态。
 3. `pasteClipboard()` 委托给 composer 既有的 Ctrl+V 处理函数：先处理剪贴板图片，
@@ -88,7 +91,7 @@ Ink 已有自己的选取与右键菜单；本变更定义 OpenTUI 的行为，�
 6. transcript scrollbox 接收
    `scrollbarOptions={openTuiScrollbarOptions(settings.merged.ui?.showOpenTuiScrollbar)}`。
    未设置或为 false 时隐藏滚动条；为 true 时 `scrollbarOptions` 保持 undefined，
-   让 OpenTUI 使用自己的自动隐藏行为。
+   让 OpenTUI 使用自己的显示规则：内容超出视口时显示滚动条。
 7. Linux 剪贴板写入使用共用的 `copyToClipboard()` 分派：
    `wl-copy` → `xclip` → `xsel` → 原生 `@teddyzhu/clipboard` addon → OSC 52。
    即使 addon 能在进程内加载，原生写入也一律在 Node 子进程执行：clipboard-rs 在替
@@ -97,7 +100,7 @@ Ink 已有自己的选取与右键菜单；本变更定义 OpenTUI 的行为，�
    composer 那一行。子进程的 stdout 是 pipe。子进程在 `setClipboardText()` 之后
    多存活 150 ms，让操作系统的剪贴板管理器接手拥有权。没有剪贴板管理器接手时，X11
    选取会随拥有者一起消失，因此写入成功后，桥接会再用一个子进程把剪贴板读回来；若
-   文字没有保留下来，复制会回报失败，`copyToClipboard()` 改走 OSC 52，而不是确认一
+   文字没有保留下来，或读回已执行但失败／逾时，复制会回报失败，`copyToClipboard()` 改走 OSC 52，而不是确认一
    个已经消失的复制。读取基于同样的理由也在子进程执行，只有无法启动 Node 子进程时
    （例如 PATH 上没有 Node）才在进程内使用 addon；子进程已执行但失败时不会退回。
    Node 路径来自 `QWEN_NODE_BINARY`（由 npm Bun handoff 设置）或 `NVM_BIN`，因为

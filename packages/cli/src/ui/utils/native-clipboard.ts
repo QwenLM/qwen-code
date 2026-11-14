@@ -267,7 +267,11 @@ export function createNativeClipboardBridge(
       // it, and the helper exits shortly after writing. Read it back so a lost
       // copy reports failure and the caller falls through to OSC 52.
       const check = await deps.runHelper(READ_HELPER_SCRIPT, null);
-      if (!check || check.code !== 0 || check.overflow) return true;
+      // No child could run, so the write cannot be checked; trust it. A
+      // read-back that ran and failed or timed out is a lost copy.
+      if (!check) return true;
+      if (check.code !== 0) return false;
+      if (check.overflow) return true;
       return (
         normalizeClipboardText(extractReadPayload(check.stdout)) ===
         normalizeClipboardText(text)

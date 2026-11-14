@@ -133,6 +133,7 @@ import { isRenderableWithin } from './renderable-tree.js';
 import { openTuiScrollbarOptions } from './scrollbar-visibility.js';
 import { useSelectionAutoCopy } from './selection-auto-copy.js';
 import { handleTranscriptRightClick } from './transcript-mouse.js';
+import { readClipboardText } from '../utils/clipboardUtils.js';
 import {
   normalizeQuitSubmission,
   OpenTuiSlashGateway,
@@ -781,12 +782,26 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       handleTranscriptRightClick(event, {
         hasSelection,
         clearSelection: () => renderer.clearSelection(),
-        pasteClipboard: () => props.composerHandle?.current?.pasteClipboard?.(),
+        pasteClipboard: () => {
+          // A focused foreground shell owns input, so paste where its other
+          // paste route (onShellPaste) writes instead of into the chat draft.
+          if (shellFocused && foregroundShell && shellControl) {
+            void readClipboardText().then((text) => {
+              if (text && !shellControl.writeShellInput(foregroundShell, text))
+                setShellFocus(null);
+            });
+            return;
+          }
+          props.composerHandle?.current?.pasteClipboard?.();
+        },
       });
     },
     [
       renderer,
       props.composerHandle,
+      shellFocused,
+      foregroundShell,
+      shellControl,
       dialog,
       activeModal,
       activeToolCall,

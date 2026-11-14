@@ -33,11 +33,14 @@ defines the OpenTUI behavior rather than copying Ink's menu model.
 - Right-click anywhere in the shell with a scoped transcript selection clears
   the selection.
 - Right-click anywhere in the shell with no selection runs the composer's Ctrl+V
-  clipboard path, including image-first handling and text fallback.
+  clipboard path, including image-first handling and text fallback; with a
+  focused foreground shell the clipboard text goes to the shell instead. While a
+  dialog, tool confirmation, or approval prompt is open, right-click is ignored.
 - PageUp/PageDown scroll one viewport page; Ctrl+Home/Ctrl+End jump to the
   edges; the jump-to-bottom hint appears away from the tail.
 - The native OpenTUI transcript scrollbar is hidden by default. An explicit
-  `ui.showOpenTuiScrollbar: true` restores OpenTUI's normal auto-hiding bar.
+  `ui.showOpenTuiScrollbar: true` restores OpenTUI's default bar, which is drawn
+  whenever the transcript overflows (it does not fade out when idle).
 - Behavior is split into small modules with tests rather than embedded in the
   app shell.
 
@@ -62,7 +65,7 @@ defines the OpenTUI behavior rather than copying Ink's menu model.
 | `selection-auto-copy.ts`                   | `useSelectionAutoCopy()`: copy any non-empty OpenTUI selection and report success.                                                                           |
 | `copy-notice.tsx`                          | Transient bottom-right `Copied N chars` confirmation; expires after two seconds.                                                                             |
 | `transcript-mouse.ts`                      | `handleTranscriptRightClick()`: pure right-click policy (clear selection vs paste).                                                                          |
-| `scrollbar-visibility.ts`                  | `openTuiScrollbarOptions()`: map the setting to `{ visible: false }` or `undefined` (OpenTUI auto-hide).                                                     |
+| `scrollbar-visibility.ts`                  | `openTuiScrollbarOptions()`: map the setting to `{ visible: false }` or `undefined` (OpenTUI default).                                                       |
 | `native-clipboard.ts`                      | Native clipboard bridge: writes and reads run in a Node child; reads use the in-process addon only when no child can run. Includes Windows/macOS text reads. |
 | `jump-to-bottom-hint.tsx`                  | New tail predicate and floating hint.                                                                                                                        |
 | `input-submission.ts` / `input-prompt.tsx` | Composer handle gains `pasteClipboard()`, which runs the existing Ctrl+V path.                                                                               |
@@ -86,7 +89,9 @@ defines the OpenTUI behavior rather than copying Ink's menu model.
    `handleTranscriptRightClick()` clears it. A plain left-click leaves OpenTUI
    with a zero-length selection whose container is the clicked text's parent;
    that does not count, so the next right-click still pastes. Otherwise it calls
-   `composerHandle.current.pasteClipboard()`. Transcript item click handlers
+   `composerHandle.current.pasteClipboard()`, or, while a foreground shell has
+   input focus, reads the clipboard text and writes it to the shell, the same
+   destination as a terminal paste into the focused shell. Transcript item click handlers
    (thinking blocks, tool cards) check for the left button so the matching right
    mouse-up cannot toggle a card behind the paste.
 3. `pasteClipboard()` delegates to the composer's existing Ctrl+V handler:
@@ -104,7 +109,8 @@ defines the OpenTUI behavior rather than copying Ink's menu model.
 6. The transcript scrollbox receives
    `scrollbarOptions={openTuiScrollbarOptions(settings.merged.ui?.showOpenTuiScrollbar)}`.
    Missing/false hides the bar; true leaves `scrollbarOptions` undefined so
-   OpenTUI keeps its own auto-hide behavior.
+   OpenTUI keeps its own visibility rule: the bar shows whenever the content
+   overflows.
 7. Linux clipboard writes use the shared `copyToClipboard()` dispatch:
    `wl-copy` → `xclip` → `xsel` → native `@teddyzhu/clipboard` addon → OSC 52.
    Native writes always run in a Node child, even when the addon loads in
@@ -115,8 +121,8 @@ defines the OpenTUI behavior rather than copying Ink's menu model.
    stays alive for 150 ms after `setClipboardText()` so the OS clipboard
    manager can take ownership. An X11 selection dies with its owner when no
    clipboard manager takes it, so after a successful write the bridge reads the
-   clipboard back through a second child; when the text did not persist the
-   copy reports failure and `copyToClipboard()` falls through to OSC 52 instead
+   clipboard back through a second child; when the text did not persist, or
+   the read-back ran and failed or timed out, the copy reports failure and `copyToClipboard()` falls through to OSC 52 instead
    of confirming a copy that is gone. Reads also run in the child for the same
    reason, and use the addon in process only when no Node child can start (for
    example, no Node on PATH); a child that ran and failed does not fall back.
