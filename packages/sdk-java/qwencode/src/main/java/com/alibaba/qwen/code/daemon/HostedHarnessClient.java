@@ -2729,9 +2729,15 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         if (!heartbeatInterval.isZero()) {
             long delay = saturatedMillis(heartbeatInterval);
-            replacement.task = scheduler.scheduleWithFixedDelay(
+            ScheduledFuture<?> task = scheduler.scheduleWithFixedDelay(
                     () -> scheduleHeartbeat(replacement), delay, delay,
                     TimeUnit.MILLISECONDS);
+            replacement.task = task;
+            // Removal may have cancelled the attachment before its future
+            // was available. Complete that cancellation after publication.
+            if (replacement.cancelled.get()) {
+                task.cancel(false);
+            }
         }
     }
 
