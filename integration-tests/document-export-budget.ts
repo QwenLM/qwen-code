@@ -13,8 +13,9 @@
  * (#17158), and 60.9s (#17203). Those hosts get the same 3x
  * multiplier the interactive harness uses in `interactive/wait.ts`; GitHub-
  * hosted CI and local runs keep the tight 60s ceiling so a real regression
- * still fails fast. The gate inherits the integration suite's 5-minute
- * testTimeout, so the widened budget is always observed before a case timeout.
+ * still fails fast. The gate sets its per-case ceiling 30s above this budget,
+ * under the integration suite's 5-minute testTimeout, so the budget assertion
+ * is always observed before a case timeout.
  *
  * Pure and read at call time so the decision is pinned state-by-state with a
  * plain object instead of real time
