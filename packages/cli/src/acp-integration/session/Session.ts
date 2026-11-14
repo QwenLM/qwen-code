@@ -8673,6 +8673,11 @@ export class Session implements SessionContext {
                               channelDeliveryResponseBlock,
                               channelDeliveryCheckpoint,
                             );
+                            // The attempt the flag described is abandoned
+                            // here; a later response must decide the flag
+                            // afresh, or a completed turn still reports
+                            // max_tokens.
+                            truncatedAtOutputLimit = false;
                           }
                           await finalizeToolCallPreparations(
                             preparationTracker,
@@ -8856,6 +8861,7 @@ export class Session implements SessionContext {
 
               // The shared round's stop point ran in the client, so its turn
               // ends here; otherwise fire the session's Stop hook loop.
+              let continuationFinishReason: string | undefined;
               const result = sharedModelRound
                 ? {
                     stopReason: getAbortAwareEndTurnStopReason(
@@ -8873,6 +8879,9 @@ export class Session implements SessionContext {
                     rejectOnLoopDetected,
                     goalTurn,
                     channelTurn,
+                    (reason) => {
+                      continuationFinishReason = reason;
+                    },
                   );
               // Recovery is bounded: exhausting its attempts leaves the answer
               // cut off. The internal outcome stays `end_turn` — every
@@ -8887,6 +8896,13 @@ export class Session implements SessionContext {
                 isFreshUserTurn,
                 { channelTurn, sharedModelRound, memoryTasksRanInClient },
               );
+              if (!sharedModelRound && continuationFinishReason !== undefined) {
+                // The Stop-hook continuation's own finish reason decides the
+                // flag: a continuation that completed the answer must not
+                // inherit the superseded round's MAX_TOKENS.
+                truncatedAtOutputLimit =
+                  continuationFinishReason === FinishReason.MAX_TOKENS;
+              }
               return truncatedAtOutputLimit && result.stopReason === 'end_turn'
                 ? {
                     stopReason: result.stopReason,
@@ -9177,6 +9193,10 @@ export class Session implements SessionContext {
                 functionCalls.length = 0;
                 toolRequests.length = 0;
                 attempt = newModelResponseFacts();
+                // The retried round owns the finish reason from here on;
+                // keeping the abandoned attempt's MAX_TOKENS would report a
+                // completed retry as truncated.
+                lastFinishReason = undefined;
                 break;
               }
               case LlmEventType.ChatCompressed:
@@ -9650,11 +9670,12 @@ export class Session implements SessionContext {
     rejectOnLoopDetected = false,
     goalTurn?: AcpGoalTurn,
     channelTurn = false,
+    onFinishReason?: (reason: string | undefined) => void,
   ): Promise<{
     stopReason: PromptResponse['stopReason'];
     loopProtectionStopped?: boolean;
   }> {
-    const stopHookBlockingCap = this.config.getStopHookBlockingCap();
+        const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     // Foreground prompts only: cron and background turns run without external
     // hooks, and channel turns deliver each response block as it ends.
     const interruptible = allowExternalHooks && !channelTurn;
@@ -9731,6 +9752,7 @@ export class Session implements SessionContext {
             getModelOverride: () => modelOverride,
             responseCapture,
             rejectOnLoopDetected,
+            ...(onFinishReason ? { onFinishReason } : {}),
             ...(goalTurn ? { goalTurn } : {}),
             ...(channelTurn ? { channelTurn: true } : {}),
             ...(interruptible
@@ -9898,6 +9920,7 @@ export class Session implements SessionContext {
                 getModelOverride: () => modelOverride,
                 responseCapture,
                 rejectOnLoopDetected,
+                ...(onFinishReason ? { onFinishReason } : {}),
                 ...(goalTurn ? { goalTurn } : {}),
                 ...(channelTurn ? { channelTurn: true } : {}),
                 ...(interruptible
@@ -10033,6 +10056,7 @@ export class Session implements SessionContext {
           getModelOverride: () => modelOverride,
           responseCapture,
           rejectOnLoopDetected,
+          ...(onFinishReason ? { onFinishReason } : {}),
           ...(goalTurn ? { goalTurn } : {}),
           ...(channelTurn ? { channelTurn: true } : {}),
           ...(interruptible
@@ -10079,6 +10103,8 @@ export class Session implements SessionContext {
       interruptible?: boolean;
       /** Called when the continuation answers user input it cut in for. */
       onUserInputAnswered?: () => void;
+      /** Observes the continuation's own last model finish reason. */
+      onFinishReason?: (reason: string | undefined) => void;
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
@@ -10529,6 +10555,9 @@ export class Session implements SessionContext {
             options.responseCapture?.agentOutput.observeFinishReason(
               candidate.finishReason,
             );
+            if (candidate.finishReason) {
+              options.onFinishReason?.(candidate.finishReason);
+            }
           }
 
           if (
