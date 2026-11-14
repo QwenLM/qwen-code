@@ -129,6 +129,12 @@ timer and releases reader/dispatcher resources independently.
 
 ## Shared Web integration
 
+Builds containing only the backend PR (#17223), before the Web integration
+(#17224), do not recognize `wecom-webhook` in Web Shell. The Channels manager
+offers no creation entry and hides existing instances. During that interval,
+manage the Channel through `settings.json` and `qwen serve --channel <name>`.
+The Web integration below makes both creation and existing instances available.
+
 Group `wecom` and `wecom-webhook` under WeCom, with accurate method labels
 `Intelligent bot` and `Webhook sending`. Keep `wecom-callback` as its existing
 independent entry. Reuse the current platform helper, localized labels,
