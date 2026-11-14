@@ -109,13 +109,35 @@ describe('model picker independence from subscription authentication', () => {
       messageType: 'info',
       content: 'Model: fallback',
     });
-    expect(switchModel).toHaveBeenCalledWith(
-      AuthType.USE_OPENAI,
-      'fallback',
-      undefined,
-    );
+    expect(switchModel).toHaveBeenCalledWith(AuthType.USE_OPENAI, 'fallback', {
+      initializeIfNeeded: true,
+    });
     expect(refreshSubscriptionModels).not.toHaveBeenCalled();
     expect(context.ui.addItem).not.toHaveBeenCalled();
+  });
+
+  it('rejects an explicit model that violates the auth policy', async () => {
+    const switchModel = vi.fn();
+    const context = createMockCommandContext({
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
+          switchModel,
+        },
+        settings: {
+          merged: {
+            security: { auth: { enforcedType: AuthType.QWEN_SUBSCRIPTION } },
+          },
+        },
+      },
+    });
+
+    expect(await modelCommand.action!(context, 'fallback(openai)')).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'Authentication is restricted by policy.',
+    });
+    expect(switchModel).not.toHaveBeenCalled();
   });
 
   it.each([AuthType.QWEN_SUBSCRIPTION, AuthType.USE_OPENAI])(
@@ -182,7 +204,7 @@ describe('model picker independence from subscription authentication', () => {
     expect(switchModel).toHaveBeenCalledWith(
       AuthType.QWEN_SUBSCRIPTION,
       'replacement',
-      undefined,
+      { initializeIfNeeded: true },
     );
     expect(context.ui.addItem).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ text: 'Loading models from provider…' }),

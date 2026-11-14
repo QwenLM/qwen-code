@@ -30,7 +30,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 public class WakeRecoveryStoreTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     protected ManagedSchemaJdbcTemplate jdbc;
-    protected WakeRecoveryStore store;
+    protected JdbcWakeRecoveryStore store;
     private long revision;
     private long sequence;
 
@@ -46,7 +46,7 @@ public class WakeRecoveryStoreTest {
         var source = dataSource();
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
-        store = new WakeRecoveryStore(jdbc);
+        store = new JdbcWakeRecoveryStore(jdbc);
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create,"
                 + " gmt_modified) VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1)");
         jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, workspace_id,"
@@ -60,7 +60,7 @@ public class WakeRecoveryStoreTest {
 
     @Test
     void discoversEverySourceWithoutMqAndOnlyMatchingSettlementConsumesIt() {
-        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "session_message")) {
+        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "session_message", "loop")) {
             append("input.accepted", "turn-" + source, source);
         }
         // Cross the journal page boundary; neither an attempt nor a different Turn settles this input.
@@ -70,7 +70,7 @@ public class WakeRecoveryStoreTest {
         jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id,"
                 + " wake_covered_sequence, gmt_modified) VALUES ('tenant', 'session', 'SESSION', '', 999, 1)");
         assertThat(store.hasPendingInput(candidate())).contains(true);
-        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation")) {
+        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "loop")) {
             append("turn.settled", "turn-" + source, null);
             assertThat(store.hasPendingInput(candidate())).contains(true);
         }
@@ -90,7 +90,7 @@ public class WakeRecoveryStoreTest {
         append("input.accepted", "turn", "monitor");
         var pending = candidate();
         assertThat(store.claim(pending)).isTrue();
-        var restarted = new WakeRecoveryStore(jdbc);
+        var restarted = new JdbcWakeRecoveryStore(jdbc);
         assertThat(restarted.claim(pending)).isFalse();
         assertThat(restarted.findPending("workspace", 8)).isEmpty();
         assertThat(restarted.hasPendingInput(pending)).contains(true);
@@ -113,7 +113,7 @@ public class WakeRecoveryStoreTest {
                 if (!start.await(5, TimeUnit.SECONDS)) {
                     throw new IllegalStateException("claim did not start");
                 }
-                return new WakeRecoveryStore(jdbc).claim(pending);
+                return new JdbcWakeRecoveryStore(jdbc).claim(pending);
             };
             var first = workers.submit(claim);
             var second = workers.submit(claim);
@@ -214,7 +214,7 @@ public class WakeRecoveryStoreTest {
         jdbc.update("DELETE FROM ma_session_journal_tx");
         assertThatThrownBy(() -> store.hasPendingInput(pending)).hasMessageContaining("cannot prove");
         jdbc.update("UPDATE ma_session_head SET compacted_through_revision = 1");
-        var compacted = new WakeRecoveryStore.Candidate("tenant", "workspace", "session",
+        var compacted = new JdbcWakeRecoveryStore.Candidate("tenant", "workspace", "session",
                 pending.journalRevision(), pending.committedSequence(), 1, null, null);
         assertThatThrownBy(() -> store.hasPendingInput(compacted)).hasMessageContaining("cannot prove");
         assertThat(store.findPending("workspace", 8)).isEmpty();
@@ -229,16 +229,16 @@ public class WakeRecoveryStoreTest {
         jdbc.update("UPDATE ma_session_head SET journal_revision = 1, committed_sequence = 1");
         assertThat(store.hasPendingInput(candidate())).contains(true);
         jdbc.update("UPDATE ma_session_journal_tx SET workspace_id = 'other' WHERE journal_revision = 1");
-        assertThatThrownBy(() -> new WakeRecoveryStore(jdbc).hasPendingInput(candidate())).hasMessageContaining("cannot prove");
+        assertThatThrownBy(() -> new JdbcWakeRecoveryStore(jdbc).hasPendingInput(candidate())).hasMessageContaining("cannot prove");
     }
 
     @Test
     void hintOnlyMarksSupportedInputAdmissions() {
-        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "session_message")) {
-            assertThat(WakeRecoveryStore.isWakeInput(event("input.accepted", "turn", source))).isTrue();
+        for (String source : List.of("monitor", "channel", "child_agent", "workflow", "automation", "session_message", "loop")) {
+            assertThat(JdbcWakeRecoveryStore.isWakeInput(event("input.accepted", "turn", source))).isTrue();
         }
-        assertThat(WakeRecoveryStore.isWakeInput(event("input.accepted", "turn", "user"))).isFalse();
-        assertThat(WakeRecoveryStore.isWakeInput(event("turn.settled", "turn", null))).isFalse();
+        assertThat(JdbcWakeRecoveryStore.isWakeInput(event("input.accepted", "turn", "user"))).isFalse();
+        assertThat(JdbcWakeRecoveryStore.isWakeInput(event("turn.settled", "turn", null))).isFalse();
     }
 
     @Test
@@ -257,7 +257,7 @@ public class WakeRecoveryStoreTest {
                             + " FROM ma_session_head WHERE session_id = ?",
                     "0".repeat(60) + String.format("%04d", index), id, id, "session");
         }
-        assertThat(store.findPending("workspace", 1)).extracting(WakeRecoveryStore.Candidate::sessionId)
+        assertThat(store.findPending("workspace", 1)).extracting(JdbcWakeRecoveryStore.Candidate::sessionId)
                 .containsExactly("session");
         assertThat(store.findPending("workspace", 8)).hasSize(8);
     }
@@ -297,7 +297,7 @@ public class WakeRecoveryStoreTest {
         }
         var pending = candidate();
         var reads = new CountingJdbcTemplate(jdbc.getDataSource());
-        store = new WakeRecoveryStore(reads);
+        store = new JdbcWakeRecoveryStore(reads);
         for (int pass = 0; pass < 2; pass++) {
             assertThat(store.hasPendingInput(pending)).isEmpty();
             assertThat(reads.revisions).hasSize(32 * (pass + 1));
@@ -342,7 +342,7 @@ public class WakeRecoveryStoreTest {
         var before = candidate();
         assertThat(store.hasPendingInput(before)).isEmpty();
         var reads = new CountingJdbcTemplate(jdbc.getDataSource());
-        store = new WakeRecoveryStore(reads);
+        store = new JdbcWakeRecoveryStore(reads);
         assertThat(store.hasPendingInput(before)).isEmpty();
         assertThat(reads.revisions.getFirst()).isZero();
         append("turn.settled", "pending", null);
@@ -361,7 +361,7 @@ public class WakeRecoveryStoreTest {
         }
         var pending = candidate();
         var reads = new CountingJdbcTemplate(jdbc.getDataSource());
-        store = new WakeRecoveryStore(reads);
+        store = new JdbcWakeRecoveryStore(reads);
         assertThat(store.hasPendingInput(pending)).isEmpty();
         jdbc.update("UPDATE ma_session_journal_tx SET record_digest = ? WHERE journal_revision = 33", "c".repeat(64));
         assertThatThrownBy(() -> store.hasPendingInput(pending)).hasMessageContaining("cannot prove");
@@ -384,7 +384,7 @@ public class WakeRecoveryStoreTest {
             }
             var candidates = store.findPending("workspace", 200);
             assertThat(candidates).hasSize(129);
-            var completed = new HashSet<WakeRecoveryStore.Candidate>();
+            var completed = new HashSet<JdbcWakeRecoveryStore.Candidate>();
             for (int pass = 0; pass < 4 && completed.size() < candidates.size(); pass++) {
                 for (var row : candidates) {
                     if (!completed.contains(row) && store.hasPendingInput(row).equals(java.util.Optional.of(true))) {
@@ -394,7 +394,7 @@ public class WakeRecoveryStoreTest {
             }
             assertThat(completed).containsExactlyInAnyOrderElementsOf(candidates);
 
-            store = new WakeRecoveryStore(jdbc);
+            store = new JdbcWakeRecoveryStore(jdbc);
             for (var row : candidates.subList(0, 128)) {
                 assertThat(store.hasPendingInput(row)).isEmpty();
             }
@@ -451,7 +451,7 @@ public class WakeRecoveryStoreTest {
         }
     }
 
-    private WakeRecoveryStore.Candidate candidate() {
+    private JdbcWakeRecoveryStore.Candidate candidate() {
         return store.findPending("workspace", 8).getFirst();
     }
 
@@ -464,6 +464,198 @@ public class WakeRecoveryStoreTest {
             payload.put("source", source);
         }
         return event;
+    }
+
+    @Test
+    void futureOnlyLoopWakeupIsDeferredNotParked() {
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode future = event("input.accepted", "loop-future", "loop");
+        ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
+        appendBatch(future);
+        // The only unsettled wake input is a not-yet-due wakeup: the proof
+        // certifies nothing (empty keeps the durable hint) rather than clearing
+        // it, so recovery must not attach yet but must not drop the wakeup.
+        assertThat(store.hasPendingInput(candidate())).isEmpty();
+        // Once the fire time passes, the same journal attaches the Harness.
+        store.setNowMillis(() -> 3_000_000L);
+        assertThat(store.hasPendingInput(candidate())).contains(true);
+    }
+
+    @Test
+    void dueLoopWakeupStillAttaches() {
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode due = event("input.accepted", "loop-due", "loop");
+        ((ObjectNode) due.get("payload")).put("notBefore", 500_000L);
+        appendBatch(due);
+        assertThat(store.hasPendingInput(candidate())).contains(true);
+    }
+
+    @Test
+    void immediateLoopWakeupWithoutNotBeforeStillAttaches() {
+        store.setNowMillis(() -> 1_000_000L);
+        append("input.accepted", "loop-now", "loop");
+        assertThat(store.hasPendingInput(candidate())).contains(true);
+    }
+
+    @Test
+    void nonLoopPendingInputIsUnaffectedByTheLoopExemption() {
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode future = event("input.accepted", "loop-future", "loop");
+        ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
+        ObjectNode monitor = event("input.accepted", "monitor-turn", "monitor");
+        appendBatch(future, monitor);
+        assertThat(store.hasPendingInput(candidate())).contains(true);
+    }
+
+    @Test
+    void sentinelLoopWakeupReplaysWithNotBeforeParity() {
+        // A fire-time sentinel wakeup (the autonomous/loop.md sentinel prompt the
+        // Harness expands) is a loop input carrying notBefore; the Java replay
+        // proof must treat it exactly like the Harness's deferral, not attach early.
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode sentinel = event("input.accepted", "loop:wakeup-sentinel", "loop");
+        ((ObjectNode) sentinel.get("payload")).put("notBefore", 5_000_000L);
+        appendBatch(sentinel);
+        assertThat(store.hasPendingInput(candidate())).isEmpty();
+        store.setNowMillis(() -> 6_000_000L);
+        assertThat(store.hasPendingInput(candidate())).contains(true);
+    }
+
+    @Test
+    void aDeferredOnlyJournalKeepsTheRecoveryHintUntilTheWakeupIsDue() {
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode future = event("input.accepted", "loop-future", "loop");
+        ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
+        appendBatch(future);
+        // Production arms the hint in the same commit as the wake input
+        // (JournalCommit writes is_wake_pending beside the revision). With the
+        // hint set, only the hinted pass can return the row — the unhinted
+        // fallback filters is_wake_pending = FALSE — so the assertions below
+        // exercise the path a real armed Session is discovered through.
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = TRUE");
+        var deferred = candidate();
+        var answer = store.hasPendingInput(deferred);
+        assertThat(answer).isEmpty();
+        // WakeRecovery.scan records only a present answer; an empty proof keeps
+        // the durable hint. Clearing it here (the old false answer) would make
+        // findPending drop the Session and the armed wakeup would never fire.
+        answer.ifPresent(pending -> store.recordPending(deferred, pending));
+        assertThat(store.findPending("workspace", 8)).isNotEmpty();
+        // Once due, the same journal is discovered and recorded pending.
+        store.setNowMillis(() -> 3_000_000L);
+        var due = candidate();
+        assertThat(store.hasPendingInput(due)).contains(true);
+        assertThat(store.recordPending(due, true)).isTrue();
+        assertThat(store.findPending("workspace", 8)).isNotEmpty();
+    }
+
+    @Test
+    void aPagedProofDoesNotForgetADeferredLoopWakeup() {
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode future = event("input.accepted", "loop-future", "loop");
+        ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
+        appendBatch(future);
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = TRUE");
+        // Push the journal well past the 32-revision per-call proof bound so
+        // the deferred input and the head land in different proof pages.
+        for (int i = 0; i < 200; i++) {
+            append("turn.settled", "settled-" + i, null);
+        }
+        var reads = new CountingJdbcTemplate(jdbc.getDataSource());
+        store = new JdbcWakeRecoveryStore(reads);
+        store.setNowMillis(() -> 1_000_000L);
+        // The first scan pages past the deferred input and certifies nothing.
+        assertThat(store.hasPendingInput(candidate())).isEmpty();
+        assertThat(reads.revisions).hasSize(32);
+        // The next scan resumes at the page boundary instead of restarting:
+        // a deferred proof refuses the answer, not the progress. Throwing the
+        // partial proof away would restart every scan at revision 0 and stop
+        // in the same window forever.
+        assertThat(store.hasPendingInput(candidate())).isEmpty();
+        assertThat(reads.revisions).hasSize(64);
+        assertThat(reads.revisions.get(32)).isEqualTo(32L);
+        // Drain to the head; the deferred-only journal keeps the hint (empty).
+        var answer = store.hasPendingInput(candidate());
+        for (int i = 0; i < 5 && answer.isEmpty(); i++) {
+            answer = store.hasPendingInput(candidate());
+        }
+        assertThat(answer).isEmpty();
+        int readsAtHead = reads.revisions.size();
+        assertThat(readsAtHead).isEqualTo(201);
+        // The head-reached deferred proof is cached: the next scan re-reads
+        // nothing and still keeps the hint.
+        assertThat(store.hasPendingInput(candidate())).isEmpty();
+        assertThat(reads.revisions).hasSize(readsAtHead);
+        // Once due, the cached deferred proof expires and a fresh proof span
+        // counts the input; it attaches at that span's head. A proof that kept
+        // skipping the input as deferred would never answer true.
+        store.setNowMillis(() -> 3_000_000L);
+        var due = store.hasPendingInput(candidate());
+        for (int i = 0; i < 9 && due.isEmpty(); i++) {
+            due = store.hasPendingInput(candidate());
+        }
+        assertThat(due).contains(true);
+    }
+
+    @Test
+    void aWakeInputPastTheProofWindowIsReachedByResumedDeferredProofs() {
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode future = event("input.accepted", "loop-future", "loop");
+        ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
+        appendBatch(future);
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = TRUE");
+        for (int i = 0; i < 40; i++) {
+            append("turn.settled", "settled-" + i, null);
+        }
+        // A crashed turn's monitor input lands at the head, past the 32-page
+        // window the first call can read.
+        append("input.accepted", "monitor-turn", "monitor");
+        assertThat(store.hasPendingInput(candidate())).isEmpty();
+        // The resumed proof reaches the monitor input and attaches. A proof
+        // that restarted at zero every scan would never read past revision 32
+        // and would strand the crashed turn for the whole deferral window.
+        assertThat(store.hasPendingInput(candidate())).contains(true);
+    }
+
+    @Test
+    void aSettledDeferredWakeupReleasesTheHintBeforeItsFireTime() {
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode future = event("input.accepted", "loop-future", "loop");
+        ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
+        appendBatch(future);
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = TRUE");
+        assertThat(store.hasPendingInput(candidate())).isEmpty();
+        // The wakeup is cancelled (its turn settles) while still unfired: the
+        // deferred latch must clear so the hint can be retired instead of
+        // staying armed until the fire time.
+        append("turn.settled", "loop-future", null);
+        var settled = candidate();
+        assertThat(store.hasPendingInput(settled)).contains(false);
+        assertThat(store.recordPending(settled, false)).isTrue();
+        assertThat(store.findPending("workspace", 8)).isEmpty();
+    }
+
+    @Test
+    void aCompleteDeferredProofIsMemoizedAcrossScans() {
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode future = event("input.accepted", "loop-future", "loop");
+        ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
+        ObjectNode monitor = event("input.accepted", "monitor-turn", "monitor");
+        appendBatch(future, monitor);
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = TRUE");
+        var reads = new CountingJdbcTemplate(jdbc.getDataSource());
+        store = new JdbcWakeRecoveryStore(reads);
+        store.setNowMillis(() -> 1_000_000L);
+        var pending = candidate();
+        // The due monitor input makes the proof complete even though a deferred
+        // wakeup sits beside it: recovery attaches now.
+        assertThat(store.hasPendingInput(pending)).contains(true);
+        int readsAfterFirst = reads.revisions.size();
+        // The complete proof is memoized, so the next scan answers true without
+        // re-reading the journal. An early return before the put would skip the
+        // cache and re-prove from revision zero on every scan.
+        assertThat(store.hasPendingInput(pending)).contains(true);
+        assertThat(reads.revisions).hasSize(readsAfterFirst);
     }
 
     private void append(String kind, String turn, String source) {

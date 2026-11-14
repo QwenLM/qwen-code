@@ -192,7 +192,7 @@ public class SessionWorktreeService {
                 store.complete(row, owner, "READY", null, storedBlocker);
                 return;
             }
-            var binding = com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.storageBinding(row.plan());
+            var binding = SessionWorktreeStore.storageBinding(row.plan());
             String step = execution.holdForMaintenance(binding, row.operationId(), row.generation());
             String identity = null;
             boolean stopped = true;
