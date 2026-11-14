@@ -147,9 +147,8 @@ test('global turn navigation follows transcript scrolling @smoke', async ({
 
   // The rail highlights the reading position without any click, sitting at
   // its own bottom edge while the transcript is at the live tail.
-  await expect.poll(() => ariaOrdinal(page)).not.toBeNull();
+  await expect.poll(() => ariaOrdinal(page)).toBeGreaterThanOrEqual(TURNS - 6);
   const atBottom = (await ariaOrdinal(page))!;
-  expect(atBottom).toBeGreaterThanOrEqual(TURNS - 6);
   await expect.poll(() => inRangeCount(page)).toBeGreaterThan(0);
   await expect.poll(() => markerOffsetRatio(page)).toBeGreaterThan(0.85);
   await expect.poll(() => railScrollTop(page)).toBeGreaterThan(0);
@@ -184,6 +183,17 @@ test('global turn navigation follows transcript scrolling @smoke', async ({
   const ratio = await markerOffsetRatio(page);
   expect(ratio).toBeGreaterThanOrEqual(0);
   expect(ratio).toBeLessThanOrEqual(1);
+
+  // A width change relayouts the virtualized transcript and re-follows the
+  // tail, so keep asking for the upper reading position until the rail
+  // reflects it. At the tail the rail would re-window away from tick 0
+  // before the click lands.
+  await expect
+    .poll(async () => {
+      await scrollTranscriptTo(page, 0.2);
+      return ariaOrdinal(page);
+    })
+    .toBeLessThan(TURNS / 2);
 
   // Clicking a tick still jumps, and the highlight lands on the jumped turn.
   await rail
