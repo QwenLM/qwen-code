@@ -751,6 +751,27 @@ export default {
     '使い方: /forget <削除するメモリテキスト>',
   'No managed auto-memory entries matched: {{query}}':
     '一致するマネージド自動メモリエントリなし: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'GitHub プルリクエストをこのセッションにバインド',
+  'Usage: /pr <number | url>': '使用法: /pr <番号 | url>',
+  'No PRs bound to this session.':
+    'このセッションにバインドされた PR はありません。',
+  'Bound PRs: {{list}}': 'バインド済み PR: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    '無効な PR 参照です。使用法: /pr <番号 | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'gh で PR #{{number}} を解決できませんでした。完全な PR URL を指定してください。',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} をこのセッションにバインドしました：{{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} はすでにこのセッションにバインドされています：{{url}}',
+  'Failed to bind PR #{{number}}.': 'PR #{{number}} のバインドに失敗しました。',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'PR #{{number}} のバインドに失敗しました: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'このセッションの PR バインドを読み取れませんでした。',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) が利用できないかタイムアウトしました。完全な PR URL を指定してバインドしてください。',
   'Consolidate managed auto-memory topic files.':
     'マネージド自動メモリトピックファイルを統合する。',
   'No MCP servers configured.': 'MCP servers が設定されていません',
@@ -1260,6 +1281,7 @@ export default {
   Reqs: 'リクエスト',
   'Input Tokens': '入力トークン',
   'Output Tokens': '出力トークン',
+  'Output (incl. Reasoning)': '出力（推論を含む）',
   'Savings Highlight:': '節約ハイライト:',
   'of input tokens were served from the cache, reducing costs.':
     '入力トークンがキャッシュから提供され、コストを削減しました',
@@ -1627,6 +1649,8 @@ export default {
     'アドバイザーレビューに失敗しました：{{error}}',
   'No conversation context available for /advisor':
     '/advisor に使用できる会話コンテキストがありません',
+  'No conversation context available for /btw':
+    '/btw に使用できる会話コンテキストがありません',
   'Focus too long (max {{max}} chars)':
     'フォーカスが長すぎます（最大 {{max}} 文字）',
   'Another operation is in progress, wait for it to complete before running /advisor':
