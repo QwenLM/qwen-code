@@ -6,7 +6,7 @@
 
 修订 2026-11-08（评审）：watch 仅在把评论投递给至少一个绑定会话时才消费它——其较窄的 `comment` 类无法路由的评论保持未消费（不写共享去重键），好让通知 lane 仍按线程自身的 reason 投递；评论游标不会越过投递意图未被持久化认领的评论（`dispatchEnvelope` 返回 false 时保留 `commentSince` 以便重试）；两个评论抓取沿用状态 watch 的限流快速退出重试判断，并把共享凭据/限流错误交给本轮中止逻辑；归因要求写标志与评论集合同处一个管道段（链尾的 `stat -f` 或引号内的 `grep 'gh pr comment'` 属读取）、对显式 GET（即便带字段参数）一票否决、剥离引号片段、给 transcript 扫描缓存设上限、且只在有候选时才查询；每轮候选上限用于排出停机积压而不丢尾部。watch 记录 `dispatchedCommentTimes` 使其去重键可被逐出；仅评论的 channel（`prWatchEvents` 为空）跳过每轮 `pulls.get`。`prCommentWatch` 不带 `deliverToBoundSessions` 依赖校验，因为编辑器会为每个 channel 提交它的默认值。归因读活跃 transcript 及该会话的 subagent transcript（归档会话自己发的评论是已点名的尽力而为残余）。watch 将自身限定于同账号评论——即通知 lane 看不到的缺口；异账号评论仍由通知 lane 处理，因为若以 watch 较窄的 `comment` 类消费它们，可能只触达已配置角色的一个子集而饿死其余角色。作者排除先于每轮批次上限执行，避免一连串自己发的评论占满批次位、卡住游标。归因还识别纯数字的创建结果（`--jq '.id'`）与标志在 URL 之前的 curl 写入、否决带引号的 GET 方法值、并把换行视为命令边界。
 
-修订 2026-11-14（启动积压，见[绑定投递启动积压](2026-11-14-bound-delivery-startup-backlog.zh-CN.md)）：检测到停机缺口后——或可投递窗口超过 `MAX_WATCH_COMMENTS_PER_PASS` 时——watch 以私有**摘要** prompt 投递积压，而非每条评论一条。上文两处陈述仅就该路径修订：(1) 事件/幂等键不再是稳定评论 id，而是 `comment-digest:<n>:<排序后已渲染成员 key 的 sha256-40>`——对 prompt 实际携带内容的哈希，故游标保存前崩溃后的重列会去重已渲染成员，窗口长大时只派发新增余量；已渲染成员的稳定 id 仍记入 `dispatchedComments`。(2) 作者排除基于**已渲染片段**与绑定 follower 集计算：写了**每个**已渲染成员的 follower 被排除出该 digest（它已持有全部正文），部分作者仍收到——故缺口后写了数条中一条的会话会收到含其自身成员的 digest，并以自身为作者标注。digest 携带 channel 账号身份（发送者白名单豁免匹配它），最新成员优先分配共享正文预算，省略成员以更多 digest 补投（游标停留、其键不记录），retired 判定绝不推进游标。逐条投递（无缺口、窗口在上限内）不变。
+修订 2026-11-14（启动积压，见[绑定投递启动积压](2026-11-14-bound-delivery-startup-backlog.zh-CN.md)）：检测到停机缺口后——或可投递窗口超过 `MAX_WATCH_COMMENTS_PER_PASS` 时——watch 以私有**摘要** prompt 投递积压，而非每条评论一条。以下内容仅就该路径修订：(1) 下文投递流程第 3 步的事件/幂等键不再是稳定评论 id，而是 `comment-digest:<n>:<排序后已渲染成员 key 的 sha256-40>`——对 prompt 实际携带内容的哈希，故游标保存前崩溃后的重列会去重已渲染成员，窗口长大时只派发新增余量；已渲染成员的稳定 id 仍记入 `dispatchedComments`。(2) 作者排除基于**已渲染片段**与绑定 follower 集计算：写了**每个**已渲染成员的 follower 被排除出该 digest（它已持有全部正文），部分作者仍收到——故缺口后写了数条中一条的会话会收到含其自身成员的 digest，并以自身为作者标注。(3) 下文的作者排除验收标准就该路径放宽：任何会话都不会收到其本人写就**全部**已渲染成员的摘要（部分作者仍收到）。digest 携带 channel 账号身份（发送者白名单豁免匹配它），最新成员优先分配共享正文预算，省略成员以更多 digest 补投（游标停留、其键不记录），retired 判定绝不推进游标。逐条投递（无缺口、窗口在上限内）不变。
 
 ## 问题
 
@@ -73,7 +73,7 @@
 
 1. 用现有角色感知解析器（`resolveBoundTargets`）解析该 PR 的绑定目标，事件类为 `comment`。
 2. 剔除 `postedCommentIds` 含该评论标识的每个目标。
-3. 经现有绑定 prompt 路径（`claimInboundTask` + `deliverToBoundSession`）投递给剩余目标，用稳定评论 id 作事件/幂等键。复用角色模板（`fix:comment` / `comment` / `default`）、死信、背压与唤醒。
+3. 经现有绑定 prompt 路径（`claimInboundTask` + `deliverToBoundSession`）投递给剩余目标，用稳定评论 id 作事件/幂等键（摘要模式下该键为内容哈希 `comment-digest:<n>:<hash>`——见上文 2026-11-14 修订）。复用角色模板（`fix:comment` / `comment` / `default`）、死信、背压与唤醒。
 4. 若无剩余目标（都发过它，或没有绑定），私有退休并记一条 journal；绝不回退公开回复。
 
 prompt envelope 携带：作者 login、评论正文（sanitize + 码点上限）、评论 URL，行内评论还带文件路径与行/侧（不带 diff-hunk 上下文）。metadata 身份行渲染最近观测到的 PR 标题，因此只要观测过标题，`%title%` 绑定动作变量就有值（从未观测过标题的仅评论 pass 渲染为空）。所有 GitHub 内容标记为不可信事件数据；回复留在会话内。
@@ -113,7 +113,7 @@ prompt envelope 携带：作者 login、评论正文（sanitize + 码点上限�
 ## 验收标准
 
 - 一个绑定会话发布的同账号评论，在推荐的 `senders: allowlist` 策略下、无需标记或 mention，投递给每一个没有发过它的其他绑定会话。
-- 作者会话收不到自己的评论；仅读取过评论的会话仍会收到。
+- 作者会话收不到自己的评论；仅读取过评论的会话仍会收到。（摘要路径按 2026-11-14 修订放宽：仅当某会话写了**每个**已渲染成员时才被排除，故部分作者仍收到摘要。）
 - 异账号评论与 review 正文不被 watch 消费。
 - UI 创建/编辑的 channel 保持监视默认开启；显式 `prCommentWatch: false` 禁用它。
 

@@ -294,6 +294,23 @@ function boundDeadLetterPath(
   );
 }
 
+/** Mirrors channelFilePath('github-bound-delivered.json') for assertions. */
+function boundDeliveredRingPath(
+  cwd = '/tmp/test',
+  channelName = 'test-github',
+): string {
+  const nameHash = createHash('sha256')
+    .update(channelName)
+    .digest('hex')
+    .slice(0, 16);
+  return join(
+    process.env.QWEN_HOME!,
+    'channels',
+    getWorkspaceScopeDirName(cwd),
+    `${channelName}-${nameHash}-github-bound-delivered.json`,
+  );
+}
+
 function makeInboundTaskRecord(overrides: Record<string, unknown> = {}) {
   const envelope = {
     channelName: 'test-github',
@@ -31669,9 +31686,14 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
             fired: [staleKey],
           },
         });
-        writeInboundTasks([
-          parkedWatchTask(staleKey, { id: 'task-inflight', state: 'accepted' }),
-        ]);
+        writeInboundTasks([parkedWatchTask(staleKey, { id: 'task-inflight' })]);
+        // A retrying parked task still reads state:'failed' on disk while the
+        // runner delivers it; only publicTasksInFlight marks it in flight. An
+        // 'accepted' seed would be rejected by the state operand before the
+        // in-flight check is ever consulted.
+        (
+          channel as unknown as { publicTasksInFlight: Set<string> }
+        ).publicTasksInFlight.add('task-inflight');
         installWatchPaginateRouting();
         mockPull({ head: { sha: 'sha-2' } });
         mockChecks([{ status: 'completed', conclusion: 'success' }]);
@@ -31999,11 +32021,30 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(3));
         mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
         boundSessions.listPrBindings.mockResolvedValueOnce({
-          bindings: [],
+          bindings: [makeBinding()],
           partial: true,
         });
         await pollOnce();
         expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        // A non-empty partial snapshot still reaches watchPrComments, whose
+        // untrusted-snapshot deferral must keep commentSince and the arm for
+        // the unscanned workspace (an empty binding list would skip the loop
+        // entirely and never exercise that branch).
+        expect(readWatchState().entries['owner/repo#42']!['commentSince']).toBe(
+          '2026-07-01T00:00:00.000Z',
+        );
+        expect(
+          readWatchState().entries['owner/repo#42']!['digestPending'],
+        ).toBe(true);
+        // The deferral advances the fetch clock; reset it so the recheck
+        // interval does not gate the next fetch.
+        (
+          channel as unknown as {
+            prWatchState: {
+              entries: Record<string, { commentLastFetchAt?: number }>;
+            };
+          }
+        ).prWatchState.entries['owner/repo#42']!.commentLastFetchAt = 0;
         await pollOnce();
         expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
         expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
@@ -32134,6 +32175,70 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           .split('\n')
           .map((line) => JSON.parse(line) as Record<string, unknown>);
         expect(records[0]!['reason']).toBe('superseded: head advanced');
+      });
+
+      it('a restart poll holds a stale parked watch task until a trusted pass observes it', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const staleKey = 'watch:ci_failure:42:sha-1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            ci: 'failure',
+            prState: 'open',
+            ciFiredSha: 'sha-1',
+            fired: [staleKey],
+          },
+        });
+        writeInboundTasks([parkedWatchTask(staleKey)]);
+        // A downtime gap: the persisted baseline is still the pre-shutdown
+        // one the stale key was derived from, so neither fold arm can match.
+        setLastPollAt(new Date(Date.now() - 3600 * 1000).toISOString());
+        installWatchPaginateRouting();
+        mockNotificationsOnce([]);
+        // Poll 1: binding refresh fails and the watch pass is skipped. The
+        // arm persisted at gap detection must HOLD the stale parked task
+        // (no delivery, no dead-letter), not replay it.
+        boundSessions.listPrBindings.mockRejectedValue(
+          new Error('daemon unreachable'),
+        );
+        mockPull({});
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(existsSync(inboundTaskPath())).toBe(true);
+        // Poll 2: the refresh recovers with the head advanced; the trusted
+        // watch pass commits a fresh baseline and clears the arm, so recovery
+        // retires the stale task instead of delivering it.
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [makeBinding()],
+          partial: false,
+        });
+        mockPull({ head: { sha: 'sha-2' } });
+        // Persistent success: a Once-mock would be shadowed by any queued
+        // checks answer and re-detect a failure on the new head.
+        mockOctokit.rest.checks.listForRef.mockResolvedValue([
+          { status: 'completed', conclusion: 'success' },
+        ]);
+        await pollOnce();
+        expect(
+          boundSessions.deliverPrompt.mock.calls.filter((call) =>
+            String(call[1]).includes('CI failed'),
+          ),
+        ).toHaveLength(0);
+        expect(existsSync(inboundTaskPath())).toBe(false);
+        const records = readFileSync(boundDeadLetterPath(), 'utf-8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        expect(
+          records.some((r) => r['reason'] === 'superseded: head advanced'),
+        ).toBe(true);
       });
 
       it('a retained pending ci_failure folds on a later pass without a new transition', async () => {
@@ -32587,6 +32692,74 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(
           readWatchState().entries['owner/repo#42']!['digestPending'],
         ).toBe(true);
+        // The claim-time member recording must be undone on a retired
+        // verdict: otherwise the next pass filters every member as already
+        // dispatched and its empty candidate set consumes the whole backlog.
+        const recordedAfterRetire =
+          (channel as unknown as { cursor: { dispatchedComments?: string[] } })
+            .cursor.dispatchedComments ?? [];
+        expect(recordedAfterRetire).not.toContain('IC_555');
+        // Remove the route gate and retry: the backlog must still deliver as
+        // one digest with the member keys recorded, not vanish.
+        (
+          channel as unknown as { messageRoutes: Map<string, string> }
+        ).messageRoutes.clear();
+        (
+          channel as unknown as {
+            prWatchState: {
+              entries: Record<string, { commentLastFetchAt?: number }>;
+            };
+          }
+        ).prWatchState.entries['owner/repo#42']!.commentLastFetchAt = 0;
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'Offline backlog: 3',
+        );
+        const recorded = (
+          channel as unknown as { cursor: { dispatchedComments?: string[] } }
+        ).cursor.dispatchedComments!;
+        expect(recorded).toEqual(
+          expect.arrayContaining(['IC_555', 'IC_556', 'IC_557']),
+        );
+      });
+
+      it('an unreadable delivery ring holds the retired digest cursor', async () => {
+        // A corrupt delivery ring, written BEFORE connect loads it: the ring
+        // is read once at init, so a later write would not be re-read.
+        // boundEventAlreadyDelivered fail-opens on an unreadable ring, but the
+        // digest must treat unknown as NOT delivered and hold the cursor.
+        mkdirSync(dirname(boundDeliveredRingPath()), { recursive: true });
+        writeFileSync(boundDeliveredRingPath(), '{invalid json', 'utf-8');
+        await initChannel(
+          {
+            ...commentOnlyConfig,
+            messageRoutes: { '/review': 'Review the change.' },
+          },
+          { boundSessions },
+        );
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(3));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        try {
+          await pollOnce();
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(readWatchState().entries['owner/repo#42']!['commentSince']).toBe(
+          '2026-07-01T00:00:00.000Z',
+        );
+        expect(
+          readWatchState().entries['owner/repo#42']!['digestPending'],
+        ).toBe(true);
       });
 
       it('a green fold releases the head slot so a later real failure fires', async () => {
@@ -32679,6 +32852,132 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           records.some((r) => r['reason'] === 'superseded: CI recovered'),
         ).toBe(true);
         expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('a green re-run folds a pending ci_failure and releases the head slot', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const staleKey = 'watch:ci_failure:42:sha-1:1751446800000';
+        const predecessorKey = 'watch:head_change:42:99:1751446700000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            ci: 'failure',
+            prState: 'open',
+            ciFiredSha: 'sha-1',
+            fired: [staleKey],
+            pending: [makePendingWatch({ key: staleKey })],
+          },
+        });
+        // An unsettled predecessor keeps the drain from delivering the pending
+        // event before the fold can retire it.
+        writeInboundTasks([parkedWatchTask(predecessorKey)]);
+        installWatchPaginateRouting();
+        mockPull({ updated_at: '2026-07-02T11:00:00.000Z' });
+        mockOctokit.rest.checks.listForRef.mockResolvedValue([
+          { status: 'completed', conclusion: 'success' },
+        ]);
+        await runWatchPass();
+        const entry = readWatchState().entries['owner/repo#42']!;
+        expect(
+          (entry['pending'] as Array<{ key: string }>).map((p) => p.key),
+        ).not.toContain(staleKey);
+        expect(entry['ciFiredSha']).toBeUndefined();
+        expect(entry['fired']).not.toContain(staleKey);
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        const records = readFileSync(boundDeadLetterPath(), 'utf-8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        expect(
+          records.some((r) => r['reason'] === 'superseded: CI recovered'),
+        ).toBe(true);
+        // Settle the predecessor; a genuine red on the same head must fire.
+        writeInboundTasks([]);
+        mockPull({ updated_at: '2026-07-02T12:00:00.000Z' });
+        mockOctokit.rest.checks.listForRef.mockResolvedValue([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        await runWatchPass();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'CI failed on head sha-1',
+        );
+      });
+
+      it('disabling comment watch clears a stale arm without losing the cursor', async () => {
+        // watchConfig keeps prWatchEvents non-empty so the watch pass (and thus
+        // watchPrComments' disabled branch) runs even with prCommentWatch off.
+        await initChannel(watchConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentEntry({ digestPending: true });
+        installWatchPaginateRouting();
+        mockPull({});
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        mockOctokit.rest.activity.listNotificationsForAuthenticatedUser.mockResolvedValue(
+          [],
+        );
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(1));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        const entry = readWatchState().entries['owner/repo#42']!;
+        expect(entry['digestPending']).toBe(false);
+        expect(entry['commentSince']).toBe('2026-07-01T00:00:00.000Z');
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        // Re-enable: the next comment delivers per-comment, not as a digest of
+        // comments that were never gap backlog.
+        await initChannel(
+          { ...watchConfig, prCommentWatch: true },
+          { boundSessions },
+        );
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        installWatchPaginateRouting();
+        mockPull({});
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        mockOctokit.rest.activity.listNotificationsForAuthenticatedUser.mockResolvedValue(
+          [],
+        );
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(1));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'New comment by',
+        );
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).not.toContain(
+          'Offline backlog',
+        );
+      });
+
+      it('a single over-budget member falls through to per-comment and consumes the arm', async () => {
+        await initChannel(commentOnlyConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+        // Only an API-supplied html_url can push a single member line past the
+        // 6,000-code-point body ceiling, so no member fits the digest.
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([
+          {
+            id: 777,
+            node_id: 'RC_777',
+            body: 'short body',
+            created_at: '2026-07-02T10:00:00.000Z',
+            user: { login: 'test-bot' },
+            html_url: `https://github.com/owner/repo/pull/42#discussion_r777${'x'.repeat(7000)}`,
+            path: 'file.ts',
+            line: 1,
+          },
+        ]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).not.toContain(
+          'Offline backlog',
+        );
+        const entry = readWatchState().entries['owner/repo#42']!;
+        expect(entry['digestPending']).toBe(false);
+        expect(entry['commentSince']).not.toBe('2026-07-01T00:00:00.000Z');
       });
 
       it('the coalescer skips a dead-lettered pending hop and appends a new one', async () => {
@@ -32824,11 +33123,29 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         installWatchPaginateRouting();
         mockPull({ head: { sha: 'sha-2' } });
         mockChecks([{ status: 'completed', conclusion: 'success' }]);
-        await runWatchPass();
-        const prompts = boundSessions.deliverPrompt.mock.calls.map(
-          (call) => call[1] as string,
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        let lines: string[] = [];
+        try {
+          await runWatchPass();
+          lines = stderr.mock.calls.map((call) => String(call[0]));
+        } finally {
+          stderr.mockRestore();
+        }
+        // The whole entry is dropped (not just the malformed pending item):
+        // nothing is delivered, the entry re-baselines at the observed head,
+        // and the operator-visible drop line is emitted. A fix that merely
+        // re-minted the hop from entry.headSha would deliver 'sha-1 to sha-2'.
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(readWatchState().entries['owner/repo#42']!['headSha']).toBe(
+          'sha-2',
         );
-        expect(prompts.some((p) => p.includes('from null'))).toBe(false);
+        expect(
+          lines.some((line) =>
+            line.includes('dropped 1 malformed PR watch entry'),
+          ),
+        ).toBe(true);
       });
 
       it('the overflow retire keeps the event-scoped index current in-process', async () => {
@@ -32952,8 +33269,31 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
         await pollOnce();
         expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        // The size arm fires on a healthy heartbeat: it must not claim the
+        // channel was not running (the gap arm keeps the outage wording).
         expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
-          'Offline backlog: 25',
+          'Comment backlog: 25',
+        );
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).not.toContain(
+          'while this channel was not running',
+        );
+        // The omitted tail arms the entry even though the SIZE arm (not the
+        // gap-arming loop) entered the digest, so the remainder follows as a
+        // further digest instead of one prompt per comment.
+        expect(
+          readWatchState().entries['owner/repo#42']!['digestPending'],
+        ).toBe(true);
+        (
+          channel as unknown as {
+            prWatchState: {
+              entries: Record<string, { commentLastFetchAt?: number }>;
+            };
+          }
+        ).prWatchState.entries['owner/repo#42']!.commentLastFetchAt = 0;
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+        expect(boundSessions.deliverPrompt.mock.calls[1]![1]).toContain(
+          'Offline backlog:',
         );
       });
 

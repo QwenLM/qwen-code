@@ -61,14 +61,18 @@ configured with only member-class templates (e.g. `fix:watch:ci_failure`).
    observation, and never deliver intermediate PENDING head hops when the net
    change is available (a parked hop delivers as observed — a hop is a
    historical fact, not a current-state claim; see §1). Retirements are
-   visible (dead-letter + journal), never silent.
+   visible (dead-letter + journal), never silent. An event already `pending`
+   at shutdown is the carved-out exception: the reconcile contract delivers it
+   on the first poll before detection can fold it (accepted for v1; see Scope).
 2. After a detected downtime gap (or a window larger than the per-comment pass
    cap), deliver the comment backlog of each bound PR as private digest
    prompts — one per body-budget window, never one prompt per comment — with
    no change to role routing, authorship attribution direction, or cursor
    crash-safety.
 3. No new configuration keys; no change to the notification lane, the public
-   publication contract, or the recovery contract for already-claimed tasks.
+   publication contract, or the recovery contract for in-flight or delivered
+   tasks; a parked, undelivered watch task's recovery now completes a durable
+   retirement instead of delivering it (§1, acceptance criterion 4).
 
 ## Scope boundaries
 
@@ -404,7 +408,7 @@ byte-identical entries for `en`).
 
 ## Validation plan
 
-- Unit tests (collocated, `GithubAdapter.test.ts`, 65 cases in the
+- Unit tests (collocated, `GithubAdapter.test.ts`, 70 cases in the
   `startup backlog` suite): each folding arm on pending events and parked
   tasks (head advanced, CI recovered, conflicts resolved, PR reopened, round
   trip), fact-driven retry after a failed dead-letter write, recovery-time
@@ -425,7 +429,13 @@ byte-identical entries for `en`).
   arm retained, content-hash id shape, re-list dedupe, mutual authorship,
   exclusion over the rendered slice and follower set, group sender allowlist
   delivering the digest, a retired verdict (message-route preflight) holding
-  the cursor and the arm, size-based arming without a gap, cursor commit/hold,
+  the cursor and the arm, an unreadable delivery ring holding the retired
+  digest cursor, a retired digest's members re-listing on the next pass, a
+  restart poll holding a stale parked watch task until a trusted pass observes
+  it, a pending-event CI-recovered release, disabling comment watch clearing a
+  stale arm without losing the cursor, a single over-budget member falling
+  through to per-comment and consuming the arm, size-based arming without a
+  gap (neutral lead, omitted tail armed), cursor commit/hold,
   per-PR arm retention across partial/empty snapshots and a restart, persistent
   fetch failure running the per-PR handler, gate grace and refused dispatch
   keeping the arm, budget exhaustion, first-observation silence under a gap.
@@ -448,10 +458,12 @@ byte-identical entries for `en`).
    `merge_conflict` after a positively observed non-dirty state, a
    `state_change` after a reopen, and intermediate pending head hops are
    retired/coalesced with dead-letter + journal traces (coalescing: journal
-   only, and the net-change prompt still delivers) — whether the event sits in
-   `pending` or is a parked backpressure task, and whether the watch pass ran
-   or was skipped; a CI-recovered retire releases the head's suppression so a
-   later genuine failure fires; the coalescer never absorbs into a
+   only, and the net-change prompt still delivers) — whether the event is a
+   pending item queued during a watch pass or a parked backpressure task, and
+   whether the watch pass ran or was skipped (an event already pending at
+   shutdown drains via reconcile first — see Scope); a CI-recovered retire
+   releases the head's suppression so a later genuine failure fires; the
+   coalescer never absorbs into a
    dead-lettered key, and a round trip after a partial delivery queues the
    reverse hop; a recovery pass completes a dead-lettered watch task's
    retirement only when the record covers that task; nothing is silently

@@ -29,9 +29,9 @@
 
 ## 目标
 
-1. 绝不投递事实已被后续观测取代的 watch 事件；净变化可得时绝不投递中间 **pending** head 跳变（停放的跳变按观测投递——跳变是历史事实而非当前状态断言；见 §1）。退役可见（死信 + journal），绝不静默。
+1. 绝不投递事实已被后续观测取代的 watch 事件；净变化可得时绝不投递中间 **pending** head 跳变（停放的跳变按观测投递——跳变是历史事实而非当前状态断言；见 §1）。退役可见（死信 + journal），绝不静默。停机时已在 `pending` 的事件是 carved-out 例外：reconcile 契约在首轮先于检测可折叠的时机投递它（v1 接受；见范围）。
 2. 检测到停机缺口后（或窗口大于逐条评论 pass 上限），每个绑定 PR 的评论积压以私有摘要 prompt 投递——每个正文预算窗口一条，绝不每条评论一条；角色路由、归属排除方向、游标崩溃安全性均不变。
-3. 不新增配置键；不改通知 lane、公开发布契约、已认领任务的恢复契约。
+3. 不新增配置键；不改通知 lane、公开发布契约、在途或已投递任务的恢复契约；停放未投递的 watch 任务恢复时现在完成持久退役而非投递（§1、验收标准 4）。
 
 ## 范围边界
 
@@ -64,7 +64,7 @@
 
 **未投递的同 head 退役释放抑制。** fired 环前缀与 `ciFiredSha` pin 的存在是为了让**已投递**的红抑制同 head 的红→绿→红抖动。CI 恢复分支退役的是从未投递的失败，因此绝不能耗掉该 head 唯一的触发名额：该分支退役 `ci_failure` 时（pending 或停放，检测或恢复），清除 pin（若其点名该 key 的 SHA）并移除匹配的 fired 环前缀条目，使同 head 之后真正的失败再次 fire。已投递的红保留两个抑制器；head 前进照旧丢弃 pin。恢复时释放在死信记录写入**之前**保存到 watch 状态：恢复的死信守卫会在后续回合完成退役而不重新推导释放，故释放必须先于「让该守卫得以移除任务的那条记录」持久化（释放保存失败则留下停放任务且不写死信，交由下一次恢复重新折叠）。释放是事实驱动的——此分支 CI 必为正向绿——因此即便随后死信写失败、任务重试，释放也依然正确。退役停放的前驱同时解除按 PR 的 drain 保序守卫，幸存的净 `head_change` 无需等待过期事件的视界即可投递。
 
-契约修订：bound-session-events 的验收「每个迁移实例恰好产生一条注入 prompt」变为「每个迁移实例恰好产生一条注入 prompt **或一次可见的被取代退役**」；合并后的 pending 跳变仍投递**一条**净变化 prompt 加一条 `watch_coalesced` 行。合法复发（dirty → clean → dirty、close → reopen → close、新 head 失败）仍会 fire；回到仍 pending 跳变的起点是 carved-out 例外（未投递时以零 prompt 退役）。2026-11-02 设计对在同一次改动中修订。
+契约修订：bound-session-events 的验收「每个迁移实例恰好产生一条注入 prompt」变为「每个迁移实例恰好产生一条注入 prompt **或一次可见的被取代退役**」；合并后的 pending 跳变仍投递**一条**净变化 prompt 加一条 `watch_coalesced` 行。合法复发（dirty → clean → dirty、close → reopen → close、新 head 失败）仍会 fire；回到仍 pending 跳变的起点是 carved-out 例外（未投递时以零 prompt 退役）。2026-11-02 的两份设计（英文与中文）在同一次改动中修订。
 
 ### 2. 停机缺口检测
 
@@ -121,15 +121,15 @@ digest 模式也由**积压大小**装载：可投递窗口大于 `MAX_WATCH_COM
 
 ## 验证计划
 
-- 单元测试（collocated，`GithubAdapter.test.ts`，`startup backlog` 套件 65 例）：每条折叠分支在 pending 事件与停放任务上（head 前进、CI 恢复、冲突解决、PR 重开、往返），死信写失败后的事实驱动重试，watch pass 跳过时的恢复基线折叠，按任务与事件级死信记录的作用域（兄弟角色幸存），fail-closed 死信写，`unknown`-SHA 与 null-mergeable 不折叠，在途/已投递任务绝不折叠，跨**仓库**任务作用域（同 PR 号），带 `watch_coalesced` journal 行与端到端 `headChangeFrom` 生成的合并，合并器跳过已死信 pending 跳变，部分扇出投递后的往返排入反向跳变，CI 恢复释放让同 head 之后的失败再次 fire，恢复时释放保存失败保留停放任务待重试完成释放，畸形 `headChangeFrom` 丢弃条目，溢出退役在进程内保持事件级索引最新；缺口下限（6 分钟否 / 11 分钟是）、间隔缩放、进程内故障恢复、遗留游标容忍、时钟偏移；digest 正文预算（最新幸存、无尾部截断）、无损省略尾部以**更多 digest** 补投且保留装载、内容哈希 id 形状、重列去重、互相署名、基于已渲染片段与 follower 集的排除、群组发送者白名单下投递 digest、retired 判定（message-route preflight）停留游标与装载、无缺口时按大小装载、游标提交/保持、按 PR 装载在部分/空快照与重启下的保留、持续拉取失败运行逐 PR 处理器、gate 宽限与被拒 dispatch 保留装载、预算耗尽、缺口下首次观测静默。
+- 单元测试（collocated，`GithubAdapter.test.ts`，`startup backlog` 套件 70 例）：每条折叠分支在 pending 事件与停放任务上（head 前进、CI 恢复、冲突解决、PR 重开、往返），死信写失败后的事实驱动重试，watch pass 跳过时的恢复基线折叠，按任务与事件级死信记录的作用域（兄弟角色幸存），fail-closed 死信写，`unknown`-SHA 与 null-mergeable 不折叠，在途/已投递任务绝不折叠，跨**仓库**任务作用域（同 PR 号），带 `watch_coalesced` journal 行与端到端 `headChangeFrom` 生成的合并，合并器跳过已死信 pending 跳变，部分扇出投递后的往返排入反向跳变，CI 恢复释放让同 head 之后的失败再次 fire，恢复时释放保存失败保留停放任务待重试完成释放，畸形 `headChangeFrom` 丢弃条目，溢出退役在进程内保持事件级索引最新；缺口下限（6 分钟否 / 11 分钟是）、间隔缩放、进程内故障恢复、遗留游标容忍、时钟偏移；digest 正文预算（最新幸存、无尾部截断）、无损省略尾部以**更多 digest** 补投且保留装载、内容哈希 id 形状、重列去重、互相署名、基于已渲染片段与 follower 集的排除、群组发送者白名单下投递 digest、retired 判定（message-route preflight）停留游标与装载、不可读投递环停留 retired digest 游标、retired digest 成员下一轮重列、重启 poll 保留过期停放 watch 任务直至可信 pass 观测、pending 事件 CI 恢复释放、禁用评论监视清除陈旧装载而不丢游标、单个超预算成员退回逐条并消费装载、无缺口时按大小装载（中性 lead、省略尾部装载）、游标提交/保持、按 PR 装载在部分/空快照与重启下的保留、持续拉取失败运行逐 PR 处理器、gate 宽限与被拒 dispatch 保留装载、预算耗尽、缺口下首次观测静默。
 - E2E（封闭 mock GitHub + 隔离 daemon，按绑定投递夹具模式；两阶段：启动 → 绑定 → 静默基线 → 停止 → 重写 `commentSince`/`lastPollAt` 模拟缺口 → 重启）：断言绑定会话 transcript 中**一条** digest prompt 且记录已渲染成员去重键；无缺口对照断言逐条评论投递不变；背压臂（prompt 队列满、CI 变红后 head 前进）断言过期 `ci_failure` 任务从 `github-inbound-tasks.json` 退役并有 superseded 死信行；满员积压臂断言最新成员在正文预算内幸存；缺口下首次观测臂断言静默。首次启动前预种 watch 状态**不可行**：首个「完整但空」的绑定快照会剪掉未绑定条目。
 - `npm run build && npm run typecheck`，改动文件的聚焦 vitest。
 
 ## 验收标准
 
-1. 非当前 head 或正向恢复 head 的 `ci_failure`、明确观测非 dirty 后的 `merge_conflict`、reopen 后的 `state_change`、中间 pending head 跳变被退役/合并，带死信 + journal 痕迹（合并：仅 journal，净变化 prompt 仍投递）——无论事件在 `pending` 还是停放背压任务，无论 watch pass 运行还是被跳过；CI 恢复退役释放该 head 的抑制使之后真正的失败再次 fire；合并器绝不吸收进已死信 key，部分投递后的往返排入反向跳变；恢复回合仅在记录覆盖该任务时完成已死信 watch 任务的退役；无任何静默消费；死信写失败事件留队/任务继续停放；在途与已投递任务绝不折叠。
+1. 非当前 head 或正向恢复 head 的 `ci_failure`、明确观测非 dirty 后的 `merge_conflict`、reopen 后的 `state_change`、中间 pending head 跳变被退役/合并，带死信 + journal 痕迹（合并：仅 journal，净变化 prompt 仍投递）——无论是 watch pass 期间排队的 pending 项还是停放背压任务，无论 watch pass 运行还是被跳过（停机时已在 pending 的事件先经 reconcile 排空——见范围）；CI 恢复退役释放该 head 的抑制使之后真正的失败再次 fire；合并器绝不吸收进已死信 key，部分投递后的往返排入反向跳变；恢复回合仅在记录覆盖该任务时完成已死信 watch 任务的退役；无任何静默消费；死信写失败事件留队/任务继续停放；在途与已投递任务绝不折叠。
 2. 缺口超阈值后（或窗口大于逐条评论 pass 上限），每个绑定 PR 的同账号评论积压以类别为 `comment` 的私有 digest prompt 到达——每个正文预算窗口一条，最新成员在预算内，恰好记录已渲染成员去重键，基于已渲染片段与 follower 集排除全上下文作者，channel 账号身份被发送者白名单接纳，retired 判定绝不推进游标，省略成员以更多 digest 补投（游标停留，装载保留，无丢失）。
-3. 无缺口（或首次观测）且可投递窗口在逐条评论 pass 上限内时，**评论**投递与今天逐字节一致：逐条评论 prompt、静默基线、无 digest。窗口**超过**上限时即使无缺口也打 digest（标准 2 的大小装载——对旧的逐条突发排空的有意扩展，评论监视契约对已记录）。常开的被取代折叠无论有无缺口都适用于 watch 事件——那是标准 1，不是评论投递变化。
+3. 无缺口（或首次观测）且可投递窗口在逐条评论 pass 上限内时，**评论**投递与今天逐字节一致：逐条评论 prompt、静默基线、无 digest。窗口**超过**上限时即使无缺口也打 digest（标准 2 的大小装载——对旧的逐条突发排空的有意扩展，由评论监视契约对（2026-11-08 的两份设计）在同一改动中记录）。常开的被取代折叠无论有无缺口都适用于 watch 事件——那是标准 1，不是评论投递变化。
 4. 角色感知路由、accepted/running/已投递任务的恢复、通知 lane、公开发布契约不变；已死信停放 watch 任务的恢复现在完成其退役（§1）而非投递。
 
 ## 开放问题
