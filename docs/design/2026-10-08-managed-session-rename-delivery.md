@@ -2,6 +2,8 @@
 
 [中文](2026-10-08-managed-session-rename-delivery.zh-CN.md)
 
+Status: superseded by [2026-11-12-managed-rename-single-authority](2026-11-12-managed-rename-single-authority.md). Manual rename now settles synchronously in one SQL transaction under a single display authority; the delivery saga described here (claim/lease, redelivery, parked reconciliation) is removed.
+
 ## Problem and scope
 
 A same-key sibling can fail while another request remains inside the Harness. Retiring the public receipt frees a later rename, but an older remote write can then finish last. A SQL completion check cannot undo that private write. An accepted write whose HTTP reply is lost creates the reverse gap: the private title is durable while the public title is unchanged. This follow-up to #13163 covers both Workspace-bound and unbound Sessions, with remote or local Harness journal storage.

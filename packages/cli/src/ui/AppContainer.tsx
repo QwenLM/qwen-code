@@ -16,6 +16,7 @@ import {
   type SetStateAction,
 } from 'react';
 import { type DOMElement, measureElement } from 'ink';
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { App } from './App.js';
 import { AppContext } from './contexts/AppContext.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
@@ -268,6 +269,7 @@ import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useStatsDialog } from './hooks/useStatsDialog.js';
 import { useMemoryDialog } from './hooks/useMemoryDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import { getPendingBackgroundApprovals } from './components/background-view/BackgroundTasksPill.js';
 import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
@@ -871,7 +873,7 @@ export const AppContainer = (props: AppContainerProps) => {
     () => props.extensionRefreshState ?? new ExtensionRefreshState(),
     [props.extensionRefreshState],
   );
-  const historyManager = useHistory();
+  const historyManager = useHistory(config.getSessionId());
   const addHistoryItem = historyManager.addItem;
   useEffect(
     () =>
@@ -1106,8 +1108,8 @@ export const AppContainer = (props: AppContainerProps) => {
   // exactly that).
   const { loadHistory: rawLoadHistory } = historyManager;
   const loadHistoryWithLatchReconciliation = useCallback(
-    (newHistory: HistoryItem[]) => {
-      rawLoadHistory(newHistory);
+    (newHistory: HistoryItem[], ...owner: [sessionId?: string]) => {
+      rawLoadHistory(newHistory, ...owner);
       contextFilesAnnouncedRef.current = newHistory.some(
         isContextFilesAnnouncement,
       );
@@ -1258,7 +1260,7 @@ export const AppContainer = (props: AppContainerProps) => {
           collapseOnResume,
           collapsePreviewCount,
         );
-        loadHistoryWithLatchReconciliation(historyItems);
+        loadHistoryWithLatchReconciliation(historyItems, config.getSessionId());
 
         // Seed past identities already claimed by the resumed transcript.
         seedPromptCount(
@@ -1270,9 +1272,16 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // Restore the transcript before Mod diagnostics, without making input
-      // or Mod startup wait for asynchronous session recovery.
+      // or Mod startup wait for asynchronous session recovery. Reply rows are
+      // offered only where the viewport can draw a committed row again; the
+      // terminal scrollback cannot.
       void getInteractiveModSession(config)
-        ?.initialize(['AbovePrompt'], { prompts: true, runsPrompts: true })
+        ?.initialize(
+          useTerminalBuffer
+            ? ['AbovePrompt', 'AssistantMessage']
+            : ['AbovePrompt'],
+          { prompts: true, runsPrompts: true },
+        )
         .catch(() => {});
 
       if (resumedSessionData) {
@@ -2263,6 +2272,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEffortDialog,
       openOutputStyleDialog,
       quit: (messages: HistoryItem[]) => {
+        prepareFileWatchersForProcessExit();
         try {
           cancelOngoingRequestRef.current();
         } catch (error) {
@@ -2340,6 +2350,10 @@ export const AppContainer = (props: AppContainerProps) => {
     btwItem,
     setBtwItem,
     cancelBtw,
+    cancelSlashCommand,
+    isCommandCancellationBlocked,
+    isCommandCommitting,
+    commandCancellationBlocked,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
@@ -2353,7 +2367,6 @@ export const AppContainer = (props: AppContainerProps) => {
     loadHistoryWithLatchReconciliation,
     refreshStatic,
     toggleVimEnabled,
-    isProcessing,
     setIsProcessing,
     isIdleRef,
     setMemoryFileCount,
@@ -2665,6 +2678,7 @@ export const AppContainer = (props: AppContainerProps) => {
     midTurnRestoreRef,
     goalQueueRef,
     returnPrompt,
+    isCommandCancellationBlocked,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
   clearPendingStateRef.current = clearPendingState;
@@ -4862,6 +4876,10 @@ export const AppContainer = (props: AppContainerProps) => {
       )
     : currentLoadingPhrase;
 
+  const backgroundApprovals = useMemo(
+    () => getPendingBackgroundApprovals(bgTaskEntries),
+    [bgTaskEntries],
+  );
   useAttentionNotifications({
     isFocused,
     streamingState,
@@ -4870,6 +4888,7 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     terminal,
     pendingToolCalls,
+    backgroundApprovals,
   });
 
   // Program status (OSC 7501) for terminal tabs and agent inboxes
@@ -5007,9 +5026,19 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // 4. Cancel ongoing requests
-      if (streamingState === StreamingState.Responding) {
+      if (
+        streamingState === StreamingState.Responding &&
+        !isCommandCancellationBlocked()
+      ) {
         cancelOngoingRequest?.();
         return; // Request cancelled, end processing
+      }
+      if (
+        streamingState === StreamingState.Idle &&
+        submissionInFlightRef.current &&
+        cancelOngoingRequest?.()
+      ) {
+        return;
       }
 
       // 5. Clear input buffer (if has content)
@@ -5032,6 +5061,7 @@ export const AppContainer = (props: AppContainerProps) => {
       cancelBtw,
       streamingState,
       cancelOngoingRequest,
+      isCommandCancellationBlocked,
       buffer,
       activeWorktree,
     ],
@@ -5048,6 +5078,23 @@ export const AppContainer = (props: AppContainerProps) => {
       if (keyMatchers[Command.TOGGLE_THINKING_EXPANDED](key)) {
         setThoughtExpanded((prev) => !prev);
         refreshStatic();
+        return;
+      }
+
+      if (
+        isCommandCommitting() &&
+        (keyMatchers[Command.QUIT](key) ||
+          keyMatchers[Command.EXIT](key) ||
+          keyMatchers[Command.ESCAPE](key))
+      ) {
+        return;
+      }
+
+      if (
+        (shellConfirmationRequest || confirmationRequest) &&
+        (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key) ||
+          keyMatchers[Command.TOGGLE_IDE_CONTEXT_DETAIL](key))
+      ) {
         return;
       }
 
@@ -5103,8 +5150,7 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
-        // Skip if shell is focused (to allow shell's own escape handling)
-        if (embeddedShellFocused) {
+        if (embeddedShellFocused || dialogsVisibleRef.current) {
           return;
         }
 
@@ -5124,28 +5170,24 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
-        // Input is empty, cancel request immediately (no double-press needed)
-        // Skip when a dialog (background tasks, etc.) is open — ESC should
-        // close the dialog, not cancel the running request.
-        if (
-          streamingState === StreamingState.Responding &&
-          !dialogsVisibleRef.current
-        ) {
+        const isResponding = streamingState === StreamingState.Responding;
+        const requestCancelled =
+          (isResponding ||
+            (streamingState === StreamingState.Idle &&
+              submissionInFlightRef.current)) &&
+          cancelOngoingRequest?.();
+        const commandCancelled = cancelSlashCommand();
+        if (isResponding || requestCancelled || commandCancelled) {
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
             escapeTimerRef.current = null;
           }
-          cancelOngoingRequest?.();
           setEscapePressedOnce(false);
           return;
         }
 
         // Input is empty and idle — double-ESC opens rewind selector
-        if (
-          streamingState === StreamingState.Idle &&
-          !dialogsVisibleRef.current &&
-          !config.getIdeMode()
-        ) {
+        if (streamingState === StreamingState.Idle && !config.getIdeMode()) {
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
             escapeTimerRef.current = null;
@@ -5269,6 +5311,9 @@ export const AppContainer = (props: AppContainerProps) => {
       config,
       ideContextState,
       handleExit,
+      isCommandCommitting,
+      shellConfirmationRequest,
+      confirmationRequest,
       ctrlCPressedOnce,
       setCtrlCPressedOnce,
       ctrlCTimerRef,
@@ -5280,6 +5325,7 @@ export const AppContainer = (props: AppContainerProps) => {
       escapeTimerRef,
       streamingState,
       cancelOngoingRequest,
+      cancelSlashCommand,
       buffer,
       handleSlashCommand,
       activePtyId,
@@ -5419,6 +5465,7 @@ export const AppContainer = (props: AppContainerProps) => {
       loopDetectionConfirmationRequest,
       memoryFileCount,
       streamingState,
+      commandCancellationBlocked,
       initError,
       pendingLlmHistoryItems,
       thought,
@@ -5571,6 +5618,7 @@ export const AppContainer = (props: AppContainerProps) => {
       loopDetectionConfirmationRequest,
       memoryFileCount,
       streamingState,
+      commandCancellationBlocked,
       initError,
       pendingLlmHistoryItems,
       thought,
