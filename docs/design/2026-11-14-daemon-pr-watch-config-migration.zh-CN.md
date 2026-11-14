@@ -246,9 +246,10 @@ host 按 watch identity 的口径归并（裸 hostname、不带端口），因�
 
 `connect()` 接受 `prWatchEvents`、`watch:*` 键，以及已失效的 `prWatchLimit` /
 `prWatchBudgetReserve`，恰好记录一条点名 `sessionPrWatch` 与这四个键的告警，
-且不跑状态检测。在那个提交上抛错的校验（`normalizePrWatchEvents`，
-`GithubAdapter.ts:882-914`，经 `:982-987` 与 `:2093-2096` 抵达）仅对这些键改为了告警；
-通知原因键保持了原有校验。
+且不跑状态检测。在那个提交上抛错的校验仅对这些键改为了告警——两个事件键经
+`normalizePrWatchEvents`（`GithubAdapter.ts:882-914`，经 `:982-987` 与 `:2093-2096`
+抵达），两个 limit 旋钮经 `validateBoundSessionConfig`（`:921`，旋钮校验在
+`:931-936`、`:958-963` 与 `:972-981`）。通知原因键保持了原有校验。
 
 由于 descriptor 没有弃用字段，弃用通过字段描述与类型层 `@deprecated` 表达，Web Shell
 编辑器则如对待 `senderPolicy` 那样在保存时继续保留这些键。用户页的配置表、状态 watch
