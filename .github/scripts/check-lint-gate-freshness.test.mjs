@@ -882,15 +882,16 @@ test('a base ref containing a hash is URI-encoded in the tree path', async () =>
 });
 
 test('a base ref containing a percent is URI-encoded in the tree path', async () => {
-  // '%' is the hazard the server decodes INTO an illegal ref, so it fails the
-  // lookup instead of quietly answering for another ref.
+  // The server decodes '%' escapes, so the ref it looks up is the DECODED one.
   // 'fix%201' is a legal ref; unencoded it is requested verbatim and the server
   // decodes it to 'fix 1', which is NOT a legal ref, so the lookup 404s. What
   // that costs depends on the site: inside the narrowing it fails closed and
   // keeps a stuck stale verdict, but the commits lookup is awaited outside that
   // try, so its 404 reaches main()'s fail-open and reports the branch fresh — a
-  // false green. Reading a DIFFERENT ref needs '&'; see the all-hazards sample
-  // below. The fixture keys trees by the raw ref, so pass 'fix%201' unencoded.
+  // false green. This sample only 404s because its decoded form is illegal; a
+  // '%' escape that decodes to an existing ref does read that one (measured:
+  // &sha=mai%6E answers 200 with main's commit). The fixture keys trees by the
+  // raw ref, so pass 'fix%201' unencoded.
   const calls = [];
   const stale = await findStaleGateFiles({
     ...PRETTIER_OPTS,
@@ -924,13 +925,16 @@ test('a base ref containing a percent is URI-encoded in the tree path', async ()
 // One sample carrying every URL-hazardous character that git still allows in a
 // ref ('&', '#', '%', '+', '=', ';', '@' — all pass git check-ref-format; '?'
 // and space do not), asserted per site. Adding a row per character is what kept
-// regenerating findings: '#' and '%' each got a case while '&' — the one
-// character that makes an unencoded query value name a DIFFERENT EXISTING ref —
-// had none, so an encoder narrowed to '%'/'#'/'/' passed the whole suite.
-// Measured live: contents/.prettierignore?ref=main&x answers 200 with main's
-// file, ?ref=main%26x answers 404. A raw-ref scan cannot
-// stand in for these: once '#' and '%' are escaped the full raw needle is gone,
-// and the query-value sites are exactly where '&' changes meaning.
+// regenerating findings: '#' and '%' each got a case while '&' had none, so an
+// encoder narrowed to '%'/'#'/'/' passed the whole suite. Three of them can
+// name a DIFFERENT EXISTING ref, by three mechanisms: '&' starts another query
+// parameter (measured: contents/.prettierignore?ref=main&x answers 200 with
+// main's file, ?ref=main%26x answers 404), '#' cuts the value at the fragment
+// (measured: &sha=x6#frag reads branch x6), and '%' is decoded server-side
+// (measured: &sha=mai%6E reads main). The other four all 404 at that site
+// (measured: sha=main;x, main=x, main+x, main@x). A raw-ref scan cannot stand
+// in for these: once '#' and '%' are escaped the full raw needle is gone, and
+// the query-value sites are exactly where the meaning changes.
 const HAZARD_REF = 'a&b#c%d+e=f;g@h';
 const HAZARD_ENC = 'a%26b%23c%25d%2Be%3Df%3Bg%40h';
 
@@ -1066,10 +1070,10 @@ test('the fail-closed catch leaves a diagnostic', () => {
   );
 });
 
-// Both wiring pins below read the same call, so the anchors are checked here
-// once: an unchecked indexOf turns a hoisted options literal into an empty
-// slice and a false red, and a second call earlier in main() would let the
-// real one encode its ref unseen.
+// Both wiring pins below read the same call, so its shape is checked here once.
+// Without these checks a hoisted options literal misdiagnoses intact wiring,
+// and a decoy call earlier in main() lets the real one encode its ref unseen
+// (measured: that pair passed 82/82 before the checks existed).
 function mainWiring() {
   const source = readFileSync(
     join(repoRoot, '.github/scripts/check-lint-gate-freshness.mjs'),
@@ -1084,11 +1088,19 @@ function mainWiring() {
     1,
     'main() must make exactly one verdict call for the pins to anchor to it',
   );
-  const call = main.slice(
-    main.indexOf(anchor),
-    main.indexOf('});', main.indexOf(anchor)),
+  // Bounded by the option-line shape, not by a `});` search: that substring
+  // also occurs inside main()'s own warning template (`(${error.message}); …`),
+  // so a missing closer widens the slice into the catch block instead of
+  // failing. Measured: 146 chars intact, 745 with the closer changed.
+  const call =
+    /await findStaleGateFiles\(\{\n(?:[ \t]+[\w$]+(?::[^,\n]*)?,\n)+[ \t]*\}\);/.exec(
+      main,
+    );
+  assert.ok(
+    call,
+    'the verdict call must be an options literal closed by `});`',
   );
-  return { main, call };
+  return { main, call: call[0] };
 }
 
 test('main() passes BASE_REF through verbatim', () => {
