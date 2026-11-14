@@ -20,6 +20,13 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { executeUserShell } from './shell-mode.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
+import { foldLiveEvent, type LiveHistoryItem } from './live-session-model.js';
+import { toolStatusMeta } from './messages.js';
+
+vi.mock('@opentui/core', () => ({
+  SyntaxStyle: { fromStyles: () => ({}) },
+  MouseButton: { LEFT: 0 },
+}));
 
 const executeMock = vi.hoisted(() => vi.fn());
 const addHistoryMock = vi.hoisted(() => vi.fn());
@@ -53,6 +60,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 vi.mock('../hooks/shellCommandProcessor.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../hooks/shellCommandProcessor.js')>();
+  addHistoryMock.mockImplementation(actual.addShellCommandToLlmHistory);
   return {
     ...actual,
     addShellCommandToLlmHistory: addHistoryMock,
@@ -61,6 +69,7 @@ vi.mock('../hooks/shellCommandProcessor.js', async (importOriginal) => {
 
 let currentChat: object | undefined = {};
 const llmClient = {
+  addHistory: vi.fn(),
   getChat: () => {
     if (currentChat === undefined) {
       // core's real shape (R5-7): getChat() throws while the client is
@@ -111,7 +120,8 @@ describe('executeUserShell', () => {
     runtimeShellMock.mockImplementation((_runtime, ...args) =>
       executeMock(...args),
     );
-    addHistoryMock.mockReset();
+    addHistoryMock.mockClear();
+    llmClient.addHistory.mockClear();
     currentChat = {};
     osPlatformMock.mockReturnValue('linux');
   });
@@ -150,6 +160,7 @@ describe('executeUserShell', () => {
       resolveResult,
       executeArgs,
       signal: controller.signal,
+      abort: () => controller.abort(),
     };
   }
 
@@ -417,6 +428,114 @@ describe('executeUserShell', () => {
       summary: 'cancelled',
     });
   });
+
+  it.each([
+    {
+      aborted: true,
+      summary: 'cancelled',
+      glyph: '-',
+      cancellationPrefix: 'Command was cancelled.\n',
+      exitCode: null,
+      signal: null,
+      statusPrefix: '',
+    },
+    {
+      aborted: false,
+      summary: 'error',
+      glyph: 'x',
+      cancellationPrefix: '',
+      exitCode: null,
+      signal: null,
+      statusPrefix: '',
+    },
+    {
+      aborted: false,
+      summary: 'error',
+      glyph: 'x',
+      cancellationPrefix: '',
+      exitCode: 1,
+      signal: null,
+      statusPrefix: 'Exit code: 1.\n',
+    },
+    {
+      aborted: true,
+      summary: 'cancelled',
+      glyph: '-',
+      cancellationPrefix: 'Command was cancelled.\n',
+      exitCode: 0,
+      signal: null,
+      statusPrefix: 'Exit code: 0.\n',
+    },
+    {
+      aborted: true,
+      summary: 'cancelled',
+      glyph: '-',
+      cancellationPrefix: 'Command was cancelled.\n',
+      exitCode: 17,
+      signal: 15,
+      statusPrefix: 'Command terminated by signal: 15.\n',
+    },
+    {
+      aborted: false,
+      summary: 'error',
+      glyph: 'x',
+      cancellationPrefix: '',
+      exitCode: null,
+      signal: 15,
+      statusPrefix: 'Command terminated by signal: 15.\n',
+    },
+  ])(
+    'preserves cleanup diagnostics with aborted=$aborted, exit=$exitCode, signal=$signal as $summary',
+    async ({
+      aborted,
+      summary,
+      glyph,
+      cancellationPrefix,
+      exitCode,
+      signal,
+      statusPrefix,
+    }) => {
+      const cleanupDiagnostic = 'Process group 4242 did not stop after SIGKILL';
+      const output = 'partial command output';
+      const finalOutput = `${cancellationPrefix}${statusPrefix}${cleanupDiagnostic}\n${output}`;
+      const { events, done, resolveResult, abort } = setup();
+      if (aborted) abort();
+      resolveResult(
+        makeResult({
+          aborted,
+          error: new Error(cleanupDiagnostic),
+          exitCode,
+          signal,
+          output,
+        }),
+      );
+      await done;
+
+      const items = events.reduce<readonly LiveHistoryItem[]>(
+        foldLiveEvent,
+        [],
+      );
+      const tool = items.find((item) => item.kind === 'tool');
+      if (tool?.kind !== 'tool') throw new Error('no shell tool card');
+      expect.soft(tool.output).toBe(finalOutput);
+      expect(toolStatusMeta(tool)).toMatchObject({
+        glyph,
+        strikethrough: aborted,
+      });
+      expect(tool).toMatchObject({ done: true, success: false, summary });
+      expect(events[events.length - 1]).toMatchObject({
+        type: 'tool-end',
+        success: false,
+        summary,
+      });
+      expect
+        .soft(addHistoryMock)
+        .toHaveBeenCalledWith(llmClient, 'echo hello', finalOutput);
+      const modelHistoryText = llmClient.addHistory.mock.calls[0]![0].parts[0]
+        .text as string;
+      expect.soft(modelHistoryText).toContain(`\`\`\`\n${finalOutput}\n\`\`\``);
+    },
+  );
 
   it('keeps card ids unique across two calls in the same millisecond', async () => {
     executeMock.mockImplementation(() =>
