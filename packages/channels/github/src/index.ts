@@ -6,10 +6,6 @@ import type { ChannelPlugin } from '@qwen-code/channel-base';
 import {
   GithubChannel,
   validateBoundSessionConfig,
-  DEFAULT_PR_WATCH_LIMIT,
-  MAX_PR_WATCH_LIMIT,
-  DEFAULT_PR_WATCH_BUDGET_RESERVE,
-  MAX_PR_WATCH_BUDGET_RESERVE,
   validateRepoFilterConfig,
   PR_NOTIFICATION_REASONS,
   PR_WATCH_EVENTS,
@@ -24,10 +20,12 @@ import {
  */
 const BOUND_ACTION_DESCRIPTIONS: Record<string, string> = {
   default: 'Fallback template for any event without a more specific key',
-  'watch:ci_failure': 'CI checks turn red on a head commit',
-  'watch:merge_conflict': 'The PR develops a merge conflict',
-  'watch:head_change': 'The PR’s head commit changes',
-  'watch:state_change': 'The PR is merged or closed',
+  'watch:ci_failure': 'Deprecated (use serve.sessionPrWatch): checks turn red',
+  'watch:merge_conflict':
+    'Deprecated (use serve.sessionPrWatch): merge conflict',
+  'watch:head_change': 'Deprecated (use serve.sessionPrWatch): head changes',
+  'watch:state_change':
+    'Deprecated (use serve.sessionPrWatch): merged or closed',
   mention: 'You are @mentioned in a comment',
   review_requested: 'A review is requested from you',
   assign: 'You are assigned to the PR',
@@ -189,40 +187,20 @@ export const plugin: ChannelPlugin = {
       },
       {
         key: 'prWatchEvents',
-        label: 'PR Watch Events',
+        label: 'PR Watch Events (Deprecated)',
         kind: 'string-list',
         description:
-          'Optional. State transitions to watch for bound PRs (requires Deliver To PR-Bound Sessions). Leave empty to disable.',
+          'Deprecated. The daemon now detects PR-state transitions: configure serve.sessionPrWatch in the daemon settings. This channel no longer watches bound PRs. For one minor release the key is accepted and read as a per-host alias when that setting is unset, for PRs on this channel’s web host; read only while Deliver To PR-Bound Sessions is on.',
         // Built from the adapter's exported vocabulary so the UI options can
-        // never drift from the validator/emit path (R2-18).
+        // never drift from the alias vocabulary (R2-18).
         options: PR_WATCH_EVENTS.map((value) => ({ value, label: value })),
-      },
-      {
-        key: 'prWatchLimit',
-        label: 'PR Watch Limit',
-        kind: 'number',
-        exclusiveMinimum: 0,
-        maximum: MAX_PR_WATCH_LIMIT,
-        default: String(DEFAULT_PR_WATCH_LIMIT),
-        description:
-          'Maximum open bound PRs watched per poll (requires Deliver To PR-Bound Sessions; the per-PR pulls.get also needs PR Watch Events — without them the cap only bounds the comment watch). Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR still issues about one pulls.get per poll, but an unchanged PR answers 304 and costs no primary rate limit, so the state watch is near-free while PRs are quiet. What still counts is the default-on comment watch (~60 requests/hour per PR) and the periodic CI re-checks, which put a 5000/hour PAT budget at roughly 70-75 bound PRs. The ceiling moved from the state watch to the comment watch; it did not disappear. An over-budget configuration makes every watch pass abort on rate limits. Raise Poll Interval when raising this. Leave empty for the default.',
-      },
-      {
-        key: 'prWatchBudgetReserve',
-        label: 'PR Watch Budget Reserve',
-        kind: 'number',
-        minimum: 0,
-        maximum: MAX_PR_WATCH_BUDGET_RESERVE,
-        default: String(DEFAULT_PR_WATCH_BUDGET_RESERVE),
-        description:
-          'REST requests held back for the interactive notification lane (requires Deliver To PR-Bound Sessions; the gate covers the comment watch too, so PR Watch Events are not required). When the last known remaining budget is at or below this, the PR state watch is skipped for that poll — and stopped mid-pass if a pass spends down to it — so a human mention is not starved by background polling; detection resumes once the budget recovers or its window resets. The default (200) is ~4% of a 5000/hour PAT budget. Set 0 to disable the gate. Leave empty for the default.',
       },
       {
         key: 'boundSessionActions',
         label: 'Bound Session Actions',
         kind: 'record',
         description:
-          'Optional. Instruction templates delivered to PR-bound sessions. Pick an event key below; a role prefix (review:, verify:, fix:) targets that binding role only. Requires Deliver To PR-Bound Sessions. Each role with a matching key gets its own delivery; roles without one skip the event. Variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%; %% for a literal %. Leave empty for the default generic prompt.',
+          'Optional. Instruction templates delivered to PR-bound sessions. Pick an event key below; a role prefix (review:, verify:, fix:) targets that binding role only. Requires Deliver To PR-Bound Sessions. Each role with a matching key gets its own delivery; roles without one skip the event. The watch:* keys are deprecated: configure serve.sessionPrWatch.actions for state transitions. Variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%; %% for a literal %. Leave empty for the default generic prompt.',
         options: BOUND_ACTION_KEY_OPTIONS,
       },
     ],
