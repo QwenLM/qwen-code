@@ -1,0 +1,140 @@
+name: 'PR 15959 action status MySQL A-B'
+on:
+  push:
+    branches: ['codex/verify-pr-15959-action-status-ci']
+permissions:
+  contents: read
+jobs:
+  mysql-status:
+    runs-on: [self-hosted, linux, x64, ecs-qwen]
+    container: maven:3.9.11-eclipse-temurin-21
+    timeout-minutes: 55
+    env:
+      NODE_OPTIONS: '--max-old-space-size=6144'
+      MAVEN_OPTS: '-Xmx2048m'
+      MAVEN_ARGS: '-Dmaven.repo.local=/tmp/pr15959-m2'
+    services:
+      mysql:
+        image: mysql:8.4.6
+        env:
+          MYSQL_ROOT_PASSWORD: verify-fixture
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: qwen_verify
+        options: >-
+          --tmpfs /var/lib/mysql
+          --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root --password=verify-fixture --silent"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: '098e6ef6a3ab0afff52fdf3e789491cbb562440a'
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Prepare and attest isolated tools and database
+        timeout-minutes: 6
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq python3 default-mysql-client
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          mkdir -p .verify-evidence
+          test "$(git rev-parse HEAD)" = '098e6ef6a3ab0afff52fdf3e789491cbb562440a'
+          git rev-parse HEAD | tee .verify-evidence/source-sha.txt
+          java -version 2>&1 | tee .verify-evidence/java-version.txt
+          mvn -version | tee .verify-evidence/maven-version.txt
+          mysql --host=mysql --user=root --password=verify-fixture -e 'SET GLOBAL max_allowed_packet = 134217728; SELECT VERSION(), @@transaction_isolation, @@innodb_use_native_aio, @@max_allowed_packet; SHOW GRANTS;' | tee .verify-evidence/mysql-settings.txt
+          printf '%s\n' 'Task service uses image default AIO/binlog; selected cases do not exercise large-object or server-wide deadlock counters. Full CI retains its normal flags.' > .verify-evidence/service-deviation.txt
+      - name: Install sibling SDK from candidate source
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install 2>&1 | tee .verify-evidence/sdk-install.log
+      - name: Compare same regression tests and consumers against old and fixed production
+        timeout-minutes: 42
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import shutil
+          import subprocess
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          
+          root = Path.cwd()
+          out = root / '.verify-evidence'
+          module = root / 'packages/managed-agent-server'
+          relative = 'packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/JdbcManagedActionStore.java'
+          prod = root / relative
+          fixed = prod.read_bytes()
+          original = subprocess.check_output(['git', 'show', '0ba1d481cd98f8ea78698ef282767babc555c954:' + relative])
+          assert fixed != original
+          assert subprocess.check_output(['git', 'show', 'HEAD:' + relative]) == fixed
+          test = module / 'verification/src/test/java/com/alibaba/qwen/code/managedagent/WorkspaceSessionCloseMySqlIT.java'
+          (out / 'regression-source.java').write_bytes(test.read_bytes())
+          (out / 'production-original.java').write_bytes(original)
+          (out / 'production-fixed.java').write_bytes(fixed)
+          command = ['mvn', '--batch-mode', '--no-transfer-progress', '-Pmysql-integration',
+                     '-Dtest=ManagedActionStoreTest,ConsolidatedActionStoreTest,ManagedActionsTest',
+                     '-Dsurefire.failIfNoSpecifiedTests=false', '-Dit.test=WorkspaceSessionCloseMySqlIT',
+                     '-Dmysql.url=jdbc:mysql://mysql:3306/qwen_verify?allowPublicKeyRetrieval=true&useSSL=false',
+                     '-Dmysql.user=root', '-Dmysql.password=verify-fixture',
+                     'clean', 'verify', 'checkstyle:check']
+          results = []
+          try:
+              for label, source in [('original', original), ('fixed', fixed)]:
+                  prod.write_bytes(source)
+                  arm = out / label
+                  arm.mkdir()
+                  (arm / 'command.json').write_text(json.dumps(command) + '\n')
+                  with (arm / 'maven.log').open('wb') as log:
+                      run = subprocess.run(command, cwd=module, stdout=log, stderr=subprocess.STDOUT, timeout=1200)
+                  (arm / 'maven.rc').write_text(str(run.returncode) + '\n')
+                  cases = []
+                  for folder in ('surefire-reports', 'failsafe-reports'):
+                      reports = module / 'verification/target' / folder
+                      if not reports.exists():
+                          continue
+                      shutil.copytree(reports, arm / folder)
+                      for xml in reports.glob('TEST-*.xml'):
+                          for case in ET.parse(xml).getroot().iter('testcase'):
+                              failures = [n.attrib.get('message', '') + '\n' + (n.text or '') for n in case if n.tag in ('failure', 'error')]
+                              cases.append({'class': case.attrib['classname'], 'name': case.attrib['name'],
+                                            'skipped': case.find('skipped') is not None,
+                                            'errors': len(case.findall('error')), 'failures': failures})
+                  mysql = [c for c in cases if c['class'].endswith('.WorkspaceSessionCloseMySqlIT')]
+                  units = [c for c in cases if c not in mysql]
+                  result = {'arm': label, 'exit': run.returncode, 'productionSha256': hashlib.sha256(source).hexdigest(),
+                            'testSha256': hashlib.sha256(test.read_bytes()).hexdigest(), 'mysql': mysql, 'units': units}
+                  results.append(result)
+                  (out / 'results.json').write_text(json.dumps(results, indent=2) + '\n')
+                  print(json.dumps({'arm': label, 'exit': run.returncode, 'mysqlCount': len(mysql),
+                                    'mysqlFailed': sum(bool(c['failures']) for c in mysql), 'unitCount': len(units)}), flush=True)
+          finally:
+              prod.write_bytes(fixed)
+              subprocess.run(['git', 'diff', '--exit-code'], check=True)
+          
+          for result in results:
+              assert len(result['mysql']) == 6, 'Wrong MySQL selection or incomplete Maven run'
+              assert not any(c['skipped'] or c['errors'] for c in result['mysql']), 'Not an assertion-only MySQL result'
+              assert {c['class'].split('.')[-1] for c in result['units']} == {'ManagedActionStoreTest', 'ConsolidatedActionStoreTest', 'ManagedActionsTest'}
+              assert not any(c['skipped'] or c['failures'] for c in result['units']), 'Consumer unit failure or skip'
+          bad = {c['name']: '\n'.join(c['failures']) for c in results[0]['mysql'] if c['failures']}
+          assert set(bad) == {'closeCommitsBeforeQueuedTurnAndActionAdmissionsCanInspectTheSession', 'failedActionReplayUsesTheLockedSessionStatusAfterAnOlderSnapshot'}
+          assert 'session_inactive' in bad['closeCommitsBeforeQueuedTurnAndActionAdmissionsCanInspectTheSession']
+          assert 'invalid_action_response' in bad['closeCommitsBeforeQueuedTurnAndActionAdmissionsCanInspectTheSession']
+          assert 'FAILED' in bad['failedActionReplayUsesTheLockedSessionStatusAfterAnOlderSnapshot']
+          assert 'PENDING' in bad['failedActionReplayUsesTheLockedSessionStatusAfterAnOlderSnapshot']
+          assert results[0]['exit'] == 1
+          assert results[1]['exit'] == 0 and not any(c['failures'] for c in results[1]['mysql'])
+          assert results[0]['testSha256'] == results[1]['testSha256']
+          print('Old production fails the two declared status oracles; fixed production passes all six MySQL cases and selected consumers.', flush=True)
+          PY
+      - name: Preserve executed evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr15959-action-status-mysql-ab
+          path: .verify-evidence/
+          include-hidden-files: true
