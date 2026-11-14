@@ -60,9 +60,22 @@ interface GithubConfig extends ChannelConfig, RepoFilterConfigFields {
   reasonFilter?: unknown;
   useLocalGh?: boolean;
   deliverToBoundSessions?: boolean;
+  /**
+   * @deprecated Configure serve.sessionPrWatch in the daemon. Read as a
+   * per-host alias for one minor release.
+   */
   prWatchEvents?: unknown;
+  /** @deprecated Removed with the adapter's state watch; ignored. */
   prWatchLimit?: unknown;
+  /**
+   * @deprecated Removed with the adapter's state watch; the budget gate keeps
+   * its default reserve.
+   */
   prWatchBudgetReserve?: unknown;
+  /**
+   * Instruction templates for bound delivery. `watch:*` keys are deprecated;
+   * configure serve.sessionPrWatch.actions for state transitions.
+   */
   boundSessionActions?: unknown;
   requireBoundWatch?: boolean;
   prCommentWatch?: unknown;
@@ -502,10 +515,9 @@ export function validateRepoFilterConfig(
 }
 
 /**
- * The prWatchEvents vocabulary, shared by the config validator, the watch
- * emit path, and the management UI's option list (built from this constant
- * in index.ts) so the three cannot drift apart (R2-18). Lowercase: the
- * editor and normalizePrWatchEvents both lowercase before matching.
+ * The prWatchEvents vocabulary, shared by the deprecated alias's option list
+ * (built from this constant in index.ts) and the bound-action validator, so
+ * the management UI cannot drift from the key vocabulary (R2-18). Lowercase.
  */
 export const PR_WATCH_EVENTS = [
   'ci_failure',
@@ -564,60 +576,13 @@ const BOUND_ACTION_VOCABULARY: BoundActionKeyVocabulary = {
 };
 
 /**
- * Default open-PR watch fan-out per poll (~1 pulls.get per watched PR plus
- * conditional Checks fetches; terminal-pending bindings drain in an
- * additional slice of up to 20% outside this budget). Operators with more
- * open bindings raise `prWatchLimit` (and `pollInterval`) deliberately;
- * the watch pass already fails fast on rate limits, so an over-budget
- * configuration degrades instead of hammering the API. Exported for the
- * descriptor so the form bound and the effective bound cannot drift.
- */
-export const DEFAULT_PR_WATCH_LIMIT = 30;
-
-/** Hard ceiling for the configurable watch fan-out. */
-export const MAX_PR_WATCH_LIMIT = 500;
-
-/**
  * Requests held back for the interactive notification lane. When the last
  * known REST budget is at or below this, the watch pass is skipped for the
  * poll so a human mention is not starved by background PR polling. ~4% of a
  * 5,000/hour classic-PAT budget: enough for several polls of mention traffic
- * while barely trimming a healthy watch. Operators on other scales (GitHub
- * Enterprise, finer-grained tokens) set prWatchBudgetReserve explicitly.
+ * while barely trimming a healthy comment watch.
  */
-export const DEFAULT_PR_WATCH_BUDGET_RESERVE = 200;
-
-/** Hard ceiling for the configurable watch budget reserve. */
-export const MAX_PR_WATCH_BUDGET_RESERVE = 5000;
-
-/**
- * After a head change, checks register asynchronously (queued or self-hosted
- * runners can take minutes). Within this window an empty CI aggregate
- * ('none') is treated as unsettled and re-checked every poll.
- */
-const CI_NONE_GRACE_MS = 10 * 60 * 1000;
-
-/**
- * Settled heads are re-checked on this period even when nothing observable
- * advances: PR updated_at does NOT bump on check re-runs (verified against
- * the live API), and CI can appear long after the grace window on a manual
- * workflow_dispatch. Without a periodic re-check a settled head that turns
- * red later would be missed forever. Cost: at most 2 extra calls per watched
- * PR per interval (30 PRs x 2 x 6/hour = 360/hour on top of the 1800/hour
- * steady state, well under the 5000/hour token budget).
- */
-const CI_RECHECK_INTERVAL_MS = 10 * 60 * 1000;
-
-/**
- * Pending aggregates re-check on this period, NOT every poll: a workflow
- * queued for environment approval or an offline runner can stay pending for
- * hours, and an unbounded per-poll re-fetch turns the settled-head cost
- * model into ~3,600 CI calls/hour at the watch cap — over the 5,000/hour
- * PAT budget once pulls.get is counted, starving the notification lane.
- * Must stay above the poll interval (60s) to actually bound the fan-out;
- * pending still settles within one period of the real transition.
- */
-const CI_PENDING_RECHECK_INTERVAL_MS = 5 * 60 * 1000;
+const PR_WATCH_BUDGET_RESERVE = 200;
 
 /**
  * Bound PR comment watch re-check period. Comments are fetched when the PR's
@@ -664,102 +629,21 @@ const MAX_COLD_EMPTY_PARTIAL_POLLS = 30;
 
 /**
  * Retention bound under a PERMANENT partial snapshot: prune never runs while
- * the binding answer is incomplete, so unlisted sessions and unbound PR
- * entries would otherwise accumulate for the daemon's whole uptime (same
- * cap discipline as the worker's wake cache). Oldest-first eviction,
- * surfaced on stderr; watch-entry eviction additionally protects retained
- * bindings and in-flight tasks, and an evicted entry's PR has no delivery
- * target — a later rebind re-baselines silently like any first observation,
- * so eviction bounds memory without losing a deliverable event.
+ * the binding answer is incomplete, so unlisted PR entries would otherwise
+ * accumulate for the daemon's whole uptime. Oldest-first eviction, surfaced
+ * on stderr; an evicted entry has no retained binding, so a later rebind
+ * re-baselines it silently.
  */
 const MAX_PARTIAL_RETAINED = 1024;
 
 /**
- * Per-entry pending queue bound. A persistently failing claim (task store
- * unreadable/unwritable) keeps every detected transition queued; without a
- * cap the entry is also exempt from retention eviction, and the watch file
- * would grow without bound. Overflow retires the OLDEST queued event to the
- * private dead-letter (surfaced, never silent); a failed dead-letter write
- * keeps the event queued and retries the overflow next detection.
+ * Persisted per-PR state for the comment watch. The state-transition baseline
+ * and queue moved to the daemon (master §7); the one-time retirement strips
+ * them, keeping only the comment cursors and the last title.
  */
-const MAX_PENDING_WATCH_PER_ENTRY = 64;
-
-type PrWatchEventType =
-  | 'ci_failure'
-  | 'merge_conflict'
-  | 'head_change'
-  | 'state_change';
-
-type CiAggregate = 'none' | 'pending' | 'success' | 'failure';
-
-interface CiObservation {
-  aggregate: CiAggregate;
-  /** Names of failed checks (capped), for actionable event summaries. */
-  failedChecks: string[];
-  /**
-   * The walk stopped on a failing page that still had a next page, so any
-   * failures beyond it went unread. Whether there ARE more is unknown — that
-   * is what skipping the page means — so the summary says "may be incomplete".
-   * It has to say something: ci_failure fires once per head, so this is the
-   * only notice those later failures would ever get.
-   */
-  namesIncomplete: boolean;
-}
-
-const MAX_REPORTED_FAILED_CHECKS = 5;
-
-/** Persisted per-PR observation backing edge-triggered watch events. */
 interface PrWatchEntry {
-  headSha?: string;
-  ci?: CiAggregate;
-  mergeableState?: string;
-  prState?: string;
   /** Last observed PR title, so comment-watch prompts can render %title%. */
   title?: string;
-  /**
-   * Last observed PR updated_at. An advance re-checks a settled head, but
-   * it is NOT a reliable re-run signal: GitHub does not bump updated_at on
-   * check activity (verified against the live API), so settled heads also
-   * re-check on the CI_RECHECK_INTERVAL_MS period.
-   */
-  prUpdatedAt?: string;
-  /** When the current head was first observed; bounds the 'none' grace. */
-  headObservedAt?: number;
-  /**
-   * When the CI aggregate was last fetch-ATTEMPTED (success or failure);
-   * drives the periodic re-check and bounds retries of a persistently
-   * failing Checks endpoint.
-   */
-  lastCiFetchAt?: number;
-  /**
-   * Monotonic episode counter. merge_conflict / state_change / head_change
-   * keys identify a transition INSTANCE
-   * (watch:<type>:<pr>:<seq>:<detectedAt>), not a state value, so a
-   * legitimate recurrence (dirty -> clean -> dirty, close -> reopen ->
-   * close, a SHA revisit) fires again. ci_failure keys carry the PR + head
-   * SHA (watch:ci_failure:<pr>:<sha>:<detectedAt>) and match by prefix:
-   * once per head even across aggregate flapping.
-   */
-  seq?: number;
-  /**
-   * Detected events durably queued for delivery. Persisted together with
-   * the baseline so a crash between detection and claim loses nothing.
-   */
-  pending?: PendingWatchEvent[];
-  /**
-   * Dedupe keys already claimed for delivery (capped ring). Survives task
-   * completion and restarts, so a transition fires at most once even when
-   * the aggregate flaps back and forth on the same head.
-   */
-  fired?: string[];
-  /**
-   * Head SHA whose ci_failure already fired. The fired ring is capped, so
-   * 64 non-ci episodes on a long-lived head can evict the per-head
-   * ci_failure key; this pin keeps ci_failure once-per-head even after that
-   * eviction (a flapping aggregate must not re-fire on the same head).
-   * Reset when the head changes.
-   */
-  ciFiredSha?: string;
   /**
    * Bound PR comment watch cursor. `commentBaseline` is the first-observation
    * cutoff (no backlog delivery): only comments created strictly after it are
@@ -773,15 +657,6 @@ interface PrWatchEntry {
   commentLastFetchAt?: number;
 }
 
-interface PendingWatchEvent {
-  key: string;
-  issueNumber: number;
-  envelope: Envelope;
-  delivery?: InboundTaskRecord['delivery'];
-}
-
-const MAX_FIRED_KEYS = 64;
-
 interface PrWatchStateFile {
   version: 1;
   entries: Record<string, PrWatchEntry>;
@@ -789,11 +664,10 @@ interface PrWatchStateFile {
 
 /**
  * Shape check for a persisted watch entry. The container check alone lets a
- * legal-JSON malformed value (e.g. `null`) through, and
- * `reconcilePendingWatch` dereferences every entry — one bad entry would
- * throw each poll and starve the API-independent drain of the entries after
- * it. A malformed entry is dropped (healthy entries survive) rather than
- * resetting the whole file.
+ * legal-JSON malformed value (e.g. `null`) through, and the comment pass
+ * dereferences every entry — one bad entry would throw each poll and starve
+ * the entries after it. A malformed entry is dropped (healthy entries
+ * survive) rather than resetting the whole file.
  */
 function isPrWatchEntryShape(value: unknown): value is PrWatchEntry {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -804,48 +678,18 @@ function isPrWatchEntryShape(value: unknown): value is PrWatchEntry {
     v === undefined || typeof v === 'string';
   const numberOrUndef = (v: unknown) =>
     v === undefined || typeof v === 'number';
-  // The envelope and delivery must satisfy the SAME validators the task
-  // store applies at claim time: a shape-valid envelope missing chatId
-  // would throw in prBindingKey and abort the whole reconcile loop
-  // (starving the healthy entries queued behind it), and a partial
-  // envelope would be claimed verbatim, rejected by isInboundTaskRecord on
-  // the next read, and wedge the task file until an operator deletes it.
-  const isPending = (item: unknown) =>
-    item !== null &&
-    typeof item === 'object' &&
-    typeof (item as PendingWatchEvent).key === 'string' &&
-    typeof (item as PendingWatchEvent).issueNumber === 'number' &&
-    (item as PendingWatchEvent).envelope !== undefined &&
-    isInboundEnvelope((item as PendingWatchEvent).envelope) &&
-    ((item as PendingWatchEvent).delivery === undefined ||
-      isBoundDeliveryShape((item as PendingWatchEvent).delivery));
   return (
-    stringOrUndef(entry.headSha) &&
-    stringOrUndef(entry.ci) &&
-    stringOrUndef(entry.mergeableState) &&
-    stringOrUndef(entry.prState) &&
     stringOrUndef(entry.title) &&
-    stringOrUndef(entry.prUpdatedAt) &&
-    numberOrUndef(entry.headObservedAt) &&
-    numberOrUndef(entry.lastCiFetchAt) &&
-    numberOrUndef(entry.seq) &&
-    stringOrUndef(entry.ciFiredSha) &&
     stringOrUndef(entry.commentBaseline) &&
     stringOrUndef(entry.commentSince) &&
-    numberOrUndef(entry.commentLastFetchAt) &&
-    (entry.pending === undefined ||
-      (Array.isArray(entry.pending) && entry.pending.every(isPending))) &&
-    (entry.fired === undefined ||
-      (Array.isArray(entry.fired) &&
-        entry.fired.every((k) => typeof k === 'string')))
+    numberOrUndef(entry.commentLastFetchAt)
   );
 }
 
 interface BoundSessionConfigFields {
   deliverToBoundSessions?: unknown;
+  /** @deprecated Configure serve.sessionPrWatch in the daemon. */
   prWatchEvents?: unknown;
-  prWatchLimit?: unknown;
-  prWatchBudgetReserve?: unknown;
   boundSessionActions?: unknown;
   requireBoundWatch?: unknown;
   prCommentWatch?: unknown;
@@ -879,38 +723,29 @@ function normalizeBoundSessionActions(
   return validateBoundActionEntries(entries, source, BOUND_ACTION_VOCABULARY);
 }
 
-function normalizePrWatchEvents(
+/**
+ * Whether the channel still uses the deprecated state-watch surface:
+ * `prWatchEvents` itself, or a `watch:*` key in `boundSessionActions`.
+ * These keys are accepted for one minor release; the daemon reads them as a
+ * per-host alias when `serve.sessionPrWatch` is unset.
+ */
+function usesDeprecatedPrWatchSurface(
   config: BoundSessionConfigFields,
-  channelName: string,
-): Set<PrWatchEventType> {
-  if (config.prWatchEvents === undefined) return new Set();
-  if (!Array.isArray(config.prWatchEvents)) {
-    throw new Error(
-      `prWatchEvents for channel ${channelName} must be an array of event names.`,
-    );
+): boolean {
+  if (config.prWatchEvents !== undefined) return true;
+  const actions = config.boundSessionActions;
+  if (
+    actions === null ||
+    typeof actions !== 'object' ||
+    Array.isArray(actions)
+  ) {
+    return false;
   }
-  const events = new Set<PrWatchEventType>();
-  for (const value of config.prWatchEvents) {
-    if (typeof value !== 'string') {
-      throw new Error(
-        `prWatchEvents entries for channel ${channelName} must be strings.`,
-      );
-    }
-    const event = value.trim().toLowerCase();
-    if (!event) continue;
-    if (!KNOWN_PR_WATCH_EVENTS.has(event)) {
-      throw new Error(
-        `Unrecognized prWatchEvents value for channel ${channelName}: ${value}`,
-      );
-    }
-    events.add(event as PrWatchEventType);
-  }
-  if (events.size > 0 && config.deliverToBoundSessions !== true) {
-    throw new Error(
-      `prWatchEvents for channel ${channelName} requires deliverToBoundSessions: true.`,
-    );
-  }
-  return events;
+  return Object.keys(actions as Record<string, unknown>).some((key) => {
+    if (key.startsWith('watch:')) return true;
+    const colon = key.indexOf(':');
+    return colon !== -1 && key.slice(colon + 1).startsWith('watch:');
+  });
 }
 
 /**
@@ -927,12 +762,6 @@ export function validateBoundSessionConfig(
     typeof config.deliverToBoundSessions !== 'boolean'
   ) {
     return `[Channel:${channelName}] deliverToBoundSessions must be a boolean.`;
-  }
-  if (
-    config.prWatchLimit !== undefined &&
-    config.deliverToBoundSessions !== true
-  ) {
-    return `prWatchLimit for channel ${channelName} requires deliverToBoundSessions: true.`;
   }
   if (
     config.requireBoundWatch !== undefined &&
@@ -955,32 +784,7 @@ export function validateBoundSessionConfig(
   // No deliverToBoundSessions dependency: prCommentWatch is default-on, so the
   // editor emits it even for channels without bound delivery. It is inert there
   // (the watch is gated on deliverToBoundSessions at runtime), not an error.
-  if (
-    config.prWatchBudgetReserve !== undefined &&
-    config.deliverToBoundSessions !== true
-  ) {
-    return `prWatchBudgetReserve for channel ${channelName} requires deliverToBoundSessions: true.`;
-  }
-  // The descriptor now declares minimum: 0, so the editor refuses a negative
-  // the operator types. This check still guards everything else: a hand-edited
-  // settings.json or a daemon API call, and a stored negative the editor
-  // re-sends unchanged under its descriptor-level tolerance. The getter would
-  // silently fall back to the default for a negative, letting a saved value
-  // mean something other than it says.
-  // Positive fractions stay legal: the getter rounds them UP, which is the
-  // documented behaviour, not a silent fallback.
-  if (config.prWatchBudgetReserve !== undefined) {
-    const reserve = config.prWatchBudgetReserve;
-    if (
-      typeof reserve !== 'number' ||
-      !Number.isFinite(reserve) ||
-      reserve < 0
-    ) {
-      return `prWatchBudgetReserve for channel ${channelName} must be a non-negative number.`;
-    }
-  }
   try {
-    normalizePrWatchEvents(config, channelName);
     normalizeBoundSessionActions(config, channelName);
   } catch (err) {
     return err instanceof Error ? err.message : String(err);
@@ -1349,12 +1153,6 @@ const BOUND_DELIVERY_COPY: Readonly<
       newInlineReviewCommentLead(author: string): string;
       reviewRequestedInstruction: string;
       assignInstruction: string;
-      headChange(fromSha: string, toSha: string): string;
-      ciFailure(headSha: string): string;
-      failedChecks(names: string, namesIncomplete: boolean): string;
-      mergeConflict: string;
-      prMerged: string;
-      prClosed: string;
     }
   >
 > = {
@@ -1372,18 +1170,6 @@ const BOUND_DELIVERY_COPY: Readonly<
     reviewRequestedInstruction:
       'Return a formal review summary with verified actionable findings, or a concise no-blocker result.',
     assignInstruction: 'Triage this issue and respond with the next action.',
-    headChange: (fromSha, toSha) =>
-      `New commits pushed: head moved from ${fromSha} to ${toSha}.`,
-    ciFailure: (headSha) => `CI failed on head ${headSha}.`,
-    failedChecks: (names, namesIncomplete) =>
-      ` Failed checks: ${names}${
-        namesIncomplete
-          ? ' (list may be incomplete: later check pages were not read)'
-          : ''
-      }.`,
-    mergeConflict: 'Merge conflicts detected (mergeable_state: dirty).',
-    prMerged: 'The PR was merged.',
-    prClosed: 'The PR was closed without merging.',
   },
   zh: {
     provenance: (channelName) =>
@@ -1398,16 +1184,6 @@ const BOUND_DELIVERY_COPY: Readonly<
     reviewRequestedInstruction:
       '请给出正式的评审总结，包含经核实的可操作发现；若没有阻塞问题，给出简洁的无阻塞结论。',
     assignInstruction: '请分诊该 issue 并给出下一步行动。',
-    headChange: (fromSha, toSha) =>
-      `有新提交推送：head 从 ${fromSha} 变为 ${toSha}。`,
-    ciFailure: (headSha) => `head ${headSha} 的 CI 失败。`,
-    failedChecks: (names, namesIncomplete) =>
-      `失败的检查：${names}${
-        namesIncomplete ? '（列表可能不完整：未读取后续检查分页）' : ''
-      }。`,
-    mergeConflict: '检测到合并冲突（mergeable_state: dirty）。',
-    prMerged: 'PR 已合并。',
-    prClosed: 'PR 已关闭，未合并。',
   },
 };
 
@@ -1421,19 +1197,11 @@ function isNoReplySentinel(text: string): boolean {
 const SECONDARY_RATE_LIMIT_MESSAGE = /secondary rate limit|abuse detection/i;
 
 /**
- * Cap on cached conditional responses, sized from the fan-out it has to
- * serve: up to MAX_PR_WATCH_LIMIT open PRs, a terminal-drain slice on top,
- * and the notifications pages. A cap below the sweep does not degrade
- * proportionally — each miss evicts the entry the sweep is about to read, so
- * every read of every later pass misses and the saving is exactly zero for
- * the high-fan-out deployments this is meant to help. Derived from the watch
- * limit so the two cannot drift apart.
- *
- * A moved notifications `since` cursor still mints new keys, so the map is
- * bounded and evicts least-recently-used first; an evicted URL simply pays
- * for one full 200 again.
+ * Cap on cached conditional responses. 1,000 is the former watch fan-out
+ * ceiling doubled; the state watch is gone, but the cache still serves the
+ * notification pages and the comment watch's list reads.
  */
-export const CONDITIONAL_CACHE_MAX_ENTRIES = MAX_PR_WATCH_LIMIT * 2;
+export const CONDITIONAL_CACHE_MAX_ENTRIES = 1000;
 
 /**
  * Bodies above this size are not cached, so a pathologically large page
@@ -1706,7 +1474,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * with deliverToBoundSessions; `prCommentWatch: false` disables it.
    */
   private prCommentWatchEnabled = true;
-  private prWatchEvents = new Set<PrWatchEventType>();
   /**
    * Operator instruction templates keyed by the closed bound-action
    * vocabulary. Non-empty switches routing to role-aware fan-out (one
@@ -1822,27 +1589,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.gateDeferredOnce.delete(key);
   }
   /**
-   * True while the most recent pending-watch reconciliation FAILED (e.g.
-   * the watch file is unreadable). Generic recovery must then leave watch
-   * tasks alone: delivering and removing an accepted watch task without
-   * reconciling its on-disk pending record would let a later drain claim
-   * and deliver the same transition a second time. Unrelated comment
-   * recovery keeps running.
-   */
-  private watchReconcileBlocked = false;
-  /**
-   * The cause the blocking watch-guard row last named. The row is
-   * edge-triggered per CAUSE, not just per blocked window: a pending backlog
-   * that turns into an unreadable sidecar (or back) must re-journal, or the
-   * timeline keeps naming a remedy that no longer applies. Cleared on the
-   * recovery edge.
-   */
-  private watchReconcileBlockedCause:
-    | 'reconcile_failed'
-    | 'read_error'
-    | 'pending'
-    | undefined;
-  /**
    * Last REST budget seen on a SUCCESSFUL response, recorded by the request
    * hook regardless of the call's return shape. Undefined until the first
    * response carries the header. Gates the watch pass so background polling
@@ -1858,9 +1604,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private lastRateLimitResetAt: number | undefined;
   /**
    * Whether the watch pass is currently skipped for low budget. Edge-triggered
-   * journaling (the watchReconcileBlockedCause pattern): a permanent low-budget
-   * condition journalled once on the edge, not every poll, so it cannot rotate
-   * the useful rows out of the timeline. Cleared on the recovery edge.
+   * journaling: a permanent low-budget condition is journalled once on the
+   * edge, not every poll, so it cannot rotate the useful rows out of the
+   * timeline. Cleared on the recovery edge.
    */
   private watchBudgetLow = false;
   /**
@@ -1900,16 +1646,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private boundSnapshotFailureStreak = 0;
   private prWatchState: PrWatchStateFile = { version: 1, entries: {} };
   private prWatchStateLoaded = false;
-  /**
-   * Message keys that already have a durable dead-letter record, lazily
-   * loaded from the never-rotated dead-letter file on first use and kept
-   * current as this process appends. The file is the overflow retire's commit
-   * point: a head with a record is never re-appended — even across a restart,
-   * which empties this cache and reloads it from disk — and never delivered;
-   * the drain completes its retire instead. Watch keys are unique per
-   * episode, so a record can only match the same transition.
-   */
-  private deadLetteredKeys: Set<string> | undefined;
   private inboundRecoveryPending = true;
   private recoverableInboundTasks = 0;
   /**
@@ -2093,11 +1829,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     if (boundConfigError) {
       throw new Error(boundConfigError);
     }
-    this.prWatchEvents = normalizePrWatchEvents(cfg, this.name);
     this.boundSessionActions = normalizeBoundSessionActions(cfg, this.name);
     this.deliverToBoundSessions = cfg.deliverToBoundSessions === true;
     this.requireBoundWatch = cfg.requireBoundWatch === true;
     this.prCommentWatchEnabled = cfg.prCommentWatch !== false;
+    if (usesDeprecatedPrWatchSurface(cfg)) {
+      process.stderr.write(
+        `[Channel:${this.name}] warning: prWatchEvents and the watch:* keys of boundSessionActions are deprecated; this channel no longer detects PR state transitions. Configure serve.sessionPrWatch in the daemon's settings instead. The deprecated keys are read as a per-host alias for one minor release.\n`,
+      );
+    }
     if (this.deliverToBoundSessions) {
       this.loadBoundDeliveredRing();
     }
@@ -2107,7 +1847,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
       this.deliverToBoundSessions = false;
       this.requireBoundWatch = false;
-      this.prWatchEvents = new Set();
       this.boundSessionActions = new Map();
     }
     const baseUrl = cfg.baseUrl || 'https://api.github.com';
@@ -2198,6 +1937,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.config.operators = this.config.operators.map((u) => u.toLowerCase());
     }
     this.migrateLegacyPublicationState();
+    this.retireLegacyPrWatchState();
     this.inboundPersistenceBlocked = false;
     this.inboundRecoveryPending = true;
     // A reconnect starts a fresh runner generation; any runner left over
@@ -2978,133 +2718,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       await this.refreshBoundSessions();
     }
 
-    // Reconcile durable pending watch events BEFORE generic recovery and
-    // independently of the live API pass: a crash between claim and the
-    // pending->fired save leaves both records on disk, and if recovery ran
-    // first it would deliver and remove the task, then a later drain would
-    // claim and deliver the same transition again. Draining needs no GitHub
-    // calls, so a failing or rate-limited binding fetch must not starve it —
-    // drain's own re-validation fails closed (keeps the frozen target) when
-    // the snapshot is partial or the refresh failed.
-    if (this.prWatchEvents.size > 0) {
-      try {
-        await this.reconcilePendingWatch();
-        const wasBlocked = this.watchReconcileBlocked;
-        this.watchReconcileBlocked = false;
-        this.watchReconcileBlockedCause = undefined;
-        // The clearing edge is the recovery signal. A `poll` / `ok` row is
-        // not: the base writes one after every poll that does not throw,
-        // including every poll of a sustained outage, so it is present
-        // throughout the degraded window and cannot mark its end.
-        if (wasBlocked) {
-          this.recordPollDegraded('watch_reconcile_recovered');
-        }
-      } catch (err) {
-        // Recovery must not deliver accepted watch tasks while their pending
-        // records are unreconciled (a later drain would deliver them again).
-        this.watchReconcileBlocked = true;
-        const message = sanitizeLogText(
-          err instanceof Error ? err.message : String(err),
-          200,
-        );
-        process.stderr.write(
-          `[Channel:${this.name}] pending watch reconciliation failed, will retry next poll: ${message}\n`,
-        );
-        // Edge-triggered per cause: this catch runs on EVERY poll while the
-        // watch state stays unreadable, so a per-poll row would rotate the
-        // journal — but a cause that CHANGES while blocked must re-journal.
-        if (this.watchReconcileBlockedCause !== 'reconcile_failed') {
-          this.recordPollDegraded(
-            'watch_reconcile_blocked',
-            undefined,
-            message,
-          );
-          this.watchReconcileBlockedCause = 'reconcile_failed';
-        }
-      }
-    } else {
-      // Subscriptions are off, but unreconciled pending records on disk
-      // still own their accepted tasks: recovery must not deliver and
-      // remove a task that a later re-enabled drain would claim and
-      // deliver again. Keep the guard until no watch pending remains.
-      //
-      // Classify the cause first. hasUnreconciledWatchPending() is fail-closed
-      // on a read error, so an unreadable sidecar also blocks recovery — but
-      // reporting that as a pending backlog names a remedy (re-enable
-      // subscriptions) that cannot clear it. The gate below is unchanged.
-      let watchStateError: string | undefined;
-      try {
-        this.loadPrWatchState();
-      } catch (err) {
-        watchStateError = sanitizeLogText(
-          err instanceof Error ? err.message : String(err),
-          200,
-        );
-      }
-      const wasBlocked = this.watchReconcileBlocked;
-      this.watchReconcileBlocked = this.hasUnreconciledWatchPending();
-      if (this.watchReconcileBlocked) {
-        // Park the legacy watch tasks as backpressure so they stop
-        // blocking the SHARED notification cursor: watch delivery is off,
-        // the reconcile guard still skips them in recovery, and comment
-        // events must not stall channel-wide until an operator re-enables
-        // watch. Re-enabling drains the pendings and re-resolves them.
-        try {
-          for (const task of this.readInboundTasks()) {
-            if (
-              this.isRecoverableInboundTask(task) &&
-              task.backpressure !== true &&
-              task.envelope?.messageId?.startsWith('watch:') === true
-            ) {
-              this.transitionInboundTask(task.id, 'failed', {
-                error: 'watch subscriptions disabled; parked until re-enabled',
-                attempts: task.attempts ?? 0,
-                deferCount: task.deferCount ?? 0,
-                backpressure: true,
-              });
-            }
-          }
-        } catch {
-          // Task store unreadable/unwritable: fail closed, retry next poll.
-        }
-        process.stderr.write(
-          `[Channel:${this.name}] watch subscriptions are disabled but pending watch events remain unreconciled; watch task recovery stays blocked until subscriptions are re-enabled and the pending events reconcile (legacy watch tasks parked as backpressure so the notification cursor keeps flowing)${watchStateError ? ` — the watch state is also unreadable, which alone blocks recovery: ${watchStateError}` : ''}\n`,
-        );
-        // Edge-triggered per cause, for the same reason as the reconcile
-        // failure above: this branch runs on every poll until an operator
-        // re-enables watch, but a backlog that turns into a read error (or
-        // back) must re-journal so the row never names a stale remedy.
-        const cause = watchStateError ? 'read_error' : 'pending';
-        if (this.watchReconcileBlockedCause !== cause) {
-          if (watchStateError) {
-            this.recordPollDegraded(
-              'watch_reconcile_blocked',
-              undefined,
-              watchStateError,
-            );
-          } else {
-            this.recordPollDegraded('watch_pending_unreconciled');
-          }
-          this.watchReconcileBlockedCause = cause;
-        }
-      } else {
-        this.watchReconcileBlockedCause = undefined;
-        if (wasBlocked) {
-          this.recordPollDegraded('watch_reconcile_recovered');
-        }
-      }
-    }
-
-    // The watch pass runs before generic recovery so detection cannot race
-    // recovery over the same task; pending events were already reconciled.
-    // The comment watch is independent of the state-event subscription, so an
-    // empty prWatchEvents still runs the pass while comment watching is on.
+    // The comment watch runs before generic recovery so a slow fetch cannot
+    // race the tasks its own deliveries create. It is default-on with bound
+    // delivery and independent of the retired state subscription.
     const commentWatchActive =
       this.deliverToBoundSessions && this.prCommentWatchEnabled;
-    if (
-      (this.prWatchEvents.size > 0 || commentWatchActive) &&
-      !this.boundRefreshFailed
-    ) {
+    if (commentWatchActive && !this.boundRefreshFailed) {
       // Protect the interactive notification lane: the watch runs first and
       // is best-effort edge-triggered detection, so when the last known REST
       // budget is at or below the reserve, skip the pass this poll rather
@@ -4514,31 +4133,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         record.source.messageId === envelope.messageId &&
         // Fan-out claims one task per (event, target): the target is part
         // of the task identity, while source.messageId stays the pure
-        // event key (watch prefix, audit key, and dedupe all ride it).
+        // event key (audit key and dedupe ride it).
         record.delivery?.sessionId === delivery?.sessionId,
     );
     if (existing) {
-      // A terminal failed/cancelled record must not swallow the same key's
-      // surviving pending event (a crash can leave the pending queue and a
-      // terminal attempt of one episode): replace it with a fresh task.
-      // reply_pending is NOT terminal — a public reply is still awaiting
-      // publication, and replacing it would double-publish.
-      const terminal =
-        existing.state === 'cancelled' ||
-        (existing.state === 'failed' &&
-          (existing.attempts ?? 0) >= MAX_INBOUND_TASK_ATTEMPTS);
-      // Only watch episode keys legitimately recur. Comment/event/issue-body
-      // keys are stable identifiers that never re-fire: a terminal record
-      // there is a permanent dedupe barrier. Replacing it would revive a
-      // cancelled comment (public reply to a silenced comment) or duplicate
-      // a failed one after a crash leaves the cursor behind the cancel.
-      const recurrible =
-        existing.source.messageId?.startsWith('watch:') === true;
-      if (!terminal || !recurrible) {
-        this.applyTaskDedupe(existing.dedupe);
-        return existing;
-      }
-      this.removeInboundTask(existing.id);
+      // Comment/event/issue-body keys are stable identifiers that never
+      // re-fire: any existing record is a permanent dedupe barrier. Replacing
+      // it would revive a cancelled comment (public reply to a silenced
+      // comment) or duplicate a failed one after a crash leaves the cursor
+      // behind the cancel.
+      this.applyTaskDedupe(existing.dedupe);
+      return existing;
     }
     const now = new Date().toISOString();
     const task: InboundTaskRecord = {
@@ -4696,10 +4301,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const envelope = task.envelope;
     if (!envelope) return false;
     const bound = task.delivery?.kind === 'bound-session';
-    const isWatch = envelope.messageId?.startsWith('watch:') === true;
     if (
       bound ||
-      isWatch ||
       !this.deliverToBoundSessions ||
       envelope.threadId?.startsWith('pr:') !== true
     ) {
@@ -4734,7 +4337,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const envelope = task.envelope;
     if (!envelope) return true;
     const bound = task.delivery?.kind === 'bound-session';
-    const isWatch = envelope.messageId?.startsWith('watch:') === true;
     // Absence from the map authorizes the irreversible public path ONLY
     // on a current complete, successful snapshot. A partial answer cannot
     // prove absence for a PR even when every OBSERVED binder is listed and
@@ -4760,24 +4362,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // increment. The backpressure rollback is a second write, and a crash
     // between the two would leak one budget per cycle until the event is
     // silently dropped. Recovery charges the interrupted attempt instead,
-    // which keeps crash loops terminating. Watch events are bound-path too
-    // (private-only), so they share the no-charge running transition.
-    this.transitionInboundTask(
-      task.id,
-      'running',
-      bound || isWatch ? {} : { attempts },
-    );
+    // which keeps crash loops terminating.
+    this.transitionInboundTask(task.id, 'running', bound ? {} : { attempts });
     let cancelled = false;
     // The public path journals its own acceptance and publication; only
     // bound delivery needs a verdict to name its terminal outcome.
     let boundResult: BoundDeliveryResult = { kind: 'public' };
     try {
-      // Watch events are private-only: route them by envelope identity, not
-      // by the current delivery. A watch task whose delivery was cleared (a
-      // gone session, or a crash/removal failure that left it running with no
-      // target) must never fall through to the public channel path —
-      // deliverToBoundSession retires a targetless watch event privately.
-      if (bound || isWatch) {
+      if (bound) {
         boundResult = await this.deliverToBoundSession(task, envelope);
         if (boundResult.kind === 'deferred') return false;
         // The gone-session fallback requeued the task as public work: the
@@ -4948,14 +4540,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       this.removeInboundTask(task.id);
       return true;
     }
-    if (isWatch || this.privatelyRetiredInboundTaskIds.has(task.id)) {
-      // A watch task reaches here only after a private retire cleared its
-      // delivery (gone session, no target left); a role-aware comment task
-      // after a private retire (role lost its match, siblings already
-      // delivered). Neither published anything, so they can have no pending
-      // final delivery: reading the public reply lane's store here would
-      // wedge the retired task — and with it the shared cursor — on an
-      // unrelated file's readability.
+    if (this.privatelyRetiredInboundTaskIds.has(task.id)) {
+      // A role-aware comment task reaches here after a private retire (role
+      // lost its match, siblings already delivered). It published nothing, so
+      // it can have no pending final delivery: reading the public reply lane's
+      // store here would wedge the retired task — and with it the shared
+      // cursor — on an unrelated file's readability.
       this.privatelyRetiredInboundTaskIds.delete(task.id);
       this.removeInboundTask(task.id);
       // After the removal, like the dead-letter site: a throwing removal
@@ -5067,18 +4657,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // survives) and deliver it bound a second time. A running task with no
       // in-flight entry is a genuine crash and must still be recovered.
       if (this.publicTasksInFlight.has(task.id)) continue;
-      this.applyTaskDedupe(task.dedupe);
-      if (
-        this.watchReconcileBlocked &&
-        task.envelope.messageId?.startsWith('watch:') === true
-      ) {
-        // Reconciliation itself failed (e.g. the watch file is unreadable):
-        // delivering and removing this accepted task now would leave its
-        // on-disk pending record for a later drain to claim and deliver a
-        // second time. Keep it queued for the reconcile pass; unrelated
-        // comment recovery continues below.
+      if (task.envelope.messageId?.startsWith('watch:') === true) {
+        // The adapter's state watch is retired. A task left behind by a
+        // failed retirement must never be replayed; its dead-letter record is
+        // the only intended trace. A failed write keeps it for the next pass.
+        this.retireBoundTask(
+          task,
+          'the adapter PR state watch was retired; the transition is not replayed',
+        );
         continue;
       }
+      this.applyTaskDedupe(task.dedupe);
       if (task.deliveredAt !== undefined) {
         // The daemon accepted this prompt before the crash; re-injecting
         // would deliver the same event twice. Retire without replay — but
@@ -5264,13 +4853,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * deferral horizon, and must not freeze mark-as-read for every unrelated
    * PR the channel follows. This covers both bound deliveries and the
    * targetless deferrals an incomplete binding snapshot produces (no
-   * delivery yet, same durable retry). Watch tasks are excluded while
-   * reconcile is blocked: recovery skips them and the drain cannot run, so
-   * they cannot make progress — and watch events are detected from PR
-   * state, not notifications, so holding the cursor for them only stalls
-   * unrelated comment traffic until the watch sidecar recovers. Once
-   * reconcile succeeds they count again, and their retry budgets guarantee
-   * they settle instead of freezing the cursor forever.
+   * delivery yet, same durable retry). Every entry here settles through its
+   * own retry budget, so it cannot freeze the cursor forever.
    */
   private hasCursorBlockingTasks(): boolean {
     return this.readInboundTasks().some((task) =>
@@ -5301,14 +4885,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private isCursorBlockingTask(task: InboundTaskRecord): boolean {
-    return (
-      this.isRecoverableInboundTask(task) &&
-      task.backpressure !== true &&
-      !(
-        this.watchReconcileBlocked &&
-        task.envelope?.messageId?.startsWith('watch:') === true
-      )
-    );
+    return this.isRecoverableInboundTask(task) && task.backpressure !== true;
   }
 
   /** Whether one of the thread's own tasks holds the cursor, as last seen. */
@@ -5634,67 +5211,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ?.workspaceCwd;
   }
 
-  /**
-   * Whether a message key already has a durable dead-letter record. Loads the
-   * never-rotated file's keys once, then serves from the cache this process
-   * keeps current on append. A read failure yields an empty cache: nothing is
-   * known to be dead-lettered, so the caller appends (a possible duplicate is
-   * benign) rather than silently skipping the exhaustion surface.
-   */
-  private isDeadLettered(messageKey: string): boolean {
-    if (this.deadLetteredKeys === undefined) {
-      const keys = new Set<string>();
-      try {
-        const raw = readFileSync(
-          this.channelFilePath('github-bound-deadletter.jsonl'),
-          'utf-8',
-        );
-        for (const line of raw.split('\n')) {
-          if (!line) continue;
-          try {
-            const rec = JSON.parse(line) as { source?: { messageId?: string } };
-            if (typeof rec.source?.messageId === 'string') {
-              keys.add(rec.source.messageId);
-            }
-          } catch {
-            // A malformed line names no key; skip it.
-          }
-        }
-      } catch {
-        // No file yet, or unreadable: nothing known to be dead-lettered.
-      }
-      this.deadLetteredKeys = keys;
-    }
-    return this.deadLetteredKeys.has(messageKey);
-  }
-
-  /**
-   * The overflow retire's journal trace, written only after the retire is
-   * durable. Identifiers only — the dead-letter record's `text` (the body)
-   * must never be copied here. Carries the frozen target and its workspace so
-   * the row links to the session the event lost, even in another workspace.
-   */
-  private recordWatchOverflowSkip(pending: PendingWatchEvent): void {
-    const sessionId =
-      pending.delivery?.kind === 'bound-session'
-        ? pending.delivery.sessionId
-        : undefined;
-    const workspaceCwd = sessionId
-      ? this.sessionWorkspaceFor(sessionId)
-      : undefined;
-    this.recordChannelEvent({
-      type: 'inbound',
-      outcome: 'skipped',
-      reason: 'watch_pending_overflow',
-      repository: pending.envelope.chatId,
-      thread: pending.envelope.threadId,
-      number: pending.issueNumber,
-      messageId: pending.key,
-      ...(sessionId ? { sessionId } : {}),
-      ...(workspaceCwd ? { sessionWorkspaceCwd: workspaceCwd } : {}),
-    });
-  }
-
   private removeInboundTask(taskId: string): void {
     this.updateInboundTasks((records) =>
       records.filter((record) => record.id !== taskId),
@@ -5815,11 +5331,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * covers a wrong estimate or a secondary limit.
    */
   private watchBudgetExhausted(): boolean {
-    const reserve = this.prWatchBudgetReserve;
-    // A reserve of 0 disables the gate outright. Without this, a remaining
-    // of 0 would still satisfy `0 <= 0` and skip the watch the operator
-    // explicitly opted out of protecting.
-    if (reserve === 0) return false;
+    const reserve = PR_WATCH_BUDGET_RESERVE;
     if (this.lastRateLimitRemaining === undefined) return false;
     if (
       this.lastRateLimitResetAt !== undefined &&
@@ -5841,10 +5353,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.watchBudgetLow = true;
     this.recordPollDegraded('watch_budget_low', {
       remaining: this.lastRateLimitRemaining ?? 0,
-      reserve: this.prWatchBudgetReserve,
+      reserve: PR_WATCH_BUDGET_RESERVE,
     });
     process.stderr.write(
-      `[Channel:${this.name}] PR state watch skipped: REST budget ${this.lastRateLimitRemaining} at or below reserve ${this.prWatchBudgetReserve}; preserving budget for the notification lane\n`,
+      `[Channel:${this.name}] PR watch skipped: REST budget ${this.lastRateLimitRemaining} at or below reserve ${PR_WATCH_BUDGET_RESERVE}; preserving budget for the notification lane\n`,
     );
   }
 
@@ -6692,18 +6204,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
-   * The event class a bound delivery resolves templates against: the watch
-   * type from the durable message id (authoritative — the metadata Event
-   * line is display, not identity), else the notification trigger reason.
-   * An envelope with neither has no class and resolves through `default`.
+   * The event class a bound delivery resolves templates against: the
+   * notification trigger reason. An envelope with none has no class and
+   * resolves through `default`.
    */
   private boundEventClass(envelope: Envelope): string | undefined {
-    const messageId = envelope.messageId ?? '';
-    if (messageId.startsWith('watch:')) {
-      const type = messageId.slice('watch:'.length).split(':')[0];
-      if (type && KNOWN_PR_WATCH_EVENTS.has(type)) return `watch:${type}`;
-      return undefined;
-    }
     return parseTriggerKind(envelope.metadata);
   }
 
@@ -6712,7 +6217,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * aggregate, identified by their dispatchedComments dedupe) fall back to
    * `comment` after the thread's notification reason, so a `fix:comment`
    * template catches a comment delivered under `mention`/`subscribed`/
-   * `author` too. Watch and direct-event lanes have no lane fallback.
+   * `author` too. A direct-event lane has no lane fallback.
    */
   private boundLaneClass(
     dedupe: InboundTaskDedupe | undefined,
@@ -7229,18 +6734,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   ): Promise<BoundDeliveryResult> {
     const boundSessions = this.boundSessions;
     let delivery = task.delivery;
-    const isWatch = envelope.messageId?.startsWith('watch:') === true;
     if (!boundSessions || delivery?.kind !== 'bound-session') {
-      // Watch events are operator-facing machine state with no public path:
-      // a channel session's reply would publish the internal prompt text on
-      // the PR. They are only ever delivered privately; without a bound
-      // target they are logged and retired, never fallen back publicly.
-      if (isWatch) {
-        process.stderr.write(
-          `[Channel:${this.name}] watch event ${envelope.messageId} has no bound delivery target; retiring without public fallback\n`,
-        );
-        return { kind: 'retired', reason: 'watch_no_target' };
-      }
       if (this.boundRoleAware && this.boundEventAlreadyDelivered(envelope)) {
         // Defensive: a sibling role already accepted this event privately, so
         // a targetless retry must not answer it publicly (durable delivery
@@ -7298,8 +6792,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         delivery = current;
       } else if (
         !current &&
-        (isWatch ||
-          this.boundRoleAware ||
+        (this.boundRoleAware ||
           this.frozenTargetGateExcluded(
             delivery,
             envelope.chatId,
@@ -7307,25 +6800,24 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           ))
       ) {
         // On a complete snapshot with no candidate left for the task's role,
-        // retire privately. Watch events are private-only by contract; a
-        // role-aware COMMENT whose role lost its match (the binding's role
-        // changed, or the operator removed the template) must not keep
-        // injecting the obsolete role's instruction into the frozen session
-        // either. Under the watch gate a legacy comment retires too, but
-        // ONLY when the gate excluded the FROZEN TARGET itself (it stopped
-        // watching between claim and delivery). The decision is about the
-        // target, not the follower set: an exempt fix/untyped target, a
+        // retire privately. A role-aware COMMENT whose role lost its match
+        // (the binding's role changed, or the operator removed the template)
+        // must not keep injecting the obsolete role's instruction into the
+        // frozen session. Under the watch gate a legacy comment retires too,
+        // but ONLY when the gate excluded the FROZEN TARGET itself (it
+        // stopped watching between claim and delivery). The decision is about
+        // the target, not the follower set: an exempt fix/untyped target, a
         // merely author-excluded winner, or a REMOVED binding all keep the
         // legacy contract — the frozen target stands and the gone path below
         // owns the fallback — so the gate never changes behavior for the
         // fix/untyped sessions it exempts.
         process.stderr.write(
-          `[Channel:${this.name}] ${isWatch ? 'watch' : 'bound'} event ${envelope.messageId} has no bound candidate left for its role; retiring without public fallback\n`,
+          `[Channel:${this.name}] bound event ${envelope.messageId} has no bound candidate left for its role; retiring without public fallback\n`,
         );
         this.markPrivatelyRetired(task);
         return {
           kind: 'retired',
-          reason: isWatch ? 'watch_no_candidate' : 'bound_no_candidate',
+          reason: 'bound_no_candidate',
           sessionId: delivery.sessionId,
         };
       }
@@ -7333,34 +6825,31 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // The channel path runs the group/sender/pairing gates inside
     // handleInbound → preflightInbound; bound delivery bypasses
     // handleInbound, so run the same preflight here (pairing side effects
-    // included). Watch events have no human sender — they are operator
-    // opt-in state changes — and are exempt.
-    if (!isWatch) {
-      // A first-contact body is the PR's own description, not a comment
-      // for the session: it keeps the mention requirement.
-      const preflight = this.preflightInbound(envelope, {
-        waiveGroupMention:
-          !envelope.messageId?.startsWith('issue-body-') &&
-          this.waivesBoundMention(envelope.chatId, envelope.senderId),
-        // The comment watch delivers the channel account's own comments (the
-        // notification lanes filter that login out, so this can only be the
-        // watch). The sender allowlist guidance excludes that account, which
-        // would otherwise retire every watched comment as preflight_rejected.
-        waiveGroupSender:
-          this.botUsername != null &&
-          envelope.senderId === this.botUsername.toLowerCase(),
-      });
-      const admitted =
-        typeof preflight === 'boolean' ? preflight : await preflight;
-      if (!admitted) {
-        // The bound path inherits the channel gates (sender allowlist,
-        // message routes); a rejection retires the event without delivering
-        // it, so surface it instead of consuming it silently.
-        process.stderr.write(
-          `[Channel:${this.name}] bound event ${envelope.messageId} rejected by the channel preflight (sender/route gates); retiring without delivery\n`,
-        );
-        return { kind: 'retired', reason: 'preflight_rejected' };
-      }
+    // included).
+    // A first-contact body is the PR's own description, not a comment
+    // for the session: it keeps the mention requirement.
+    const preflight = this.preflightInbound(envelope, {
+      waiveGroupMention:
+        !envelope.messageId?.startsWith('issue-body-') &&
+        this.waivesBoundMention(envelope.chatId, envelope.senderId),
+      // The comment watch delivers the channel account's own comments (the
+      // notification lanes filter that login out, so this can only be the
+      // watch). The sender allowlist guidance excludes that account, which
+      // would otherwise retire every watched comment as preflight_rejected.
+      waiveGroupSender:
+        this.botUsername != null &&
+        envelope.senderId === this.botUsername.toLowerCase(),
+    });
+    const admitted =
+      typeof preflight === 'boolean' ? preflight : await preflight;
+    if (!admitted) {
+      // The bound path inherits the channel gates (sender allowlist,
+      // message routes); a rejection retires the event without delivering
+      // it, so surface it instead of consuming it silently.
+      process.stderr.write(
+        `[Channel:${this.name}] bound event ${envelope.messageId} rejected by the channel preflight (sender/route gates); retiring without delivery\n`,
+      );
+      return { kind: 'retired', reason: 'preflight_rejected' };
     }
     const prompt = this.buildBoundSessionPrompt(
       envelope,
@@ -7472,21 +6961,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           );
         }
       }
-      if (isWatch) {
-        // Private-only: no public fallback for watch events (a channel
-        // session would publish the operator-facing prompt as a PR comment
-        // and re-gate it through the sender allowlist). Log and retire.
-        process.stderr.write(
-          `[Channel:${this.name}] watch event ${envelope.messageId} lost its bound session; retiring without public fallback\n`,
-        );
-        this.transitionInboundTask(task.id, 'running', { delivery: undefined });
-        task.delivery = undefined;
-        return {
-          kind: 'retired',
-          reason: 'watch_session_gone',
-          sessionId: lastTarget.sessionId,
-        };
-      }
       // Role-aware fan-out: a partially delivered event never ALSO goes
       // public. While any role still follows the PR, the event is (or will
       // be) delivered privately through that role's own task; a public
@@ -7576,6 +7050,92 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     return { kind: 'delivered' };
   }
 
+  /**
+   * One-time retirement of the adapter's persisted state watch. The watch
+   * file stays (the comment cursors and the last title live in it), but the
+   * transition baseline and queue are stripped, and persisted `watch:`
+   * tasks are retired privately rather than replayed. A sentinel makes the
+   * count a once-only line and lets a failed retirement retry instead of
+   * being skipped.
+   */
+  private retireLegacyPrWatchState(): void {
+    const sentinel = this.channelFilePath('github-pr-watch-retired');
+    if (existsSync(sentinel)) return;
+    try {
+      // Tasks first: a failure here must not lose the count, which is only
+      // observable while the state file still holds the queue.
+      const tasks = this.readInboundTasks().filter(
+        (task) => task.envelope?.messageId?.startsWith('watch:') === true,
+      );
+      for (const task of tasks) {
+        this.retireBoundTask(
+          task,
+          'the adapter PR state watch was retired; the transition is not replayed',
+        );
+      }
+      const remaining = this.readInboundTasks().some(
+        (task) => task.envelope?.messageId?.startsWith('watch:') === true,
+      );
+      if (remaining) {
+        process.stderr.write(
+          `[Channel:${this.name}] PR state watch retirement could not retire every persisted watch task; will retry on the next connect\n`,
+        );
+        return;
+      }
+      this.loadPrWatchState();
+      let undelivered = 0;
+      const entries: Record<string, PrWatchEntry> = {};
+      for (const [key, entry] of Object.entries(this.prWatchState.entries)) {
+        // The retired watch wrote fields this type no longer declares; read
+        // only the queue length once, before stripping the entry.
+        const legacy = entry as PrWatchEntry & { pending?: unknown[] };
+        undelivered += Array.isArray(legacy.pending)
+          ? legacy.pending.length
+          : 0;
+        const kept: PrWatchEntry = {};
+        if (entry.title !== undefined) kept.title = entry.title;
+        if (entry.commentBaseline !== undefined) {
+          kept.commentBaseline = entry.commentBaseline;
+        }
+        if (entry.commentSince !== undefined) {
+          kept.commentSince = entry.commentSince;
+        }
+        if (entry.commentLastFetchAt !== undefined) {
+          kept.commentLastFetchAt = entry.commentLastFetchAt;
+        }
+        entries[key] = kept;
+      }
+      this.prWatchState = { version: 1, entries };
+      // A fresh install has no file: do not create one just to write the
+      // emptied state.
+      if (existsSync(this.prWatchStatePath())) {
+        this.savePrWatchState();
+      }
+      process.stderr.write(
+        `[Channel:${this.name}] PR state watch retired: ${undelivered} undelivered transition${undelivered === 1 ? '' : 's'} dropped (not replayed); comment cursors and the last observed title preserved\n`,
+      );
+      mkdirSync(dirname(sentinel), { recursive: true, mode: 0o700 });
+      writeFileSync(sentinel, '', { mode: 0o600 });
+    } catch (err) {
+      // Leave the sentinel unwritten so the next connect retries. Reload the
+      // file then: a failed save leaves the on-disk state intact.
+      this.prWatchStateLoaded = false;
+      process.stderr.write(
+        `[Channel:${this.name}] PR state watch retirement failed, will retry on the next connect: ${sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
+        )}\n`,
+      );
+    } finally {
+      // The pass must read the file it will maintain, whether or not a file
+      // existed before this retirement.
+      if (existsSync(sentinel)) {
+        this.prWatchState = { version: 1, entries: {} };
+        this.prWatchStateLoaded = false;
+      }
+    }
+  }
+
   private prWatchStatePath(): string {
     return this.channelFilePath('github-pr-watch.json');
   }
@@ -7648,46 +7208,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.prWatchStateLoaded = true;
   }
 
-  /**
-   * Whether any persisted watch entry still holds pending events. Keeps
-   * recovery blocked while watch subscriptions are disabled: an accepted
-   * task whose pending record is unreconciled must not be delivered and
-   * removed ahead of a later re-enabled drain. Fail-closed on read errors.
-   */
-  private hasUnreconciledWatchPending(): boolean {
-    try {
-      this.loadPrWatchState();
-    } catch {
-      return true;
-    }
-    return Object.values(this.prWatchState.entries).some(
-      (entry) => (entry.pending?.length ?? 0) > 0,
-    );
-  }
-
-  /**
-   * PR keys whose earlier watch transition still has a recoverable inbound
-   * task. Undefined when the task store cannot be read: the caller must
-   * not prune or evict watch memory it cannot cross-check (fail-closed).
-   */
-  private survivingWatchPrKeys(): Set<string> | undefined {
-    try {
-      return new Set(
-        this.readInboundTasks()
-          .filter(
-            (task) =>
-              this.isRecoverableInboundTask(task) &&
-              task.envelope?.messageId?.startsWith('watch:') === true,
-          )
-          .map((task) =>
-            this.prBindingKey(task.source.chatId, task.issueNumber),
-          ),
-      );
-    } catch {
-      return undefined;
-    }
-  }
-
   private savePrWatchState(): void {
     // Never overwrite on-disk state with memory that failed to load: a
     // transient read error must not destroy pending events / fired rings.
@@ -7720,74 +7240,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   /**
-   * Drain durable pending watch events independently of the live API pass
-   * and BEFORE generic recovery. Needs no GitHub calls: a failing or
-   * rate-limited watch pass must not starve already-detected events, and
-   * recovery must not deliver-and-remove a task that a later drain would
-   * re-claim (crash between the claim and the pending->fired save leaves
-   * both records on disk).
-   */
-  private async reconcilePendingWatch(): Promise<void> {
-    if (!this.boundSessions || this.prWatchEvents.size === 0) return;
-    this.loadPrWatchState();
-    for (const [key, entry] of Object.entries(this.prWatchState.entries)) {
-      if (!entry.pending?.length) continue;
-      await this.drainPendingWatch(key, entry);
-    }
-  }
-
-  /**
-   * Open-PR watch fan-out per poll (terminal-pending bindings drain in an
-   * additional slice outside it). Clamped like pollInterval: unset or
-   * invalid keeps the default; a fractional count rounds up so the
-   * configured budget is never silently smaller than requested.
-   */
-  private get prWatchLimit(): number {
-    const configured: unknown = (this.config as GithubConfig).prWatchLimit;
-    if (
-      typeof configured === 'number' &&
-      Number.isFinite(configured) &&
-      configured > 0
-    ) {
-      return Math.min(Math.max(Math.ceil(configured), 1), MAX_PR_WATCH_LIMIT);
-    }
-    return DEFAULT_PR_WATCH_LIMIT;
-  }
-
-  /**
-   * Requests reserved for the notification lane: at or below this remaining
-   * budget the watch pass yields. Clamped like prWatchLimit; a configured 0
-   * is honoured (disables the gate) so an operator can opt out, while unset
-   * or invalid keeps the default. Rounds up so the reserve is never silently
-   * smaller than requested.
-   */
-  private get prWatchBudgetReserve(): number {
-    const configured: unknown = (this.config as GithubConfig)
-      .prWatchBudgetReserve;
-    if (
-      typeof configured === 'number' &&
-      Number.isFinite(configured) &&
-      configured >= 0
-    ) {
-      return Math.min(Math.ceil(configured), MAX_PR_WATCH_BUDGET_RESERVE);
-    }
-    return DEFAULT_PR_WATCH_BUDGET_RESERVE;
-  }
-
-  /**
-   * Edge-triggered state watch over the PRs bound to live sessions. Runs
-   * inside the existing poll loop; detection is API-level and costs no model
-   * tokens until a real transition fires.
+   * The comment-watch pass over the PRs bound to live sessions. Runs inside
+   * the existing poll loop. The state-transition watch that used to share
+   * this pass moved to the daemon (master §7), so an empty state
+   * subscription no longer skips it: only the comment subscription and the
+   * bound-session handle decide.
    */
   private async runPrStateWatch(): Promise<void> {
-    // The comment watch is default-on with deliverToBoundSessions and is
-    // independent of the state-event subscription, so an empty prWatchEvents
-    // must not skip the pass while comment watching is enabled.
-    const commentWatchActive =
-      this.deliverToBoundSessions && this.prCommentWatchEnabled;
     if (
       !this.boundSessions ||
-      (this.prWatchEvents.size === 0 && !commentWatchActive)
+      !this.deliverToBoundSessions ||
+      !this.prCommentWatchEnabled
     ) {
       return;
     }
@@ -7796,15 +7259,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       string,
       { chatId: string; number: number; updatedAt: string }
     >();
-    const active = new Map<
-      string,
-      { chatId: string; number: number; updatedAt: string; terminal: boolean }
-    >();
     for (const summary of this.lastBindings) {
       if (summary.sourceType === 'channel') continue;
       for (const pr of summary.prs) {
         const identity = this.parsePrBindingUrl(pr.url);
         if (!identity || identity.number !== pr.number) continue;
+        // A merged or closed binding has no new comments to fetch. The state
+        // watch used to keep it polled until it observed the closure; with
+        // that gone, the binding's own terminal state is authoritative. A
+        // reopen flips the binding back to open and resumes the watch.
+        if (pr.state === 'merged' || pr.state === 'closed') continue;
         const key = this.prBindingKey(identity.chatId, identity.number);
         const updatedAt = summary.updatedAt ?? '';
         const existing = candidates.get(key);
@@ -7815,176 +7279,59 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             updatedAt,
           });
         }
-        // The independent binding refresh can record merged/closed before
-        // this poll observes the transition. Keep such PRs polled until the
-        // terminal transition has actually been observed (prState 'closed'),
-        // so state_change is never skipped. Once observed, the terminal
-        // MARKER is retained (no polling) for as long as the binding lists
-        // the PR: pruning it here would re-add the closed PR as a first
-        // observation on the next poll (query oscillation) and lose the
-        // terminal record. Binding retention and active polling are
-        // separate concerns. A comment-only channel subscribes no state
-        // event, so there is no state_change to observe and watchOnePr (the
-        // only prState writer) never runs: drain on the binding's terminal
-        // state alone, else merged/closed bindings would be comment-fetched
-        // forever. A reopened binding flips back to open and resumes.
-        if (
-          (pr.state === 'merged' || pr.state === 'closed') &&
-          (this.prWatchState.entries[key]?.prState === 'closed' ||
-            this.prWatchEvents.size === 0)
-        ) {
-          continue;
-        }
-        const existingActive = active.get(key);
-        if (!existingActive || updatedAt > existingActive.updatedAt) {
-          active.set(key, {
-            chatId: identity.chatId,
-            number: identity.number,
-            updatedAt,
-            // Tiering only — observation stays API-authoritative. A binding
-            // still saying open while the watch already observed closed must
-            // not hold an open-tier slot (stale registry, e.g. refresh
-            // disabled); a genuinely reopened PR gets one leftover-budget
-            // observation and returns to the open tier, self-correcting.
-            terminal:
-              pr.state === 'merged' ||
-              pr.state === 'closed' ||
-              this.prWatchState.entries[key]?.prState === 'closed',
-          });
-        }
       }
     }
-    // Prune only against a complete snapshot: a partial answer (workspace
-    // failure, unreadable sidecar or missing runtime) must not destroy
-    // the edge-triggered memory of PRs it failed to list. Prune against the
-    // full candidate set, not the capped watch set, so PRs rotating out of
-    // the cap keep their baseline. Never delete an entry that still holds
-    // undelivered pending events (a failed claim keeps its queue) OR whose
-    // earlier transition still has a surviving inbound task: keep the
-    // baseline and ciFiredSha pin while the old transition is in flight so
-    // a rebind does not re-fire the same red head.
+    // Prune only against a complete snapshot: a partial answer must not
+    // destroy cursors for PRs it failed to list.
     if (!this.lastBindingsPartial) {
-      // Undefined = task store unreadable: skip pruning entirely this poll
-      // (fail-closed, same convention as the persistence-blocked cursor).
-      const survivingWatchPrs = this.survivingWatchPrKeys();
-      if (survivingWatchPrs !== undefined) {
-        for (const key of Object.keys(this.prWatchState.entries)) {
-          if (candidates.has(key)) continue;
-          if (this.prWatchState.entries[key]?.pending?.length) continue;
-          if (survivingWatchPrs.has(key)) continue;
-          delete this.prWatchState.entries[key];
-        }
+      for (const key of Object.keys(this.prWatchState.entries)) {
+        if (!candidates.has(key)) delete this.prWatchState.entries[key];
       }
     }
-    // The prune above never runs under a permanent partial; cap the entry
-    // map so an unscannable workspace cannot grow it without bound. Evict
-    // only the oldest IDLE entries that no retained binding still claims
-    // and no in-flight watch task still owns — the same protections as the
-    // complete-snapshot prune. An evicted entry belongs to a PR with no
-    // delivery target: a later rebind re-baselines silently like any first
-    // observation, so eviction bounds memory without losing a deliverable
-    // event. Surfaced on stderr, never silent.
+    // Cap the entry map so an unscannable workspace cannot grow it without
+    // bound. Evict only idle entries no retained binding still claims; an
+    // evicted entry re-baselines silently on a later rebind. Surfaced on
+    // stderr, never silent.
     const entryKeys = Object.keys(this.prWatchState.entries);
     if (entryKeys.length > MAX_PARTIAL_RETAINED) {
-      const survivingWatchPrs = this.survivingWatchPrKeys();
-      if (survivingWatchPrs !== undefined) {
-        const evictable = entryKeys
-          .filter(
-            (key) =>
-              !this.prWatchState.entries[key]?.pending?.length &&
-              !candidates.has(key) &&
-              !survivingWatchPrs.has(key),
-          )
-          .sort(
-            (a, b) =>
-              (this.prWatchState.entries[a]?.headObservedAt ?? 0) -
-              (this.prWatchState.entries[b]?.headObservedAt ?? 0),
-          );
-        const evictCount = Math.min(
-          evictable.length,
-          entryKeys.length - MAX_PARTIAL_RETAINED,
+      const evictable = entryKeys
+        .filter((key) => !candidates.has(key))
+        .sort(
+          (a, b) =>
+            (this.prWatchState.entries[a]?.commentLastFetchAt ?? 0) -
+            (this.prWatchState.entries[b]?.commentLastFetchAt ?? 0),
         );
-        for (let i = 0; i < evictCount; i++) {
-          delete this.prWatchState.entries[evictable[i]];
-        }
-        if (evictCount > 0) {
-          process.stderr.write(
-            `[Channel:${this.name}] PR watch entry cap exceeded: evicted ${evictCount} idle entries (oldest first) to bound memory under a partial binding snapshot\n`,
-          );
-        }
+      const evictCount = Math.min(
+        evictable.length,
+        entryKeys.length - MAX_PARTIAL_RETAINED,
+      );
+      for (let i = 0; i < evictCount; i++) {
+        delete this.prWatchState.entries[evictable[i]];
       }
-    }
-    // Open bindings take the FULL watch budget: a merged or closed PR that
-    // the watch has not observed yet must never crowd a live PR out of it,
-    // even when open bindings fill the limit. Terminal-pending bindings
-    // drain in an ADDITIONAL slice outside the open budget (20% of the
-    // limit, at least one, plus any leftover open budget): without it they
-    // would never receive their one terminal observation when open PRs
-    // fill the limit, and the active set would grow with every merge. The
-    // extra slice costs at most ceil(limit*0.2) additional pulls.get per
-    // poll while a backlog drains; each drained binding leaves the active
-    // set for good, so the fan-out returns to the open budget once the
-    // backlog clears.
-    const limit = this.prWatchLimit;
-    const byRecency = (
-      a: [string, { updatedAt: string }],
-      b: [string, { updatedAt: string }],
-    ) => b[1].updatedAt.localeCompare(a[1].updatedAt);
-    const openEntries = [...active.entries()]
-      .filter(([, candidate]) => !candidate.terminal)
-      .sort(byRecency);
-    const terminalEntries = [...active.entries()]
-      .filter(([, candidate]) => candidate.terminal)
-      .sort(byRecency);
-    const terminalReserved =
-      terminalEntries.length > 0
-        ? Math.min(terminalEntries.length, Math.max(1, Math.ceil(limit * 0.2)))
-        : 0;
-    const watched = openEntries.slice(0, limit);
-    const terminalSlots = Math.max(terminalReserved, limit - watched.length);
-    watched.push(
-      ...terminalEntries.slice(
-        0,
-        Math.min(terminalEntries.length, terminalSlots),
-      ),
-    );
-    if (watched.length < active.size) {
-      // The cap deterministically excludes the oldest bindings every poll.
-      // Surface it (dead-letter principle: surfaced, never silently
-      // consumed) so an operator knows some bound PRs are not watched this
-      // pass.
-      const watchedKeys = new Set(watched.map(([key]) => key));
-      const excluded = [...active.keys()].filter(
-        (key) => !watchedKeys.has(key),
-      );
-      process.stderr.write(
-        `[Channel:${this.name}] PR watch cap exceeded: watching ${watched.length}/${active.size} bound PRs (open first, most recent; open limit ${limit}); not watched: ${excluded.join(', ')}\n`,
-      );
+      if (evictCount > 0) {
+        process.stderr.write(
+          `[Channel:${this.name}] PR watch entry cap exceeded: evicted ${evictCount} idle entries (oldest first) to bound memory under a partial binding snapshot\n`,
+        );
+      }
     }
     // One burst budget for the whole pass: after an outage every watched PR
     // can be due at once, and a per-PR cap would claim up to cap × watched-PR
     // durable tasks in a single poll. PRs that find it spent keep their cursor
     // and resume next pass.
     const commentBudget = { remaining: MAX_WATCH_COMMENTS_PER_PASS };
-    for (const [key, candidate] of watched) {
+    for (const [key, candidate] of candidates) {
       // Yield at the spend site, not only at the poll boundary: one pass can
       // issue several requests per watched PR, so a pass entered just above
       // the reserve would otherwise spend the whole reserve before the
-      // notification lane runs. Break (not return) so the baseline observed
-      // so far still reaches savePrWatchState below.
+      // notification lane runs. Break (not return) so the cursors observed
+      // so far still reach savePrWatchState below.
       if (this.watchBudgetExhausted()) {
         this.noteWatchBudgetLow();
         break;
       }
       try {
-        // The state observation costs a pulls.get per watched PR per poll; skip
-        // it when no state event is subscribed so a comment-only channel does
-        // not pay for transitions it never emits.
-        if (this.prWatchEvents.size > 0) {
-          await this.watchOnePr(key, candidate.chatId, candidate.number);
-        }
         // Additive comment watch: isolates its own failures so a comment
-        // fetch problem never skips the state transitions above.
+        // fetch problem never skips the next PR.
         await this.watchPrComments(
           key,
           candidate.chatId,
@@ -8015,347 +7362,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.savePrWatchState();
   }
 
-  private async watchOnePr(
-    key: string,
-    chatId: string,
-    number: number,
-  ): Promise<void> {
-    const copy = BOUND_DELIVERY_COPY[this.locale];
-    const [owner, repo] = chatId.split('/');
-    // Rate-limited watch calls fail fast instead of sleeping out the reset
-    // window: the watch pass runs before notification processing, and a
-    // blocking cooldown here would pin the whole notification lane (the
-    // design promises notifications are unaffected by watch rate limiting).
-    const { data: pr } = await this.githubApi(
-      () =>
-        this.octokit.rest.pulls.get({
-          owner,
-          repo,
-          pull_number: number,
-        }),
-      `pulls.get(watch ${key})`,
-      3,
-      (err) => !isWatchFailFastError(err),
-    );
-    const entry = this.prWatchState.entries[key] ?? {};
-    const firstObservation =
-      entry.headSha === undefined && entry.prState === undefined;
-    const headSha = pr.head?.sha;
-    const headChanged =
-      headSha !== undefined &&
-      entry.headSha !== undefined &&
-      headSha !== entry.headSha;
-    const events: Array<{ type: PrWatchEventType; summary: string }> = [];
-
-    if (headChanged && this.prWatchEvents.has('head_change')) {
-      events.push({
-        type: 'head_change',
-        summary: copy.headChange(entry.headSha!, headSha!),
-      });
-    }
-
-    // Check fetches are conditional and gated on the ci_failure subscription
-    // (the other three events come from pulls.get fields alone). A
-    // steady-state green PR costs one pulls.get per poll. A new head always
-    // re-checks; a pending aggregate re-checks on the
-    // CI_PENDING_RECHECK_INTERVAL_MS period until it settles; an advanced
-    // updated_at re-checks a settled head. updated_at is NOT a reliable
-    // re-run signal (GitHub does not bump it on check activity), so settled
-    // heads — including 'none' past the grace window — also re-check on the
-    // CI_RECHECK_INTERVAL_MS period to catch re-runs that turn red and CI
-    // that appears late (manual workflow_dispatch).
-    const prUpdatedAt =
-      typeof pr.updated_at === 'string' ? pr.updated_at : undefined;
-    let ciResult: CiObservation | undefined;
-    let ciFetchAttempted = false;
-    if (
-      headSha &&
-      this.prWatchEvents.has('ci_failure') &&
-      (headChanged ||
-        ((entry.ci === undefined || entry.ci === 'pending') &&
-          (entry.lastCiFetchAt === undefined ||
-            Date.now() - entry.lastCiFetchAt >=
-              CI_PENDING_RECHECK_INTERVAL_MS)) ||
-        (prUpdatedAt !== undefined && prUpdatedAt !== entry.prUpdatedAt) ||
-        (entry.ci === 'none' &&
-          entry.headObservedAt !== undefined &&
-          Date.now() - entry.headObservedAt < CI_NONE_GRACE_MS) ||
-        (entry.lastCiFetchAt !== undefined &&
-          Date.now() - entry.lastCiFetchAt >= CI_RECHECK_INTERVAL_MS))
-    ) {
-      ciFetchAttempted = true;
-      try {
-        ciResult = await this.fetchCiAggregate(owner, repo, headSha);
-      } catch (err) {
-        // CI is a conditional refinement of the pulls.get baseline, not a
-        // dependency of it: a persistent Checks-endpoint failure (a classic
-        // PAT without Checks permission, an enterprise policy) must not
-        // suppress merge_conflict / state_change, whose data already arrived
-        // in pulls.get. Leave ciResult undefined so entry.ci is preserved
-        // (writing 'none' would re-fire ci_failure when the endpoint heals).
-        // The attempt still advances lastCiFetchAt below: without it, a
-        // persistent failure would leave the interval conditions true every
-        // poll and degrade to one doomed request per PR per poll.
-        process.stderr.write(
-          `[Channel:${this.name}] CI fetch failed for ${key}, continuing without CI state this poll: ${sanitizeLogText(
-            err instanceof Error ? err.message : String(err),
-            200,
-          )}\n`,
-        );
-      }
-    }
-    const ci = ciResult?.aggregate;
-    const prevCiForThisHead = headChanged ? undefined : entry.ci;
-    if (
-      !firstObservation &&
-      ci === 'failure' &&
-      prevCiForThisHead !== 'failure' &&
-      this.prWatchEvents.has('ci_failure')
-    ) {
-      const failedChecks =
-        ciResult && ciResult.failedChecks.length > 0
-          ? copy.failedChecks(
-              ciResult.failedChecks.join(', '),
-              ciResult.namesIncomplete,
-            )
-          : '';
-      events.push({
-        type: 'ci_failure',
-        // ciResult is assigned only inside the headSha-guarded fetch block,
-        // so ci === 'failure' proves headSha is defined.
-        summary: `${copy.ciFailure(headSha!)}${failedChecks}`,
-      });
-    }
-
-    // mergeable === null means GitHub is still computing; never overwrite
-    // the last known state with it.
-    const mergeableState =
-      pr.mergeable !== null && typeof pr.mergeable_state === 'string'
-        ? pr.mergeable_state
-        : undefined;
-    if (
-      !firstObservation &&
-      mergeableState === 'dirty' &&
-      entry.mergeableState !== 'dirty' &&
-      this.prWatchEvents.has('merge_conflict')
-    ) {
-      events.push({
-        type: 'merge_conflict',
-        summary: copy.mergeConflict,
-      });
-    }
-
-    const prState = pr.state;
-    if (
-      !firstObservation &&
-      prState === 'closed' &&
-      entry.prState !== 'closed' &&
-      this.prWatchEvents.has('state_change')
-    ) {
-      events.push({
-        type: 'state_change',
-        summary: pr.merged ? copy.prMerged : copy.prClosed,
-      });
-    }
-
-    const next: PrWatchEntry = {
-      ...(headSha !== undefined ? { headSha } : {}),
-      ...(ci !== undefined
-        ? { ci }
-        : headChanged
-          ? {}
-          : entry.ci !== undefined
-            ? { ci: entry.ci }
-            : {}),
-      ...(mergeableState !== undefined
-        ? { mergeableState }
-        : entry.mergeableState !== undefined
-          ? { mergeableState: entry.mergeableState }
-          : {}),
-      ...(prState !== undefined ? { prState } : {}),
-      ...(pr.title !== undefined
-        ? { title: pr.title }
-        : entry.title !== undefined
-          ? { title: entry.title }
-          : {}),
-      ...(prUpdatedAt !== undefined ? { prUpdatedAt } : {}),
-      ...(firstObservation || headChanged
-        ? { headObservedAt: Date.now() }
-        : entry.headObservedAt !== undefined
-          ? { headObservedAt: entry.headObservedAt }
-          : {}),
-      ...(ciFetchAttempted
-        ? { lastCiFetchAt: Date.now() }
-        : entry.lastCiFetchAt !== undefined
-          ? { lastCiFetchAt: entry.lastCiFetchAt }
-          : {}),
-      ...(entry.seq !== undefined ? { seq: entry.seq } : {}),
-      ...(entry.pending !== undefined ? { pending: entry.pending } : {}),
-      ...(entry.fired !== undefined ? { fired: entry.fired } : {}),
-      ...(!headChanged && entry.ciFiredSha !== undefined
-        ? { ciFiredSha: entry.ciFiredSha }
-        : {}),
-      // The comment watch cursor is independent of head/CI transitions; carry
-      // it through so the state baseline write does not drop it.
-      ...(entry.commentBaseline !== undefined
-        ? { commentBaseline: entry.commentBaseline }
-        : {}),
-      ...(entry.commentSince !== undefined
-        ? { commentSince: entry.commentSince }
-        : {}),
-      ...(entry.commentLastFetchAt !== undefined
-        ? { commentLastFetchAt: entry.commentLastFetchAt }
-        : {}),
-    };
-
-    // Bake the PR number and detection time into every watch key. The
-    // delivery idempotency key is chatId + messageId only, so without the
-    // PR number two PRs of one repo bound to the same session would issue
-    // identical first-episode keys and the daemon ring would silently
-    // dedupe the second PR's event. The timestamp survives episode-counter
-    // resets (prune, corruption recovery): the daemon ring outlives the
-    // worker, and a re-issued bare seq key would dedupe into the old
-    // admission instead of delivering the new transition. The identity is
-    // instance-local by design: two channel configurations watching the
-    // same repo each deliver their own watch notifications (at-least-once
-    // per subscription) — the ring dedupes retries of ONE delivery, not
-    // independent subscriptions. Comment events still dedupe across
-    // instances via their stable GitHub ids.
-    const detectedAt = Date.now();
-    // Overflow retires sliced during this pass; their skip rows are journalled
-    // only after the end-of-pass save commits the baseline and queue together.
-    const overflowRetires: PendingWatchEvent[] = [];
-    for (const event of events) {
-      // ci_failure dedupes per head SHA: once per head even when the
-      // aggregate flaps back to success and fails again. The other three
-      // identify the transition INSTANCE with a monotonic episode counter,
-      // so a legitimate recurrence fires again: dirty -> clean -> dirty,
-      // close -> reopen -> close, and a force-push revisit of a recent SHA.
-      // A state-valued key (the old `open`/`closed`/target-SHA shape) would
-      // suppress those forever within the fired ring's window, contradicting
-      // the documented edge-triggered semantics.
-      let dedupeKey: string;
-      if (event.type === 'ci_failure') {
-        dedupeKey = `watch:ci_failure:${number}:${headSha ?? 'unknown'}:${detectedAt}`;
-      } else {
-        next.seq = (next.seq ?? 0) + 1;
-        dedupeKey = `watch:${event.type}:${number}:${next.seq}:${detectedAt}`;
-      }
-      // The fired ring is the durable once-per-transition record: inbound
-      // tasks are removed on success, so task-level dedupe alone would let
-      // a flapping aggregate re-fire the same head after a restart.
-      // ci_failure matches by PR+SHA PREFIX: the nonce suffix makes every
-      // detection key unique, but once-per-head must survive head changes
-      // (the ciFiredSha pin drops on a head change) and flaps while an
-      // earlier episode is still pending.
-      const ciPrefix =
-        event.type === 'ci_failure'
-          ? `watch:ci_failure:${number}:${headSha ?? 'unknown'}:`
-          : undefined;
-      const recorded = (key: string) =>
-        ciPrefix !== undefined ? key.startsWith(ciPrefix) : key === dedupeKey;
-      if (next.fired?.some(recorded)) continue;
-      // The fired ring is capped: 64 non-ci episodes on a long-lived head
-      // can evict the ci_failure key. The ciFiredSha pin keeps ci_failure
-      // once-per-head even after that eviction (a flapping aggregate must
-      // not re-fire on the same head).
-      if (
-        event.type === 'ci_failure' &&
-        headSha !== undefined &&
-        next.ciFiredSha === headSha
-      ) {
-        continue;
-      }
-      if (next.pending?.some((p) => recorded(p.key))) continue;
-      const envelope: Envelope = {
-        channelName: this.name,
-        senderId: 'github',
-        senderName: 'GitHub',
-        chatId,
-        threadId: `pr:${number}`,
-        messageId: dedupeKey,
-        text: event.summary,
-        isGroup: true,
-        isMentioned: true,
-        isReplyToBot: false,
-        metadata: `${this.buildMetadata(chatId, `pr:${number}`, pr.title ?? '')}\nEvent: ${event.type}.`,
-      };
-      (next.pending ??= []).push({
-        key: dedupeKey,
-        issueNumber: number,
-        envelope,
-        delivery: this.resolveBoundDelivery(chatId, number),
-      });
-      if (next.pending.length > MAX_PENDING_WATCH_PER_ENTRY) {
-        const oldest = next.pending[0]!;
-        if (!this.isDeadLettered(oldest.key)) {
-          const record = {
-            retiredAt: new Date().toISOString(),
-            issueNumber: oldest.issueNumber,
-            source: {
-              chatId,
-              threadId: `pr:${number}`,
-              messageId: oldest.key,
-            },
-            delivery: oldest.delivery,
-            reason: `watch pending queue overflow (cap ${MAX_PENDING_WATCH_PER_ENTRY}); oldest event retired undelivered`,
-            text: oldest.envelope.text,
-          };
-          try {
-            const path = this.channelFilePath('github-bound-deadletter.jsonl');
-            mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-            appendFileSync(path, `${JSON.stringify(record)}\n`, {
-              encoding: 'utf-8',
-              mode: 0o600,
-            });
-            this.deadLetteredKeys!.add(oldest.key);
-          } catch (err) {
-            // The exhaustion surface cannot be written: keep the event queued
-            // (over cap) and retry the overflow on the next detection instead
-            // of dropping it. The body has nowhere else to go, so dump it to
-            // stderr — sanitized without truncation, like retireBoundTask.
-            const payload = JSON.stringify(record);
-            process.stderr.write(
-              `[Channel:${this.name}] failed to write watch pending overflow dead-letter (${oldest.key}): ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}; payload: ${sanitizeLogText(payload, payload.length)}\n`,
-            );
-          }
-        }
-        if (this.isDeadLettered(oldest.key)) {
-          // The dead-letter record is the retire's commit point. Slice in
-          // memory ONLY: the end-of-pass save below commits the advanced
-          // baseline and the full queue in one write. A mid-pass save here
-          // would persist the baseline before this pass's later events are
-          // queued, so a crash would never re-derive them. The skip row is
-          // journalled after that save, never before; if the save throws, the
-          // drain completes the retire next poll (the head is dead-lettered,
-          // so it is never delivered).
-          next.pending = next.pending.slice(1);
-          this.prWatchState.entries[key] = next;
-          overflowRetires.push(oldest);
-          process.stderr.write(
-            `[Channel:${this.name}] watch pending overflow for ${key}: retired ${oldest.key} to dead-letter (cap ${MAX_PENDING_WATCH_PER_ENTRY})\n`,
-          );
-        }
-      }
-      if (event.type === 'ci_failure' && headSha !== undefined) {
-        next.ciFiredSha = headSha;
-      }
-    }
-
-    this.prWatchState.entries[key] = next;
-    // Baseline and pending queue commit in one write: a crash from here on
-    // either finds the pending event (drained next poll) or the claimed
-    // task (recovery), never a consumed transition with nothing to retry.
-    this.savePrWatchState();
-    // The overflow retires are durable only now. Journal their skip rows after
-    // the save: a throwing save leaves no claim for an event still queued on
-    // disk, and the drain completes the retire next poll instead.
-    for (const retired of overflowRetires) {
-      this.recordWatchOverflowSkip(retired);
-    }
-    await this.drainPendingWatch(key, next);
-  }
-
   /**
    * Bound PR comment watch (docs/design/2026-11-08-bound-pr-comment-watch.md).
    * Poll conversation + inline review comments on a bound PR and deliver each
@@ -8367,7 +7373,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * what prevents a fix session's own reply from re-triggering it.
    *
    * Default-on with deliverToBoundSessions; `prCommentWatch: false` disables
-   * it. Failures are isolated here so they never skip the state transitions.
+   * it. Failures are isolated here so one PR's fetch never skips the next.
    */
   private async watchPrComments(
     key: string,
@@ -8774,498 +7780,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           : nowIso,
       );
     }
-  }
-
-  /**
-   * Deliver queued watch events. Order per event: claim the inbound task
-   * (durable), move the key from pending to fired (durable), then run the
-   * task. A crash at any point leaves either a pending event or a claimed
-   * task for the next poll / recovery, and the fired ring prevents a second
-   * delivery of the same transition.
-   */
-  private async drainPendingWatch(
-    key: string,
-    entry: PrWatchEntry,
-  ): Promise<void> {
-    if (this.boundRoleAware) {
-      return this.drainPendingWatchRoleAware(key, entry);
-    }
-    // Per-PR ordering across passes: an earlier watch transition that is
-    // still unsettled (a failed/backpressure/running task from a previous
-    // attempt) must settle via recovery BEFORE any later pending event
-    // drains — the watch pass re-drains after reconcile, and the next
-    // poll's reconcile runs before recovery, so a per-pass break alone
-    // would still let the later event arrive first. Skip the whole entry
-    // until recovery settles the predecessor; nothing is lost (pending
-    // and fired are persisted). A task whose key EQUALS the pending head
-    // is that same event's own claim (the crash window between claim and
-    // fire-save), not a predecessor — draining reuses it, so let it pass.
-    const headKey = entry.pending?.[0]?.key;
-    const unsettledPredecessor = this.readInboundTasks().some(
-      (task) =>
-        this.isRecoverableInboundTask(task) &&
-        task.envelope?.messageId?.startsWith('watch:') === true &&
-        task.source.messageId !== headKey &&
-        this.prBindingKey(task.source.chatId, task.issueNumber) === key,
-    );
-    if (unsettledPredecessor) return;
-    while (entry.pending && entry.pending.length > 0) {
-      const pending = entry.pending[0]!;
-      if (this.isDeadLettered(pending.key)) {
-        // This head already carries a durable "retired undelivered" record
-        // (an overflow whose end-of-pass save failed, or a crash before it).
-        // Complete the retire instead of delivering: a delivered event must
-        // never also stand in the dead-letter file as retired undelivered.
-        const pendingBefore = entry.pending;
-        entry.pending = entry.pending.slice(1);
-        this.prWatchState.entries[key] = entry;
-        try {
-          this.savePrWatchState();
-        } catch (err) {
-          entry.pending = pendingBefore;
-          this.prWatchState.entries[key] = entry;
-          throw err;
-        }
-        this.recordWatchOverflowSkip(pending);
-        continue;
-      }
-      // Re-validate the frozen recipient against the latest COMPLETE
-      // snapshot: a live rebind must not misdeliver to the old session. On
-      // a partial/failed scan the persisted target stands (fail-closed).
-      // With no candidate left on a complete snapshot the watch event is
-      // private-only: retire it with a log rather than queue a delivery
-      // that would retire publicly anyway.
-      let delivery = pending.delivery;
-      if (
-        this.boundSnapshotTrusted &&
-        !this.lastBindingsPartial &&
-        !this.boundRefreshFailed
-      ) {
-        const current = this.resolveBoundDelivery(
-          pending.envelope.chatId,
-          pending.issueNumber,
-        );
-        if (current) {
-          delivery = current;
-          this.gateGraceClear(pending.key);
-        } else {
-          // One grace cycle when the gate is the cause: a watch installed
-          // after the snapshot was fetched surfaces on the next refresh, and
-          // the transition it was installed to catch must not retire first.
-          // The grace is scoped to the snapshot generation, so a second drain
-          // of the same PR in the same poll does not spend it.
-          if (
-            this.gateExcludedAllFollowers(
-              pending.envelope.chatId,
-              pending.issueNumber,
-            ) &&
-            this.gateGraceShouldHold(pending.key)
-          ) {
-            return;
-          }
-          this.gateGraceClear(pending.key);
-          process.stderr.write(
-            `[Channel:${this.name}] watch event ${pending.key} has no bound candidate left; retiring without public fallback\n`,
-          );
-          const pendingBefore = entry.pending;
-          entry.pending = entry.pending.slice(1);
-          this.prWatchState.entries[key] = entry;
-          try {
-            this.savePrWatchState();
-          } catch (err) {
-            // The slice already mutated the loaded state, and a failed save
-            // does not clear prWatchStateLoaded — without this rollback the
-            // next poll skips the entry and the end-of-pass save persists the
-            // truncation, losing the event with no trace at all. Mirrors the
-            // claim path's rollback below.
-            entry.pending = pendingBefore;
-            this.prWatchState.entries[key] = entry;
-            throw err;
-          }
-          // Retired before any task was claimed, so there is no task row to
-          // close: the skip is the event's only journal trace. After the
-          // durable save — the rollback above keeps the event queued when the
-          // save throws, and the journal must not claim a retire that did not
-          // happen.
-          const lostTarget =
-            pending.delivery?.kind === 'bound-session'
-              ? pending.delivery.sessionId
-              : undefined;
-          const lostWorkspace = lostTarget
-            ? this.sessionWorkspaceFor(lostTarget)
-            : undefined;
-          this.recordChannelEvent({
-            type: 'inbound',
-            outcome: 'skipped',
-            reason: 'watch_no_candidate',
-            repository: pending.envelope.chatId,
-            thread: pending.envelope.threadId,
-            number: pending.issueNumber,
-            messageId: pending.key,
-            // The frozen target is in hand; this retire writes no dead-letter
-            // record (only the overflow retire does), so the skip row is the
-            // event's only trace — without the target it cannot say whether
-            // the retired event ever belonged to a session.
-            ...(lostTarget ? { sessionId: lostTarget } : {}),
-            ...(lostWorkspace ? { sessionWorkspaceCwd: lostWorkspace } : {}),
-          });
-          continue;
-        }
-      }
-      // A partial/failed scan keeps the frozen target — which may be absent
-      // because the gate filtered the map at detection time. Give that state
-      // the same one grace cycle before claiming a task that would retire
-      // targetless at run time.
-      if (
-        delivery === undefined &&
-        this.gateExcludedAllFollowers(
-          pending.envelope.chatId,
-          pending.issueNumber,
-        ) &&
-        this.gateGraceShouldHold(pending.key)
-      ) {
-        return;
-      }
-      let task: InboundTaskRecord;
-      try {
-        task = this.claimInboundTask(
-          pending.envelope,
-          pending.issueNumber,
-          {},
-          delivery,
-        );
-      } catch (err) {
-        // Claim persistence failed: keep the event queued and retry on the
-        // next poll instead of consuming the transition. Propagate so the
-        // reconcile pass fails and sets watchReconcileBlocked: a swallowed
-        // failure would let recovery deliver an accepted watch task whose
-        // pending record is still unreconciled on disk.
-        process.stderr.write(
-          `[Channel:${this.name}] failed to claim watch event ${pending.key}, will retry: ${sanitizeLogText(
-            err instanceof Error ? err.message : String(err),
-            200,
-          )}\n`,
-        );
-        throw err;
-      }
-      const firedBefore = entry.fired;
-      const pendingBefore = entry.pending;
-      entry.fired = [...(entry.fired ?? []), pending.key].slice(
-        -MAX_FIRED_KEYS,
-      );
-      entry.pending = entry.pending.slice(1);
-      this.prWatchState.entries[key] = entry;
-      try {
-        this.savePrWatchState();
-      } catch (err) {
-        // The claim is durable but the pending->fired save failed (watch
-        // file unwritable while the task file is writable). Roll the claim
-        // back so the event stays queued: otherwise same-poll recovery would
-        // deliver and remove the task while the on-disk pending survives,
-        // and a restart would re-claim and deliver the same transition twice.
-        entry.fired = firedBefore;
-        entry.pending = pendingBefore;
-        this.prWatchState.entries[key] = entry;
-        this.removeInboundTask(task.id);
-        process.stderr.write(
-          `[Channel:${this.name}] failed to persist watch fire for ${pending.key}, rolled back claim, will retry: ${sanitizeLogText(
-            err instanceof Error ? err.message : String(err),
-            200,
-          )}\n`,
-        );
-        return;
-      }
-      const delivered = await this.runInboundTask(task);
-      if (!delivered) {
-        // Preserve per-PR ordering: a failed/deferred event retries via
-        // recovery next poll; delivering later pendings now would arrive
-        // out of order. Pending and fired are already persisted, so
-        // stopping here loses nothing.
-        return;
-      }
-    }
-  }
-
-  /**
-   * Role-aware watch drain: one durable task per (event, matched role
-   * winner). The event leaves `pending` for `fired` only after EVERY
-   * matched target is claimed, so a crash mid-fan-out re-claims exactly the
-   * missing targets (claimInboundTask reuses an existing (event, target)
-   * task). Ordering is per (PR, target): a target with an unsettled
-   * predecessor waits while the event's other targets drain — one stuck
-   * role never head-of-line-blocks another.
-   */
-  private async drainPendingWatchRoleAware(
-    key: string,
-    entry: PrWatchEntry,
-  ): Promise<void> {
-    while (entry.pending && entry.pending.length > 0) {
-      const pending = entry.pending[0]!;
-      if (this.isDeadLettered(pending.key)) {
-        // A dead-lettered head is committed to retire; complete it rather than
-        // deliver, so no event is both delivered and filed as retired
-        // undelivered. Mirrors the legacy drain's guard.
-        const pendingBefore = entry.pending;
-        entry.pending = entry.pending.slice(1);
-        this.prWatchState.entries[key] = entry;
-        try {
-          this.savePrWatchState();
-        } catch (err) {
-          entry.pending = pendingBefore;
-          this.prWatchState.entries[key] = entry;
-          throw err;
-        }
-        this.recordWatchOverflowSkip(pending);
-        continue;
-      }
-      const { targets } = this.resolveBoundTargets(
-        pending.envelope.chatId,
-        pending.issueNumber,
-        this.boundEventClass(pending.envelope),
-      );
-      if (targets.length === 0) {
-        // An incomplete enumeration is not an absence: defer instead of
-        // retiring while the snapshot cannot prove no role matches.
-        if (
-          !this.boundSnapshotTrusted ||
-          this.lastBindingsPartial ||
-          this.boundRefreshFailed
-        ) {
-          return;
-        }
-        // One grace cycle when the gate is the cause: a watch installed
-        // after the snapshot was fetched surfaces on the next refresh. The
-        // grace is scoped to the snapshot generation (a second drain of the
-        // same PR in the same poll must not spend it).
-        if (
-          this.gateExcludedAllFollowers(
-            pending.envelope.chatId,
-            pending.issueNumber,
-          ) &&
-          this.gateGraceShouldHold(pending.key)
-        ) {
-          return;
-        }
-        this.gateGraceClear(pending.key);
-        process.stderr.write(
-          `[Channel:${this.name}] watch event ${pending.key} has no matching role target; retiring without public fallback\n`,
-        );
-        entry.pending = entry.pending.slice(1);
-        this.prWatchState.entries[key] = entry;
-        this.savePrWatchState();
-        continue;
-      }
-      this.gateGraceClear(pending.key);
-      const tasksBefore = this.readInboundTasks();
-      const knownIds = new Set(tasksBefore.map((task) => task.id));
-      const claimable = targets.filter(
-        (target) =>
-          !tasksBefore.some(
-            (task) =>
-              this.isRecoverableInboundTask(task) &&
-              task.envelope?.messageId?.startsWith('watch:') === true &&
-              task.source.messageId !== pending.key &&
-              task.delivery?.sessionId === target.sessionId &&
-              this.prBindingKey(task.source.chatId, task.issueNumber) === key,
-          ),
-      );
-      if (claimable.length === 0) return;
-      const claimed: InboundTaskRecord[] = [];
-      const newlyClaimed: string[] = [];
-      try {
-        for (const target of claimable) {
-          const task = this.claimInboundTask(
-            pending.envelope,
-            pending.issueNumber,
-            {},
-            {
-              kind: 'bound-session',
-              sessionId: target.sessionId,
-              ...(target.role ? { role: target.role } : {}),
-            },
-          );
-          claimed.push(task);
-          if (!knownIds.has(task.id)) newlyClaimed.push(task.id);
-        }
-      } catch (err) {
-        // Claim persistence failed: keep the event queued and surface the
-        // failure so reconcile blocks recovery (same contract as legacy).
-        process.stderr.write(
-          `[Channel:${this.name}] failed to claim watch event ${pending.key}, will retry: ${sanitizeLogText(
-            err instanceof Error ? err.message : String(err),
-            200,
-          )}\n`,
-        );
-        throw err;
-      }
-      if (claimable.length === targets.length) {
-        const firedBefore = entry.fired;
-        const pendingBefore = entry.pending;
-        entry.fired = [...(entry.fired ?? []), pending.key].slice(
-          -MAX_FIRED_KEYS,
-        );
-        entry.pending = entry.pending.slice(1);
-        this.prWatchState.entries[key] = entry;
-        try {
-          this.savePrWatchState();
-        } catch (err) {
-          // Roll back every NEW claim of this event so the pending record
-          // and the task store cannot diverge across a restart; reused
-          // tasks predate this pass and stay.
-          entry.fired = firedBefore;
-          entry.pending = pendingBefore;
-          this.prWatchState.entries[key] = entry;
-          for (const id of newlyClaimed) this.removeInboundTask(id);
-          process.stderr.write(
-            `[Channel:${this.name}] failed to persist watch fire for ${pending.key}, rolled back claims, will retry: ${sanitizeLogText(
-              err instanceof Error ? err.message : String(err),
-              200,
-            )}\n`,
-          );
-          return;
-        }
-      }
-      for (const task of claimed) {
-        const delivered = await this.runInboundTask(task);
-        if (!delivered) return;
-      }
-      if (claimable.length !== targets.length) {
-        // Blocked targets keep the event pending; their predecessors
-        // settle via recovery, and the next drain re-claims only them
-        // (delivered siblings dedupe at admission if re-listed).
-        return;
-      }
-    }
-  }
-
-  private async fetchCiAggregate(
-    owner: string,
-    repo: string,
-    sha: string,
-  ): Promise<CiObservation> {
-    // The observation is accumulated per ATTEMPT, inside the retried
-    // closure: githubApi retries the whole pagination, and state carried
-    // over from an attempt that died on a later page would let its partial
-    // pending/success readings decide the retry's aggregate.
-    const checks = await this.githubApi(
-      async () => {
-        let sawFailure = false;
-        let sawPending = false;
-        let sawSuccess = false;
-        let namesIncomplete = false;
-        const failedChecks: string[] = [];
-        await this.octokit.paginate(
-          this.octokit.rest.checks.listForRef,
-          {
-            owner,
-            repo,
-            ref: sha,
-            per_page: 100,
-          },
-          (response, done) => {
-            // Octokit's conclusion union omits 'startup_failure', which the
-            // API does return and this aggregate must count as a failure.
-            const runs = response.data as Array<{
-              name?: string | null;
-              status?: string | null;
-              conclusion?: string | null;
-            }>;
-            for (const run of runs) {
-              if (run.status !== 'completed') {
-                sawPending = true;
-                continue;
-              }
-              if (
-                run.conclusion === 'failure' ||
-                run.conclusion === 'timed_out' ||
-                run.conclusion === 'action_required' ||
-                // A workflow that fails at startup (e.g. a broken workflow
-                // file) never runs a single job; missing it would certify a
-                // broken CI as 'none' or even 'success'. A deliberate SUBSET
-                // of core's FAILING_CHECK_RUN_CONCLUSIONS: core also counts
-                // cancelled/stale, which the design excludes as
-                // concurrency-cancel noise (a superseded run's cancellation
-                // is not a CI failure of this head).
-                run.conclusion === 'startup_failure'
-              ) {
-                sawFailure = true;
-                if (
-                  typeof run.name === 'string' &&
-                  run.name.length > 0 &&
-                  failedChecks.length < MAX_REPORTED_FAILED_CHECKS
-                ) {
-                  failedChecks.push(run.name);
-                }
-              } else if (run.conclusion === 'success') {
-                sawSuccess = true;
-              }
-            }
-            // A failure decides the aggregate: no later page can overturn
-            // it, so stop paging instead of spending one request per page
-            // of a head that carries hundreds of check runs. Whole pages are
-            // still read, so a head whose failures all fit in the pages read
-            // reports the same names as before.
-            if (sawFailure) {
-              // Only unread pages make the list partial: stopping on the
-              // LAST page read everything. The iterator follows this same
-              // header, so its presence is exactly "a page went unread".
-              namesIncomplete = /<[^<>]+>;\s*rel="next"/.test(
-                response.headers?.link ?? '',
-              );
-              done();
-            }
-            return [];
-          },
-        );
-        return {
-          sawFailure,
-          sawPending,
-          sawSuccess,
-          failedChecks,
-          namesIncomplete,
-        };
-      },
-      `checks.listForRef(${sha})`,
-      3,
-      (err) => !isWatchFailFastError(err),
-    );
-    let { sawFailure, sawPending, sawSuccess } = checks;
-    const { failedChecks, namesIncomplete } = checks;
-    // A check run already failed, so the combined status could only confirm
-    // 'failure' — skip the request rather than pay for a decided aggregate.
-    if (!sawFailure) {
-      const { data: combined } = await this.githubApi(
-        () =>
-          this.octokit.rest.repos.getCombinedStatusForRef({
-            owner,
-            repo,
-            ref: sha,
-          }),
-        `combinedStatus(${sha})`,
-        3,
-        (err) => !isWatchFailFastError(err),
-      );
-      // GitHub returns {state:"pending", total_count:0, statuses:[]} for a
-      // SHA with no legacy commit statuses; an empty combined status must not
-      // count as active CI (it would keep every poll re-fetching forever).
-      if (combined.total_count > 0) {
-        if (combined.state === 'failure' || combined.state === 'error') {
-          sawFailure = true;
-        } else if (combined.state === 'pending') {
-          sawPending = true;
-        } else {
-          sawSuccess = true;
-        }
-      }
-    }
-    const aggregate: CiAggregate = sawFailure
-      ? 'failure'
-      : sawPending
-        ? 'pending'
-        : sawSuccess
-          ? 'success'
-          : 'none';
-    return { aggregate, failedChecks, namesIncomplete };
   }
 
   private async markNotificationsAsRead(lastReadAt: string): Promise<void> {
