@@ -2123,8 +2123,9 @@ export function registerWorkspaceManagementRoutes(
             try {
               runtime.bridge.killAllSync();
             } catch {
-              // Logical removal must still converge after persistence commits.
+              // Keep the owner unavailable until shutdown is confirmed.
             }
+            throw err;
           });
         try {
           getAcpHandle?.()?.disposeWorkspace(runtime.workspaceId);
@@ -2225,8 +2226,8 @@ export function registerWorkspaceManagementRoutes(
           }
         }
 
-        // Persistence is the commit point. Every cleanup step after it is
-        // best-effort and logical removal must never roll back to active.
+        // Persistence is the commit point: failures must not reactivate the
+        // runtime, and its owner stays unavailable until shutdown is confirmed.
         removalCommitted = true;
         try {
           workspaceRegistry.commitDrain(runtime);

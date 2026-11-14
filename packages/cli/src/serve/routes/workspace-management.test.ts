@@ -2575,20 +2575,20 @@ describe('DELETE /workspaces/:workspace', () => {
       .delete(`/workspaces/${encodeURIComponent(runtime.workspaceId)}`)
       .send({ force: true });
 
-    expect(res.status).toBe(200);
-    expect(res.body.forced).toBe(true);
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('workspace_runtime_removal_failed');
     expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledWith(
       runtime,
       'workspace_removed',
     );
     expect(runtimeRemoval.cancelDrain).not.toHaveBeenCalled();
-    expect(runtimeRemoval.completeDrain).toHaveBeenCalledWith(runtime);
+    expect(runtimeRemoval.completeDrain).not.toHaveBeenCalled();
     expect(acpHandle.cancelWorkspaceDrain).not.toHaveBeenCalled();
     expect(runtime.bridge.killAllSync).toHaveBeenCalledOnce();
     expect(deps.workspaceRegistry.cancelDrain).not.toHaveBeenCalled();
     expect(
       deps.workspaceRegistry.getManagedByWorkspaceId(runtime.workspaceId),
-    ).toBeUndefined();
+    ).toBe(runtime);
   });
 
   it('continues cleanup when registry drain commit fails after persistence commits', async () => {
