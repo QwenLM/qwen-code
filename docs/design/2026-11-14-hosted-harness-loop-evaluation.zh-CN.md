@@ -3,7 +3,7 @@
 [English](2026-11-14-hosted-harness-loop-evaluation.md) | [简体中文](2026-11-14-hosted-harness-loop-evaluation.zh-CN.md)
 
 - **状态**：仅评估；不做实现、不引入开关。本文记录 Hosted Harness 循环与共享代理循环之间的 parity 差异，并建议**推迟** Hosted Harness 迁移。这是[统一代理循环](2026-10-23-unified-agent-loop.md)计划（跟踪 issue #15327）最后一个表面的评估——该设计明确将 Hosted Harness 留待「其他表面之后单独评估」。本文沿用[流式工具派发评估](2026-11-11-streaming-tool-dispatch.md)（#16949）的纯文档切片形态。
-- **日期**：2026-11-14。行号引用已在 `main` `46a56e116b15` 上核实。
+- **日期**：2026-11-14。行号引用已在 `main` `af312d610143` 上核实。
 - **行为来源**：`packages/cli/src/serve/hosted-harness-model.ts`（1,599 行）与 `packages/cli/src/serve/hosted-workspace-tool-turn.ts`（10,908 行）。
 - **相关**：
   - [统一代理循环](2026-10-23-unified-agent-loop.md)——已接受的设计；其「Loops」表将 Hosted Harness 列为 `LlmClient` 加自触发 hook、以及 journal 化串行派发；

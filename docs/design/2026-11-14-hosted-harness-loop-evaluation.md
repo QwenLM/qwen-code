@@ -3,7 +3,7 @@
 [English](2026-11-14-hosted-harness-loop-evaluation.md) | [简体中文](2026-11-14-hosted-harness-loop-evaluation.zh-CN.md)
 
 - **Status**: evaluation only; no implementation and no setting. It records the parity differences between the Hosted Harness loop and the shared agent loop, and recommends **deferring** the Hosted Harness migration. This is the evaluation of the last surface of the [unified agent loop](2026-10-23-unified-agent-loop.md) program (tracking issue #15327), which that design explicitly left "evaluated separately after the other surfaces". It follows the same doc-only shape as the [streaming tool dispatch evaluation](2026-11-11-streaming-tool-dispatch.md) (#16949).
-- **Date**: 2026-11-14. Line citations verified on `main` `46a56e116b15`.
+- **Date**: 2026-11-14. Line citations verified on `main` `af312d610143`.
 - **Source of the behavior**: `packages/cli/src/serve/hosted-harness-model.ts` (1,599 lines) and `packages/cli/src/serve/hosted-workspace-tool-turn.ts` (10,908 lines).
 - **Related**:
   - [Unified agent loop](2026-10-23-unified-agent-loop.md) — the accepted design; its "Loops" table lists the Hosted Harness as `LlmClient` plus self-fired hooks and journaled sequential dispatch;
