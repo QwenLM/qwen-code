@@ -9,7 +9,7 @@
 Java 控制面台账之上的每一层都已支持 1–64 段的交付：
 
 - H5a 记录契约（`managed-channel-record.ts`，由 `ManagedChannelRecords` 镜像）携带稳定的 `segmentId`/`ordinal` 计划，每段一个写一次的回执。
-- Harness 漏斗（`hosted-channel-session.ts`）对 claim 应答**全部未结分段**，**按 ordinal** 接受回执（仍有分段时为 `partial`，最后一段为 `delivered`），重发只携带已证明未发送的分段。
+- Harness 漏斗（`hosted-channel-session.ts`）对 claim 应答**装进领取文本预算（`maxClaimTextBytes`）的前若干个未回执分段**，**按 ordinal** 接受回执（仍有分段时为 `partial`，最后一段为 `delivered`），每次回执后重新领取其余，重发只携带已证明未发送的分段。
 - 可信适配器面（`ChannelAdapterModels`）已暴露 `ClaimedDelivery.segments[]` 与 `ReceiptRequest.ordinal`。
 - email 适配器（`managed-email-adapter.ts`）已遍历每个被认领的分段、逐段发送、按 ordinal 逐段回执。
 
@@ -86,14 +86,14 @@ Java 控制面台账之上的每一层都已支持 1–64 段的交付：
 ## 范围边界
 
 - 不改 journal 记录契约、Harness 漏斗、可信线路面、email 适配器或公开 API 形状。
-- 不做第二个适配器、不做多分段生产者：email 计划仍是一段。多分段行为经记录型 Harness 与仓储契约演练，而非真实 provider。
+- 不做第二个适配器；多分段生产者不在本台账切片范围内，此后已落地（多分段生产者设计，2026-11-12），email 计划如今把长回复拆成有序分段。多分段行为经记录型 Harness 与仓储契约演练，而非真实 provider。
 - 不做公开 `segments` 投影，不做 OpenAPI / WebShell 变更。
 
 ## 验证计划
 
 - H2 服务用例：一个多分段交付被认领、按 ordinal 逐段回执（分段之间为 `partial`，最后一段为 `delivered`），每段回执持久且归属正确；重发只规划未发送分段；对账器在应答丢失后收敛每个分段回执。每条规则逐一禁用都有测试失败（变异见证）。
 - 仓储契约（H2，并在 MySQL 重跑）：计划幂等、写一次回执（同段第二次回执不覆盖）、有序列表、租户/channel 隔离。
-- 既有单分段套件保持绿色不变。
+- 既有单分段套件在本切片保持绿色不变；其后的多分段生产者切片（2026-11-12）把长回复钉住点重定靶为有序分段。
 - 新表的写一次与并发行为经一个继承 H2 仓储测试的仓储级 MySQL IT（`ManagedSideQueryStoreMySqlIT` 模式）取得真实 MySQL 证据，含「同段两个并发回执只留一个持久回执」；完整 Hosted/fault profile 仍归 CI。不新增 `Hosted*IT` 类，因此不重测共享 failsafe fork 预算。
 
 ## 未决问题

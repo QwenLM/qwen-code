@@ -59,11 +59,11 @@ Surefire。
 套件由它持有），保持不变。
 
 更深层的 profile 结构去重（把共享的 Failsafe 版本与 executions 移入
-`pluginManagement`）有意不做：v0.26.5 发布修复补丁
-`scripts/patches/managed-runtime-v0.26.5-verification.patch`（由
-`scripts/tests/managed-runtime-release.test.js` 演练）会对当前 pom 做
-reverse-apply，逐字节钉住 `pluginManagement` 块。为省约 100 行 XML 而重构它
-会破坏被钉住的发布修复。
+`pluginManagement`）最初被 v0.26.5 发布修复补丁
+`scripts/patches/managed-runtime-v0.26.5-verification.patch` 阻塞：它对当前 pom
+做 reverse-apply，逐字节钉住 `pluginManagement` 块。该补丁及其元测试已被
+dead-tag 发布修复清理删除（投产前收敛设计，切片2），故去重不再被钉死阻塞。
+它仍是一项独立的谨慎改动，因为会触及 CI lane 定义。
 
 ## 文档策略
 

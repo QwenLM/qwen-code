@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as React from 'react';
 import { act } from 'react';
+import { createPortal } from 'react-dom';
 import { createRoot, type Root } from 'react-dom/client';
 import {
   McpAppGeneratedUiOwnerContext,
@@ -800,7 +801,7 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     expect(active.deleteSession).not.toHaveBeenCalled();
   });
 
-  it('shares the existing Projects search text with Managed navigation', async () => {
+  it('shares dialog search text with Managed navigation and resets it on close', async () => {
     const onSearchQueryChange = vi.fn();
     renderSidebar({
       managedWorkspaces: <div data-managed-workspaces />,
@@ -815,7 +816,7 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
       ),
     );
     await flushSidebar();
-    const input = container.querySelector<HTMLInputElement>(
+    const input = document.querySelector<HTMLInputElement>(
       'input[aria-label="Search sessions"]',
     )!;
     expect(input).not.toBeNull();
@@ -834,6 +835,231 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
       );
     });
     expect(onSearchQueryChange).toHaveBeenLastCalledWith('');
+  });
+
+  it('clears the host query when search closes without the dialog', async () => {
+    const onSearchQueryChange = vi.fn();
+
+    function CollapsibleHost() {
+      const [collapsed, setCollapsed] = React.useState(false);
+      return (
+        <I18nProvider language="en">
+          <McpAppGeneratedUiOwnerContext.Provider value={generatedUiOwner}>
+            <WebShellSidebar
+              archivedSessionsTarget={null}
+              collapsed={collapsed}
+              onCollapsedChange={setCollapsed}
+              onOpenSettings={() => {}}
+              onOpenDaemonStatus={() => {}}
+              onOpenScheduledTasks={() => {}}
+              onOpenGoals={() => {}}
+              onOpenSessions={() => {}}
+              onOpenSplitView={() => {}}
+              onNewSession={() => false}
+              onLoadSession={loadSession}
+              onError={() => {}}
+              onSearchQueryChange={onSearchQueryChange}
+              sessionActions={{ inlineItems: ['delete'] }}
+            />
+          </McpAppGeneratedUiOwnerContext.Provider>
+        </I18nProvider>
+      );
+    }
+
+    act(() => root.render(<CollapsibleHost />));
+    await flushSidebar();
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Search sessions"]',
+        )!,
+      ),
+    );
+    await flushSidebar();
+    const input = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Search sessions"]',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Managed needle');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flushSidebar();
+    expect(onSearchQueryChange).toHaveBeenLastCalledWith('Managed needle');
+
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          '[data-web-shell-sidebar-collapse]',
+        )!,
+      ),
+    );
+    await flushSidebar();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(onSearchQueryChange).toHaveBeenLastCalledWith('');
+  });
+
+  it('closes session search when a Managed row arrives through a portal', async () => {
+    const onSearchQueryChange = vi.fn();
+    const selected: string[] = [];
+
+    function PortalHost() {
+      const [target, setTarget] = React.useState<HTMLElement | null>(null);
+      return (
+        <>
+          <I18nProvider language="en">
+            <McpAppGeneratedUiOwnerContext.Provider value={generatedUiOwner}>
+              <WebShellSidebar
+                archivedSessionsTarget={null}
+                collapsed={false}
+                onCollapsedChange={() => {}}
+                onOpenSettings={() => {}}
+                onOpenDaemonStatus={() => {}}
+                onOpenScheduledTasks={() => {}}
+                onOpenGoals={() => {}}
+                onOpenSessions={() => {}}
+                onOpenSplitView={() => {}}
+                onNewSession={() => false}
+                onLoadSession={loadSession}
+                onError={() => {}}
+                managedWorkspaces={<div ref={setTarget} />}
+                onSearchQueryChange={onSearchQueryChange}
+                sessionActions={{ inlineItems: ['delete'] }}
+              />
+            </McpAppGeneratedUiOwnerContext.Provider>
+          </I18nProvider>
+          {target
+            ? createPortal(
+                <div
+                  data-managed-session-id="managed-1"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => selected.push('managed-1')}
+                >
+                  Managed session
+                </div>,
+                target,
+              )
+            : null}
+        </>
+      );
+    }
+
+    act(() => root.render(<PortalHost />));
+    await flushSidebar();
+    act(() =>
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Search sessions"]',
+        )!,
+      ),
+    );
+    await flushSidebar();
+    const input = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Search sessions"]',
+    )!;
+    expect(input).not.toBeNull();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Managed needle');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flushSidebar();
+    expect(onSearchQueryChange).toHaveBeenLastCalledWith('Managed needle');
+    const row = document.querySelector('[data-managed-session-id="managed-1"]');
+    expect(row).not.toBeNull();
+    act(() => (row as HTMLElement).click());
+    await flushSidebar();
+    expect(selected).toEqual(['managed-1']);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(onSearchQueryChange).toHaveBeenLastCalledWith('');
+  });
+
+  it('keeps the Managed navigation mounted across search open and close', async () => {
+    const mounts: number[] = [];
+
+    function ManagedNavigation() {
+      React.useEffect(() => {
+        mounts.push(1);
+      }, []);
+      return <div data-managed-session-id="managed-1">Managed session</div>;
+    }
+
+    function PortalHost() {
+      const [target, setTarget] = React.useState<HTMLElement | null>(null);
+      return (
+        <>
+          <I18nProvider language="en">
+            <McpAppGeneratedUiOwnerContext.Provider value={generatedUiOwner}>
+              <WebShellSidebar
+                archivedSessionsTarget={null}
+                collapsed={false}
+                onCollapsedChange={() => {}}
+                onOpenSettings={() => {}}
+                onOpenDaemonStatus={() => {}}
+                onOpenScheduledTasks={() => {}}
+                onOpenGoals={() => {}}
+                onOpenSessions={() => {}}
+                onOpenSplitView={() => {}}
+                onNewSession={() => false}
+                onLoadSession={loadSession}
+                onError={() => {}}
+                managedWorkspaces={<div ref={setTarget} />}
+                sessionActions={{ inlineItems: ['delete'] }}
+              />
+            </McpAppGeneratedUiOwnerContext.Provider>
+          </I18nProvider>
+          {target ? createPortal(<ManagedNavigation />, target) : null}
+        </>
+      );
+    }
+
+    act(() => root.render(<PortalHost />));
+    await flushSidebar();
+    expect(mounts).toHaveLength(1);
+    expect(
+      container.querySelector('[data-managed-session-id="managed-1"]'),
+    ).not.toBeNull();
+
+    const searchButton = () =>
+      container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Search sessions"]',
+      )!;
+    act(() => click(searchButton()));
+    await flushSidebar();
+    expect(mounts).toHaveLength(1);
+    expect(
+      document.querySelector(
+        '[role="dialog"] [data-managed-session-id="managed-1"]',
+      ),
+    ).not.toBeNull();
+
+    await act(async () => {
+      document
+        .querySelector<HTMLInputElement>('input[aria-label="Search sessions"]')!
+        .dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
+    });
+    await flushSidebar();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(mounts).toHaveLength(1);
+    expect(
+      container.querySelector('[data-managed-session-id="managed-1"]'),
+    ).not.toBeNull();
+
+    act(() => click(searchButton()));
+    await flushSidebar();
+    expect(mounts).toHaveLength(1);
+    expect(
+      document.querySelector(
+        '[role="dialog"] [data-managed-session-id="managed-1"]',
+      ),
+    ).not.toBeNull();
   });
 
   it('deletes the current session from the sidebar row when it is idle', async () => {
