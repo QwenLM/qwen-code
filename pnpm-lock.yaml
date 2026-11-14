@@ -639,6 +639,9 @@ importers:
       saxes:
         specifier: 6.0.0
         version: 6.0.0
+      undici:
+        specifier: ^7.28.0
+        version: 7.29.0
     devDependencies:
       typescript:
         specifier: 5.8.3
