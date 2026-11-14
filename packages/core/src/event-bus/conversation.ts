@@ -15,6 +15,9 @@ import {
   type RunStateStore,
 } from './state.js';
 
+/** How long a cancelled run may take to settle before it ends anyway. */
+export const CANCEL_SETTLEMENT_CAP_MS = 10_000;
+
 /**
  * The loop's only decision maker and the only owner of the boundary
  * callbacks. It fires `onRoundStart`/`onRoundEnd` in its own serial delivery
@@ -30,11 +33,22 @@ export class ConversationHandler {
   ) {}
 
   register(): () => void {
-    return this.bus.subscribe(
+    const off = this.bus.subscribe(
       'conversation',
       ['loop.started', 'llm.settled', 'tool.settled'],
       (event) => this.handle(event),
     );
+    // An awaited round-end hook must not delay the cancellation deadline.
+    const offCancellation = this.bus.subscribe(
+      'conversation',
+      ['loop.cancelled'],
+      (event) => this.handle(event),
+      { name: 'conversation-cancellation' },
+    );
+    return () => {
+      off();
+      offCancellation();
+    };
   }
 
   private async handle(event: AnyBusEvent): Promise<void> {
@@ -55,6 +69,18 @@ export class ConversationHandler {
         );
         return;
       }
+      case 'loop.cancelled': {
+        // The handlers stop at the cancelled signal; a run they have not
+        // settled within the cap ends here, and its late work is dropped.
+        state.settleTimer ??= setTimeout(() => {
+          this.finish(state, {
+            reason: 'cancelled',
+            rounds: (state.round ?? 0) + 1,
+            ...(state.model?.turn ? { turn: state.model.turn } : {}),
+          });
+        }, CANCEL_SETTLEMENT_CAP_MS);
+        return;
+      }
       case 'llm.settled': {
         const round = currentRound(state, event.round);
         const model = state.model;
@@ -63,6 +89,7 @@ export class ConversationHandler {
           calls: model.calls,
           ...(model.stop ? { stop: model.stop } : {}),
         });
+        if (state.finished) return;
         const stop = model.stop ?? hostStop;
         const rounds = round + 1;
         if (stop) {

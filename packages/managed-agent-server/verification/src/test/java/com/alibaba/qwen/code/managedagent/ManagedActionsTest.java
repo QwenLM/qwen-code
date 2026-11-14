@@ -285,7 +285,7 @@ class ManagedActionsTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"web_fetch", "read_file", "write_file", "edit", "run_shell_command",
-            "todo_write", "loop_wakeup", "cron_list", "cron_delete", "context_search", "context_remember", "context_get", "context_forget",
+            "todo_write", "loop_wakeup", "cron_create", "cron_list", "cron_delete", "context_search", "context_remember", "context_get", "context_forget",
             "team_create", "task_create", "task_update", "workflow",
             "request_shutdown", "exit_plan_mode", "team_plan_approval"})
     void previewsExactInputOnPublicAndWebShellListsAndDetails(String tool) throws Exception {
@@ -300,6 +300,7 @@ class ManagedActionsTest {
             // #15076: the task list is the only preview this profile adds.
             case "todo_write" -> "{ \"todos\" : [ { \"id\" : \"1\", \"content\" : \"audit\", \"status\" : \"pending\" } ] }";
             case "loop_wakeup" -> "{ \"delaySeconds\" : 60, \"prompt\" : \"/loop tick\" }";
+            case "cron_create" -> "{ \"cron\" : \"*/5 * * * *\", \"prompt\" : \"/loop tick\", \"recurring\" : true }";
             case "cron_list" -> "{}";
             case "cron_delete" -> "{ \"id\" : \"loop:wakeup-1\" }";
             case "context_search" -> "{ \"query\" : \"preferences\" }";
