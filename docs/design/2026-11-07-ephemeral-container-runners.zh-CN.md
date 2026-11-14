@@ -268,6 +268,16 @@ push、手动运行相同的 20 分钟上限。该表达式逐字重复 selector
 因为求值上限时拿不到 runner 自身的环境；路由测试用同一组替换同时建模这两个
 表达式，一旦二者写法漂移，先失败的是测试而不是线上任务。
 
+加入常驻机群也意味着继承它的工作区复用。一次性池每个任务都从全新容器开始；
+常驻机群的工作区在任务之间保留，前一条泳道可能留下 root 属主的文件让
+`git clean` 失败，或留下稀疏索引让 checkout 的 `sparse-checkout disable`
+中止、`.github/actions/` 不在盘上。因此两条改道泳道都采用机群标准的
+checkout 前两步——先恢复工作区属主，再删除 `.git` 让 checkout 全新克隆——
+并登记进 `scripts/tests/qwen-runner-checkout-workflow.test.js` 的 checkout
+矩阵。首次实跑证明了必要性：loop 的 kernel 分支在脏工作区上死于 checkout
+的重建路径；同一天两个 pull request 的 tui-parity checkout 又因残留稀疏索引
+丢失。该泳道本就在机群上，有属主修复但缺元数据重置，因此本次一并补上重置。
+
 Web-shell Visuals capture 刻意保留所有 PR（含同仓 PR）都进池。它的 capture 任务
 被自身测试和上文决策钉在这个行为上，而且它正是出网暴露面已被接受的那条泳道，
 因此不纳入本次改动。

@@ -57,6 +57,29 @@ jobs:
       MANAGED_LOOP_REPORT_DIR: '${{ github.workspace }}/test-results/managed-loop'
       QWEN_SANDBOX: 'false'
     steps:
+      # The persistent fleet this lane now joins reuses workspaces between
+      # jobs; the disposable pool it came from starts fresh and never needed
+      # either heal. Root-owned leftovers fail git clean and send checkout
+      # into its recreate path, which dies in its own auth cleanup (run
+      # 43621213542, kernel leg). A leftover sparse index makes checkout's
+      # clean/reset skip the excluded paths, then `sparse-checkout disable`
+      # aborts and leaves no .github/actions/ on disk (e2e.yml documents the
+      # same failure). Same pair as ci.yml/e2e.yml, pinned by
+      # qwen-runner-checkout-workflow.test.js.
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
       - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           persist-credentials: false

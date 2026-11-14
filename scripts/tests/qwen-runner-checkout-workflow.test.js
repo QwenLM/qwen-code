@@ -82,6 +82,13 @@ const jobs = [
     name,
   ]),
   ...['classify', 'act'].map((name) => ['qwen-ci-flaky-rerun', name]),
+  // The managed lanes joined the persistent fleet with the trusted-PR
+  // routing split (#17279). The fleet reuses workspaces between jobs, so
+  // they inherit the same leftovers as the lanes above: the kernel leg's
+  // first fleet run (43621213542) died in checkout's recreate path on
+  // root-owned files.
+  ['managed-agent-loop', 'managed-loop'],
+  ['web-shell-managed-host', 'build'],
 ];
 
 it.each(jobs)(

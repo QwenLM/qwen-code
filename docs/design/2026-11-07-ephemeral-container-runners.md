@@ -355,6 +355,20 @@ verbatim, because the runner's own environment is not available when the
 ceiling is evaluated; the routing tests model both expressions with one set of
 substitutions so a drift between them fails a test rather than a job.
 
+Joining the fleet also means inheriting its workspace reuse. The disposable
+pool starts every job in a fresh container; a fleet runner's workspace survives
+between jobs, and a previous lane can leave root-owned files that fail
+`git clean`, or a sparse index that makes checkout's `sparse-checkout disable`
+abort and leave `.github/actions/` off disk. Both rerouted lanes therefore
+adopt the fleet's standard pre-checkout pair — restore workspace ownership,
+then drop `.git` so checkout clones fresh — and join the checkout matrix pinned
+by `scripts/tests/qwen-runner-checkout-workflow.test.js`. The first live run
+proved the need: the loop's kernel leg died in checkout's recreate path on a
+dirty fleet workspace, and the same day two pull requests lost their tui-parity
+checkout to a leftover sparse index. That lane was already on the fleet and had
+the ownership heal but not the metadata reset, so it gains the reset in the
+same change.
+
 Web-shell Visuals capture deliberately keeps the pool for every PR, including
 same-repository ones. Its capture job is pinned that way by its own tests and
 by the decision above, and it is the lane whose egress exposure is already
