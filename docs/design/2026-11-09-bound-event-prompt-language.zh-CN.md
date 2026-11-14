@@ -51,8 +51,9 @@ daemon PR-state watch（观测 + drain）在生产中关闭：
   为中文：信封措辞、角色指引、来源说明、指令来源措辞、聚合评论头部、
   watch 摘要。
 - 其他任何 locale 保持今天的英文输出逐字节不变。
-- 语言维度可扩展：后续补充语言只需增加 copy map 条目与 locale 联合成员，
-  不是结构性改动。
+- 当前刻意只支持 `'en' | 'zh'`。后续新增支持的语言时，按既有结构明确补
+  联合类型成员、locale resolver、文案表及聚焦测试，不改变提示词组合的
+  结构性契约；不承诺自动翻译回退。
 - 不新增设置、不新增接线：复用既有的
   `general.language` → `resolveChannelLocale` → `ChannelBase.locale` 路径。
 
@@ -62,7 +63,8 @@ daemon PR-state watch（观测 + drain）在生产中关闭：
   标签、`Source:` 行、`Role:` 行，以及数据行字段标签（`Type:`、`Title:`、
   `URL:`、`Trigger:`、`Event:`、`Author:`）。它们是紧邻平台数据的稳定
   信任边界与字段标记，不是措辞；保持语言不变既保留剥壳/副本不变量，也
-  避免重新解析已渲染的元数据行。
+  避免重新解析已渲染的元数据行。字面量截断标记 `[truncated]` 与身份缺失
+  时的 `Author: unknown` 回退同样是技术哨兵值，不是要本地化的叙述文案。
 - **平台来源内容从不翻译**：PR 标题、评论正文、检查名、SHA、
   `mergeable_state` 值、通知 reason。
 - **运维模板不变**：`boundSessionActions` / `sessionPrWatch.actions` 的值
@@ -248,11 +250,15 @@ channel 撰写的字符串：
 
 1. locale 解析为 `zh` 的 channel 投递的绑定提示词，其产品撰写措辞（信封、
    指引、来源说明、摘要、聚合头部）为中文，legacy 与 role-aware 模式皆然。
+   渲染内置角色指引时也应为中文；已选中的运维指令占据该指引的位置，
+   不与默认指引并列出现。
 2. 无 locale 或英文 locale 时，每条投递提示词与今天字节一致，包括 daemon
    drain 的。
 3. 结构性标记（`[Operator instruction — trusted]`、`Source:`、`Role:`、
    数据行标签）与平台来源值在两种语言下都不变。
 4. 运维模板在两种语言下原样渲染；role-aware 模式下未匹配角色仍被跳过。
+   一个事件不会同时渲染运维指令与内置角色指引：选中运维指令时，该指令
+   替代而非补充默认指引。
 5. 不可信文本开头的 zh 头部与截断标记副本失去方括号，与英文标签完全一致。
 6. 两种语言下都没有 watch 摘要含祈使动作。
 7. 构建、类型检查、聚焦套件通过；每处源码改动都有让点名测试变红的变异

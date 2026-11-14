@@ -111,6 +111,8 @@ import {
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
 } from '../tools/tool-call.js';
 import {
+  getChannelWorkflowOrigin,
+  isBackgroundWorkflowBlocked,
   getInvocationContext,
   runWithInvocationContext,
   type InvocationContextV1,
@@ -2343,81 +2345,104 @@ describe('CoreToolScheduler', () => {
     }
   });
 
-  it('restores the invocation context when a delayed confirmation executes', async () => {
-    const hookOwner = {
-      runtimeId: 'runtime',
-      sessionId: 'session-context',
-      agentId: 'A',
-    };
-    const invocationContext: InvocationContextV1 = {
-      version: 1,
-      sessionId: 'session-context',
-      promptId: 'prompt-context',
-    };
-    const unrelatedContext: InvocationContextV1 = {
-      ...invocationContext,
-      sessionId: 'unrelated-session',
-      promptId: 'unrelated-prompt',
-    };
-    let observedContext: InvocationContextV1 | undefined;
-    let observedPromptId: string | undefined;
-    let observedTodoWorkChainId: string | undefined;
-    const tool = new MockTool({
-      name: 'approval-context-tool',
-      getDefaultPermission: async () => 'ask',
-      getConfirmationDetails: async () => ({
-        type: 'info' as const,
-        title: 'Confirm context tool',
-        prompt: 'Run context tool?',
-        onConfirm: vi.fn().mockResolvedValue(undefined),
-      }),
-      execute: async () => {
-        expect(getHookExecutionOwner()).toEqual(hookOwner);
-        observedContext = getInvocationContext();
-        observedPromptId = promptIdContext.getStore();
-        observedTodoWorkChainId = todoWorkChainContext.getStore();
-        return textResult('ok');
-      },
-    });
-    const { scheduler, onToolCallsUpdate } = createSchedulerForLegacyToolTests({
-      toolsByName: toolMap(tool),
-      approvalMode: ApprovalMode.DEFAULT,
-      hookSystem: {
-        runtimeId: hookOwner.runtimeId,
-        firePermissionDeniedEvent: vi.fn(),
-      },
-      getActiveTodoWorkChainOwner: () => 'mapped-work-chain',
-    });
+  it.each([false, true])(
+    'restores a Channel launch after delayed confirmation (daemon: %s)',
+    async (daemon) => {
+      const hookOwner = {
+        runtimeId: 'runtime',
+        sessionId: 'session-context',
+        agentId: 'A',
+      };
+      const invocationContext: InvocationContextV1 | undefined = daemon
+        ? {
+            version: 1,
+            sessionId: 'session-context',
+            promptId: 'prompt-context',
+          }
+        : undefined;
+      const workflowOrigin = {
+        channelName: 'telegram',
+        chatId: 'launch-chat',
+        threadId: 'launch-thread',
+        senderId: 'launch-user',
+        userInitiated: true as const,
+      };
+      const unrelatedContext: InvocationContextV1 = {
+        version: 1,
+        sessionId: 'unrelated-session',
+        promptId: 'unrelated-prompt',
+      };
+      let observedContext: InvocationContextV1 | undefined;
+      let observedWorkflowOrigin: ReturnType<typeof getChannelWorkflowOrigin>;
+      let observedBackgroundWorkflowBlocked: boolean | undefined;
+      let observedPromptId: string | undefined;
+      let observedTodoWorkChainId: string | undefined;
+      const tool = new MockTool({
+        name: 'approval-context-tool',
+        getDefaultPermission: async () => 'ask',
+        getConfirmationDetails: async () => ({
+          type: 'info' as const,
+          title: 'Confirm context tool',
+          prompt: 'Run context tool?',
+          onConfirm: vi.fn().mockResolvedValue(undefined),
+        }),
+        execute: async () => {
+          expect(getHookExecutionOwner()).toEqual(hookOwner);
+          observedContext = getInvocationContext();
+          observedWorkflowOrigin = getChannelWorkflowOrigin();
+          observedBackgroundWorkflowBlocked = isBackgroundWorkflowBlocked();
+          observedPromptId = promptIdContext.getStore();
+          observedTodoWorkChainId = todoWorkChainContext.getStore();
+          return textResult('ok');
+        },
+      });
+      const { scheduler, onToolCallsUpdate } =
+        createSchedulerForLegacyToolTests({
+          toolsByName: toolMap(tool),
+          approvalMode: ApprovalMode.DEFAULT,
+          hookSystem: {
+            runtimeId: hookOwner.runtimeId,
+            firePermissionDeniedEvent: vi.fn(),
+          },
+          getActiveTodoWorkChainOwner: () => 'mapped-work-chain',
+        });
 
-    await runWithHookExecutionOwner(hookOwner, () =>
-      runWithInvocationContext(invocationContext, () =>
-        scheduleBatch(
-          scheduler,
-          toolRequest(
-            'approval-context-call',
-            tool.name,
-            {},
-            invocationContext.promptId,
+      await runWithHookExecutionOwner(hookOwner, () =>
+        runWithInvocationContext(
+          invocationContext,
+          () =>
+            scheduleBatch(
+              scheduler,
+              toolRequest(
+                'approval-context-call',
+                tool.name,
+                {},
+                'prompt-context',
+              ),
+            ),
+          workflowOrigin,
+          true,
+        ),
+      );
+      const waiting = await waitForApproval(onToolCallsUpdate);
+
+      await runWithHookExecutionOwner({ ...hookOwner, agentId: 'B' }, () =>
+        todoWorkChainContext.run('stale-work-chain', () =>
+          runWithInvocationContext(unrelatedContext, () =>
+            waiting.confirmationDetails.onConfirm(
+              ToolConfirmationOutcome.ProceedOnce,
+            ),
           ),
         ),
-      ),
-    );
-    const waiting = await waitForApproval(onToolCallsUpdate);
+      );
 
-    await runWithHookExecutionOwner({ ...hookOwner, agentId: 'B' }, () =>
-      todoWorkChainContext.run('stale-work-chain', () =>
-        runWithInvocationContext(unrelatedContext, () =>
-          waiting.confirmationDetails.onConfirm(
-            ToolConfirmationOutcome.ProceedOnce,
-          ),
-        ),
-      ),
-    );
-
-    expect(observedContext).toEqual(invocationContext);
-    expect(observedPromptId).toBe(invocationContext.promptId);
-    expect(observedTodoWorkChainId).toBe('mapped-work-chain');
-  });
+      expect(observedContext).toEqual(invocationContext);
+      expect(observedWorkflowOrigin).toEqual(workflowOrigin);
+      expect(observedBackgroundWorkflowBlocked).toBe(true);
+      expect(observedPromptId).toBe('prompt-context');
+      expect(observedTodoWorkChainId).toBe('mapped-work-chain');
+    },
+  );
 
   it('isolates enter_plan_mode as a batch boundary and preserves its full reminder', async () => {
     const reminder = getPlanModeSystemReminder(false);
@@ -10433,6 +10458,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     includeSensitiveSpanAttributes?: boolean;
     sensitiveSpanAttributeMaxLength?: number;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
+    isFinished?: () => boolean;
     shouldObserveProducer?: (callId: string) => boolean;
     configOverrides?: Record<string, unknown>;
   };
@@ -10490,6 +10516,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       {
         onAllToolCallsComplete,
         onToolCallsUpdate,
+        isFinished: options.isFinished,
         shouldObserveProducer: options.shouldObserveProducer,
       },
     );
@@ -12774,6 +12801,75 @@ describe('CoreToolScheduler telemetry spans', () => {
         ? { hookSpecificOutput: { artifacts: [{ title, workspacePath }] } }
         : { decision: 'allow' },
     );
+
+  it.each(['resolve', 'reject'])(
+    'skips the failure hook when an abandoned tool settles by %s',
+    async (outcome) => {
+      const abort = new AbortController();
+      const entered = deferred();
+      const release = deferred();
+      let finished = false;
+      const hookEvents: string[] = [];
+      const { scheduler, onAllToolCallsComplete } = buildScheduler({
+        isFinished: () => finished,
+        hooks: eventHookBus(allowAll, (name) => hookEvents.push(name)),
+        execute: async () => {
+          entered.resolve();
+          await release.promise;
+          if (outcome === 'reject') throw new Error('interrupted');
+          return textResult('done');
+        },
+      });
+      const scheduled = scheduler.schedule(
+        mockToolRequest('abandoned'),
+        abort.signal,
+      );
+      await entered.promise;
+      abort.abort();
+      finished = true;
+      release.resolve();
+      await scheduled;
+      const [call] = await settledLastBatch(onAllToolCallsComplete);
+      expectStatus(call, 'cancelled');
+      expect(hookEvents).toEqual(['PreToolUse']);
+    },
+  );
+
+  it('skips per-tool persistence when a post hook outlives the run', async () => {
+    const abort = new AbortController();
+    const entered = deferred();
+    const release = deferred();
+    let finished = false;
+    const trackToolResultBytes = vi.fn();
+    const { scheduler, onAllToolCallsComplete } = buildScheduler({
+      isFinished: () => finished,
+      execute: async () => textResult('x'.repeat(2320)),
+      hooks: hookBus(async ({ eventName }) => {
+        if (eventName === 'PostToolUse') {
+          entered.resolve();
+          await release.promise;
+        }
+        return hookResponse(eventName, { decision: 'allow' });
+      }),
+      configOverrides: {
+        getTruncateToolOutputThreshold: () => 128,
+        storage: { getProjectTempDir: () => '/dev/null/tool-results' },
+        trackToolResultBytes,
+      },
+    });
+    const scheduled = scheduler.schedule(
+      mockToolRequest('late-post-hook'),
+      abort.signal,
+    );
+    await entered.promise;
+    abort.abort();
+    finished = true;
+    release.resolve();
+    await scheduled;
+    const [call] = await settledLastBatch(onAllToolCallsComplete);
+    expectStatus(call, 'cancelled');
+    expect(trackToolResultBytes).not.toHaveBeenCalled();
+  });
 
   it('PostToolUseFailure hook span records is_interrupt=true on user-abort path (#4321)', async () => {
     // _executeToolCallBody's catch fires PostToolUseFailure with
@@ -15982,9 +16078,11 @@ describe('persistence size attribution', () => {
       getTruncateToolOutputThreshold: () => 25000,
       getChatCompression: () => ({ imageTokenEstimate: 800 }),
     } as Config;
-    const owner = Object.assign(Object.create(CoreToolScheduler.prototype), {
+    const owner = new CoreToolScheduler({
       config: cfg,
-    }) as {
+      getPreferredEditor: () => undefined,
+      onEditorClose: () => {},
+    }) as unknown as {
       maybePersistLargeToolResult(
         callId: string,
         toolName: string,

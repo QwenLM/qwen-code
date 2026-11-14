@@ -2,8 +2,8 @@
 
 [English](2026-11-11-streaming-tool-dispatch.md) | [简体中文](2026-11-11-streaming-tool-dispatch.zh-CN.md)
 
-- **Status**: evaluation complete; recommendation below. This is the third slice of the [event-bus agent loop](2026-11-11-event-bus-agent-loop.md) port (PR 1 #16935 merged, PR 2 #16938 in review). It is the "evaluate and decide" slice that design named; it records the parity differences and the implementation design, and makes the call on whether/when to implement.
-- **Date**: 2026-11-11. Line citations verified on `feat/event-bus-handlers` (PR 2 #16938, atop `origin/main` `1fe1f197781c`).
+- **Status**: decided 2026-11-13: not implemented in #17045; the implementation moves to its follow-up issue with the design below. This is the third slice of the [event-bus agent loop](2026-11-11-event-bus-agent-loop.md) port (PR 1 #16935 merged, PR 2 #16938 merged). It records the parity differences, the decisions and the design for the follow-up, and keeps the recommendation of 2026-11-11 to defer.
+- **Date**: 2026-11-11, decisions 2026-11-13. Line citations verified on `main` `0207b03518`.
 - **Source of the behavior**: `v1.0.0-preview` `587e3429cabf`, `event-bus/llm/inference-round.ts`, `event-bus/tool-handler.ts`, `tool-executor/`.
 
 ## The behavior difference
@@ -14,11 +14,11 @@ Main runs a model round to completion, collects its tool calls, then runs them a
 
 Streaming dispatch is not "schedule earlier". Three facts from the current tree shape the work:
 
-1. **The executor interfaces differ in shape.** Main's `AgentLoopToolExecutor.run(requests, signal, hooks)` (`core/agent-loop.ts:163`) is batch-shaped: `createSchedulerExecutor` (`:623`) builds one `CoreToolScheduler` and calls `schedule(requests, …)` with the whole batch, resolving on `onAllToolCallsComplete`. Preview's `ToolExecutor` is streaming-shaped: `execute(block)` per call, `waitForExecutions(batch)`, `stopExecution(batch)`. A streaming path needs a new executor adapter, not a flag on the existing one.
+1. **The executor interfaces differ in shape.** Main's `AgentLoopToolExecutor.run(requests, signal, hooks)` (`core/agent-loop.ts:241`) is batch-shaped: `createSchedulerExecutor` (`:798`) builds one `CoreToolScheduler` and calls `schedule(requests, …)` with the whole batch, resolving on `onAllToolCallsComplete`. Preview's `ToolExecutor` is streaming-shaped: `execute(block)` per call, `waitForExecutions(batch)`, `stopExecution(batch)`. A streaming path needs a new executor adapter, not a flag on the existing one.
 
-2. **`CoreToolScheduler` can be scheduled incrementally, but its completion signal is idle-based.** `schedule` (`coreToolScheduler.ts:3090`) queues a request when the scheduler is running and drains the queue when idle. So calls can be fed in one at a time. But `onAllToolCallsComplete` fires whenever the scheduler goes idle with everything settled — which happens between streamed calls. A streaming executor must therefore track dispatched-vs-settled call ids itself and only resolve a round once the round has settled **and** every dispatched call is terminal; it cannot rely on `onAllToolCallsComplete` alone.
+2. **`CoreToolScheduler` can be scheduled incrementally, but its completion signal is idle-based.** `schedule` (`coreToolScheduler.ts:3094`) queues a request when the scheduler is running and drains the queue when idle. So calls can be fed in one at a time. But `onAllToolCallsComplete` fires whenever the scheduler goes idle with everything settled — which happens between streamed calls. A streaming executor must therefore track dispatched-vs-settled call ids itself and only resolve a round once the round has settled **and** every dispatched call is terminal; it cannot rely on `onAllToolCallsComplete` alone.
 
-3. **`runToolBatch` is more than execution.** It does duplicate/replay suppression, surface selection, the launch hook, ordered results, `finalizeToolResponses`, and recording with Goal provenance (`core/agent-loop.ts:361`). A streaming path must reproduce all of this incrementally — preview does it in a separate streaming tool-executor and `completeToolExecutions`, not by calling the batch function. Reusing `runToolBatch` as-is is incompatible with mid-stream dispatch.
+3. **`runToolBatch` is more than execution.** It does duplicate/replay suppression, surface selection, the launch hook, ordered results, `finalizeToolResponses`, and recording with Goal provenance (`core/agent-loop.ts:503`). The follow-up needs a way to supply early results at the batch's launch boundary so the batch can still own those decisions and finalize the round.
 
 ## Parity differences a streaming path introduces
 
@@ -32,33 +32,55 @@ Streaming dispatch is not "schedule earlier". Three facts from the current tree 
 | Structured-output selection      | headless `selectCalls` reads the whole batch: when a `structured_output` call is present, only those calls run and every other call (including earlier ones) is skipped | a later `structured_output` may arrive after an earlier call already ran, which cannot be undone                                | same shape as plan-mode: per-dispatch cannot preserve it; needs conservative buffering or an explicit relaxation                                                               |
 | Batch-level hook / output budget | `PostToolBatch` fires once per batch with that batch's completed calls                                                                                                  | per-dispatch would fire it per call (`[A]`, `[B]` instead of `[A, B]`), changing count-sensitive hook output and stop decisions | defer the batch-level hook/budget/recording to round settlement and apply it to the round's completed calls as one batch, or list split-batch as an additional semantic change |
 
-These are not bugs to fix; they are the semantics of streaming. The retry row is the load-bearing one: it changes a correctness contract (discard-on-retry) that main's surfaces and tests rely on.
+The table describes what unrestricted dispatch would change. The follow-up keeps the existing approval timing and batch result handling. It can still spend time executing a read that the batch later skips and leave a tool-call log entry.
 
-## Implementation design (when implemented)
+## Decisions (2026-11-13)
 
-- A `StreamingToolExecutor` adapter wrapping one `CoreToolScheduler` per round: `dispatch(call)` schedules incrementally and records the call id; `onToolCallsUpdate` is progress only. `settle()` resolves only when every dispatched call has passed the **final completion** stage (`onAllToolCallsComplete`-equivalent: resource release, `PostToolBatch` hook, output budget and recording), not merely when its status is terminal. `cancel()` aborts the round signal and stops queued calls.
-- It reproduces `runToolBatch`'s dedup/selection/launch-hook/finalize/record incrementally (the preview `completeToolExecutions` equivalent), and the batch-level `PostToolBatch` hook, output budget and recording are applied **once at settle to the round's completed calls as one batch** (not per dispatch), so batch-scoped hook semantics are preserved and results and recording match the batch path for the non-retry case **excluding plan-mode and structured_output batches**.
-- `runModelRound` gains an additive optional `onToolCall` callback (existing callers unaffected); the Llm handler publishes `llm.tool_call` per collected call when streaming is on; the Tool handler dispatches on `llm.tool_call` and settles on `llm.settled`. **Conversation cannot stay unchanged**: it must track dispatched calls and wait for their final settlement instead of finishing on `model.stop` or on an empty call list — otherwise a retry that clears the collected calls would finish the loop while dispatched tools are still running and their results would be lost. It also owns how the streaming path handles the original `tool.request`.
-- A `streamingToolDispatch` option, effective only with `useEventBus`, default off. The four currently-unemitted bus events (`llm.tool_call`, `tool.cancel`, `loop.output`, `loop.cancelled`) gain their emission points here.
-- Retry-after-dispatch follows preview: dispatched calls keep their results; the discard-on-retry contract is explicitly relaxed for the streaming path and documented per surface.
+On 2026-11-13 #17045 took streaming dispatch on as block S, narrowed to read-only calls that need no approval. The assessment found little room for latency savings on the main provider path. The implementation moves to the follow-up issue with the design below.
 
-## Recommendation (the call)
+- **Chat Completions releases calls at the finish frame.** The Qwen and Bailian presets and the parity suites' fake server use this protocol. Main's converter emits the calls together at `finish_reason` (`openaiContentGenerator/converter.ts:2058`). The next `index` is an unsafe boundary because providers can interleave or reuse indexes. Preview also closes the tool blocks at `finish_reason`, where it can overlap the remaining stream tail, such as a usage frame.
+- **Per-call events help when the generator forwards the call.** Preview can dispatch on `content_block_stop` for Messages and `response.output_item.done` for Responses. Its Qoder provider uses Responses. On main, Anthropic buffers completed calls until the stop reason on a successful response (`anthropicContentGenerator/anthropicContentGenerator.ts:1610`). The Responses converter emits a call at `response.output_item.done` (`openaiResponsesContentGenerator/responses-converter.ts:278`). Even a sole or final call can overlap work before `response.completed`. Gemini forwards SDK chunks as they arrive, so the available overlap depends on when those chunks carry complete calls.
+- **The eligible set is narrow.** Reads, searches and foreground read-only shell commands can qualify. Agents, fetches that require approval, and commands that write or run in the background wait for the batch.
+- **Discarding a result can affect later calls.** A full `read_file` updates the file-read cache before its result reaches history. If the result is dropped, a repeat read can return `file_unchanged` for content the model never saw, and a later edit can pass the prior-read check. Execution can also leave a tool-call log entry.
 
-**Do not implement streaming dispatch in this slice. Land this evaluation, and implement streaming as a separate opt-in experimental slice after the unified-loop surfaces converge.** Reasoning, grounded in the code above:
+The evaluation's three decision points, as the follow-up takes them:
+
+1. **Retry.** The discard contract stays. Main retries inside the chat layer: an abandoned attempt's calls never reach history, and the retried attempt emits its calls again, so a result kept from the abandoned attempt has no call to pair with. On `Retry` or `ModelFallback` a call that started early is cancelled if it is still running and its result is dropped, as the batch path drops the abandoned attempt's calls today.
+2. **Approval.** No approval is asked during the stream. Only a call that needs none starts early; every other call waits for the batch after the response, as today.
+3. **Latency against complexity.** Not justified for the narrowed form on main today. It is worth revisiting for a provider path that ends each call during the stream, or for calls that need approval or write.
+
+## Design (for the follow-up)
+
+**Which calls start early.** Headless uses the normal batch path whenever a finite tool-call budget is configured through `--max-tool-calls` or `model.maxToolCalls`. The budget limits actual executions, so a later drop cannot undo an overrun. In eligible runs, dispatch the leading calls of a response in stream order, stopping at the first ineligible call so reads cannot move ahead of a possible write. Each early call must meet all of these conditions:
+
+- It performs a read, search or fetch, or runs a foreground shell command that passes the scheduler's read-only check. Background shell calls (`is_background: true`) register a task, write output to disk, and use a signal independent of the attempt. Agent calls also wait for the batch.
+- It passes the surface's normal execution checks, including AgentCore's declared-tool and execution allowlist checks. The full scheduler permission decision must allow execution without confirmation or a model call. Defer any call whose eligibility cannot be established locally, including shell calls that `permissions.autoMode.classifyAllShell` sends to the classifier in `AUTO` mode.
+- No hook on tool events (PreToolUse, PostToolUse, PostToolUseFailure, PostToolBatch, PermissionRequest) and no Mod tool check is registered. These can ask, deny or replace a call's input and are visible when they fire.
+- The call ID is fresh in this attempt, and the call passes the existing replay check.
+
+**The batch takes the results.** An executor adapter starts eligible calls as they arrive and holds their results and output. At round end the batch retains deduplication and `selectCalls`. Its normal launch boundary calls `beforeToolLaunch` once per selected call in batch order, including calls that already started. At that boundary the adapter supplies the early result, awaiting it if necessary, or runs the call normally. When the batch skips a call, for example a sibling of `enter_plan_mode`, a call displaced by `structured_output`, or a host-refused launch, discard the early result and use the normal batch outcome. Deliver accepted results through `onToolResult` in batch order. Surface notifications and buffered output for accepted calls go out at their normal batch stages. Discarded calls can still leave an execution log entry.
+
+**Read cache.** Stage cache updates from early reads outside the shared file-read cache. Apply the prior-read update when the batch accepts the result, before subsequent batch work that depends on that read. Use the file identity and fingerprint captured by the read and honor cache invalidation during the attempt. Mark the read as resident only once its content enters model history. Discard the staged updates with any rejected or abandoned result.
+
+**Events.** With the setting on, the Llm handler publishes `llm.tool_call` for each call as the stream delivers it, and the Tool handler starts the eligible ones. `tool.request` still carries the round's calls at its end and runs the batch. `tool.cancel` cancels early calls when an attempt is abandoned (`Retry`, `ModelFallback`) or the request fails. Scope early calls and results by run, round and attempt so a retry can reuse a call ID without taking a discarded result.
+
+**Settlement and cancellation.** Each attempt's early calls use a signal derived from the run's tool signal. Retry cancels the abandoned attempt and run abort cancels all attempts. Cancel skipped calls and calls left without a batch when the round stops. Track unsettled early calls until cleanup completes. When a handler throws, the loop adapter retains the original error, cancels outstanding early calls and waits for settlement before rejecting and disposing of the bus. Bound terminal cleanup at 10 s even when the run signal is still live, since the timer from block K (#17145) starts on run abort. Use the same deadline if the run has already aborted. The deadline releases the recorded terminal outcome and drops late results and notifications.
+
+**Surfaces.** Headless can use its default executor, which the kernel creates before the round. AgentCore supplies an executor up front and can opt in once it honors the supplied attempt signal in place of its captured round controller, and holds its direct `TOOL_CALL` and `TOOL_RESULT` events until batch acceptance. Those events feed the agent transcript. The Ink TUI and OpenTUI hand their scheduler over in `onRoundEnd`, and ACP runs its round and batch separately. Those surfaces first need to provide an executor when the round starts.
+
+**Setting and acceptance tests.** `experimental.streamingToolDispatch` defaults off and is read only on the kernel (`experimental.eventBusAgentLoop`). Compare both settings for the eligible prefix, exact launch-hook count and result order. Verify that a read-only background shell, a shell requiring classification in `AUTO` mode, and an undeclared or disallowed AgentCore tool never start early. Cover finite headless budgets (including zero), a discarded full read followed by a read of the same file, and AgentCore transcript parity for skipped calls. Exercise a retry that reuses an in-flight call's ID, a run abort with an early call in flight, and a thrown request with a live run signal and an executor that ignores cancellation. Check that the original error survives and cleanup meets the deadline.
+
+## Recommendation of 2026-11-11
+
+The decisions of 2026-11-13 keep this call: **do not implement streaming dispatch in this slice. Land this evaluation, and implement streaming as a separate opt-in experimental slice after the unified-loop surfaces converge.** Reasoning, grounded in the code above:
 
 - The architecture port (PR 1 + PR 2) delivers the event-bus loop and stands on its own; streaming is an optional latency optimization, not a prerequisite.
-- Streaming changes a correctness contract (discard-on-retry) and approval timing. Landing it now — while only headless and part of ACP are on the shared loop and the equivalence harness covers only those — would lock in semantics before the parity harness covers the surfaces that actually depend on the batch contract (Ink, OpenTUI, AgentCore, Hosted).
-- The executor adapter plus the incremental re-implementation of `runToolBatch`'s finalize/dedup/record is a substantial, correctness-sensitive change; it deserves its own slice with the full parity harness, not a prototype bundled into the architecture port.
+- The initial evaluation identified retry, approval and output ordering as batch contracts to check before adding streaming. The opt-in follow-up needs parity evidence for each surface it enables.
+- The executor adapter, staged cache updates and failure cleanup require their own acceptance tests. The batch still owns finalization, deduplication and recording.
 
-When implemented, it ships behind `streamingToolDispatch` (default off), with the retry-after-dispatch relaxation documented and an equivalence test that asserts result parity for the non-retry case **excluding plan-mode and structured_output batches** (whose batch-wide selection boundaries conservative buffering must preserve), and explicitly pins the changed retry/approval semantics, the batch-scoped `PostToolBatch` hook/budget scope (applied once at settle to the round's completed calls), and the dispatched→retry→no-new-calls and terminal-with-running-tools settlement paths.
-
-## Decision points (for the maintainer enabling it later)
-
-1. Accept the retry-after-dispatch relaxation (executed tools survive a retry) for the streaming path?
-2. Accept per-call mid-stream approval timing, and adapt the surfaces that approve per batch?
-3. Confirm the latency win justifies the added executor complexity once the parity harness covers all surfaces?
+The design above keeps both contracts, retry still discards and approval still happens per batch, and has the batch take the early results instead of re-implementing `runToolBatch` incrementally.
 
 ## Scope
 
-- In: this evaluation, the parity-difference record, the implementation design, the recommendation.
-- Out (deferred to the implementation slice): the `StreamingToolExecutor`, the `onToolCall` emission, the `streamingToolDispatch` flag, and the streaming equivalence tests.
+- In: this evaluation, the parity-difference record, the decisions and the design for the follow-up.
+- Out (the follow-up issue): the implementation, the setting and its tests.
