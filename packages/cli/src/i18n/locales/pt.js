@@ -2393,4 +2393,5 @@ export default {
   'Kept model as {{model}}': 'Modelo mantido como {{model}}',
   'Jump to bottom (ctrl+End)': 'Ir para o fim (Ctrl+End)',
   'Copied {{count}} chars': '{{count}} caracteres copiados',
+  'Copied 1 char': '1 caractere copiado',
 };

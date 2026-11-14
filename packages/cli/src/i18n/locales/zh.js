@@ -2883,4 +2883,5 @@ export default {
     '（模型试图调用 {{tool}}，而没有直接回答。请换个问法，或在主对话中提问。）',
   'Jump to bottom (ctrl+End)': '跳到底部（Ctrl+End）',
   'Copied {{count}} chars': '已复制 {{count}} 个字符',
+  'Copied 1 char': '已复制 1 个字符',
 };

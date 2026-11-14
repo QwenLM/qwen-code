@@ -694,6 +694,16 @@ describe('clipboardUtils', () => {
       expect(requestedTypes()).toEqual(['STRING']);
     });
 
+    it('does not spawn the native reader when a reachable tool reports an empty clipboard', async () => {
+      const native = await import('./native-clipboard.js');
+      setupX11Env();
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      mockClipboard([], {});
+
+      await expect(readClipboardText()).resolves.toBeNull();
+      expect(native.readTextViaNativeClipboard).not.toHaveBeenCalled();
+    });
+
     it('keeps valid UTF-8 that contains U+FFFD instead of retrying as Latin-1', async () => {
       setupX11Env();
       mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));

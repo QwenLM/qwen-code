@@ -3112,4 +3112,5 @@ export default {
     '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)',
   'Jump to bottom (ctrl+End)': 'Jump to bottom (ctrl+End)',
   'Copied {{count}} chars': 'Copied {{count}} chars',
+  'Copied 1 char': 'Copied 1 char',
 };

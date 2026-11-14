@@ -96,6 +96,11 @@ describe('npm Bun runtime admission', () => {
         bun: realpathSync(f.bun),
         cli: realpathSync(f.script),
       });
+      // The native clipboard helper runs under this Node, since the Bun
+      // child's PATH may not reach one.
+      expect(result!.childEnv['QWEN_NODE_BINARY']).toBe(
+        realpathSync(process.execPath),
+      );
     },
   );
 

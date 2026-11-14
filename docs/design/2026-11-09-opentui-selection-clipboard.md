@@ -28,7 +28,8 @@ defines the OpenTUI behavior rather than copying Ink's menu model.
 - A completed selection in any OpenTUI region is copied to the clipboard and
   remains highlighted.
 - A short-lived bottom-right `Copied N chars` confirmation appears after a
-  successful copy.
+  successful copy, except behind a dialog or confirmation, where the copy is
+  silent.
 - Right-click anywhere in the shell with a scoped transcript selection clears
   the selection.
 - Right-click anywhere in the shell with no selection runs the composer's Ctrl+V
@@ -44,8 +45,10 @@ defines the OpenTUI behavior rather than copying Ink's menu model.
 
 - No in-app context menu. Link actions, code-block actions, and Select All stay
   out of this change.
-- Terminal-native Shift+drag selection is invisible to the app; the app does
-  not auto-copy it and right-click still belongs to the terminal in that case.
+- Terminal-native Shift+drag selection is invisible to the app, so the app does
+  not auto-copy it. The app still receives the next click: a right-click after
+  a Shift+drag pastes into the composer. Setting `ui.mouseTracking: false` gives
+  the right-click menu back to the terminal.
 - History unmounted by the virtualized transcript cannot be copied.
 - Ink's existing selection and right-click behavior is unchanged.
 
@@ -61,7 +64,7 @@ defines the OpenTUI behavior rather than copying Ink's menu model.
 | `transcript-mouse.ts`                      | `handleTranscriptRightClick()`: pure right-click policy (clear selection vs paste).                                                                          |
 | `scrollbar-visibility.ts`                  | `openTuiScrollbarOptions()`: map the setting to `{ visible: false }` or `undefined` (OpenTUI auto-hide).                                                     |
 | `native-clipboard.ts`                      | Native clipboard bridge: writes and reads run in a Node child; reads use the in-process addon only when no child can run. Includes Windows/macOS text reads. |
-| `jump-to-bottom-hint.tsx`                  | Existing tail predicate and floating hint.                                                                                                                   |
+| `jump-to-bottom-hint.tsx`                  | New tail predicate and floating hint.                                                                                                                        |
 | `input-submission.ts` / `input-prompt.tsx` | Composer handle gains `pasteClipboard()`, which runs the existing Ctrl+V path.                                                                               |
 
 ### Behavior
@@ -73,20 +76,27 @@ defines the OpenTUI behavior rather than copying Ink's menu model.
    bottom-right. The toast uses the jump hint's row when the hint is hidden and
    shifts up one row while the hint is visible, so bottom chrome always stacks
    from the bottom instead of leaving an empty slot. A failed clipboard write
-   stays silent.
+   stays silent, and so does a copy made while a dialog, approval modal, tool
+   confirmation, or the completion list is open: the toast is never mounted
+   over a modal.
 2. A right mouse-down anywhere in the shell is intercepted only when no dialog,
    approval modal, or tool confirmation is open. The handler sits on the root
    box and the transcript scrollbox; the scrollbox stops propagation so a click
-   inside it is handled once. If a scoped selection exists,
-   `handleTranscriptRightClick()` clears it. Otherwise it calls
+   inside it is handled once. If a scoped selection with non-empty text exists,
+   `handleTranscriptRightClick()` clears it. A plain left-click leaves OpenTUI
+   with a zero-length selection whose container is the clicked text's parent;
+   that does not count, so the next right-click still pastes. Otherwise it calls
    `composerHandle.current.pasteClipboard()`. Transcript item click handlers
    (thinking blocks, tool cards) check for the left button so the matching right
    mouse-up cannot toggle a card behind the paste.
 3. `pasteClipboard()` delegates to the composer's existing Ctrl+V handler:
    clipboard image first, then text, with the same paste-collapsing and notices.
 4. PageUp/PageDown use `ScrollBoxRenderable.scrollBy(±1, 'viewport')`.
-   Ctrl+Home/Ctrl+End use `scrollTo(0)` / `scrollTo(scrollHeight)`. They are
-   ignored while the foreground shell, a dialog, or a confirmation owns input.
+   Ctrl+Home/Ctrl+End use `scrollTo(0)` / `scrollTo(scrollHeight)`. The keys
+   come from the shared `PAGE_UP`, `PAGE_DOWN`, `SCROLL_HOME`, and `SCROLL_END`
+   bindings, so Ctrl+PageUp/PageDown also scroll and a rebinding reaches both
+   renderers. They are ignored while the foreground shell, a dialog, or a
+   confirmation owns input.
 5. The jump-to-bottom hint listens to the scrollbar's `change` event and
    re-checks after each render for streaming growth. It reports its visibility
    to the shell so the copy toast can stack above it. It is not mounted behind
@@ -103,17 +113,24 @@ defines the OpenTUI behavior rather than copying Ink's menu model.
    owner, and in-process that stdout is the TUI's alternate screen, so the
    message would land on the composer row. The child's stdout is a pipe. It
    stays alive for 150 ms after `setClipboardText()` so the OS clipboard
-   manager can take ownership; exiting immediately leaves the next read with
-   an empty clipboard. Reads also run in the child for the same reason, and use
-   the addon in process only when no Node child can run. The Node path comes from `QWEN_NODE_BINARY` (set by the
-   npm Bun handoff) or `NVM_BIN`, since Bun's snap PATH may omit nvm.
-   Right-click paste uses the same addon fallback for reads when no
-   `wl-paste`/`xclip` is installed. Reads retry the addon's transient
+   manager can take ownership. An X11 selection dies with its owner when no
+   clipboard manager takes it, so after a successful write the bridge reads the
+   clipboard back through a second child; when the text did not persist the
+   copy reports failure and `copyToClipboard()` falls through to OSC 52 instead
+   of confirming a copy that is gone. Reads also run in the child for the same
+   reason, and use the addon in process only when no Node child can start (for
+   example, no Node on PATH); a child that ran and failed does not fall back.
+   The Node path comes from `QWEN_NODE_BINARY` (set by the npm Bun handoff) or
+   `NVM_BIN`, since Bun's snap PATH may omit nvm.
+   Right-click paste uses the same addon fallback for reads only when no
+   `wl-paste`/`xclip` is installed; a reachable tool's answer, including an
+   empty clipboard, is final. Reads retry the addon's transient
    `Somebody else owns the clipboard now` ownership error, and that string is
-   filtered out of both the read result and the composer notice path so it can
-   never be pasted or shown as text. The read helper frames its payload with a
-   marker so any native stdout diagnostics are discarded, and an over-cap
-   payload is dropped instead of pasted truncated.
+   filtered out of the read result so it can never be pasted as text. The read
+   helper frames its payload with a marker so any native stdout diagnostics are
+   discarded; the first marker is the helper's, so clipboard text that itself
+   contains the marker is kept whole. An over-cap payload is dropped instead of
+   pasted truncated.
 
 ### Platform notes
 
@@ -145,11 +162,10 @@ Add under `ui` in `settingsSchema.ts`:
 
 The new user-facing strings are:
 
-- the existing `Jump to bottom (ctrl+End)` hint key in `MUST_TRANSLATE_KEYS` and
+- the new `Jump to bottom (ctrl+End)` hint key in `MUST_TRANSLATE_KEYS` and
   all built-in locales;
-- `Copied {{count}} chars`, also in `MUST_TRANSLATE_KEYS` and every locale.
-
-The removed context-menu labels are deleted from the same files.
+- `Copied {{count}} chars` and its singular `Copied 1 char`, also in
+  `MUST_TRANSLATE_KEYS` and every locale.
 
 ## Files affected
 
@@ -162,7 +178,7 @@ The removed context-menu labels are deleted from the same files.
 - `packages/cli/src/ui/utils/commandUtils.ts` / `clipboardUtils.ts` (fallback
   integration)
 - `packages/cli/src/utils/npm-runtime.ts` (pass the Node binary to Bun)
-- `packages/cli/src/ui/opentui/jump-to-bottom-hint.tsx` (existing)
+- `packages/cli/src/ui/opentui/jump-to-bottom-hint.tsx` (new)
 - `packages/cli/src/ui/opentui/transcript-view.tsx` (left-button guard on item
   clicks)
 - `packages/cli/src/ui/opentui/input-submission.ts`
@@ -203,7 +219,9 @@ The removed context-menu labels are deleted from the same files.
   executable; the snap Bun package cannot spawn the nvm Node (use the bundled
   Bun 1.4.4 for local OpenTUI builds). The child lingers 150 ms after writing
   so the clipboard manager can take over; without that pause an immediate
-  right-click read often sees an empty clipboard.
+  right-click read often sees an empty clipboard. On X11 with no clipboard
+  manager the native copy cannot outlive the child; the read-back turns that
+  into a fallback to OSC 52, which a terminal may still ignore.
 - Auto-copy covers every OpenTUI selection, including composer and dialog text;
   copying while editing is intentional but may overwrite the clipboard.
 - Right-click paste depends on `ui.mouseTracking`; disabling it returns the
@@ -217,15 +235,22 @@ The removed context-menu labels are deleted from the same files.
   jump hint's visibility callback, right-click clear-vs-paste and non-right
   buttons, scrollbar option mapping, the scroll-tail predicate, and hint
   visibility/click; native clipboard bridge tests cover in-process, Node-child,
-  read normalization, the ownership-error filter, marker framing, overflow, and
-  failure branches; `readClipboardText()` tests cover darwin/win32 reading
-  through the addon and dropping trailing whitespace.
+  copy read-back, read normalization, the ownership-error filter, marker
+  framing, overflow, and failure branches, and helper-script tests run the real
+  copy/read scripts in Node children against a fake addon (round trip, busy
+  retry, and a Node binary that cannot spawn); `readClipboardText()` tests
+  cover darwin/win32 reading through the addon, dropping trailing whitespace,
+  and not spawning the addon after a reachable tool reports an empty clipboard.
 - App shell tests: right-click without selection calls `pasteClipboard`;
   right-click on the footer (outside the scrollbox) also pastes; with a scoped
-  selection calls `clearSelection` and not paste; PageUp/PageDown and
-  Ctrl+Home/End still pass.
+  selection calls `clearSelection` and not paste; a zero-length selection left
+  by a plain click still pastes; PageUp/PageDown (including Ctrl+PageUp) and
+  Ctrl+Home/End still pass. Composer tests paste through the mounted handle,
+  and transcript tests pin that a right mouse-up does not expand a thought or a
+  tool card.
 - Manual E2E with the bundled Bun OpenTUI build: select transcript/footer/
-  composer/dialog text and verify auto-copy + toast; right-click paste;
+  composer text and verify auto-copy + toast, and dialog text copies without a
+  toast; right-click paste;
   right-click dismiss; PageUp/PageDown; Ctrl+Home/End; jump hint; hidden
   scrollbar by default; `ui.showOpenTuiScrollbar: true` after restart.
 - i18n must-translate suite and focused OpenTUI suites.

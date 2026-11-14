@@ -2680,4 +2680,5 @@ export default {
     '（模型嘗試呼叫 {{tool}}，而沒有直接回答。請換個問法，或在主對話中提問。）',
   'Jump to bottom (ctrl+End)': '跳到底部（Ctrl+End）',
   'Copied {{count}} chars': '已複製 {{count}} 個字元',
+  'Copied 1 char': '已複製 1 個字元',
 };

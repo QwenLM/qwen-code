@@ -15,7 +15,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { render, act } from '@testing-library/react';
+import { render, act, fireEvent } from '@testing-library/react';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
 
 // theme.ts builds a SyntaxStyle at module scope, which needs the OpenTUI
@@ -57,6 +57,10 @@ const mocks = vi.hoisted(() => {
           if (source[name] !== undefined) {
             dom[`data-${name}`] = String(source[name]);
           }
+        }
+        if (source['onMouseUp'] !== undefined) {
+          // The click-to-expand rows need their handler to receive events.
+          dom['onMouseUp'] = source['onMouseUp'];
         }
         if (source['ref'] !== undefined) {
           // The transcript's windowing hangs off the root element it is handed
@@ -896,6 +900,37 @@ describe('OpenTuiTranscriptView', () => {
       expanded.container.querySelector('markdown')?.getAttribute('content'),
     ).toContain('INSPECTING_THE_REPOSITORY');
     expect(expanded.container.textContent).toContain('ctrl+o to collapse');
+  });
+
+  it('expands a thought or tool card on left-click only, not on the right-click that pastes', () => {
+    const thought: LiveThinkingItem[] = [
+      {
+        kind: 'thinking',
+        id: 'th1',
+        text: 'BODY',
+        done: true,
+        durationMs: 12_000,
+      },
+    ];
+    const view = render(<OpenTuiTranscriptView items={thought} />);
+    const head = () => view.getByText(/Thought for 12s/);
+    fireEvent.mouseUp(head(), { button: 2 });
+    expect(view.container.querySelector('markdown')).toBeNull();
+    fireEvent.mouseUp(head(), { button: 0 });
+    expect(view.container.querySelector('markdown')).not.toBeNull();
+    view.unmount();
+
+    const tool = render(
+      <OpenTuiTranscriptView
+        items={[toolItem({ description: 'echo HI', done: true })]}
+        showToolCallDetails={false}
+      />,
+    );
+    const toolHead = () => tool.getByText(/click to expand/);
+    fireEvent.mouseUp(toolHead(), { button: 2 });
+    expect(tool.container.textContent).toContain('click to expand');
+    fireEvent.mouseUp(toolHead(), { button: 0 });
+    expect(tool.container.textContent).not.toContain('click to expand');
   });
 
   it('drops the click affordance from both hints when ui.mouseTracking is off (#172)', () => {

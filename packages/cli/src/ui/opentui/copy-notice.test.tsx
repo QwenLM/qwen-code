@@ -62,6 +62,17 @@ describe('CopyNoticeToast', () => {
     expect(screen.getByText(/Copied 5 chars/)).toBeTruthy();
   });
 
+  it('uses the singular for a one-character copy', () => {
+    render(
+      <CopyNoticeToast
+        notice={{ id: 1, text: '😀' }}
+        bottom={3}
+        onExpire={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('Copied 1 char')).toBeTruthy();
+  });
+
   it('expires after two seconds', () => {
     const onExpire = vi.fn();
     render(

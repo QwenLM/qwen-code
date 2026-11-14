@@ -139,6 +139,7 @@ export const MUST_TRANSLATE_KEYS = [
   'Standalone install detected. Please rerun the standalone installer to update:',
   'Jump to bottom (ctrl+End)',
   'Copied {{count}} chars',
+  'Copied 1 char',
   'Bind a GitHub pull request to this session',
   'Usage: /pr <number | url>',
   'No PRs bound to this session.',

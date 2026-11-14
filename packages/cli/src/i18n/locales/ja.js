@@ -2175,4 +2175,5 @@ export default {
   'Kept model as {{model}}': 'モデルは {{model}} のままです',
   'Jump to bottom (ctrl+End)': '一番下へ移動（Ctrl+End）',
   'Copied {{count}} chars': '{{count}} 文字をコピーしました',
+  'Copied 1 char': '1 文字をコピーしました',
 };

@@ -2932,4 +2932,5 @@ export default {
   'Kept model as {{model}}': 'Model mantingut com a {{model}}',
   'Jump to bottom (ctrl+End)': 'Ves a baix (Ctrl+Fi)',
   'Copied {{count}} chars': '{{count}} caràcters copiats',
+  'Copied 1 char': '1 caràcter copiat',
 };

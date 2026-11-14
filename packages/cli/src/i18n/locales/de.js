@@ -2411,4 +2411,5 @@ export default {
   'Kept model as {{model}}': 'Modell als {{model}} beibehalten',
   'Jump to bottom (ctrl+End)': 'Nach unten springen (Strg+Ende)',
   'Copied {{count}} chars': '{{count}} Zeichen kopiert',
+  'Copied 1 char': '1 Zeichen kopiert',
 };

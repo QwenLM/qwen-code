@@ -50,7 +50,7 @@ export function CopyNoticeToast({
     >
       <text
         fg={C.green}
-      >{` ${t('Copied {{count}} chars', { count: String(count) })} `}</text>
+      >{` ${count === 1 ? t('Copied 1 char') : t('Copied {{count}} chars', { count: String(count) })} `}</text>
     </box>
   );
 }

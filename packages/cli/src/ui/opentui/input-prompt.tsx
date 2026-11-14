@@ -62,7 +62,6 @@ import {
   cleanupOldClipboardImages,
   readClipboardText,
 } from '../utils/clipboardUtils.js';
-import { CLIPBOARD_BUSY_MESSAGE } from '../utils/native-clipboard.js';
 import path from 'node:path';
 import { copyFile, mkdir, stat, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -1209,13 +1208,8 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       };
       const result = operation(notify, () => draft.valid).catch(
         (error: unknown) => {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          // The addon's ownership race is transient; showing its raw message
-          // would read as a paste failure the user cannot act on.
-          if (draft.valid && !message.includes(CLIPBOARD_BUSY_MESSAGE)) {
-            onNotice?.(message);
-          }
+          if (draft.valid)
+            onNotice?.(error instanceof Error ? error.message : String(error));
           return { paths: [] };
         },
       );

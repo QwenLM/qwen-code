@@ -894,7 +894,9 @@ export async function readClipboardText(): Promise<string | null> {
       return converted.trim() ? converted : null;
     }
   }
-  return normalizeNativeClipboardText(await readTextViaNativeClipboard());
+  // A reachable tool already answered for this display; the addon would read
+  // the same selection, so do not spawn it for an empty clipboard.
+  return null;
 }
 
 /**

@@ -1,116 +1,128 @@
-# OpenTUI 選取複製、右鍵貼上與 scrollbar 顯示
+# OpenTUI 选取复制、右键操作与滚动条显示
 
 [English](2026-11-09-opentui-selection-clipboard.md) | [简体中文](2026-11-09-opentui-selection-clipboard.zh-CN.md)
 
-狀態：提案中
+状态：提案中
 日期：2026-11-09
 
-## 問題
+## 问题
 
-OpenTUI 的文字選取目前只會反白。放開滑鼠不會複製、右鍵沒有反應，而且原生
-scrollbar 一直佔用一欄。使用者期望的操作是：
+OpenTUI 的文字选取目前只会画出高亮。选取文字不会复制，右键没有任何作用，原生
+transcript 滚动条也一直占用一列。期望的交互是：
 
-- 完成任何 OpenTUI 區域（對話、footer、composer、dialog）的選取後自動複製；
-- 在畫面任一處按右鍵（沒有對話選取時），把剪貼簿貼進 composer；
-- 有對話選取時按右鍵，取消選取；
-- PageUp/PageDown 與 Ctrl+Home/Ctrl+End 可在對話中移動；
-- 對話不在尾部時顯示 **Jump to bottom** 提示；
-- 可隱藏對話 scrollbar 以換取一欄空間。
+- 完成 OpenTUI 选取后自动复制，不论选取属于哪个区域（transcript、footer、
+  composer、对话框）；
+- 在 shell 任意位置右键、且没有 transcript 选取时，把剪贴板贴到 composer；
+- 在 transcript 选取上右键会取消选取；
+- PageUp/PageDown 与 Ctrl+Home/Ctrl+End 可在 transcript 中移动；
+- transcript 不在底部时显示 **Jump to bottom** 提示；
+- 可以隐藏 transcript 滚动条，把那一列让给对话。
 
-Ink 已有自己的選取與右鍵選單；本次定義 OpenTUI 的行為，而不是複製 Ink
-的選單模型。
+Ink 已有自己的选取与右键菜单；本变更定义 OpenTUI 的行为，而不是照搬 Ink 的菜单
+模型。
 
-## 目標
+## 目标
 
-- 任何 OpenTUI 區域完成選取後都會複製到剪貼簿，選取維持反白。
-- 複製成功後在右下角短暫顯示 `Copied N chars` 確認訊息。
-- 在畫面任一處按右鍵：有對話選取時取消該選取。
-- 在畫面任一處按右鍵：沒有選取時執行 composer 的 Ctrl+V 剪貼簿路徑（先處理
-  圖片，再退回文字）。
-- PageUp/PageDown 以一個視窗頁捲動；Ctrl+Home/Ctrl+End 跳到兩端；離開底部
-  時顯示可跳至底部的提示。
-- 原生 OpenTUI 對話 scrollbar 預設隱藏；明確設定
-  `ui.showOpenTuiScrollbar: true` 才恢復 OpenTUI 原本的自動隱藏 bar。
-- 行為拆成小型模組與測試，不塞進 app shell。
+- 任意 OpenTUI 区域完成的选取都会复制到剪贴板，并保持高亮。
+- 复制成功后，右下角短暂显示 `Copied N chars` 确认；在对话框或确认画面之后的复制
+  不显示确认。
+- 在 shell 任意位置右键、且存在属于 transcript 的选取时，清除该选取。
+- 在 shell 任意位置右键、且没有选取时，执行 composer 的 Ctrl+V 剪贴板路径，包括
+  图片优先处理与文字后备。
+- PageUp/PageDown 每次滚动一个视口页；Ctrl+Home/Ctrl+End 跳到两端；不在底部时
+  显示跳到底部提示。
+- 原生 OpenTUI transcript 滚动条默认隐藏。显式设置
+  `ui.showOpenTuiScrollbar: true` 可恢复 OpenTUI 原本的自动隐藏滚动条。
+- 行为拆成带测试的小模块，而不是全部写在 app shell 里。
 
-## 非目標
+## 非目标
 
-- 不提供應用程式內右鍵選單；連結、程式碼區塊、Select All 等操作不在本次範圍。
-- 終端機原生 Shift+拖曳選取對應用程式不可見，應用程式不會自動複製它；該
-  情況下右鍵仍由終端機處理。
-- 已被虛擬化對話卸載的歷史無法複製。
-- 不改動 Ink 現有的選取與右鍵行為。
+- 不提供应用内上下文菜单。链接操作、代码块操作与全选不在本变更范围内。
+- 终端原生的 Shift+拖曳选取对应用不可见，因此应用不会自动复制它。应用仍会收到下
+  一次点击：Shift+拖曳之后的右键会贴到 composer。设置 `ui.mouseTracking: false`
+  可把右键菜单交还给终端。
+- 虚拟化 transcript 已卸载的历史无法复制。
+- Ink 既有的选取与右键行为不变。
 
-## 設計方案
+## 设计方案
 
-### 模組結構
+### 模块结构
 
-| 檔案                                       | 職責                                                                                                                      |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| `renderable-tree.ts`                       | `isRenderableWithin()`：把右鍵策略的選取範圍限定在對話區。                                                                |
-| `selection-auto-copy.ts`                   | `useSelectionAutoCopy()`：複製任何非空的 OpenTUI 選取並回報成功。                                                         |
-| `copy-notice.tsx`                          | 右下角短暫顯示的 `Copied N chars` 確認訊息，兩秒後消失。                                                                  |
-| `transcript-mouse.ts`                      | `handleTranscriptRightClick()`：純右鍵策略（取消選取或貼上）。                                                            |
-| `scrollbar-visibility.ts`                  | `openTuiScrollbarOptions()`：把設定映射成 `{ visible: false }` 或 `undefined`（交給 OpenTUI 自動隱藏）。                  |
-| `native-clipboard.ts`                      | 原生剪貼簿橋接：寫入與讀取都走 Node 子程序；只有子程序無法執行時，讀取才在目前程序使用 addon。含 Windows/macOS 文字讀取。 |
-| `jump-to-bottom-hint.tsx`                  | 既有的尾部判斷與浮動提示。                                                                                                |
-| `input-submission.ts` / `input-prompt.tsx` | Composer handle 新增 `pasteClipboard()`，執行既有 Ctrl+V 路徑。                                                           |
+| 文件                                       | 职责                                                                                                                          |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `renderable-tree.ts`                       | `isRenderableWithin()`：把 renderer 选取限定在 transcript 范围内。                                                            |
+| `selection-auto-copy.ts`                   | `useSelectionAutoCopy()`：复制任何非空的 OpenTUI 选取并回报成功。                                                             |
+| `copy-notice.tsx`                          | 右下角暂时显示的 `Copied N chars` 确认；两秒后消失。                                                                          |
+| `transcript-mouse.ts`                      | `handleTranscriptRightClick()`：纯右键策略（清除选取或贴上）。                                                                |
+| `scrollbar-visibility.ts`                  | `openTuiScrollbarOptions()`：把设置映射为 `{ visible: false }` 或 `undefined`（OpenTUI 自动隐藏）。                           |
+| `native-clipboard.ts`                      | 原生剪贴板桥接：写入与读取都在 Node 子进程执行；只有子进程无法运行时，读取才在进程内使用 addon。包含 Windows/macOS 文字读取。 |
+| `jump-to-bottom-hint.tsx`                  | 新增的底部判断与浮动提示。                                                                                                    |
+| `input-submission.ts` / `input-prompt.tsx` | composer handle 新增 `pasteClipboard()`，执行既有的 Ctrl+V 路径。                                                             |
 
-### 行為
+### 行为
 
-1. 滑鼠選取完成時，OpenTUI 發出 `selection` 事件。Hook 會複製任何非空的
-   選取文字，不檢查選取範圍：footer、composer、dialog 與其他區域都包含在
-   內。選取維持反白；成功後 app shell 在右下角顯示兩秒的
-   `Copied N chars` 訊息。jump hint 隱藏時訊息使用最底下那一列；hint 出現時
-   訊息往上移一列，讓底部提示永遠從底部開始堆疊，而不是固定空出一列。
-   剪貼簿寫入失敗時保持靜默。
-2. 只有在沒有 dialog、approval modal、tool confirmation 時，才攔截右鍵。處理
-   器同時掛在根 box 與對話 scrollbox 上；scrollbox 會停止事件冒泡，避免同一
-   次點擊處理兩遍。若有範圍內的選取，`handleTranscriptRightClick()` 會取消
-   它；否則呼叫 `composerHandle.current.pasteClipboard()`。對話項目的點擊
-   handler（thinking block、tool card）會檢查左鍵，避免對應的右鍵放開事件
-   在貼上後又切換卡片。
-3. `pasteClipboard()` 交給 composer 既有的 Ctrl+V handler：先圖片、再文字，
-   沿用貼上摺疊與提示。
+1. 鼠标选取完成时，OpenTUI 会发出 `selection`。hook 复制任何非空的选取文字，不限
+   transcript 范围：footer、composer、对话框与其他区域都包含在内。选取保持高亮；
+   成功时 app shell 在右下角显示两秒的 `Copied N chars` 提示。提示隐藏时使用跳到
+   底部提示的那一行，提示显示时则上移一行，让底部元素始终从底部往上堆叠，不会留下
+   空行。剪贴板写入失败时不显示任何内容；在对话框、审批弹窗、工具确认或补全列表打
+   开时复制也不显示：提示绝不会盖在弹窗上。
+2. 只有在没有对话框、审批弹窗或工具确认打开时，才拦截 shell 任意位置的右键按下。
+   处理函数挂在根 box 与 transcript scrollbox 上；scrollbox 会停止事件冒泡，所以其
+   中的一次点击只处理一次。若存在属于 transcript 且有非空文字的选取，
+   `handleTranscriptRightClick()` 会清除它。单纯的左键点击会让 OpenTUI 留下一个长
+   度为零的选取，其容器是被点击文字的父节点；这种选取不算数，所以下一次右键仍会贴
+   上。否则调用 `composerHandle.current.pasteClipboard()`。transcript 条目的点击处
+   理函数（思考块、工具卡片）会检查是否为左键，避免对应的右键放开在贴上的同时切换
+   卡片展开状态。
+3. `pasteClipboard()` 委托给 composer 既有的 Ctrl+V 处理函数：先处理剪贴板图片，
+   再处理文字，沿用相同的贴上折叠与提示。
 4. PageUp/PageDown 使用 `ScrollBoxRenderable.scrollBy(±1, 'viewport')`。
-   Ctrl+Home/Ctrl+End 使用 `scrollTo(0)` / `scrollTo(scrollHeight)`。前景
-   shell、dialog 或 confirmation 擁有輸入時忽略。
-5. Jump-to-bottom 提示訂閱 scrollbar 的 `change` 事件，並在每次 render 後
-   重新檢查（串流成長）。它會把顯示狀態回報給 shell，讓 copy toast 疊在
-   上方。dialog、confirmation、完成清單開啟時不掛載。
-6. 對話 scrollbox 收到
+   Ctrl+Home/Ctrl+End 使用 `scrollTo(0)` / `scrollTo(scrollHeight)`。这些按键来自
+   共用的 `PAGE_UP`、`PAGE_DOWN`、`SCROLL_HOME` 与 `SCROLL_END` 绑定，因此
+   Ctrl+PageUp/PageDown 也会滚动，重新绑定也会同时作用于两个 renderer。当前台
+   shell、对话框或确认画面拥有输入时会忽略这些按键。
+5. 跳到底部提示监听滚动条的 `change` 事件，并在每次渲染后重新检查，以涵盖流式输出
+   造成的内容增长。它会把自己的显示状态回报给 shell，让复制提示能堆叠在它上方。对
+   话框、确认画面或补全列表打开时不挂载它。
+6. transcript scrollbox 接收
    `scrollbarOptions={openTuiScrollbarOptions(settings.merged.ui?.showOpenTuiScrollbar)}`。
-   未設定／false 隱藏；true 時留 undefined，讓 OpenTUI 保持自己的自動隱藏
-   行為。
-7. Linux 寫入走共用 `copyToClipboard()`：
-   `wl-copy` → `xclip` → `xsel` → native `@teddyzhu/clipboard` addon →
-   OSC 52。原生寫入一律在 Node 子程序中執行，即使 addon 可在本程序載入：
-   clipboard-rs 在替換 X11 擁有者時會把
-   `Somebody else owns the clipboard now` 之類的診斷**印到 stdout**，而 TUI
-   的 stdout 就是 alternate screen，訊息會直接蓋在 composer 那一列。子程序的
-   stdout 是 pipe，不會碰到畫面。子程序在 `setClipboardText()` 後多存活
-   150ms，讓作業系統剪貼簿管理員完成接手；立即結束會讓下一次讀取拿到空字串。
-   讀取基於同樣理由也走子程序，只有無法啟動 Node 子程序時才在目前程序使用 addon。Node 路徑優先取
-   `QWEN_NODE_BINARY`（npm Bun handoff 設定）或 `NVM_BIN`，因為 snap Bun
-   的 PATH 可能沒有 nvm。右鍵貼上的讀取在沒有 `wl-paste`/`xclip` 時也走同一
-   addon fallback。讀取會重試 addon 暫時性的
-   `Somebody else owns the clipboard now` 佔用錯誤，並把這個字串從讀取結果與
-   composer 提示路徑中濾掉，避免它被貼上或顯示成文字。讀取 helper 會用
-   marker 框住 payload，native 印到 stdout 的診斷會被丟棄；超過上限的內容
-   會整筆放棄，不會貼上被截斷的字串。
+   未设置或为 false 时隐藏滚动条；为 true 时 `scrollbarOptions` 保持 undefined，
+   让 OpenTUI 使用自己的自动隐藏行为。
+7. Linux 剪贴板写入使用共用的 `copyToClipboard()` 分派：
+   `wl-copy` → `xclip` → `xsel` → 原生 `@teddyzhu/clipboard` addon → OSC 52。
+   即使 addon 能在进程内加载，原生写入也一律在 Node 子进程执行：clipboard-rs 在替
+   换 X11 拥有者时会把 `Somebody else owns the clipboard now` 之类的诊断打印到
+   stdout，而在进程内 stdout 就是 TUI 的 alternate screen，消息会直接出现在
+   composer 那一行。子进程的 stdout 是 pipe。子进程在 `setClipboardText()` 之后
+   多存活 150 ms，让操作系统的剪贴板管理器接手拥有权。没有剪贴板管理器接手时，X11
+   选取会随拥有者一起消失，因此写入成功后，桥接会再用一个子进程把剪贴板读回来；若
+   文字没有保留下来，复制会回报失败，`copyToClipboard()` 改走 OSC 52，而不是确认一
+   个已经消失的复制。读取基于同样的理由也在子进程执行，只有无法启动 Node 子进程时
+   （例如 PATH 上没有 Node）才在进程内使用 addon；子进程已执行但失败时不会退回。
+   Node 路径来自 `QWEN_NODE_BINARY`（由 npm Bun handoff 设置）或 `NVM_BIN`，因为
+   Bun 的 snap PATH 可能不包含 nvm。
+   右键贴上只有在没有安装 `wl-paste`/`xclip` 时，读取才使用同一个 addon 后备；可用
+   工具的回答（包括剪贴板为空）即为最终结果。读取会重试 addon 暂时性的
+   `Somebody else owns the clipboard now` 拥有权错误，并把这个字符串从读取结果中滤
+   掉，使它绝不会被当成文字贴上。读取 helper 用标记框住 payload，丢弃原生 stdout
+   诊断；第一个标记就是 helper 自己写的，所以本身含有该标记的剪贴板文字会完整保留。
+   超过上限的 payload 会整笔丢弃，而不是贴上被截断的内容。
 
-### 平台差異
+### 平台差异
 
-- **macOS**：寫入使用內建 `pbcopy`；`readClipboardText()` 現在會透過
-  `@teddyzhu/clipboard` 讀取文字，因此 OpenTUI 在 macOS 上也能右鍵貼上文字。
-  npm 套件已包含 arm64/x64 的 Bun、`libopentui.dylib` 與 clipboard addon。
-- **Windows**：寫入使用 `cmd /c chcp 65001 && clip`；文字與圖片讀取走 addon，
-  `win32-x64-msvc`、`win32-arm64-msvc` 都已宣告。OpenTUI 的 npm 封裝仍待補：
-  Bun 只有 `@oven/bun-windows-x64`（沒有 Windows ARM64），npm handoff 也還沒
-  列出 Windows 套件。
-- **非 Linux 文字讀取**會正規化並移除結尾換行，貼上時不會多出空白列。
+- **macOS**：写入使用内置的 `pbcopy`；`readClipboardText()` 现在通过
+  `@teddyzhu/clipboard` addon 读取文字，因此在 macOS 上运行 OpenTUI 时可以右键贴
+  上文字。npm 包已附带 arm64 与 x64 的 Bun、`libopentui.dylib` 资源与剪贴板
+  addon。
+- **Windows**：写入使用 `cmd /c chcp 65001 && clip`；文字与图片读取使用 addon，
+  并声明了 `win32-x64-msvc` 与 `win32-arm64-msvc`。OpenTUI 的 npm 打包仍待完成：
+  Bun 只发布 `@oven/bun-windows-x64`（没有 Windows ARM64），npm handoff 也还没有
+  列出 Windows 包。
+- **非 Linux 的文字读取**会经过规范化并去掉结尾换行，复制的一行贴上时不会多出空
+  白行。
 
-### 設定
+### 设置
 
 在 `settingsSchema.ts` 的 `ui` 下新增：
 
@@ -118,89 +130,94 @@ Ink 已有自己的選取與右鍵選單；本次定義 OpenTUI 的行為，而�
 "showOpenTuiScrollbar": false
 ```
 
-- 標籤：`Show Scrollbar (OpenTUI)`。
-- `requiresRestart: true`，讓 scrollbox 以新選項重建，避免移除 prop 後
-  visibility 仍停在舊值。
-- 預設 `false`，把多出的一欄還給對話。
+- 标签：`Show Scrollbar (OpenTUI)`。
+- `requiresRestart: true`，让 scrollbox 用新选项重建，而不是依赖移除的 prop 来重
+  置显示状态。
+- 默认 `false`，把多出的一列让给对话。
 
 ### i18n
 
-新的使用者可見字串是：
+新的面向用户字符串有：
 
-- 既有的 `Jump to bottom (ctrl+End)`，維持在 `MUST_TRANSLATE_KEYS` 與所有
-  內建 locale。
-- `Copied {{count}} chars`，同樣放進 `MUST_TRANSLATE_KEYS` 與每個 locale。
+- 新增的 `Jump to bottom (ctrl+End)` 提示 key，加入 `MUST_TRANSLATE_KEYS` 与所有
+  内置语言；
+- `Copied {{count}} chars` 及其单数形式 `Copied 1 char`，同样加入
+  `MUST_TRANSLATE_KEYS` 与每个语言。
 
-已移除的右鍵選單標籤會從同一批檔案刪除。
+## 影响文件
 
-## 影響檔案
-
-- `packages/cli/src/ui/opentui/renderable-tree.ts`（新）
-- `packages/cli/src/ui/opentui/selection-auto-copy.ts`（新）
-- `packages/cli/src/ui/opentui/copy-notice.tsx`（新）
-- `packages/cli/src/ui/opentui/transcript-mouse.ts`（新）
-- `packages/cli/src/ui/opentui/scrollbar-visibility.ts`（新）
-- `packages/cli/src/ui/utils/native-clipboard.ts`（新 Linux fallback）
-- `packages/cli/src/ui/utils/commandUtils.ts` / `clipboardUtils.ts`（fallback
-  整合）
-- `packages/cli/src/utils/npm-runtime.ts`（把 Node binary 傳給 Bun）
-- `packages/cli/src/ui/opentui/jump-to-bottom-hint.tsx`（既有）
-- `packages/cli/src/ui/opentui/transcript-view.tsx`（項目點擊的左鍵檢查）
+- `packages/cli/src/ui/opentui/renderable-tree.ts`（新增）
+- `packages/cli/src/ui/opentui/selection-auto-copy.ts`（新增）
+- `packages/cli/src/ui/opentui/copy-notice.tsx`（新增）
+- `packages/cli/src/ui/opentui/transcript-mouse.ts`（新增）
+- `packages/cli/src/ui/opentui/scrollbar-visibility.ts`（新增）
+- `packages/cli/src/ui/utils/native-clipboard.ts`（新增 Linux 后备）
+- `packages/cli/src/ui/utils/commandUtils.ts` / `clipboardUtils.ts`（后备整合）
+- `packages/cli/src/utils/npm-runtime.ts`（把 Node 可执行文件传给 Bun）
+- `packages/cli/src/ui/opentui/jump-to-bottom-hint.tsx`（新增）
+- `packages/cli/src/ui/opentui/transcript-view.tsx`（条目点击的左键判断）
 - `packages/cli/src/ui/opentui/input-submission.ts`
 - `packages/cli/src/ui/opentui/input-prompt.tsx`
 - `packages/cli/src/ui/opentui/opentui-app-shell.tsx`
 - `packages/cli/src/config/settingsSchema.ts`
-- `packages/cli/src/i18n/mustTranslateKeys.ts` 與九個 locale 檔
-- 新模組旁的測試與更新後的 app-shell 測試
+- `packages/cli/src/i18n/mustTranslateKeys.ts` 与九个语言文件
+- 新模块旁的新测试，以及更新的 app shell 测试
 
-## 關鍵決策
+## 关键决策
 
-- **右鍵是二選一。** 有選取＝取消；沒選取＝貼上。沒有選單，行為可預期。
-- **貼上涵蓋整個畫面，取消只限對話選取。** 處理器同時掛在根 box 與
-  scrollbox，composer、footer、狀態列都能右鍵貼上；只有對話區的選取會抑制
-  貼上，composer 自己的選取不影響。
-- **底部提示從底部堆疊。** jump hint 佔最底列；hint 隱藏時 copy toast 使用
-  同一列，hint 出現時 toast 往上移一列，不再固定預留兩列。
-- **所有 OpenTUI 選取都自動複製。** Hook 不檢查選取範圍，footer、composer、
-  dialog 與其他區域的選取也會複製；右鍵策略仍只處理對話區。
-- **重用 composer 的 Ctrl+V 路徑。** 剪貼簿可能是圖片、大型貼上或需要
-  placeholder 摺疊的文字；另寫一套貼上會逐漸偏離。
-- **scrollbar 預設隱藏、設定啟用。** 未設定或 false 傳
-  `{ visible: false }`；明確 true 才交給 OpenTUI 原本的可見性邏輯。
-- **設定需重啟。** scrollbox 選項是結構性的；重啟可避免關閉後再打開時 bar
-  仍隱藏。
+- **右键是双向开关。** 有选取代表“取消”，没有选取代表“贴上”。没有菜单，行为保持
+  可预期。
+- **贴上作用于整个 shell；清除只限 transcript。** 处理函数挂在根 box 与 scrollbox
+  上，所以 composer、footer 与状态区域都能贴上。只有 transcript 选取会抑制贴上；
+  composer 选取不会。
+- **右下角元素从底部堆叠。** 跳到底部提示占用最底行；提示隐藏时复制提示移入该行，
+  提示出现时上移一行，而不是固定保留两行。
+- **自动复制所有 OpenTUI 选取。** hook 不限 transcript 范围，所以 footer、
+  composer、对话框与其他区域的选取也会复制；右键策略仍只限 transcript。
+- **复用 composer 的 Ctrl+V 路径。** 剪贴板可能是图片、大段贴上或需要占位符折叠的
+  文字；另写一套贴上实现会逐渐分歧。
+- **默认隐藏滚动条，通过设置启用。** `undefined`（`showOpenTuiScrollbar` 未设置
+  或为 false）传入 `{ visible: false }`；显式为 true 时保留 OpenTUI 原本的显示逻
+  辑。
+- **需要重启的设置。** scrollbox 选项属于结构性设置；重启可避免设置重新打开后仍残
+  留隐藏的滚动条。
 
-## 風險與限制
+## 风险与限制
 
-- Linux 寫入優先 `wl-copy`／`xclip`／`xsel`，再來 native addon，最後 OSC
-  52。三者都沒有時，VTE 可能忽略 OSC 52 卻仍回報成功；最可靠仍是安裝
-  `wl-clipboard`。Native addon 的 Bun → Node 子程序需要可執行的 Node；snap
-  Bun 無法 spawn nvm Node（local OpenTUI 請用內附 Bun 1.4.4）。子程序寫入後
-  多存活 150ms，讓剪貼簿管理員接手；沒有這段停頓，緊接著的右鍵讀取常會拿到
-  空字串。
-- 自動複製涵蓋所有 OpenTUI 選取，包含 composer 與 dialog 文字；編輯時複製
-  是刻意行為，但可能覆寫剪貼簿。
-- 右鍵貼上依賴 `ui.mouseTracking`；關閉後滑鼠交還終端機。
-- scrollbar 設定需重啟，且只影響 OpenTUI。
+- Linux 剪贴板写入优先使用 `wl-copy`/`xclip`/`xsel`，其次是原生 addon，最后是
+  OSC 52。全部不可用时，即使写入回报成功，VTE 也可能忽略 OSC 52；安装
+  `wl-clipboard` 可获得最可靠的结果。原生 addon 的 Bun → Node 子进程路径需要 Node
+  可执行文件；snap 版 Bun 无法启动 nvm 的 Node（本地 OpenTUI 构建请使用附带的
+  Bun 1.4.4）。子进程写入后多存活 150 ms，让剪贴板管理器接手；没有这段停顿，紧接
+  着的右键读取常会读到空剪贴板。在没有剪贴板管理器的 X11 上，原生复制无法在子进程
+  结束后保留；读回检查会把它转为改走 OSC 52，而终端仍可能忽略 OSC 52。
+- 自动复制涵盖所有 OpenTUI 选取，包括 composer 与对话框文字；编辑时复制是刻意的
+  行为，但可能覆盖剪贴板。
+- 右键贴上依赖 `ui.mouseTracking`；关闭后鼠标交还给终端。
+- 滚动条设置需要重启，且只适用于 OpenTUI。
 
-## 驗證計畫
+## 验证计划
 
-- 單元測試：`isRenderableWithin`、任意區域選取自動複製／空白／失敗／解除
-  訂閱、copy toast 的數量與逾時、jump hint 的顯示狀態回報、右鍵取消與貼上、
-  非右鍵、scrollbar 選項映射、尾部判斷、提示顯示與點擊；native bridge 測試
-  涵蓋 in-process、Node 子程序、讀取正規化、佔用錯誤過濾、marker framing、
-  overflow 與失敗分支；`readClipboardText()` 測試涵蓋 darwin/win32 走 addon
-  與移除結尾空白。
-- App shell 測試：無選取右鍵呼叫 `pasteClipboard`；在 footer（scrollbox
-  外）右鍵也會貼上；有對話選取右鍵呼叫 `clearSelection` 且不貼上；
-  PageUp/PageDown 與 Ctrl+Home/End 仍通過。
-- 使用 Bundled Bun OpenTUI build 手動 E2E：選取對話／footer／composer／
-  dialog 文字並確認自動複製 + toast；右鍵貼上；右鍵取消；PageUp/PageDown；
-  Ctrl+Home/End；jump hint；預設隱藏 scrollbar；
-  `ui.showOpenTuiScrollbar: true` 重啟後顯示。
-- i18n must-translate 測試與相關 OpenTUI 測試。
+- 单元测试涵盖 `isRenderableWithin`、来自任意区域的选取自动复制／空文字／失败／取
+  消订阅、复制提示的字数与逾时、跳到底部提示的显示回调、右键清除或贴上与非右键按
+  钮、滚动条选项映射、滚动到底部的判断，以及提示的显示与点击；原生剪贴板桥接测试
+  涵盖进程内、Node 子进程、复制读回、读取规范化、拥有权错误过滤、标记框定、超出上
+  限与失败分支，helper 脚本测试则在 Node 子进程中针对假的 addon 实际执行复制／读取
+  脚本（往返、忙碌重试，以及无法启动的 Node 可执行文件）；`readClipboardText()`
+  测试涵盖 darwin/win32 通过 addon 读取、去掉结尾空白，以及可用工具回报剪贴板为空
+  后不再启动 addon。
+- app shell 测试：没有选取时右键调用 `pasteClipboard`；在 footer（scrollbox 之
+  外）右键也会贴上；有属于 transcript 的选取时调用 `clearSelection` 而不贴上；单
+  纯点击留下的零长度选取仍会贴上；PageUp/PageDown（包括 Ctrl+PageUp）与
+  Ctrl+Home/End 仍正常。composer 测试通过已挂载的 handle 贴上，transcript 测试钉
+  住右键放开不会展开思考块或工具卡片。
+- 使用附带 Bun 的 OpenTUI 构建进行手动 E2E：选取 transcript／footer／composer 文
+  字并确认自动复制与提示，对话框文字复制时不显示提示；右键贴上；右键取消选取；
+  PageUp/PageDown；Ctrl+Home/End；跳到底部提示；默认隐藏滚动条；重启后
+  `ui.showOpenTuiScrollbar: true`。
+- i18n 必须翻译测试与相关 OpenTUI 测试。
 
-## 待決問題
+## 待决问题
 
-- 若未來出現更多 OpenTUI 專屬選項，是否要移到 renderer 專屬子群組？等有
-  第二個選項再討論。
+- 如果出现更多 OpenTUI 专用选项，滚动条设置是否应放在 renderer 专属的子分组下？
+  出现第二个选项时再讨论。

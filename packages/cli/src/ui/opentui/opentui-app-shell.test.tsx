@@ -227,12 +227,12 @@ vi.mock('@opentui/react', () => ({
     on: () => {},
     off: () => {},
     getSelectionContainer: () =>
-      mocks.state.selectionText
+      mocks.state.selectionText !== null
         ? (mocks.state.selectionContainer ??
           document.querySelector('scrollbox'))
         : null,
     getSelection: () =>
-      mocks.state.selectionText
+      mocks.state.selectionText !== null
         ? {
             getSelectedText: () => mocks.state.selectionText,
             selectedRenderables: mocks.state.selectionRenderables ?? [
@@ -4784,6 +4784,10 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     const down = await pressKey({ name: 'pagedown' });
     expect(scrollBy).toHaveBeenLastCalledWith(1, 'viewport');
     expect(down.preventDefault).toHaveBeenCalledTimes(1);
+
+    // The shared PAGE_UP/PAGE_DOWN matchers also accept Ctrl.
+    await pressKey({ name: 'pageup', ctrl: true });
+    expect(scrollBy).toHaveBeenLastCalledWith(-1, 'viewport');
   });
 
   it('jumps to the top and bottom on Ctrl+Home and Ctrl+End', async () => {
@@ -4866,6 +4870,30 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     fireEvent.mouseDown(scrollbox, { button: 2 });
     expect(mocks.state.clearSelection).toHaveBeenCalledTimes(1);
     expect(pasteClipboard).not.toHaveBeenCalled();
+  });
+
+  it('pastes after a plain left-click leaves a zero-length transcript selection', async () => {
+    const pasteClipboard = vi.fn();
+    renderApp({
+      composerHandle: {
+        current: {
+          getText: () => '',
+          setText: () => {},
+          pasteClipboard,
+        },
+      },
+    });
+    await settle();
+    const scrollbox = document.querySelector('scrollbox')!;
+    // OpenTUI keeps the clicked text's container as the selection container
+    // after a click without a drag, but nothing is selected.
+    mocks.state.selectionText = '';
+    mocks.state.selectionContainer = scrollbox;
+    mocks.state.selectionRenderables = [];
+
+    fireEvent.mouseDown(scrollbox, { button: 2 });
+    expect(pasteClipboard).toHaveBeenCalledTimes(1);
+    expect(mocks.state.clearSelection).not.toHaveBeenCalled();
   });
 
   it('pastes when every selected renderable is outside the transcript', async () => {

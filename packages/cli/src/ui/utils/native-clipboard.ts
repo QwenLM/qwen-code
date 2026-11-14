@@ -40,7 +40,7 @@ export interface HelperResult {
 let modulePromise: Promise<NativeClipboardModule | null> | undefined;
 let addonEntry: string | null | undefined;
 
-const COPY_HELPER_SCRIPT = `
+export const COPY_HELPER_SCRIPT = `
 const mod = require(process.env.QWEN_CLIPBOARD_ADDON);
 const chunks = [];
 process.stdin.on('data', (chunk) => chunks.push(chunk));
@@ -59,7 +59,7 @@ process.stdin.on('end', () => {
 });
 `;
 
-const READ_HELPER_SCRIPT = `
+export const READ_HELPER_SCRIPT = `
 const mod = require(process.env.QWEN_CLIPBOARD_ADDON);
 const BUSY = ${JSON.stringify(CLIPBOARD_BUSY_MESSAGE)};
 const MARKER = ${JSON.stringify(CLIPBOARD_READ_MARKER)};
@@ -131,11 +131,13 @@ function resolveNodeBinary(): string {
   return 'node';
 }
 
-function runNodeHelper(
+/** Runs a helper script in a Node child. `entry` is the addon to load; tests
+ *  pass a fake one so no real clipboard is touched. */
+export function runNodeHelper(
   script: string,
   input: string | null,
+  entry: string | null = resolveAddonEntry(),
 ): Promise<HelperResult | null> {
-  const entry = resolveAddonEntry();
   if (!entry) return Promise.resolve(null);
 
   return new Promise((resolve) => {
@@ -186,7 +188,11 @@ function runNodeHelper(
     });
     child.on('error', (error) => {
       debugLogger.debug('Native clipboard helper failed to spawn:', error);
-      finish(null);
+      // It never ran, so report no child and let a read fall back in process.
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(null);
     });
     child.on('close', (code) => finish(code));
 
@@ -209,9 +215,11 @@ function normalizeClipboardText(text: string): string | null {
   return normalized || null;
 }
 
-/** Keep only what the helper wrote after its marker, discarding native noise. */
+/** Keep only what the helper wrote after its marker, discarding native noise.
+ *  The first marker is the helper's, so clipboard text that contains the
+ *  marker itself is kept whole. */
 function extractReadPayload(stdout: string): string {
-  const markerIndex = stdout.lastIndexOf(CLIPBOARD_READ_MARKER);
+  const markerIndex = stdout.indexOf(CLIPBOARD_READ_MARKER);
   return markerIndex >= 0
     ? stdout.slice(markerIndex + CLIPBOARD_READ_MARKER.length)
     : stdout;
@@ -247,13 +255,23 @@ export function createNativeClipboardBridge(
       // screen, so the message lands on the composer row. The helper's stdout
       // is a pipe, which keeps the native output out of the renderer.
       const result = await deps.runHelper(COPY_HELPER_SCRIPT, text);
-      if (result?.code === 0) return true;
-      if (result) {
-        debugLogger.debug(
-          `Native clipboard helper exited ${result.code}: ${result.stderr}`,
-        );
+      if (result?.code !== 0) {
+        if (result) {
+          debugLogger.debug(
+            `Native clipboard helper exited ${result.code}: ${result.stderr}`,
+          );
+        }
+        return false;
       }
-      return false;
+      // An X11 selection dies with its owner unless a clipboard manager takes
+      // it, and the helper exits shortly after writing. Read it back so a lost
+      // copy reports failure and the caller falls through to OSC 52.
+      const check = await deps.runHelper(READ_HELPER_SCRIPT, null);
+      if (!check || check.code !== 0 || check.overflow) return true;
+      return (
+        normalizeClipboardText(extractReadPayload(check.stdout)) ===
+        normalizeClipboardText(text)
+      );
     },
 
     async readText(): Promise<string | null> {

@@ -768,8 +768,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       const selectedInTranscript = (selection?.selectedRenderables ?? []).some(
         (node) => transcript && isRenderableWithin(node, transcript),
       );
+      // A click without a drag leaves a zero-length selection whose container
+      // is the clicked text's parent; only real selected text counts.
+      const hasText = Boolean(selection?.getSelectedText().trim());
       const hasSelection = Boolean(
-        transcript &&
+        hasText &&
+          transcript &&
           (selectedInTranscript ||
             (selectionContainer &&
               isRenderableWithin(selectionContainer, transcript))),
@@ -908,9 +912,16 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       return;
     }
     const { name, shift, ctrl } = toOriginalKey(key);
-    const pageDelta =
-      !ctrl && name === 'pageup' ? -1 : !ctrl && name === 'pagedown' ? 1 : null;
-    const edge = ctrl && (name === 'home' || name === 'end') ? name : null;
+    const pageDelta = matchesCommand(Command.PAGE_UP, key)
+      ? -1
+      : matchesCommand(Command.PAGE_DOWN, key)
+        ? 1
+        : null;
+    const edge = matchesCommand(Command.SCROLL_HOME, key)
+      ? 'home'
+      : matchesCommand(Command.SCROLL_END, key)
+        ? 'end'
+        : null;
     if (
       key.eventType !== 'release' &&
       !dialog &&

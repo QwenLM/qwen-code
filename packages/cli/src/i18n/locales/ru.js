@@ -2384,4 +2384,5 @@ export default {
   'Kept model as {{model}}': 'Оставлена модель {{model}}',
   'Jump to bottom (ctrl+End)': 'Перейти вниз (Ctrl+End)',
   'Copied {{count}} chars': 'Скопировано символов: {{count}}',
+  'Copied 1 char': 'Скопировано символов: 1',
 };
