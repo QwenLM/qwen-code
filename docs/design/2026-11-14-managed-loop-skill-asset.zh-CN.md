@@ -1,0 +1,127 @@
+# Managed `/loop` skill 资产
+
+[English](2026-11-14-managed-loop-skill-asset.md) | [简体中文](2026-11-14-managed-loop-skill-asset.zh-CN.md)
+
+状态：提案。解决[固定间隔调度设计](2026-11-10-managed-loop-schedule.md)的开放问题 4，以及[自定步调唤醒设计](2026-11-10-managed-loop-wakeup.md)的共享 skill 触点。两个工具切片均已合入（#16835 `70a487be84`、#17088 `f3dc48c79e`，评审跟进 #17197 `0ffaea08ba` 与 #17235 `9d390e23af`）；两者共同延后的 skill 变体仍未实现。
+
+## 问题陈述
+
+Managed Session 已经能运行 `/loop` 工具面：Hosted profile 以 Managed 描述声明 `cron_create` / `cron_list` / `cron_delete` / `loop_wakeup`，内部 automation 路由创建 H6 定义，scanner 触发它们。但模型没有驱动该工具面的 `/loop` skill。bundled `loop` skill（`packages/core/src/skills/bundled/loop/SKILL.md`）携带**本地**语义——`durable` 默认 session-only、recurring 任务创建后 7 天自动过期——这对 Managed 调度是错误的（恒 durable、运行至取消、无过期）。今天 Hosted skill 目录里根本没有 loop skill（`2026-11-10-managed-loop-wakeup.md:31-32`）。
+
+调度设计（决策 8）说 managed 变体"以 skill 资产经现有 Session Skills 发布承载，`allowedTools` 与 bundled skill 一致；其可见性随工具门控，镜像本地 `BundledSkillLoader` 规则"。勘察表明这句话无法照字面实现；本设计解决它实际如何承载。
+
+## 现状（在 `970e1d6ea2` 核实）
+
+skill 发布有两个生产者、一个消费者；Harness 只是消费者。
+
+- **路径 A — 创建导入。** daemon 枚举工作区技能（含 bundled）（`workspace-skills-status.ts:559`、`skill-manager.ts:321,479-480`）；快照路由（`routes/workspace-skills.ts:1025-1064`）把每项映射为 `{name, description, body, model_invocable?, user_invocable?}`；WebShell 在创建时导入快照（`WorkspaceBindingCreator.tsx:861-905`）；Java 准入并合并（`ManagedAgentService.java:532,560-562,591-594`、`AgentSessionAdmissions.java:236-264`），把目录冻结进 `ma_request_receipt`（`JdbcManagedSessionSkills.java:190-202`）；派发时发布为 `managed-agent-skills` 资源（`QwenHostedHarnessConnector.java:2341-2356`）。
+- **路径 B — 存储的 AgentDefinition skills。** pinned definition 的 `skills` 数组（`QwenHostedHarnessConnector.java:2295-2337`）。内置 `qwen-code` agent 无存储行、不携带任何 skill（`AgentSessionPolicies.java:185-196`）。
+- **消费者。** `HostedSkillCatalog`（`hosted-skill-catalog.ts`）解析资源字节；effective 目录为 `sessionSkillsRef ?? agentDefinition.skillsRef`（`hosted-harness-session.ts:6354-6355`）。WebShell 目录读取对 READ profile 返空（`ManagedSkillCatalogService.java:25-27`）。
+
+四个事实约束设计：
+
+1. **wire 格式没有 `allowedTools`。** `SKILL_FIELDS` 为 `{name, description, body, base_directory, model_invocable, user_invocable}`（`AgentDefinitionExtensions.java:26`）；消费端接受同样字段外加 `asset_directory`（`hosted-skill-catalog.ts:86-160`）。读 body 时 frontmatter 即被剥离（`skill-manager.ts:742-749`）。本地 `BundledSkillLoader` 门按 frontmatter 的 `allowedTools` 判定（`BundledSkillLoader.ts:55-66`），且只管交互式 slash 命令可见性——无法搬到 managed wire 上。
+2. **今天 skill 侧没有任何门。** skill 准入既不咨询 automation 设置、loop env 门，也不咨询 profile（catalog 目录零 `cron` 命中）。唯一的 profile 敏感性是 READ profile 返空目录。
+3. **目录创建即冻结。** receipt 按 digest 寻址且不可变；load 拒绝变更或省略的 ref（`hosted-harness-session.ts:6342-6354`）。变体无法热替换进存活 Session；其形态在创建时刻固定。
+4. **无任何 managed skill 变体先例。** 任何地方都没有 managed 专属 skill body，也没有其他 bundled skill 的 managed 变体可作模板。最接近的先例是按 profile 组合工具描述（`hosted-workspace-tool-turn.ts:920-981,2716-2742`），但它覆盖工具，不覆盖 skill。
+
+变体必须在其间降级的 profile 形状（`WorkspaceToolProfiles.java`、`hosted-workspace-tool-turn.ts:2488-2513`）：
+
+| Profile                        | `cron_create` | `cron_list`/`cron_delete` | `loop_wakeup` |
+| ------------------------------ | ------------- | ------------------------- | ------------- |
+| `hosted-workspace-shell/3`     | —             | ✓                         | ✓             |
+| `hosted-workspace-files/4`     | ✓             | ✓                         | —             |
+| `hosted-workspace-team-lead/2` | ✓             | ✓                         | —             |
+| `hosted-workspace-shell/4`     | ✓             | ✓                         | ✓             |
+| `hosted-workspace-read/1`      | —             | —                         | —             |
+
+工具背后有两个独立部署门：automation 设置 `qwen.managed-agent.automation.enabled`（Java 侧，门控 `cron_create` 与 scanner，`ManagedAutomationService.java:810`）与 loop env 契约 `QWEN_MANAGED_AGENT_LOOP_ENABLED`（Harness 进程 env，门控 wakeup arming，`hosted-loop-session.ts:57-63,354`）。两者都是**操作门，而非声明门**：工具声明纯按 profile 驱动（`declaresCronCreate` / `declaresLoopTool` / `declaresCronTools`，`hosted-workspace-tool-turn.ts:2488-2513`，不咨询任何门），门在运行时以类型化错误拒绝调用，但保留声明。loop 门在准入时也**对 Java 不可见**。
+
+## 目标
+
+- 发布一个 Managed `/loop` skill 变体，其 body 教授与 bundled skill 相同的解析、interval-to-cron 表与子命令，但用 Managed durable/expiry 措辞（恒 durable、运行至取消、无 7 天过期）。
+- 变体可见性随 Session profile 声明的工具门控，使 body 绝不把模型引向准入链拒绝的工具。
+- 在四个携带 creator 的 profile 与 READ profile 上正确降级，且只有一个工具切片的门启用时仍正确。
+- 共享 skill 内容保持单一来源，使本地与 managed body 不会静默漂移。
+
+## 非目标
+
+- 不改工具面、scanner、journal schema 或触发管线（均已合入）。
+- 不新增 skill wire 字段；`allowedTools` 仅作源资产属性。
+- 不向存活 Session 热替换目录（receipt 不可变）。
+- 无 Web Shell 调度 UI；除变体出现在目录外不改创建导入 UX。
+- 真实 `/loop` 模型回合 E2E 仍是独立验证工作。
+
+## 提议方案
+
+在**创建准入时服务端注入** managed loop 变体，按 Session 的 tool profile 选择，注入到被冻结与发布的同一合并目录。这是唯一知道 profile、并写入 Harness 资源与 WebShell 目录都读取的不可变快照的点。
+
+### 设计决策
+
+**D1 — 生产者：Java 创建准入。** 在 `AgentSessionAdmissions` 中，caller/definition skills 合并之后、`creationSkills.save` 之前，当 profile 声明至少一个 loop creator（`cron_create` 或 `loop_wakeup`）时，加入 managed loop 变体。注入**纯按 profile 驱动**：部署门不作为条件，因为它们是保留工具声明的操作门（见现状），skill 镜像声明。变体是服务端贡献，不是 caller skill：即使 caller 提供空 `skills` 数组（内置 `qwen-code` 情形）也必须加入，因此 `if (!skills.isEmpty())` 的 save 守卫放宽为"effective 目录非空即 save"。变体在请求 digest 计算**之后**注入，不扰动幂等；由于 profile 是同一创建请求的确定性输入，重放注入相同变体、复现相同快照。
+
+**D2 — 可见性随工具门控，按 profile。** 变体 body 由章节块组合，使其只描述 profile 声明的 creator，镜像工具描述原则"声明绝不点名 Session 未声明的工具"（`hosted-workspace-tool-turn.ts:920-931`）。具体：
+
+- 固定间隔 recurring 章节（调用 `cron_create`）仅在 profile 声明 `cron_create` 时包含（files/4、team-lead/2、shell/4）。
+- 自定步调 / wakeup 章节（调用 `loop_wakeup`）仅在 profile 声明 `loop_wakeup` 时包含（shell/3、shell/4）。
+- `cron_list` / `cron_delete` 与 `list` / `clear` 子命令在声明并集处恒描述（全部四个携带 creator 的 profile）。
+- READ profile 与任何不声明 loop creator 的 profile 不得到变体（空贡献），与现有 READ 空目录规则一致。
+
+两个部署门都不改变 body。变体在 profile 声明 `loop_wakeup` 处描述 wakeup 路径、在声明 `cron_create` 处描述固定间隔路径，与门无关；门在运行时以类型化错误拒绝 create/arming 调用，正如不变的工具声明已然允许。这使 skill 与工具面一致，而非试图从控制面预测运行时操作门（其中之一 loop env 门甚至对 Java 不可见）。
+
+**D3 — body 来源与单一来源。** 共享 skill 内容住在 bundled `SKILL.md`。managed 变体表达为一组小的、有文档的措辞替换（durable/expiry 句）加 profile 条件章节块。managed body 资产提交在 `packages/core/src/managed-runtime/contracts/` 下（contracts 模块已把该目录拷贝到 Java classpath，`contracts/pom.xml:53-54`），故 Java 以 classpath 资源读取，无需新构建机制。一个 TypeScript 一致性测试读取 bundled `SKILL.md`，应用有文档的替换与章节选择，对每个 profile 形状断言与提交的 managed 资产逐字节相等——任一方向漂移都使测试变红（"从生产者钉消费者"模式）。资产是 Java 发布的单一提交产物；测试把它绑回 bundled 源。
+
+**D4 — 冻结、重放安全、容量受限。** 注入的变体搭乘现有不可变 receipt 与 digest；无新资源 kind、无 schema 版本 bump。loop body 约 7 KiB，远低于 512 KiB 单 body / 2 MiB 目录上限（`AgentDefinitionExtensions.java:42-81`）。注入对 profile 确定，保持幂等键下的重放。
+
+**D5 — 命名。** 变体保持 skill 名 `loop`，使 `/loop` 调用与 `allowedTools` 源属性不变；只有 body 措辞与 profile 条件章节不同。同一次创建中导入本地 `loop` skill 的 caller 会因重名冲突——准入已拒绝重名（`AgentDefinitionExtensions.java` 的 names 集合）；设计视服务端变体为权威，并文档化 managed-bound 创建不应同时导入本地 `loop` body。
+
+### 涉及文件
+
+- `packages/core/src/managed-runtime/contracts/` — managed loop body 资产（共享内容 + profile 条件块），拷贝到 Java。
+- `packages/core/src/skills/bundled/loop/` — 把 managed 资产绑回 `SKILL.md` 的一致性测试（不改 `SKILL.md` 本身）。
+- `packages/managed-agent-server/persistence/.../AgentSessionAdmissions.java` — 按 profile 注入变体；放宽 save 守卫。
+- `packages/managed-agent-server/persistence/.../JdbcManagedSessionSkills.java` — 读 classpath 资产；组合按 profile 的 body（或一个小 helper）。
+- `packages/managed-agent-server/contracts/.../WorkspaceToolProfiles.java` — loop-creator 谓词 helper（若尚不存在）。
+- 验证：每个 profile 形状的准入测试、空 caller-skills 情形、门无关性、重放确定性、重名冲突、READ/无 creator 的空贡献。
+
+## 约束
+
+- wire 格式承载不了 `allowedTools`；门控必须住在生产者。
+- 目录创建后不可变；降级在创建时固定。
+- loop env 门是 Harness 进程级、对 Java 不可见；skill 跟随 profile 的工具声明，而非门。
+- 核心基础设施（控制面准入、contracts、core 资产）——属 maintainer 领域，遵循 `AGENTS.md` 的两级门。
+
+## 风险
+
+- **body 组合复杂度。** 在 Java 中按 profile 组合 markdown 章节比子句级工具描述更脆弱。缓解：一致性测试把每个 profile 的组合 body 逐字节钉回 bundled 源；删掉某 creator 章节的变异使其变红。
+- **单一来源漂移。** 两个提交 body（本地 + managed）可能分叉。缓解：D3 的一致性测试从 bundled 源派生 managed 资产。
+- **幂等交互。** 在请求 digest 之后注入不得改变重放结果。缓解：重放测试断言相同快照。
+- **与 caller 导入的本地 `loop` 重名冲突**。缓解：D5 文档化服务端变体为权威；测试钉住冲突。
+
+## 验证计划
+
+- 准入矩阵：shell/3、files/4、team-lead/2、shell/4 各收到一个变体，其 body 恰好点名该 profile 声明的 creator；READ 与无 creator profile 不得到。
+- 空 caller-skills：无 caller skills 的内置 `qwen-code` 创建仍收到变体（放宽的 save 守卫）。
+- 门无关性：任一部署门关闭时，同一 profile 注入的 body 不变（门是操作门）；create 或 arming 调用仍得到类型化运行时拒绝，声明保留。
+- 重放：重驱动的创建注入相同变体、复现相同 receipt digest。
+- 一致性：TS 测试断言每个 profile 的 managed body 等于 bundled 源在有文档替换下的结果；删章节或漂移措辞的变异使其变红。
+- Skill E2E（延后到独立 E2E 工作）：`/loop 5m …` 创建定义并立即跑 prompt；`/loop list` 显示；`/loop clear` 退役。
+
+## 验收标准
+
+- 携带 creator 的 profile 上的 Managed Session，其发布目录中有 `loop` skill，body 用 Managed durable/expiry 措辞且只点名该 profile 声明的 creator。
+- 无 caller skills 的内置 `qwen-code` agent 收到变体。
+- READ profile 与无 creator profile 不得到 loop skill。
+- 重放的创建产生相同目录快照。
+- managed body 无法在不使一致性测试变红的情况下偏离 bundled 源。
+- 无新 wire 字段、资源 kind 或 journal 变更。
+
+## 开放问题
+
+设计期间已解决（留档）：
+
+- **组合位置。** 在 Java 准入时组合按 profile 的 body（D2/D3），保持单一提交资产并由一致性测试绑定，而非构建时为每个 profile 形状预生成一个 body。已定：Java 组合。
+- **门关闭粒度。** 部署门是保留工具声明的操作门（`hosted-workspace-tool-turn.ts:2488-2513` 不咨询门），故 body 按 profile 驱动、与门无关；门在运行时拒绝调用。已定：门不影响 body。
+- **与 caller 导入的本地 `loop` 共存。** 拒绝重名（当前准入行为）并文档化 managed-bound 创建不应同时导入本地 `loop` body，而非静默覆盖 caller 意图。已定：拒绝 + 文档化。
+
+实现阶段无遗留开放问题。
