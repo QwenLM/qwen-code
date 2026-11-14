@@ -96,7 +96,7 @@ public final class AgentDefinitionCompiler {
                     || !(entry.get("profile") instanceof String profile)) {
                 throw unsupported("tools");
             } else {
-                if (WorkspaceToolProfiles.INTERNAL_TEAM_LEAD.equals(profile)
+                if (WorkspaceToolProfiles.isInternalTeamLead(profile)
                         || profile.startsWith("hosted-workspace-shell/") && !WorkspaceToolProfiles.isPublicShell(profile)
                         || !toolProfiles.contains(profile)) {
                     throw unsupported("tools");

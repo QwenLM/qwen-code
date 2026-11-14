@@ -624,7 +624,7 @@ class HostedHarnessClientTest {
     @org.junit.jupiter.params.provider.ValueSource(strings = {"effects", "prepare_resources", "settle_resources"})
     void lifecycleV2RequiresExactCapabilityAndReceiptIdentity(String phase) {
         capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
-                "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,\"lifecycleV2Profiles\":[\"hosted-workspace-shell/1\",\"hosted-workspace-shell/3\"],"));
+                "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,\"lifecycleV2Profiles\":[\"hosted-workspace-shell/1\",\"hosted-workspace-shell/3\",\"hosted-workspace-shell/4\"],"));
         createSessionRoute();
         AtomicInteger calls = new AtomicInteger();
         AtomicBoolean wrongPhase = new AtomicBoolean();
@@ -648,6 +648,11 @@ class HostedHarnessClientTest {
             var shell3 = new java.util.LinkedHashMap<>(request);
             shell3.put("toolProfile", "hosted-workspace-shell/3");
             assertEquals("close-2", client.settleLifecycle(session, shell3).get("operationId"));
+            // The fixed-interval revision shell/4 settles on the same arm; a
+            // dropped allowlist entry would refuse it before the mutation sends.
+            var shell4 = new java.util.LinkedHashMap<>(request);
+            shell4.put("toolProfile", "hosted-workspace-shell/4");
+            assertEquals("close-2", client.settleLifecycle(session, shell4).get("operationId"));
             wrongPhase.set(true);
             // The Harness answered 200 with a mismatched receipt: a
             // post-answer failure, not a pre-send protocol refusal.
@@ -657,7 +662,7 @@ class HostedHarnessClientTest {
             assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
             unsupported.put("protocolVersion", 3);
             assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
-            assertEquals(3, calls.get());
+            assertEquals(4, calls.get());
         }
     }
 
