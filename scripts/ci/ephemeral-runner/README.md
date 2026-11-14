@@ -81,6 +81,63 @@ so a dependency bump fails that test rather than silently leaving a revision to
 be downloaded inside a job. The final layer asserts the font baseline, ffmpeg and
 a launchable Chromium, and fails the build if any of them is missing.
 
+## Interpreter archives in the image
+
+The image also carries the two archives the standalone runtime regression runs
+under: the pinned Node tarball and the pinned Bun tarball. This is the same
+empty-cache problem as the browsers, but its failure mode is worse than a slow
+job.
+
+`Configure persistent standalone runtime cache (self-hosted)` in `ci.yml` points
+`QWEN_STANDALONE_RUNTIME_CACHE` at `${HOME}/.cache/qwen-code/standalone-runtimes`.
+On a persistent runner that is a host-wide directory, so each archive is
+downloaded once per host. Inside a disposable container the same path is in the
+container's own filesystem: on hz4 both archives sit under the runner user's home
+on the host while the container's directory does not exist at all. Nothing is
+ever reused, so every job downloads both.
+
+When that download fails, no test fails. Each archive gets three attempts at
+300 s each and then rethrows, the standalone step exits 1, and that becomes the
+side lane's verdict — after every workspace suite and the whole scripts suite
+have already passed. Job
+[131062149608](https://github.com/QwenLM/qwen-code/actions/runs/43168498988/job/131062149608)
+reads exactly that: both archives were downloaded — `runtime archive cached:` is
+logged after the fetch writes the file back, not on a hit (a hit logs
+`runtime archive reused from cache:`) — and then Bun timed out three times against
+`registry.npmjs.org`, so the lane reported `Side lane exited with 1` under 2786
+passing script tests. That is roughly 110 MB of downloads per job with nothing
+reused. The unit lane's RPC retry cannot help, because the failure is not inside a
+suite.
+
+The archives are verified during the build against the published digests the
+script already checks: Node's `SHASUMS256.txt` entry and Bun's npm
+`dist.integrity`, per architecture. A mirror serving different bytes fails the
+build rather than a job. `NODE_RUNTIME_MIRROR` and `BUN_RUNTIME_MIRROR` override
+the two sources for a host that reaches an internal mirror faster;
+`NODE_RUNTIME_VERSION` and `BUN_RUNTIME_VERSION` must stay equal to the pins in
+`scripts/lib/standalone-runtime-pins.js`, which
+`scripts/tests/runtime-archive-cache.test.js` enforces along with the digests.
+
+The seed is not the cache. `QWEN_CI_BAKED_RUNTIME_CACHE` names a root-owned,
+world-readable directory, while the cache has to be writable: reusing an archive
+refreshes its mtime and a weekly sweep removes what no run has used for a week,
+and both are wrapped in a catch, so pointing the cache at a read-only directory
+would disable them silently. The entrypoint therefore copies the archives into
+the job's own cache directory before the runner starts, skipping any name already
+present. A copy that fails only logs: the fetch falls back to downloading exactly
+as before.
+
+About 110 MB of archives for the two interpreters on one architecture — measured
+from the cached files on hz4 (57 MB Node, 53 MB Bun), against the 2 GB the
+browsers already cost.
+
+The two archives do not share a suffix: Node's is `.tar.gz` and Bun's is `.tgz`.
+Anything that selects them — the build's count, the entrypoint's copy loop — has
+to name both, because `*.tgz` matches only Bun. The suite therefore extracts
+those selectors and runs them against the real filenames instead of asserting
+that a pattern appears in the file: a loop that visits one archive exits 0
+exactly like one that visits two, so reading the text cannot tell them apart.
+
 For a real deployment, publish the image to a registry and configure its
 immutable `repository@sha256:...` digest. A local `sha256:...` image ID may be
 used for a trial. Runner and base versions need routine security updates.
@@ -296,9 +353,19 @@ sudo systemctl stop qwen-ephemeral-runner.service
 The existing CI routes untrusted fork PR build, Linux unit tests, lint and no-AK
 integration jobs directly to the formal ARM64 disposable label set. No
 repository-variable switch, configuration relay or manual smoke workflow is
-needed. Trusted and same-repository PRs retain their existing routes. GitHub
-queues excess jobs; the manager replaces completed runners within ten fixed
-slots, without demand-based autoscaling.
+needed. Under that first stage, trusted and same-repository PRs retained their
+existing routes. GitHub queues excess jobs; the manager replaces completed
+runners within ten fixed slots, without demand-based autoscaling.
+
+Update 2026-11-11: two more pool consumers, both credential-free PR jobs that
+run PR code with a read-only token. Web-shell Visuals capture uses this pool for
+every PR, and the Managed Host bundle build uses it on `pull_request` events
+only — its post-merge push and manual runs, and the credential-bearing Visuals
+publisher, stay GitHub-hosted. Size the pool for these lanes as well: they now
+arrive on same-repository PRs, not only untrusted forks. Their rollback lever is
+`MAINTAINER_ECS_RUNNER_DISABLED=true`, which the `ci.yml` `pr_test_runner`
+selector below does not control. Details:
+[disposable container runners design](../../../docs/design/2026-11-07-ephemeral-container-runners.md).
 
 Repository variables are unavailable in fork-triggered CI. Existing global
 overrides still work in contexts where their values are available, but cannot
@@ -309,3 +376,8 @@ already-selected work and trigger fresh CI using the updated workflow; reruns
 of saved older workflows retain their old routing. Jobs do not migrate
 automatically. Dedicated-host/network and runner-access-policy limitations
 remain tracked in #16514.
+
+The same fork limit applies to the two web-shell lanes: a fork run cannot read
+`MAINTAINER_ECS_RUNNER_DISABLED`, so its escape is editing that lane's `runs-on`
+selector on `main` and triggering a fresh event. The switch does reach their
+same-repository runs.

@@ -10,7 +10,6 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
@@ -61,19 +60,16 @@ import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
-import java.time.Clock;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -82,7 +78,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.UUID;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
 
@@ -103,13 +98,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private static final Pattern TURN_CURSOR = Pattern.compile(
             "^(0|[1-9][0-9]{0,18}):([A-Za-z0-9_-]{1,64})$");
     private static final int TURN_ID_MAX_LENGTH = 64;
-    /**
-     * How long a rename waits for a delivery the background coordinator
-     * claimed first. The coordinator scans {@code RENAME} rows a request has
-     * just admitted, so its claim can beat this request's own without any
-     * concurrent caller.
-     */
-    private static final java.time.Duration RENAME_CLAIM_SETTLE = java.time.Duration.ofSeconds(2);
     // Catch-up reads of a stream use pages of this size.
     static final int STREAM_PAGE = 100;
     // "text" is the spelling that clients used before the contract.
@@ -132,14 +120,29 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         this.extensionPackages = value;
     }
     private org.springframework.beans.factory.ObjectProvider<SessionRecoveryService> recoveryServices;
-    private java.util.function.Supplier<java.time.Duration> renameLeaseDuration = () -> java.time.Duration.ofSeconds(60);
-    private Clock renameClock = Clock.systemUTC();
     private BooleanSupplier sideQueriesEnabled = () -> false;
+    private BooleanSupplier terminalEnabled = () -> false;
+    private java.util.function.Predicate<SessionRecord> terminalPlacementCapable = session -> false;
 
     @Autowired
     void configureSideQueries(ManagedAgentSettings properties) {
         sideQueriesEnabled = () -> properties.isSideQueriesEnabled() && properties.getSessionStore().isEnabled()
                 && harness.supportsSideQueries();
+    }
+
+    @Autowired
+    void configureTerminal(ManagedAgentSettings properties) {
+        terminalEnabled = () -> properties.getRuntimeBroker().isWebTerminal();
+    }
+
+    @Autowired(required = false)
+    void configureTerminalPlacement(
+            org.springframework.beans.factory.ObjectProvider<
+                    com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeResolver> resolvers) {
+        var resolver = resolvers.getIfAvailable();
+        if (resolver != null) {
+            terminalPlacementCapable = resolver::terminalCapable;
+        }
     }
 
     private boolean supportsSideQueries(SessionRecord session) {
@@ -148,10 +151,21 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 && sideQueriesEnabled.getAsBoolean();
     }
 
+    private BooleanSupplier clientFilesEnabled = () -> false;
+
     @Autowired
-    void configureRenameDelivery(ManagedAgentSettings properties, @Qualifier("managedAgentClock") Clock clock) {
-        renameLeaseDuration = properties.getDispatch()::getLeaseDuration;
-        renameClock = clock;
+    void configureClientFiles(ManagedAgentSettings properties) {
+        clientFilesEnabled = () -> properties.getClientFiles().isEnabled()
+                && harness.supportsClientFiles();
+    }
+
+    private boolean supportsClientFiles(SessionRecord session) {
+        return session.deletedAt() == null && "ACTIVE".equals(session.status())
+                && clientFilesEnabled.getAsBoolean()
+                // Ask the same question the register route answers: a
+                // foregroundOnly or profile-less Session is always refused, so
+                // the capability must not advertise it there.
+                && harness.supportsClientFiles(session);
     }
 
     @Autowired(required = false)
@@ -588,7 +602,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
         Admission admission;
         Set<String> extensionLifecycleProfiles = extensionPins == null ? Set.of()
-                : java.util.stream.Stream.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP)
+                : java.util.stream.Stream.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.SHELL_V3, WorkspaceToolProfiles.SHELL_V4, WorkspaceToolProfiles.MCP)
                         .filter(harness::supportsLifecycle).collect(java.util.stream.Collectors.toSet());
         if (worktree != null && sessionWorktrees == null) {
             throw new ManagedAgentException(409, "worktree_unavailable", "Session worktrees are unavailable.");
@@ -960,13 +974,13 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         // A recorded rename answers before the shape and availability gates
         // a deleted Session can no longer pass, but only when the recorded
         // command IS this request — the key is tenant-global, so a key
-        // another Session consumed falls through to beginSessionRename,
+        // another Session consumed falls through to settleRenameSync,
         // which answers idempotency_conflict. The actor gates stay ahead
         // of the outcome, exactly as the fresh path applies them — the
         // OPERATOR role, whose 404 arm covers the read grant, and the
         // creator half, because the recorded outcome stays creator-scoped —
-        // and the read-only probe never writes the PENDING row
-        // beginSessionRename would create for a fresh key.
+        // and the read-only probe never writes the receipt
+        // settleRenameSync would create for a fresh key.
         StoreModels.CommandRecord recorded = store.findCommand(tenantId,
                 RENAME, idempotencyKey).orElse(null);
         if (recorded != null && recorded.sessionId().equals(sessionId)) {
@@ -976,15 +990,14 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             // answer on the key's liveness (400 against a recorded key,
             // 404 against a fresh one); the uniform answer is the read
             // grant's 404. They also cover a recorded row of ANY status,
-            // not only the completed outcome: beginSessionRename below
+            // not only the completed outcome: settleRenameSync below
             // compares key, Session and digest, never the actor, so an
             // unfinished row answered without the gates would hand the
-            // recorder's pending delivery — and the recorded outcome it
-            // becomes — to any OPERATOR replaying the key, and a
-            // different-title replay would answer idempotency_conflict,
-            // naming the live key the grant-less caller's uniform 404
-            // keeps hidden; a fellow OPERATOR's refusal still differs
-            // from a fresh key's.
+            // recorder's recorded outcome to any OPERATOR replaying the
+            // key, and a different-title replay would answer
+            // idempotency_conflict, naming the live key the grant-less
+            // caller's uniform 404 keeps hidden; a fellow OPERATOR's
+            // refusal still differs from a fresh key's.
             SessionRecord session = store.requireSession(tenantId,
                     sessionId);
             inputPolicy.requireSubmitterRole(session, actorId);
@@ -998,7 +1011,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             // path, whose validRenameTitle still answers 400 to an
             // authorized caller. Only a COMPLETED row answers here: the
             // recorder's unfinished row falls through too, so its own
-            // retry resumes the delivery below.
+            // retry re-settles synchronously below.
             if ("COMPLETED".equals(recorded.status()) && title != null
                     && recorded.requestDigest().equals(
                             digests.digest(Map.of("sessionId", sessionId,
@@ -1015,129 +1028,34 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         inputPolicy.requireSubmitterFacts(current, actorId);
         requireReadyWorktree(current);
         String effectiveTitle = validRenameTitle(title);
-        requireHarness();
-        if (!harness.supportsFencedTitles()) {
-            throw dependencyUnavailable("hosted_harness_unavailable",
-                    "The Hosted Harness must support title protocol version 1.");
-        }
-        SessionMutationCommand command = store.beginSessionRename(tenantId,
+        // The SQL row is the public display authority: settlement is one local
+        // transaction with no delivery row, claim or lease. The journal copy is
+        // updated by a best-effort notification afterwards.
+        StoreModels.SyncRename result = store.settleRenameSync(tenantId,
                 idempotencyKey, renameDigest(sessionId, title), sessionId,
                 effectiveTitle, actorId);
-        if (!"COMPLETED".equals(command.status())) {
-            String owner = UUID.randomUUID().toString();
-            var candidate = new StoreModels.RenameDelivery(tenantId, sessionId,
-                    idempotencyKey, effectiveTitle, command.renameRevision(), 0);
-            var delivery = store.claimRename(candidate, owner, renameLeaseDuration.get()).orElse(null);
-            if (delivery == null) {
-                // The dispatcher can claim the row this request just admitted.
-                // Wait for that delivery to settle so one request never
-                // answers "already being delivered" for its own rename.
-                if (awaitRenameSettle(tenantId, idempotencyKey, sessionId,
-                        renameDigest(sessionId, title)) != null) {
-                    // The settle arm answers a recorded outcome through the
-                    // same TOCTOU window as the COMPLETED read-back below:
-                    // the pre-read above could not see a key the recorder
-                    // committed after it, so the creator gate re-runs here,
-                    // and the body serializes the Session as last visible.
-                    SessionRecord settled = store.requireSession(tenantId,
-                            sessionId);
-                    requireReplayActor(tenantId, RENAME, idempotencyKey,
-                            settled, actorId);
-                    return new SessionMutationResult<>(publicSession(
-                            asLastVisible(settled)), true);
-                }
-                throw dependencyUnavailable("hosted_harness_unavailable",
-                        "The Session title is already being delivered.");
-            }
+        // Notify only when this call settled a new revision. A pure COMPLETED
+        // replay returns revision 0; a legacy FAILED/PENDING receipt re-settles
+        // under a new revision even though it reports replayed, and that fresh
+        // settlement must still notify.
+        if (result.revision() > 0) {
             try {
-                SessionRecord session = store.requireSession(tenantId, sessionId);
-                HarnessConnector.Attachment attachment = harness.createOrLoad(tenantId, sessionId,
-                        session.harnessBootId() != null, true);
-                store.markRenameSubmitted(delivery, owner);
-                harness.rename(tenantId, sessionId, effectiveTitle, command.renameRevision());
-                session = store.completeSessionRename(delivery, owner, attachment.bootId());
-                return new SessionMutationResult<>(publicSession(session),
-                        command.replayed());
+                if (harness.supportsFencedTitles()) {
+                    harness.rename(tenantId, sessionId, effectiveTitle, result.revision());
+                } else {
+                    LOG.debug("Session title journal notification skipped (unsupported) tenant={} session={}",
+                            tenantId, sessionId);
+                }
             } catch (RuntimeException error) {
-                try {
-                    store.abandonSessionRename(tenantId, idempotencyKey, sessionId,
-                            command.renameRevision(), owner);
-                    store.retryRename(delivery, owner, renameClock.millis());
-                } catch (RuntimeException cleanupError) {
-                    LOG.warn("Failed to retire rename tenant={} session={}",
-                            tenantId, sessionId, cleanupError);
-                }
-                if (error instanceof HarnessHttpFailure refusal
-                        && refusal.getStatusCode() == 409
-                        && "session_mutation_superseded".equals(refusal.getErrorCode())) {
-                    throw new ManagedAgentException(409,
-                            "session_mutation_superseded",
-                            "A later Session title attempt has been admitted.");
-                }
-                if (error instanceof ManagedAgentException failure) {
-                    throw failure;
-                }
-                if (error instanceof RuntimeBrokerException refusal
-                        && !refusal.isRetryable()) {
-                    org.springframework.http.HttpStatus status = org.springframework.http.HttpStatus.resolve(
-                            refusal.getStatusCode());
-                    throw new ManagedAgentException(
-                            status == null ? 409 : status.value(),
-                            refusal.getCode(), refusal.getMessage());
-                }
-                // Chain and log the root cause: a plain 503 leaves on-call
-                // unable to tell a network fault from a daemon bug. The
-                // catch wraps the store calls too, so the WARN names the
-                // operation rather than a subsystem the fault may not be in.
-                LOG.warn("Managed Agent rename failed tenant={} session={}",
+                // A lost notification only lags the transcript copy until a
+                // later rename carries a higher revision; the public SQL title
+                // is already durable, so the rename still succeeds.
+                LOG.debug("Session title journal notification lagging tenant={} session={}",
                         tenantId, sessionId, error);
-                throw new ManagedAgentException(503,
-                        "hosted_harness_unavailable",
-                        "The Hosted Harness could not persist the Session title.",
-                        error);
             }
         }
-        // A replay re-reads the row without the visibility filter: the
-        // recorded success must not 404 after a later delete, and the body
-        // serializes the Session as it was last visible, so the closed
-        // status enum never has to carry "deleted". The recorder/creator
-        // gate re-runs on the command row first: the pre-read above could
-        // not see a key the recorder committed after it, so this arm would
-        // otherwise answer the recorded outcome ungated.
-        SessionRecord replayed = store.requireSession(tenantId, sessionId);
-        requireReplayActor(tenantId, RENAME, idempotencyKey, replayed,
-                actorId);
         return new SessionMutationResult<>(publicSession(
-                asLastVisible(replayed)), true);
-    }
-
-    /**
-     * Waits a bounded time for the delivery that won this rename's claim,
-     * and answers the recorded command once it completes. Returns null when
-     * the row is gone, the digest belongs to another request, or the
-     * delivery is still in flight when the wait expires.
-     */
-    private StoreModels.CommandRecord awaitRenameSettle(String tenantId, String idempotencyKey,
-            String sessionId, String digest) {
-        long deadline = System.nanoTime() + RENAME_CLAIM_SETTLE.toNanos();
-        while (System.nanoTime() < deadline) {
-            StoreModels.CommandRecord recorded = store
-                    .findCommand(tenantId, RENAME, idempotencyKey).orElse(null);
-            if (recorded == null || !recorded.sessionId().equals(sessionId)
-                    || !digest.equals(recorded.requestDigest())) {
-                return null;
-            }
-            if ("COMPLETED".equals(recorded.status())) {
-                return recorded;
-            }
-            try {
-                Thread.sleep(25);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                return null;
-            }
-        }
-        return null;
+                asLastVisible(result.session())), result.replayed());
     }
 
     // An archived Session stays closed, so unarchive needs neither the
@@ -1542,6 +1460,9 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         var compressions = store.contextCompressionStates(tenantId, boundIds);
         Map<String, WebShellModelContext> modelContexts = store.findModelContexts(tenantId, boundIds);
         boolean modelSelectionSupported = !store.modelOptions().isEmpty() && harness.supportsModelSelection();
+        // Deliberately Harness-bound: the advertisement reports whether the
+        // journal copy can stay in sync, not whether the SQL rename can succeed
+        // (it succeeds offline too). Do not relax this to always-true.
         boolean renameSupported = harness.isAvailable() && harness.supportsFencedTitles();
         Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
         boolean compressionSupported = harness.supportsContextCompression();
@@ -1667,7 +1588,19 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         visible && approvalExecutable && compressionSupported && compression.available(),
                         childAgentsCapability(session, worktree),
                         (session.workspace() == null || maySubmit) && supportsSideQueries(session),
-                        (session.workspace() == null || maySubmit) && supportsSideQueries(session)),
+                        (session.workspace() == null || maySubmit) && supportsSideQueries(session),
+                        // UI hint only; the relay re-runs the full admission on attach.
+                        // Null while the opt-in is off so both surfaces omit it alike.
+                        // Only advertise it for placements that can actually attach
+                        // (local-mount measured), not ssh/resident/extension ones.
+                        terminalEnabled.getAsBoolean()
+                                ? maySubmit && Boolean.TRUE.equals(foregroundShell(session, worktree))
+                                        && terminalPlacementCapable.test(session)
+                                : null,
+                        // Registration refuses a Workspace-less Session (mayExecute
+                        // requires a bound Workspace), so the capability must not
+                        // advertise it there.
+                        session.workspace() != null && maySubmit && supportsClientFiles(session)),
                 session.workspace() != null || session.agentDefinitionDigest() != null
                         ? approvalSelection == null ? session.approvalMode() : approvalSelection.mode() : null,
                 modelContext, modelSelection, approvalSelection == null ? null : approvalSelection.revision(),
@@ -2011,6 +1944,39 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     }
 
     /**
+     * The Managed Web Terminal handshake admission: a readable, active,
+     * Workspace-bound Shell Session whose Shell opt-ins and persisted
+     * approval are valid, and whose caller holds OPERATOR on the Workspace.
+     * The terminal deployment opt-in and the terminal-capable Runtime
+     * binding are checked by the relay, not here. A human terminal is not a
+     * model tool call, so the per-command approval mode does not gate it;
+     * the OPERATOR grant plus the deployment opt-in are the boundary.
+     */
+    public SessionRecord admitTerminalSession(String tenantId, String actorId,
+            String sessionId) {
+        SessionRecord session = requireReadableSession(tenantId, actorId, sessionId);
+        if (!"ACTIVE".equals(session.status())) {
+            throw new ManagedAgentException(409, "session_operation_active",
+                    "The Session is not active.");
+        }
+        // Authorization before capability, like every other OPERATOR surface:
+        // a caller below the grant learns the role refusal, not whether the
+        // Session happens to carry a Shell.
+        if (session.workspace() != null && !workspaces.accessOf(session.tenantId(),
+                actorId, session.workspace().getWorkspaceId())
+                .atLeast(WorkspaceAccess.OPERATOR)) {
+            throw new ManagedAgentException(403, "session_operation_forbidden",
+                    "Only a Workspace operator may open a terminal.");
+        }
+        var worktree = store.findSessionWorktree(tenantId, sessionId);
+        if (!Boolean.TRUE.equals(foregroundShell(session, worktree))) {
+            throw new ManagedAgentException(409, "workspace_unavailable",
+                    "The Session does not admit a terminal.");
+        }
+        return session;
+    }
+
+    /**
      * Reads the next catch-up page of a stream.
      *
      * @throws ReplayCursorExpired when the cursor is below the replay floor
@@ -2068,17 +2034,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         if (!admission.replayed()) {
             return;
         }
-        requireReplayActor(tenantId, operation, idempotencyKey, session,
-                actorId);
-    }
-
-    // The probe half, standing alone for the mutation routes whose replay
-    // arms carry no Admission: rename's in-store COMPLETED read-back has
-    // only the command row to interrogate. The read stays a plain probe —
-    // never a locking one, so AgentStateStore's replay-probe rule still
-    // holds.
-    private void requireReplayActor(String tenantId, String operation,
-            String idempotencyKey, SessionRecord session, String actorId) {
         store.findCommand(tenantId, operation, idempotencyKey)
                 .filter(command -> !recordedByCaller(command, actorId))
                 .ifPresent(command -> requireReplayCreator(session,

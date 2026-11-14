@@ -59,8 +59,10 @@ live producer of bound event prompts today.
   provenance, instruction-source prose, aggregate-comment header, and watch
   summaries.
 - Every other locale keeps today's English output byte-for-byte.
-- The language dimension is extensible: adding a language later is a copy-map
-  entry plus the locale union, not a structural change.
+- The supported set is deliberately `'en' | 'zh'` today. Adding a supported
+  language later is an explicit increment to the existing union, locale
+  resolver and copy maps, with focused tests; the builder's structural
+  contract stays unchanged. No automatic translation fallback is claimed.
 - No new setting and no new wiring: reuse the existing
   `general.language` → `resolveChannelLocale` → `ChannelBase.locale` path.
 
@@ -71,7 +73,9 @@ live producer of bound event prompts today.
   line, and the data-line field labels (`Type:`, `Title:`, `URL:`, `Trigger:`,
   `Event:`, `Author:`). They are stable trust-boundary and field markers next
   to platform data, not prose; keeping them language-invariant preserves the
-  peel/copy invariants and avoids re-parsing rendered metadata lines.
+  peel/copy invariants and avoids re-parsing rendered metadata lines. The
+  literal `[truncated]` cap marker and the `Author: unknown` missing-identity
+  fallback are also technical sentinels, not localized narrative text.
 - **Platform-derived content is never translated**: PR titles, comment bodies,
   check names, SHAs, `mergeable_state` values, notification reasons.
 - **Operator templates are unchanged**: `boundSessionActions` /
@@ -294,14 +298,18 @@ Check names keep their `, ` join in both languages; they are platform data.
 
 1. A channel whose locale resolves to `zh` delivers bound prompts whose
    product-authored prose (envelope, guidance, provenance, summaries, aggregate
-   header) is Chinese, in both legacy and role-aware modes.
+   header) is Chinese, in both legacy and role-aware modes. Whenever built-in
+   role guidance is rendered, it is Chinese as well; a selected operator
+   instruction replaces that guidance rather than appearing alongside it.
 2. With no locale or an English locale, every delivered prompt is byte-identical
    to today, including the daemon drain's.
 3. Structural markers (`[Operator instruction — trusted]`, `Source:`, `Role:`,
    data-line labels) and platform-derived values are unchanged in both
    languages.
 4. Operator templates render verbatim in both languages; an unmatched role is
-   still skipped in role-aware mode.
+   still skipped in role-aware mode. The chosen operator instruction and the
+   built-in role guidance never both render for one event: the operator
+   instruction takes the built-in guidance's slot instead of supplementing it.
 5. Copies of the zh header and truncation marker at the start of untrusted text
    lose their brackets, exactly like the English tags.
 6. No watch summary contains an imperative action in either language.

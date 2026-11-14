@@ -305,7 +305,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@qwen-code/acp-bridge": "*",
     "@qwen-code/qwen-code-core": "*",
     "@qwen-code/sdk": "*",
