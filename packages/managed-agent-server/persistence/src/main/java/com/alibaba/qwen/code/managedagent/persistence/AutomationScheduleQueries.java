@@ -60,17 +60,17 @@ final class AutomationScheduleQueries {
         // live capacity (32), never by the Session's lifetime creations.
         String select = "SELECT " + ManagedSchemaProjection.SCHEDULE.columns("s")
                 + " FROM ma_schedule s WHERE s.tenant_id = ? AND s.session_id = ?"
-                + " AND s.state = '" + AutomationLedgerStore.STATE_LIVE + "'";
+                + " AND s.state = ?";
         List<ScheduleRow> rows = cursor == null
                 ? jdbc.query(select + " ORDER BY s.gmt_create DESC,"
                         + " s.schedule_id DESC LIMIT ?", mapper, tenantId,
-                        sessionId, limit + 1)
+                        sessionId, AutomationLedgerStore.STATE_LIVE, limit + 1)
                 : jdbc.query(select + " AND (s.gmt_create < ?"
                         + " OR (s.gmt_create = ? AND s.schedule_id < ?))"
                         + " ORDER BY s.gmt_create DESC, s.schedule_id DESC"
                         + " LIMIT ?", mapper, tenantId, sessionId,
-                        cursor.createdAt(), cursor.createdAt(),
-                        cursor.scheduleId(), limit + 1);
+                        AutomationLedgerStore.STATE_LIVE, cursor.createdAt(),
+                        cursor.createdAt(), cursor.scheduleId(), limit + 1);
         boolean hasMore = rows.size() > limit;
         return new SchedulePage(hasMore ? rows.subList(0, limit) : rows,
                 hasMore);

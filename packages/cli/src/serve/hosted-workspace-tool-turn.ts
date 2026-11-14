@@ -893,8 +893,7 @@ export const HOSTED_CRON_CREATE_TOOL: FunctionDeclaration = {
 // rendered exactly as cron_delete accepts it.
 export const HOSTED_CRON_LIST_TOOL: FunctionDeclaration = {
   name: 'cron_list',
-  description:
-    'List this Session’s live recurring cron schedules (created via cron_create) and any pending loop wakeup scheduled via loop_wakeup. Shows each schedule’s id, cron, timezone, state and a short goal label, and each wakeup’s id, fire time and a short prompt preview.',
+  description: cronListDescription(true, true),
   parametersJsonSchema: {
     type: 'object',
     properties: {},
@@ -903,21 +902,72 @@ export const HOSTED_CRON_LIST_TOOL: FunctionDeclaration = {
 };
 export const HOSTED_CRON_DELETE_TOOL: FunctionDeclaration = {
   name: 'cron_delete',
-  description:
-    'Cancel a recurring cron schedule or a pending loop wakeup by its id (as returned by cron_list). A wakeup whose turn already started cannot be cancelled.',
+  description: cronDeleteDescription(true),
   parametersJsonSchema: {
     type: 'object',
     properties: {
       id: {
         type: 'string',
-        description:
-          'A schedule id from cron_create, or a wakeup id (loop:<wakeupId>) from loop_wakeup.',
+        description: cronDeleteIdDescription(true, true),
       },
     },
     required: ['id'],
     additionalProperties: false,
   },
 };
+// The cron union surface ships on profiles that lack one of the two creators:
+// files/4 and team-lead/2 carry the trio without loop_wakeup, shell/3 keeps the
+// wakeup slice's list/delete without cron_create. The declarations must never
+// name a tool the Session does not declare — naming one steers the model into
+// emitting it, which the admission chain refuses and fails the whole turn.
+//
+// The handlers are not narrowed by profile: cron_list always spreads the
+// Session's definitions and wakeups, and cron_delete retires any non-loop id.
+// Recurring schedules can exist on ANY profile because the public actor-scoped
+// automation route creates them without consulting the CLI tool profile, so the
+// schedule half is always described; wakeups only exist where loop_wakeup is
+// declared. Each creator is named only when the profile declares it. The
+// sentences are composed from those clauses (no per-state literal copies), and
+// the exported HOSTED_CRON_* constants above are the (true, true) composition,
+// so the served wording has a single producer. The (false, false) corner names
+// neither tool.
+export function cronListDescription(
+  hasCronCreate: boolean,
+  hasLoopWakeup: boolean,
+): string {
+  const schedules = hasCronCreate
+    ? 'live recurring cron schedules (created via cron_create)'
+    : 'live recurring cron schedules';
+  const scheduleFields =
+    'Shows each schedule’s id, cron, timezone, state and a short goal label';
+  if (!hasLoopWakeup) {
+    return `List this Session’s ${schedules}. ${scheduleFields}.`;
+  }
+  return `List this Session’s ${schedules} and any pending loop wakeup scheduled via loop_wakeup. ${scheduleFields}, and each wakeup’s id, fire time and a short prompt preview.`;
+}
+
+export function cronDeleteDescription(hasLoopWakeup: boolean): string {
+  const target = hasLoopWakeup
+    ? 'a recurring cron schedule or a pending loop wakeup'
+    : 'a recurring cron schedule';
+  const wakeupNote = hasLoopWakeup
+    ? ' A wakeup whose turn already started cannot be cancelled.'
+    : '';
+  return `Cancel ${target} by its id (as returned by cron_list).${wakeupNote}`;
+}
+
+export function cronDeleteIdDescription(
+  hasCronCreate: boolean,
+  hasLoopWakeup: boolean,
+): string {
+  const scheduleId = hasCronCreate
+    ? 'A schedule id from cron_create'
+    : 'A schedule id';
+  if (!hasLoopWakeup) {
+    return `${scheduleId}.`;
+  }
+  return `${scheduleId}, or a wakeup id (loop:<wakeupId>) from loop_wakeup.`;
+}
 // #13753 I3: the read profile of a snapshot child, which reads a frozen copy
 // of its parent's Workspace. Nothing here writes, and the turn refuses any
 // call it does not declare.
@@ -2690,6 +2740,28 @@ export class HostedWorkspaceToolTurn {
           if (tool.name === 'cron_create' && !loopTool) {
             // The profile has no loop_wakeup to fall back to; do not name it.
             tool = { ...tool, description: CRON_CREATE_DESCRIPTION };
+          }
+          if (tool.name === 'cron_list') {
+            tool = {
+              ...tool,
+              description: cronListDescription(cronCreate, loopTool),
+            };
+          }
+          if (tool.name === 'cron_delete') {
+            const schema = structuredClone(tool.parametersJsonSchema) as {
+              properties?: Record<string, { description?: string }>;
+            };
+            if (schema.properties?.['id']) {
+              schema.properties['id'].description = cronDeleteIdDescription(
+                cronCreate,
+                loopTool,
+              );
+            }
+            tool = {
+              ...tool,
+              description: cronDeleteDescription(loopTool),
+              parametersJsonSchema: schema,
+            };
           }
           return extensionToolDeclaration(
             hostedWorkspaceDeclarations([tool], !this.fileBackupsEnabled)[0],
