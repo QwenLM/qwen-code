@@ -53,20 +53,26 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   by `scripts/verify-pr-watch-state.mjs` (`--start` / `--complete`) since
   PR #17185 — rounds no longer hand-write the JSON, whose completion write
   two consecutive rounds on PR #16866 skipped, leaving the file two heads
-  stale. The file holds the last sha this session verified plus a single
-  in-flight marker. Dedup is **per head**: a fire for a sha already verified,
-  or for the sha whose round is in flight, is ignored without a model turn;
-  a fire for a _new_ head starts its own round even while another head's
-  round is running, because per-head dedup guarantees every head gets a
-  round where global suppression can strand one. That start takes the single
-  in-flight slot, and `--complete` clears the marker only when it belongs to
-  the completing head, so completing Y never wipes X's still-running marker
-  — the bound-delivery design dedupes redelivered head-change events against
-  it. `--start` writes the sha **before** the round begins, so a round that
-  dies still does not replay the same head. A round that dies after
-  `--start` is recovered with `--release [--head <oid>]`, which clears the
-  marker without recording a verdict and refuses a marker belonging to
-  another head — the same recovery the gate provides for a dead claim.
+  stale. The file holds two lists, `verifiedHeads` and `inFlightHeads`, each
+  entry carrying its own head, round, artifact directory and timestamp; the
+  top-level `verifiedHead`/`previousHead` fields are a compatibility view
+  over the most recent completions. Dedup is **per head over the whole
+  list**: a fire for any sha already verified, or for any sha whose round is
+  in flight, is ignored without a model turn; a fire for a _new_ head starts
+  its own round even while another head's round is running, because per-head
+  dedup guarantees every head gets a round where global suppression can
+  strand one. Neither a start nor a completion erases another head's entry —
+  a single in-flight slot let starting Y erase X's marker, so a redelivered
+  X started a second concurrent round — and the bound-delivery design dedupes
+  redelivered head-change events against these lists. `--complete` removes
+  only its own head's in-flight entry and upserts its verified entry; a late
+  completion by an older round changes the top-level view but erases no
+  verification. `--start` writes the sha **before** the round begins, so a
+  round that dies still does not replay the same head. A round that dies
+  after `--start` is recovered with `--release --head <oid>` (the head is
+  mandatory), which removes only the named head's in-flight entry without
+  recording a verdict and refuses a head with no entry — the same recovery
+  the gate provides for a dead claim.
 
 ## Design decisions
 
@@ -112,6 +118,11 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
 - `.qwen/skills/verify-pr/SKILL.md` — the `--watch` contract and its guardrails.
 - `scripts/verify-pr-watch-gate.mjs` — the gate wrapper: forwards only `resync`
   and `stop`, and refuses to install over another consumer's probe state.
+- `scripts/verify-pr-watch-state.mjs` — the state file's owner since PR #17185:
+  per-head `verifiedHeads`/`inFlightHeads` lists, atomic writes, UTC stamps,
+  and the `--start` / `--complete` / `--release` contract.
+- `scripts/tests/verify-pr-watch-state.test.js` — the dedup, completion,
+  release and migration cases, including the concurrent-head witnesses.
 - `scripts/tests/verify-pr-watch-gate.test.js` — the filter's five outcomes and
   the coexistence checks.
 - `scripts/tests/qwen-triage-workflow.test.js` — assertions pinning the wrapper

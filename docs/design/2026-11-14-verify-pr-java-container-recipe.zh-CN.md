@@ -33,9 +33,9 @@
 在 skill 中增加第二份配方，当增量触及 `packages/managed-agent-server/` 时选用：
 
 1. **镜像。** 自带车道 Maven 与 JDK 的 Maven 镜像，如 `maven:3.9.11-eclipse-temurin-21`。实现时核实确切 tag 存在并按 digest 钉住（JS 配方按 tag 引用 `node:22-bookworm`；Java 配方应更严）。
-2. **离线 Maven 仓库。** 宿主（可信侧）用 PR head 的 pom 跑 `mvn dependency:go-offline` 预置每轮仓库，使用宿主正常的镜像源配置。容器只挂载该仓库目录——绝不挂 `settings.xml`（可能带镜像源凭据）。电池容器以 `-Dmaven.repo.local=/m2 --network none` 运行——比 JS 配方更严（JS 配方为模型代理保留网络），因为 Java 电池不需要模型访问。离线解析保住无凭据边界：无网络即无外泄路径，容器内也没有镜像源鉴权。
-3. **可信脚本、PR 克隆、模型代理。** 与 JS 配方同一布局：脚本来自可信克隆，轮次跑在独立 PR 克隆里，任何模型驱动步骤走宿主侧 `verify-pr-model-proxy.mjs` 中继。Java 电池本身不需要模型访问。
-4. **声明。** 门禁通过后轮次写入 `{"mode":"container","detail":"maven:3.9.11-eclipse-temurin-21, --network none, offline m2, credential-free"}`。
+2. **离线 Maven 仓库。** 宿主（可信侧）用 PR head 的 pom 跑 `mvn dependency:go-offline` 预置每轮仓库，使用宿主正常的镜像源配置。预置还必须把 PR 的 `packages/sdk-java` reactor 产物安装进该仓库（对 SDK 模块跑 `mvn install`）：managed-agent 构建从本地仓库解析它们，新预置缺了就无法解析，复用预置里陈旧的则会对着错误的 jar 编译——SDK pom 或源码变化时按同一条「为此 head 构建」复用规则重新安装。随后剥掉 `_remote.repositories` 跟踪文件（或以 `-Dmaven.legacyLocalRepo=true` 预置）：它们记录每个 artifact 由哪个镜像服务，离线解析遇到不同 repo id 否则会重新解析并失败。容器只挂载该仓库目录——绝不挂 `settings.xml`（可能带镜像源凭据）。电池容器以 `-Dmaven.repo.local=/m2 --network none` 运行——比 JS 配方更严（JS 配方为模型代理保留网络），因为 Java 电池不需要模型访问。离线解析保住无凭据边界：无网络即无外泄路径，容器内也没有镜像源鉴权。
+3. **可信脚本、PR 克隆、模型代理。** 与 JS 配方同一布局：脚本来自可信克隆，轮次跑在独立 PR 克隆里，任何模型驱动步骤走宿主侧 `verify-pr-model-proxy.mjs` 中继。离线电池容器够不到该代理，因此轮次自己的模型 turn 跑在另一个接代理的容器里（JS 配方的形状），或者不跑；电池本身不需要模型访问。
+4. **声明。** 门禁通过后由**运营方**写入 `{"mode":"container","detail":"maven:3.9.11-eclipse-temurin-21, --network none, offline m2, credential-free"}`——与 JS 配方同一条运营方持有规则，不是轮次自己写。
 
 ## 设计决策与理由
 
@@ -46,7 +46,7 @@
 
 - 容器看不到任何宿主凭据；挂载的仓库只有依赖 jar。
 - `--require-isolation` 必须在内部 exit 0；仅有容器标记不算通过（既有规则）。
-- 预置步骤在宿主上以维护者正常的 Maven 配置运行，属可信操作；不得执行 PR 代码（只做解析）。要点名检查，而不是只点名要删的目录：Maven 启动时会加载 `.mvn/` 核心扩展，**并且**在构建项目模型时解析并加载 pom 声明的构建扩展（`<build><extensions>`，以及根与每个模块 pom 里带 `<extensions>true</extensions>` 的 `<plugin>`）——早于任何 goal 运行。预置副本必须剥离或拒绝这两个入口，或者让预置在凭证隔离、仅允许配置镜像出网的容器内完成，再把产出的仓库拷贝出来。无论哪种方式，可信的镜像配置都留在宿主侧（容器绝不挂载 `settings.xml`）。
+- 预置步骤在宿主上以维护者正常的 Maven 配置运行，属可信操作；不得执行 PR 代码（只做解析）。预置副本必须移除**整个 `.mvn/` 目录**：启动器会加载核心扩展、`jvm.config`（在 JVM 启动前拼进 `MAVEN_OPTS`——里面的 `-javaagent:` 会在预置期间运行）与 `maven.config`。在此之上，拒绝 pom 声明的构建扩展（`<build><extensions>`，以及根与每个模块 pom 里带 `<extensions>true</extensions>` 的 `<plugin>`），它们在构建项目模型时就被解析加载——早于任何 goal 运行。另一个选择是彻底放弃剥离选项，让预置在凭证隔离、仅允许配置镜像出网的容器内完成，再把产出的仓库拷贝出来。无论哪种方式，可信的镜像配置都留在宿主侧（容器绝不挂载 `settings.xml`）。
 
 ## 风险
 

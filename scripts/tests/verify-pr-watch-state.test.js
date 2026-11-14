@@ -164,6 +164,67 @@ describe('startRound', () => {
     expect(readState(root, 1).inFlightHead).toBe(HEAD);
   });
 
+  // R2-1 witness: with a single slot, starting Y erased X's marker and a
+  // redelivered X started a second concurrent round. Every in-flight head
+  // must stay recorded.
+  it('keeps every in-flight head dedupable after another head starts', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
+    startRound(root, { pr: 1, head: PREV, round: 11, artifactDir: 'r11' });
+    const redelivered = startRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 12,
+      artifactDir: 'r12',
+    });
+    expect(redelivered.duplicate).toBe('in-flight');
+    expect(readState(root, 1).inFlightHeads.map((e) => e.head)).toEqual([
+      HEAD,
+      PREV,
+    ]);
+  });
+
+  it('dedupes a head verified one round back, not just the latest', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: PREV, round: 9, artifactDir: 'r9' });
+    completeRound(root, { pr: 1, head: PREV, round: 9, verdict: 'findings' });
+    startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
+    completeRound(root, { pr: 1, head: HEAD, round: 10, verdict: 'findings' });
+    expect(
+      startRound(root, { pr: 1, head: PREV, round: 11, artifactDir: 'r11' })
+        .duplicate,
+    ).toBe('verified');
+  });
+
+  it('migrates the pre-list single-marker shape', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        repo: 'QwenLM/qwen-code',
+        verifiedHead: PREV,
+        previousHead: null,
+        round: 9,
+        verdict: 'findings',
+        commentId: '111',
+        artifactDir: 'r9',
+        inFlightHead: HEAD,
+        inFlight: true,
+        startedAt: '2026-11-14T02:01:19.000Z',
+      }),
+    );
+    expect(duplicateHead(readState(root, 1), HEAD)).toBe('in-flight');
+    expect(duplicateHead(readState(root, 1), PREV)).toBe('verified');
+    completeRound(root, { pr: 1, head: HEAD, round: 10, verdict: 'blocked' });
+    const state = readState(root, 1);
+    expect(state.verifiedHead).toBe(HEAD);
+    expect(state.previousHead).toBe(PREV);
+    expect(state.inFlight).toBe(false);
+    expect(state.repo).toBe('QwenLM/qwen-code');
+  });
+
   it('leaves no temporary file behind', () => {
     const root = makeRoot();
     startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
@@ -176,7 +237,11 @@ describe('completeRound', () => {
   it('records the verdict and rotates the previous head', () => {
     const root = makeRoot();
     startRound(root, { pr: 1, head: PREV, round: 9, artifactDir: 'r9' });
-    completeRound(root, { pr: 1, head: PREV, round: 9, verdict: 'findings' });
+    completeRound(
+      root,
+      { pr: 1, head: PREV, round: 9, verdict: 'findings' },
+      new Date('2026-11-14T03:00:00.000Z'),
+    );
     startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
     const now = new Date('2026-11-14T03:20:47.000Z');
     completeRound(
@@ -237,23 +302,67 @@ describe('completeRound', () => {
     const root = makeRoot();
     startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
     startRound(root, { pr: 1, head: PREV, round: 11, artifactDir: 'r11' });
-    completeRound(root, { pr: 1, head: HEAD, round: 10, verdict: 'findings' });
+    completeRound(
+      root,
+      { pr: 1, head: HEAD, round: 10, verdict: 'findings' },
+      new Date('2026-11-14T03:00:00.000Z'),
+    );
     expect(readState(root, 1)).toMatchObject({
       verifiedHead: HEAD,
       inFlight: true,
       inFlightHead: PREV,
     });
-    completeRound(root, {
-      pr: 1,
-      head: PREV,
-      round: 11,
-      verdict: 'merge-ready',
-    });
+    completeRound(
+      root,
+      { pr: 1, head: PREV, round: 11, verdict: 'merge-ready' },
+      new Date('2026-11-14T03:10:00.000Z'),
+    );
     expect(readState(root, 1)).toMatchObject({
       verifiedHead: PREV,
       inFlight: false,
       inFlightHead: null,
     });
+  });
+
+  // A late completion by an older round changes the top-level view but must
+  // erase no verification: both heads stay dedupable.
+  it('a late completion keeps the newer verification in the list', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
+    startRound(root, { pr: 1, head: PREV, round: 11, artifactDir: 'r11' });
+    completeRound(
+      root,
+      { pr: 1, head: PREV, round: 11, verdict: 'merge-ready' },
+      new Date('2026-11-14T03:00:00.000Z'),
+    );
+    completeRound(
+      root,
+      { pr: 1, head: HEAD, round: 10, verdict: 'findings' },
+      new Date('2026-11-14T04:00:00.000Z'),
+    );
+    const state = readState(root, 1);
+    expect(state.verifiedHead).toBe(HEAD);
+    expect(state.previousHead).toBe(PREV);
+    expect(state.verifiedHeads.map((e) => e.head).sort()).toEqual(
+      [HEAD, PREV].sort(),
+    );
+    expect(duplicateHead(state, PREV)).toBe('verified');
+    expect(duplicateHead(state, HEAD)).toBe('verified');
+  });
+
+  it('each in-flight entry keeps its own artifact directory', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'dirX' });
+    startRound(root, { pr: 1, head: PREV, round: 11, artifactDir: 'dirY' });
+    completeRound(root, { pr: 1, head: HEAD, round: 10, verdict: 'findings' });
+    const state = readState(root, 1);
+    expect(state.inFlightHeads).toEqual([
+      expect.objectContaining({ head: PREV, artifactDir: 'dirY' }),
+    ]);
+    expect(state.artifactDir).toBe('dirX');
+    // A completion without --artifact-dir inherits its own start's directory.
+    completeRound(root, { pr: 1, head: PREV, round: 11, verdict: 'blocked' });
+    expect(readState(root, 1).artifactDir).toBe('dirY');
   });
 });
 
@@ -307,6 +416,22 @@ describe('releaseRound', () => {
   });
 });
 
+describe('readState', () => {
+  it('throws on a read failure other than ENOENT', () => {
+    const root = makeRoot();
+    mkdirSync(statePath(root, 1), { recursive: true });
+    expect(() => readState(root, 1)).toThrow(/EISDIR/);
+  });
+
+  it('returns null for a missing file and for corrupt JSON', () => {
+    const root = makeRoot();
+    expect(readState(root, 1)).toBeNull();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(statePath(root, 1), '{corrupt');
+    expect(readState(root, 1)).toBeNull();
+  });
+});
+
 describe('duplicateHead', () => {
   it('matches by prefix in both directions', () => {
     expect(duplicateHead({ verifiedHead: HEAD }, HEAD.slice(0, 8))).toBe(
@@ -355,10 +480,70 @@ describe('CLI', () => {
     const released = run(root, ['16866', '--release', '--head', HEAD]);
     expect(released.status).toBe(0);
     expect(released.stdout).toMatch(/released in-flight marker/);
-    const noop = run(root, ['16866', '--release']);
+    const noop = run(root, ['16866', '--release', '--head', HEAD]);
     expect(noop.status).toBe(0);
     expect(noop.stdout).toMatch(/no in-flight marker/);
     expect(run(root, [...START, '--artifact-dir', 'r12']).status).toBe(0);
+  });
+
+  // The head-less form used to clear any marker, including a live round's;
+  // the head is now mandatory so recovery can never hit another round.
+  it('refuses a release without --head and keeps the marker', () => {
+    const root = makeRoot();
+    expect(run(root, [...START, '--artifact-dir', 'r11']).status).toBe(0);
+    const bare = run(root, ['16866', '--release']);
+    expect(bare.status).toBe(2);
+    expect(readState(root, 16866).inFlight).toBe(true);
+  });
+
+  it('refuses an empty --state-root instead of writing into the cwd', () => {
+    const root = makeRoot();
+    const res = spawnSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '16866',
+        '--start',
+        '--head',
+        HEAD,
+        '--round',
+        '1',
+        '--artifact-dir',
+        'r',
+        '--state-root',
+        '',
+      ],
+      { encoding: 'utf8', cwd: root },
+    );
+    expect(res.status).toBe(2);
+    expect(existsSync(statePath(root, 16866))).toBe(false);
+  });
+
+  // The regression idiom (local wall clock stamped with Z) is byte-identical
+  // to UTC on a UTC host, so the clock-seam equality cannot see it there.
+  // An offset zone makes it visible on every lane.
+  it('records the real instant under a non-UTC zone', () => {
+    const root = makeRoot();
+    const res = spawnSync(
+      process.execPath,
+      [SCRIPT, ...START, '--artifact-dir', 'r11', '--state-root', root],
+      { encoding: 'utf8', env: { ...process.env, TZ: 'Pacific/Kiritimati' } },
+    );
+    expect(res.status).toBe(0);
+    const startedAt = readState(root, 16866).startedAt;
+    expect(Math.abs(Date.now() - Date.parse(startedAt))).toBeLessThan(60000);
+  });
+
+  it('fails on an unreadable state instead of silently rewriting it', () => {
+    const root = makeRoot();
+    // A directory in the state file's place is an unreadable state (EISDIR)
+    // on every platform, unlike a permission bit.
+    mkdirSync(statePath(root, 16866), { recursive: true });
+    const res = run(root, [...START, '--artifact-dir', 'r11']);
+    expect(res.status).toBe(1);
+    // The failure must come from the read, not from a later write hitting
+    // the same directory — a swallowed read error would surface there.
+    expect(res.stderr).toMatch(/read/);
   });
 
   it('rejects bad usage with exit 2', () => {

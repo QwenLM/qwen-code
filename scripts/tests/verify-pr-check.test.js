@@ -23,7 +23,7 @@ const HEAD = 'b'.repeat(40);
 
 function validFiles(overrides = {}) {
   return {
-    report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n`,
+    report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n\n## Methodology\n\n**Boundary.** node:22-bookworm, --network none, credential-free.\n`,
     verdict: 'merge-ready\n',
     assertions: JSON.stringify({ pass: 4, fail: 0, total: 4 }),
     boundary: JSON.stringify({
@@ -642,6 +642,51 @@ describe('checkBoundary', () => {
     });
     expect(result.errors.join('\n')).toMatch(/not valid JSON/);
   });
+
+  // A declaration copied from the skill's template without filling it in
+  // declares nothing; the <placeholder> shape is the tell.
+  it('refuses unfilled template placeholders in either mode', () => {
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'container',
+          detail: '<image, network policy, credential-free mount>',
+        }),
+      ).errors.join('\n'),
+    ).toMatch(/detail still carries a <placeholder>/);
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'waived',
+          by: '<maintainer>',
+          reason: 'approved in words',
+        }),
+      ).errors.join('\n'),
+    ).toMatch(/waiver still carries a <placeholder>/);
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'waived',
+          by: 'shaojin.wensj',
+          reason: '<why this round may run outside a boundary>',
+        }),
+      ).errors.join('\n'),
+    ).toMatch(/waiver still carries a <placeholder>/);
+  });
+});
+
+describe('boundary line in the report', () => {
+  it('warns when the Methodology has no Boundary line', () => {
+    const result = check({
+      report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n`,
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.join('\n')).toMatch(/no \*\*Boundary\.\*\* line/);
+  });
+
+  it('stays quiet when the Boundary line is present', () => {
+    expect(check({}).warnings).toEqual([]);
+  });
 });
 
 // Three rounds of PR #15984 opened with the title and the whole verdict
@@ -661,7 +706,9 @@ describe('verdict line shape', () => {
   });
 
   it('accepts the same line as a plain paragraph', () => {
-    const result = check({ report: `${shippedLead.slice(2)}\n` });
+    const result = check({
+      report: `${shippedLead.slice(2)}\n\n**Boundary.** test boundary.\n`,
+    });
     expect(result.warnings).toEqual([]);
   });
 
@@ -684,7 +731,9 @@ describe('verdict line shape', () => {
     expect(heading.warnings.join('\n')).toMatch(
       /report\.md opens with a heading carrying the verdict/,
     );
-    const plain = check({ report: `${shippedLead.slice(2)}\r\n` });
+    const plain = check({
+      report: `${shippedLead.slice(2)}\r\n\r\n**Boundary.** test boundary.\r\n`,
+    });
     expect(plain.warnings).toEqual([]);
   });
 

@@ -22,7 +22,7 @@ Status: implementing with this change.
 - 任务形态：cron 每 2 分钟；gate = `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --repo <owner>/<repo> --cli <绝对路径 qwen>`；`recurring: true`、`durable: true`、`sessionMode: "current"`。包装脚本只转发 `resync`（head 移动）与 `stop`；评论或 CI 失败是 `action: "fix"`，会被丢弃——调度器只要看到非空输出就开一轮，prompt 无法"取消"已经开始的那一轮。
 - prompt 消费包装转发的输出：`head_moved_externally` → 对该 sha 开一轮；`stop`（merged/closed）→ 删除任务并停止。
 - 包装脚本的 `--check` 在 `.qwen/tmp` 已存在 `autofix-pr-<n>-gate.json` 或 `autofix-pr-<n>-state.json` 时拒绝安装：一个游标只服务一个消费者，第二个 watch 会抢走第一个需要的 head 移动与 `stop`。
-- 去重写在状态文件（`.qwen/tmp/verify-pr-watch-<n>.json`），自 PR #17185 起由 `scripts/verify-pr-watch-state.mjs`（`--start` / `--complete`）接管——轮次不再手写 JSON：PR #16866 的连续两个轮次跳过了手写完成写入，让文件落后了两个 head。文件保存本会话已验过的 sha 加一个 in-flight 标记。去重**按 head**：已验过的 sha、或正在跑的那个 sha 的重复 fire，都不产生模型 turn；_新_ head 的 fire 即使另一个 head 的轮次还在跑也会开出自己的一轮——按 head 去重保证每个 head 都有一轮，全局抑制可能让某个 head 永远验不到。该 start 占用唯一的 in-flight 槽位，而 `--complete` 只在标记属于完成的 head 时才清除，因此完成 Y 绝不会抹掉 X 仍在跑的标记——绑定投递设计正是用它对重投递的 head-change 事件去重。`--start` **先写 sha 再开轮次**，这样中途死掉的轮次不会重放同一个 head。`--start` 之后死掉的轮次用 `--release [--head <oid>]` 恢复：清除标记但不记录判定，且拒绝清除属于另一个 head 的标记——与 gate 对死锁声明的恢复同形。
+- 去重写在状态文件（`.qwen/tmp/verify-pr-watch-<n>.json`），自 PR #17185 起由 `scripts/verify-pr-watch-state.mjs`（`--start` / `--complete` / `--release`）接管——轮次不再手写 JSON：PR #16866 的连续两个轮次跳过了手写完成写入，让文件落后了两个 head。文件保存两个列表 `verifiedHeads` 与 `inFlightHeads`，每项自带 head、轮次、产物目录与时间戳；顶层 `verifiedHead`/`previousHead` 是最近完成记录的兼容视图。去重**按 head 遍历整个列表**：任何已验过的 sha、或任何正在跑的 sha 的重复 fire，都不产生模型 turn；_新_ head 的 fire 即使另一个 head 的轮次还在跑也会开出自己的一轮——按 head 去重保证每个 head 都有一轮，全局抑制可能让某个 head 永远验不到。start 与 complete 都不会抹掉其他 head 的记录——单 in-flight 槽位曾让 start Y 抹掉 X 的标记，于是重投递的 X 开出第二个并发轮次——绑定投递设计正是用这两个列表对重投递的 head-change 事件去重。`--complete` 只移除自己 head 的 in-flight 项并更新自己的已验项；旧轮次的晚到完成只改变顶层视图，不抹掉任何验证。`--start` **先写 sha 再开轮次**，这样中途死掉的轮次不会重放同一个 head。`--start` 之后死掉的轮次用 `--release --head <oid>` 恢复（head 必填）：只移除具名 head 的 in-flight 项、不记录判定，无此项的 head 会被拒绝——与 gate 对死锁声明的恢复同形。
 
 ## 设计决策
 
@@ -44,6 +44,8 @@ Status: implementing with this change.
 
 - `.qwen/skills/verify-pr/SKILL.md` —— `--watch` 的契约与护栏。
 - `scripts/verify-pr-watch-gate.mjs` —— gate 包装：只转发 `resync` 与 `stop`，并在别的消费者已占用探针状态时拒绝安装。
+- `scripts/verify-pr-watch-state.mjs` —— 自 PR #17185 起状态文件的持有者：按 head 的 `verifiedHeads`/`inFlightHeads` 列表、原子写、UTC 时间戳，以及 `--start` / `--complete` / `--release` 契约。
+- `scripts/tests/verify-pr-watch-state.test.js` —— 去重、完成、释放与迁移用例，含并发 head 见证。
 - `scripts/tests/verify-pr-watch-gate.test.js` —— 过滤的几种结果与共存检查。
 - `scripts/tests/qwen-triage-workflow.test.js` —— 钉住包装命令、过滤、归属检查与二进制能力拒绝。
 - `docs/design/verify-pr-watch.md` + `.zh-CN.md` —— 本文档。

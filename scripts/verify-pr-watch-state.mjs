@@ -22,20 +22,22 @@
  *   node verify-pr-watch-state.mjs <pr> --complete --head <oid> --round <n> \
  *     --verdict <word> [--comment-id <id>] [--artifact-dir <dir>] \
  *     [--state-root <dir>]
- *   node verify-pr-watch-state.mjs <pr> --release [--head <oid>] \
+ *   node verify-pr-watch-state.mjs <pr> --release --head <oid> \
  *     [--state-root <dir>]
  *
  * `--start` exits 3 when the file already records the head as verified or
- * in flight: that round answers instead of a duplicate. Dedup is per head:
- * a new head starts its own round even while another head's round is in
- * flight, and that start takes the single in-flight slot. `--complete`
- * records the head as verified, rotates the previous verified head into
- * `previousHead`, and clears the in-flight marker only when it belongs to
- * the completing head. `--release` is the recovery path for a round that
- * died after `--start`: it clears the marker without recording a verdict,
- * and with `--head` refuses a marker belonging to another head. The state
- * root defaults to the clone's main worktree, the same place the watch
- * gate keeps its cursor.
+ * in flight: that round answers instead of a duplicate. Dedup is per head
+ * over two lists, `inFlightHeads` and `verifiedHeads`: a new head starts its
+ * own round even while another head's round is running, and neither start
+ * nor completion erases another head's entry — a redelivered head-change
+ * event for any recorded head still dedupes (the bound-delivery design leans
+ * on this file for at-least-once safety). `--complete` removes only its own
+ * in-flight entry and upserts its verified entry; the top-level
+ * `verifiedHead`/`previousHead` view reflects the most recent completion.
+ * `--release --head <oid>` is the recovery path for a round that died after
+ * `--start`: it removes only the named head's in-flight entry and refuses a
+ * head with no entry. The state root defaults to the clone's main worktree,
+ * the same place the watch gate keeps its cursor.
  *
  * Exit codes: 0 written, 1 I/O error, 2 usage, 3 duplicate head / foreign
  * marker.
@@ -53,11 +55,22 @@ export function statePath(stateRoot, prNumber) {
   return join(stateRoot, '.qwen', 'tmp', `verify-pr-watch-${prNumber}.json`);
 }
 
+/**
+ * A missing file is "no state yet"; a corrupt JSON body is recoverable the
+ * same way. Any other read failure (permissions, a directory in the path)
+ * throws: silently rewriting an unreadable state would erase dedup history
+ * the round cannot see.
+ */
 export function readState(stateRoot, prNumber) {
+  let text;
   try {
-    const parsed = JSON.parse(
-      readFileSync(statePath(stateRoot, prNumber), 'utf8'),
-    );
+    text = readFileSync(statePath(stateRoot, prNumber), 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  try {
+    const parsed = JSON.parse(text);
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
       ? parsed
       : null;
@@ -75,6 +88,83 @@ function sameCommit(a, b) {
   );
 }
 
+/** In-flight entries, migrating the pre-list single-marker shape. */
+function inFlightEntries(existing) {
+  if (Array.isArray(existing?.inFlightHeads)) {
+    return existing.inFlightHeads.filter(
+      (entry) => entry && typeof entry.head === 'string',
+    );
+  }
+  if (existing?.inFlight && typeof existing?.inFlightHead === 'string') {
+    return [
+      {
+        head: existing.inFlightHead,
+        round: existing.round ?? null,
+        artifactDir: existing.artifactDir ?? null,
+        startedAt: existing.startedAt ?? null,
+      },
+    ];
+  }
+  return [];
+}
+
+/** Verified entries, migrating the pre-list verifiedHead/previousHead pair. */
+function verifiedEntries(existing) {
+  if (Array.isArray(existing?.verifiedHeads)) {
+    return existing.verifiedHeads.filter(
+      (entry) => entry && typeof entry.head === 'string',
+    );
+  }
+  const entries = [];
+  if (typeof existing?.verifiedHead === 'string') {
+    entries.push({
+      head: existing.verifiedHead,
+      round: existing.round ?? null,
+      verdict: existing.verdict ?? null,
+      commentId: existing.commentId ?? null,
+      artifactDir: existing.artifactDir ?? null,
+      completedAt: existing.completedAt ?? null,
+    });
+  }
+  if (typeof existing?.previousHead === 'string') {
+    entries.push({
+      head: existing.previousHead,
+      round: null,
+      verdict: null,
+      commentId: null,
+      artifactDir: null,
+      completedAt: null,
+    });
+  }
+  return entries;
+}
+
+const byCompletion = (a, b) =>
+  (b.completedAt ?? '').localeCompare(a.completedAt ?? '');
+
+/**
+ * The top-level fields are a compatibility view over the lists: the most
+ * recent completion names `verifiedHead`, the one before it `previousHead`.
+ * A late completion by an older round changes the view but erases no entry.
+ */
+function deriveView(state) {
+  const verified = [...state.verifiedHeads].sort(byCompletion);
+  const latest = verified[0] ?? null;
+  const previous =
+    verified.find((entry) => !sameCommit(entry.head, latest?.head)) ?? null;
+  const flights = state.inFlightHeads;
+  return {
+    ...state,
+    verifiedHead: latest?.head ?? null,
+    previousHead: previous?.head ?? null,
+    verdict: latest?.verdict ?? null,
+    commentId: latest?.commentId ?? null,
+    completedAt: latest?.completedAt ?? null,
+    inFlightHead: flights[flights.length - 1]?.head ?? null,
+    inFlight: flights.length > 0,
+  };
+}
+
 /**
  * Atomic replace: a reader (the watch gate fires every two minutes) never
  * sees a half-written state file.
@@ -89,13 +179,16 @@ function writeState(stateRoot, prNumber, state) {
 }
 
 /**
- * The head already has an answer when the file records it as verified or
- * marks a round in flight for it — the same dedup the watch prompt applies.
+ * The head already has an answer when any verified entry or any in-flight
+ * entry records it — the same dedup the watch prompt applies, over every
+ * head the file remembers, not just the most recent one.
  */
 export function duplicateHead(existing, head) {
   if (!existing) return null;
-  if (sameCommit(existing.verifiedHead, head)) return 'verified';
-  if (existing.inFlight && sameCommit(existing.inFlightHead, head)) {
+  if (verifiedEntries(existing).some((entry) => sameCommit(entry.head, head))) {
+    return 'verified';
+  }
+  if (inFlightEntries(existing).some((entry) => sameCommit(entry.head, head))) {
     return 'in-flight';
   }
   return null;
@@ -109,19 +202,19 @@ export function startRound(
   const existing = readState(stateRoot, pr);
   const duplicate = duplicateHead(existing, head);
   if (duplicate) return { duplicate, path: statePath(stateRoot, pr) };
-  const state = {
+  const startedAt = now.toISOString();
+  const state = deriveView({
     pr,
     repo: repo ?? existing?.repo ?? null,
-    verifiedHead: existing?.verifiedHead ?? null,
-    previousHead: existing?.previousHead ?? null,
+    verifiedHeads: verifiedEntries(existing),
+    inFlightHeads: [
+      ...inFlightEntries(existing),
+      { head, round, artifactDir, startedAt },
+    ],
     round,
-    verdict: null,
-    commentId: null,
     artifactDir,
-    inFlightHead: head,
-    inFlight: true,
-    startedAt: now.toISOString(),
-  };
+    startedAt,
+  });
   return { path: writeState(stateRoot, pr, state), state };
 }
 
@@ -131,32 +224,35 @@ export function completeRound(
   now = new Date(),
 ) {
   const existing = readState(stateRoot, pr);
-  const previousHead =
-    existing?.verifiedHead && !sameCommit(existing.verifiedHead, head)
-      ? existing.verifiedHead
-      : (existing?.previousHead ?? null);
-  // A completion only clears its own head's marker. The single in-flight
-  // slot belongs to the most recent start, and a redelivered head-change
-  // event dedupes against it (the bound-delivery design leans on this file
-  // for at-least-once safety), so completing Y must not wipe X's marker
-  // while X's round is still running.
-  const keepsForeignMarker =
-    !!existing?.inFlight &&
-    typeof existing?.inFlightHead === 'string' &&
-    !sameCommit(existing.inFlightHead, head);
-  const state = {
+  const completedAt = now.toISOString();
+  const kept = verifiedEntries(existing).filter(
+    (entry) => !sameCommit(entry.head, head),
+  );
+  const flights = inFlightEntries(existing);
+  const ownFlight = flights.find((entry) => sameCommit(entry.head, head));
+  const dir = artifactDir ?? ownFlight?.artifactDir ?? null;
+  const state = deriveView({
     ...(existing ?? {}),
     pr,
+    verifiedHeads: [
+      ...kept,
+      {
+        head,
+        round,
+        verdict,
+        commentId: commentId ?? null,
+        artifactDir: dir,
+        completedAt,
+      },
+    ],
+    // A completion removes only its own head's in-flight entry; every other
+    // running round keeps its marker and its own artifact directory.
+    inFlightHeads: flights.filter((entry) => !sameCommit(entry.head, head)),
     round,
-    verifiedHead: head,
-    previousHead,
-    verdict,
-    commentId: commentId ?? null,
-    artifactDir: artifactDir ?? existing?.artifactDir ?? null,
-    inFlightHead: keepsForeignMarker ? existing.inFlightHead : null,
-    inFlight: keepsForeignMarker,
-    completedAt: now.toISOString(),
-  };
+    artifactDir: dir,
+    startedAt: existing?.startedAt ?? null,
+    completedAt,
+  });
   return { path: writeState(stateRoot, pr, state), state };
 }
 
@@ -164,37 +260,45 @@ export function completeRound(
  * Recovery for a round that died after --start: without it the head stays
  * in flight forever, every later fire exits 3, and the skill forbids the
  * hand-edit that used to be the escape hatch. Mirrors the watch gate's
- * --release for a dead claim. A named head must prefix-match the recorded
- * marker, so one round cannot release another's.
+ * --release for a dead claim. The head is mandatory and must prefix-match
+ * an in-flight entry, so one round can never release another's marker —
+ * liveness is not something the helper can test.
  */
 export function releaseRound(stateRoot, { pr, head }) {
   const existing = readState(stateRoot, pr);
-  if (!existing?.inFlight) return { released: false };
-  if (head && !sameCommit(existing.inFlightHead, head)) {
-    return { mismatch: true, recorded: existing.inFlightHead };
+  const flights = inFlightEntries(existing);
+  const entry = flights.find((candidate) => sameCommit(candidate.head, head));
+  if (!entry) {
+    return flights.length > 0
+      ? { mismatch: true, recorded: flights.map((f) => f.head).join(', ') }
+      : { released: false };
   }
-  const state = {
-    ...existing,
-    inFlightHead: null,
-    inFlight: false,
-  };
+  const state = deriveView({
+    ...(existing ?? {}),
+    pr,
+    verifiedHeads: verifiedEntries(existing),
+    inFlightHeads: flights.filter(
+      (candidate) => !sameCommit(candidate.head, head),
+    ),
+  });
   writeState(stateRoot, pr, state);
   return {
     released: true,
-    head: existing.inFlightHead,
-    startedAt: existing.startedAt,
+    head: entry.head,
+    startedAt: entry.startedAt,
   };
 }
 
 const HELP = `Usage:
   node verify-pr-watch-state.mjs <pr> --start --head <oid> --round <n> --artifact-dir <dir> [--repo <owner>/<repo>] [--state-root <dir>]
   node verify-pr-watch-state.mjs <pr> --complete --head <oid> --round <n> --verdict <word> [--comment-id <id>] [--artifact-dir <dir>] [--state-root <dir>]
-  node verify-pr-watch-state.mjs <pr> --release [--head <oid>] [--state-root <dir>]
+  node verify-pr-watch-state.mjs <pr> --release --head <oid> [--state-root <dir>]
 
 Owns .qwen/tmp/verify-pr-watch-<pr>.json so rounds never hand-write it.
---start exits 3 when the head is already verified or in flight.
---release clears a dead round's in-flight marker (verifiedHead is kept);
-with --head it refuses a marker belonging to another head (exit 3).
+--start exits 3 when the head is already verified or in flight (any recorded
+head, not just the most recent). --release removes only the named head's
+in-flight entry; a head with no entry is refused (exit 3) or, with no
+markers at all, a no-op.
 
 Exit codes: 0 written, 1 I/O error, 2 usage, 3 duplicate head / foreign marker.
 `;
@@ -236,11 +340,10 @@ function parseArgs(argv) {
       `exactly one of --start / --complete / --release is required\n\n${HELP}`,
     );
   }
-  if (out.head !== null && !OID.test(out.head)) {
-    throw new Error(`--head must be a 7-40 character hex OID\n\n${HELP}`);
-  }
-  if (!out.release && !OID.test(out.head ?? '')) {
-    throw new Error(`--head is required\n\n${HELP}`);
+  if (!OID.test(out.head ?? '')) {
+    throw new Error(
+      `--head is required and must be a 7-40 character hex OID\n\n${HELP}`,
+    );
   }
   if (!out.release && (!Number.isInteger(out.round) || out.round <= 0)) {
     throw new Error(`--round must be a positive integer\n\n${HELP}`);
@@ -252,6 +355,9 @@ function parseArgs(argv) {
     throw new Error(
       `--verdict must be one of ${VERDICTS.join(' | ')}\n\n${HELP}`,
     );
+  }
+  if (out.stateRoot !== null && out.stateRoot.trim() === '') {
+    throw new Error(`--state-root must not be empty\n\n${HELP}`);
   }
   return out;
 }
@@ -268,7 +374,8 @@ function main(argv) {
     process.stderr.write(`verify-pr watch-state: ${error.message}`);
     return 2;
   }
-  const root = args.stateRoot ? resolve(args.stateRoot) : mainWorktree();
+  const root =
+    args.stateRoot !== null ? resolve(args.stateRoot) : mainWorktree();
   try {
     if (args.start) {
       const result = startRound(root, args);
@@ -290,7 +397,7 @@ function main(argv) {
       const result = releaseRound(root, args);
       if (result.mismatch) {
         process.stderr.write(
-          `verify-pr watch-state: PR ${args.pr} in-flight marker belongs to ${result.recorded}, not ${args.head}; refusing to release another round's marker\n`,
+          `verify-pr watch-state: PR ${args.pr} head ${args.head} has no in-flight marker (recorded: ${result.recorded}); refusing to release another round's marker\n`,
         );
         return 3;
       }

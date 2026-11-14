@@ -6801,7 +6801,10 @@ jobs:
               # declaration. Declare it from the workflow, not the agent: a
               # round whose base-pinned skill predates boundary.json still
               # passes the checker's boundary rule, and a PR-authored file in
-              # the uploaded artifacts is overwritten, not trusted.
+              # the uploaded artifacts is overwritten, not trusted. Unlink
+              # first: the artifact tree is PR-writable, and a plain redirect
+              # would follow a planted symlink instead of replacing it.
+              rm -f -- "$(dirname "$REPORT")/boundary.json"
               printf '%s\n' '{"mode":"container","detail":"CI verify lane (credential-free container)"}' > "$(dirname "$REPORT")/boundary.json"
               node "${VERIFY_PR_CHECK:-scripts/verify-pr-check.mjs}" "$(dirname "$REPORT")" > "$check_log" 2> "$check_log.err" || check_status=$?
               case "${check_status}:$(tail -n 1 "$check_log")" in

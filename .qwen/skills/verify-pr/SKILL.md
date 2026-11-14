@@ -178,8 +178,12 @@ trigger the sandboxed `@qwen-code /verify` lane instead.
 **The boundary is a declaration, not a vibe.** Whatever the answer,
 `boundary.json` must be in the artifact directory — the checker refuses a
 round without it. On a waived host run the round writes it before any PR
-code runs; a container's operator writes it (the recipe's host check step,
-or the CI publish job). The two shapes:
+code runs; otherwise the boundary's operator writes it: the recipe's host
+check step for a container, the CI publish job for the lane, and the VM's
+operator for a VM boundary. The gate detects container markers only, so a
+VM's operator sets `container=<vm name>` and `QWEN_VERIFY_CREDENTIAL_FREE=1`
+after confirming nothing is mounted, then writes the declaration the same
+way. The two shapes:
 
 - Inside a boundary that passed `--require-isolation`:
   `{"mode":"container","detail":"<image, network policy, credential-free mount>"}`.
@@ -510,13 +514,19 @@ authority to certify the round.
 7. **After the round, check and clean up from the host.** The checker and its
    expected head both come from outside the round tree. The host built the
    boundary, so the host declares it — the inner round runs the CI entry
-   path and does not write `boundary.json` itself:
+   path and does not write `boundary.json` itself. Stop the container
+   **before** declaring, and unlink any existing `boundary.json` before
+   writing: `<round-dir>` lives inside the PR clone the container mounts
+   read-write, so PR code can plant a symlink there (a plain redirect would
+   follow it and truncate the target on the host) and a live container could
+   rewrite the declaration between the write and the checker's read:
 
    ```bash
+   docker rm -f qwen-verify-<n>
+   rm -f -- <round-dir>/boundary.json
    printf '%s\n' '{"mode":"container","detail":"<image, network policy, credential-free mount>"}' > <round-dir>/boundary.json
    node <trusted-clone>/scripts/verify-pr-check.mjs \
      --context ~/.cache/qwen-verify/pr<n>/pr.json <round-dir>
-   docker rm -f qwen-verify-<n>
    kill "$(cat ~/.cache/qwen-verify/pr<n>/proxy.pid)"
    rm -f ~/.cache/qwen-verify/pr<n>/proxy.json ~/.cache/qwen-verify/pr<n>/proxy.err ~/.cache/qwen-verify/pr<n>/proxy.pid
    unset QWEN_VERIFY_PROXY_TOKEN
@@ -570,11 +580,14 @@ Build the task in this order and stop at the first failure:
    (the gate is capped at 2048 characters). The prompt is the contract below.
 
 The prompt consumes the gate's JSON and nothing else. On
-`head_moved_externally`, take `headSha` and run the round for that sha:
-register it with
+`head_moved_externally`, take `headSha` and run the round for that sha.
+Run prepare first (trusted host metadata), then register the round with
 `node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --artifact-dir <dir> --repo <owner>/<repo>`
-**before** starting, so a round that dies does not replay the same head;
-exit 3 means the file already records that head or marks a round in flight,
+**before** the verification work starts, so a round that dies does not
+replay the same head; `<dir>` is the artifact directory prepare printed,
+and the helper runs from the trusted clone — the state root defaults to
+its main worktree, never the round's PR clone.
+Exit 3 means the file already records that head or marks a round in flight,
 and the fire is skipped. Record the finished round with the same script's
 completion form:
 `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--comment-id <id>]`
@@ -732,7 +745,9 @@ ambiguous rather than verify a guessed PR. Then, in order:
    applies.
 3. Register the round in the shared watch state before starting it, through
    the helper that owns `.qwen/tmp/verify-pr-watch-<n>.json` — never hand-write
-   that JSON:
+   that JSON. Run it from the trusted clone (the state root defaults to its
+   main worktree, never the round's PR clone), after prepare has printed the
+   artifact directory — `<dir>` is that printed path:
    `node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --artifact-dir <dir> --repo <owner>/<repo>`.
    Exit 3 means the file already records `H` as verified or in flight: let
    that round answer instead of starting a duplicate. When the in-flight
@@ -2238,9 +2253,11 @@ the report what the count holds.
    reproduction it never had.
 8. **Methodology** — one paragraph: environment, how each harness drove the
    code, where the raw logs live. Open it with a `**Boundary.**` line naming
-   what `boundary.json` records — the image and network policy, or the
-   maintainer's recorded waiver — so a human reader sees where the untrusted
-   code ran without opening the artifact.
+   the boundary the round ran in — the image and network policy, or the
+   maintainer's recorded waiver. Write it from what you know at report
+   time: on the CI path and the container recipe the operator writes
+   `boundary.json` later, so the line names the boundary itself, not a file
+   that does not exist yet.
 
 Throughout, label each claim as measured, inferred from code, or not run,
 and when the head moved during the round, label which SHA each result came

@@ -210,10 +210,21 @@ export function checkBoundary(text) {
     };
   }
   const nonEmpty = (value) => typeof value === 'string' && value.trim() !== '';
+  // The skill's template strings are <placeholder> shaped; a declaration
+  // that still carries one was copied, not filled in.
+  const placeholder = (value) =>
+    typeof value === 'string' && /<[^>]+>/.test(value);
   if (parsed.mode === 'container' && !nonEmpty(parsed.detail)) {
     return {
       errors: [
         'boundary.json mode container needs a non-empty detail naming the boundary (image and network policy, or the CI lane)',
+      ],
+    };
+  }
+  if (parsed.mode === 'container' && placeholder(parsed.detail)) {
+    return {
+      errors: [
+        'boundary.json detail still carries a <placeholder>: name the actual image and network policy',
       ],
     };
   }
@@ -227,6 +238,18 @@ export function checkBoundary(text) {
       ],
     };
   }
+  if (
+    parsed.mode === 'waived' &&
+    (placeholder(parsed.by) || placeholder(parsed.reason))
+  ) {
+    return {
+      errors: [
+        'boundary.json waiver still carries a <placeholder>: record the actual maintainer and reason',
+      ],
+    };
+  }
+  // `by` is a recorded claim, not an identity the checker can verify; the
+  // publish guard and the maintainer's review are the enforcement there.
   return { errors: [] };
 }
 
@@ -468,6 +491,11 @@ export function checkArtifacts({
       );
     }
     warnings.push(...leadShapeWarnings(report, verdict, 'report.md'));
+    if (!report.includes('**Boundary.**')) {
+      warnings.push(
+        'report.md has no **Boundary.** line: the Methodology opens with where the untrusted PR code ran (the image and network policy, or the recorded waiver)',
+      );
+    }
   }
 
   // comment.md is the exact body a local round posts: report content plus

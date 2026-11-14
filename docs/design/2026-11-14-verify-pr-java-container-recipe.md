@@ -67,8 +67,17 @@ A second recipe in the skill, selected when the delta touches
    `node:22-bookworm` by tag; the Java recipe should be stricter).
 2. **Offline Maven repository.** The host (trusted side) seeds a per-round
    repository with `mvn dependency:go-offline` against the PR head's poms,
-   using the host's normal mirror settings. The container mounts that
-   repository directory only — never `settings.xml`, which can carry mirror
+   using the host's normal mirror settings. The seed must also install the
+   PR's `packages/sdk-java` reactor artifacts into that repository
+   (`mvn install` on the SDK modules): the managed-agent build resolves them
+   from the local repo, so a fresh seed without them cannot resolve, and a
+   reused seed with stale ones compiles against the wrong jar — re-install
+   whenever the SDK poms or sources change, under the same built-for-this-head
+   reuse rule. Strip the `_remote.repositories` tracking files afterwards
+   (or seed with `-Dmaven.legacyLocalRepo=true`): they record which mirror
+   served each artifact, and offline resolution against a different repo id
+   otherwise re-resolves and fails. The container mounts that repository
+   directory only — never `settings.xml`, which can carry mirror
    credentials. The battery container runs with
    `-Dmaven.repo.local=/m2 --network none` — stricter than the JS recipe,
    which keeps network for the model proxy, because the Java battery needs
@@ -77,11 +86,14 @@ A second recipe in the skill, selected when the delta touches
 3. **Trusted scripts, PR clone, model proxy.** Same layout as the JS recipe:
    scripts come from the trusted clone, the round runs in a standalone PR
    clone, and any model-driven step goes through the host-side
-   `verify-pr-model-proxy.mjs` relay. The Java battery itself needs no model
-   access.
-4. **Declaration.** The round writes
+   `verify-pr-model-proxy.mjs` relay. The offline battery container cannot
+   reach that proxy, so the round's own model turns run in a separate
+   proxy-connected container (the JS recipe's shape) or not at all; the
+   battery itself needs no model access.
+4. **Declaration.** The operator writes
    `{"mode":"container","detail":"maven:3.9.11-eclipse-temurin-21, --network none, offline m2, credential-free"}`
-   after the gate passes.
+   after the gate passes — the same operator-owned rule as the JS recipe,
+   not the round itself.
 
 ## Design decisions and rationale
 
@@ -108,15 +120,17 @@ A second recipe in the skill, selected when the delta touches
   pass (existing rule).
 - The seed step runs on the host with the maintainer's normal Maven settings
   and is a trusted operation; it must not execute PR code (resolution only).
-  Name the check, not a directory to delete: Maven loads `.mvn/` core
-  extensions at startup, **and** resolves and loads pom-declared build
-  extensions (`<build><extensions>`, and any `<plugin>` with
-  `<extensions>true</extensions>`, in the root and every module pom) while
-  it builds the project model — before any goal runs. The seed copy must
-  strip or refuse both surfaces, or the seed must run inside a
-  credential-free container whose egress is limited to the configured
-  mirror, with the resulting repository copied out. The trusted mirror
-  settings stay host-side either way (the container never mounts
+  The seed copy must remove the **whole `.mvn/` directory**: the launcher
+  honours core extensions, `jvm.config` (concatenated into `MAVEN_OPTS`
+  before the JVM starts — a `-javaagent:` there runs during the seed), and
+  `maven.config` alike. On top of that, refuse pom-declared build extensions
+  (`<build><extensions>`, and any `<plugin>` with
+  `<extensions>true</extensions>`, in the root and every module pom), which
+  resolve and load while the project model is built — before any goal runs.
+  The alternative is to drop the strip option entirely and run the seed
+  inside a credential-free container whose egress is limited to the
+  configured mirror, with the resulting repository copied out. The trusted
+  mirror settings stay host-side either way (the container never mounts
   `settings.xml`).
 
 ## Risks

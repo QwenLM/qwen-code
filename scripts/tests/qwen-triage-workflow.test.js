@@ -6620,7 +6620,7 @@ describe('qwen-triage verify hardening round 2', () => {
     );
     expect(flat).toContain('never hand-write');
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --start --head <H> --round <r>',
+      'verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --artifact-dir <dir> --repo <owner>/<repo>',
     );
     expect(flat).toContain(
       'Exit 3 means the file already records `H` as verified or in flight',
@@ -6689,15 +6689,28 @@ describe('qwen-triage verify hardening round 2', () => {
   // the manual section's identical command uses <H> and cannot satisfy this.
   it('spells out the watch prompt completion and release forms', () => {
     const flat = verifySkill.replace(/\s+/g, ' ');
+    // The full registration form, every required flag included.
+    expect(flat).toContain(
+      'verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --artifact-dir <dir> --repo <owner>/<repo>',
+    );
     expect(flat).toContain(
       'verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word>',
     );
+    // The duty, not just the command string: deleting the consequence
+    // sentence while keeping the command must go red too.
+    expect(flat).toContain('Record the finished round');
     expect(flat).toContain(
       'a completion without it exits 2 and leaves the head in flight forever',
     );
     expect(flat).toContain(
       'verify-pr-watch-state.mjs <n> --release --head <headSha>',
     );
+    // The state root is the trusted clone's main worktree, and <dir> is
+    // the directory prepare printed — not a value invented at registration.
+    expect(flat).toContain(
+      "the helper runs from the trusted clone — the state root defaults to its main worktree, never the round's PR clone",
+    );
+    expect(flat).toContain('`<dir>` is the artifact directory prepare printed');
   });
 
   // Two local rounds on PR #16866 ran the whole battery on the host with no
@@ -6709,8 +6722,10 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('The boundary is a declaration, not a vibe');
     expect(flat).toContain('`boundary.json` must be in the artifact directory');
     expect(flat).toContain('the checker refuses a round without it');
-    // The boundary's operator owns the declaration, not the inner round.
-    expect(flat).toContain("a container's operator writes it");
+    // The boundary's operator owns the declaration, not the inner round —
+    // container, CI lane, and VM alike.
+    expect(flat).toContain("the boundary's operator writes it");
+    expect(flat).toContain("the VM's operator for a VM boundary");
     expect(flat).toContain(
       '{"mode":"container","detail":"<image, network policy, credential-free mount>"}',
     );
@@ -6726,8 +6741,16 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('carries no JDK or Maven');
     expect(flat).toContain('never a silent host fallback');
     // The local container recipe's host check step declares the container
-    // it built, before the checker runs on the round dir.
+    // it built — after stopping the container and unlinking any planted
+    // boundary.json, before the checker runs on the round dir.
     expect(flat).toContain('> <round-dir>/boundary.json');
+    expect(flat).toContain('rm -f -- <round-dir>/boundary.json');
+    expect(flat.indexOf('docker rm -f qwen-verify-<n>')).toBeLessThan(
+      flat.indexOf('rm -f -- <round-dir>/boundary.json'),
+    );
+    expect(flat.indexOf('rm -f -- <round-dir>/boundary.json')).toBeLessThan(
+      flat.indexOf('> <round-dir>/boundary.json'),
+    );
     // The report carries the boundary for human readers too.
     expect(flat).toContain('Open it with a `**Boundary.**` line');
   });
@@ -7095,9 +7118,48 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(body).toContain('merge-ready');
       const script = publishScript();
       expect(script.indexOf('CI verify lane')).toBeGreaterThan(-1);
+      // The unlink must precede the write, and the write the checker: a
+      // plain redirect into the PR-writable artifact tree would follow a
+      // planted symlink instead of replacing it.
+      expect(
+        script.indexOf('rm -f -- "$(dirname "$REPORT")/boundary.json"'),
+      ).toBeGreaterThan(-1);
+      expect(
+        script.indexOf('rm -f -- "$(dirname "$REPORT")/boundary.json"'),
+      ).toBeLessThan(script.indexOf('CI verify lane'));
       expect(script.indexOf('CI verify lane')).toBeLessThan(
         script.indexOf('VERIFY_PR_CHECK'),
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The artifact tree is PR-writable: a boundary.json symlink planted there
+  // must not turn the host's declaration write into a truncation of the
+  // link target. The unlink makes the write replace the link itself.
+  it('does not follow a planted boundary.json symlink in the artifacts', () => {
+    const dir = fixture();
+    try {
+      const art = join(dir, 'work', 'verify-results', 'prA-verify-1');
+      const victim = join(dir, 'victim.txt');
+      writeFileSync(victim, 'host data');
+      symlinkSync(victim, join(art, 'boundary.json'));
+      const body = render(dir, {
+        NAME: 'symlink',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(readFileSync(victim, 'utf8')).toBe('host data');
+      expect(lstatSync(join(art, 'boundary.json')).isSymbolicLink()).toBe(
+        false,
+      );
+      expect(
+        JSON.parse(readFileSync(join(art, 'boundary.json'), 'utf8')),
+      ).toEqual({
+        mode: 'container',
+        detail: 'CI verify lane (credential-free container)',
+      });
+      expect(body).toContain('merge-ready');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
