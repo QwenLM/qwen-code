@@ -1,3 +1,4 @@
+import { randomUUID } from '../../utils/random-uuid.js';
 import { useWorkspaceFileChanges } from './useWorkspaceFileChanges';
 import { useDaemonAvailabilityController } from '../../daemon/availability-context.js';
 import { isDaemonUnavailableError } from '../../daemon/availability.js';
@@ -82,11 +83,7 @@ function getSubagentMetrics(
 }
 
 function createDetailClientId(): string {
-  const suffix =
-    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID()
-      : Math.random().toString(36).slice(2);
-  return `subagent-detail:${suffix}`;
+  return `subagent-detail:${randomUUID()}`;
 }
 
 export function findSubagentRootTool(
