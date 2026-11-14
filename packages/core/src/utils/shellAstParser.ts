@@ -1083,22 +1083,29 @@ const PLAIN_HEREDOC_DELIMITER = /^[\w.-]+$/;
 const QUOTED_HEREDOC_DELIMITER = /^(?:'[^']*'|"[^"$`\\]*"|\\[\w.-]+)$/;
 
 /**
- * A heredoc body is expanded unless its delimiter is quoted. Under a plain
- * delimiter tree-sitter shows `$(...)` in the body as a node, which
- * `evaluateSubstitutions` judges, but a backtick substitution stays plain
- * text inside `heredoc_body`, so a backtick there is a command no rule has
- * read. Any other delimiter (`${X:-'E'}`, `$X`, `E"O"F`) is not vouched for:
- * a quote character in it need not quote it, and the parser can hide `$(...)`
- * in its body too.
+ * A heredoc body is expanded unless its delimiter is quoted, and what the
+ * parser shows of a body is not what bash expands: a backtick substitution
+ * stays plain text, and so does `$(...)` behind leading whitespace. So the
+ * body is not read from the tree. Every expansion bash performs in a heredoc
+ * body (parameter, command, arithmetic) starts with `$` or a backtick, and
+ * an expandable body holding either is not vouched for. This is the test
+ * `detectCommandSubstitution` already applies to a heredoc body, widened from
+ * `$(` to any `$`, since `$[x]` and `$((x))` run a command held in `x`.
+ *
+ * A delimiter that is neither one plain word nor quoted as a whole
+ * (`${X:-'E'}`, `$X`, `E"O"F`) is not vouched for either: a quote character
+ * in it need not quote it.
  */
 function evaluateHeredocBody(heredoc: SyntaxNode): ShellCommandSafety {
-  const part = (type: string) =>
-    heredoc.namedChildren.find((child) => child.type === type);
-  const delimiter = part('heredoc_start')?.text ?? '';
+  const delimiter =
+    heredoc.namedChildren.find((child) => child.type === 'heredoc_start')
+      ?.text ?? '';
   if (QUOTED_HEREDOC_DELIMITER.test(delimiter)) return 'read-only';
   if (!PLAIN_HEREDOC_DELIMITER.test(delimiter)) return 'unknown';
-  const body = part('heredoc_body')?.text ?? '';
-  return body.includes('`') ? 'unknown' : 'read-only';
+  // Everything after the heredoc's first line: the body and its closing line.
+  const firstLineEnd = heredoc.text.indexOf('\n');
+  const body = firstLineEnd < 0 ? '' : heredoc.text.slice(firstLineEnd + 1);
+  return /[$`]/.test(body) ? 'unknown' : 'read-only';
 }
 
 /**

@@ -1189,6 +1189,17 @@ describe('words after a redirection in the middle of a command', () => {
     'cat <<${X:-E}\n$(id -u)\n${X:-E}',
     'cat <<$X\n$(id -u)\n$X',
     'cat <<$X\nhi\n$X',
+    // The parser hides `$(...)` behind leading whitespace, and `$[x]` runs
+    // whatever `x` holds. Every expansion bash performs in a heredoc body
+    // starts with `$` or a backtick, so the body's own text is what is read.
+    'cat <<EOF\n\t$(id -u)\nEOF',
+    'cat <<EOF\n $(id -u)\nEOF',
+    'cat <<EOF\nhi\n  $(id -u)\nEOF',
+    'cat <<-EOF\n\t$(id -u)\n\tEOF',
+    'cat <<EOF\n$[x]\nEOF',
+    'cat <<EOF\n\t${x}\nEOF',
+    'cat <<EOF\n$HOME\nEOF',
+    'cat <<EOF | grep hi\n\t$(id -u)\nEOF',
   ])('does not classify %j as read-only', async (command) => {
     expect(await classifyShellCommandSafety(command)).toBe('unknown');
   });
@@ -1218,6 +1229,8 @@ describe('words after a redirection in the middle of a command', () => {
     'cat <<\\EOF\n`id -u`\nEOF',
     'cat <<"END OF"\n`id -u`\nEND OF',
     'cat <<E-O.F_1\nhi\nE-O.F_1',
+    'cat <<EOF\n\thi\n  indented text\nEOF',
+    "cat <<'EOF'\n\tcosts $5, see `notes`\nEOF",
   ])('keeps %j read-only', async (command) => {
     expect(await classifyShellCommandSafety(command)).toBe('read-only');
   });
