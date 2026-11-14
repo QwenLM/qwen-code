@@ -836,12 +836,22 @@
 
 .diffPreview {
   border: 1px solid var(--border);
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   background: var(--muted, rgba(0, 0, 0, 0.03));
   min-height: 0;
   flex: 1 1 0;
   display: flex;
   flex-direction: column;
+}
+
+/* Per-edit diff blocks (DiffView) have no flex sizing of their own, so the
+   default flex-shrink: 1 squeezes each of them into a few-pixel sliver when a
+   turn contains many edits. Pin each child at its natural height and let the
+   panel scroll. Declared before .codeMirrorDiffWrap so that rule's own flex
+   sizing still wins for the full-content case. */
+.diffPreview > * {
+  flex-shrink: 0;
 }
 
 .codeMirrorDiff {
