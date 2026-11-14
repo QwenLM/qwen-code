@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskRow;
 import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -85,10 +85,10 @@ class ManagedSessionStoreIntegrationTest {
     private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
 
     @Autowired
-    private ManagedExtensionRecordStore records;
+    private JdbcManagedExtensionRecordStore records;
 
     @Autowired
-    private ManagedSessionStore sessionStore;
+    private JdbcManagedSessionStore sessionStore;
 
     @Test
     void nativeJournalSnapshotRoutesPublishReadAndPageWithinWriterScope() throws Exception {

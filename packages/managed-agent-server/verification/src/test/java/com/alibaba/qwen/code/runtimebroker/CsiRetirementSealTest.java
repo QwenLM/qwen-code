@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
@@ -18,22 +17,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class CsiRetirementSealTest {
     @Test
-    void originalCsiHandleIsImmutableBeforeRetirementInMemoryAndJdbc() {
-        for (RuntimeBindingRepository bindings : java.util.List.of(new InMemoryRuntimeBindingRepository(),
-                new JdbcRuntimeBindingRepository(source(), new AesGcmSecretProtector("test", new byte[32])))) {
-            var original = binding(bindings, "kubernetes-workspace");
-            assertThrows(IllegalArgumentException.class, () -> bindings.compareAndSet(original,
-                    original.withResourceHandle(new RuntimeResourceHandle("kubernetes-workspace", 3,
-                            Map.of("pod", "replacement")), Instant.now())));
-            assertThrows(IllegalArgumentException.class, () -> bindings.compareAndSet(original,
-                    original.withResourceHandle(null, Instant.now())));
-            assertNotNull(bindings.compareAndSet(original, original.withResourceHandle(original.getResourceHandle(), Instant.now())));
-        }
-    }
-
-    @Test
-    void memoryCannotReopenOrReleaseASealedCsiBinding() {
-        verify(new InMemoryRuntimeBindingRepository());
+    void originalCsiHandleIsImmutableBeforeRetirement() {
+        var bindings = new JdbcRuntimeBindingRepository(source(), new AesGcmSecretProtector("test", new byte[32]));
+        var original = binding(bindings, "kubernetes-workspace");
+        assertThrows(IllegalArgumentException.class, () -> bindings.compareAndSet(original,
+                original.withResourceHandle(new RuntimeResourceHandle("kubernetes-workspace", 3,
+                        Map.of("pod", "replacement")), Instant.now())));
+        assertThrows(IllegalArgumentException.class, () -> bindings.compareAndSet(original,
+                original.withResourceHandle(null, Instant.now())));
+        assertNotNull(bindings.compareAndSet(original, original.withResourceHandle(original.getResourceHandle(), Instant.now())));
     }
 
     @Test

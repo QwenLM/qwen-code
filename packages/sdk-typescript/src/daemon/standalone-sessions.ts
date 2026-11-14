@@ -73,6 +73,8 @@ export type DaemonStandaloneSessionLookup =
   | DaemonStandaloneSessionCreating;
 
 export interface DaemonStandaloneSessionListOptions {
+  /** Descending order; question sort requires session_last_user_prompt_sort. Unknown times sort last. */
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   pageSize?: number;
   cursor?: string;
   archiveState?: DaemonSessionArchiveState;

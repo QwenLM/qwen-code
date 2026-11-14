@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.dao.DuplicateKeyException;
@@ -29,18 +31,18 @@ final class HostedCleanupReferences {
      */
     static boolean containsCleanup(byte[] recordBytes) {
         return Arrays.stream(new String(recordBytes, StandardCharsets.UTF_8).split("\n"))
-                .map(com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore::parse)
+                .map(ManagedExtensionRecordStore::parse)
                 .filter(Objects::nonNull)
                 .anyMatch(record -> "hosted.cleanup".equals(record.path("managedSession").path("kind").asText()));
     }
 
     static void apply(JdbcTemplate jdbc, String tenant, String workspace, String session,
             JsonNode payload, Function<String, StoredResource> resources, long revision, long now) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String owner = ManagedSchemaKeys.key("hosted-cleanup", payload.path("cleanupId").textValue());
         String resourceId = payload.path("descriptorRef").path("resourceId").textValue();
         StoredResource resource = resources.apply(resourceId);
-        JsonNode descriptor = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(resource.bytes(), StandardCharsets.UTF_8));
+        JsonNode descriptor = ManagedExtensionRecordStore.parse(new String(resource.bytes(), StandardCharsets.UTF_8));
         if (descriptor == null) {
             throw new IllegalStateException("Validated cleanup descriptor is unreadable");
         }
@@ -61,7 +63,7 @@ final class HostedCleanupReferences {
                         "Cleanup Runtime binding is missing or differs from its original descriptor");
             }
         }
-        String key = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, resourceId);
+        String key = ManagedSessionStore.resourceKey(scope, resourceId);
         // Only this Session's commits insert its cleanup references, and they
         // queue on its Session row before their first read, so a plain probe
         // sees every earlier one. Retirement deletes them only under the head

@@ -41,11 +41,11 @@
     "watch": "tsc --watch"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "tree-sitter-wasms": "^0.1.13",
     "web-tree-sitter": "^0.24.7",
     "ws": "^8.18.0",
-    "zod": "^3.25.76",
+    "zod": "^4.6.6",
     "@qwen-code/cua-sdk": "0.27.0"
   },
   "devDependencies": {

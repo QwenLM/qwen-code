@@ -1,7 +1,9 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -60,7 +62,7 @@ final class WorkspaceOperations {
         Object physical = data.get("physical_key");
         if (storage != null) {
             var aliases = jdbc.queryForList("SELECT storage_kind FROM ma_storage WHERE alias_key = ?", String.class,
-                    com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
+                    RuntimeAdmissionFences.storageAliasKey(tenant, storage));
             if (aliases.size() == 1 && "LOCAL".equals(aliases.getFirst())) {
                 physical = LocalStorageOwners.key(jdbc, tenant, storage);
                 if (kind == Kind.CHILD_WORKSPACE || kind == Kind.SESSION_WORKTREE) {
@@ -75,10 +77,10 @@ final class WorkspaceOperations {
         requireState(kind, state);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id, target_kind, target_key, target_id, target_revision, storage_key, physical_key, state, phase, delivery_state, request_digest, request_json, result_json, available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 key(kind, id), hash(tenant), data.get("session_id") instanceof String session
-                        ? com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session) : null, kind.name(), id.getBytes(StandardCharsets.UTF_8),
+                        ? ManagedSessionStore.sessionScopeKey(tenant, session) : null, kind.name(), id.getBytes(StandardCharsets.UTF_8),
                 tenant.getBytes(StandardCharsets.UTF_8), data.get("session_id"),
                 data.containsKey("binding_id") ? "RUNTIME_BINDING" : "STORAGE", hash(target), target.getBytes(StandardCharsets.UTF_8), revision,
-                storage == null ? null : com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
+                storage == null ? null : RuntimeAdmissionFences.storageAliasKey(tenant, storage),
                 physical, state, data.getOrDefault("phase", state), data.get("delivery_state"),
                 data.getOrDefault("request_digest", hash(request)), request, envelope(data), data.getOrDefault("available_at", 0L));
     }
@@ -175,10 +177,10 @@ final class WorkspaceOperations {
             case STORAGE_MIGRATION -> java.util.Set.of("RETIRING", "RETIRED", "PREPARING", "PREPARED", "COMPLETED", "ABORTED", "INVALIDATED");
             case CSI_RETIREMENT -> java.util.Set.of("DRAINING");
             case WORKSPACE_RETIREMENT -> java.util.Set.of("DRAINING", "PLATFORM_CLEANED", "RELEASED");
-            case CHILD_WORKSPACE -> java.util.Set.of(ChildWorkspaceStore.PREPARING, ChildWorkspaceStore.READY,
-                    ChildWorkspaceStore.MERGING, ChildWorkspaceStore.APPLYING, ChildWorkspaceStore.APPLIED,
-                    ChildWorkspaceStore.MERGED, ChildWorkspaceStore.CONFLICTED, ChildWorkspaceStore.DISCARDING,
-                    ChildWorkspaceStore.DISCARDED, ChildWorkspaceStore.FAILED, ChildWorkspaceStore.BLOCKED);
+            case CHILD_WORKSPACE -> java.util.Set.of(JdbcChildWorkspaceStore.PREPARING, JdbcChildWorkspaceStore.READY,
+                    JdbcChildWorkspaceStore.MERGING, JdbcChildWorkspaceStore.APPLYING, JdbcChildWorkspaceStore.APPLIED,
+                    JdbcChildWorkspaceStore.MERGED, JdbcChildWorkspaceStore.CONFLICTED, JdbcChildWorkspaceStore.DISCARDING,
+                    JdbcChildWorkspaceStore.DISCARDED, JdbcChildWorkspaceStore.FAILED, JdbcChildWorkspaceStore.BLOCKED);
             case SESSION_WORKTREE -> java.util.Set.of("PREPARING", "READY", "FAILED", "BLOCKED", "REMOVING", "REMOVED");
         };
         if (!allowed.contains(state)) {
