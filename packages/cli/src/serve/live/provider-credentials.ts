@@ -14,31 +14,45 @@ const REALTIME_PATH = '/api-ws/v1/realtime';
 export const DEFAULT_LIVE_VOICE = 'Tina';
 export const DEFAULT_LIVE_SHORTCUT = 'Command+E';
 
-export type TurnDetection =
-  | 'server_vad'
-  | 'smart_turn'
-  | 'smart_turn_v2'
-  | 'semantic_vad';
-
-const TURN_DETECTION_VALUES: ReadonlySet<string> = new Set([
+export const TURN_DETECTION_VALUES = [
   'server_vad',
   'smart_turn',
   'smart_turn_v2',
   'semantic_vad',
-]);
+] as const;
 
+export type TurnDetection = (typeof TURN_DETECTION_VALUES)[number];
+
+const TURN_DETECTION_SET: ReadonlySet<string> = new Set(TURN_DETECTION_VALUES);
+
+/**
+ * The only validator for `experimental.liveVoice.turnDetection`. Unset and
+ * empty (after trimming) select the model-aware default; anything else that
+ * is not a known mode yields an error message instead of throwing, so a bad
+ * value never takes down the setup card or the daemon.
+ */
+export function parseTurnDetection(configured: unknown): {
+  value?: TurnDetection;
+  error?: string;
+} {
+  const value = typeof configured === 'string' ? configured.trim() : configured;
+  if (value === undefined || value === '') return {};
+  if (typeof value === 'string' && TURN_DETECTION_SET.has(value)) {
+    return { value: value as TurnDetection };
+  }
+  return {
+    error: `experimental.liveVoice.turnDetection must be one of: ${TURN_DETECTION_VALUES.join(', ')}, or empty for the model-aware default. Got: ${JSON.stringify(configured)}`,
+  };
+}
+
+/** The mode sent on the wire: the configured one, else the model's default. */
 export function resolveTurnDetection(
-  configured: unknown,
+  configured: TurnDetection | undefined,
   model: string,
 ): TurnDetection {
-  if (configured === undefined || configured === '') {
-    return model.startsWith('qwen-audio') ? 'server_vad' : 'semantic_vad';
-  }
-  if (typeof configured === 'string' && TURN_DETECTION_VALUES.has(configured)) {
-    return configured as TurnDetection;
-  }
-  throw new LiveProviderConfigError(
-    `experimental.liveVoice.turnDetection must be one of: server_vad, smart_turn, smart_turn_v2, semantic_vad. Got: ${JSON.stringify(configured)}`,
+  return (
+    configured ??
+    (model.startsWith('qwen-audio') ? 'server_vad' : 'semantic_vad')
   );
 }
 
@@ -49,6 +63,8 @@ export interface LiveVoiceConfiguration {
   voice: string;
   shortcut: string;
   turnDetection: TurnDetection | undefined;
+  /** Why the stored `turnDetection` is refused; calls fail until it is fixed. */
+  turnDetectionError?: string;
 }
 
 /** A `modelProviders` entry that Live Voice may use as its upstream. */
@@ -78,8 +94,10 @@ export class LiveProviderConfigError extends Error {
     /**
      * `env_key_missing`: the route's `envKey` is simply unset — a state the
      * user remediates, not a route configuration defect.
+     * `invalid_turn_detection`: the key and route are fine; only the stored
+     * `turnDetection` is refused.
      */
-    readonly reason?: 'env_key_missing',
+    readonly reason?: 'env_key_missing' | 'invalid_turn_detection',
   ) {
     super(message);
     this.name = 'LiveProviderConfigError';
@@ -98,28 +116,19 @@ function readShortcut(value: unknown): string {
   return shortcut.length <= 128 ? shortcut : DEFAULT_LIVE_SHORTCUT;
 }
 
-function validateTurnDetection(configured: unknown): TurnDetection | undefined {
-  if (configured === undefined || configured === '') return undefined;
-  if (typeof configured === 'string' && TURN_DETECTION_VALUES.has(configured)) {
-    return configured as TurnDetection;
-  }
-  throw new LiveProviderConfigError(
-    `experimental.liveVoice.turnDetection must be one of: server_vad, smart_turn, smart_turn_v2, semantic_vad. Got: ${JSON.stringify(configured)}`,
-  );
-}
-
 export function readLiveVoiceConfiguration(
   settings: Settings,
 ): LiveVoiceConfiguration {
   const raw = settings.experimental?.liveVoice;
-  const model = readNonEmpty(raw?.model, DEFAULT_LIVE_VOICE_MODEL);
+  const turnDetection = parseTurnDetection(raw?.turnDetection);
   return {
     enabled: raw?.enabled === true,
-    model,
+    model: readNonEmpty(raw?.model, DEFAULT_LIVE_VOICE_MODEL),
     endpoint: readNonEmpty(raw?.endpoint, DEFAULT_LIVE_ENDPOINT),
     voice: readNonEmpty(raw?.voice, DEFAULT_LIVE_VOICE),
     shortcut: readShortcut(raw?.shortcut),
-    turnDetection: validateTurnDetection(raw?.turnDetection),
+    turnDetection: turnDetection.value,
+    ...(turnDetection.error ? { turnDetectionError: turnDetection.error } : {}),
   };
 }
 
@@ -397,6 +406,14 @@ export function resolveLiveProviderCredential(
     }
     // Stored as entered: an OpenAI-compatible base URL or a Realtime URL.
     endpoint = normalizeLiveRealtimeEndpoint(live.endpoint);
+  }
+  // Checked after the key so a status probe can tell "key fine, mode bad"
+  // apart from a broken route or a missing key.
+  if (live.turnDetectionError) {
+    throw new LiveProviderConfigError(
+      live.turnDetectionError,
+      'invalid_turn_detection',
+    );
   }
   const credential = {
     endpoint,

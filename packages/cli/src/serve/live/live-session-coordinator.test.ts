@@ -102,6 +102,7 @@ function makeHarness(
     pendingInteractions?: BridgePendingInteraction[];
     gracefulStopDrainMs?: number;
     voice?: string;
+    turnDetection?: string;
   } = {},
 ) {
   const subscribers = new Set<Subscriber>();
@@ -288,6 +289,9 @@ function makeHarness(
           apiKey: 'secret',
           realtimeModel: 'qwen3.5-omni-plus-realtime',
           voice: options.voice ?? 'Tina',
+          ...(options.turnDetection
+            ? { turnDetection: options.turnDetection }
+            : {}),
         }) as never,
     ),
     openRealtimeSession: openRealtimeSession as never,
@@ -509,6 +513,24 @@ describe('LiveSessionCoordinator', () => {
     );
     expect(harness.bridge.sendPrompt).not.toHaveBeenCalled();
   });
+
+  it.each(['server_vad', 'smart_turn_v2'])(
+    'forwards the credential turnDetection %s to the Realtime session',
+    async (turnDetection) => {
+      const harness = makeHarness({ turnDetection });
+      await harness.coordinator.start({
+        epoch: 1,
+        callId: 'call-1',
+        mode: 'new',
+      });
+
+      // Dropping the field silently falls back to semantic_vad (#17000), so
+      // pin the defined value rather than mere presence.
+      expect(harness.openRealtimeSession.mock.lastCall?.[0]).toMatchObject({
+        turnDetection,
+      });
+    },
+  );
 
   it('rolls back a fresh coordinator session and marks the catalog when the setup aborts before admission', async () => {
     // The coordinator session is spawned fresh, then the host admission step

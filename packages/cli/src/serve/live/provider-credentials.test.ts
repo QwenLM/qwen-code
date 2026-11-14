@@ -395,20 +395,57 @@ describe('Live provider credentials', () => {
       }
     });
 
-    it('rejects null', () => {
-      expect(() =>
-        readLiveVoiceConfiguration({
-          experimental: { liveVoice: { turnDetection: null } },
-        } as unknown as Settings),
-      ).toThrow(LiveProviderConfigError);
+    it('trims padded values like its sibling fields', () => {
+      const live = readLiveVoiceConfiguration({
+        experimental: { liveVoice: { turnDetection: ' server_vad ' } },
+      } as unknown as Settings);
+      expect(live.turnDetection).toBe('server_vad');
+      expect(live.turnDetectionError).toBeUndefined();
     });
 
-    it('rejects an unknown value', () => {
-      expect(() =>
-        readLiveVoiceConfiguration({
-          experimental: { liveVoice: { turnDetection: 'garbage' } },
-        } as unknown as Settings),
-      ).toThrow(LiveProviderConfigError);
+    it('treats whitespace-only as unset', () => {
+      const live = readLiveVoiceConfiguration({
+        experimental: { liveVoice: { turnDetection: '   ' } },
+      } as unknown as Settings);
+      expect(live.turnDetection).toBeUndefined();
+      expect(live.turnDetectionError).toBeUndefined();
+    });
+
+    it.each([null, 'garbage', 'server-vad', 42])(
+      'records %j as an error instead of throwing',
+      (value) => {
+        const live = readLiveVoiceConfiguration({
+          experimental: { liveVoice: { turnDetection: value } },
+        } as unknown as Settings);
+        expect(live.turnDetection).toBeUndefined();
+        expect(live.turnDetectionError).toBe(
+          `experimental.liveVoice.turnDetection must be one of: server_vad, smart_turn, smart_turn_v2, semantic_vad, or empty for the model-aware default. Got: ${JSON.stringify(value)}`,
+        );
+      },
+    );
+
+    it('refuses the credential, with its own reason, for an invalid value', () => {
+      let caught: unknown;
+      try {
+        resolveLiveProviderCredential(
+          settings({
+            experimental: {
+              liveVoice: {
+                enabled: true,
+                apiKey: 'settings-secret',
+                turnDetection: 'garbage',
+              },
+            },
+          } as unknown as Partial<Settings>),
+        );
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(LiveProviderConfigError);
+      expect((caught as LiveProviderConfigError).reason).toBe(
+        'invalid_turn_detection',
+      );
+      expect((caught as Error).message).toContain('"garbage"');
     });
 
     it('returns the resolved turnDetection in the provider credential', () => {
@@ -439,22 +476,10 @@ describe('Live provider credentials', () => {
         ).toBe('server_vad');
       });
 
-      it('empty string means model-aware default', () => {
-        expect(resolveTurnDetection('', 'qwen-audio-3.0-realtime-plus')).toBe(
-          'server_vad',
-        );
-      });
-
       it('explicit value overrides the default', () => {
         expect(
           resolveTurnDetection('smart_turn_v2', 'qwen3.5-omni-plus-realtime'),
         ).toBe('smart_turn_v2');
-      });
-
-      it('null is invalid', () => {
-        expect(() => resolveTurnDetection(null, 'any-model')).toThrow(
-          LiveProviderConfigError,
-        );
       });
     });
 

@@ -104,12 +104,6 @@ export interface QwenRealtimeConfig {
   voice?: string;
   instructions: string;
   tools: readonly RealtimeToolDefinition[];
-  /** Override the model-aware default turn detection mode. */
-  turnDetection?:
-    | 'server_vad'
-    | 'smart_turn'
-    | 'smart_turn_v2'
-    | 'semantic_vad';
 }
 
 export interface QwenRealtimeDeps {
@@ -2244,11 +2238,10 @@ export function openQwenRealtimeSession(
           },
           instructions: effectiveInstructions,
           turn_detection: {
-            type:
-              config.turnDetection ??
-              (config.model.startsWith('qwen-audio')
-                ? 'server_vad'
-                : 'semantic_vad'),
+            // qwen-audio realtime models reject semantic_vad (#17000).
+            type: config.model.startsWith('qwen-audio')
+              ? 'server_vad'
+              : 'semantic_vad',
             // The orchestrator owns response creation; this client never
             // requests one on its own.
             create_response: false,

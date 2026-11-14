@@ -746,7 +746,7 @@ describe('realtime-session', () => {
     });
   });
 
-  it('allows overriding turn_detection in config', async () => {
+  it('keeps semantic_vad for non-qwen-audio models', async () => {
     const socket = new FakeSocket();
     const opening = openQwenRealtimeSession(
       {
@@ -757,7 +757,6 @@ describe('realtime-session', () => {
         voice: 'Tina',
         instructions: 'test instructions',
         tools: [HANDOFF_TOOL],
-        turnDetection: 'smart_turn_v2',
       },
       {},
       { createWebSocket: () => socket },
@@ -772,7 +771,7 @@ describe('realtime-session', () => {
     const update = sentJson(socket, 0);
     const session = update['session'] as Record<string, unknown>;
     expect(session['turn_detection']).toEqual({
-      type: 'smart_turn_v2',
+      type: 'semantic_vad',
       create_response: false,
       interrupt_response: true,
     });

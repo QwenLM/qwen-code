@@ -156,8 +156,13 @@ When `turnDetection` is unset or empty the default is model-aware, keyed off
 the effective realtime model (including through `provider:modelId` selectors):
 models whose id starts with `qwen-audio` default to `server_vad`; all other
 models default to `semantic_vad`, preserving the existing omni realtime
-behavior. An invalid value produces a configuration error — Live Voice becomes
-unavailable while the daemon keeps running.
+behavior. Values are trimmed. The setting applies to the daemon (Web Shell)
+client; the native Live Host always uses the model-aware default.
+
+An invalid value never stops the daemon. Live Voice calls are refused, the
+setup card shows the reason, and the card can still turn Live Voice off or
+clear or replace the value (`turnDetection` in `POST /live/setup`; empty
+restores the default).
 
 ## Override reasoning capabilities
 

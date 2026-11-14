@@ -4694,8 +4694,9 @@
               "default": "Command+E"
             },
             "turnDetection": {
-              "description": "Realtime turn detection type. Unset or empty defaults to server_vad for qwen-audio realtime models and semantic_vad for all others. An invalid value prevents Live Voice from starting while the daemon keeps running. Options: server_vad, smart_turn, smart_turn_v2, semantic_vad",
+              "description": "Realtime turn detection type. Unset or empty defaults to server_vad for qwen-audio realtime models and semantic_vad for all others. An invalid value blocks Live Voice calls and is reported in the Live Voice setup card, which can clear or replace it. Options: , server_vad, smart_turn, smart_turn_v2, semantic_vad",
               "enum": [
+                "",
                 "server_vad",
                 "smart_turn",
                 "smart_turn_v2",
