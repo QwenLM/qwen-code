@@ -45,7 +45,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * ChildResultRelay's {@code binding} arm — the only thing standing between it and the
  * {@code watching} arm that reads the child's Turn — threw {@code RelayRetry} forever. These cases
  * pin the read side of the repair on all three readers the launch actually uses; the relay's own
- * visibility repair is pinned by {@code ChildResultRelayBindingFailureTest}.
+ * visibility repair is pinned by {@code ChildResultRelayTest}.
  */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:inherited-extension-configuration;"
@@ -72,6 +72,18 @@ class ManagedInheritedExtensionConfigurationTest {
     @Autowired
     @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
+
+    /**
+     * The cases below iterate this set, and the publisher gates on it, so an emptied set would make
+     * them pass vacuously while every inherited copy is refused again. Pin its members.
+     */
+    @Test
+    void theInheritedKindSetNamesExactlyTheThreeKindsTheConnectorCopies() {
+        assertThat(ManagedSessionStoreModels.INHERITED_EXTENSION_KINDS)
+                .containsExactlyInAnyOrder("managed-extension-config-bundle",
+                        "managed-extension-contributions",
+                        "managed-extension-contributions-part");
+    }
 
     /**
      * The whole inherited chain, read back through every reader the child launch uses. The owner
@@ -156,33 +168,37 @@ class ManagedInheritedExtensionConfigurationTest {
                 // An inherited extension resource is never legitimately empty.
                 "byte_length = 0",
                 "state = 'COLLECTED'",
-                "storage_kind = 'OSS_OBJECT', inline_bytes = NULL, object_key = X'6b'",
                 "deletion_operation_key = '" + "e".repeat(64) + "'")) {
             jdbc.update("UPDATE ma_resource SET " + update + " WHERE tenant_id = ?"
                     + " AND session_id = ? AND resource_id = ?", TENANT, child, resourceId);
             assertThatThrownBy(() -> records.readCommittedResource(TENANT, child,
                     ref(resourceId, kind, bytes)))
                     .as(update).hasMessageContaining("Missing committed MCP resource");
-            // The owner read refuses it too. The exact type is the reader's own
-            // business: an OSS_OBJECT row reaches the object store, which this
-            // profile leaves unwired, so only "it threw" is asserted here. The
-            // coded refusal for a row that stays inline is pinned below.
+            // The owner read refuses the very same rows with its own coded
+            // verdict. Asserting merely "it threw" would let any unrelated
+            // failure — an unwired bean, a typo in the scope — pass this arm.
             assertThatThrownBy(() -> sessionStore.readOwnerResource(TENANT, WORKSPACE, child,
                     resourceId, ExtensionRecordJournal.TOKEN))
-                    .as(update).isInstanceOf(RuntimeException.class);
+                    .as(update).isInstanceOfSatisfying(ManagedAgentException.class,
+                            error -> assertThat(error.getCode())
+                                    .isEqualTo("managed_session_resource_corrupt"));
             restoreInherited(child, resourceId, kind, bytes);
         }
 
-        // The coded refusal, pinned on a row that stays inline: this is the exact
-        // 500 the child's own bundle read used to get for a perfectly valid
-        // inherited resource, and it must remain the answer for one that is not.
-        jdbc.update("UPDATE ma_resource SET byte_length = 0 WHERE tenant_id = ?"
-                + " AND session_id = ? AND resource_id = ?", TENANT, child, resourceId);
-        assertThatThrownBy(() -> sessionStore.readOwnerResource(TENANT, WORKSPACE, child,
-                resourceId, ExtensionRecordJournal.TOKEN))
-                .isInstanceOfSatisfying(ManagedAgentException.class,
-                        error -> assertThat(error.getCode())
-                                .isEqualTo("managed_session_resource_corrupt"));
+        // The storage-mode arm is separate, and only the record reader is
+        // asserted: its SQL admits MYSQL_INLINE alone, so an external row is
+        // refused here. The owner reader legitimately accepts OSS_OBJECT for
+        // any kind — that arm never consulted the kind whitelist, before this
+        // repair or after — and would go on to an object store this profile
+        // leaves unwired. Asserting that unwired failure would pin the test
+        // environment, not the exemption.
+        jdbc.update("UPDATE ma_resource SET storage_kind = 'OSS_OBJECT',"
+                        + " inline_bytes = NULL, object_key = X'6b' WHERE tenant_id = ?"
+                        + " AND session_id = ? AND resource_id = ?",
+                TENANT, child, resourceId);
+        assertThatThrownBy(() -> records.readCommittedResource(TENANT, child,
+                ref(resourceId, kind, bytes)))
+                .hasMessageContaining("Missing committed MCP resource");
         restoreInherited(child, resourceId, kind, bytes);
 
         // A kind outside every PUBLISHED exemption gains nothing, even as a valid

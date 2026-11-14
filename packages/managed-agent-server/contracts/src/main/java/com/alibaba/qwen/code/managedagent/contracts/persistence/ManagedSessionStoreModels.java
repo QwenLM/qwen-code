@@ -108,14 +108,17 @@ public final class ManagedSessionStoreModels {
         if (kind == null) {
             return null;
         }
+        // One copy of the inherited whitelist: restating the three names in
+        // the switch below let the two drift apart, which is the defect
+        // INHERITED_EXTENSION_KINDS exists to prevent.
+        if (INHERITED_EXTENSION_KINDS.contains(kind)) {
+            return MAX_INLINE_RESOURCE_BYTES;
+        }
         return switch (kind) {
             // Instructions may legitimately be empty; the publisher writes
             // whatever the definition carries, including no bytes at all.
             case "managed-agent-instructions" -> MAX_AGENT_INSTRUCTIONS_BYTES;
             case "managed-agent-skills" -> MAX_AGENT_SKILLS_BYTES;
-            case "managed-extension-config-bundle",
-                    "managed-extension-contributions",
-                    "managed-extension-contributions-part" -> MAX_INLINE_RESOURCE_BYTES;
             default -> null;
         };
     }
