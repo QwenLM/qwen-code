@@ -26,7 +26,12 @@ const WORKSPACE_CWD = process.cwd();
 // replay can outlast a flat 15s watchdog even though that pool's suite ceiling
 // is 60s. Keep the fast arm for idle hosts.
 const WAIT_TIMEOUT_MS = slowHostBudgetMs(15_000, 45_000);
-const REPLAY_TEST_TIMEOUT_MS = slowHostBudgetMs(30_000, 90_000);
+// The replay case chains three watchdog windows: attach's connect and echo,
+// then the reconnect (whose replay listener must exist before 'open' resolves,
+// so the handshake and replay share one window). Derive the file ceiling from
+// those waits, on the same host predicate, so vitest never decides first.
+const TEST_TIMEOUT_MS = WAIT_TIMEOUT_MS * 3;
+vi.setConfig({ testTimeout: TEST_TIMEOUT_MS, hookTimeout: TEST_TIMEOUT_MS });
 
 const AUTH_HEADERS = {
   Authorization: 'Bearer test-token',
@@ -315,21 +320,18 @@ describe('ManagedRuntimeTerminals', () => {
     await Promise.all(pending);
   });
 
-  it(
-    'replays scrollback on reconnect of the same Session',
-    async () => {
-      const port = await start();
-      const first = await attachAndEcho(port, 'replay', 'session-a');
-      first.terminate();
-      // The snapshot replay carries the earlier output without new input. The
-      // server writes it in the same turn as the upgrade response, so the
-      // replay listener must exist before 'open' resolves.
-      const { ws: second, opened } = open(port, 'replay', 'session-a');
-      const replayed = waitForOutput(second, 'mwt-echo-ok');
-      await Promise.all([opened, replayed]);
-    },
-    REPLAY_TEST_TIMEOUT_MS,
-  );
+  it('replays scrollback on reconnect of the same Session', async () => {
+    expect(TEST_TIMEOUT_MS).toBeGreaterThanOrEqual(WAIT_TIMEOUT_MS * 3);
+    const port = await start();
+    const first = await attachAndEcho(port, 'replay', 'session-a');
+    first.terminate();
+    // The snapshot replay carries the earlier output without new input. The
+    // server writes it in the same turn as the upgrade response, so the
+    // replay listener must exist before 'open' resolves.
+    const { ws: second, opened } = open(port, 'replay', 'session-a');
+    const replayed = waitForOutput(second, 'mwt-echo-ok');
+    await Promise.all([opened, replayed]);
+  });
 
   it('admission reads lifecycle state without joining the scrollback', async () => {
     const port = await start();
