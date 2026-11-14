@@ -264,26 +264,12 @@ export function useManagedLocalFilesBridge(
             return;
           }
           const previousHandle = handleRef.current;
-          // Re-confirming the already-bound entry is not a change: the picker
-          // reopens the last choice (fixed PICKER_ID), so pressing Select
-          // without navigating must not tear down and re-register the live
-          // bridge. Identity, not basename — a same-named folder elsewhere is
-          // a real change; a throwing isSameEntry fails closed (not same).
-          if (forcePicker && previousHandle) {
-            let same = false;
-            try {
-              same = await previousHandle.isSameEntry(picked.handle);
-            } catch {
-              same = false;
-            }
-            if (stale()) return;
-            if (same) {
-              handleRef.current = picked.handle;
-              return;
-            }
-          }
           handle = picked.handle;
           handleRef.current = handle;
+          // Save before the same-entry short-circuit, in the daemon hook's
+          // order: re-confirming the bound folder must re-persist a grant the
+          // record has lost (a peer tab's Disconnect clears the origin-scoped
+          // slot), not discard the freshly granted handle.
           const saved = (await storeRef.current?.save(handle)) ?? false;
           if (stale()) return;
           // A change that failed to persist must not leave the old directory
@@ -294,6 +280,21 @@ export function useManagedLocalFilesBridge(
           if (forcePicker && !saved) {
             handleRef.current = previousHandle;
             return { kind: 'repick-failed' } as const;
+          }
+          // Re-confirming the already-bound entry is not a change: the picker
+          // reopens the last choice (fixed PICKER_ID), so pressing Select
+          // without navigating must not tear down and re-register the live
+          // bridge. Identity, not basename — a same-named folder elsewhere is
+          // a real change; a throwing isSameEntry fails closed (not same).
+          if (forcePicker && previousHandle) {
+            let same = false;
+            try {
+              same = await previousHandle.isSameEntry(handle);
+            } catch {
+              same = false;
+            }
+            if (stale()) return;
+            if (same) return;
           }
         }
         if (stale()) return;

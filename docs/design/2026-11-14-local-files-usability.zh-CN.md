@@ -61,9 +61,9 @@ tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootN
 - `forcePicker` 下的选择器结果保持运行中桥的真实性：
   - 取消 → 不写状态、无返回值（旧桥继续运行，handler 保持静默）；
   - 失败/不可用 → 保留连接前状态而非写 `failed`，因为旧桥仍连接，写 `failed` 既误报状态，又会让后续重试卡在同条目短路上。hook 返回 `repick-failed` 结果，控制将其呈现为错误 toast，使这次点击不静默；
-  - 重选已绑定的条目（经 `isSameEntry` 判同一性，而非 basename）保留运行中的桥，不拆掉重建。两个 hook 都短路；Managed hook 在保存之前就返回，因此重复确认已绑定目录绝不会重新注册绑定。
+  - 重选已绑定的条目（经 `isSameEntry` 判同一性，而非 basename）保留运行中的桥，不拆掉重建。两个 hook 都先保存再短路，因此重复确认已绑定目录会把记录中已丢失的授权重新写入（对端标签页的 Disconnect 会清掉按 origin 作用域的记录），但绝不重新注册绑定。`isSameEntry` 抛错时按「不同」失败关闭：变更继续，而非把用户困在旧授权上。
 - 强制路径上保存软失败（配额/驱逐）在**两个** hook 中都按重选失败处理：整笔变更被拒绝，活桥继续服务旧目录，记录继续持有旧目录，handler 弹出错误 toast。若内存中服务新目录而记录仍是旧目录，刷新会静默回绑用户刻意换走的目录。
-- 瞬态 resolving 抖动期间，daemon hook 寄存一个强制重建义务而非在抖动中重建；rebind effect 在判定落定后消费它。该义务是必需的：rebind 的保桥豁免只比较 basename，分不清同名新目录与旧目录。
+- 瞬态 resolving 抖动期间，daemon hook 寄存一个强制重建义务而非在抖动中重建；rebind effect 在判定落定后消费它。该义务是必需的：rebind 的保桥豁免只比较 basename，分不清同名新目录与旧目录。暂存结果返回 `change-deferred` 判别值，控制弹出 info toast（「变更已保存，工作区解析完成后生效」）：抖动可能远长于这次点击，而活桥仍在服务旧目录，静默成功会把变更误报为已生效。
 
 ### 4.3 重新授权提示
 
@@ -78,7 +78,7 @@ tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootN
 ### 4.5 可执行的阻断文案
 
 - `unsupported-daemon`：「复制启动命令」按钮复制 `QWEN_SERVE_CLIENT_MCP_OVER_WS=1 qwen serve`。
-- `insecure-context`：先于 `unsupported-browser` 诊断——安全上下文是 picker 的前提，因此在本阻断所针对的纯 http 非回环部署上 picker 必然缺失，先诊断它会把隧道指引藏在「请用 Chrome」后面。当控制能推导出绝对 daemon URL 时，「复制 SSH 隧道命令」按钮复制 `ssh -L <localPort>:localhost:<remotePort> <hostname>`——远端端口取自 URL（缺省按协议），特权远端端口（<1024）本地映射为 `remotePort + 8000`，使隧道无需特权本地绑定。host 走白名单（`[A-Za-z0-9._:-]`、禁止前导 `-`、保留 IPv6 的 `:`），因为命令要粘贴进 shell，而 WHATWG URL 解析器会保留 host 中的 shell 元字符；不安全的 host 不产生命令。解释文案点名要打开的**本地**绑定（`http://localhost:<localPort>`）——命令中唯一的 `localhost` 是远端。
+- `insecure-context`：先于 `unsupported-browser` 诊断——安全上下文是 picker 的前提，因此在本阻断所针对的纯 http 非回环部署上 picker 必然缺失，先诊断它会把隧道指引藏在「请用 Chrome」后面。当控制能推导出绝对 daemon URL 时，「复制 SSH 隧道命令」按钮复制 `ssh -L <localPort>:localhost:<remotePort> <hostname>`——远端端口取自 URL（缺省按协议），特权远端端口（<1024）本地映射为 `remotePort + 8000`，使隧道无需特权本地绑定。host 走白名单（`[A-Za-z0-9._:-]`、禁止前导 `-`、保留 IPv6 的 `:`），因为命令要粘贴进 shell，而 WHATWG URL 解析器会保留 host 中的 shell 元字符；不安全的 host 不产生命令。解释文案点名要打开的**本地**绑定（`http://localhost:<localPort>`）——命令中唯一的 `localhost` 是远端。推导不出端口时（Managed 面渲染此阻断且无复制按钮），文案保留可替换的 `http://localhost:<port>` 占位符，而非裸 `http://localhost`——后者会落在没有任何 Web Shell 监听的 80 端口。
 - `workspace-ineligible`：文案改写为给出下一步——在受信任的普通工作区会话中使用——而非只点名内部条件。
 - 带有名授权的 `failed`：连接按钮标「重试」；无授权时仍标「连接目录…」。两者都调用同一 `onConnect`。
 
@@ -86,7 +86,9 @@ tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootN
 
 ### 4.6 managed-only 外壳中的 toast 通道
 
-`requestToast` 是窗口 `CustomEvent`，daemon 宿主外壳中唯一的监听器在 App。managed-only 启动路径（`ManagedStandaloneApp` → `ManagedAgentWebShell`）现在挂载 `WindowToastHost`——一个自包含宿主，与 App 监听器同一契约：非空 message 校验、tone+message 去重、上限栈、按截止时间自动消失。没有它，「更换目录」失败 toast 会派发进一个没有监听器的文档而被静默丢弃。toast 栈常量放在 `ToastHost.tsx` 并与 App 共享，使两个宿主不会漂移。
+`requestToast` 是 `CustomEvent`，daemon 宿主外壳中唯一的文档级监听器在 App。managed-only 启动路径（`ManagedStandaloneApp` → `ManagedAgentWebShell`）现在挂载 `WindowToastHost`——一个自包含宿主，与 App 监听器同一契约：非空 message 校验、tone+message 去重、上限栈、按截止时间自动消失。没有它，「更换目录」失败 toast 会派发进一个没有监听器的文档而被静默丢弃。toast 栈常量放在 `ToastHost.tsx` 并与 App 共享，使两个宿主不会漂移。
+
+通道按 shell 作用域隔离：`requestToast` 派发到动作所在 shell 的 `[data-web-shell-root]`（从焦点元素向上找，冒泡到 window 供 App 宿主接收），每个 `WindowToastHost` 只监听自己的 shell root。`renderManagedAgentWebShell` 是公开嵌入 API，宿主页面可在同一文档挂载多个 shell；不做隔离时，一个 shell 抛出的提示会同时出现在另一个 shell——可能属于另一个租户。
 
 ## 5. 设计决策与理由
 

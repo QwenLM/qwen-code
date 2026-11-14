@@ -652,6 +652,10 @@ export function LocalFilesControl({
               // click must not be silent (R1-5).
               if (result?.kind === 'repick-failed') {
                 requestToast('error', t('localFiles.changeDirectoryFailed'));
+              } else if (result?.kind === 'change-deferred') {
+                // The grant is saved but the live bridge keeps serving the old
+                // directory until the workspace verdict settles; say so.
+                requestToast('info', t('localFiles.changeDirectoryDeferred'));
               }
             });
           }}

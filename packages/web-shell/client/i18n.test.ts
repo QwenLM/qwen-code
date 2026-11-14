@@ -302,6 +302,7 @@ describe('web-shell i18n catalog', () => {
       'localFiles.copied',
       'localFiles.copyFailed',
       'localFiles.changeDirectoryFailed',
+      'localFiles.changeDirectoryDeferred',
       // The two blocker messages this change rewrites are exactly the ones
       // whose zh drift would otherwise go unseen (R3-9).
       'localFiles.blocker.insecureContext',
@@ -326,6 +327,9 @@ describe('web-shell i18n catalog', () => {
     expect(zh('localFiles.gestureToast', vars)).not.toBe(
       en('localFiles.gestureToast', vars),
     );
+    // Both locales must interpolate the directory name, not drop it (R4-4).
+    expect(en('localFiles.gestureToast', vars)).toContain('proj');
+    expect(zh('localFiles.gestureToast', vars)).toContain('proj');
     // The insecure-context instruction is function-valued too: pin its
     // local-port branch in both locales, naming the same address.
     const portVars = { localPort: 8080 };

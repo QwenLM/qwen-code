@@ -615,14 +615,17 @@ describe('useLocalFilesBridge forcePicker', () => {
 
     pick.mockClear();
     pick.mockImplementation(async () => second);
+    let outcome: { kind: string } | undefined;
     await act(async () => {
-      await h.get().connect({ forcePicker: true });
+      outcome = await h.get().connect({ forcePicker: true });
     });
     await h.flush();
     // The click reaches the picker and must not overwrite the live connected
     // status with unavailable/workspace-resolving, nor tear down the bridge
-    // mid-blip.
+    // mid-blip. The parked outcome is reported as deferred — the live bridge
+    // still serves the old directory, so a silent success would misreport.
     expect(pick).toHaveBeenCalledOnce();
+    expect(outcome).toEqual({ kind: 'change-deferred' });
     expect(h.get().status.phase).toBe('connected');
     expect(h.sockets).toHaveLength(1);
     expect(h.sockets[0]!.closeCount).toBe(0);

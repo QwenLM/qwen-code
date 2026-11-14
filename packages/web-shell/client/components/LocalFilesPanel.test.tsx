@@ -374,6 +374,28 @@ describe('LocalFilesPanel usability affordances', () => {
     expect(buttonByLabel('New session')).toBeUndefined();
   });
 
+  it('omits new session outside needs-session even when provided (R4-4)', () => {
+    mountExtra(connected, { onNewSession: vi.fn() });
+    expect(buttonByLabel('New session')).toBeUndefined();
+  });
+
+  it('omits the session row outside connected even when named (R4-4)', () => {
+    mountExtra(
+      { phase: 'needs-session', blocker: null, rootName: 'ai_coding' },
+      { sessionName: 'My task' },
+    );
+    expect(text()).not.toContain('Session');
+    expect(text()).not.toContain('My task');
+  });
+
+  it('keeps a substitutable port in the port-less insecure instruction (R4-1)', () => {
+    // The Managed surface renders this blocker with no tunnel command and no
+    // port; pointing at bare http://localhost would land on port 80 where
+    // nothing serves the shell.
+    mountExtra({ phase: 'unavailable', blocker: 'insecure-context' });
+    expect(text()).toContain('http://localhost:<port>');
+  });
+
   it('labels a failed bridge with a stored grant as Retry', () => {
     mountExtra({
       phase: 'failed',

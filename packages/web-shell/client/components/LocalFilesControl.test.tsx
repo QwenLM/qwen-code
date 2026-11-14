@@ -60,7 +60,11 @@ const bridgeStatusOverride = vi.hoisted(() => ({
 // The real hook's connect() always returns a promise; the control chains
 // .then() on it for the repick-failed toast.
 const bridgeConnectSpy = vi.hoisted(() =>
-  vi.fn(async (): Promise<{ kind: 'repick-failed' } | undefined> => undefined),
+  vi.fn(
+    async (): Promise<
+      { kind: 'repick-failed' } | { kind: 'change-deferred' } | undefined
+    > => undefined,
+  ),
 );
 const toastSpy = vi.hoisted(() => vi.fn());
 const newSessionSpy = vi.hoisted(() => vi.fn(async () => {}));
@@ -592,6 +596,16 @@ describe('getLocalFilesTooltip', () => {
       ),
     ).toBe('localFiles.trigger — localFiles.status.resolving');
   });
+  it('keeps the permanent label for hard blockers (R4-4)', () => {
+    // Broadening the predicate to `blocker !== null` would mislabel every
+    // hard verdict as still resolving.
+    expect(
+      getLocalFilesTooltip(
+        { phase: 'unavailable', blocker: 'workspace-ineligible' },
+        t,
+      ),
+    ).toBe('localFiles.trigger — localFiles.status.unavailable');
+  });
 });
 
 describe('deriveLocalFilesTunnelCommand (R1-3)', () => {
@@ -631,6 +645,9 @@ describe('deriveLocalFilesTunnelCommand (R1-3)', () => {
       'http://-oProxyCommand=x/',
       'http://a|b/',
       'http://a&b/',
+      // Every character is allowlisted; only the leading-dash check rejects
+      // this one, so dropping that check keeps the suite green without it.
+      'http://-host/',
     ]) {
       expect(deriveLocalFilesTunnelCommand(host)).toBeUndefined();
       expect(deriveLocalFilesTunnelLocalPort(host)).toBeUndefined();
@@ -868,6 +885,27 @@ describe('LocalFilesControl trigger and notices', () => {
     expect(toastSpy).not.toHaveBeenCalled();
   });
 
+  it('toasts a pending notice when the change is deferred by a resolving blip', async () => {
+    bridgeStatusOverride.current = {
+      phase: 'connected',
+      blocker: null,
+      rootName: 'proj',
+      toolCount: 4,
+    };
+    const { container } = await renderControl();
+    openPopover(container);
+    bridgeConnectSpy.mockResolvedValueOnce({ kind: 'change-deferred' });
+    await act(async () => {
+      panelButton('Change directory…').click();
+    });
+    // The live bridge still serves the old directory until the verdict
+    // settles; a silent success would misreport the change as effective.
+    expect(toastSpy).toHaveBeenCalledWith(
+      'info',
+      'Directory change saved. It takes effect once the workspace finishes resolving; until then the current directory stays connected.',
+    );
+  });
+
   function openPopover(container: HTMLElement): void {
     act(() => {
       triggerOf(container).dispatchEvent(
@@ -968,6 +1006,42 @@ describe('LocalFilesControl trigger and notices', () => {
       panelButton('New session').click();
     });
     expect(newSessionSpy).toHaveBeenCalledOnce();
+  });
+
+  it('handles a rejected newSession without an unhandled rejection (R4-4)', async () => {
+    bridgeStatusOverride.current = { phase: 'needs-session', blocker: null };
+    const { container } = await renderControl();
+    openPopover(container);
+    // A thenable that records whether the caller attached a rejection
+    // handler: dropping the control's .catch leaves the rejection unhandled.
+    let handlerAttached = false;
+    const rejected = Promise.reject(new Error('creation refused'));
+    rejected.catch(() => {});
+    const thenable = {
+      then(onFulfilled?: unknown, onRejected?: unknown) {
+        if (onRejected) handlerAttached = true;
+        return rejected.then(
+          onFulfilled as (() => unknown) | undefined,
+          onRejected as (() => unknown) | undefined,
+        );
+      },
+      catch(onRejected?: unknown) {
+        handlerAttached = true;
+        return rejected.catch(onRejected as (() => unknown) | undefined);
+      },
+    };
+    newSessionSpy.mockImplementationOnce(
+      () => thenable as unknown as Promise<void>,
+    );
+    await act(async () => {
+      panelButton('New session').click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(newSessionSpy).toHaveBeenCalledOnce();
+    // newSession reports through the notice system; the control must not
+    // add a toast of its own, and must handle the rejection itself.
+    expect(toastSpy).not.toHaveBeenCalled();
+    expect(handlerAttached).toBe(true);
   });
 
   it('shows the bound session name from the connection', async () => {

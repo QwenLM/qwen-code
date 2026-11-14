@@ -2347,7 +2347,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'localFiles.blocker.insecureContext': (v) =>
     v?.localPort !== undefined
       ? `This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or run the copied SSH tunnel command and open http://localhost:${v.localPort}.`
-      : 'This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or forward the daemon port with SSH and open http://localhost.',
+      : 'This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or forward the daemon port with SSH and open http://localhost:<port>.',
   'localFiles.blocker.crossOriginFrame':
     'Local file access is blocked inside a cross-origin frame. Open the Web Shell in its own browser tab to connect a directory.',
   'localFiles.blocker.unsupportedBrowser':
@@ -2368,6 +2368,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'localFiles.copyFailed': 'Could not copy the command',
   'localFiles.changeDirectoryFailed':
     'Could not change the directory. The current directory is still connected.',
+  'localFiles.changeDirectoryDeferred':
+    'Directory change saved. It takes effect once the workspace finishes resolving; until then the current directory stays connected.',
   'localFiles.gestureToast': (v) =>
     v?.name
       ? `Local directory "${v.name}" needs to be reconnected. Open Local files to grant access again.`
@@ -7508,7 +7510,7 @@ const ZH: Messages = {
   'localFiles.blocker.insecureContext': (v) =>
     v?.localPort !== undefined
       ? `当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或运行所复制的 SSH 隧道命令后打开 http://localhost:${v.localPort}。`
-      : '当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或用 SSH 转发 daemon 端口后打开 http://localhost。',
+      : '当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或用 SSH 转发 daemon 端口后打开 http://localhost:<port>。',
   'localFiles.blocker.crossOriginFrame':
     '跨源 iframe 中本地文件访问被禁用。请在独立的浏览器标签页中打开 Web Shell 再连接目录。',
   'localFiles.blocker.unsupportedBrowser':
@@ -7527,6 +7529,8 @@ const ZH: Messages = {
   'localFiles.copied': '命令已复制',
   'localFiles.copyFailed': '复制命令失败',
   'localFiles.changeDirectoryFailed': '无法更换目录。当前目录仍保持连接。',
+  'localFiles.changeDirectoryDeferred':
+    '目录变更已保存，将在工作区解析完成后生效；在此之前当前目录仍保持连接。',
   'localFiles.gestureToast': (v) =>
     v?.name
       ? `本地目录「${v.name}」需要重新连接。打开「本地文件」即可重新授权。`

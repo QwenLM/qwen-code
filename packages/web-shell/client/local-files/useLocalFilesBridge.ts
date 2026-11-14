@@ -1029,7 +1029,10 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         // correctly-routed bridge for the forced rebuild; keep the fresh grant
         // and park a forced-rebuild obligation the rebind effect consumes once
         // the verdict settles. Without the obligation the rebind's basename
-        // exemption would keep serving the OLD same-named directory. Hard
+        // exemption would keep serving the OLD same-named directory. The
+        // outcome is reported as deferred — the blip can outlive the click by
+        // a long time, and the live bridge still serves the old directory, so
+        // a silent success would misreport the change as effective. Hard
         // verdicts still withhold through startBridge below.
         if (
           forcePicker &&
@@ -1040,7 +1043,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
           handleRef.current = result.handle;
           handleEpochRef.current += 1;
           pendingForceRebuildRef.current = result.handle;
-          return;
+          return { kind: 'change-deferred' } as const;
         }
         pendingForceRebuildRef.current = undefined;
         startBridge(result.handle, { force: true });

@@ -217,4 +217,53 @@ describe('WindowToastHost', () => {
       `message-${MAX_TOASTS + 1}`,
     );
   });
+
+  it('auto-dismisses after the shared deadline (R4-4)', () => {
+    vi.useFakeTimers();
+    try {
+      const container = renderWindowHost();
+      act(() => {
+        requestToast('info', 'transient');
+      });
+      expect(toasts(container)).toHaveLength(1);
+      act(() => {
+        vi.advanceTimersByTime(5000);
+      });
+      // A mutated dismissAt far in the future would keep the toast here.
+      expect(toasts(container)).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('scopes notices to the acting shell when co-mounted (R4-6)', () => {
+    function mountShell(): { shell: HTMLElement; host: HTMLElement } {
+      const shell = document.createElement('div');
+      shell.setAttribute('data-web-shell-root', '');
+      const button = document.createElement('button');
+      shell.appendChild(button);
+      const host = document.createElement('div');
+      shell.appendChild(host);
+      document.body.appendChild(shell);
+      const root = createRoot(host);
+      mounted.push({ root, containers: [shell] });
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <WindowToastHost scope={shell} />
+          </I18nProvider>,
+        );
+      });
+      return { shell, host };
+    }
+    const a = mountShell();
+    const b = mountShell();
+    // The acting control lives in shell A; its notice must not reach B.
+    (a.shell.querySelector('button') as HTMLButtonElement).focus();
+    act(() => {
+      requestToast('error', 'shell-a notice');
+    });
+    expect(toasts(a.host)).toHaveLength(1);
+    expect(toasts(b.host)).toHaveLength(0);
+  });
 });

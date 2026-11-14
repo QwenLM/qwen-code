@@ -415,8 +415,10 @@ function ManagedAgentWebShellRoot(props: ManagedAgentWebShellProps) {
                       )}
                       {/* The managed-only shell has no App toast state; host
                           the window toast channel here so nested controls'
-                          requestToast notices are not silently dropped. */}
-                      <WindowToastHost />
+                          requestToast notices are not silently dropped. The
+                          scope keeps co-mounted shells from showing each
+                          other's notices. */}
+                      <WindowToastHost scope={portalRoot} />
                     </div>
                   </CompactModeContext.Provider>
                 </TodoContextsProvider>

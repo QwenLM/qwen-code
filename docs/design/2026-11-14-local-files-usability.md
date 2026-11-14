@@ -125,8 +125,11 @@ stable.
     the control surfaces it as an error toast, so the click is not silent;
   - re-picking the already-bound entry (identity via `isSameEntry`, not
     basename) keeps the live bridge instead of tearing it down for a rebuild.
-    Both hooks short-circuit; the Managed hook returns before the save, so
-    re-confirming the bound folder never re-registers the binding.
+    Both hooks save first and only then short-circuit, so re-confirming the
+    bound folder re-persists a grant the record has lost (a peer tab's
+    Disconnect clears the origin-scoped slot) yet never re-registers the
+    binding. A throwing `isSameEntry` fails closed (not same): the change
+    proceeds rather than stranding the user on the old grant.
 - A soft-failed save (quota/eviction) on the forced path is treated as a
   failed re-pick in **both** hooks: the change is rejected wholesale, the live
   bridge keeps serving the old directory, the record keeps holding it, and
@@ -137,7 +140,11 @@ stable.
   obligation instead of rebuilding mid-blip; the rebind effect consumes it
   once the verdict settles. The obligation is required because the rebind's
   keep-bridge exemption compares basenames and cannot tell a new same-named
-  directory from the old one.
+  directory from the old one. The parked outcome returns a `change-deferred`
+  discriminant and the control raises an info toast ("change saved, takes
+  effect once the workspace finishes resolving"): the blip can outlive the
+  click by a long time while the live bridge keeps serving the old directory,
+  so a silent success would misreport the change as effective.
 
 ### 4.3 Re-authorization notice
 
@@ -182,7 +189,10 @@ daemon-only.
   metacharacters in the host; an unsafe host yields no command. The
   explanatory copy names the **local** bind to open
   (`http://localhost:<localPort>`) — the command's only `localhost` token is
-  the remote side.
+  the remote side. When no port can be derived (the Managed surface, which
+  renders this blocker with no copy button), the copy keeps the substitutable
+  `http://localhost:<port>` placeholder rather than bare `http://localhost`,
+  which would land on port 80 where nothing serves the shell.
 - `workspace-ineligible`: copy rewritten to state the next step — use a
   session in a trusted, regular workspace — instead of only naming the
   internal condition.
@@ -199,8 +209,8 @@ browser-level and its base URL is a relative API path).
 
 ### 4.6 Toast channel in the managed-only shell
 
-`requestToast` is a window `CustomEvent`, and App carries the only listener
-in the daemon-hosted shell. The managed-only boot path
+`requestToast` is a `CustomEvent`, and App carries the only document-wide
+listener in the daemon-hosted shell. The managed-only boot path
 (`ManagedStandaloneApp` → `ManagedAgentWebShell`) now mounts
 `WindowToastHost`, a self-contained host with the same contract as App's
 listener: non-empty message guard, tone+message de-duplication, a capped
@@ -208,6 +218,13 @@ stack, and deadline-based auto-dismiss. Without it, the Change-directory
 failure toast dispatches into a document with no listener and is silently
 dropped. The toast stack constants live in `ToastHost.tsx` and are shared
 with App so the two hosts cannot drift.
+
+The channel is shell-scoped: `requestToast` dispatches on the acting shell's
+`[data-web-shell-root]` (found from the focused element, bubbling to window
+for App's host), and each `WindowToastHost` listens on its own shell root.
+`renderManagedAgentWebShell` is a public embedding API, so a host page may
+mount several shells in one document; without the scoping, a notice raised
+in one shell would also appear in another — possibly a different tenant's.
 
 ## 5. Design decisions and rationale
 

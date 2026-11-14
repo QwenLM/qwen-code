@@ -20,9 +20,19 @@ export interface ToastRequestDetail {
 }
 
 export function requestToast(tone: ToastTone, message: string): void {
-  window.dispatchEvent(
+  // Dispatch on the acting shell's root so co-mounted shells (the managed
+  // embedding API allows several per document) do not receive each other's
+  // notices; the event bubbles to window, where App's document-wide host
+  // listens. Falls back to window when no focused shell root is found.
+  const active =
+    typeof document !== 'undefined' ? document.activeElement : null;
+  const root =
+    active instanceof Element ? active.closest('[data-web-shell-root]') : null;
+  const target: Element | Window = root ?? window;
+  target.dispatchEvent(
     new CustomEvent<ToastRequestDetail>(TOAST_REQUEST_EVENT, {
       detail: { tone, message },
+      bubbles: true,
     }),
   );
 }
@@ -114,8 +124,13 @@ function ToastItem({
  * capped stack, and deadline-based auto-dismiss. Without it, requestToast
  * from a nested control dispatches into a document with no listener and the
  * notice is silently dropped.
+ *
+ * `scope` narrows the listener to one shell's root element: requestToast
+ * dispatches on the acting shell's root (bubbling to window), so co-mounted
+ * shells do not show each other's notices. Omit it only for a single-shell
+ * document.
  */
-export function WindowToastHost() {
+export function WindowToastHost({ scope }: { scope?: HTMLElement | null }) {
   const [toasts, setToasts] = useState<WebShellToast[]>([]);
   const toastIdRef = useRef(0);
   const dismissToast = useCallback((id: string) => {
@@ -140,8 +155,9 @@ export function WindowToastHost() {
         return [...withoutDuplicate, toast].slice(-MAX_TOASTS);
       });
     };
-    window.addEventListener(TOAST_REQUEST_EVENT, handler);
-    return () => window.removeEventListener(TOAST_REQUEST_EVENT, handler);
-  }, []);
+    const target: HTMLElement | Window = scope ?? window;
+    target.addEventListener(TOAST_REQUEST_EVENT, handler);
+    return () => target.removeEventListener(TOAST_REQUEST_EVENT, handler);
+  }, [scope]);
   return <ToastHost toasts={toasts} onDismiss={dismissToast} />;
 }
