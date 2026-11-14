@@ -44,6 +44,7 @@ import * as http from 'node:http';
 import * as crypto from 'node:crypto';
 import type {
   MCPOAuthConfig,
+  OAuthAuthorizationResponse,
   OAuthTokenResponse,
   OAuthClientRegistrationResponse,
 } from './oauth-provider.js';
@@ -680,6 +681,44 @@ describe('MCPOAuthProvider', () => {
         refreshToken: mockToken.refreshToken,
         tokenType: mockToken.tokenType,
         scope: mockToken.scope,
+      });
+    });
+
+    it('should fail a superseded callback flow immediately', async () => {
+      const handlers: Array<(req: unknown, res: unknown) => Promise<void>> = [];
+      vi.mocked(http.createServer).mockImplementation((handler) => {
+        handlers.push(
+          handler as unknown as (req: unknown, res: unknown) => Promise<void>,
+        );
+        return mockHttpServer as unknown as http.Server;
+      });
+      mockHttpServer.listen.mockImplementation((port, callback) => {
+        callback?.();
+      });
+
+      const provider = new MCPOAuthProvider();
+      const startCallbackServer = (
+        provider as unknown as {
+          startCallbackServer: (
+            state: string,
+          ) => Promise<OAuthAuthorizationResponse>;
+        }
+      ).startCallbackServer.bind(provider);
+
+      const first = startCallbackServer('first-state');
+      const second = startCallbackServer('second-state');
+
+      await expect(first).rejects.toThrow(
+        'OAuth callback superseded by a newer authorization',
+      );
+
+      await handlers[1]!(
+        { url: '/oauth/callback?code=second-code&state=second-state' },
+        { writeHead: vi.fn(), end: vi.fn() },
+      );
+      await expect(second).resolves.toEqual({
+        code: 'second-code',
+        state: 'second-state',
       });
     });
 

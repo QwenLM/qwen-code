@@ -44,6 +44,7 @@ const debugLogger = createDebugLogger('MCP_OAUTH');
 // first to avoid EADDRINUSE errors.
 let activeCallbackServer: http.Server | null = null;
 let activeCallbackTimeout: ReturnType<typeof setTimeout> | null = null;
+let activeCallbackReject: ((reason?: unknown) => void) | null = null;
 
 /**
  * OAuth configuration for an MCP server.
@@ -245,6 +246,12 @@ export class MCPOAuthProvider {
     expectedState: string,
   ): Promise<OAuthAuthorizationResponse> {
     // Close any previously active callback server to avoid EADDRINUSE
+    if (activeCallbackReject) {
+      activeCallbackReject(
+        new Error('OAuth callback superseded by a newer authorization'),
+      );
+      activeCallbackReject = null;
+    }
     if (activeCallbackServer) {
       try {
         activeCallbackServer.close();
@@ -296,6 +303,7 @@ export class MCPOAuthProvider {
               </html>
             `);
               activeCallbackServer = null;
+              activeCallbackReject = null;
               if (activeCallbackTimeout) {
                 clearTimeout(activeCallbackTimeout);
                 activeCallbackTimeout = null;
@@ -324,6 +332,7 @@ export class MCPOAuthProvider {
           `);
 
             activeCallbackServer = null;
+            activeCallbackReject = null;
             if (activeCallbackTimeout) {
               clearTimeout(activeCallbackTimeout);
               activeCallbackTimeout = null;
@@ -332,6 +341,7 @@ export class MCPOAuthProvider {
             resolve({ code, state });
           } catch (error) {
             activeCallbackServer = null;
+            activeCallbackReject = null;
             if (activeCallbackTimeout) {
               clearTimeout(activeCallbackTimeout);
               activeCallbackTimeout = null;
@@ -351,11 +361,13 @@ export class MCPOAuthProvider {
 
       // Track the active server so it can be cleaned up if a new auth starts
       activeCallbackServer = server;
+      activeCallbackReject = reject;
 
       // Timeout after 5 minutes
       activeCallbackTimeout = setTimeout(
         () => {
           activeCallbackServer = null;
+          activeCallbackReject = null;
           activeCallbackTimeout = null;
           server.close();
           reject(new Error('OAuth callback timeout'));
@@ -869,6 +881,9 @@ export class MCPOAuthProvider {
 
     // Start callback server
     const callbackPromise = this.startCallbackServer(pkceParams.state);
+    // A superseding authorization can reject this before the browser launch
+    // finishes. Observe the early rejection; the await below still propagates it.
+    callbackPromise.catch(() => {});
 
     // Open browser securely
     try {
