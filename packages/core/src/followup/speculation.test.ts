@@ -1300,14 +1300,23 @@ describe('speculation shared-round event semantics', () => {
       },
     },
   ])('$name drops an abandoned call, not only text', async ({ event }) => {
-    const on = await runEventRound(true, [
+    const events = [
       chunk([fnCall('read_file', { path: 'a.ts' }, 'call-abandoned')]),
       event,
       chunk([fnCall('read_file', { path: 'b.ts' }, 'call-kept')]),
-    ]);
+    ];
+    const on = await runEventRound(true, events);
     expect(on.status).toBe('completed');
     expect(modelCalls(on.messages).map((c) => c.id)).toEqual(['call-kept']);
     expect(on.toolUseCount).toBe(1);
     expect(responseIds(on.messages)).toEqual(['call-kept']);
+    // The raw round skips non-chunk events, so it keeps both calls.
+    const off = await runEventRound(false, events);
+    expect(off.status).toBe('completed');
+    expect(modelCalls(off.messages).map((c) => c.id)).toEqual([
+      'call-abandoned',
+      'call-kept',
+    ]);
+    expect(off.toolUseCount).toBe(2);
   });
 });
