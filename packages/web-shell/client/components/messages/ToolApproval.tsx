@@ -767,18 +767,6 @@ export function ToolApproval({
         </div>
       )}
 
-      {isExec && command && generateContent && (
-        <div className={styles.explainRow}>
-          <ThinkingTranslateButton
-            key={request.id}
-            content={command}
-            generateContent={generateContent}
-            className={styles.explainButton}
-            mode="explain-shell"
-          />
-        </div>
-      )}
-
       <div
         className={isGoal ? styles.goalHint : styles.question}
         id={questionId}
@@ -798,49 +786,70 @@ export function ToolApproval({
         </div>
       )}
 
-      {/* radiogroup semantics — the approval choice is single-select. No label
-          on the group: the alertdialog already exposes the question via
-          aria-describedby, so labelling the container with the same text would
-          make screen readers speak the question twice. */}
-      <div className={styles.options} role="radiogroup">
-        {displayOptions.map((option, i) => {
-          const isSelected = i === selected;
-          const label = labelForOption(option);
-          return (
-            <button
-              key={option.id}
-              type="button"
-              ref={(el) => {
-                optionRefs.current[i] = el;
-              }}
-              className={`${styles.option} ${getOptionClassName(option)} ${
-                isSelected ? styles.optionActive : ''
-              }`}
-              data-web-shell-permission-option
-              disabled={disabled || (isGoal && submitting)}
-              data-option-id={option.id}
-              tabIndex={isSelected ? 0 : -1}
-              role="radio"
-              aria-checked={isSelected}
-              aria-keyshortcuts={i < 9 ? String(i + 1) : undefined}
-              onClick={() => confirm(option.id)}
-              onFocus={() => {
-                selectedRef.current = i;
-                setSelected(i);
-              }}
-            >
-              <span className={styles.pointer} aria-hidden="true">
-                {isSelected ? '›' : ' '}
-              </span>
-              <span className={styles.num} aria-hidden="true">
-                {i + 1}.
-              </span>
-              <span className={styles.label} data-web-shell-option-label>
-                {label}
-              </span>
-            </button>
-          );
-        })}
+      <div
+        className={[
+          styles.footer,
+          isExec && command && generateContent && styles.footerWithExplanation,
+        ]
+          .filter(Boolean)
+          .join(' ')}
+      >
+        {isExec && command && generateContent && (
+          <div className={styles.explainRow}>
+            <ThinkingTranslateButton
+              key={request.id}
+              content={command}
+              generateContent={generateContent}
+              className={styles.explainButton}
+              mode="explain-shell"
+            />
+          </div>
+        )}
+
+        {/* radiogroup semantics — the approval choice is single-select. No label
+            on the group: the alertdialog already exposes the question via
+            aria-describedby, so labelling the container with the same text would
+            make screen readers speak the question twice. */}
+        <div className={styles.options} role="radiogroup">
+          {displayOptions.map((option, i) => {
+            const isSelected = i === selected;
+            const label = labelForOption(option);
+            return (
+              <button
+                key={option.id}
+                type="button"
+                ref={(el) => {
+                  optionRefs.current[i] = el;
+                }}
+                className={`${styles.option} ${getOptionClassName(option)} ${
+                  isSelected ? styles.optionActive : ''
+                }`}
+                data-web-shell-permission-option
+                disabled={disabled || (isGoal && submitting)}
+                data-option-id={option.id}
+                tabIndex={isSelected ? 0 : -1}
+                role="radio"
+                aria-checked={isSelected}
+                aria-keyshortcuts={i < 9 ? String(i + 1) : undefined}
+                onClick={() => confirm(option.id)}
+                onFocus={() => {
+                  selectedRef.current = i;
+                  setSelected(i);
+                }}
+              >
+                <span className={styles.pointer} aria-hidden="true">
+                  {isSelected ? '›' : ' '}
+                </span>
+                <span className={styles.num} aria-hidden="true">
+                  {i + 1}.
+                </span>
+                <span className={styles.label} data-web-shell-option-label>
+                  {label}
+                </span>
+              </button>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
