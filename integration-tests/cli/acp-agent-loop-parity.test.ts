@@ -23,13 +23,14 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   CONTAINER_SANDBOX_NO_PROXY,
   fakeServerHostOptions,
   IS_CONTAINER_SANDBOX,
+  readDebugLogs,
   TestRig,
 } from '../test-helper.js';
 import {
@@ -115,8 +116,16 @@ interface Run {
 
 const PROMPT_TIMEOUT_MS = 60_000;
 
-/** What the session logs for each round it runs in a `runAgentLoop` call. */
-const SHARED_ROUND_LOG = 'model round on the shared agent loop';
+/**
+ * What the session logs once per round it runs on the shared loop. Count the
+ * unprefixed "model round on the shared agent loop (prompt …)" line: the
+ * `#runSharedRound` entry also logs an `[ACP]`-prefixed copy for the same
+ * round, so the bare substring would count those rounds twice. The negative
+ * lookbehind drops the `[ACP]` copy and keeps the one unprefixed line each
+ * round logs.
+ */
+const SHARED_ROUND_LOG =
+  /(?<!\[ACP\] )model round on the shared agent loop \(prompt/g;
 
 /**
  * The session's rounds the event-bus adapter ran, matched to the session's
@@ -127,7 +136,7 @@ function countKernelRounds(debugLog: string): number {
   const promptIds = new Set(
     Array.from(
       debugLog.matchAll(
-        /model round on the shared agent loop \(prompt ([^)]+)\)/g,
+        /(?<!\[ACP\] )model round on the shared agent loop \(prompt ([^)]+)\)/g,
       ),
       ([, promptId]) => promptId,
     ),
@@ -141,15 +150,7 @@ function countKernelRounds(debugLog: string): number {
 
 /** The debug logs a run wrote under its runtime directory. */
 function readDebugLog(runtimeDir: string): string {
-  const debugDir = join(runtimeDir, 'debug');
-  if (!existsSync(debugDir)) return '';
-  return (
-    readdirSync(debugDir, { recursive: true, withFileTypes: true })
-      // `latest` points at the session's own log.
-      .filter((entry) => entry.isFile() && basename(entry.name) !== 'latest')
-      .map((entry) => readFileSync(join(entry.parentPath, entry.name), 'utf8'))
-      .join('')
-  );
+  return readDebugLogs(runtimeDir);
 }
 
 // A Goal's id and the record ids it cites are random in each run.
@@ -383,10 +384,11 @@ const allowOnce = () => ({
         // The debug log records the rounds each loop ran.
         QWEN_DEBUG_LOG_FILE: '1',
       };
-      delete env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'];
-      if (shared) env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = '1';
-      delete env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'];
-      if (kernel) env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] = '1';
+      // Force both directions explicitly so an off arm stays off even after a
+      // future surface-default flip, and each arm forces every surface together
+      // (whole-value env) so the process-wide round count is a valid identity.
+      env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = shared ? '1' : '0';
+      env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] = kernel ? '1' : '0';
       delete env[PRIVATE_ACP_CAPABILITY_ENV];
       if (scenario.trustedParent) {
         env[PRIVATE_ACP_CAPABILITY_ENV] = PARENT_CAPABILITY;
@@ -610,7 +612,7 @@ const allowOnce = () => ({
         permissionsAt,
         goalTurnEnds,
         backgroundTurnEnds,
-        sharedRounds: debugLog.split(SHARED_ROUND_LOG).length - 1,
+        sharedRounds: (debugLog.match(SHARED_ROUND_LOG) ?? []).length,
         kernelRounds: countKernelRounds(debugLog),
       };
     }
