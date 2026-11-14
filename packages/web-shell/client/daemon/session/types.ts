@@ -264,6 +264,8 @@ export interface DaemonSessionProviderProps {
   prefetchSkills?: boolean;
   /** Connect to the daemon automatically on mount. */
   autoConnect?: boolean;
+  /** Automatically continue recoverable interrupted turns after session restore. */
+  autoContinueInterruptedTurns?: boolean;
   /** Reconnect automatically after recoverable daemon/session failures. */
   autoReconnect?: boolean;
   /**

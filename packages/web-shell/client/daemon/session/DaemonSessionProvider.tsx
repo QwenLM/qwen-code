@@ -951,6 +951,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     prefetchGitBranch = true,
     prefetchSkills = true,
     autoConnect = true,
+    autoContinueInterruptedTurns = true,
     autoReconnect = true,
     restartEventStreamOnPrompt = false,
     reconnectDelayMs = 1_000,
@@ -1393,6 +1394,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const [restoreSessionNonce, setRestoreSessionNonce] = useState(0);
   const [attachSessionNonce, setAttachSessionNonce] = useState(0);
   const [newSessionNonce, setNewSessionNonce] = useState(0);
+  const autoContinuationLoadRef = useRef<
+    { sessionId: string; requestId: number } | undefined
+  >(undefined);
+  const explicitRestoreRequestRef = useRef<
+    { sessionId: string; requestId: number } | undefined
+  >(undefined);
+  const explicitRestoreRequestIdRef = useRef(0);
   const [connection, setConnection] = useState<DaemonConnectionState>({
     capabilities: workspace?.capabilities,
     status: sessionContextResolutionError
@@ -5632,6 +5640,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         setRestoreSessionNonce,
         setAttachSessionNonce,
         setNewSessionNonce,
+        onSessionRestoreRequested: (sessionId) => {
+          const requestId = ++explicitRestoreRequestIdRef.current;
+          explicitRestoreRequestRef.current = { sessionId, requestId };
+        },
         clearLiveJournalRepair: () => {
           liveJournalRepairRef.current?.controller?.abort();
           liveJournalRepairRef.current = undefined;
@@ -5703,6 +5715,89 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       turnNavigationStore,
     ],
   );
+
+  useEffect(() => {
+    if (!autoConnect || !autoContinueInterruptedTurns || !restoreSessionId) {
+      return;
+    }
+    // Initial runtime discovery may surface a recoverable interruption while
+    // the daemon is already live. Automatic continuation is reserved for an
+    // explicit session restore (including the initial session supplied by the
+    // host), so the normal in-session recovery banner remains manual.
+    const explicitRestore = explicitRestoreRequestRef.current;
+    const explicitlyRestored =
+      initialRestoreSessionId === restoreSessionId ||
+      explicitRestore?.sessionId === restoreSessionId;
+    if (!explicitlyRestored) {
+      return;
+    }
+    if (
+      connection.status !== 'connected' ||
+      connection.loadingTranscript ||
+      connection.catchingUp
+    ) {
+      return;
+    }
+    const session = sessionRef.current;
+    const recovery = connection.context?.recovery;
+    if (
+      !session ||
+      session.sessionId !== restoreSessionId ||
+      connection.context?.sessionId !== session.sessionId ||
+      recovery === undefined
+    ) {
+      return;
+    }
+    if (typeof session.continueSession !== 'function') return;
+
+    const load = {
+      sessionId: session.sessionId,
+      requestId:
+        explicitRestore?.sessionId === session.sessionId
+          ? explicitRestore.requestId
+          : 0,
+    };
+    const attempted = autoContinuationLoadRef.current;
+    if (
+      attempted?.sessionId === load.sessionId &&
+      attempted.requestId === load.requestId
+    ) {
+      return;
+    }
+    autoContinuationLoadRef.current = load;
+
+    // A live prompt belongs to the daemon already and must not be submitted a
+    // second time after a page reload. The recovery snapshot is authoritative
+    // for whether a stopped turn is eligible for continuation.
+    if (
+      session.hasActivePrompt ||
+      !recovery.canContinue ||
+      recovery.cancellationConfirmationId !== undefined
+    ) {
+      return;
+    }
+
+    void actions.continueSession().catch((error: unknown) => {
+      // continueSession already publishes a recoverable action notice. Keep
+      // the load successful and make the automatic path observable in logs.
+      console.warn(
+        '[DaemonSessionProvider] automatic continuation failed:',
+        error,
+      );
+    });
+  }, [
+    actions,
+    autoConnect,
+    autoContinueInterruptedTurns,
+    connection.catchingUp,
+    connection.context,
+    connection.loadingTranscript,
+    connection.status,
+    restoreSessionId,
+    restoreSessionNonce,
+    initialRestoreSessionId,
+  ]);
+
   repairReloadRef.current = actions.reloadSession;
   refreshModelsRef.current = actions.refreshModels;
   useEffect(() => {
