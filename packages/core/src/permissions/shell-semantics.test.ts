@@ -1355,3 +1355,155 @@ describe('quoted and decoded tilde targets', () => {
     ]);
   });
 });
+
+describe('argument marks survive the env-assignment strip', () => {
+  // `tokens` and `bares` are index-parallel. Dropping a leading assignment from
+  // only one of them gave every later argument the previous word's marks, so a
+  // destination bash resolves at runtime was certified as a literal path.
+  it.each(['cat dir/$OUT', 'X=1 cat dir/$OUT', 'X=1 Y=2 cat dir/$OUT'])(
+    'keeps the expanded read uncertain: %s',
+    (command) => {
+      expect(ops(command)).toEqual([
+        {
+          virtualTool: 'read_file',
+          filePath: `${CWD}/dir/$OUT`,
+          pathUnknown: true,
+        },
+      ]);
+    },
+  );
+
+  it.each(['cp dir/$OUT /tmp/y', 'X=1 cp dir/$OUT /tmp/y'])(
+    'marks the expanded source and not the literal destination: %s',
+    (command) => {
+      expect(ops(command)).toEqual([
+        {
+          virtualTool: 'read_file',
+          filePath: `${CWD}/dir/$OUT`,
+          pathUnknown: true,
+        },
+        write('/tmp/y'),
+      ]);
+    },
+  );
+
+  it('leaves a fully literal prefixed command known', () => {
+    expect(ops('X=1 cat /tmp/safe')).toEqual([read('/tmp/safe')]);
+  });
+});
+
+describe('paths a handler derives from an argument stay uncertain', () => {
+  // A flag value is a substring of its argument and a `-t` destination is a
+  // join, so neither string is ever an element of `args`. Matching finished
+  // paths against whole arguments dropped the mark for those spellings.
+  it.each([
+    'sort -o .qwen/$OUT in.txt',
+    'sort -o.qwen/$OUT in.txt',
+    'sort --output=.qwen/$OUT in.txt',
+  ])('marks the output flag in every spelling: %s', (command) => {
+    const writes = ops(command).filter((op) => op.virtualTool === 'write_file');
+    expect(writes).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: `${CWD}/.qwen/$OUT`,
+        pathUnknown: true,
+      },
+    ]);
+  });
+
+  it.each([
+    ['curl -o.qwen/$OUT https://example.com', 'curl'],
+    ['wget -O.qwen/$OUT https://example.com', 'wget'],
+  ])('marks an attached download destination: %s', (command) => {
+    const writes = ops(command).filter((op) => op.virtualTool === 'write_file');
+    expect(writes).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: `${CWD}/.qwen/$OUT`,
+        pathUnknown: true,
+      },
+    ]);
+  });
+
+  it.each([
+    'cp -t out/$D file',
+    'cp -tout/$D file',
+    'cp --target-directory=out/$D file',
+    'mv -t out/$D file',
+    'install -t out/$D file',
+  ])('marks a joined target-directory destination: %s', (command) => {
+    const writes = ops(command).filter((op) => op.virtualTool === 'write_file');
+    expect(writes).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: `${CWD}/out/$D/file`,
+        pathUnknown: true,
+      },
+    ]);
+  });
+
+  it.each([
+    'sort -o/tmp/safe in.txt',
+    'sort -o /tmp/safe in.txt',
+    'curl -o/tmp/safe https://example.com',
+  ])('leaves a literal derived destination known: %s', (command) => {
+    const writes = ops(command).filter((op) => op.virtualTool === 'write_file');
+    expect(writes).toEqual([write('/tmp/safe')]);
+  });
+
+  it('leaves a literal target-directory destination known', () => {
+    const writes = ops('cp -t /tmp/safe file').filter(
+      (op) => op.virtualTool === 'write_file',
+    );
+    expect(writes).toEqual([write('/tmp/safe/file')]);
+  });
+});
+
+describe('unquoted pathname globbing is an expansion', () => {
+  // A glob character is marked bare rather than as expansion syntax, so a
+  // predicate that read only the expansion mark certified `> settings.jso?`
+  // at a name bash never opens.
+  it.each([
+    "printf '{}' > .qwen/settings.jso?",
+    "printf '{}' > .qwen/[s]ettings.json",
+    "printf '{}' > .qwen/settings.json*",
+  ])('keeps a globbed redirect target uncertain: %s', (command) => {
+    expect(across(command)).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath:
+          '/repo/.qwen/' + command.split('> ')[1]!.replace('.qwen/', ''),
+        pathUnknown: true,
+      },
+    ]);
+  });
+
+  it('keeps a globbed read argument uncertain', () => {
+    expect(ops('cat .qwen/settings.jso?')).toEqual([
+      {
+        virtualTool: 'read_file',
+        filePath: `${CWD}/.qwen/settings.jso?`,
+        pathUnknown: true,
+      },
+    ]);
+  });
+
+  it('escalates the segment after a globbed cd', () => {
+    expect(across('cd .qwen/sub? && echo x > settings.json')).toEqual([
+      uncertainWrite('/repo/.qwen/sub?/settings.json'),
+    ]);
+  });
+
+  it.each([
+    ['cat "foo*"', 'foo*'],
+    ["cat 'foo*'", 'foo*'],
+    [String.raw`cat esc\*.txt`, 'esc*.txt'],
+    ['cat data.csv', 'data.csv'],
+  ])('leaves a quoted or escaped glob literal: %s', (command, file) => {
+    expect(ops(command)).toEqual([read(`${CWD}/${file}`)]);
+  });
+
+  it('leaves an ordinary redirect known', () => {
+    expect(across('echo hi > log.txt')).toEqual([write('/repo/log.txt')]);
+  });
+});

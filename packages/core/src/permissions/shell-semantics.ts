@@ -406,27 +406,134 @@ function isShellAbsolutePath(p: string): boolean {
   return p.startsWith('/') || /^[A-Za-z]:\//.test(p.replace(/\\/g, '/'));
 }
 
+/**
+ * True when the shell can still change this word before it reaches the syscall.
+ *
+ * `$`/backtick expansion (mark '2'), an unquoted pathname glob and undecodable
+ * bytes all qualify. A glob character is marked '1' (bare) rather than '2', so
+ * reading only the expansion mark would certify `> settings.jso?` at a literal
+ * name bash never opens.
+ */
 function isUncertainPath(word: string, bare?: string): boolean {
-  return bare?.includes('2') || hasUnpairedSurrogate(word);
+  if (bare?.includes('2') || hasUnpairedSurrogate(word)) return true;
+  if (bare === undefined) return false;
+  for (let i = 0; i < word.length && i < bare.length; i++) {
+    if (bare[i] !== '1') continue;
+    const ch = word[i];
+    if (ch === '*' || ch === '?' || ch === '[') return true;
+  }
+  return false;
 }
 
-function markUncertainArgs(
-  ops: ShellOperation[],
+/** One argument word and the marking of each of its characters. */
+interface ArgumentWord {
+  text: string;
+  bare: string;
+}
+
+let argumentContext: readonly ArgumentWord[] = [];
+let dispatchCwd = '';
+
+/**
+ * The marking of the argument characters `fragment` was taken from.
+ *
+ * A handler does not always use an argument whole: `getFlagValue` returns a
+ * substring (`-oPATH`, `--output=PATH`) and `targetDirectoryWrites` joins a
+ * directory with a basename. Matching finished paths against whole arguments
+ * therefore drops the mark for every derived spelling. Looking the fragment up
+ * in the source words keeps the marking attached to the characters that carry
+ * it, so `-o.qwen/$OUT` stays uncertain while `-o/tmp/safe` does not.
+ */
+function fragmentBare(fragment: string): string | undefined {
+  if (!fragment) return undefined;
+  let merged: string | undefined;
+  for (const word of argumentContext) {
+    let at = word.text.indexOf(fragment);
+    while (at >= 0) {
+      const slice = word.bare.slice(at, at + fragment.length);
+      merged = merged === undefined ? slice : mergeBares(merged, slice);
+      at = word.text.indexOf(fragment, at + 1);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Marks for a path a handler already resolved.
+ *
+ * Two spellings need more than a verbatim lookup: an attached flag value
+ * (`-tout/$D`) carries a prefix the path does not, and normalization can drop
+ * the characters that carried the mark (`out/$D/..` resolves to `out`). Each
+ * suffix of an argument word is therefore resolved and compared by equality or
+ * directory prefix. The shortest matching suffix wins, so a flag prefix does
+ * not drag its own characters into the marking.
+ */
+function resolvedFragmentBare(resolved: string): string | undefined {
+  let merged = fragmentBare(resolved);
+  for (const word of argumentContext) {
+    for (let at = word.text.length - 1; at >= 0; at--) {
+      const bare = word.bare.slice(at);
+      const candidate = resolvePath(word.text.slice(at), dispatchCwd, bare);
+      if (candidate !== resolved && !resolved.startsWith(`${candidate}/`)) {
+        continue;
+      }
+      merged = merged === undefined ? bare : mergeBares(merged, bare);
+      break;
+    }
+  }
+  return merged;
+}
+
+/** Combine two markings of the same characters, keeping the strongest. */
+function mergeBares(left: string, right: string): string {
+  let merged = '';
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    const a = left[i] ?? '0';
+    const b = right[i] ?? '0';
+    merged += a === '2' || b === '2' ? '2' : a === '1' || b === '1' ? '1' : '0';
+  }
+  return merged;
+}
+
+/**
+ * Build a file operation whose uncertainty follows the argument characters the
+ * path was derived from, including flag substrings and joined directories.
+ */
+function pathOperation(
+  virtualTool: ShellOperation['virtualTool'],
+  path: string,
+  cwd: string,
+  bare?: string,
+): ShellOperation {
+  const inherited = bare ?? fragmentBare(path);
+  const operation: ShellOperation = {
+    virtualTool,
+    filePath: resolvePath(path, cwd, inherited),
+  };
+  if (isUncertainPath(path, inherited)) operation.pathUnknown = true;
+  return operation;
+}
+
+/** Run a command handler with its argument words available to path resolution. */
+function dispatchHandler(
+  handler: CommandHandler,
   args: string[],
   cwd: string,
-  bares?: string[],
+  bares: string[],
 ): ShellOperation[] {
-  const uncertainPaths = new Set(
-    args
-      .filter((word, index) => isUncertainPath(word, bares?.[index]))
-      .map((word) => resolvePath(word, cwd)),
-  );
-  if (uncertainPaths.size === 0) return ops;
-  return ops.map((op) =>
-    op.filePath && uncertainPaths.has(op.filePath)
-      ? { ...op, pathUnknown: true }
-      : op,
-  );
+  const outer = argumentContext;
+  const outerCwd = dispatchCwd;
+  dispatchCwd = cwd;
+  argumentContext = args.map((text, index) => ({
+    text,
+    bare: bares[index] ?? '',
+  }));
+  try {
+    return handler(args, cwd);
+  } finally {
+    argumentContext = outer;
+    dispatchCwd = outerCwd;
+  }
 }
 
 function isEnvAssignmentToken(token: string): boolean {
@@ -832,20 +939,33 @@ function getFlagValue(
 function targetDirectoryPath(args: string[], cwd: string): string | undefined {
   const target = getFlagValue(args, '-t', '--target-directory');
   if (!target || !looksLikePath(target)) return undefined;
-  return resolvePath(target, cwd);
+  return resolvePath(target, cwd, fragmentBare(target));
 }
 
 function targetDirectoryWrites(
   targetDir: string,
   sources: string[],
 ): ShellOperation[] {
-  return sources.map((source) => ({
-    virtualTool: 'write_file',
-    filePath: nodePath.posix.join(
-      targetDir,
-      nodePath.posix.basename(source.replace(/\\/g, '/')),
-    ),
-  }));
+  return sources.map((source) => {
+    const base = nodePath.posix.basename(source.replace(/\\/g, '/'));
+    const operation: ShellOperation = {
+      virtualTool: 'write_file',
+      filePath: nodePath.posix.join(targetDir, base),
+    };
+    // The destination inherits uncertainty from both halves: an expanded
+    // `-t out/$D` and a globbed source basename each make it unknowable. The
+    // resolved directory is matched back to its source word, because
+    // normalization can drop the very characters that carried the mark.
+    const dirBare = resolvedFragmentBare(targetDir);
+    if (
+      (dirBare !== undefined && dirBare.includes('2')) ||
+      isUncertainPath(targetDir, dirBare) ||
+      isUncertainPath(base, fragmentBare(base))
+    ) {
+      operation.pathUnknown = true;
+    }
+    return operation;
+  });
 }
 
 function writeOpForFlag(
@@ -856,7 +976,7 @@ function writeOpForFlag(
 ): ShellOperation | undefined {
   const target = getFlagValue(args, shortName, longName);
   if (!target || !looksLikePath(target)) return undefined;
-  return { virtualTool: 'write_file', filePath: resolvePath(target, cwd) };
+  return pathOperation('write_file', target, cwd);
 }
 
 function hasCombinedShortFlag(arg: string, flag: string): boolean {
@@ -889,10 +1009,7 @@ function readOps(
 ): ShellOperation[] {
   return getPositionalArgs(args, flagsWithValue)
     .filter(looksLikePath)
-    .map((p) => ({
-      virtualTool: 'read_file' as const,
-      filePath: resolvePath(p, cwd),
-    }));
+    .map((p) => pathOperation('read_file', p, cwd));
 }
 
 /** Build list_directory operations from positional path arguments.
@@ -905,10 +1022,7 @@ function listOps(
   const dirs = getPositionalArgs(args, flagsWithValue).filter(looksLikePath);
   if (dirs.length === 0)
     return [{ virtualTool: 'list_directory', filePath: cwd }];
-  return dirs.map((p) => ({
-    virtualTool: 'list_directory' as const,
-    filePath: resolvePath(p, cwd),
-  }));
+  return dirs.map((p) => pathOperation('list_directory', p, cwd));
 }
 
 /** Extract URL domain and return a web_fetch operation, or null on failure. */
@@ -1329,10 +1443,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     const tool: 'read_file' | 'list_directory' = isRecursive
       ? 'list_directory'
       : 'read_file';
-    return filePaths.map((p) => ({
-      virtualTool: tool,
-      filePath: resolvePath(p, cwd),
-    }));
+    return filePaths.map((p) => pathOperation(tool, p, cwd));
   },
   egrep: (a, d) => (COMMANDS['grep'] as CommandHandler)(a, d),
   fgrep: (a, d) => (COMMANDS['grep'] as CommandHandler)(a, d),
@@ -1369,10 +1480,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       looksLikePath,
     );
     const filePaths = hasPatternFlag ? positional : positional.slice(1);
-    return filePaths.map((p) => ({
-      virtualTool: 'list_directory' as const,
-      filePath: resolvePath(p, cwd),
-    }));
+    return filePaths.map((p) => pathOperation('list_directory', p, cwd));
   },
 
   ag: (args, cwd) => {
@@ -1394,10 +1502,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       looksLikePath,
     );
     const filePaths = hasPatternFlag ? positional : positional.slice(1);
-    return filePaths.map((p) => ({
-      virtualTool: 'list_directory' as const,
-      filePath: resolvePath(p, cwd),
-    }));
+    return filePaths.map((p) => pathOperation('list_directory', p, cwd));
   },
 
   ack: (args, cwd) => {
@@ -1416,10 +1521,9 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     const positional = getPositionalArgs(args, flagsWithValue).filter(
       looksLikePath,
     );
-    return positional.slice(1).map((p) => ({
-      virtualTool: 'list_directory' as const,
-      filePath: resolvePath(p, cwd),
-    }));
+    return positional
+      .slice(1)
+      .map((p) => pathOperation('list_directory', p, cwd));
   },
 
   // ── Directory-listing commands ────────────────────────────────────────────
@@ -1602,34 +1706,22 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       new Set(['-t', '-r', '--reference', '--date', '-d', '--time']),
     )
       .filter(looksLikePath)
-      .map((p) => ({
-        virtualTool: 'write_file' as const,
-        filePath: resolvePath(p, cwd),
-      })),
+      .map((p) => pathOperation('write_file', p, cwd)),
 
   mkdir: (args, cwd) =>
     getPositionalArgs(args, new Set(['-m', '--mode', '-Z', '--context']))
       .filter(looksLikePath)
-      .map((p) => ({
-        virtualTool: 'write_file' as const,
-        filePath: resolvePath(p, cwd),
-      })),
+      .map((p) => pathOperation('write_file', p, cwd)),
 
   mkfifo: (args, cwd) =>
     getPositionalArgs(args, new Set(['-m', '--mode', '-Z']))
       .filter(looksLikePath)
-      .map((p) => ({
-        virtualTool: 'write_file' as const,
-        filePath: resolvePath(p, cwd),
-      })),
+      .map((p) => pathOperation('write_file', p, cwd)),
 
   tee: (args, cwd) =>
     getPositionalArgs(args)
       .filter(looksLikePath)
-      .map((p) => ({
-        virtualTool: 'write_file' as const,
-        filePath: resolvePath(p, cwd),
-      })),
+      .map((p) => pathOperation('write_file', p, cwd)),
 
   cp: (args, cwd) => {
     const targetDir = targetDirectoryPath(args, cwd);
@@ -1652,29 +1744,18 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     if (positional.length === 0) return [];
     if (targetDir) {
       return [
-        ...positional.map((p) => ({
-          virtualTool: 'read_file' as const,
-          filePath: resolvePath(p, cwd),
-        })),
+        ...positional.map((p) => pathOperation('read_file', p, cwd)),
         ...targetDirectoryWrites(targetDir, positional),
       ];
     }
     if (positional.length === 1) {
-      return [
-        {
-          virtualTool: 'read_file',
-          filePath: resolvePath(positional[0]!, cwd),
-        },
-      ];
+      return [pathOperation('read_file', positional[0]!, cwd)];
     }
     const srcs = positional.slice(0, -1);
     const dst = positional[positional.length - 1]!;
     return [
-      ...srcs.map((p) => ({
-        virtualTool: 'read_file' as const,
-        filePath: resolvePath(p, cwd),
-      })),
-      { virtualTool: 'write_file' as const, filePath: resolvePath(dst, cwd) },
+      ...srcs.map((p) => pathOperation('read_file', p, cwd)),
+      pathOperation('write_file', dst, cwd),
     ];
   },
 
@@ -1694,10 +1775,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     );
     if (targetDir && positional.length > 0) {
       return [
-        ...positional.map((p) => ({
-          virtualTool: 'edit' as const,
-          filePath: resolvePath(p, cwd),
-        })),
+        ...positional.map((p) => pathOperation('edit', p, cwd)),
         ...targetDirectoryWrites(targetDir, positional),
       ];
     }
@@ -1706,11 +1784,8 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     const dst = positional[positional.length - 1]!;
     return [
       // The source files are edited (moved away — their original location changes)
-      ...srcs.map((p) => ({
-        virtualTool: 'edit' as const,
-        filePath: resolvePath(p, cwd),
-      })),
-      { virtualTool: 'write_file' as const, filePath: resolvePath(dst, cwd) },
+      ...srcs.map((p) => pathOperation('edit', p, cwd)),
+      pathOperation('write_file', dst, cwd),
     ];
   },
 
@@ -1739,10 +1814,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     );
     if (targetDir && positional.length > 0) {
       return [
-        ...positional.map((p) => ({
-          virtualTool: 'read_file' as const,
-          filePath: resolvePath(p, cwd),
-        })),
+        ...positional.map((p) => pathOperation('read_file', p, cwd)),
         ...targetDirectoryWrites(targetDir, positional),
       ];
     }
@@ -1750,11 +1822,8 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     const srcs = positional.slice(0, -1);
     const dst = positional[positional.length - 1]!;
     return [
-      ...srcs.map((p) => ({
-        virtualTool: 'read_file' as const,
-        filePath: resolvePath(p, cwd),
-      })),
-      { virtualTool: 'write_file', filePath: resolvePath(dst, cwd) },
+      ...srcs.map((p) => pathOperation('read_file', p, cwd)),
+      pathOperation('write_file', dst, cwd),
     ];
   },
 
@@ -1765,15 +1834,12 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       if (arg.startsWith('if=')) {
         const p = arg.slice(3);
         if (looksLikePath(p)) {
-          ops.push({ virtualTool: 'read_file', filePath: resolvePath(p, cwd) });
+          ops.push(pathOperation('read_file', p, cwd));
         }
       } else if (arg.startsWith('of=')) {
         const p = arg.slice(3);
         if (looksLikePath(p)) {
-          ops.push({
-            virtualTool: 'write_file',
-            filePath: resolvePath(p, cwd),
-          });
+          ops.push(pathOperation('write_file', p, cwd));
         }
       }
     }
@@ -1797,21 +1863,13 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     ).filter(looksLikePath);
     if (positional.length === 0) return [];
     if (positional.length === 1) {
-      return [
-        {
-          virtualTool: 'read_file',
-          filePath: resolvePath(positional[0]!, cwd),
-        },
-      ];
+      return [pathOperation('read_file', positional[0]!, cwd)];
     }
     const srcs = positional.slice(0, -1);
     const dst = positional[positional.length - 1]!;
     return [
-      ...srcs.map((p) => ({
-        virtualTool: 'read_file' as const,
-        filePath: resolvePath(p, cwd),
-      })),
-      { virtualTool: 'write_file' as const, filePath: resolvePath(dst, cwd) },
+      ...srcs.map((p) => pathOperation('read_file', p, cwd)),
+      pathOperation('write_file', dst, cwd),
     ];
   },
 
@@ -1824,10 +1882,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     ).filter(looksLikePath);
     if (targetDir && positional.length > 0) {
       return [
-        ...positional.map((p) => ({
-          virtualTool: 'read_file' as const,
-          filePath: resolvePath(p, cwd),
-        })),
+        ...positional.map((p) => pathOperation('read_file', p, cwd)),
         ...targetDirectoryWrites(targetDir, positional),
       ];
     }
@@ -1835,11 +1890,8 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     const targets = positional.slice(0, -1);
     const linkname = positional[positional.length - 1]!;
     return [
-      ...targets.map((p) => ({
-        virtualTool: 'read_file' as const,
-        filePath: resolvePath(p, cwd),
-      })),
-      { virtualTool: 'write_file', filePath: resolvePath(linkname, cwd) },
+      ...targets.map((p) => pathOperation('read_file', p, cwd)),
+      pathOperation('write_file', linkname, cwd),
     ];
   },
 
@@ -1848,10 +1900,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
   rm: (args, cwd) =>
     getPositionalArgs(args, new Set(['--interactive']))
       .filter(looksLikePath)
-      .map((p) => ({
-        virtualTool: 'edit' as const,
-        filePath: resolvePath(p, cwd),
-      })),
+      .map((p) => pathOperation('edit', p, cwd)),
 
   rmdir: (args, cwd) =>
     getPositionalArgs(
@@ -1859,18 +1908,12 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       new Set(['--ignore-fail-on-non-empty', '-p', '--parents']),
     )
       .filter(looksLikePath)
-      .map((p) => ({
-        virtualTool: 'edit' as const,
-        filePath: resolvePath(p, cwd),
-      })),
+      .map((p) => pathOperation('edit', p, cwd)),
 
   unlink: (args, cwd) =>
     getPositionalArgs(args)
       .filter(looksLikePath)
-      .map((p) => ({
-        virtualTool: 'edit' as const,
-        filePath: resolvePath(p, cwd),
-      })),
+      .map((p) => pathOperation('edit', p, cwd)),
 
   shred: (args, cwd) =>
     getPositionalArgs(
@@ -1878,10 +1921,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       new Set(['-n', '--iterations', '-s', '--size', '--random-source']),
     )
       .filter(looksLikePath)
-      .map((p) => ({
-        virtualTool: 'edit' as const,
-        filePath: resolvePath(p, cwd),
-      })),
+      .map((p) => pathOperation('edit', p, cwd)),
 
   truncate: (args, cwd) =>
     getPositionalArgs(
@@ -1899,10 +1939,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       ]),
     )
       .filter(looksLikePath)
-      .map((p) => ({
-        virtualTool: 'edit' as const,
-        filePath: resolvePath(p, cwd),
-      })),
+      .map((p) => pathOperation('edit', p, cwd)),
 
   chmod: (args, cwd) => {
     // chmod [opts] MODE file... — the mode is the first positional arg.
@@ -1915,10 +1952,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     return positional
       .slice(1)
       .filter(looksLikePath)
-      .map((p) => ({
-        virtualTool: 'edit' as const,
-        filePath: resolvePath(p, cwd),
-      }));
+      .map((p) => pathOperation('edit', p, cwd));
   },
 
   chown: (args, cwd) => {
@@ -1930,10 +1964,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     return positional
       .slice(1)
       .filter(looksLikePath)
-      .map((p) => ({
-        virtualTool: 'edit' as const,
-        filePath: resolvePath(p, cwd),
-      }));
+      .map((p) => pathOperation('edit', p, cwd));
   },
 
   chgrp: (args, cwd) => {
@@ -1941,31 +1972,20 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     return positional
       .slice(1)
       .filter(looksLikePath)
-      .map((p) => ({
-        virtualTool: 'edit' as const,
-        filePath: resolvePath(p, cwd),
-      }));
+      .map((p) => pathOperation('edit', p, cwd));
   },
 
   rename: (args, cwd) => {
     // rename FROM TO file... — skip first two positionals (the from/to patterns)
     const positional = getPositionalArgs(args).filter(looksLikePath);
-    return positional.slice(2).map((p) => ({
-      virtualTool: 'edit' as const,
-      filePath: resolvePath(p, cwd),
-    }));
+    return positional.slice(2).map((p) => pathOperation('edit', p, cwd));
   },
 
   patch: (args, cwd) => {
     const output = getFlagValue(args, '-o', '--output');
     const outputOps =
       output && looksLikePath(output)
-        ? [
-            {
-              virtualTool: 'edit' as const,
-              filePath: resolvePath(output, cwd),
-            },
-          ]
+        ? [pathOperation('edit', output, cwd)]
         : [];
 
     return [
@@ -1975,10 +1995,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
         new Set(['-i', '--input', '-d', '--directory', '-o', '--output']),
       )
         .filter(looksLikePath)
-        .map((p) => ({
-          virtualTool: 'edit' as const,
-          filePath: resolvePath(p, cwd),
-        })),
+        .map((p) => pathOperation('edit', p, cwd)),
     ];
   },
 
@@ -2004,10 +2021,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     ).filter(looksLikePath);
     const files = hasExplicitScript ? positional : positional.slice(1);
     const tool: 'edit' | 'read_file' = hasInPlace ? 'edit' : 'read_file';
-    return files.map((p) => ({
-      virtualTool: tool,
-      filePath: resolvePath(p, cwd),
-    }));
+    return files.map((p) => pathOperation(tool, p, cwd));
   },
 
   sed: (args, cwd) => {
@@ -2048,10 +2062,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     // Otherwise, the first positional is the script expression.
     const filePaths = hasExplicitScript ? positional : positional.slice(1);
     const tool: 'edit' | 'read_file' = hasInPlace ? 'edit' : 'read_file';
-    return filePaths.map((p) => ({
-      virtualTool: tool,
-      filePath: resolvePath(p, cwd),
-    }));
+    return filePaths.map((p) => pathOperation(tool, p, cwd));
   },
 
   awk: (args, cwd) => {
@@ -2093,10 +2104,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     const tool: 'edit' | 'read_file' = hasInPlace ? 'edit' : 'read_file';
     return getPositionalArgs(args, flagsWithValue)
       .filter(looksLikePath)
-      .map((p) => ({
-        virtualTool: tool,
-        filePath: resolvePath(p, cwd),
-      }));
+      .map((p) => pathOperation(tool, p, cwd));
   },
   gawk: (a, d) => (COMMANDS['awk'] as CommandHandler)(a, d),
 
@@ -2360,8 +2368,11 @@ export function extractShellOperations(
   const { readFiles: redirectReads, writeFiles: redirectWrites } =
     extractRedirects(tokens, cwd, fdRedirects, fdCloses, bares);
 
+  // `tokens` and `bares` are index-parallel; dropping an assignment from only
+  // one of them hands every later argument the previous word's marks.
   while (tokens[0] && isEnvAssignmentToken(tokens[0])) {
     tokens.shift();
+    bares.shift();
   }
 
   const cmdName = tokens[0];
@@ -2424,7 +2435,7 @@ export function extractShellOperations(
     if (handler) {
       const args = tokens.slice(1);
       const argBares = bares.slice(1);
-      ops.push(...markUncertainArgs(handler(args, cwd), args, cwd, argBares));
+      ops.push(...dispatchHandler(handler, args, cwd, argBares));
     }
     // Unknown commands: return no ops (safe — we don't guess what we don't know)
   }
