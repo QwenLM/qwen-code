@@ -132,6 +132,18 @@ test('pausing a secondary goal uses its own session route', async ({
       ),
     )
     .toBe(true);
+
+  // The control must flip the SECONDARY card, not the primary's: the mock
+  // resolves the target snapshot by session id like the real owner route.
+  await expect(
+    secondaryCard.getByText('Paused', { exact: true }),
+  ).toBeVisible();
+  const primaryCard = page
+    .locator('[role="listitem"]')
+    .filter({ hasText: 'primary goal' });
+  await expect(
+    primaryCard.getByText('In progress', { exact: true }),
+  ).toBeVisible();
 });
 
 test('one workspace failing keeps the others listed', async ({
@@ -175,13 +187,38 @@ test('an untrusted secondary is neither listed nor requested', async ({
   expect(
     daemon.requests.filter((r) => r.path.includes('/workspaces/ws-secondary')),
   ).toHaveLength(0);
+  // The page never asks, but the route itself must still reject a direct
+  // read of an untrusted workspace even when the fixture gave it goals.
+  const status = await page.evaluate(() =>
+    fetch('/workspaces/ws-secondary/goals').then((r) => r.status),
+  );
+  expect(status).toBe(403);
+});
+
+test('an advertised workspace with no goals lists empty, not an error', async ({
+  page,
+  baseURL,
+}) => {
+  // Registration, not goals-map membership, is the route's gate: a project
+  // with no active goals is the natural empty case, not a load failure.
+  await openGoals(page, baseURL!, {
+    capabilities: { workspaces: [PRIMARY, SECONDARY] },
+    goalSnapshot: goalSnapshot('primary goal', 1_000),
+  });
+
+  await expect(page.getByText('primary goal')).toBeVisible();
+  await expect(page.getByText('Workspace mismatch')).toHaveCount(0);
+  await expect(page.getByTestId('goals-skipped')).toHaveCount(0);
 });
 
 test('a single workspace keeps the plain primary-only view', async ({
   page,
   baseURL,
 }) => {
+  // A genuine one-workspace daemon advertises exactly one entry — the
+  // zero-workspace fallback is a different arm and must not stand in for it.
   const daemon = await openGoals(page, baseURL!, {
+    capabilities: { workspaces: [PRIMARY] },
     goalSnapshot: goalSnapshot('primary goal', 1_000),
   });
 

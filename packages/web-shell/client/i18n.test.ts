@@ -156,6 +156,20 @@ describe('web-shell i18n catalog', () => {
     );
   });
 
+  it('localizes the Goals workspace picker label in every catalog that translates the dialog', () => {
+    // The ru catalog translates the whole Goals dialog; leaving the picker
+    // label English would strand one untranslated string mid-surface.
+    const en = getTranslator('en')('goals.workspace');
+    expect(en).toBe('Workspace');
+    expect(getTranslator('zh-CN')('goals.workspace')).not.toBe(en);
+    expect(getTranslator('ru')('goals.workspace')).not.toBe(en);
+    for (const language of ['en', 'zh-CN', 'ru'] as const) {
+      expect(
+        getTranslator(language)('goals.untrustedSkipped', { count: 2 }),
+      ).not.toBe('goals.untrustedSkipped');
+    }
+  });
+
   it('keeps every scheduled-task delivery translation in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');

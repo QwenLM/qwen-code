@@ -129,9 +129,17 @@ async function mount(
       string,
       { goals: MockGoal[]; droppedCount: number }
     >;
+    /** Full control of the listGoals mock (e.g. rejections on the mount
+     * load); takes precedence over the other two shapes. */
+    listGoalsImpl?: (workspaceId?: string) => Promise<{
+      goals: MockGoal[];
+      droppedCount: number;
+    }>;
   } = {},
 ) {
-  if (opts.listGoalsByWorkspace) {
+  if (opts.listGoalsImpl) {
+    actions.listGoals.mockImplementation(opts.listGoalsImpl);
+  } else if (opts.listGoalsByWorkspace) {
     const byWorkspace = opts.listGoalsByWorkspace;
     actions.listGoals.mockImplementation(async (workspaceId?: string) =>
       Promise.resolve(
@@ -1142,7 +1150,31 @@ describe('GoalsDialog multi-workspace', () => {
     expect(actions.listGoals).not.toHaveBeenCalledWith('ws-untrusted');
   });
 
-  it('keeps the other workspaces goals when one listing fails', async () => {
+  it('keeps the other workspaces goals when one listing fails on first load', async () => {
+    // The failure must hit the MOUNT load: if the per-workspace catch were
+    // removed, Promise.all would reject and the first paint would render no
+    // goals at all (the outer catch only retains a previously loaded list).
+    await mount([], {
+      workspaces: [primaryWs, secondaryWs],
+      listGoalsImpl: async (workspaceId?: string) => {
+        if (workspaceId === 'ws-2') throw new Error('secondary unreachable');
+        return {
+          goals: [baseGoal({ sessionId: 'p1', condition: 'primary goal' })],
+          droppedCount: 0,
+        };
+      },
+    });
+
+    expect(document.body.textContent).toContain('primary goal');
+    // The error names the workspace so the user knows which project is missing.
+    expect(document.body.textContent).toContain(
+      'Secondary: secondary unreachable',
+    );
+  });
+
+  it('keeps the previous list when every workspace listing fails', async () => {
+    // A total outage must not erase the page for multi-workspace users only —
+    // the single/locked views retain the previous list via the outer catch.
     await mount([], {
       workspaces: [primaryWs, secondaryWs],
       listGoalsByWorkspace: {
@@ -1153,19 +1185,69 @@ describe('GoalsDialog multi-workspace', () => {
         'ws-2': { goals: [], droppedCount: 0 },
       },
     });
+    expect(document.body.textContent).toContain('primary goal');
 
-    actions.listGoals.mockImplementation(async (workspaceId?: string) => {
-      if (workspaceId === 'ws-2') throw new Error('secondary unreachable');
-      return {
-        goals: [baseGoal({ sessionId: 'p1', condition: 'primary goal' })],
-        droppedCount: 0,
-      };
-    });
+    actions.listGoals.mockRejectedValue(new Error('daemon restarting'));
     click(findButton('Refresh'));
     await flush();
 
     expect(document.body.textContent).toContain('primary goal');
-    expect(document.body.textContent).toContain('secondary unreachable');
+    expect(document.body.textContent).toContain('daemon restarting');
+  });
+
+  it('shows an untrusted primary listing failure instead of dropping it silently', async () => {
+    // Narrowing the operable filter to `ws.trusted` would drop the untrusted
+    // primary from the fan-out and hide its goals with no error at all.
+    const untrustedPrimary = { ...primaryWs, trusted: false };
+    await mount([], {
+      workspaces: [untrustedPrimary, secondaryWs],
+      listGoalsImpl: async (workspaceId?: string) => {
+        if (workspaceId === undefined) throw new Error('primary untrusted');
+        return { goals: [], droppedCount: 0 };
+      },
+    });
+
+    expect(actions.listGoals).toHaveBeenCalledWith(undefined);
+    expect(document.body.textContent).toContain('primary untrusted');
+  });
+
+  it('accounts for skipped untrusted secondaries instead of a bare empty state', async () => {
+    await mount([], {
+      workspaces: [primaryWs, untrustedWs],
+      listGoalsByWorkspace: { '': { goals: [], droppedCount: 0 } },
+    });
+
+    const skipped = document.querySelector('[data-testid="goals-skipped"]');
+    expect(skipped).not.toBeNull();
+    expect(skipped!.textContent).toContain('1');
+    expect(document.body.textContent).not.toContain('No active goals');
+  });
+
+  it('disambiguates picker labels when two workspaces share a basename', async () => {
+    const checkoutA = {
+      id: 'ws-a',
+      cwd: '/home/me/work/qwen-code',
+      primary: true,
+      trusted: true,
+    };
+    const checkoutB = {
+      id: 'ws-b',
+      cwd: '/home/me/oss/qwen-code',
+      primary: false,
+      trusted: true,
+    };
+    await mount([], {
+      workspaces: [checkoutA, checkoutB],
+      listGoalsByWorkspace: {},
+    });
+
+    click(findButton('New goal'));
+    const labels = Array.from(document.querySelector('select')!.options).map(
+      (o) => o.textContent,
+    );
+    expect(labels[0]).not.toBe(labels[1]);
+    expect(labels[0]).toContain('qwen-code');
+    expect(labels[1]).toContain('qwen-code');
   });
 
   it('sums dropped counts across workspaces', async () => {
@@ -1209,8 +1291,11 @@ describe('GoalsDialog multi-workspace', () => {
   });
 
   it('falls back to the primary when the default workspace is not operable', async () => {
+    // The untrusted workspace must be IN the list so the trust filter in
+    // defaultCreateWorkspaceCwd is actually consulted (a cwd absent from the
+    // list would fall back under a raw workspaceList.some() too).
     await mount([], {
-      workspaces: [primaryWs, secondaryWs],
+      workspaces: [primaryWs, secondaryWs, untrustedWs],
       defaultWorkspaceCwd: '/w-untrusted',
       listGoalsByWorkspace: {},
     });

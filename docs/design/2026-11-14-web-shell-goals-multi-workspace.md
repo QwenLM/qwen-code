@@ -34,9 +34,12 @@ Verified at `origin/main` `114694062b` (line numbers from that commit):
 | `GoalsDialog` (`packages/web-shell/client/components/dialogs/GoalsDialog.tsx`)                                | Polls `actions.listGoals()` every 10 s; cards keyed by `sessionId`; controls go through the per-session routes above; create delegates to the App's `onCreateGoal(condition)`. No workspace awareness.                                                                                                                                                                                                                                                                                                                                                                                    |
 | Scheduled-tasks reference pattern                                                                             | Daemon: `registerWorkspaceQualifiedScheduledTasksRoutes` (`routes/scheduled-tasks.ts`, line 2312) resolves `:workspace` via `resolveWorkspaceRuntimeWithLiveCompatibilityFromParam` + `requireTrustedWorkspaceRuntime`. Client: `listScheduledTasks(workspaceId?)` builds `/workspaces/:id/scheduled-tasks` for secondaries and keeps the unqualified route for the primary; `ScheduledTasksDialog` fans out over `operableWorkspaces` (primary + trusted secondaries), tags each item with `workspaceId`/`workspaceCwd`, badges cards, and offers a workspace picker in the create form. |
 
-One trust-semantics difference matters: the primary scheduled-tasks read
-surface is trust-free, while the primary `GET /goals` keeps its trust gate
-(`isWorkspaceTrusted`). This design preserves each surface's existing gate.
+Both primary read surfaces are trust-gated: the primary scheduled-tasks
+list resolves its runtime through the same `requireTrustedWorkspaceRuntime`
+check as the qualified routes, and the primary `GET /goals` keeps its
+`isWorkspaceTrusted` gate. (They differ on the inactive-runtime status —
+scheduled tasks answer 503, the goals primary listing has no runtime
+lookup.) This design preserves each surface's existing gate.
 
 ## Goals
 
@@ -47,8 +50,10 @@ surface is trust-free, while the primary `GET /goals` keeps its trust gate
   currently selected workspace.
 - Pause / resume / edit / clear keep working for goals in any workspace
   (the per-session control routes already resolve the owner).
-- Single-workspace and locked-workspace deployments keep today's behavior
-  and chrome (no badges, no picker).
+- Single-workspace deployments keep today's behavior and chrome (no
+  badges, no picker). A deployment locked to the primary keeps the
+  unqualified route; one locked to a secondary lists through that
+  workspace's qualified route, still without badges or a picker.
 
 ## Non-goals
 
@@ -114,9 +119,7 @@ Mirror `ScheduledTasksDialog`'s multi-workspace shape:
   `lockedWorkspace?: DaemonWorkspaceCapability`, passed by App exactly as
   for scheduled tasks (`lockedWorkspaceCwd ? visibleWorkspaces :
 ordinaryWorkspaces`, and `lockedWorkspaceCapability`).
-- Derived state: `isMultiWorkspace = !lockedWorkspace && workspaces.length
-  > 1`; `operableWorkspaces = workspaces.filter(ws => ws.primary ||
-  > ws.trusted)`; `workspaceActionId(ws) = ws.primary ? undefined : ws.id`.
+- Derived state: `isMultiWorkspace = !lockedWorkspace && workspaceList.length > 1`; `operableWorkspaces = workspaceList.filter(ws => ws.primary || ws.trusted)`; `workspaceActionId(ws) = ws.primary ? undefined : ws.id`.
 - Reload: locked → single qualified (or primary) fetch, tagged with the
   locked workspace's cwd; multi → fan out over `operableWorkspaces` with
   `Promise.all`, tag each goal with its workspace, sum `droppedCount`, keep
@@ -125,15 +128,25 @@ ordinaryWorkspaces`, and `lockedWorkspaceCapability`).
   daemon advertises exactly one workspace (daemons with no workspace list
   keep the untagged legacy shape). Tagging in all three branches mirrors
   `ScheduledTasksDialog` so opening a goal's session carries its workspace
-  context even without a badge. The existing monotonic reload sequence and
-  self-chaining 10 s poll stay unchanged.
-- Cards: in multi-workspace view, a workspace badge (label from the existing
-  `workspaceLabel` utils) leads the card footer. Card keys stay
+  context even without a badge. A partial failure keeps the other
+  workspaces' goals and surfaces the first error prefixed with the failing
+  workspace's display label; a total failure (every listing rejects)
+  retains the previous list instead of blanking the page, matching the
+  retention the single/locked views already had. The existing monotonic
+  reload sequence and self-chaining 10 s poll stay unchanged.
+- Cards: in multi-workspace view, a shared `WorkspacePill` badge (also used
+  by the Scheduled Tasks page) leads the card footer. Card keys stay
   `sessionId` (session ids are daemon-global, unlike scheduled-task ids).
+- Untrusted secondaries are excluded from the fan-out, and the aggregated
+  view shows a count notice (`goals.untrustedSkipped`) instead of a bare
+  "no goals" empty state for workspaces it never read.
 - Create form: in multi-workspace view, a workspace picker defaulting to
   the currently selected workspace when it is operable, else the primary.
   The App supplies that default through a `defaultWorkspaceCwd` prop.
-  Edit form: no picker — the goal's session already owns its workspace.
+  Picker and badge labels go through `disambiguateWorkspaceLabels` so two
+  checkouts sharing a basename stay distinguishable in a native `<select>`
+  (which cannot carry tooltips). Edit form: no picker — the goal's session
+  already owns its workspace.
 - `onCreateGoal` becomes `(condition: string, workspaceCwd?: string)`.
   `onOpenSession` becomes `(sessionId: string, workspaceCwd?: string)` and
   the App loads the session in the goal's own workspace, exactly as the
@@ -157,11 +170,12 @@ ordinaryWorkspaces`, and `lockedWorkspaceCapability`).
 
 ### i18n
 
-Add the goals-page workspace picker label (`goals.workspace`) to the en and
-zh locales, reusing the scheduled-tasks wording; the partial ru locale
-falls back to en, the same way it does for `scheduledTasks.workspace`.
-Workspace display names come from the existing `workspaceLabel` /
-`workspaceLabelForCwd` utils; the badge tooltip is the raw cwd.
+Add `goals.workspace` (picker label) and `goals.untrustedSkipped` (skipped
+workspace notice) to the en, zh, and ru catalogs — the ru catalog translates
+the whole Goals dialog, so it gets both keys rather than an English
+fallback mid-surface. Workspace display names come from the existing
+`workspaceLabel` / `disambiguateWorkspaceLabels` utils; the badge tooltip is
+the raw cwd.
 
 ## Design decisions
 
@@ -169,18 +183,22 @@ Workspace display names come from the existing `workspaceLabel` /
    tasks; keeps the daemon read surface per-workspace and lets one failing
    workspace degrade gracefully instead of failing the whole list.
 2. **Primary keeps the unqualified, trust-gated route.** The client passes
-   `undefined` for the primary exactly like scheduled tasks. Because
-   `GET /goals` (unlike primary scheduled-tasks reads) is trust-gated, an
-   untrusted primary's fan-out member returns 403 and surfaces as the
-   page's partial-load error while other workspaces still render. This is
-   the existing primary behavior, not a regression.
+   `undefined` for the primary exactly like scheduled tasks. Both primary
+   read surfaces are trust-gated, so an untrusted primary's fan-out member
+   returns 403 and surfaces as the page's partial-load error while other
+   workspaces still render — keeping the primary in the fan-out makes that
+   unreadability loud instead of silently dropping its goals. This is the
+   existing primary behavior, not a regression.
 3. **No workspace fields in the daemon payload.** The client tags goals
    with `workspaceCwd` in every listing branch; the primary contract stays
    byte-compatible. No `workspaceId` is carried because goal mutations use
    the owner-resolving per-session routes, not workspace-scoped ones.
 4. **Controls unchanged.** Owner-resolving per-session routes already work
-   cross-workspace (pinned by `multi-workspace-sessions.test.ts`); adding
-   qualified control routes would duplicate that machinery.
+   cross-workspace: `multi-workspace-sessions.test.ts` pins the clear path
+   across runtimes, and a cross-workspace pause case pins the control path
+   (`controlSessionGoal` reaches the secondary's bridge, never the
+   primary's). Adding qualified control routes would duplicate that
+   machinery.
 5. **Live-conversation workspaces excluded from the page, supported by the
    route.** Same split as scheduled tasks: the UI aggregates ordinary
    workspaces; the qualified resolver still handles the internal runtime
@@ -189,16 +207,24 @@ Workspace display names come from the existing `workspaceLabel` /
 ## Files affected
 
 - `packages/cli/src/serve/routes/goals.ts` (shared listing + qualified
-  registration) and `goals.test.ts`
+  registration, workspace id in diagnostics) and `goals.test.ts`
 - `packages/cli/src/serve/server.ts` (register qualified surface)
+- `packages/cli/src/serve/multi-workspace-sessions.test.ts`
+  (cross-workspace goal control pin), `workspace-qualified-rest.test.ts`
+  (createServeApp-level registration + trust pins)
 - `packages/web-shell/client/daemon/workspace/types.ts`, `actions.ts`,
   `goals.actions.test.ts`
+- `packages/web-shell/client/components/WorkspacePill.tsx` +
+  `.module.css` (shared badge, also used by Scheduled Tasks)
 - `packages/web-shell/client/components/dialogs/GoalsDialog.tsx`,
-  `GoalsDialog.test.tsx`, `GoalsDialog.module.css` (badge/picker styles)
-- `packages/web-shell/client/App.tsx` (props + create wiring)
-- `packages/web-shell/client/i18n.tsx` (new keys, both locales)
+  `GoalsDialog.test.tsx`, `GoalsDialog.module.css` (picker styles);
+  `ScheduledTasksDialog.tsx` / `.module.css` (switch to the shared badge)
+- `packages/web-shell/client/App.tsx` (props + create wiring),
+  `App.test.tsx` (open-session workspace-context pin)
+- `packages/web-shell/client/i18n.tsx` (new keys, en/zh/ru), `i18n.test.ts`
 - `packages/web-shell/client/e2e/utils/mockDaemon.ts` (qualified `/goals`
-  branch) and affected E2E specs
+  branch gated on registration + trust; goal actions resolve the target
+  snapshot by session id) and the goals multi-workspace E2E spec
 
 ## Constraints and risks
 
@@ -213,9 +239,9 @@ Workspace display names come from the existing `workspaceLabel` /
 - **Dropped-probe accounting.** `droppedCount` becomes a sum across
   workspaces; the degraded banner wording stays count-based and remains
   accurate.
-- **Untrusted secondary.** Excluded from `operableWorkspaces`; its goals
-  are silently absent, matching scheduled tasks. The qualified route
-  rejects direct reads with 403.
+- **Untrusted secondary.** Excluded from `operableWorkspaces`; the
+  aggregated view shows a count notice so the absence is accounted for,
+  and the qualified route rejects direct reads with 403.
 
 ## Validation plan
 
@@ -239,8 +265,10 @@ Workspace display names come from the existing `workspaceLabel` /
 - Pause/resume/edit/clear work for secondary-workspace goals.
 - One workspace failing to list does not blank the others; the error and
   dropped counts surface.
-- Single-workspace and locked-workspace views are unchanged (no badges, no
-  picker, unqualified route).
+- Single-workspace views are unchanged (no badges, no picker, unqualified
+  route). A deployment locked to the primary keeps the unqualified route;
+  one locked to a secondary uses that workspace's qualified route, with no
+  badges and no picker.
 - The primary `GET /goals` response contract is unchanged.
 
 ## Open questions

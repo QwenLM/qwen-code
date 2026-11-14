@@ -445,10 +445,12 @@ function makeQualifiedApp(runtimes: QualifiedGoalsRuntime[]) {
   }));
   const workspaceRegistry = {
     listEntries: () => entries.filter((entry) => !entry.internal),
+    // The real registry hides internal entries from the plain accessors;
+    // only the managed pair sees them (workspace-registry.ts).
     getEntryByWorkspaceId: (id: string) =>
-      entries.find((entry) => entry.workspaceId === id),
+      entries.find((entry) => entry.workspaceId === id && !entry.internal),
     getEntryByWorkspaceCwd: (cwd: string) =>
-      entries.find((entry) => entry.workspaceCwd === cwd),
+      entries.find((entry) => entry.workspaceCwd === cwd && !entry.internal),
     getManagedEntryByWorkspaceId: (id: string) =>
       entries.find((entry) => entry.workspaceId === id),
     getManagedEntryByWorkspaceCwd: (cwd: string) =>
@@ -467,17 +469,18 @@ const qualified = (id: string) => `/workspaces/${id}/goals`;
 
 describe('GET /workspaces/:workspace/goals', () => {
   const primaryBridge = (): GoalsSessionBridge => ({
-    listWorkspaceSessions: () => [summary('p1')],
+    listWorkspaceSessions: vi.fn(() => [summary('p1')]),
     getSessionGoal: async () => activeGoal('primary goal'),
   });
   const secondaryBridge = (): GoalsSessionBridge => ({
-    listWorkspaceSessions: () => [
+    listWorkspaceSessions: vi.fn(() => [
       summary('s1', { workspaceCwd: '/w-secondary' }),
-    ],
+    ]),
     getSessionGoal: async () => activeGoal('secondary goal'),
   });
 
   it('lists the targeted workspace goals, not the primary ones', async () => {
+    const secondary = secondaryBridge();
     const app = makeQualifiedApp([
       {
         workspaceId: 'id-primary',
@@ -489,7 +492,7 @@ describe('GET /workspaces/:workspace/goals', () => {
         workspaceId: 'id-secondary',
         workspaceCwd: '/w-secondary',
         trusted: true,
-        bridge: secondaryBridge(),
+        bridge: secondary,
       },
     ]);
 
@@ -502,6 +505,11 @@ describe('GET /workspaces/:workspace/goals', () => {
       condition: 'secondary goal',
     });
     expect(res.body.droppedCount).toBe(0);
+    // The real bridge returns [] for any cwd but its own, so a wrong cwd
+    // would silently list nothing — pin the cwd the route hands over.
+    expect(secondary.listWorkspaceSessions).toHaveBeenCalledWith(
+      '/w-secondary',
+    );
   });
 
   it('keeps the primary surface scoped to the primary workspace', async () => {
@@ -544,6 +552,7 @@ describe('GET /workspaces/:workspace/goals', () => {
   });
 
   it('resolves a workspace by absolute path selector', async () => {
+    const secondary = secondaryBridge();
     const app = makeQualifiedApp([
       {
         workspaceId: 'id-primary',
@@ -555,7 +564,7 @@ describe('GET /workspaces/:workspace/goals', () => {
         workspaceId: 'id-secondary',
         workspaceCwd: '/w-secondary',
         trusted: true,
-        bridge: secondaryBridge(),
+        bridge: secondary,
       },
     ]);
 
@@ -565,6 +574,9 @@ describe('GET /workspaces/:workspace/goals', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.goals[0].condition).toBe('secondary goal');
+    expect(secondary.listWorkspaceSessions).toHaveBeenCalledWith(
+      '/w-secondary',
+    );
   });
 
   it('rejects an unregistered selector with workspace_mismatch', async () => {
@@ -738,8 +750,10 @@ describe('GET /workspaces/:workspace/goals', () => {
     expect(res.body.droppedCount).toBe(1);
     expect(res.body.goals).toHaveLength(1);
     const logged = vi.mocked(writeStderrLine).mock.calls.map((c) => c[0]);
+    // The label carries the resolved workspace id so an operator can tell
+    // which project's listing dropped probes.
     expect(logged.join('\n')).toContain(
-      'GET /workspaces/:workspace/goals could not probe 1 of 2 session(s)',
+      'GET /workspaces/id-secondary/goals could not probe 1 of 2 session(s)',
     );
   });
 

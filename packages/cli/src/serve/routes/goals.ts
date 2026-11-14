@@ -257,7 +257,7 @@ export function registerWorkspaceQualifiedGoalsRoutes(
             assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
           }
         : {}),
-      routeLabel: 'GET /workspaces/:workspace/goals',
+      routeLabel: `GET /workspaces/${runtime.workspaceId}/goals`,
     });
   });
 }

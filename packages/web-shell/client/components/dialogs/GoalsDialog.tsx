@@ -12,15 +12,19 @@ import {
   type DaemonGoal,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
-import { FolderIcon, Pause, Pencil, Play, Trash2 } from 'lucide-react';
+import { Pause, Pencil, Play, Trash2 } from 'lucide-react';
 import { useI18n } from '../../i18n';
-import { workspaceLabel, workspaceLabelForCwd } from '../../utils/workspace';
+import {
+  disambiguateWorkspaceLabels,
+  workspaceLabel,
+} from '../../utils/workspace';
 import { DialogShell } from './DialogShell';
 import {
   getGoalActiveTimeLabel,
   getGoalActiveTimeMs,
   getGoalTokenLabel,
 } from '../GoalStatusStrip';
+import { WorkspacePill } from '../WorkspacePill';
 import styles from './GoalsDialog.module.css';
 
 /**
@@ -76,18 +80,40 @@ export function GoalsDialog({
   // the derived arrays are stable identities — `reload` depends on them, and a
   // fresh array each render would re-fire its mount effect in a loop.
   const workspaceList = useMemo(() => workspaces ?? [], [workspaces]);
-  const workspaceLabelCandidates = lockedWorkspace
-    ? [lockedWorkspace, ...workspaceList]
-    : workspaceList;
   const isMultiWorkspace = !lockedWorkspace && workspaceList.length > 1;
   // The workspaces the page can actually read: every trusted one, PLUS the
-  // primary even when untrusted — the primary keeps its existing trust-gated
-  // unqualified route, so an untrusted primary surfaces as a partial-load
-  // error rather than silently disappearing. Secondaries stay gated on trust;
-  // their qualified route rejects an untrusted read.
+  // primary even when untrusted — both primary read surfaces are trust-gated,
+  // so an untrusted primary surfaces as a partial-load error rather than
+  // silently disappearing. Secondaries stay gated on trust; their qualified
+  // route rejects an untrusted read, and the page says so instead of showing
+  // a bare "no goals" for a workspace it never read.
   const operableWorkspaces = useMemo(
     () => workspaceList.filter((ws) => ws.primary || ws.trusted),
     [workspaceList],
+  );
+  const skippedWorkspaces = useMemo(
+    () => workspaceList.filter((ws) => !ws.primary && !ws.trusted),
+    [workspaceList],
+  );
+  // The notice only renders in the aggregated view; the empty-state
+  // suppression must use the same predicate so a locked view never hides its
+  // empty state without showing the notice.
+  const showSkippedNotice = isMultiWorkspace && skippedWorkspaces.length > 0;
+  // Two checkouts can share a basename; a native <select> cannot carry a
+  // tooltip, so the picker (and the badges) disambiguate like the composer's
+  // workspace menu does.
+  const labeledWorkspaces = useMemo(
+    () =>
+      disambiguateWorkspaceLabels(
+        operableWorkspaces.map((ws) => ({ ...ws, label: workspaceLabel(ws) })),
+      ),
+    [operableWorkspaces],
+  );
+  const workspaceDisplayLabel = useCallback(
+    (cwd: string) =>
+      labeledWorkspaces.find((ws) => ws.cwd === cwd)?.label ??
+      workspaceLabel({ cwd }),
+    [labeledWorkspaces],
   );
   // The workspace id to pass to listGoals: primary uses its unqualified route
   // (undefined), secondaries their qualified one.
@@ -164,7 +190,9 @@ export function GoalsDialog({
       } else if (isMultiWorkspace) {
         // Fan out over every operable workspace and tag each goal with its
         // workspace so cards can badge it. One workspace failing must not
-        // blank the whole list — keep the others and surface the first error.
+        // blank the whole list — keep the others and surface the first error,
+        // named so the user knows which project is missing.
+        let failures = 0;
         const results = await Promise.all(
           operableWorkspaces.map(async (ws) => {
             const actionId = workspaceActionId(ws);
@@ -178,13 +206,26 @@ export function GoalsDialog({
                 droppedCount: result.droppedCount,
               };
             } catch (err) {
+              failures += 1;
               if (!firstError) {
-                firstError = err instanceof Error ? err.message : String(err);
+                const message =
+                  err instanceof Error ? err.message : String(err);
+                firstError = `${workspaceDisplayLabel(ws.cwd)}: ${message}`;
               }
               return { goals: [] as DaemonGoal[], droppedCount: 0 };
             }
           }),
         );
+        if (failures === operableWorkspaces.length) {
+          // A total outage (daemon restart, wedged bridges) must not erase the
+          // page for multi-workspace users only — keep the previous list, the
+          // same retention the single/locked views get from the outer catch.
+          if (!mountedRef.current || seq !== reloadSeqRef.current) return;
+          setLoadError(firstError);
+          setGoals((prev) => prev ?? []);
+          setDroppedCount(0);
+          return;
+        }
         list = results.flatMap((result) => result.goals);
         dropped = results.reduce((sum, result) => sum + result.droppedCount, 0);
       } else {
@@ -222,6 +263,7 @@ export function GoalsDialog({
     lockedWorkspaceId,
     operableWorkspaces,
     workspaceActionId,
+    workspaceDisplayLabel,
     workspaceList,
   ]);
 
@@ -436,9 +478,9 @@ export function GoalsDialog({
                     setFormWorkspaceCwd(e.target.value || undefined)
                   }
                 >
-                  {operableWorkspaces.map((ws) => (
+                  {labeledWorkspaces.map((ws) => (
                     <option key={ws.id} value={ws.cwd}>
-                      {workspaceLabel(ws)}
+                      {ws.label}
                     </option>
                   ))}
                 </select>
@@ -508,9 +550,18 @@ export function GoalsDialog({
         </div>
       )}
 
-      {goals !== null && goals.length === 0 && !loadError && (
-        <div className={styles.empty}>{t('goals.empty')}</div>
+      {showSkippedNotice && (
+        <div className={styles.degraded} data-testid="goals-skipped">
+          {t('goals.untrustedSkipped', { count: skippedWorkspaces.length })}
+        </div>
       )}
+
+      {goals !== null &&
+        goals.length === 0 &&
+        !loadError &&
+        !showSkippedNotice && (
+          <div className={styles.empty}>{t('goals.empty')}</div>
+        )}
 
       {/* Explicit list semantics: these are divs, and even a real <ul> loses its
           implicit role under `display: flex` in Safari. Without them a screen
@@ -601,20 +652,11 @@ export function GoalsDialog({
 
               <div className={styles.cardFooter}>
                 {isMultiWorkspace && item.workspaceCwd && (
-                  <span
-                    className={styles.workspacePill}
-                    title={item.workspaceCwd}
-                    data-testid="goal-workspace"
-                  >
-                    <span className={styles.workspaceIcon} aria-hidden="true">
-                      <FolderIcon />
-                    </span>
-                    <span className={styles.workspaceName}>
-                      {workspaceLabelForCwd(
-                        item.workspaceCwd,
-                        workspaceLabelCandidates,
-                      )}
-                    </span>
+                  <span data-testid="goal-workspace">
+                    <WorkspacePill
+                      cwd={item.workspaceCwd}
+                      label={workspaceDisplayLabel(item.workspaceCwd)}
+                    />
                   </span>
                 )}
                 <span className={styles.statusPill}>

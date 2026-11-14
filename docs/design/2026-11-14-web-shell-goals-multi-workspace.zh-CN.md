@@ -32,9 +32,11 @@ multi-workspace daemon 上：
 | `GoalsDialog`（`packages/web-shell/client/components/dialogs/GoalsDialog.tsx`）                         | 每 10 s 轮询 `actions.listGoals()`；卡片以 `sessionId` 为键；控制走上述会话级路由；创建委托 App 的 `onCreateGoal(condition)`。无 workspace 感知。                                                                                                                                                                                                                                                                                                                                                                       |
 | Scheduled-tasks 参照模式                                                                                | daemon：`registerWorkspaceQualifiedScheduledTasksRoutes`（`routes/scheduled-tasks.ts`，2312 行）经 `resolveWorkspaceRuntimeWithLiveCompatibilityFromParam` + `requireTrustedWorkspaceRuntime` 解析 `:workspace`。客户端：`listScheduledTasks(workspaceId?)` 为 secondary 构造 `/workspaces/:id/scheduled-tasks`，primary 保留无后缀路由；`ScheduledTasksDialog` 对 `operableWorkspaces`（primary + 受信 secondary）fan-out，给每条任务打 `workspaceId`/`workspaceCwd` 标签，卡片加徽章，创建表单提供 workspace 选择器。 |
 
-有一处信任语义差异需要注意：primary scheduled-tasks 读面免信任检查，而
-primary `GET /goals` 保留信任门（`isWorkspaceTrusted`）。本设计保留各面现
-有的门。
+两个 primary 读面都带信任门：primary scheduled-tasks 列表经与限定路由相同
+的 `requireTrustedWorkspaceRuntime` 检查解析运行时，primary `GET /goals`
+保留 `isWorkspaceTrusted` 门。（二者在运行时不活跃时的状态码不同——
+scheduled tasks 回 503，goals primary 列举不做运行时查询。）本设计保留各
+面现有的门。
 
 ## 目标
 
@@ -43,8 +45,9 @@ primary `GET /goals` 保留信任门（`isWorkspaceTrusted`）。本设计保留
 - 创建表单可指向任一可操作 workspace；默认仍是当前选中的 workspace。
 - 暂停 / 恢复 / 编辑 / 清除对任何 workspace 的 Goal 保持可用（会话级控制
   路由已能解析属主）。
-- 单 workspace 与锁定 workspace 部署保持今天的行为与外观（无徽章、无选择
-  器）。
+- 单 workspace 部署保持今天的行为与外观（无徽章、无选择器）。锁定到
+  primary 的部署保持无后缀路由；锁定到 secondary 的部署经该 workspace 的
+  限定路由列举，同样无徽章、无选择器。
 
 ## 非目标
 
@@ -105,18 +108,25 @@ ordinaryWorkspaces`，以及 `lockedWorkspaceCapability`）。
   `workspaceActionId(ws) = ws.primary ? undefined : ws.id`。
 - 重载：锁定 → 单次限定（或 primary）请求，打上锁定 workspace 的 cwd；
   多 workspace → 对 `operableWorkspaces` 用 `Promise.all` fan-out，给每条
-  Goal 打 workspace 标签，`droppedCount` 求和，保留第一个错误同时留住其他
-  workspace 的 Goal；单 workspace → 今天的无后缀请求，daemon 恰好广告一个
+  Goal 打 workspace 标签，`droppedCount` 求和；部分失败时留住其他
+  workspace 的 Goal，第一个错误带上失败 workspace 的显示名；全部失败
+  （每个列举都 reject）时保留上一份列表而不清空页面，与单/锁定视图既有
+  的保留行为一致。单 workspace → 今天的无后缀请求，daemon 恰好广告一个
   workspace 时打上该 primary 的 cwd（不广告 workspace 列表的 daemon 保持
   无标签的旧形状）。三个分支都打标签，镜像 `ScheduledTasksDialog`，使打开
   Goal 会话时即使无徽章也带上 workspace 上下文。现有单调重载序号与自链式
   10 s 轮询保持不变。
-- 卡片：多 workspace 视图下，卡片 footer 起始处加 workspace 徽章（标签用
-  现有 `workspaceLabel` 工具）。卡片键仍是 `sessionId`（会话 id 是 daemon
-  全局的，不同于 scheduled-task id）。
+- 卡片：多 workspace 视图下，卡片 footer 起始处加共享 `WorkspacePill`
+  徽章（Scheduled Tasks 页同用）。卡片键仍是 `sessionId`（会话 id 是
+  daemon 全局的，不同于 scheduled-task id）。
+- 未受信 secondary 被排除在 fan-out 之外，聚合视图显示计数提示
+  （`goals.untrustedSkipped`），而不是对从未读取的 workspace 显示干巴巴
+  的「没有目标」空态。
 - 创建表单：多 workspace 视图下提供 workspace 选择器，默认当前选中的
   workspace（若可操作），否则 primary。App 通过 `defaultWorkspaceCwd`
-  prop 提供该默认值。编辑表单无选择器——Goal 的会话已确定其 workspace。
+  prop 提供该默认值。选择器与徽章标签经 `disambiguateWorkspaceLabels`
+  消歧，两个同 basename 的 checkout 在原生 `<select>`（无法承载 tooltip）
+  里仍可区分。编辑表单无选择器——Goal 的会话已确定其 workspace。
 - `onCreateGoal` 变为 `(condition: string, workspaceCwd?: string)`。
   `onOpenSession` 变为 `(sessionId: string, workspaceCwd?: string)`，App
   在 Goal 自己的 workspace 里加载会话，与 scheduled-tasks 页完全一致。
@@ -137,10 +147,11 @@ ordinaryWorkspaces`，以及 `lockedWorkspaceCapability`）。
 
 ### i18n
 
-en 与 zh 语言包各新增 Goals 页的 workspace 选择器标签
-（`goals.workspace`），措辞沿用 scheduled tasks；部分翻译的 ru 语言包回退
-en，与 `scheduledTasks.workspace` 的先例一致。workspace 显示名来自现有
-`workspaceLabel` / `workspaceLabelForCwd` 工具；徽章提示是原始 cwd。
+en、zh、ru 三个语言包各新增 `goals.workspace`（选择器标签）与
+`goals.untrustedSkipped`（被跳过 workspace 提示）——ru 语言包翻译了整个
+Goals 对话框，因此补全这两个键，而不是在整片俄文里留一个英文回退。
+workspace 显示名来自现有 `workspaceLabel` / `disambiguateWorkspaceLabels`
+工具；徽章提示是原始 cwd。
 
 ## 设计决策
 
@@ -148,33 +159,42 @@ en，与 `scheduledTasks.workspace` 的先例一致。workspace 显示名来自�
    daemon 读面保持按 workspace 划分，单个 workspace 失败时优雅降级而不是
    整列表失败。
 2. **primary 保留无后缀、带信任门的路由。** 客户端对 primary 传
-   `undefined`，与 scheduled tasks 完全一致。由于 `GET /goals`（不同于
-   primary scheduled-tasks 读面）带信任门，未受信 primary 的 fan-out 成员
-   会返回 403，表现为页面的部分加载错误，其他 workspace 照常渲染。这是
-   primary 的既有行为，不是回归。
+   `undefined`，与 scheduled tasks 完全一致。两个 primary 读面都带信任门，
+   因此未受信 primary 的 fan-out 成员返回 403，表现为页面的部分加载错误，
+   其他 workspace 照常渲染——把 primary 留在 fan-out 里让这种不可读「响亮
+   地」暴露，而不是静默丢掉它的 Goal。这是 primary 的既有行为，不是回归。
 3. **daemon 载荷不加 workspace 字段。** 客户端在每个列举分支给 Goal 打
    `workspaceCwd` 标签；primary 契约保持字节级兼容。不携带 `workspaceId`，
    因为 Goal 变更走按属主解析的会话级路由，而非 workspace 限定路由。
-4. **控制路由不动。** 按属主解析的会话级路由已跨 workspace 可用（有
-   `multi-workspace-sessions.test.ts` 钉子）；新增限定控制路由只会重复这
-   套机制。
+4. **控制路由不动。** 按属主解析的会话级路由已跨 workspace 可用：
+   `multi-workspace-sessions.test.ts` 钉住跨运行时的 clear 路径，跨
+   workspace 暂停用例钉住控制路径（`controlSessionGoal` 到达 secondary 的
+   bridge，绝不碰 primary）。新增限定控制路由只会重复这套机制。
 5. **live-conversation workspace：页面不列，路由支持。** 与 scheduled
    tasks 同一划分：UI 聚合 ordinary workspace；限定解析器仍以只读方式处理
    内部运行时。
 
 ## 涉及文件
 
-- `packages/cli/src/serve/routes/goals.ts`（共享列举 + 限定注册）与
-  `goals.test.ts`
+- `packages/cli/src/serve/routes/goals.ts`（共享列举 + 限定注册，诊断带
+  workspace id）与 `goals.test.ts`
 - `packages/cli/src/serve/server.ts`（注册限定面）
+- `packages/cli/src/serve/multi-workspace-sessions.test.ts`（跨 workspace
+  Goal 控制钉子）、`workspace-qualified-rest.test.ts`（createServeApp 级
+  注册 + 信任钉子）
 - `packages/web-shell/client/daemon/workspace/types.ts`、`actions.ts`、
   `goals.actions.test.ts`
+- `packages/web-shell/client/components/WorkspacePill.tsx` +
+  `.module.css`（共享徽章，Scheduled Tasks 同用）
 - `packages/web-shell/client/components/dialogs/GoalsDialog.tsx`、
-  `GoalsDialog.test.tsx`、`GoalsDialog.module.css`（徽章/选择器样式）
-- `packages/web-shell/client/App.tsx`（props + 创建接线）
-- `packages/web-shell/client/i18n.tsx`（新键，两种语言）
-- `packages/web-shell/client/e2e/utils/mockDaemon.ts`（限定 `/goals` 分
-  支）及受影响的 E2E spec
+  `GoalsDialog.test.tsx`、`GoalsDialog.module.css`（选择器样式）；
+  `ScheduledTasksDialog.tsx` / `.module.css`（改用共享徽章）
+- `packages/web-shell/client/App.tsx`（props + 创建接线）、`App.test.tsx`
+  （打开会话的 workspace 上下文钉子）
+- `packages/web-shell/client/i18n.tsx`（新键，en/zh/ru）、`i18n.test.ts`
+- `packages/web-shell/client/e2e/utils/mockDaemon.ts`（限定 `/goals` 分支
+  按注册 + 信任判门；Goal 操作按 session id 解析目标快照）及 goals
+  multi-workspace E2E spec
 
 ## 约束与风险
 
@@ -186,8 +206,8 @@ en，与 `scheduledTasks.workspace` 的先例一致。workspace 显示名来自�
   effect（与 scheduled tasks 一致）。
 - **丢弃探针计数。** `droppedCount` 变为跨 workspace 求和；降级横幅文案
   仍按计数表述，保持准确。
-- **未受信 secondary。** 被排除在 `operableWorkspaces` 之外；其 Goal 静默
-  缺席，与 scheduled tasks 一致。限定路由对直接读返回 403。
+- **未受信 secondary。** 被排除在 `operableWorkspaces` 之外；聚合视图显示
+  计数提示，使缺席有交代。限定路由对直接读返回 403。
 
 ## 验证计划
 
@@ -207,8 +227,9 @@ en，与 `scheduledTasks.workspace` 的先例一致。workspace 显示名来自�
 - 经选择器创建的 Goal 落在所选 workspace，页面下次轮询即列出。
 - 暂停/恢复/编辑/清除对 secondary workspace 的 Goal 可用。
 - 单个 workspace 列举失败不清空其他 workspace；错误与丢弃计数可见。
-- 单 workspace 与锁定 workspace 视图不变（无徽章、无选择器、无后缀路
-  由）。
+- 单 workspace 视图不变（无徽章、无选择器、无后缀路由）。锁定到 primary
+  的部署保持无后缀路由；锁定到 secondary 的部署走该 workspace 的限定路
+  由，无徽章、无选择器。
 - primary `GET /goals` 响应契约不变。
 
 ## 开放问题

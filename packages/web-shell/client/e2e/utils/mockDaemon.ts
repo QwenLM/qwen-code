@@ -2390,9 +2390,14 @@ async function handleDaemonRoute(
   }
   const workspaceGoalsMatch = path.match(/^\/workspaces\/([^/]+)\/goals\/?$/);
   if (method === 'GET' && workspaceGoalsMatch) {
-    const workspaceId = decodeURIComponent(workspaceGoalsMatch[1]!);
-    const entry = scenario.goalsByWorkspace?.[workspaceId];
-    if (!entry) {
+    const selector = decodeURIComponent(workspaceGoalsMatch[1]!);
+    // Gate on registration and trust like the real route, not on map
+    // membership: an advertised workspace with no goals lists empty, and an
+    // untrusted one is rejected even if the fixture gave it goals.
+    const ws = (scenario.capabilities.workspaces ?? []).find(
+      (w) => w.id === selector || w.cwd === selector,
+    );
+    if (!ws) {
       await json(
         route,
         {
@@ -2404,11 +2409,20 @@ async function handleDaemonRoute(
       );
       return;
     }
-    const goal = entry.snapshot.goal;
+    if (!ws.trusted) {
+      await json(
+        route,
+        { error: 'Workspace is not trusted.', code: 'untrusted_workspace' },
+        403,
+      );
+      return;
+    }
+    const entry = scenario.goalsByWorkspace?.[ws.id];
+    const goal = entry?.snapshot.goal;
     await json(route, {
       v: 1,
       goals:
-        goal && goal.status !== 'complete'
+        entry && goal && goal.status !== 'complete'
           ? [
               {
                 sessionId: entry.sessionId,
@@ -2450,15 +2464,32 @@ async function handleDaemonRoute(
 
   const goalMatch = path.match(/^\/session\/([^/]+)\/goal\/?$/);
   if (goalMatch) {
+    // Resolve the target snapshot by session id so controlling a secondary
+    // goal does not mutate the primary's card (the real routes address the
+    // owning runtime).
+    const sessionId = decodeURIComponent(goalMatch[1]!);
+    const wsEntry = Object.values(scenario.goalsByWorkspace ?? {}).find(
+      (entry) => entry.sessionId === sessionId,
+    );
     if (method === 'GET') {
-      await json(route, { snapshot: scenario.goalSnapshot });
+      await json(route, {
+        snapshot: wsEntry ? wsEntry.snapshot : scenario.goalSnapshot,
+      });
       return;
     }
-    scenario.goalSnapshot = reduceMockGoal(
-      scenario.goalSnapshot,
-      body as GoalControlRequest,
-    );
-    await json(route, { snapshot: scenario.goalSnapshot });
+    if (wsEntry) {
+      wsEntry.snapshot = reduceMockGoal(
+        wsEntry.snapshot,
+        body as GoalControlRequest,
+      );
+      await json(route, { snapshot: wsEntry.snapshot });
+    } else {
+      scenario.goalSnapshot = reduceMockGoal(
+        scenario.goalSnapshot,
+        body as GoalControlRequest,
+      );
+      await json(route, { snapshot: scenario.goalSnapshot });
+    }
     return;
   }
   if (method === 'GET' && /^\/session\/[^/]+\/status\/?$/.test(path)) {
