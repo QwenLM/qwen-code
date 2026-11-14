@@ -4,6 +4,9 @@
 
 状态：实现 issue [#13242](https://github.com/QwenLM/qwen-code/issues/13242)。
 
+受理开关、能力 header 和同步模式随后已删除，异步受理是唯一的生产者模式。见
+[单一校验模式](2026-11-10-managed-tool-publication-single-verification-mode.zh-CN.md)。
+
 ## 问题与范围
 
 发布上传会在 HTTP 线程读回存储字节；seal、prefix、finish 也在该线程扫描捕获流。

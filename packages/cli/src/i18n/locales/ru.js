@@ -1000,6 +1000,26 @@ export default {
     'Использование: /forget <текст воспоминания для удаления>',
   'No managed auto-memory entries matched: {{query}}':
     'Не найдено совпадающих записей автопамяти: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'Привязать pull request GitHub к этой сессии',
+  'Usage: /pr <number | url>': 'Использование: /pr <номер | url>',
+  'No PRs bound to this session.': 'К этой сессии не привязан ни один PR.',
+  'Bound PRs: {{list}}': 'Привязанные PR: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Недопустимая ссылка на PR. Использование: /pr <номер | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'Не удалось определить PR #{{number}} через gh. Укажите полный URL PR.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} привязан к этой сессии: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} уже привязан к этой сессии: {{url}}',
+  'Failed to bind PR #{{number}}.': 'Не удалось привязать PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'Не удалось привязать PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'Не удалось прочитать привязки PR этой сессии.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) недоступен или превысил время ожидания. Укажите полный URL PR для привязки без него.',
   'Consolidate managed auto-memory topic files.':
     'Консолидировать файлы тем управляемой автопамяти.',
   'Could not retrieve tool registry.':
@@ -1445,6 +1465,7 @@ export default {
   Reqs: 'Запросов',
   'Input Tokens': 'Входных токенов',
   'Output Tokens': 'Выходных токенов',
+  'Output (incl. Reasoning)': 'Вывод (с рассуждением)',
   'Savings Highlight:': 'Экономия:',
   'of input tokens were served from the cache, reducing costs.':
     'входных токенов обслужено из кэша, снижая затраты.',
@@ -2041,6 +2062,8 @@ export default {
   'Advisor review failed: {{error}}': 'Ошибка обзора советника: {{error}}',
   'No conversation context available for /advisor':
     'Нет контекста разговора, доступного для /advisor',
+  'No conversation context available for /btw':
+    'Нет контекста разговора, доступного для /btw',
   'Focus too long (max {{max}} chars)':
     'Фокус слишком длинный (макс. {{max}} символов)',
   'Another operation is in progress, wait for it to complete before running /advisor':

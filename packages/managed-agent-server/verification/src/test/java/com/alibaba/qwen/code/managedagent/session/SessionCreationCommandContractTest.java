@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.session;
 
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
@@ -57,10 +58,17 @@ class SessionCreationCommandContractTest {
         assertThat(command.publicChildrenSupported()).isFalse();
         assertThat(command.modelId()).isNull();
         assertThat(command.extensionPins()).isNull();
+        assertThat(command.extensionSelection()).isNull();
         assertThat(command.extensionLifecycleProfiles()).isEqualTo(Set.of());
         assertThat(command.worktree()).isNull();
         assertThat(command.modelConfig()).isNull();
-        assertThat(SessionCreationCommand.class.getRecordComponents()).hasSize(21);
+        assertThat(command.memoryStoreId()).isNull();
+        assertThat(SessionCreationCommand.builder().memoryStoreId("memory-store").build().memoryStoreId())
+                .isEqualTo("memory-store");
+        var extensionSelection = new ExtensionPackages.Selection() { };
+        assertThat(SessionCreationCommand.builder().extensionSelection(extensionSelection).build().extensionSelection())
+                .isSameAs(extensionSelection);
+        assertThat(SessionCreationCommand.class.getRecordComponents()).hasSize(23);
     }
 
     @Test
