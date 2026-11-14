@@ -339,4 +339,21 @@ describe('WindowToastHost', () => {
       window.removeEventListener(TOAST_REQUEST_EVENT, windowListener);
     }
   });
+
+  it('composed lets a shadow-root dispatch reach a window listener (F2)', () => {
+    const a = mountShell(true);
+    const windowListener = vi.fn();
+    window.addEventListener(TOAST_REQUEST_EVENT, windowListener);
+    try {
+      act(() => {
+        // Dispatch on an element INSIDE the shadow tree: only a composed
+        // event crosses the shadow boundary to reach window.
+        requestToast('info', 'crossing the boundary', a.button);
+      });
+      expect(windowListener).toHaveBeenCalledOnce();
+      expect(toasts(a.host)).toHaveLength(1);
+    } finally {
+      window.removeEventListener(TOAST_REQUEST_EVENT, windowListener);
+    }
+  });
 });

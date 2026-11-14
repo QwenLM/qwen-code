@@ -37,6 +37,7 @@ vi.mock('./ToastHost', async (importOriginal) => ({
 }));
 
 import { ManagedLocalFilesControl } from './ManagedLocalFilesControl';
+import { WebShellPortalRootContext } from '../portalRoot';
 
 function provider(withClientFiles: boolean): ManagedAgentProvider {
   return {
@@ -153,7 +154,46 @@ describe('ManagedLocalFilesControl', () => {
     expect(description?.textContent).toBe(
       'localFiles.trigger — localFiles.status.failed (my-dir)',
     );
+    // The native title is the only affordance a mouse user sees on the dot.
+    expect(trigger.getAttribute('title')).toBe(
+      'localFiles.trigger — localFiles.status.failed (my-dir)',
+    );
     expect(trigger.querySelector('.bg-destructive')).not.toBeNull();
+  });
+
+  it('scopes its toasts to the portal root it is mounted under (F3)', async () => {
+    const shellRoot = document.createElement('div');
+    shellRoot.setAttribute('data-web-shell-root', '');
+    document.body.appendChild(shellRoot);
+    try {
+      bridge.status = {
+        phase: 'connected',
+        blocker: null,
+        rootName: 'my-dir',
+        toolCount: 1,
+      };
+      render(
+        <WebShellPortalRootContext.Provider value={shellRoot}>
+          <ManagedLocalFilesControl
+            provider={provider(true)}
+            sessionId="session-1"
+            triggerClassName="trigger"
+          />
+        </WebShellPortalRootContext.Provider>,
+      );
+      fireEvent.click(screen.getByLabelText('localFiles.trigger'));
+      bridge.connect.mockResolvedValueOnce({ kind: 'repick-failed' });
+      await act(async () => {
+        fireEvent.click(screen.getByText('localFiles.changeDirectory'));
+      });
+      expect(toastSpy).toHaveBeenCalledWith(
+        'error',
+        'localFiles.changeDirectoryFailed',
+        shellRoot,
+      );
+    } finally {
+      shellRoot.remove();
+    }
   });
 
   it('renders the warning-token dot for a grant that needs a gesture (R3-4)', () => {

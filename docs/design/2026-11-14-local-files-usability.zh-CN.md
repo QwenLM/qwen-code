@@ -88,7 +88,7 @@ tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootN
 
 `requestToast` 是 `CustomEvent`，daemon 宿主外壳中唯一的文档级监听器在 App。managed-only 启动路径（`ManagedStandaloneApp` → `ManagedAgentWebShell`）现在挂载 `WindowToastHost`——一个自包含宿主，与 App 监听器同一契约：非空 message 校验、tone+message 去重、上限栈、按截止时间自动消失。没有它，「更换目录」失败 toast 会派发进一个没有监听器的文档而被静默丢弃。toast 栈常量放在 `ToastHost.tsx` 并与 App 共享，使两个宿主不会漂移。
 
-通道按 shell 作用域隔离，且归属绝不单靠焦点推断：控件经 `useWebShellPortalRoot` 把自己的 shell root 作为显式 scope 传入，优先于任何焦点状态。无 scope 时，`requestToast` 沿焦点元素下钻 shadow root（`document.activeElement` 是 shadow 宿主而非聚焦控件）找到其 `[data-web-shell-root]`；再找不到时，唯一挂载的 shell root 仍会收到提示，因此无焦点或 effect 驱动的调用不会丢失。只有没有唯一 shell 的文档才回退到 window。事件带 `bubbles`（App 的 window 监听器仍能收到 shell-root 派发）与 `composed`（跨越 shadow 边界）。每个 `WindowToastHost` 只监听自己的 shell root。`renderManagedAgentWebShell` 是公开嵌入 API，宿主页面可在同一文档挂载多个 shell；不做隔离时，一个 shell 抛出的提示会同时出现在另一个 shell——可能属于另一个租户。
+通道按 shell 作用域隔离，且归属绝不单靠焦点推断：每个发 toast 的控件与 hook（两个 local-files 控件、`useExternalLinkOpener`、`useReportedArtifactRegistration`）都经 `useWebShellPortalRoot` 把自己的 shell root 作为显式 scope 传入，优先于任何焦点状态。无 scope 时，`requestToast` 沿焦点元素下钻 shadow root（`document.activeElement` 是 shadow 宿主而非聚焦控件）找到其 `[data-web-shell-root]`；再找不到时，唯一挂载的 shell root 仍会收到提示，因此无焦点或 effect 驱动的调用不会丢失。只有没有唯一 shell 的文档才回退到 window。事件带 `bubbles`（App 的 window 监听器仍能收到 shell-root 派发）与 `composed`（跨越 shadow 边界）。每个 `WindowToastHost` 只监听自己的 shell root。`renderManagedAgentWebShell` 是公开嵌入 API，宿主页面可在同一文档挂载多个 shell；不做隔离时，一个 shell 抛出的提示会同时出现在另一个 shell——可能属于另一个租户。
 
 ## 5. 设计决策与理由
 

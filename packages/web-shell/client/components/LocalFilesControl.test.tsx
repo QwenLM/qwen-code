@@ -27,6 +27,7 @@ import {
   deriveLocalFilesTunnelLocalPort,
   deriveLocalFilesDaemonCommand,
 } from './LocalFilesControl';
+import { WebShellPortalRootContext } from '../portalRoot';
 
 const bridgeLifecycle = vi.hoisted(() => ({
   mount: vi.fn(),
@@ -711,7 +712,7 @@ describe('LocalFilesControl trigger and notices', () => {
     });
   });
 
-  async function renderControl() {
+  async function renderControl(portalRoot?: HTMLElement | null) {
     const { createRoot } = await import('react-dom/client');
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
     const container = document.createElement('div');
@@ -719,7 +720,9 @@ describe('LocalFilesControl trigger and notices', () => {
     const root = createRoot(container);
     const renderTree = () => (
       <I18nProvider language="en">
-        <LocalFilesControl triggerClassName="t" />
+        <WebShellPortalRootContext.Provider value={portalRoot ?? null}>
+          <LocalFilesControl triggerClassName="t" />
+        </WebShellPortalRootContext.Provider>
       </I18nProvider>
     );
     act(() => {
@@ -928,6 +931,36 @@ describe('LocalFilesControl trigger and notices', () => {
       'Directory change saved. It takes effect once the workspace finishes resolving; until then the current directory stays connected.',
       null,
     );
+  });
+
+  it('scopes its toasts to the portal root it is mounted under (F3)', async () => {
+    // The explicit scope is what keeps a notice in its own shell when a host
+    // page mounts several; nulling toastScope must red this even though the
+    // single-root fallback would still deliver in a one-shell document.
+    const shellRoot = document.createElement('div');
+    shellRoot.setAttribute('data-web-shell-root', '');
+    document.body.appendChild(shellRoot);
+    try {
+      bridgeStatusOverride.current = {
+        phase: 'connected',
+        blocker: null,
+        rootName: 'proj',
+        toolCount: 4,
+      };
+      const { container } = await renderControl(shellRoot);
+      openPopover(container);
+      bridgeConnectSpy.mockResolvedValueOnce({ kind: 'repick-failed' });
+      await act(async () => {
+        panelButton('Change directory…').click();
+      });
+      expect(toastSpy).toHaveBeenCalledWith(
+        'error',
+        'Could not change the directory. The current directory is still connected.',
+        shellRoot,
+      );
+    } finally {
+      shellRoot.remove();
+    }
   });
 
   function openPopover(container: HTMLElement): void {

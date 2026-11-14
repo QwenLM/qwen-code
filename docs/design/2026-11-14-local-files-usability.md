@@ -228,8 +228,10 @@ dropped. The toast stack constants live in `ToastHost.tsx` and are shared
 with App so the two hosts cannot drift.
 
 The channel is shell-scoped, and ownership is never inferred from focus
-alone: a control passes its own shell root (via `useWebShellPortalRoot`) as
-an explicit scope, which wins over any focus state. Without a scope,
+alone: every toast-raising control and hook (both local-files controls,
+`useExternalLinkOpener`, `useReportedArtifactRegistration`) passes its own
+shell root (via `useWebShellPortalRoot`) as an explicit scope, which wins
+over any focus state. Without a scope,
 `requestToast` walks the focused element through shadow roots
 (`document.activeElement` is the shadow host, not the focused control) to its
 `[data-web-shell-root]`; failing that, a single mounted shell root still
