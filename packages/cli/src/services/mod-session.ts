@@ -1360,9 +1360,9 @@ export class ModSession implements ICommandLoader {
   }
 }
 
-// A provider's count as the Mods take it: a whole number, or 0 when it is
-// missing or not a count at all.
-// The API's four counts, summed over the turn's responses.
+// The API's four counts, summed over the turn's responses. Cache reads and
+// writes are separated from input. Anthropic sums writes into its prompt
+// total; OpenAI Chat already includes them in prompt_tokens.
 function addTurnUsage(
   usage: RunningTurn['usage'],
   metadata: GenerateContentResponseUsageMetadata | undefined,

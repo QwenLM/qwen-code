@@ -9,6 +9,7 @@ import { AuthType } from '../utils/auth-type.js';
 
 export interface GenAiUsageProvenance {
   cachedInputTokensReported?: boolean;
+  /** A provider-reported breakdown within promptTokenCount, not an extra charge. */
   cacheCreationInputTokens?: number;
 }
 

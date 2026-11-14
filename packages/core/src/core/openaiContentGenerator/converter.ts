@@ -46,7 +46,10 @@ import { InvalidStreamError } from '../invalid-stream-error.js';
 import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
 import { isDisclosureText } from '../../omni/disclosure.js';
 import { evictOldestImagesBeyondCap } from './image-budget.js';
-import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import {
+  setGenAiUsageProvenance,
+  type GenAiUsageProvenance,
+} from '../../telemetry/gen-ai-usage.js';
 import { SchemaValidator } from '../../utils/schemaValidator.js';
 import { TrailingThinkingTagFilter } from './trailing-thinking-tag-filter.js';
 
@@ -72,6 +75,22 @@ interface ExtendedCompletionUsage extends OpenAI.CompletionUsage {
   // base member does not admit `null`, so the override must not either.
   prompt_tokens_details?: OpenAI.CompletionUsage.PromptTokensDetails & {
     cache_write_tokens?: number;
+  };
+}
+
+function readOpenAIUsageProvenance(
+  usage: OpenAI.CompletionUsage,
+): GenAiUsageProvenance {
+  const extendedUsage = usage as ExtendedCompletionUsage;
+  return {
+    cachedInputTokensReported:
+      typeof usage.prompt_tokens_details?.cached_tokens === 'number' ||
+      typeof extendedUsage.cached_tokens === 'number',
+    cacheCreationInputTokens:
+      typeof extendedUsage.prompt_tokens_details?.cache_write_tokens ===
+      'number'
+        ? extendedUsage.prompt_tokens_details.cache_write_tokens
+        : undefined,
   };
 }
 
@@ -1552,11 +1571,6 @@ export function convertOpenAIResponseToLlm(
       usage.prompt_tokens_details?.cached_tokens ??
       extendedUsage.cached_tokens ??
       0;
-    const cachedInputTokensReported =
-      typeof usage.prompt_tokens_details?.cached_tokens === 'number' ||
-      typeof extendedUsage.cached_tokens === 'number';
-    const cacheWriteTokens =
-      extendedUsage.prompt_tokens_details?.cache_write_tokens;
     const providerReasoningTokens =
       usage.completion_tokens_details?.reasoning_tokens;
     let thinkingTokens = providerReasoningTokens;
@@ -1587,11 +1601,10 @@ export function convertOpenAIResponseToLlm(
       cachedContentTokenCount: cachedTokens,
       thoughtsTokenCount: thinkingTokens,
     };
-    setGenAiUsageProvenance(response.usageMetadata, {
-      cachedInputTokensReported,
-      cacheCreationInputTokens:
-        typeof cacheWriteTokens === 'number' ? cacheWriteTokens : undefined,
-    });
+    setGenAiUsageProvenance(
+      response.usageMetadata,
+      readOpenAIUsageProvenance(usage),
+    );
   }
 
   return response;
@@ -2184,11 +2197,6 @@ export function convertOpenAIChunkToLlm(
       usage.prompt_tokens_details?.cached_tokens ??
       extendedUsage.cached_tokens ??
       0;
-    const cachedInputTokensReported =
-      typeof usage.prompt_tokens_details?.cached_tokens === 'number' ||
-      typeof extendedUsage.cached_tokens === 'number';
-    const cacheWriteTokens =
-      extendedUsage.prompt_tokens_details?.cache_write_tokens;
 
     const hasTokenBreakdown =
       totalTokens === 0 || promptTokens !== 0 || completionTokens !== 0;
@@ -2204,11 +2212,10 @@ export function convertOpenAIChunkToLlm(
       totalTokenCount: totalTokens,
       cachedContentTokenCount: cachedTokens,
     };
-    setGenAiUsageProvenance(response.usageMetadata, {
-      cachedInputTokensReported,
-      cacheCreationInputTokens:
-        typeof cacheWriteTokens === 'number' ? cacheWriteTokens : undefined,
-    });
+    setGenAiUsageProvenance(
+      response.usageMetadata,
+      readOpenAIUsageProvenance(usage),
+    );
   }
 
   if (preparations.length > 0) {
