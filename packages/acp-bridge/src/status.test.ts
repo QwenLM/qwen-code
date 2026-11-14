@@ -12,8 +12,17 @@ import {
   MissingCliEntryError,
   SessionRestoreTimeoutError,
   SERVE_ERROR_KINDS,
+  SERVE_STATUS_EXT_METHODS,
   mapDomainErrorToErrorKind,
 } from './status.js';
+
+describe('SERVE_STATUS_EXT_METHODS', () => {
+  it('pins the session loop-wakeup status method name', () => {
+    expect(SERVE_STATUS_EXT_METHODS.sessionWakeupStatus).toBe(
+      'qwen/status/session/wakeup_status',
+    );
+  });
+});
 
 describe('SERVE_ERROR_KINDS', () => {
   it('exposes the roadmap-defined error kinds in stable order', () => {

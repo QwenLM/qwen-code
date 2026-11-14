@@ -76,6 +76,7 @@ import type {
   ServeWorkspaceToolsStatus,
   ServeSessionContextUsageStatus,
   ServeSessionStatsStatus,
+  ServeSessionWakeupStatus,
 } from './status.js';
 
 import type {
@@ -2607,6 +2608,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     sessionId: string,
     opts?: { detail?: boolean },
   ): Promise<ServeSessionContextUsageStatus>;
+
+  /** Read the session's pending loop wakeup, if any. */
+  getSessionWakeupStatus(sessionId: string): Promise<ServeSessionWakeupStatus>;
 
   /** Read slash-command/skill command availability for a live session. */
   getSessionSupportedCommandsStatus(
