@@ -231,14 +231,20 @@ describe('FileManagedSessionInbox', () => {
     'compacts repeated processing fences and restores only the current fence',
     async () => {
       const inbox = await openInbox();
-      const input = userMessage('long-lived');
+      // A 512-byte messageId (the cap asserted above) makes each journal
+      // entry ~1.3 KB, so two threshold crossings cost ~130 fsync'd
+      // appends instead of ~620 — the bytes required are fixed, only the
+      // number of durability barriers is negotiable (review R1-2).
+      const input = userMessage('l'.repeat(512));
       await inbox.admit(input, limits);
       await inbox.markActivationReady(input);
       // Each fence append is one fsync'd journal line. A fixed 1024-epoch
       // loop crossed the 64 KiB compaction threshold with room to spare on
-      // a fast disk, but on the fleet's container storage each fsync costs
-      // tens of milliseconds and the loop alone outlasted the flat 60s
-      // budget (#16937: three 60s timeouts, no assertion). Derive the epoch
+      // a fast disk, but on the fleet's container storage the failing job
+      // measured ~37 ms per append (the twin activation-store test ran the
+      // same 1024 appends in 37.9 s), and this loop timed out three times
+      // under a lower load than the twin finished under — so append cost
+      // alone does not explain the full overrun (#16937). Derive the epoch
       // count from one measured entry instead — sized to cross the
       // compaction boundary TWICE with margin, because the second
       // compaction is the only witness in this package that
@@ -282,6 +288,7 @@ describe('FileManagedSessionInbox', () => {
         v: 2,
         type: 'inbox.snapshot',
       });
+      expect(checkpointLine).toBeDefined();
       expect(lines[0]).not.toBe(checkpointLine);
       expect(Buffer.byteLength(contents)).toBeLessThan(
         MANAGED_JOURNAL_COMPACT_BYTES + Buffer.byteLength(lines[0]) + 512,
