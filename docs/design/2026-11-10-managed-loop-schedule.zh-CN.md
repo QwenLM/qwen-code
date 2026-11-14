@@ -2,7 +2,10 @@
 
 [English](2026-11-10-managed-loop-schedule.md) | [简体中文](2026-11-10-managed-loop-schedule.zh-CN.md)
 
-状态：提案，尚未实现。这是 Managed Session 支持 `/loop` 的固定间隔分支，
+状态：实现中。自定步调唤醒姊妹切片已先落地并占用
+`hosted-workspace-shell/3`，故本切片按决策 8 的落地顺序取下一修订号
+（`hosted-workspace-files/4`、`hosted-workspace-shell/4`、
+`hosted-workspace-team-lead/2`）。这是 Managed Session 支持 `/loop` 的固定间隔分支，
 是[自定步调唤醒设计](2026-11-10-managed-loop-wakeup.zh-CN.md)的姊妹篇。
 它从 Session 内部创建
 [H6 automation definition](2026-10-04-managed-automation.zh-CN.md)，
@@ -178,18 +181,20 @@ Session 内部的模型没有任何创建途径。
    公开 API definition 一样适用。skill 的立即首次执行就是当前 turn；
    不为其新增机制。
 8. **工具面随下一批 profile 修订版发布。**
-   `hosted-workspace-files/4`、`hosted-workspace-shell/3`、
+   `hosted-workspace-files/4`、`hosted-workspace-shell/4`、
    `hosted-workspace-team-lead/2` 声明 cron 三件套，沿用 `files/3`
-   先例；版号假设本切片先落地，若姊妹切片先落地则两族互换。`shell/2`
+   先例。唤醒姊妹切片已先落地并占用 `hosted-workspace-shell/3`
+   （声明 `loop_wakeup` 及 `cron_list`/`cron_delete`），故本切片的 Shell
+   修订号取下一号 `shell/4`：它继承 `loop_wakeup` 并新增 `cron_create`；
+   `files/4` 与 `team-lead/2` 声明 cron 三件套但不含 `loop_wakeup`。`shell/2`
    被有意跳过：它是已退役标识符，由
    [2026-10-23 Shell profile 设计](2026-10-23-managed-shell-profile.zh-CN.md)
    撤回并被回归测试钉死，重新启用会反转它们。`cron_create` 的准入要求
    `qwen.managed-agent.automation.enabled`；`cron_list` 与
    `cron_delete` 在开关关闭时仍声明且可用（决策 2）。read profile 永不
-   声明它们。姊妹切片在其后的一批修订版上新增 `loop_wakeup`，并把
-   `cron_list`/`cron_delete` 扩展到决策 6 的并集——工具名是持久化词汇，
-   行为可以生长；无论哪个切片先落地都由它声明 `cron_list`/`cron_delete`。
-   managed loop skill 变体作为 skill 资产经现有 Session Skills 发布，
+   声明它们。工具名是持久化词汇，行为可以生长：本切片把已声明的
+   `cron_list`/`cron_delete` 扩展到决策 6 的并集（definition 加未触发
+   wakeup）。managed loop skill 变体作为 skill 资产经现有 Session Skills 发布，
    `allowedTools` 与 bundled skill 相同；其可见性与工具一同门控，对应
    本地 `BundledSkillLoader` 在 cron 关闭时隐藏 `cron_` skill 的规则。
 9. **失败语义区分可重试与终态。** 传输故障或 503 使工具执行保持
@@ -216,9 +221,15 @@ Session 内部的模型没有任何创建途径。
 ## 契约触点
 
 - 新的内部 controller（`ManagedMemorySessionController` 的形状）承载
-  三个动词，配 `SurfaceRegistry` 条目、OpenAPI 内部面、
-  `ManagedAgentApiContractTest`、`SurfaceRegistryGateTest` 与
-  `managed-surface.txt` fixture。
+  三个动词，由 writer 绑定鉴权（`X-Qwen-Managed-Writer-Token` +
+  `workspaceId`/`writerId`/`writerGeneration`，经 `authorizeOrdinary`），
+  配 `SurfaceRegistry` 条目（`Surface.INTERNAL`、`RuleClass.INTERNAL_WRITER`、
+  新 capability）、重生成的 `managed-surface.txt` fixture，以及
+  `SurfaceRegistryGateTest` 的 handler↔registry 精确双射。不存在内部
+  OpenAPI 文件：公开契约走查（`ManagedAgentApiContractTest`）跳过
+  `/internal/`，故 registry + fixture + gate 测试即内部面的契约钉子。
+  内部路由没有用户 principal（`TenantContext.actorId` 为 null）；创建者
+  actor 从 `ma_session.creator_actor_key` 派生。
 - `ManagedAutomationService`：controller 推导创建者 actor 并委托；内部
   路由的 list/retire 在服务/账本内部变为 Session 作用域（分页 limit 前
   过滤、正确的 `next` 游标、覆盖容量的页大小），作为保留公开 actor 作用域
@@ -230,7 +241,7 @@ Session 内部的模型没有任何创建途径。
   路由。Shell 身份并非集中式：profile 谓词
   （`isHostedWorkspaceShellProfile` 等）、比较字面量
   `hosted-workspace-shell/1` 的准入路径、控制面的规范 Shell 准入都必须
-  识别 `shell/3`，否则 `shell/3` Session 会失去 shell lane、child-agent
+  识别 `shell/4`，否则 `shell/4` Session 会失去 shell lane、child-agent
   与 foreground-only 准入。列出 `files/4` 的 unknown-profile fixture 在
   同一改动中翻转。
 - managed loop skill 变体，作为 Session Skills 发布中的 skill 资产。
@@ -263,7 +274,7 @@ Session 内部的模型没有任何创建途径。
   退役。21+ 个 definition 时 `cron_list` 返回每个 id，`/loop clear` 后
   零个存活 definition。
 - profile 准入：已退役的 `hosted-workspace-shell/2` 仍被拒绝；
-  `hosted-workspace-shell/3` Session 保留 shell lane、child-agent 与
+  `hosted-workspace-shell/4` Session 保留 shell lane、child-agent 与
   foreground-only 准入；列出 `files/4` 的 unknown-profile fixture 在
   准入它的同一改动中翻转。
 - 失败划分：503 以同一 key 重驱动；pre-commit 拒绝释放 key；丢失的
@@ -286,6 +297,34 @@ Session 内部的模型没有任何创建途径。
 - 一个 Session 的 writer 不能列出或退役另一个 Session 的 definition，
   即使创建者相同。
 - 无新 journal 事件种类或 payload 字段；无第二个调度器。
+
+## 同 PR 伴随跟进
+
+两个唤醒切片的小跟进随本切片落地，而非单独改动：
+
+1. **notBefore 感知的唤醒恢复豁免。** 控制面 `WakeRecovery.scan` 对任何
+   journal 证明有 pending wake input 的 Session 挂载 Harness
+   （`recoverForWake`）。`JdbcWakeRecoveryStore.hasPendingInput` 把每个
+   未 settle、source 在 `SOURCES`（已含 `loop`）中的 `input.accepted`
+   都计为 pending，不看 `notBefore`。于是唯一 pending input 是未到期
+   loop wakeup 的 Session 会在每次恢复扫描时被提前重挂。修法：当唯一
+   未 settle 的 wake input 是携带未来 `notBefore` 的 `loop`
+   `input.accepted` 时，回答 `Optional.empty()`（它是延迟而非停泊；空
+   回答保留 durable hint，而 `false` 会清掉 hint 并丢弃已武装的
+   wakeup）；到期或立即的 loop input 仍回答 `true`。证明的进度保持缓
+   存——拒绝的是结论而非已读的页——因此提交在 32 修订证明窗口之外的
+   wake input 仍能被读到。不认证任何 pending 的缓存延迟证明在最早的
+   延迟触发时刻失效；同时携带到期 pending input 的证明则经 complete
+   短路回答 `true`，并在该修订上保持缓存直到 journal 推进。settle 把
+   该 input 从延迟闩锁中移除。豁免需要 store 内的时钟引
+   用，以及一对 `WakeRecoveryStoreTest`（仅未来 loop input → `isEmpty()`，
+   不挂载；到期 loop input → `contains(true)`，挂载）。
+2. **fire-time sentinel 的 Java fixture 重放对等。**
+   `JdbcWakeRecoveryStore` 的 journal 重放证明必须识别唤醒切片写入的
+   loop sentinel input，用一个重放携带 sentinel loop input（及其
+   `notBefore`）的 journal 的 fixture 测试，使 Java 投影与 Harness 的
+   fire-time 展开保持对等。这与跟进 1 同属
+   `hasPendingInput`/`isWakeInput` 域，一并钉住。
 
 ## 开放问题
 
