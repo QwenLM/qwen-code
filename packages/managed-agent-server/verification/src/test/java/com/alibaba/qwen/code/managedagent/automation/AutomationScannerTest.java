@@ -228,10 +228,27 @@ class AutomationScannerTest {
     }
 
     @Test
-    void listSessionPagesWithACursorUnderTheLiveStateBind() {
+    void listSessionPagesWithACursorUnderTheLiveStateFilter() {
         // A limit below the live capacity forces hasMore and a nextCursor, so
         // the cursor arm of the query (which carries the live-state bind in a
         // different positional order than the first-page arm) is exercised.
+        // One definition is retired first: pages order by gmt_create DESC, so
+        // the retired row sorts after the cursor and the cursor arm must
+        // exclude it — dropping the filter from that arm leaks the retired
+        // row into the second page and reddens the page-size assertion. A
+        // shifted bind order surfaces as a type-conversion error; the bound
+        // vs literal form of the filter is behaviour-neutral and not pinned.
+        String retired = service.create(tenant, ACTOR,
+                "iso-page-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true))
+                .body().id();
+        service.retireSession(tenant, sessionId, ACTOR, retired,
+                "iso-page-retire-" + UUID.randomUUID());
+        // gmt_create reads the controlled clock: advance it so the live
+        // definitions are strictly newer and the retired row cannot tie-break
+        // ahead of the cursor on the random schedule id.
+        clock.addAndGet(2);
         List<String> created = new java.util.ArrayList<>();
         for (int i = 0; i < 3; i++) {
             created.add(service.create(tenant, ACTOR,

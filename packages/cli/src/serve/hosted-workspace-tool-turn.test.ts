@@ -2860,6 +2860,9 @@ it('the cron union declarations name only the creators the profile declares', as
     expect(list!.description?.includes('loop_wakeup')).toBe(hasLoopWakeup);
     expect(list!.description?.includes('cron_create')).toBe(hasCronCreate);
     expect(del!.description?.includes('loop wakeup')).toBe(hasLoopWakeup);
+    expect(del!.description?.includes('cannot be cancelled')).toBe(
+      hasLoopWakeup,
+    );
     expect(delId?.includes('loop_wakeup')).toBe(hasLoopWakeup);
     expect(delId?.includes('cron_create')).toBe(hasCronCreate);
     // The handlers are not narrowed by profile: schedules can exist on any
@@ -2878,11 +2881,14 @@ it('the cron description helpers name only the declared creators in every corner
   for (const hasCronCreate of [false, true]) {
     for (const hasLoopWakeup of [false, true]) {
       const list = cronListDescription(hasCronCreate, hasLoopWakeup);
-      const del = cronDeleteDescription(hasCronCreate, hasLoopWakeup);
+      const del = cronDeleteDescription(hasLoopWakeup);
       const delId = cronDeleteIdDescription(hasCronCreate, hasLoopWakeup);
       expect(list.includes('cron_create')).toBe(hasCronCreate);
       expect(list.includes('loop_wakeup')).toBe(hasLoopWakeup);
       expect(del.includes('loop wakeup')).toBe(hasLoopWakeup);
+      // The cancellation note names "a wakeup", not "loop wakeup", so it
+      // needs its own pin — the concept phrase alone misses a leaked note.
+      expect(del.includes('cannot be cancelled')).toBe(hasLoopWakeup);
       expect(delId.includes('cron_create')).toBe(hasCronCreate);
       expect(delId.includes('loop_wakeup')).toBe(hasLoopWakeup);
       // Schedules are always listable/retirable regardless of profile.
@@ -2890,21 +2896,6 @@ it('the cron description helpers name only the declared creators in every corner
       expect(delId).toMatch(/schedule id/);
     }
   }
-  // The both-creators wording is served only by the exported constants; the
-  // composed (true, true) corner must match them so the two cannot drift.
-  expect(cronListDescription(true, true)).toBe(
-    HOSTED_CRON_LIST_TOOL.description,
-  );
-  expect(cronDeleteDescription(true, true)).toBe(
-    HOSTED_CRON_DELETE_TOOL.description,
-  );
-  expect(cronDeleteIdDescription(true, true)).toBe(
-    (
-      HOSTED_CRON_DELETE_TOOL.parametersJsonSchema as {
-        properties?: { id?: { description?: string } };
-      }
-    ).properties?.id?.description,
-  );
 });
 
 it.each([429, 502, 503])(

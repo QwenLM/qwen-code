@@ -893,8 +893,7 @@ export const HOSTED_CRON_CREATE_TOOL: FunctionDeclaration = {
 // rendered exactly as cron_delete accepts it.
 export const HOSTED_CRON_LIST_TOOL: FunctionDeclaration = {
   name: 'cron_list',
-  description:
-    'List this Session’s live recurring cron schedules (created via cron_create) and any pending loop wakeup scheduled via loop_wakeup. Shows each schedule’s id, cron, timezone, state and a short goal label, and each wakeup’s id, fire time and a short prompt preview.',
+  description: cronListDescription(true, true),
   parametersJsonSchema: {
     type: 'object',
     properties: {},
@@ -903,15 +902,13 @@ export const HOSTED_CRON_LIST_TOOL: FunctionDeclaration = {
 };
 export const HOSTED_CRON_DELETE_TOOL: FunctionDeclaration = {
   name: 'cron_delete',
-  description:
-    'Cancel a recurring cron schedule or a pending loop wakeup by its id (as returned by cron_list). A wakeup whose turn already started cannot be cancelled.',
+  description: cronDeleteDescription(true),
   parametersJsonSchema: {
     type: 'object',
     properties: {
       id: {
         type: 'string',
-        description:
-          'A schedule id from cron_create, or a wakeup id (loop:<wakeupId>) from loop_wakeup.',
+        description: cronDeleteIdDescription(true, true),
       },
     },
     required: ['id'],
@@ -930,10 +927,10 @@ export const HOSTED_CRON_DELETE_TOOL: FunctionDeclaration = {
 // automation route creates them without consulting the CLI tool profile, so the
 // schedule half is always described; wakeups only exist where loop_wakeup is
 // declared. Each creator is named only when the profile declares it. The
-// sentences are composed from those clauses (no per-state literal copies): the
-// both-creators wording lives only in the exported HOSTED_CRON_* constants, and
-// the (false, false) corner names neither tool. Call sites guard on
-// `!loopTool || !cronCreate`, so the both-creators corner is never served here.
+// sentences are composed from those clauses (no per-state literal copies), and
+// the exported HOSTED_CRON_* constants above are the (true, true) composition,
+// so the served wording has a single producer. The (false, false) corner names
+// neither tool.
 export function cronListDescription(
   hasCronCreate: boolean,
   hasLoopWakeup: boolean,
@@ -949,10 +946,7 @@ export function cronListDescription(
   return `List this Session’s ${schedules} and any pending loop wakeup scheduled via loop_wakeup. ${scheduleFields}, and each wakeup’s id, fire time and a short prompt preview.`;
 }
 
-export function cronDeleteDescription(
-  hasCronCreate: boolean,
-  hasLoopWakeup: boolean,
-): string {
+export function cronDeleteDescription(hasLoopWakeup: boolean): string {
   const target = hasLoopWakeup
     ? 'a recurring cron schedule or a pending loop wakeup'
     : 'a recurring cron schedule';
@@ -2747,13 +2741,13 @@ export class HostedWorkspaceToolTurn {
             // The profile has no loop_wakeup to fall back to; do not name it.
             tool = { ...tool, description: CRON_CREATE_DESCRIPTION };
           }
-          if (tool.name === 'cron_list' && (!loopTool || !cronCreate)) {
+          if (tool.name === 'cron_list') {
             tool = {
               ...tool,
               description: cronListDescription(cronCreate, loopTool),
             };
           }
-          if (tool.name === 'cron_delete' && (!loopTool || !cronCreate)) {
+          if (tool.name === 'cron_delete') {
             const schema = structuredClone(tool.parametersJsonSchema) as {
               properties?: Record<string, { description?: string }>;
             };
@@ -2765,7 +2759,7 @@ export class HostedWorkspaceToolTurn {
             }
             tool = {
               ...tool,
-              description: cronDeleteDescription(cronCreate, loopTool),
+              description: cronDeleteDescription(loopTool),
               parametersJsonSchema: schema,
             };
           }
