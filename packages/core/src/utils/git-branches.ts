@@ -1325,22 +1325,232 @@ export interface GitCommitResult {
   subject: string;
 }
 
+export interface GitCommitOptions {
+  /** Stage every working-tree change (including untracked files) first. */
+  all?: boolean;
+  /**
+   * Repo-root-relative paths to stage and commit, leaving every other change
+   * (staged or not) untouched. Either side of a rename selects the pair, so
+   * the deletion and the addition always land in the same commit.
+   */
+  paths?: readonly string[];
+}
+
+/**
+ * Git reads `*`, `?` and `[]` in a pathspec as glob wildcards, so a selection
+ * naming a file that literally contains one would also match its neighbours.
+ * `:(literal)` turns that off. `top` anchors the path at the repository root,
+ * which is where the caller's selection comes from: `fetchGitDiff` pins its
+ * keys to `findGitRoot(cwd)`, while git otherwise resolves a pathspec against
+ * the current directory. Without it a workspace bound below the root sends a
+ * root-relative path that matches nothing.
+ */
+function literalPathspec(path: string): string {
+  return `:(top,literal)${path}`;
+}
+
+function literalPathspecs(paths: readonly string[]): string[] {
+  return paths.map(literalPathspec);
+}
+
+async function hasHead(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  try {
+    await runGit(cwd, ['rev-parse', '--verify', '-q', 'HEAD'], env);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeCommitPaths(paths: readonly string[]): string[] {
+  const normalized: string[] = [];
+  for (const raw of paths) {
+    if (typeof raw !== 'string') {
+      throw new Error('invalid commit path: expected a string');
+    }
+    if (
+      !raw ||
+      // A newline is legal in a POSIX filename and the diff listing offers
+      // such files preselected; the pathspec is passed as one argv element, so
+      // it survives. `\0` cannot, because argv is NUL-terminated.
+      raw.includes('\0') ||
+      raw.startsWith('/') ||
+      /^[a-zA-Z]:/.test(raw)
+    ) {
+      throw new Error(`invalid commit path: "${raw}"`);
+    }
+    const parts = raw.split('/');
+    if (parts.some((part) => part === '..' || part === '.git')) {
+      throw new Error(`invalid commit path: "${raw}"`);
+    }
+    const cleaned = parts
+      .filter((part) => part !== '' && part !== '.')
+      .join('/');
+    if (!cleaned) {
+      throw new Error(`invalid commit path: "${raw}"`);
+    }
+    if (!normalized.includes(cleaned)) normalized.push(cleaned);
+  }
+  return normalized;
+}
+
+/** Split `git status --porcelain -z` output into entries, pairing rename halves. */
+function parseStatusEntries(output: string): Array<{
+  path: string;
+  oldPath?: string;
+}> {
+  const tokens = output.split('\0');
+  const entries: Array<{ path: string; oldPath?: string }> = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.length < 4) continue;
+    const xy = token.slice(0, 2);
+    if (xy.includes('R') || xy.includes('C')) {
+      // A rename entry is `XY newpath\0oldpath\0`.
+      const oldPath = tokens[i + 1];
+      i++;
+      entries.push({ path: token.slice(3), oldPath });
+    } else {
+      entries.push({ path: token.slice(3) });
+    }
+  }
+  return entries;
+}
+
+/**
+ * Resolve the caller's selection against what git actually sees. A selection
+ * can name a path that is already committed as-is (toggled on, then reverted),
+ * which `git add -- <path>` rejects with "did not match any files". Rename
+ * halves are paired here so the caller only has to send one side.
+ *
+ * Pairing reads `git diff HEAD`, the same view the checklist renders. The index
+ * alone can still report a rename for two rows the checklist listed separately
+ * (a staged rename whose worktree copy was rewritten below git's rename
+ * threshold), and pairing those would record a deletion the user never
+ * selected.
+ */
+async function resolveCommitPaths(
+  cwd: string,
+  paths: string[],
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string[]> {
+  const output = await runGit(
+    cwd,
+    [
+      'status',
+      '--porcelain',
+      '-z',
+      // The checklist enumerates untracked files, so the resolver must too:
+      // `status.showUntrackedFiles=no` would hide a selected new file and turn
+      // a valid selection into "none of the selected paths have changes".
+      '-uall',
+      '--',
+      ...literalPathspecs(paths),
+    ],
+    env,
+  );
+  const entries = parseStatusEntries(output);
+  if (entries.length === 0) {
+    throw new Error('cannot commit: none of the selected paths have changes');
+  }
+  const selected = new Set(paths);
+  const seen = new Set<string>();
+  const resolved: string[] = [];
+  for (const entry of entries) {
+    if (
+      entry.oldPath &&
+      !selected.has(entry.path) &&
+      !selected.has(entry.oldPath)
+    ) {
+      continue;
+    }
+    if (!seen.has(entry.path)) {
+      seen.add(entry.path);
+      resolved.push(entry.path);
+    }
+  }
+  // A directory prefix can match entries whose paths are not themselves in the
+  // selection, and a rename whose halves are both outside it is dropped above,
+  // so the loop can leave nothing behind. `[]` is truthy, so returning it would
+  // send `git commit --` an empty pathspec and commit the whole index.
+  if (resolved.length === 0) {
+    throw new Error('cannot commit: none of the selected paths have changes');
+  }
+  // A rename only exists when its two halves are recorded in one commit, so
+  // the pre-image is named too. `commit -- <old path>` takes the working-tree
+  // content of every path it names, so refuse rather than publish whatever now
+  // sits at the old path.
+  // An unborn HEAD has nothing to rename against and `HEAD` does not resolve.
+  if (!(await hasHead(cwd, env))) return resolved;
+  const diffOutput = await runGit(
+    cwd,
+    ['diff', '--name-status', '-z', '-M', '--diff-filter=R', 'HEAD'],
+    env,
+  );
+  const tokens = diffOutput.split('\0');
+  for (let i = 0; i + 2 < tokens.length; i += 3) {
+    if (!tokens[i].startsWith('R')) continue;
+    const oldPath = tokens[i + 1];
+    const newPath = tokens[i + 2];
+    if (!selected.has(newPath) && !selected.has(oldPath)) continue;
+    for (const p of [newPath, oldPath]) {
+      if (!seen.has(p)) {
+        seen.add(p);
+        resolved.push(p);
+      }
+    }
+    if (fs.existsSync(path.join(cwd, oldPath))) {
+      throw new Error(
+        `cannot commit: ${oldPath} was renamed to ${newPath}, but a file now sits at the old path`,
+      );
+    }
+  }
+  return resolved;
+}
+
 /**
  * Commit changes. With `all: true`, stages every change in the working tree
  * (including untracked files) via `git add -A` before committing, so the
- * commit matches what the UI displays.
+ * commit matches what the UI displays. With `paths`, stages and commits only
+ * those files; anything else that was staged stays staged.
  */
 export async function gitCommit(
   cwd: string,
   message: string,
-  opts?: { all?: boolean },
+  opts?: GitCommitOptions,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<GitCommitResult> {
-  // Snapshot the index before `git add -A` so a failed commit (e.g. a
-  // rejecting pre-commit hook) can restore the user's original staging
-  // instead of leaving the whole working tree staged.
+  if (opts?.all && opts.paths) {
+    throw new Error('all and paths are mutually exclusive');
+  }
+  const paths = opts?.paths ? normalizeCommitPaths(opts.paths) : undefined;
+  if (paths && paths.length === 0) {
+    throw new Error('cannot commit: no paths selected');
+  }
+  // `git commit -- <paths>` is a partial commit, which git refuses outright
+  // while a merge, cherry-pick, revert or rebase is parked. Say so here
+  // instead of surfacing git's raw fatal, and point at the whole-index commit
+  // that does work in that state.
+  if (paths) {
+    const operation = await operationInProgress(cwd, env);
+    if (operation) {
+      throw new Error(
+        `cannot commit selected paths: a ${operation} is in progress; commit everything to finish it`,
+      );
+    }
+  }
+  const selection = paths
+    ? await resolveCommitPaths(cwd, paths, env)
+    : undefined;
+  const stagesEverything = opts?.all === true;
+  // Snapshot the index before staging so a failed commit (e.g. a rejecting
+  // pre-commit hook) can restore the user's original staging instead of
+  // leaving the staged changes behind.
   let savedIndex: string | null = null;
-  if (opts?.all) {
+  if (stagesEverything || selection) {
     const tree = (
       await runGit(cwd, ['write-tree'], env).catch(() => '')
     ).trim();
@@ -1354,24 +1564,81 @@ export async function gitCommit(
       ).trim();
       if (unmerged) {
         throw new Error(
-          'cannot stage all changes: unresolved merge conflicts in the index',
+          'cannot stage changes: unresolved merge conflicts in the index',
         );
       }
       throw new Error(
-        'cannot stage all changes: failed to snapshot index (write-tree failed)',
+        'cannot stage changes: failed to snapshot index (write-tree failed)',
       );
     }
   }
   try {
-    if (opts?.all) {
+    if (stagesEverything) {
       await runGit(cwd, ['add', '-A'], env);
+      await runGit(cwd, ['commit', '-m', message], env);
+    } else if (selection) {
+      // `add -A` is scoped by the pathspec so it also records deletions
+      // (a plain `add` refuses a path that no longer exists) while leaving
+      // everything else the caller staged untouched. The pathspec on `commit`
+      // then keeps work staged outside the selection out of this commit. A
+      // rename's pre-image is already in the index, so only the new path is
+      // staged; `commit` still records the deletion from the index diff.
+      const stageable = await runGit(
+        cwd,
+        [
+          'ls-files',
+          '--full-name',
+          '--cached',
+          '--others',
+          '-z',
+          '--',
+          ...literalPathspecs(selection),
+        ],
+        env,
+      );
+      const known = new Set(
+        stageable.split('\0').filter((line) => line !== ''),
+      );
+      const existing = selection.filter((p) => known.has(p));
+      // `resolveCommitPaths` ran before staging, and staging is what can empty
+      // the selection — a rename whose halves the resolver dropped, or a path
+      // that only differs by case on a case-insensitive filesystem. Committing
+      // with an empty `existing` would hand git a path with nothing to commit.
+      if (existing.length === 0) {
+        throw new Error(
+          'cannot commit: none of the selected paths have changes',
+        );
+      }
+      await runGit(
+        cwd,
+        ['add', '-A', '--', ...literalPathspecs(existing)],
+        env,
+      );
+      // `commit -- <path>` takes the working-tree content of every path it
+      // names, so a rename's pre-image is already staged and does not need to
+      // be named; only paths that still exist are named, which keeps whatever
+      // now sits at an old path out of the commit.
+      const root = (
+        await runGit(cwd, ['rev-parse', '--show-toplevel'], env)
+      ).trim();
+      const commitPaths = selection.filter(
+        (p) =>
+          known.has(p) ||
+          !fs.existsSync(path.join(root || cwd, ...p.split('/'))),
+      );
+      await runGit(
+        cwd,
+        ['commit', '-m', message, '--', ...literalPathspecs(commitPaths)],
+        env,
+      );
+    } else {
+      await runGit(cwd, ['commit', '-m', message], env);
     }
-    await runGit(cwd, ['commit', '-m', message], env);
   } catch (err) {
     if (savedIndex) {
       await runGit(cwd, ['read-tree', savedIndex], env).catch((rollbackErr) => {
-        // A failed rollback leaves the whole `add -A` result staged; surface
-        // it so the stale index can be diagnosed instead of failing silently.
+        // A failed rollback leaves the staged result in place; surface it so
+        // the stale index can be diagnosed instead of failing silently.
         // eslint-disable-next-line no-console
         console.error('git index rollback failed:', rollbackErr);
       });

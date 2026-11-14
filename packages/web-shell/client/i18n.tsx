@@ -701,6 +701,13 @@ const EN: Messages = {
   'gitCommit.commitPushSuccess': (v) => `Committed & pushed ${v?.sha ?? ''}`,
   'gitCommit.commitSuccessPushFailed': (v) =>
     `Committed ${v?.sha ?? ''} — push failed: ${v?.error ?? 'unknown'}`,
+  'gitCommit.filesSelected': (v) =>
+    `Files to commit (${v?.selected ?? 0}/${v?.total ?? 0})`,
+  'gitCommit.noFilesSelected': 'Select at least one file to commit',
+  'gitCommit.fileAdded': 'Added',
+  'gitCommit.fileDeleted': 'Deleted',
+  'gitCommit.fileRenamed': 'Renamed',
+  'gitCommit.fileModified': 'Modified',
   'branchSelect.baseBranch': 'Base branch',
   'branchSelect.search': 'Search branches…',
   'branchSelect.loading': 'Loading…',
@@ -5879,6 +5886,13 @@ const ZH: Messages = {
   'gitCommit.commitPushSuccess': (v) => `已提交并推送 ${v?.sha ?? ''}`,
   'gitCommit.commitSuccessPushFailed': (v) =>
     `已提交 ${v?.sha ?? ''} — 推送失败：${v?.error ?? '未知错误'}`,
+  'gitCommit.filesSelected': (v) =>
+    `要提交的文件（${v?.selected ?? 0}/${v?.total ?? 0}）`,
+  'gitCommit.noFilesSelected': '请至少选择一个文件',
+  'gitCommit.fileAdded': '已新增',
+  'gitCommit.fileDeleted': '已删除',
+  'gitCommit.fileRenamed': '已重命名',
+  'gitCommit.fileModified': '已修改',
   'branchSelect.baseBranch': '目标分支',
   'branchSelect.search': '搜索分支…',
   'branchSelect.loading': '加载中…',

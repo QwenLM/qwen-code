@@ -943,6 +943,202 @@ describe('gitCommit', () => {
 
     await expect(gitCommit(dir, 'noop', { all: true })).rejects.toThrow();
   });
+
+  it('commits only the selected paths and leaves the rest dirty', async () => {
+    const dir = makeRepo();
+    write(dir, { 'a.txt': 'two\n', 'b.txt': 'two\n' });
+
+    await gitCommit(dir, 'update a only', { paths: ['a.txt'] });
+
+    expect(git(dir, 'show', '--name-only', '--format=', 'HEAD').trim()).toBe(
+      'a.txt',
+    );
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('?? b.txt');
+  });
+
+  it('keeps work staged outside the selection out of the commit', async () => {
+    const dir = makeRepo();
+    write(dir, { 'a.txt': 'two\n', 'b.txt': 'two\n' });
+    git(dir, 'add', 'b.txt');
+
+    await gitCommit(dir, 'update a only', { paths: ['a.txt'] });
+
+    expect(git(dir, 'show', '--name-only', '--format=', 'HEAD').trim()).toBe(
+      'a.txt',
+    );
+    // b.txt is still staged, untouched by the scoped commit.
+    expect(git(dir, 'diff', '--cached', '--name-only').trim()).toBe('b.txt');
+  });
+
+  it('records both sides of a rename from the post-rename path alone', async () => {
+    const dir = makeRepo();
+    commitFile(dir, 'old.txt', 'content\n', 'add old');
+    git(dir, 'mv', 'old.txt', 'new.txt');
+
+    await gitCommit(dir, 'rename file', { paths: ['new.txt'] });
+
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+    // git records the deletion and the addition; rename detection then pairs
+    // them into a single `{old => new}` entry.
+    expect(
+      git(dir, 'show', '--name-status', '-M', '--format=', 'HEAD').trim(),
+    ).toBe('R100\told.txt\tnew.txt');
+  });
+
+  it('stages a newly created file that is only selected by paths', async () => {
+    const dir = makeRepo();
+    write(dir, { 'new/deep.txt': 'fresh\n' });
+
+    await gitCommit(dir, 'add one new file', { paths: ['new/deep.txt'] });
+
+    expect(git(dir, 'show', '--name-only', '--format=', 'HEAD').trim()).toBe(
+      'new/deep.txt',
+    );
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'commits a file whose name contains a newline',
+    async () => {
+      const dir = makeRepo();
+      write(dir, { 'line1\nline2.txt': 'fresh\n' });
+
+      await gitCommit(dir, 'add a newline name', {
+        paths: ['line1\nline2.txt'],
+      });
+
+      expect(
+        git(dir, 'show', '--name-only', '-z', '--format=', 'HEAD')
+          .split('\0')
+          .filter(Boolean),
+      ).toEqual(['line1\nline2.txt']);
+    },
+  );
+
+  it('names an emptied selection instead of forwarding git did not match', async () => {
+    const dir = makeRepo();
+    commitFile(dir, 'dir/a.txt', 'one\n', 'add a');
+    // Status reports the pair against `dir`; the rename filter drops both
+    // halves because neither equals the selected path, so the resolver hands
+    // staging an empty selection.
+    git(dir, 'mv', 'dir/a.txt', 'dir/b.txt');
+
+    await expect(
+      gitCommit(dir, 'commit dir', { paths: ['dir'] }),
+    ).rejects.toThrow('cannot commit: none of the selected paths have changes');
+  });
+
+  it('rejects a selection that escapes the repository', async () => {
+    const dir = makeRepo();
+    write(dir, { 'a.txt': 'two\n' });
+
+    await expect(
+      gitCommit(dir, 'bad', { paths: ['../escape.txt'] }),
+    ).rejects.toThrow('invalid commit path');
+    await expect(
+      gitCommit(dir, 'bad', { paths: ['/etc/passwd'] }),
+    ).rejects.toThrow('invalid commit path');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'treats glob metacharacters in a selected name literally',
+    async () => {
+      const dir = makeRepo();
+      commitFile(dir, 'ab.txt', 'one\n', 'add ab');
+      // Two files, one literal `*` in its name and one the glob would match.
+      // NTFS rejects `*` in a filename, so this fixture cannot be created there.
+      write(dir, { 'a*.txt': 'fresh\n', 'ab.txt': 'two\n' });
+
+      await gitCommit(dir, 'commit the starred file', { paths: ['a*.txt'] });
+
+      expect(git(dir, 'show', '--name-only', '--format=', 'HEAD').trim()).toBe(
+        'a*.txt',
+      );
+      expect(git(dir, 'status', '--porcelain').trim()).toBe('M ab.txt');
+    },
+  );
+
+  it('creates a non-ASCII path', async () => {
+    const dir = makeRepo();
+    write(dir, { '中文.txt': 'fresh\n' });
+
+    await gitCommit(dir, 'add a unicode file', { paths: ['中文.txt'] });
+
+    expect(
+      git(dir, 'show', '--name-only', '-z', '--format=', 'HEAD')
+        .split('\0')
+        .filter(Boolean),
+    ).toEqual(['中文.txt']);
+  });
+
+  it('pairs both halves of a non-ASCII rename', async () => {
+    const dir = makeRepo();
+    commitFile(dir, '旧.txt', 'body\n', 'add old');
+    git(dir, 'mv', '旧.txt', '新.txt');
+
+    await gitCommit(dir, 'rename to unicode', { paths: ['新.txt'] });
+
+    expect(
+      git(dir, 'show', '--name-status', '-M', '-z', '--format=', 'HEAD')
+        .split('\0')
+        .filter(Boolean),
+    ).toEqual(['R100', '旧.txt', '新.txt']);
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+  });
+
+  it('commits into a repository that has no HEAD yet', async () => {
+    const dir = tmpDir('qwen-gitbranches-unborn-');
+    git(dir, 'init', '-q', '-b', 'master');
+    git(dir, 'config', 'user.email', 'test@example.com');
+    git(dir, 'config', 'user.name', 'Test');
+    git(dir, 'config', 'commit.gpgsign', 'false');
+    write(dir, { 'first.txt': 'hello\n' });
+
+    await gitCommit(dir, 'initial commit', { paths: ['first.txt'] });
+
+    expect(git(dir, 'show', '--name-only', '--format=', 'HEAD').trim()).toBe(
+      'first.txt',
+    );
+  });
+
+  it('commits a root-relative path from a workspace below the root', async () => {
+    const dir = makeRepo();
+    commitFile(dir, 'sub/a.txt', 'one\n', 'add sub');
+    const sub = path.join(dir, 'sub');
+    write(sub, { 'a.txt': 'two\n' });
+
+    await gitCommit(sub, 'update sub', { paths: ['sub/a.txt'] });
+
+    expect(git(dir, 'show', '--name-only', '--format=', 'HEAD').trim()).toBe(
+      'sub/a.txt',
+    );
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+  });
+
+  it('refuses a partial commit while a merge is parked', async () => {
+    const dir = makeRepo();
+    commitFile(dir, 'a.txt', 'two\n', 'edit a');
+    fs.writeFileSync(path.join(dir, '.git', 'MERGE_HEAD'), headSha(dir));
+
+    await expect(
+      gitCommit(dir, 'merge resolution', { paths: ['a.txt'] }),
+    ).rejects.toThrow(/a merge is in progress/);
+  });
+
+  it('refuses when a file now sits at a rename pre-image', async () => {
+    const dir = makeRepo();
+    commitFile(dir, 'old.txt', 'content\n', 'add old');
+    git(dir, 'mv', 'old.txt', 'new.txt');
+    write(dir, { 'old.txt': 'local shim\n' });
+
+    await expect(
+      gitCommit(dir, 'rename file', { paths: ['new.txt'] }),
+    ).rejects.toThrow(/a file now sits at the old path/);
+    // Both halves are still staged exactly as before the attempt.
+    expect(git(dir, 'status', '--porcelain').trim()).toBe(
+      'R  old.txt -> new.txt\n?? old.txt',
+    );
+  });
 });
 
 describe('gitPull', () => {

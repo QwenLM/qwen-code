@@ -164,6 +164,26 @@ describe('workspace Git branch routes', () => {
     expect(response.status).toBe(400);
     expect(response.body.error).toBe('invalid_all');
   });
+
+  it('rejects a malformed paths selection with 400', async () => {
+    for (const paths of [[], ['ok', 3], ['']]) {
+      const response = await request(app())
+        .post('/workspace/git/commit')
+        .send({ message: 'x', paths });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBe('invalid_paths');
+    }
+  });
+
+  it('rejects paths combined with all', async () => {
+    const response = await request(app())
+      .post('/workspace/git/commit')
+      .send({ message: 'x', all: true, paths: ['a.txt'] });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('paths_conflict_with_all');
+  });
 });
 
 describe('legacy route trust guard', () => {
@@ -266,6 +286,36 @@ afterEach(() => {
 });
 
 describe('workspace Git branch routes against a real repo (R10 #2)', () => {
+  it('commits only the paths the caller selected', async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'brand new\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/commit')
+      .send({ message: 'feat: a only', paths: ['a.txt'] });
+
+    expect(response.status).toBe(200);
+    expect(response.body.subject).toBe('feat: a only');
+    expect(git(dir, 'show', '--name-only', '--format=', 'HEAD').trim()).toBe(
+      'a.txt',
+    );
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('?? b.txt');
+  });
+
+  it('rejects a selection that matches no changed path', async () => {
+    const dir = makeRepo();
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/commit')
+      .send({ message: 'feat: nothing', paths: ['a.txt'] });
+
+    expect(response.status).not.toBe(200);
+    expect(JSON.stringify(response.body)).toContain(
+      'none of the selected paths have changes',
+    );
+  });
+
   it('redacts the main checkout path from a linked-worktree Git error', async () => {
     const dir = makeRepo();
     const mainBranch = git(dir, 'branch', '--show-current').trim();
