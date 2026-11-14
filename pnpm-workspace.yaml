@@ -55,6 +55,15 @@ fetchRetryMaxtimeout: 120000
 fetchTimeout: 300000
 
 overrides:
+  'glob@10 || 13': '14.0.6'
+  'minimatch@9 || 10': '11.0.8'
+  qs: '6.17.1'
+  fast-uri: '3.1.9'
+  ip-address: '10.7.4'
+  hono: '4.13.18'
+  '@hono/node-server@2': '2.1.7'
+  body-parser: '2.4.0'
+  dompurify: '3.4.17'
   'brace-expansion@1': '1.1.21'
   'brace-expansion@2': '2.1.7'
   typescript: '5.8.3'
@@ -83,6 +92,10 @@ overrides:
   'rehype-katex>katex': '0.18.2'
   'micromark-extension-math>katex': '0.18.2'
   'exceljs>uuid': '11.1.1'
+  'exceljs>unzipper': '0.12.5'
+  'archiver-utils@2>glob': '14.0.6'
+  'archiver-utils@3>glob': '14.0.6'
+  'readdir-glob@1': '4.0.0'
   # web-shell generates its Managed Agent API types with openapi-typescript,
   # which asks for supports-color 10. A second, higher supports-color in the
   # graph makes pnpm resolve every `debug` instance's optional supports-color

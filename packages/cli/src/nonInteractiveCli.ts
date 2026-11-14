@@ -2827,17 +2827,21 @@ export async function runNonInteractive(
               let call: CompletedToolCall | undefined;
               const response = await executeToolCall(config, request, signal, {
                 recordToolResult: false,
+                isFinished: hooks.isFinished,
                 modToolCall: modSession?.toolCall(() =>
                   budgetEnforcer.tickToolCall(),
                 ),
-                onToolResultFullTurnModel,
+                onToolResultFullTurnModel: (model) =>
+                  !hooks.isFinished?.() && onToolResultFullTurnModel(model),
                 outputUpdateHandler: hooks.output,
                 onAllToolCallsComplete: async (calls) => {
                   call = calls[0];
                 },
                 runtimeView: scope.runtimeView,
                 ...(toolCallUpdateCallback && {
-                  onToolCallsUpdate: toolCallUpdateCallback,
+                  onToolCallsUpdate: (calls) => {
+                    if (!hooks.isFinished?.()) toolCallUpdateCallback(calls);
+                  },
                 }),
               });
               settled.push({
