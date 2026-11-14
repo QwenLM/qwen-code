@@ -130,6 +130,40 @@ converted to `wss://<host>/api-ws/v1/realtime` when a call starts; the host must
 be a DashScope or `*.maas.aliyuncs.com` endpoint. While Live Voice is on, a new
 endpoint is checked with a Realtime handshake before it is saved.
 
+### Turn detection
+
+Set `experimental.liveVoice.turnDetection` to override the turn detection mode
+sent in the Realtime `session.update`:
+
+- `server_vad` — server-side voice activity detection (supported by qwen-audio
+  realtime models)
+- `smart_turn` — smart turn handling (qwen-audio realtime)
+- `smart_turn_v2` — second-generation smart turn (qwen-audio realtime)
+- `semantic_vad` — semantic voice activity detection (used by omni realtime
+  models)
+
+```json
+{
+  "experimental": {
+    "liveVoice": {
+      "turnDetection": "server_vad"
+    }
+  }
+}
+```
+
+When `turnDetection` is unset or empty the default is model-aware, keyed off
+the effective realtime model (including through `provider:modelId` selectors):
+models whose id starts with `qwen-audio` default to `server_vad`; all other
+models default to `semantic_vad`, preserving the existing omni realtime
+behavior. Values are trimmed. The setting applies to the daemon (Web Shell)
+client; the native Live Host always uses the model-aware default.
+
+An invalid value never stops the daemon. Live Voice calls are refused, the
+setup card shows the reason, and the card can still turn Live Voice off or
+clear or replace the value (`turnDetection` in `POST /live/setup`; empty
+restores the default).
+
 ## Override reasoning capabilities
 
 Set `capabilities.reasoning` on a model entry to override its reasoning format,

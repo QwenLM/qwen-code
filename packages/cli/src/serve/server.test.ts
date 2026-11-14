@@ -46033,7 +46033,9 @@ describe('sendBridgeError daemonLog routing', () => {
 });
 
 describe('Live conversation runtime lifecycle', () => {
-  async function enableLiveVoiceAtBoot() {
+  async function enableLiveVoiceAtBoot(
+    liveVoiceOverrides: Record<string, unknown> = {},
+  ) {
     const tmp = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-live-runtime-boot-'),
     );
@@ -46043,7 +46045,11 @@ describe('Live conversation runtime lifecycle', () => {
       path.join(qwenHome, 'settings.json'),
       JSON.stringify({
         experimental: {
-          liveVoice: { enabled: true, apiKey: 'test-realtime-key' },
+          liveVoice: {
+            enabled: true,
+            apiKey: 'test-realtime-key',
+            ...liveVoiceOverrides,
+          },
         },
       }),
     );
@@ -46503,6 +46509,36 @@ describe('Live conversation runtime lifecycle', () => {
       await (
         setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
       )();
+      await restoreLiveSettings();
+    }
+  });
+
+  it('boots with an invalid turnDetection and names it in provider readiness', async () => {
+    const restoreLiveSettings = await enableLiveVoiceAtBoot({
+      turnDetection: 'garbage',
+    });
+    let setup: ReturnType<typeof setupLiveRuntime> | undefined;
+    try {
+      // A refused mode must not take the daemon down at boot.
+      expect(() => {
+        setup = setupLiveRuntime();
+      }).not.toThrow();
+      const status = (
+        setup!.app.locals['liveCoordinator'] as LiveHostCoordinator
+      ).getStatus();
+      expect(status.blocker).toBe('provider_config');
+      // The specific reason reaches the user instead of the generic
+      // "configuration is incomplete".
+      expect(JSON.stringify(status)).toContain(
+        'experimental.liveVoice.turnDetection must be one of',
+      );
+      expect(JSON.stringify(status)).toContain('garbage');
+    } finally {
+      if (setup) {
+        await (
+          setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+        )();
+      }
       await restoreLiveSettings();
     }
   });

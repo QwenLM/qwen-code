@@ -4516,6 +4516,23 @@ const SETTINGS_SCHEMA = {
               'Electron accelerator registered globally by Qwen Live Host.',
             showInDialog: false,
           },
+          turnDetection: {
+            type: 'enum',
+            label: 'Turn Detection',
+            category: 'Experimental',
+            requiresRestart: false,
+            default: undefined,
+            description:
+              'Realtime turn detection type. Unset or empty defaults to server_vad for qwen-audio realtime models and semantic_vad for all others. An invalid value blocks Live Voice calls and is reported in the Live Voice setup card, which can clear or replace it.',
+            showInDialog: false,
+            options: [
+              { value: '', label: 'Default (model-aware)' },
+              { value: 'server_vad', label: 'Server VAD' },
+              { value: 'smart_turn', label: 'Smart Turn' },
+              { value: 'smart_turn_v2', label: 'Smart Turn V2' },
+              { value: 'semantic_vad', label: 'Semantic VAD' },
+            ],
+          },
         },
       },
       sessionWorkflow: {

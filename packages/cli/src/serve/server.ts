@@ -1755,6 +1755,9 @@ export function createServeApp(
           isAgentCollaborationEnabledFor(runtime.workspaceCwd),
       );
 
+  // readLiveVoiceConfiguration never throws: a refused turnDetection is
+  // carried as turnDetectionError and fails calls (see getProviderReadiness),
+  // not daemon boot.
   const liveConfigAtBoot = liveSettingsAtBoot
     ? readLiveVoiceConfiguration(liveSettingsAtBoot)
     : undefined;
@@ -1799,7 +1802,10 @@ export function createServeApp(
               error instanceof LiveProviderConfigError &&
               error.message === 'Live Voice is disabled.'
                 ? 'Live Voice is disabled in settings.'
-                : 'Live provider configuration is incomplete.',
+                : error instanceof LiveProviderConfigError &&
+                    error.reason === 'invalid_turn_detection'
+                  ? error.message
+                  : 'Live provider configuration is incomplete.',
           };
         }
       },

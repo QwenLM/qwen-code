@@ -2238,7 +2238,12 @@ export function openQwenRealtimeSession(
           },
           instructions: effectiveInstructions,
           turn_detection: {
-            type: 'semantic_vad',
+            // qwen-audio realtime models reject semantic_vad (#17000).
+            type: config.model.startsWith('qwen-audio')
+              ? 'server_vad'
+              : 'semantic_vad',
+            // The orchestrator owns response creation; this client never
+            // requests one on its own.
             create_response: false,
             interrupt_response: true,
           },
