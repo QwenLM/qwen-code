@@ -7,7 +7,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
 import type {
   BridgeDaemonStatusSnapshot,
@@ -78,6 +78,13 @@ function bridge(): HttpAcpBridge {
 describe('runQwenServe PR-watch shutdown wiring', () => {
   let tmpDir: string;
   let handle: RunHandle | undefined;
+
+  beforeEach(() => {
+    // The allowed-set seam only exists when the daemon has an effective
+    // subscription; the operator's own event list is the simplest source that
+    // does not depend on a hosted channel contributing an alias.
+    vi.stubEnv('QWEN_SESSION_PR_WATCH_EVENTS', 'head_change');
+  });
 
   afterEach(async () => {
     await handle?.close();
