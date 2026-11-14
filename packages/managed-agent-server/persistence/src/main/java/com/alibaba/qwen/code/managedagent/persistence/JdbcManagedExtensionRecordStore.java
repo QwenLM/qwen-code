@@ -317,15 +317,31 @@ public class JdbcManagedExtensionRecordStore
 
     StoredResource readResource(String tenantId, String sessionId,
             String resourceId) {
+        // The two Agent-configuration kinds are published once at Session creation and stay
+        // PUBLISHED for the Session's whole life: JournalResourceWrites.publishAgentResource
+        // writes that state and no writer ever promotes them to REFERENCED. The transaction
+        // reader already treats PUBLISHED as their committed terminal state
+        // (JournalStoreRows.storedResource / verifyStoredResource), so this record reader must
+        // answer the same question the same way. Every other kind still has to be REFERENCED,
+        // and a PUBLISHED row is only readable under the very bounds that reader enforces.
+        // The capture guards mirror that reader too: a deletion intent is refused outright, and a
+        // non-NULL capture_state is refused unless it is VERIFIED. VERIFIED must stay readable --
+        // ToolPublicationAdmissionStore.referenceCapturedResource promotes a captured receipt to
+        // REFERENCED and MYSQL_INLINE without clearing it, while quarantine later sets QUARANTINED
+        // on that same row and both readers refuse it.
+        // `kind` is VARBINARY, so the two names bind as identities exactly as every other
+        // identity column does; a literal would not be comparable on H2.
         StoredResource resource = jdbc.query(
-                                "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ? AND resource_id = ? AND state = 'REFERENCED' AND storage_kind = 'MYSQL_INLINE' AND object_key IS NULL AND object_version_id IS NULL AND encryption_key_id IS NULL",
+                                "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ? AND resource_id = ? AND (state = 'REFERENCED' OR (state = 'PUBLISHED' AND schema_version = 1 AND ((kind = ? AND byte_length BETWEEN 0 AND " + ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES + ") OR (kind = ? AND byte_length BETWEEN 1 AND " + ManagedSessionStoreModels.MAX_AGENT_SKILLS_BYTES + ")))) AND storage_kind = 'MYSQL_INLINE' AND object_key IS NULL AND object_version_id IS NULL AND encryption_key_id IS NULL AND (capture_state IS NULL OR capture_state = 'VERIFIED') AND deletion_operation_key IS NULL",
                 (result, row) -> new StoredResource(
                         result.getString("resource_id"),
                         result.getString("kind"), result.getInt("schema_version"),
                         result.getLong("byte_length"), result.getString("sha256"),
                         result.getBytes("inline_bytes")),
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                tenantId, sessionId, resourceId).stream().findFirst()
+                tenantId, sessionId, resourceId,
+                ManagedSchemaKeys.identity("managed-agent-instructions"),
+                ManagedSchemaKeys.identity("managed-agent-skills")).stream().findFirst()
                 .orElseThrow(() -> rejected("Missing committed MCP resource."));
         require(resource.bytes() != null
                 && resource.bytes().length == resource.byteLength()
