@@ -868,6 +868,149 @@ describe('extractShellOperationsAcrossCommand', () => {
       "popd $DIR && printf '{}' > settings.local.json",
       [uncertainWrite('/repo/settings.local.json')],
     ],
+    [
+      'marks a brace-expanded cd target as cwd-unknown instead of a phantom path',
+      'cd {a,b} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'marks a brace-range cd target as cwd-unknown',
+      'cd sub{1..3} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'keeps a quoted brace list as a literal cd target',
+      "cd '{a,b}' && echo x > settings.json",
+      [uncertainWrite('/repo/{a,b}/settings.json')],
+    ],
+    [
+      'keeps a single-item brace as a literal cd target',
+      'cd {a} && echo x > settings.json',
+      [write('/repo/{a}/settings.json')],
+    ],
+    [
+      'marks a cd target whose second brace group expands as cwd-unknown',
+      'cd {a}{b,c} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'marks a cd target with an inert first brace group and an expanding second',
+      'cd x{a}y{b,c} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'marks a cd target with a quoted first brace group and an expanding second',
+      "cd '{a}'{b,c} && echo x > settings.json",
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'marks a cd target with an inert first brace group and an expanding range',
+      'cd {a}sub{1..3} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'marks a nested brace group whose outer comma follows the inner close',
+      'cd {a{b},c} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'marks a nested brace group with a range in the outer group',
+      'cd {x{1},y} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'marks a brace group nested at its first character',
+      'cd {{a},b} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'marks a brace group whose first close is escaped',
+      'cd {a\\}b,c} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'marks a brace group whose first close is quoted',
+      "cd {a'}',b} && echo x > settings.json",
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      // bash prints `a` and `{b` for `echo {a,'{'b}`: the quoted `{` does not
+      // nest, so the top-level comma still separates the group.
+      'marks a quoted opening brace after a separator',
+      "cd {a,'{'b} && echo x > settings.json",
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      // bash prints `a}b` and `c` for `echo {a}b,c}`: the first `}` leaves a
+      // body with no separator, so the expansion happens at the second one.
+      'marks a brace group that only separates after a later close',
+      'cd {a}b,c} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      // The separator is quoted, so bash keeps `{a,b}` as one literal word and
+      // the cd really lands in that directory: no expansion, no uncertainty.
+      'resolves a brace target whose only separator is quoted',
+      "cd {a','b} && echo x > settings.json",
+      [write('/repo/{a,b}/settings.json')],
+    ],
+    [
+      // Same shape for a range: `{1'..'3}` is one word, not a range.
+      'resolves a brace target whose only range operator is quoted',
+      "cd {1'..'3} && echo x > settings.json",
+      [write('/repo/{1..3}/settings.json')],
+    ],
+    [
+      // The cd's own redirect still belongs to the segment, so the early
+      // return has to carry it: bash writes `out.txt` before the cd fails.
+      'keeps a redirect on the segment of an expanding brace cd',
+      'cd {a}b,c} > out.txt && echo x > settings.json',
+      [write('/repo/out.txt'), uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      // Same continuation, one close earlier: bash prints `a}` and `b`.
+      'marks a brace group whose close directly precedes the comma',
+      'cd {a},b} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      // An empty `{}` pair is skipped, so bash reads `a{},}` as two words.
+      'marks a comma separated after a skipped empty brace pair',
+      'cd a{},} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'marks a brace group whose separator precedes an inner group close',
+      'cd {a{b,c},d} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      // bash prints `{a}bc` and `{a}bd`: the first group stays literal, the
+      // second one expands, so the whole target never names one directory.
+      'marks a later brace group when the first one stays literal',
+      'cd {a}b{c,d} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'keeps an unclosed brace as a literal cd target',
+      'cd {a,b && echo x > settings.json',
+      [write('/repo/{a,b/settings.json')],
+    ],
+    [
+      'keeps an unclosed brace as a literal pushd target',
+      'pushd {a,b && echo x > settings.json',
+      [write('/repo/{a,b/settings.json')],
+    ],
+    [
+      'marks a brace-expanded pushd target as cwd-unknown',
+      'pushd {a,b} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
+    [
+      'marks a single-result brace range cd target as cwd-unknown',
+      'cd sub{1..1} && echo x > settings.json',
+      [uncertainWrite('/repo/settings.json')],
+    ],
     // Keep the guessed path, but mark it unsafe to trust as final.
     [
       'marks relative writes after dynamic `cd` targets as cwd-unknown',
@@ -997,6 +1140,37 @@ describe('extractShellOperationsAcrossCommand', () => {
     expect(across('cd "$QWEN_HOME" && echo hi >"&"/tmp/out.txt')).toEqual([
       uncertainWrite('/repo/&/tmp/out.txt'),
     ]);
+  });
+
+  it('does not scan a pathological brace target past the length bound', () => {
+    // Every `{` re-walks to its close, so this shape is quadratic without the
+    // bound. The bound may only widen the marking, never resolve a path.
+    const target = '{'.repeat(20_000) + '}'.repeat(20_000);
+    const started = Date.now();
+    expect(across(`cd ${target} && echo x > settings.json`)).toEqual([
+      uncertainWrite('/repo/settings.json'),
+    ]);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('does not scan in-bound brace targets past the work budget', () => {
+    // One target just under the length bound, with 600 bare `{` to re-walk.
+    // Every separator is quoted, so no group can return early and the re-walk
+    // runs to the end each time. One segment is affordable; the cost multiplies
+    // across segments, which the length bail never sees. The budget may only
+    // widen the marking, like the length bail.
+    const inBound = '{'.repeat(600) + "xa'".repeat(600) + '}'.repeat(600);
+    const command = Array.from(
+      { length: 50 },
+      () => `cd ${inBound} && echo x > settings.json`,
+    ).join(' && ');
+    const started = Date.now();
+    expect(across(command)).toEqual([
+      ...Array.from({ length: 50 }, () =>
+        uncertainWrite('/repo/settings.json'),
+      ),
+    ]);
+    expect(Date.now() - started).toBeLessThan(250);
   });
 
   it('falls back gracefully on excessively deep wrapper nesting', () => {

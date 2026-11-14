@@ -2398,6 +2398,25 @@ export function extractShellOperations(
 const MAX_SHELL_UNWRAP_DEPTH = 4;
 
 /**
+ * Longest cd/pushd target worth scanning for a brace group. Past this the
+ * scan bails to "expands", which only widens the cwd marking.
+ */
+const MAX_BRACE_SCAN_LENGTH = 4096;
+
+/**
+ * Total character comparisons the brace scan may spend on one command. The
+ * length bound caps a single target, not the walk: every bare `{` re-walks to
+ * the end, and `resolveCdTargetCwd` runs once per `cd`/`pushd` segment, so a
+ * command built from in-bound brace-dense targets is still unbounded. The
+ * budget is shared by the whole walk, so splitting the work across segments
+ * cannot reset it. Once spent, every later target bails to "expands", which
+ * likewise only widens the marking.
+ */
+const MAX_BRACE_SCAN_STEPS = 1_000_000;
+
+type BraceScanBudget = { steps: number; exhausted: boolean };
+
+/**
  * Classify a literal `cd` command and resolve its target cwd when static.
  * Dynamic targets (command substitutions, variable expansions, `cd -`) are
  * reported separately so callers can mark subsequent relative paths as
@@ -2426,6 +2445,7 @@ function resolveCdTargetCwd(
   command: string,
   cwd: string,
   cwdUnknown: boolean,
+  braceBudget?: BraceScanBudget,
 ): CdResolution {
   const fdRedirects = new Set<number>();
   const fdCloses = new Set<number>();
@@ -2478,12 +2498,122 @@ function resolveCdTargetCwd(
         (target === '~' || target.startsWith('~/')))) &&
     !isShellAbsolutePath(target);
 
+  // Bash expands a brace list before the builtin sees its arguments. A
+  // multi-word list (`cd {a,b}`) makes bash report "too many arguments" and
+  // exit 1; a single-result range (`sub{1..1}` -> `sub1`) makes the cd succeed
+  // into a directory that is not statically derivable here. Either way the
+  // segment's cwd is not the literal target. Resolving the literal `{a,b}`
+  // would publish a phantom directory that a relative write later in the
+  // segment is then attributed to, which is exactly where a deny rule for a
+  // protected relative path would miss. There is no static cwd to derive, so
+  // keep the target static-loop-inert and mark the rest of the segment
+  // cwd-unknown.
+  if (canBraceExpand(target, targetBare, braceBudget)) {
+    return {
+      kind: 'static',
+      cwd,
+      cwdUnknown: true,
+      redirects,
+    };
+  }
+
   return {
     kind: 'static',
     cwd: resolvePath(target, cwd, targetBare),
     cwdUnknown: targetIsDecoded || (cwdUnknown && !isShellAbsolutePath(target)),
     redirects,
   };
+}
+
+/**
+ * True when bash would brace-expand a `cd`/`pushd` target before it runs.
+ *
+ * Only an unquoted, unescaped `{` opens a brace list, and a list needs a comma
+ * or a `..` range between the braces. `{a}` therefore stays literal and so does
+ * a quoted `'{a,b}'`, which is a real directory name a static cd can resolve.
+ *
+ * The separator test is cardinality-blind on purpose: `{1..1}` expands to one
+ * word, so treating a single-result range as inert would publish a cwd the
+ * expansion does not actually produce.
+ *
+ * A target can carry several brace groups, so every `{` is considered: in
+ * `x{a}y{b,c}` the first group is inert but the second still expands into two
+ * words. Stopping at the first group would publish a phantom cwd for the whole
+ * target.
+ *
+ * A group's close is found by depth, not by the first `}`: `{a{b},c}` closes
+ * the inner group first, and a quoted or escaped `}` closes nothing at all, so
+ * matching the first `}` would miss the outer group's top-level comma.
+ *
+ * When no close so far yields a list, bash keeps scanning for a later `}`:
+ * `{a}b,c}` expands to `a}b` and `c`, because the first `}` leaves a body with
+ * no separator while the second one encloses the comma. Stopping at the first
+ * `}` would publish `a}b` as a real cwd.
+ */
+function canBraceExpand(
+  target: string,
+  bare: string | undefined,
+  budget?: BraceScanBudget,
+): boolean {
+  // `bare` is undefined when the caller has no per-character marking; a target
+  // reached here is always shell-decoded, so assume the braces were typed bare.
+  const isBare = (index: number) => bare === undefined || bare[index] === '1';
+  // Without a `}` after it, an opening brace can never close a group, so the
+  // scan is bounded by the last bare `}`: `{{{{…` costs one pass, not one per
+  // `{`, and this runs synchronously on the permission path.
+  let lastClose = -1;
+  for (let i = target.length - 1; i >= 0; i--) {
+    if (target[i] === '}' && isBare(i)) {
+      lastClose = i;
+      break;
+    }
+  }
+  // `lastClose` does not bound the inner walk when the target ends in `}`, so a
+  // long target is still quadratic. No real cd target comes near this length,
+  // and bailing only widens the marking to `cwdUnknown` — which escalates to
+  // `ask` — so it can never narrow it.
+  if (target.length > MAX_BRACE_SCAN_LENGTH) return true;
+  const spent = budget ?? { steps: MAX_BRACE_SCAN_STEPS, exhausted: false };
+  // Once spent it stays spent: re-earning the budget per `cd` segment would
+  // let a command built from in-bound targets multiply the cost.
+  if (spent.exhausted) return true;
+  for (
+    let opening = target.indexOf('{');
+    opening !== -1;
+    opening = target.indexOf('{', opening + 1)
+  ) {
+    if (opening > lastClose) break;
+    if (!isBare(opening)) continue;
+    // Walk the group once, tracking nesting relative to this `{`. A `}` at
+    // depth 0 is a close candidate for this brace; a separator seen at depth 0
+    // stays counted for every later candidate, which is what makes `{a}b,c}`
+    // expand. Separators inside a nested group belong to that group instead.
+    let depth = 0;
+    let separates = false;
+    for (let i = opening + 1; i < target.length; i++) {
+      if (--spent.steps < 0) {
+        spent.exhausted = true;
+        return true;
+      }
+      if (!isBare(i)) continue;
+      const ch = target[i];
+      if (ch === '{') {
+        depth++;
+      } else if (ch === '}') {
+        if (depth > 0) {
+          depth--;
+        } else if (separates) {
+          return true;
+        }
+      } else if (
+        depth === 0 &&
+        (ch === ',' || (ch === '.' && target[i + 1] === '.' && isBare(i + 1)))
+      ) {
+        separates = true;
+      }
+    }
+  }
+  return false;
 }
 
 function toRedirectOperations({
@@ -2541,7 +2671,10 @@ export function extractShellOperationsAcrossCommand(
   command: string,
   cwd: string,
 ): ShellOperation[] {
-  return walkCompoundCommand(command, cwd, 0, false);
+  return walkCompoundCommand(command, cwd, 0, false, {
+    steps: MAX_BRACE_SCAN_STEPS,
+    exhausted: false,
+  });
 }
 
 function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
@@ -2663,6 +2796,7 @@ function walkCompoundCommand(
   cwd: string,
   depth: number,
   initialCwdUnknown: boolean,
+  braceBudget: BraceScanBudget,
 ): ShellOperation[] {
   const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
 
@@ -2678,7 +2812,12 @@ function walkCompoundCommand(
     // cwd, which is exactly where a protected settings file would be.
     const backgrounded = terminator === '&';
 
-    const cdTarget = resolveCdTargetCwd(sub, effectiveCwd, cwdUnknown);
+    const cdTarget = resolveCdTargetCwd(
+      sub,
+      effectiveCwd,
+      cwdUnknown,
+      braceBudget,
+    );
     if (cdTarget.kind !== 'not-cd') {
       const redirectOps = toRedirectOperations(cdTarget.redirects);
       ops.push(
@@ -2708,6 +2847,7 @@ function walkCompoundCommand(
             effectiveCwd,
             depth + 1,
             cwdUnknown,
+            braceBudget,
           ),
         );
         continue;
