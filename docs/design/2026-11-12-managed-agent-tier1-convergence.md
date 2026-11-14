@@ -200,7 +200,7 @@ Constraints:
 
 - Removing the per-call probe from `putIfAbsent` or `deleteIfPresent` (a
   correctness invariant: forbid-overwrite and physical-deletion refusal on a
-  drifted versioned bucket; pinned by the deletion regression test).
+  drifted versioned bucket; pinned by the deletion and put regression tests).
 - Removing the `validateConfiguration()` SPI method or its two explicit
   production call sites.
 - Removing the `kubernetes` reservation guards, or touching the unrelated
@@ -358,10 +358,10 @@ in the admin-launcher design and the deployment guide.
 
 - **Read-only probe removal**: the deletion probe is pinned by a safety regression
   test and a documented erasure invariant; the put probe preserves the
-  forbid-overwrite refusal. Reads are the high-frequency path and verify digests,
-  so removing their probe is the pure performance win with no safety loss. The
-  put/delete probes are correctness, not compatibility, and stay even
-  pre-production.
+  forbid-overwrite refusal and is pinned by its own regression test. Reads are
+  the high-frequency path and verify digests, so removing their probe is the
+  pure performance win with no safety loss. The put/delete probes are
+  correctness, not compatibility, and stay even pre-production.
 - **A neutral object-storage flag that defaults to follow `tool-publication.enabled`**:
   reuses an established `application.yml` pattern and keeps the custom-store
   failure mode; OSS properties stay under `tool-publication.oss-*` (no migration).
@@ -453,8 +453,9 @@ until the required CI gates pass on the accepted revision.
 
 - `open`/`openRange` no longer issue a per-call `getBucketVersioning`;
   `putIfAbsent`/`deleteIfPresent` still refuse a versioned bucket; the deletion
-  regression test is green; the guard-count and versioning request-count tests
-  expect two.
+  and put regression tests are green; the guard-count and versioning
+  request-count tests expect two, and the range-read test verifies that
+  `openRange` issues no versioning probe.
 - `object-storage.enabled=true` with `tool-publication.enabled=false` yields a
   store bean and no publication beans; existing tool-publication deployments work
   unchanged via the follows-default.
