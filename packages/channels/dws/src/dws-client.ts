@@ -5,6 +5,7 @@
  */
 
 import { execFile } from 'node:child_process';
+import { truncateCodePoints } from '@qwen-code/channel-base';
 import { dwsProcessEnvironment } from './dws-environment.js';
 import {
   startDwsEventProcess,
@@ -137,6 +138,101 @@ export type DwsCommandRunner = (
 
 export type DwsCommandOutcome = 'not_sent' | 'unknown';
 
+// The narrowest caller cap (`logReactionFailure`) is 200 code points and keeps
+// the head, so the composed message — prefix, exit detail, reason and the `…`
+// that says the reason was cut — has to fit inside it. The prefix is measured
+// from the argv rather than assumed: the longest subcommand in this client is
+// 26 code points (`chat message list-mentions`), and the old fixed 150 bound
+// assumed ~30, so a full-length reason composed to 212 and the head cut landed
+// on a line that looked complete. Callers import this constant instead of
+// repeating the literal, so narrowing a call site cannot silently undo the fit.
+export const DWS_CALLER_HEAD_BUDGET = 200;
+const DWS_ERROR_DETAIL_ELLIPSIS = '…';
+const DWS_ERROR_PREFIX = 'DWS command failed: ';
+
+// The same class as `LOG_LINE_UNSAFE_RE`: C0/C1 controls, DEL, the invisible
+// formatters and the bidi overrides/isolates. A child's stderr carries text the
+// server supplied, so every one of them is a way to repaint, re-split or reorder
+// the single line this message becomes on the operator's terminal.
+/* eslint-disable no-control-regex */
+const DWS_UNSAFE_TERMINAL_TEXT_RE =
+  /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g;
+/* eslint-enable no-control-regex */
+
+/**
+ * Compose the text a `DwsCommandError` carries. The exit code alone
+ * (`DWS command failed (1)`) is the same for every failure the CLI can hit and
+ * names neither the subcommand nor what it printed, so a user reading the
+ * channel log — which only repeats this message — has nothing to act on.
+ * Callers log through `sanitizeLogText`, which keeps the HEAD of this message
+ * within a 200–300 code-point budget, so the bound below has to leave the
+ * reason — including its ellipsis, which is what tells the operator the line
+ * was cut — inside that window instead of past it.
+ */
+export function describeDwsCommandFailure(
+  args: readonly string[],
+  code: unknown,
+  stderr: string,
+): string {
+  // Only the leading positional words name the subcommand. Everything after
+  // the first flag is either a flag value — `--text` carries the whole
+  // generated reply — or the trailing `--format json` that `run()` appends.
+  // Keeping flag values would both leak outbound message content into stderr
+  // and spend the caller's 300-code-point log budget before the exit code and
+  // the stderr reason, which are the only parts worth reading.
+  const rest = args[0] === '--profile' ? args.slice(2) : args;
+  const firstFlag = rest.findIndex((arg) => arg.startsWith('-'));
+  const subcommand = firstFlag === -1 ? rest : rest.slice(0, firstFlag);
+  // `code` is an exit status only when the child actually exited. A spawn
+  // failure reports an errno string and a timeout kill reports `null`, so
+  // labelling those `exit <value>` would name a status the process never
+  // produced.
+  const detail = [
+    `\`dws ${subcommand.join(' ')}\``,
+    typeof code === 'number'
+      ? `(exit ${String(code)})`
+      : code === undefined
+        ? ''
+        : `(${String(code)})`,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  // The reason a failing CLI prints is its last meaningful line. A banner or a
+  // progress log can be hundreds of code points long, and the whole composed
+  // message is head-truncated by every caller, so keeping a tail wider than
+  // that budget would push the reason past the cut. The unsafe class is
+  // stripped here rather than relying on every caller to sanitize: this message
+  // also reaches `writeStderrLine` raw, and a carriage return, an escape
+  // sequence or a bidi override would otherwise repaint, reorder or forge the
+  // operator's terminal line. One code point becomes one space, so the
+  // code-point arithmetic below stays exact.
+  const reason =
+    stderr
+      .split(/\r?\n/)
+      .map((line) => line.replace(DWS_UNSAFE_TERMINAL_TEXT_RE, ' ').trim())
+      .filter(Boolean)
+      .at(-1) ?? '';
+  if (!reason) {
+    return `DWS command failed: ${detail}.`;
+  }
+  // Counted in code points, because that is the unit the caller's cap uses: an
+  // astral character in the profile name would otherwise over-reserve two
+  // units for one.
+  const reserved = Array.from(
+    `${DWS_ERROR_PREFIX}${detail}: ${DWS_ERROR_DETAIL_ELLIPSIS}`,
+  ).length;
+  const maxReason = DWS_CALLER_HEAD_BUDGET - reserved;
+  const reasonLength = Array.from(reason).length;
+  const bounded =
+    reasonLength > maxReason
+      ? `${truncateCodePoints(
+          reason,
+          maxReason - DWS_ERROR_DETAIL_ELLIPSIS.length,
+        )}${DWS_ERROR_DETAIL_ELLIPSIS}`
+      : reason;
+  return `${DWS_ERROR_PREFIX}${detail}: ${bounded}`;
+}
+
 export class DwsCommandError extends Error {
   constructor(
     message: string,
@@ -219,7 +315,7 @@ function runDwsProcess(
           const outcome = classifyDwsCommandFailure(code);
           reject(
             new DwsCommandError(
-              `DWS command failed${code === undefined ? '' : ` (${String(code)})`}.`,
+              describeDwsCommandFailure(args, code, String(stderr)),
               outcome,
             ),
           );
