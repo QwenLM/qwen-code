@@ -721,6 +721,30 @@ describe('SettingsMessage user-scope editing', () => {
       'tools.webSearch.maxPerSession',
       5,
     );
+    expect(container.textContent).toContain(
+      'This change requires a restart to take effect.',
+    );
+  });
+
+  it('does not request restart after toggling loading phrases despite the shared schema flag', async () => {
+    const setValue = vi.fn(() =>
+      Promise.resolve({ requiresRestart: true } as DaemonSettingUpdateResult),
+    );
+    const loadingPhrases = {
+      ...boolSetting(),
+      key: 'ui.accessibility.enableLoadingPhrases',
+      requiresRestart: true,
+    };
+    const container = renderPanel(makeState([loadingPhrases], setValue));
+    await act(async () => switchButton(container).click());
+    expect(setValue).toHaveBeenCalledWith(
+      'workspace',
+      'ui.accessibility.enableLoadingPhrases',
+      true,
+    );
+    expect(container.textContent).not.toContain(
+      'This change requires a restart to take effect.',
+    );
   });
 
   it('edits the model output language through the language callback, user scope only', async () => {
@@ -1353,6 +1377,26 @@ describe('SettingsMessage user-scope editing', () => {
     expect(switchButton(container)).toBeTruthy();
     expect(container.textContent).not.toContain('Compact Mode');
   });
+
+  it.each([{ phrases: [] }, { phrases: ['custom phrase'] }])(
+    'keeps custom phrase arrays out of the settings panel (%j)',
+    ({ phrases }) => {
+      const customPhrases: DaemonSettingDescriptor = {
+        key: 'ui.customWittyPhrases',
+        type: 'array',
+        label: 'Custom Witty Phrases',
+        category: 'General',
+        requiresRestart: false,
+        default: [],
+        values: { effective: phrases },
+      };
+      const container = renderPanel(
+        makeState([boolSetting(), customPhrases], vi.fn()),
+      );
+      expect(container.textContent).toContain('Test Flag');
+      expect(container.textContent).not.toContain('Custom Witty Phrases');
+    },
+  );
 
   it('keeps model.reasoningEffort out of the generic settings panel', () => {
     const setValue = vi.fn(() =>
