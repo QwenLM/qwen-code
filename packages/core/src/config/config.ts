@@ -1088,22 +1088,21 @@ export interface AgentsCollabSettings {
   /** Default background mode for top-level regular subagents (default: true). */
   defaultBackground?: boolean;
   /**
-   * Global maximum number of background sub-agents running concurrently.
-   * When the cap is reached, additional launches wait for a slot.
+   * Global maximum number of top-level sub-agents running concurrently,
+   * whatever model they use. Background and foreground launches share this
+   * budget; when the cap is reached, additional launches wait for a slot.
+   * This is the ceiling to lower on a machine with a local LLM that cannot
+   * serve parallel requests — extra agents only contend there.
    */
   maxParallelAgents?: number;
   /**
    * Per-model maximum number of top-level sub-agents running concurrently,
    * keyed by concrete model ID. Bounds both background and foreground
-   * launches. For background launches the tighter of this cap and the global
-   * `maxParallelAgents` binds; foreground launches are bounded by this cap
-   * alone. Applies to top-level launches only — nested sub-agents, teammate
+   * launches. The tighter of this cap and the global `maxParallelAgents`
+   * binds. Applies to top-level launches only — nested sub-agents, teammate
    * fan-out, foreground interactive forks, external-executor subagents, and
    * agents dispatched by a workflow script are not capped. Models not listed
-   * here fall back to the global limit for background launches and are
-   * uncapped for foreground launches — list a model here to bound its
-   * foreground fan-out. Useful when a model has a lower concurrency capacity
-   * than the rest.
+   * here are still bounded by the global limit.
    */
   maxParallelAgentsByModel?: Record<string, number>;
   /** Display mode for multi-agent sessions ('in-process' | 'tmux' | 'iterm2') */
