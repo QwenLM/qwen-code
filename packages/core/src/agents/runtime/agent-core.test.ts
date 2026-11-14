@@ -330,7 +330,9 @@ describe('AgentCore.runInAgentFrames', () => {
     const runConfig: RunConfig = { max_turns: 1 };
     return new AgentCore(
       name,
-      {} as unknown as Config,
+      {
+        getToolRegistry: () => ({ getAllToolNames: () => [] }),
+      } as unknown as Config,
       promptConfig,
       modelConfig,
       runConfig,
@@ -859,6 +861,7 @@ describe.each(LOOPS)(
       const config = {
         getToolRegistry: vi.fn().mockReturnValue({
           getTool: vi.fn(),
+          getAllToolNames: vi.fn().mockReturnValue([]),
         }),
         getDebugLogger: vi
           .fn()
@@ -1193,6 +1196,7 @@ describe.each(LOOPS)(
               available && toolName === name
                 ? { serverName: 'catalog', serverToolName: 'lookup' }
                 : undefined,
+            getAllToolNames: () => [],
           }),
           getSkipLoopDetection: () => true,
           getMaxToolCallsPerTurn: () => 100,

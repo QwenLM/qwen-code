@@ -278,7 +278,7 @@ function compareSkillEntries(
  * `/context` bills it with the tool result (#12235).
  */
 export const SKILLS_ACTIVATED_OPENER =
-  'The following skill(s) became available via the Skill tool based on the file you just accessed';
+  'The following skill(s) became available based on the file you just accessed';
 
 /**
  * Renders normalized skill entries into the `<available_skills>` body. Pure: no

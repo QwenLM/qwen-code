@@ -6,11 +6,18 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { ToolNames } from '../../tools/tool-names.js';
+import { ToolMode } from '../../tools/code-mode.js';
+import { makeFakeConfig } from '../../test-utils/config.js';
+import { ToolRegistry } from '../../tools/tool-registry.js';
+import { ExecTool } from '../../tools/exec.js';
+import { MockTool } from '../../test-utils/mock-tool.js';
 import { runWithTeammateIdentity } from '../team/identity.js';
 import { runWithAgentContext } from './agent-context.js';
 import {
   buildSubagentPlanToolBlockedResult,
   getSubagentPlanToolUnavailableMessage,
+  hasAgentSkillExecBinding,
+  isAgentSkillEagerHidden,
   isPlanRequiredTeammatePreApprovalAllowedTool,
   isPlanLifecycleToolUnavailableInSubagent,
   shouldUsePlanOnlyReminderInSubagentContext,
@@ -252,7 +259,7 @@ describe('subagent plan tool policy', () => {
       expect(toolConfigAllowsSkill(toolConfig)).toBe(false);
     });
 
-    it('credits the exec gateway only under CodeModeOnly', () => {
+    it('credits the exec gateway only when its bindings are available', () => {
       const execList = { tools: [ToolNames.EXEC, ToolNames.READ_FILE] };
       expect(toolConfigAllowsSkill(execList, true)).toBe(true);
       expect(toolConfigAllowsSkill(execList, false)).toBe(false);
@@ -264,6 +271,427 @@ describe('subagent plan tool policy', () => {
         ),
       ).toBe(false);
       expect(toolConfigAllowsSkill({ tools: [] }, true)).toBe(false);
+    });
+
+    it('honours the blocklist on the exec route itself', () => {
+      // prepareTools() drops an exec the blocklist names, leaving no gateway;
+      // the listing must not keep crediting the route through it.
+      expect(
+        toolConfigAllowsSkill(
+          { tools: [ToolNames.EXEC], disallowedTools: [ToolNames.EXEC] },
+          true,
+        ),
+      ).toBe(false);
+      expect(
+        toolConfigAllowsSkill(
+          { tools: [ToolNames.EXEC], disallowedTools: [ToolNames.READ_FILE] },
+          true,
+        ),
+      ).toBe(true);
+    });
+
+    // In CodeModeOnly the exec gateway is the ONLY Skill route, so a
+    // toolConfig that closes that route must answer false whatever the
+    // declaration list says: prepareTools() drops a blocklisted exec, and
+    // leaves skill out of codeModeAllowedToolNames when the execution
+    // allowlists name neither skill nor exec; canInvokeSkill never counts a
+    // direct Skill declaration there.
+    it.each([
+      [
+        'a wildcard with exec disallowed',
+        { tools: ['*'], disallowedTools: [ToolNames.EXEC] },
+      ],
+      [
+        'an explicit Skill entry with exec disallowed',
+        { tools: [ToolNames.SKILL], disallowedTools: [ToolNames.EXEC] },
+      ],
+      [
+        'a wildcard whose execution allowlist omits skill and exec',
+        { tools: ['*'], executionAllowedTools: [ToolNames.READ_FILE] },
+      ],
+      [
+        'a wildcard whose nested execution allowlist omits skill',
+        { tools: ['*'], nestedExecutionAllowedTools: [ToolNames.READ_FILE] },
+      ],
+    ])(
+      'closes the CodeModeOnly Skill route when the exec gateway is unreachable: %s',
+      (_label, toolConfig) => {
+        expect(toolConfigAllowsSkill(toolConfig, true, false, true)).toBe(
+          false,
+        );
+      },
+    );
+
+    // The same shapes stay open outside CodeModeOnly: canInvokeSkill counts a
+    // direct Skill declaration in Direct and Hybrid, so the exec-route veto
+    // must not fire there.
+    it.each([
+      [
+        'a wildcard with exec disallowed',
+        { tools: ['*'], disallowedTools: [ToolNames.EXEC] },
+      ],
+      [
+        'a wildcard whose nested execution allowlist omits skill',
+        { tools: ['*'], nestedExecutionAllowedTools: [ToolNames.READ_FILE] },
+      ],
+    ])(
+      'keeps the Skill route open outside CodeModeOnly: %s',
+      (_label, toolConfig) => {
+        expect(toolConfigAllowsSkill(toolConfig, true, false, false)).toBe(
+          true,
+        );
+      },
+    );
+  });
+
+  it('reaches an eager-hidden Skill through a declared bridge', () => {
+    const toolConfig = {
+      tools: [ToolNames.SKILL, ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL],
+    };
+    expect(
+      toolConfigAllowsSkill(toolConfig, false, true, false, true, true),
+    ).toBe(true);
+    expect(
+      toolConfigAllowsSkill({ tools: ['*'] }, false, true, false, true, true),
+    ).toBe(true);
+    // A finite list naming only the two bridge halves reaches the demoted
+    // Skill: AgentCore.canInvokeSkill answers true for this shape.
+    expect(
+      toolConfigAllowsSkill(
+        {
+          tools: [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL],
+          executionAllowedTools: [
+            ToolNames.SKILL,
+            ToolNames.TOOL_SEARCH,
+            ToolNames.TOOL_CALL,
+          ],
+        },
+        false,
+        true,
+        false,
+        true,
+        true,
+      ),
+    ).toBe(true);
+  });
+
+  it('vetoes an eager-hidden Skill the bridge cannot invoke', () => {
+    const bridgeConfig = {
+      tools: [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL],
+      executionAllowedTools: [
+        ToolNames.SKILL,
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+      ],
+    };
+    // The per-agent blocklist still filters the resolved target.
+    expect(
+      toolConfigAllowsSkill(
+        { ...bridgeConfig, disallowedTools: [ToolNames.SKILL] },
+        false,
+        true,
+        false,
+        true,
+        true,
+      ),
+    ).toBe(false);
+    // Without an explicit execution allowlist the finite tools list is the
+    // allowlist, so a bridge-only list does not admit the resolved Skill.
+    expect(
+      toolConfigAllowsSkill(
+        { tools: [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL] },
+        false,
+        true,
+        false,
+        true,
+        true,
+      ),
+    ).toBe(false);
+    // The bridge cannot invoke a Skill the registry never registered.
+    expect(
+      toolConfigAllowsSkill(bridgeConfig, false, true, false, false, true),
+    ).toBe(false);
+    // CodeModeOnly hides and refuses tool_call, so the bridge is no route.
+    expect(
+      toolConfigAllowsSkill(bridgeConfig, false, true, true, true, true),
+    ).toBe(false);
+  });
+
+  it('vetoes an eager-hidden Skill the bridge cannot reach', () => {
+    expect(
+      toolConfigAllowsSkill({ tools: ['*'] }, false, true, false, true, false),
+    ).toBe(false);
+    expect(
+      toolConfigAllowsSkill(
+        { tools: [ToolNames.SKILL] },
+        false,
+        true,
+        false,
+        true,
+        true,
+      ),
+    ).toBe(false);
+  });
+
+  it('vetoes an eager-hidden Skill whose declared bridge is blocklisted', () => {
+    // prepareTools() drops whichever bridge half the blocklist names, so the
+    // wildcard's inherited bridge no longer reaches the withheld schema.
+    for (const blocked of [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL]) {
+      expect(
+        toolConfigAllowsSkill(
+          { tools: ['*'], disallowedTools: [blocked] },
+          false,
+          true,
+          false,
+          true,
+          true,
+        ),
+      ).toBe(false);
+    }
+    // An unrelated blocklist entry leaves the bridge intact.
+    expect(
+      toolConfigAllowsSkill(
+        { tools: ['*'], disallowedTools: [ToolNames.SHELL] },
+        false,
+        true,
+        false,
+        true,
+        true,
+      ),
+    ).toBe(true);
+  });
+
+  it('vetoes an eager-hidden Skill an execution allowlist hides the bridge from', () => {
+    // Hybrid declarations are narrowed by the execution allowlist, so a
+    // wildcard alone does not keep a bridge half the allowlist excludes.
+    for (const allowed of [
+      [ToolNames.READ_FILE],
+      [ToolNames.TOOL_SEARCH],
+      [ToolNames.TOOL_CALL],
+    ]) {
+      expect(
+        toolConfigAllowsSkill(
+          { tools: ['*'], executionAllowedTools: allowed },
+          false,
+          true,
+          false,
+          true,
+          true,
+        ),
+      ).toBe(false);
+    }
+    // Both halves declared keep the route open only while the allowlist also
+    // admits the resolved target: the scheduler re-checks `skill` against the
+    // same list after the bridge resolves the wrapper.
+    expect(
+      toolConfigAllowsSkill(
+        {
+          tools: ['*'],
+          executionAllowedTools: [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL],
+        },
+        false,
+        true,
+        false,
+        true,
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      toolConfigAllowsSkill(
+        {
+          tools: ['*'],
+          executionAllowedTools: [
+            ToolNames.TOOL_SEARCH,
+            ToolNames.TOOL_CALL,
+            ToolNames.SKILL,
+          ],
+        },
+        false,
+        true,
+        false,
+        true,
+        true,
+      ),
+    ).toBe(true);
+  });
+
+  it.each([ToolMode.Direct, ToolMode.CodeMode])(
+    'reports a permission-deferred skill as eager-hidden in %s',
+    (mode) => {
+      const config = makeFakeConfig({ toolMode: mode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerPermissionDeferredFactory(
+        ToolNames.SKILL,
+        async () => new MockTool({ name: ToolNames.SKILL }),
+      );
+
+      // prepareTools() removes the declaration outside CodeModeOnly, so the
+      // listing must not survive without a route to the tool.
+      expect(isAgentSkillEagerHidden(config)).toBe(true);
+      expect(
+        toolConfigAllowsSkill(
+          { tools: [ToolNames.SKILL] },
+          false,
+          isAgentSkillEagerHidden(config),
+          false,
+          true,
+          false,
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it('reports a permission-deferred skill as not hidden in CodeModeOnly', () => {
+    // The one mode whose admission pool retains eager-hidden targets: exec
+    // binds the registered tool even while its direct schema is withheld.
+    const config = makeFakeConfig({ toolMode: ToolMode.CodeModeOnly });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.registerPermissionDeferredFactory(
+      ToolNames.SKILL,
+      async () => new MockTool({ name: ToolNames.SKILL }),
+    );
+    expect(isAgentSkillEagerHidden(config)).toBe(false);
+  });
+
+  describe('hasAgentSkillExecBinding', () => {
+    const contextWith = (
+      mode: ToolMode,
+      registerExec: boolean,
+      registerSkill = true,
+    ) => {
+      const config = makeFakeConfig({ toolMode: mode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      if (registerExec) {
+        registry.registerTool(new ExecTool(config));
+      }
+      if (registerSkill) {
+        registry.registerTool(new MockTool({ name: ToolNames.SKILL }));
+      }
+      return config;
+    };
+
+    it('retains the always-loaded exec route when permission-deferred in Hybrid', () => {
+      const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerPermissionDeferredFactory(
+        ToolNames.EXEC,
+        async () => new ExecTool(config),
+      );
+      registry.registerTool(new MockTool({ name: ToolNames.SKILL }));
+      vi.spyOn(config, 'getVisibleTools').mockReturnValue(
+        new Set([ToolNames.SKILL]),
+      );
+      expect(hasAgentSkillExecBinding(config)).toBe(true);
+      expect(
+        toolConfigAllowsSkill(
+          { tools: [ToolNames.EXEC] },
+          hasAgentSkillExecBinding(config),
+          isAgentSkillEagerHidden(config),
+        ),
+      ).toBe(true);
+    });
+
+    it.each([ToolMode.CodeMode, ToolMode.CodeModeOnly])(
+      'reports no exec route in %s when exec was never registered',
+      (mode) => {
+        // A deny rule or a legacy coreTools allowlist can keep exec out of
+        // the registry entirely; the mode alone must not answer true.
+        const context = contextWith(mode, false);
+        expect(hasAgentSkillExecBinding(context)).toBe(false);
+        expect(
+          toolConfigAllowsSkill(
+            { tools: [ToolNames.EXEC, ToolNames.READ_FILE] },
+            hasAgentSkillExecBinding(context),
+            isAgentSkillEagerHidden(context),
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it.each([ToolMode.CodeMode, ToolMode.CodeModeOnly])(
+      'reports the exec route in %s while exec is registered',
+      (mode) => {
+        expect(hasAgentSkillExecBinding(contextWith(mode, true))).toBe(true);
+      },
+    );
+
+    // In CodeModeOnly the exec gateway is the ONLY Skill route — the
+    // invocation gate never counts a direct Skill declaration there — so with
+    // exec kept out of the registry every toolConfig shape must answer false,
+    // including the wildcard the resume path defaults to. Removing the
+    // exec-registration probe from hasAgentSkillExecBinding, or dropping the
+    // codeModeOnly conjunction from the predicate, turns each row red.
+    it.each([
+      ['a wildcard', { tools: ['*'] }],
+      ['an explicit Skill entry', { tools: [ToolNames.SKILL] }],
+      ['no tool config', undefined],
+    ])(
+      'closes every CodeModeOnly Skill route when exec is unregistered: %s',
+      (_label, toolConfig) => {
+        const context = contextWith(ToolMode.CodeModeOnly, false);
+        expect(hasAgentSkillExecBinding(context)).toBe(false);
+        expect(
+          toolConfigAllowsSkill(
+            toolConfig,
+            hasAgentSkillExecBinding(context),
+            isAgentSkillEagerHidden(context),
+            context.getToolMode?.() === ToolMode.CodeModeOnly,
+          ),
+        ).toBe(false);
+      },
+    );
+
+    // In CodeModeOnly the exec gateway reaches only registered tools, so a
+    // Skill the registry never registered (a deny rule, a legacy coreTools
+    // allowlist, or a skill-withheld parent's Config keeps the factory out)
+    // closes every route even while exec itself is registered — including the
+    // wildcard and an explicit Skill entry, the two arms that bypass
+    // execRouteOpen. Removing the skillRegistered term from the predicate's
+    // codeModeOnly veto turns each row red.
+    it.each([
+      ['a wildcard', { tools: ['*'] }],
+      ['an explicit Skill entry', { tools: [ToolNames.SKILL] }],
+      ['no tool config', undefined],
+    ])(
+      'closes every CodeModeOnly Skill route when skill is unregistered: %s',
+      (_label, toolConfig) => {
+        const context = contextWith(ToolMode.CodeModeOnly, true, false);
+        expect(hasAgentSkillExecBinding(context)).toBe(true);
+        expect(
+          toolConfigAllowsSkill(
+            toolConfig,
+            hasAgentSkillExecBinding(context),
+            isAgentSkillEagerHidden(context),
+            context.getToolMode?.() === ToolMode.CodeModeOnly,
+            context
+              .getToolRegistry()
+              .getAllToolNames()
+              .includes(ToolNames.SKILL),
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it('keeps the wildcard route open in CodeModeOnly while exec is registered', () => {
+      const context = contextWith(ToolMode.CodeModeOnly, true);
+      expect(
+        toolConfigAllowsSkill(
+          { tools: ['*'] },
+          hasAgentSkillExecBinding(context),
+          isAgentSkillEagerHidden(context),
+          context.getToolMode?.() === ToolMode.CodeModeOnly,
+        ),
+      ).toBe(true);
+    });
+
+    it('reports no exec route in Direct mode even with exec registered', () => {
+      expect(hasAgentSkillExecBinding(contextWith(ToolMode.Direct, true))).toBe(
+        false,
+      );
     });
   });
 });
