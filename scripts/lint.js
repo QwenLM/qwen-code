@@ -13,13 +13,12 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
-  realpathSync,
   rmSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { getLintScope } from './lint-scope.js';
+import { isEntryPoint } from './lib/entry-point.js';
 
 const ACTIONLINT_VERSION = '1.7.12';
 const SHELLCHECK_VERSION = '0.11.0';
@@ -587,22 +586,7 @@ async function main() {
 // instead of installing anything, silently, under continue-on-error
 // (PR #16001 review, round 4). The argv[1] guard keeps `node -e` imports
 // (no argv[1]) inert too.
-function isEntryPoint() {
-  const argv1 = process.argv[1];
-  if (!argv1) return false;
-  try {
-    // Node normally resolves the entry's symlinks, but keeps them when
-    // --preserve-symlinks-main is enabled. Accept both path forms.
-    return (
-      import.meta.url === pathToFileURL(argv1).href ||
-      import.meta.url === pathToFileURL(realpathSync(argv1)).href
-    );
-  } catch {
-    return false;
-  }
-}
-
-if (isEntryPoint()) {
+if (isEntryPoint(import.meta.url, process.argv[1])) {
   main().catch((error) => {
     console.error(error);
     process.exitCode = 1;

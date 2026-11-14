@@ -528,6 +528,11 @@ describe.skipIf(process.platform === 'win32')(
           join(dirname(lintScript), 'lint-scope.js'),
           join(isolated, 'lint-scope.js'),
         );
+        mkdirSync(join(isolated, 'lib'));
+        copyFileSync(
+          join(dirname(lintScript), 'lib', 'entry-point.js'),
+          join(isolated, 'lib', 'entry-point.js'),
+        );
         put('workflow.yml', 'name: test\n');
         commit();
         let scriptDirectory = isolated;
