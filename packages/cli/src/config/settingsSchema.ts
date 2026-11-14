@@ -397,6 +397,49 @@ const SETTINGS_SCHEMA = {
           'Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers.',
         showInDialog: false,
       },
+      sessionPrWatch: {
+        type: 'object',
+        label: 'Session PR Watch',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: {},
+        description:
+          "PR-state transitions delivered to the sessions bound to a pull request. Off until events are subscribed. Honored from user, system, and system-defaults settings only — a workspace settings file must not spend daemon-wide gh budget or inject prompts across workspaces; a hosted GitHub channel's prWatchEvents is the trust-gated per-workspace path.",
+        showInDialog: false,
+        properties: {
+          events: {
+            type: 'array',
+            label: 'PR Watch Events',
+            category: 'Advanced',
+            requiresRestart: true,
+            default: [] as string[],
+            description:
+              'Transition types to deliver: ci_failure, merge_conflict, head_change, state_change. Empty (the default) runs no view and delivers nothing. QWEN_SESSION_PR_WATCH_EVENTS overrides this as a comma-separated list; an unrecognized entry is dropped with a warning and the recognized members still apply. Files under a served project may not set either this key or its environment override.',
+            showInDialog: false,
+            items: { type: 'string' },
+          },
+          wakeDormant: {
+            type: 'boolean',
+            label: 'PR Watch Wake Dormant',
+            category: 'Advanced',
+            requiresRestart: true,
+            default: true,
+            description:
+              "Restore a dormant bound session to deliver a transition. When false, the transition stays queued until that session's next live turn, bounded by the watch's retention (7 days) and per-PR pending cap (16 entries); older or overflow entries are dropped. QWEN_SESSION_PR_WATCH_WAKE_DORMANT overrides this.",
+            showInDialog: false,
+          },
+          actions: {
+            type: 'object',
+            label: 'PR Watch Actions',
+            category: 'Advanced',
+            requiresRestart: true,
+            default: {} as Record<string, string>,
+            description:
+              'Operator instruction templates keyed by event type, optionally prefixed with a role (review, verify, fix). Without it, delivery is the single most recently active binder and the generic prompt. An unrecognized key, an empty template or one over 2000 code points refuses the boot. Settings-only: no environment override.',
+            showInDialog: false,
+          },
+        },
+      },
     },
   },
 
@@ -4592,7 +4635,17 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The Ink TUI sends its model requests and runs its tool batches through it, while its turn continuation, OpenTUI and subagents keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.',
+          'Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The Ink TUI and OpenTUI run their turns on it, and subagents send their model requests and run their tool calls through it. The QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP environment variable overrides this setting per surface: `1` enables every surface, `0` disables every surface, and a comma-separated list such as `headless,acp=0` forces individual surfaces (headless, acp, ink, opentui, agent-core, speculation). A bare `1`/`0` is only recognized as the whole value, not inside a list; surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
+        showInDialog: true,
+      },
+      eventBusAgentLoop: {
+        type: 'boolean',
+        label: 'Event-Bus Agent Loop',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Run the shared agent loop on the event-bus architecture (experimental). Applies to headless sessions (`-p` and stream-json), ACP sessions (Zed, VS Code, Web Shell, channels), the Ink TUI, OpenTUI, and subagents when experimental.unifiedAgentLoop is also enabled; other surfaces keep their current loop internals. The QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP environment variable overrides this setting: `1` enables it, `0` disables it, and a comma-separated list such as `headless=0` forces individual surfaces (headless, acp, ink, opentui, agent-core; `speculation` is reserved). Only those wired surfaces take effect today; a bare `1`/`0` is only recognized as the whole value, not inside a list, and surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
         showInDialog: true,
       },
       agentCollaboration: {

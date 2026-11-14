@@ -40,6 +40,11 @@ import {
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedApprovalWaiters } from './hosted-tool-approval.js';
+import {
+  enableManagedExecutionDiagnostics,
+  parseManagedExecutionEvidence,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
+import { assertManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import {
   hostedShellLaneAttachesChildAgents,
@@ -145,7 +150,7 @@ function createTurn(
   launchEnabled: () => boolean = () => true,
   extensionExtras: Pick<
     NonNullable<ConstructorParameters<typeof HostedWorkspaceToolTurn>[9]>,
-    'extensionAgents' | 'extensionConfig' | 'mcp' | 'hooks'
+    'extensionAgents' | 'extensionConfig' | 'mcp' | 'hooks' | 'clientFiles'
   > = {},
 ): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
@@ -153,23 +158,26 @@ function createTurn(
     session,
     createManagedHarnessHandle(session),
     promptName,
-    async (type, messageParts, model, identity) => {
+    async (type, messageParts, model, identity, diagnostics) => {
       const uuid = identity?.uuid ?? randomUUID();
-      await session.sink.write({
-        uuid,
-        parentUuid: null,
-        sessionId: sessionKey.sessionId,
-        timestamp: identity?.timestamp ?? new Date().toISOString(),
-        model,
-        type,
-        cwd: root,
-        version: 'test',
-        daemonPromptId: promptName,
-        message: {
-          role: type === 'assistant' ? 'model' : 'user',
-          parts: messageParts,
+      await session.sink.write(
+        {
+          uuid,
+          parentUuid: null,
+          sessionId: sessionKey.sessionId,
+          timestamp: identity?.timestamp ?? new Date().toISOString(),
+          model,
+          type,
+          cwd: root,
+          version: 'test',
+          daemonPromptId: promptName,
+          message: {
+            role: type === 'assistant' ? 'model' : 'user',
+            parts: messageParts,
+          },
         },
-      });
+        diagnostics,
+      );
       return uuid;
     },
     messageFitsInline,
@@ -905,6 +913,7 @@ it('says the outcome is unavailable for a worktree receipt off the shape', async
 });
 
 it('keeps the merge outcome when it folds an oversized worktree answer', async () => {
+  await enableManagedExecutionDiagnostics(session);
   messageFitsInline.mockImplementation(
     (_type, parts, _model) => JSON.stringify(parts).length < 65536,
   );
@@ -918,6 +927,19 @@ it('keeps the merge outcome when it folds an oversized worktree answer', async (
   expect(answer).toMatch(
     /\[child workspace\] merged into this Workspace as uncommitted changes\.$/,
   );
+  const event = session.authority.lastEventOfKind('message.committed')!;
+  const evidence = parseManagedExecutionEvidence(
+    await session.resources.read(
+      assertManagedSessionDurableRef(
+        event.payload['diagnosticsRef'],
+        'diagnosticsRef',
+      ),
+    ),
+  );
+  expect(evidence.observations[0]).toMatchObject({
+    execution: 'success',
+    delivery: 'partial',
+  });
 });
 
 it('refuses v1-unsupported agent arguments with a named scope', async () => {
@@ -999,6 +1021,7 @@ it('commits the launch intent on the sent arm and answers with the task id', asy
 });
 
 it('refuses a fifth concurrent launch with the count limit', async () => {
+  await enableManagedExecutionDiagnostics(session);
   const turn = createTurn();
   for (let index = 0; index < 4; index++) {
     await executeAgent(
@@ -1014,6 +1037,19 @@ it('refuses a fifth concurrent launch with the count limit', async () => {
     call({ description: 'task 5', prompt: 'work 5' }, 'call-5'),
   );
   expect(JSON.stringify(responses)).toContain('count_limit');
+  const event = session.authority.lastEventOfKind('message.committed')!;
+  const evidence = parseManagedExecutionEvidence(
+    await session.resources.read(
+      assertManagedSessionDurableRef(
+        event.payload['diagnosticsRef'],
+        'diagnosticsRef',
+      ),
+    ),
+  );
+  expect(evidence.observations[0]).toMatchObject({
+    admission: 'denied',
+    execution: 'not_started',
+  });
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     4,
   );
@@ -1749,6 +1785,123 @@ it.each([
     }
   },
 );
+
+it('keeps generation-scoped client-files names out of the durable extension launch pin', async () => {
+  // The launch pin is compared with isDeepStrictEqual on every re-drive; a
+  // generation-scoped client-files tool name must not enter it, or a reconnect
+  // that rotates the generation would change the descriptor and throw
+  // stale-config. Pin both the exclusion and the cross-generation stability.
+  broker.capabilityDigest = MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST;
+  const pin = {
+    extensionId: 'review',
+    packageRevision: 1,
+    packageDigest: 'a'.repeat(64),
+  };
+  const descriptor = {
+    configRevision: 1,
+    bundleRef: await session.resources.publish(
+      'managed-extension-config-bundle',
+      Buffer.from('{}'),
+    ),
+    pin,
+    contributionsRef: await session.resources.publish(
+      'managed-extension-contributions',
+      Buffer.from('{}'),
+    ),
+    agentName: 'review:auditor',
+    toolNames: [],
+  };
+  let cfToolName = 'mcp_' + '1'.repeat(32);
+  const clientFiles = {
+    tools: () => [
+      {
+        name: cfToolName,
+        description: 'MCP tool: "read_file"',
+        parametersJsonSchema: { type: 'object' },
+      },
+    ],
+    catalogs: () => [
+      {
+        serverId: 'local-files',
+        generation: 1,
+        tools: [{ name: 'read_file', inputSchema: {} }],
+      },
+    ],
+    resolve: (name: string) =>
+      name === cfToolName ? { name: 'read_file', inputSchema: {} } : undefined,
+    invoke: vi.fn(async () => ({ content: [] })),
+  } as unknown as import('./hosted-client-files-session.js').HostedClientFilesSession;
+  const extensionExtras = {
+    extensionAgents: [{ name: descriptor.agentName, descriptor }],
+    extensionConfig: {
+      revision: 1,
+      packages: [{ pin, assetRoot: 'extension://review/' }],
+    },
+    clientFiles,
+  };
+  const launchToolNames = async (callId: string) => {
+    const turn = createTurn(
+      0,
+      undefined,
+      'prompt',
+      true,
+      false,
+      true,
+      undefined,
+      'hosted-workspace-shell/1',
+      false,
+      true,
+      () => true,
+      extensionExtras,
+    );
+    turn.setChildModelRoute('model', {
+      authType: 'openai',
+      endpointDigest: 'a'.repeat(64),
+      providerPin: 'b'.repeat(64),
+    });
+    const running = executeAgent(
+      turn,
+      call(
+        {
+          description: 'extension audit',
+          prompt: 'review the package',
+          subagent_type: descriptor.agentName,
+          run_in_background: false,
+        },
+        callId,
+      ),
+    );
+    await vi.waitFor(
+      () => expect(children.record(`prompt:${callId}`)).toBeDefined(),
+      { timeout: 10_000 },
+    );
+    const launch = await children.publicLaunchSnapshot(`prompt:${callId}`);
+    expect(launch?.version).toBe(2);
+    const toolNames =
+      launch?.version === 2 ? launch.extensionAgent?.toolNames : undefined;
+    await children.dispatchStarted(`prompt:${callId}`, {
+      dispatchId: `dispatch-${callId}`,
+      runtime: { runtimeBindingId: `binding-${callId}`, generation: '1' },
+    });
+    await children.attach(`prompt:${callId}`, randomUUID());
+    await children.settleCompleted(`prompt:${callId}`, {
+      result: Buffer.from('extension child result'),
+      receipt: Buffer.from('{"outcome":"settled"}'),
+    });
+    await children.accept(`prompt:${callId}`);
+    await running;
+    return toolNames;
+  };
+  const first = await launchToolNames('call-1');
+  expect(first).toContain('read_file');
+  expect(first).not.toContain(cfToolName);
+  // Rotate the registration's generation: the advertised tool name changes,
+  // but the durable pin must be identical (no ephemeral name, no stale-config).
+  cfToolName = 'mcp_' + '2'.repeat(32);
+  const second = await launchToolNames('call-2');
+  expect(second).not.toContain(cfToolName);
+  expect(second).toEqual(first);
+});
 
 // The wake-turn id already embeds its commissioning run id
 // (`<childRunId>:accept:notify`); using it verbatim as the launch base

@@ -1,12 +1,20 @@
 import { useEffect, useMemo, useState } from 'react';
 import type {
   ManagedDiagnosticAgentTrace,
+  ManagedDiagnosticContextUsage,
   ManagedDiagnosticResources,
+  ManagedDiagnosticStats,
   ManagedDiagnosticsProvider,
 } from './managed-agent-provider';
 
-export type ManagedDiagnosticsTab = 'resources' | 'agents';
+export type ManagedDiagnosticsTab =
+  | 'context'
+  | 'statistics'
+  | 'resources'
+  | 'agents';
 export type ManagedDiagnosticsSnapshot =
+  | { kind: 'context'; value: ManagedDiagnosticContextUsage }
+  | { kind: 'statistics'; value: ManagedDiagnosticStats }
   | { kind: 'resources'; value: ManagedDiagnosticResources }
   | { kind: 'agents'; value: ManagedDiagnosticAgentTrace };
 
@@ -17,6 +25,7 @@ export function useManagedDiagnostics({
   tab,
   running,
   revision,
+  enabled = true,
 }: {
   provider: ManagedDiagnosticsProvider;
   sessionId: string;
@@ -24,6 +33,7 @@ export function useManagedDiagnostics({
   tab: ManagedDiagnosticsTab;
   running: boolean;
   revision?: string;
+  enabled?: boolean;
 }) {
   const owner = useMemo(
     () => ({ provider, sessionId, clientId, tab }),
@@ -45,11 +55,22 @@ export function useManagedDiagnostics({
   const current = frame?.owner === owner ? frame : undefined;
 
   useEffect(() => {
+    if (!enabled) return;
     const abort = new AbortController();
     let inFlight = false;
     const read = async (): Promise<ManagedDiagnosticsSnapshot> => {
       const options = { clientId, signal: abort.signal };
       switch (tab) {
+        case 'context':
+          return {
+            kind: tab,
+            value: await provider.getContextUsage(sessionId, options),
+          };
+        case 'statistics':
+          return {
+            kind: tab,
+            value: await provider.getStatistics(sessionId, options),
+          };
         case 'resources':
           return {
             kind: tab,
@@ -97,7 +118,7 @@ export function useManagedDiagnostics({
       if (document.visibilityState === 'visible') void refresh();
     };
     void refresh();
-    const polling = running && tab === 'agents';
+    const polling = running && (tab === 'statistics' || tab === 'agents');
     const timer = polling
       ? window.setInterval(visibleRefresh, 5_000)
       : undefined;
@@ -117,12 +138,13 @@ export function useManagedDiagnostics({
     running,
     revision,
     refreshRevision,
+    enabled,
   ]);
 
   return {
     snapshot: current?.snapshot,
-    loading: current?.loading ?? true,
-    error: current?.error ?? false,
+    loading: enabled && (current?.loading ?? true),
+    error: enabled && (current?.error ?? false),
     refresh: () => setRefreshRevision((value) => value + 1),
     hasPrevious: cursors.length > 1,
     previous: () => setPaging({ owner, cursors: cursors.slice(0, -1) }),

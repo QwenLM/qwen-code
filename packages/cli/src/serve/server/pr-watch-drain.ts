@@ -25,11 +25,13 @@ import {
   PR_WATCH_DELIVERED_CAP,
   prWatchFilePath,
   readPrWatchStateSync,
+  releaseOwnedPrWatchSync,
   writePrWatchStateSync,
   type PrWatchIdentity,
   type PrWatchPendingEntry,
   type PrWatchRoleGroup,
   type PrWatchState,
+  type PrTransitionType,
 } from './pr-watch-store.js';
 
 /** Pending entries older than this are dropped with a log line (master §5). */
@@ -83,7 +85,15 @@ export interface PrWatchDrainDeps {
   readPushedHeads: (
     recipient: PrWatchRecipient,
   ) => Promise<ReadonlySet<string> | undefined>;
-  actions?: ReadonlyMap<string, string>;
+  /**
+   * The templates for one entry's type on its PR's host. Undefined keeps the
+   * legacy single winner; a map — possibly empty — selects role-aware
+   * delivery. An empty map means no role subscribed that type.
+   */
+  actionsForEvent?: (
+    type: PrTransitionType,
+    host: string,
+  ) => ReadonlyMap<string, string> | undefined;
   wakeDormant?: boolean;
   now?: () => number;
   log?: (message: string) => void;
@@ -107,15 +117,59 @@ export interface PrWatchDrainState {
   restoring: Set<string>;
   /** Recipients with a permanent Gone outcome, sessionId -> excluded-at ms. */
   gone: Map<string, number>;
+  /**
+   * Resolves once no tick and no restore is in flight, so a shutting-down
+   * owner can release its record without a successor overlapping it. An
+   * admitted mark left by a failed recording write is NOT in-flight work — it
+   * is a retry the next owner performs — so it never holds this open.
+   * Unbounded on purpose: the caller bounds it, since only the caller knows
+   * its shutdown deadline.
+   */
+  idle: () => Promise<void>;
+}
+
+interface PrWatchDrainLiveness {
+  activeTicks: number;
+  waiters: Set<() => void>;
+}
+
+/** Kept out of the public state so only this module can settle it. */
+const drainLiveness = new WeakMap<PrWatchDrainState, PrWatchDrainLiveness>();
+
+function livenessOf(state: PrWatchDrainState): PrWatchDrainLiveness {
+  let liveness = drainLiveness.get(state);
+  if (!liveness) {
+    liveness = { activeTicks: 0, waiters: new Set() };
+    drainLiveness.set(state, liveness);
+  }
+  return liveness;
+}
+
+function settleIfIdle(state: PrWatchDrainState): void {
+  const liveness = drainLiveness.get(state);
+  if (!liveness || liveness.activeTicks > 0 || state.restoring.size > 0) return;
+  for (const resolve of liveness.waiters) resolve();
+  liveness.waiters.clear();
 }
 
 export function createPrWatchDrainState(): PrWatchDrainState {
-  return {
+  const state: PrWatchDrainState = {
     retained: new Map(),
     inFlight: new Map(),
     restoring: new Set(),
     gone: new Map(),
+    idle: () =>
+      new Promise<void>((resolve) => {
+        const liveness = livenessOf(state);
+        if (liveness.activeTicks === 0 && state.restoring.size === 0) {
+          resolve();
+          return;
+        }
+        liveness.waiters.add(resolve);
+      }),
   };
+  livenessOf(state);
+  return state;
 }
 
 export interface PrWatchDrainResult {
@@ -123,6 +177,88 @@ export interface PrWatchDrainResult {
   delivered: number;
   dropped: number;
   deleted: number;
+}
+
+/**
+ * Default bound on the shutdown wait. This is the only thing keeping `close()`
+ * finite: `closeOnce` gives app drains no deadline of their own, and its
+ * `DEFAULT_CLOSE_TIMEOUT_MS` bounds the listener close, which runs concurrently
+ * with the drains. Kept equal to that 5s so shutdown stays ~5s rather than
+ * becoming additive — raising it silently lengthens every daemon shutdown.
+ */
+export const PR_WATCH_SHUTDOWN_WAIT_MS = 5_000;
+
+export interface PrWatchShutdownOptions {
+  state: PrWatchDrainState;
+  watchDir: string;
+  /** Stops the refresh timer so no new tick can start. */
+  stopTimer: () => void;
+  /**
+   * Settles the refresh tick that holds the owner record. The observation
+   * claims it for the whole tick but is not drain work, so `state.idle()`
+   * cannot see it — releasing without this would let a successor claim and
+   * deliver while this daemon is still viewing.
+   */
+  waitForTick?: () => Promise<void>;
+  timeoutMs?: number;
+  log?: (message: string) => void;
+}
+
+/**
+ * Stop the watch, let in-flight work settle, then release the owner record —
+ * in that order, so a successor never overlaps this daemon's observation,
+ * restores and admissions (master §2).
+ *
+ * On timeout the record is deliberately KEPT. Releasing it while a restore is
+ * still admitting would let a successor claim and deliver the same transition
+ * twice; leaving it is safe because the claim sweeps a record whose process is
+ * provably gone, so the successor takes over once this process exits.
+ */
+export async function stopPrWatch(
+  options: PrWatchShutdownOptions,
+): Promise<void> {
+  const log = options.log ?? (() => {});
+  const timeoutMs = options.timeoutMs ?? PR_WATCH_SHUTDOWN_WAIT_MS;
+  options.stopTimer();
+  let timer: NodeJS.Timeout | undefined;
+  let timedOut = false;
+  // Sequential, not parallel: a tick that is still observing has not entered a
+  // drain tick yet, so sampling drain-idle alongside it resolves immediately —
+  // and that tick then dispatches a restore which outlives it. Drain-idle has
+  // to be sampled after the tick ends. Both arms share one timeout budget.
+  const settled = (async () => {
+    await options.waitForTick?.();
+    await options.state.idle();
+  })();
+  try {
+    await Promise.race([
+      settled,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          resolve();
+        }, timeoutMs);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+  if (timedOut) {
+    log(
+      `PR watch: shutdown wait exceeded ${timeoutMs}ms with work still in flight; keeping the owner record for the successor to sweep`,
+    );
+    return;
+  }
+  const outcome = releaseOwnedPrWatchSync(options.watchDir);
+  if (outcome === 'released') {
+    log('PR watch: released the owner record on shutdown');
+  } else if (outcome !== 'absent') {
+    // 'absent' is the ordinary never-claimed case and stays silent. Every
+    // other refusal kept a record this daemon expected to hand back, which an
+    // operator cannot otherwise distinguish from a clean release.
+    log(`PR watch: shutdown finished but kept the owner record (${outcome})`);
+  }
 }
 
 function roleGroupOf(role: PrWatchRecipient['role']): PrWatchRoleGroup {
@@ -394,6 +530,22 @@ export async function runPrWatchDrainTick(
   state: PrWatchDrainState,
   coveragePartial = false,
 ): Promise<PrWatchDrainResult> {
+  const liveness = livenessOf(state);
+  liveness.activeTicks += 1;
+  try {
+    return await drainTick(workspaces, deps, state, coveragePartial);
+  } finally {
+    liveness.activeTicks -= 1;
+    settleIfIdle(state);
+  }
+}
+
+async function drainTick(
+  workspaces: readonly WorkspaceRuntime[],
+  deps: PrWatchDrainDeps,
+  state: PrWatchDrainState,
+  coveragePartial: boolean,
+): Promise<PrWatchDrainResult> {
   const log = deps.log ?? (() => {});
   const now = deps.now ?? Date.now;
   const claim = claimPrWatchOwnershipSync(deps.watchDir, log);
@@ -551,9 +703,11 @@ async function drainEntry(
   log: (message: string) => void,
 ): Promise<{ delivered: number; done: boolean; entry: PrWatchPendingEntry }> {
   const identity = current.pr;
-  // An empty map is not a subscription: treat it as no actions so a
-  // momentarily empty configuration cannot strand live transitions.
-  const actions = deps.actions?.size ? deps.actions : undefined;
+  // The subscription decides per type: undefined keeps the legacy single
+  // winner, while a map — possibly empty — selects role-aware delivery. The
+  // alias uses the empty map to mean "no role subscribed", which must not
+  // fall back to the single winner.
+  const actions = deps.actionsForEvent?.(entry.type, identity.host);
   const roleAware = actions !== undefined;
   const deliveredKeys = new Set(current.delivered ?? []);
   const isGone = (sessionId: string): boolean => {
@@ -678,7 +832,10 @@ async function drainEntry(
           group,
           recipient,
           log,
-        ).finally(() => state.restoring.delete(recipient.sessionId));
+        ).finally(() => {
+          state.restoring.delete(recipient.sessionId);
+          settleIfIdle(state);
+        });
         break;
       }
       const promptText = buildDrainPrompt(current, entry, recipient, actions);
@@ -794,7 +951,7 @@ async function restoreAndAdmit(
         const liveEntry = (current.pending ?? []).find(
           (p) => p.key === entry.key,
         );
-        const actions = deps.actions?.size ? deps.actions : undefined;
+        const actions = deps.actionsForEvent?.(entry.type, identity.host);
         const promptText = buildDrainPrompt(
           current,
           liveEntry ?? entry,

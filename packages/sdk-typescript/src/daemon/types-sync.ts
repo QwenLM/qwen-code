@@ -5,6 +5,12 @@
  */
 
 import type {
+  HookLifecycleEvent as CoreHookLifecycleEvent,
+  HookTurnPage as CoreHookTurnPage,
+} from '@qwen-code/qwen-code-core/telemetry/hook-lifecycle-contract.js';
+import type { HookLifecycleEvent, HookTurnPage } from './ui/hook-lifecycle.js';
+
+import type {
   BridgePendingInteractionOption,
   BridgePendingPermissionInteraction,
   BridgePendingUserQuestion,
@@ -29,6 +35,11 @@ type Equal<X, Y> =
   (<T>() => T extends X ? 1 : 2) extends <T>() => T extends Y ? 1 : 2
     ? true
     : false;
+
+export const hookLifecycleTypesInSync: [
+  Assert<Equal<CoreHookLifecycleEvent, HookLifecycleEvent>>,
+  Assert<Equal<CoreHookTurnPage, HookTurnPage>>,
+] = [true, true];
 
 type PendingInteractionOptionStaysInSync = Assert<
   MutuallyAssignable<

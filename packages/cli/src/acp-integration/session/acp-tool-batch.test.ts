@@ -5,14 +5,25 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core';
+import type { LlmClient, ToolCallRequestInfo } from '@qwen-code/qwen-code-core';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
+import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
+import { LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
+import { CANCEL_SETTLEMENT_CAP_MS } from '@qwen-code/qwen-code-core/event-bus/conversation.js';
 import type {
+  AgentLoopToolExecutor,
   AgentLoopToolResult,
-  ToolBatchOptions,
+  ToolBatchResult,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
-import type { Part } from '@google/genai';
-import { runAcpToolBatch, type AcpToolBatchHost } from './acp-tool-batch.js';
+import {
+  startSharedLoopRound,
+  type SharedLoopBatch,
+} from '../../ui/hooks/shared-loop-round.js';
+import {
+  deferredToolUpdateContext,
+  runAcpToolBatch,
+  type AcpToolBatchHost,
+} from './acp-tool-batch.js';
 
 type SchedulerOptions = {
   onToolCallsUpdate: (calls: unknown[]) => void;
@@ -28,19 +39,33 @@ type SchedulerOptions = {
 const batch = vi.hoisted(() => ({
   options: undefined as unknown as SchedulerOptions,
   run: undefined as unknown as (
-    requests: ToolCallRequestInfo[],
-    options: ToolBatchOptions,
-  ) => Promise<{ parts: Part[]; stop?: string }>,
+    shared: SharedLoopBatch,
+  ) => Promise<ToolBatchResult>,
+  execute: undefined as AgentLoopToolExecutor['run'] | undefined,
 }));
 
-vi.mock('@qwen-code/qwen-code-core/core/agent-loop.js', () => ({
-  createSchedulerExecutor: (_config: unknown, options: SchedulerOptions) => {
-    batch.options = options;
-    return {};
+vi.mock(
+  '@qwen-code/qwen-code-core/core/agent-loop.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/core/agent-loop.js')
+      >();
+    return {
+      ...actual,
+      createSchedulerExecutor: (
+        _config: unknown,
+        options: SchedulerOptions,
+      ) => {
+        batch.options = options;
+        return { run: batch.execute };
+      },
+    };
   },
-  runToolBatch: (requests: ToolCallRequestInfo[], options: ToolBatchOptions) =>
-    batch.run(requests, options),
-}));
+);
+
+/** The loop call of the batch's round, which runs what it is handed. */
+const loop = { runBatch: (shared: SharedLoopBatch) => batch.run(shared) };
 
 const read: ToolCallRequestInfo = {
   callId: 'call_read',
@@ -102,12 +127,29 @@ const executed = (
     origin: 'executed',
   }) as AgentLoopToolResult;
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 describe('runAcpToolBatch', () => {
   let log: Array<[string, unknown]>;
   let host: AcpToolBatchHost;
   let requestPermission: ReturnType<typeof vi.fn>;
+  const isEventBusAgentLoopEnabled = vi.fn();
+  const getToolOutputBatchBudget = vi.fn();
+  const recordToolResult = vi.fn();
+  const recordCompletedToolCall = vi.fn();
 
   beforeEach(() => {
+    batch.execute = undefined;
+    recordToolResult.mockClear();
+    recordCompletedToolCall.mockClear();
+    isEventBusAgentLoopEnabled.mockReturnValue(false);
+    getToolOutputBatchBudget.mockReturnValue(Number.POSITIVE_INFINITY);
     log = [];
     const record =
       (name: string, result?: unknown) =>
@@ -120,10 +162,12 @@ describe('runAcpToolBatch', () => {
     });
     const config = {
       getSessionId: () => 'session',
-      getChatRecordingService: () => undefined,
+      getChatRecordingService: () => ({ recordToolResult }),
       getApprovalMode: () => 'default',
       setApprovalMode: vi.fn(),
-      getLlmClient: () => ({}),
+      getLlmClient: () => ({ recordCompletedToolCall }),
+      isEventBusAgentLoopEnabled,
+      getToolOutputBatchBudget,
     };
     host = {
       ctx: { sessionId: 'session', config, sendUpdate: vi.fn() },
@@ -164,8 +208,249 @@ describe('runAcpToolBatch', () => {
             : undefined,
     ]);
 
+  async function runOnKernel(
+    requests: ToolCallRequestInfo[],
+    signal: AbortSignal,
+  ) {
+    isEventBusAgentLoopEnabled.mockReturnValue(true);
+    const client = {
+      async *sendMessageStream() {
+        for (const request of requests) {
+          yield { type: LlmEventType.ToolCallRequest, value: request };
+        }
+      },
+      recordCompletedToolCall,
+    } as unknown as LlmClient;
+    const round = startSharedLoopRound(
+      client,
+      {
+        parts: [{ text: 'test' }],
+        promptId: 'prompt',
+        options: { type: SendMessageType.UserQuery },
+      },
+      {
+        config: host.ctx.config,
+        signal,
+        deferRecording: false,
+        useEventBus: true,
+        onModelEvent: () => {},
+      },
+    );
+    await round.model;
+    return runAcpToolBatch(host, {
+      requests,
+      loop: round,
+      signal,
+      duplicates: { handled: new Map(), responded: new Set() },
+    });
+  }
+
+  it('returns at the kernel cancellation deadline while an approved tool is still running', async () => {
+    vi.useFakeTimers();
+    const abort = new AbortController();
+    const started = deferred<void>();
+    const tool = deferred<[]>();
+    batch.execute = async () => {
+      batch.options.onToolCallsUpdate([
+        {
+          status: 'awaiting_approval',
+          request: write,
+          invocation,
+          tool: { kind: 'edit' },
+          confirmationDetails: editDetails(
+            vi.fn(async () => {
+              started.resolve();
+              await tool.promise;
+            }),
+          ),
+        },
+      ]);
+      return tool.promise;
+    };
+    const settled = vi.fn();
+    const result = runOnKernel([write], abort.signal).then(settled);
+    try {
+      await started.promise;
+      abort.abort();
+      await vi.advanceTimersByTimeAsync(CANCEL_SETTLEMENT_CAP_MS - 1);
+      expect(settled).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toHaveBeenCalledWith(
+        expect.objectContaining({ stop: 'cancelled', parts: [] }),
+      );
+    } finally {
+      tool.resolve([]);
+      await result;
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the scheduler response when cancellation settles before confirmation returns', async () => {
+    const abort = new AbortController();
+    const confirming = deferred<void>();
+    const confirmation = deferred<void>();
+    const cancelled = {
+      ...executed(write),
+      status: 'cancelled' as const,
+      response: {
+        ...response(write),
+        executionStatus: 'not_started' as const,
+      },
+    };
+    batch.execute = async (_requests, signal) => {
+      const onConfirm = vi.fn(async () => {
+        confirming.resolve();
+        await confirmation.promise;
+      });
+      batch.options.onToolCallsUpdate([
+        {
+          status: 'awaiting_approval',
+          request: write,
+          invocation,
+          tool: { kind: 'edit' },
+          confirmationDetails: editDetails(onConfirm),
+        },
+      ]);
+      await new Promise<void>((resolve) => {
+        signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      batch.options.onToolCallsUpdate([cancelled]);
+      return [cancelled];
+    };
+    const settled = vi.fn();
+    const running = runOnKernel([write], abort.signal).then(settled);
+    try {
+      await confirming.promise;
+      abort.abort();
+      await vi.waitFor(() =>
+        expect(settled).toHaveBeenCalledWith(
+          expect.objectContaining({
+            stop: 'cancelled',
+            parts: cancelled.response.responseParts,
+          }),
+        ),
+      );
+      expect(events()).toContainEqual(['error', undefined]);
+      expect(recordToolResult).toHaveBeenCalledTimes(1);
+      // This cancellation settles with a recorded response, so it takes the
+      // fallback path that reads the kernel switch for the 'acp' surface; a
+      // wrong-but-valid label there must red this, not pass silently.
+      const kernelCalls = isEventBusAgentLoopEnabled.mock.calls;
+      expect(kernelCalls.length).toBeGreaterThan(0);
+      expect(kernelCalls.every(([surface]) => surface === 'acp')).toBe(true);
+    } finally {
+      confirmation.resolve();
+      await running;
+    }
+  });
+
+  it.each([Number.POSITIVE_INFINITY, 512])(
+    'keeps and delivers the completed sibling once after the cancellation deadline (budget %s)',
+    async (budget) => {
+      vi.useFakeTimers();
+      getToolOutputBatchBudget.mockReturnValue(budget);
+      const abort = new AbortController();
+      const started = deferred<void>();
+      const stalled = deferred<[]>();
+      const pendingUpdate = deferred<void>();
+      const emitStart = host.toolCallEmitter.emitStart;
+      host.toolCallEmitter.emitStart = async (params) => {
+        const emitted = await emitStart(params);
+        await pendingUpdate.promise;
+        return emitted;
+      };
+      const emitResult = host.toolCallEmitter.emitResult;
+      const deferredDelivery = vi.fn();
+      host.toolCallEmitter.emitResult = (params) => {
+        deferredDelivery(deferredToolUpdateContext.getStore());
+        return emitResult(params);
+      };
+      const fullOutput = 'abcdefghij'.repeat(120);
+      const readResult = executed(read);
+      const completed = {
+        ...readResult,
+        status: 'success' as const,
+        response: {
+          ...readResult.response,
+          responseParts: [
+            {
+              functionResponse: {
+                id: read.callId,
+                name: read.name,
+                response: { output: fullOutput },
+              },
+            },
+          ],
+        },
+      };
+      batch.execute = async (_requests, _signal, hooks) => {
+        hooks.beforeLaunch(read, []);
+        batch.options.onToolCallsUpdate([
+          { status: 'executing', request: read },
+        ]);
+        batch.options.onToolExecutionStarted(read.callId, 1);
+        batch.options.onToolCallsUpdate([completed]);
+        hooks.beforeLaunch(write, [completed]);
+        started.resolve();
+        await stalled.promise;
+        return [completed];
+      };
+      const running = runOnKernel([read, write], abort.signal);
+      const settled = vi.fn<(result: Awaited<typeof running>) => void>();
+      void running.then(settled);
+      try {
+        await started.promise;
+        abort.abort();
+        await vi.advanceTimersByTimeAsync(CANCEL_SETTLEMENT_CAP_MS);
+        expect(events()).toContainEqual(['start', 'in_progress']);
+        expect(events()).not.toContainEqual(['result', true]);
+        const result = settled.mock.calls[0]?.[0];
+        expect(result?.stop).toBe('cancelled');
+        if (!result) throw new Error('Batch did not return at the deadline');
+        const output = result.parts[0]?.functionResponse?.response?.['output'];
+        if (typeof output !== 'string') throw new Error('Missing tool output');
+        if (Number.isFinite(budget)) {
+          expect(output.length).toBeLessThanOrEqual(budget);
+          expect(output).toContain('Tool output truncated.');
+        } else {
+          expect(output).toBe(fullOutput);
+        }
+        expect(result.results).toEqual([
+          {
+            ...completed,
+            response: { ...completed.response, responseParts: result.parts },
+          },
+        ]);
+        expect(recordToolResult).toHaveBeenCalledExactlyOnceWith(
+          result.parts,
+          expect.objectContaining({ callId: read.callId, status: 'success' }),
+          undefined,
+        );
+        expect(recordCompletedToolCall).toHaveBeenCalledExactlyOnceWith(
+          read.name,
+          read.args,
+          { ...completed.response, status: completed.status },
+        );
+        pendingUpdate.resolve();
+        stalled.resolve([]);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(events().filter(([name]) => name === 'result')).toEqual([
+          ['result', true],
+        ]);
+        expect(deferredDelivery).toHaveBeenCalledExactlyOnceWith(true);
+        expect(recordToolResult).toHaveBeenCalledTimes(1);
+        expect(recordCompletedToolCall).toHaveBeenCalledTimes(1);
+      } finally {
+        pendingUpdate.resolve();
+        stalled.resolve([]);
+        await running;
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('reports a call as it starts and as it settles', async () => {
-    batch.run = async (_requests, options) => {
+    batch.run = async (shared) => {
       const { onToolCallsUpdate, onToolExecutionStarted } = batch.options;
       onToolCallsUpdate([{ status: 'scheduled', request: read, invocation }]);
       onToolCallsUpdate([{ status: 'executing', request: read, invocation }]);
@@ -174,12 +459,13 @@ describe('runAcpToolBatch', () => {
       onToolCallsUpdate([
         { status: 'success', request: read, response: response(read) },
       ]);
-      options.host?.onToolResult?.(executed(read));
+      shared.onToolResult(executed(read));
       return { parts: response(read).responseParts };
     };
 
     const result = await runAcpToolBatch(host, {
       requests: [read],
+      loop,
       signal: new AbortController().signal,
       duplicates: { handled: new Map(), responded: new Set() },
     });
@@ -212,6 +498,7 @@ describe('runAcpToolBatch', () => {
 
     await runAcpToolBatch(host, {
       requests: [write],
+      loop,
       signal: new AbortController().signal,
       duplicates: { handled: new Map(), responded: new Set() },
     });
@@ -241,8 +528,8 @@ describe('runAcpToolBatch', () => {
     requestPermission.mockResolvedValue({ outcome: { outcome: 'cancelled' } });
     const onConfirm = vi.fn().mockResolvedValue(undefined);
     let toolSignal: AbortSignal | undefined;
-    batch.run = async (_requests, options) => {
-      toolSignal = options.toolSignal;
+    batch.run = async (shared) => {
+      toolSignal = shared.toolSignal;
       batch.options.onToolCallsUpdate([
         {
           status: 'awaiting_approval',
@@ -268,6 +555,7 @@ describe('runAcpToolBatch', () => {
 
     const result = await runAcpToolBatch(host, {
       requests: [write],
+      loop,
       signal: new AbortController().signal,
       duplicates: { handled: new Map(), responded: new Set() },
     });
@@ -285,6 +573,49 @@ describe('runAcpToolBatch', () => {
         new Error('Tool "write_file" was canceled by the user.'),
       ],
     ]);
+  });
+
+  it('stops the batch at a call whose plan approval went stale before its launch', async () => {
+    const exitPlan: ToolCallRequestInfo = {
+      callId: 'call_exit',
+      name: 'exit_plan_mode',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'prompt',
+    };
+    let stale = false;
+    host.todoPlanApproval = () => ({
+      revision: { planId: 'plan', sourceCallId: 'call_todo' },
+      generation: 1,
+    });
+    host.isTodoPlanApprovalStale = () => stale;
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    let launched: boolean | undefined;
+    batch.run = async (shared) => {
+      batch.options.onToolCallsUpdate([
+        {
+          status: 'awaiting_approval',
+          request: exitPlan,
+          tool: { kind: 'think' },
+          invocation,
+          confirmationDetails: editDetails(onConfirm),
+        },
+      ]);
+      await vi.waitFor(() => expect(onConfirm).toHaveBeenCalled());
+      stale = true;
+      launched = shared.beforeToolLaunch?.(exitPlan, []);
+      return { parts: [] };
+    };
+
+    const result = await runAcpToolBatch(host, {
+      requests: [exitPlan],
+      loop,
+      signal: new AbortController().signal,
+      duplicates: { handled: new Map(), responded: new Set() },
+    });
+
+    expect(launched).toBe(false);
+    expect(result.stopAfterPermissionCancel).toBe(true);
   });
 
   it('tells the client the mode changed before an edit allowed always starts', async () => {
@@ -312,6 +643,7 @@ describe('runAcpToolBatch', () => {
 
     await runAcpToolBatch(host, {
       requests: [write],
+      loop,
       signal: new AbortController().signal,
       duplicates: { handled: new Map(), responded: new Set() },
     });
@@ -339,6 +671,7 @@ describe('runAcpToolBatch', () => {
 
     await runAcpToolBatch(host, {
       requests: [write],
+      loop,
       signal: new AbortController().signal,
       duplicates: { handled: new Map(), responded: new Set() },
     });
@@ -355,8 +688,8 @@ describe('runAcpToolBatch', () => {
   });
 
   it('reports a replayed call as failed', async () => {
-    batch.run = async (_requests, options) => {
-      options.host?.onToolResult?.({
+    batch.run = async (shared) => {
+      shared.onToolResult({
         ...executed(read),
         status: 'error',
         origin: 'replayed',
@@ -366,6 +699,7 @@ describe('runAcpToolBatch', () => {
 
     await runAcpToolBatch(host, {
       requests: [read],
+      loop,
       signal: new AbortController().signal,
       duplicates: { handled: new Map(), responded: new Set() },
     });
@@ -385,6 +719,7 @@ describe('runAcpToolBatch', () => {
 
     await runAcpToolBatch(host, {
       requests: [read],
+      loop,
       signal: new AbortController().signal,
       duplicates: { handled: new Map(), responded: new Set() },
     });

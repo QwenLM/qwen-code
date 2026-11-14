@@ -33,6 +33,7 @@ import type {
 import { buildAdvisorReminder } from './advisor-policy.js';
 import { isDeferredToolBridgeAvailable } from '../tools/tool-search.js';
 import { createUserContent } from './genai-compat.js';
+import type { Span } from '@opentelemetry/api';
 import process from 'node:process';
 
 // Config
@@ -97,9 +98,12 @@ import {
   getCoreSystemPrompt,
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
+  loadCoreSystemPromptSource,
   resolveInteractionMode,
   resolveMainSessionOutputStyle,
+  type CoreSystemPromptSource,
 } from './prompts.js';
+import { getSystemPromptModel } from './request-model.js';
 import { buildOmniMediaGuidanceSection } from '../omni/media-guidance.js';
 import { getOutputStyleTurnReminder } from './output-styles.js';
 import {
@@ -116,7 +120,10 @@ import {
   LoopDetectionService,
 } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
-import type { UserPromptRecordPayload } from '../services/chatRecordingService.js';
+import type {
+  NotificationRecordPayload,
+  UserPromptRecordPayload,
+} from '../services/chatRecordingService.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
@@ -293,7 +300,9 @@ function hostContinuationOptions(
 ): Partial<SendMessageOptions> {
   return {
     ...(options?.toolCallPreparations && { toolCallPreparations: true }),
-    ...(options?.interactionSpanByHost && { interactionSpanByHost: true }),
+    ...(options?.interactionSpan && {
+      interactionSpan: options.interactionSpan,
+    }),
     ...(options?.toolLoopGuardsByHost && { toolLoopGuardsByHost: true }),
     ...(options?.skipMemoryExtraction && { skipMemoryExtraction: true }),
     ...(options?.stopPolicies && { stopPolicies: options.stopPolicies }),
@@ -311,6 +320,90 @@ function hostContinuationOptions(
 
 /** Upper bound on prompt ids tracked for an in-flight Stop-hook chain. */
 export const MAX_STOP_HOOK_CHAIN_PROMPT_IDS = 32;
+
+export type UserTurnRecord =
+  | {
+      kind: 'user';
+      message: PartListUnion;
+      payload?: UserPromptRecordPayload;
+      promptId?: string;
+      daemonPromptId?: string;
+      goalPermit?: GoalTurnPermit;
+    }
+  | {
+      kind: 'goal';
+      message: PartListUnion;
+      goalPermit: GoalTurnPermit;
+    }
+  | {
+      kind: 'cron';
+      message: PartListUnion;
+      displayText?: string;
+    }
+  | {
+      kind: 'notification';
+      message: PartListUnion;
+      displayText?: string;
+      backgroundTask?: NotificationRecordPayload['backgroundTask'];
+    };
+
+/**
+ * What the host already recorded and set up for this turn: either it wrote the
+ * record through {@link recordUserTurn} at its existing timing, or the message
+ * is already in history. A matching `promptId` tells core to record nothing
+ * itself.
+ */
+export interface UserTurnInput {
+  promptId: string;
+  todoWorkChain?: { promptId: string };
+  /**
+   * Present when the host ran the snapshot phase for this turn, in any of its
+   * three outcomes: the snapshot was taken, it was deliberately skipped for a
+   * restore, or it was attempted and failed. Core records no snapshot of its
+   * own either way and does not retry a failed one.
+   */
+  fileHistory?: { promptId: string };
+}
+
+/** Writes the host's record at its existing timing. */
+export function recordUserTurn(config: Config, record: UserTurnRecord): void {
+  const recorder = config.getChatRecordingService();
+  switch (record.kind) {
+    case 'user':
+      recorder?.recordUserMessage(
+        record.message,
+        record.goalPermit,
+        record.payload,
+        record.promptId,
+        record.daemonPromptId,
+      );
+      break;
+    case 'goal':
+      recorder?.recordGoalRuntimeMessage(record.message, record.goalPermit);
+      break;
+    case 'cron':
+      recorder?.recordCronPrompt(record.message, record.displayText);
+      break;
+    case 'notification':
+      if (record.backgroundTask !== undefined) {
+        recorder?.recordNotification(
+          record.message,
+          record.displayText,
+          record.backgroundTask,
+        );
+      } else {
+        recorder?.recordNotification(record.message, record.displayText);
+      }
+      break;
+    default: {
+      // A new kind without a case has to fail HERE, at compile time. This runs
+      // outside the caller's `try` (Session.ts), so a runtime throw escapes the
+      // turn handler instead of being turned into a turn error.
+      const _exhaustive: never = record;
+      void _exhaustive;
+    }
+  }
+}
 
 interface StopHookChain {
   count: number;
@@ -362,17 +455,7 @@ export interface SendMessageOptions {
    * round it sends; the client carries it to the continuations it starts.
    */
   skipMemoryExtraction?: boolean;
-  /**
-   * The host already recorded this UserQuery's user message, started its todo
-   * work chain and took its file-history snapshot, as ACP does when it admits
-   * a prompt, so the client does none of them. On a Retry, the host started
-   * the todo work chain and keeps the attempt's recorded user message, so the
-   * client neither starts the chain nor records the message again. On a Goal
-   * turn, the host recorded the runtime continuation's message. On a Cron or
-   * Notification send, the host records the prompt or the notification
-   * itself.
-   */
-  userTurnRecordedByHost?: boolean;
+  userTurn?: UserTurnInput;
   /**
    * The rewindable identity a Retry's request carries in history: that of the
    * attempt it replaces. Spent by the first request.
@@ -386,10 +469,16 @@ export interface SendMessageOptions {
    */
   stopPolicies?: readonly StopPolicy[];
   /**
-   * The host keeps the interaction span open around its turn, so this send
-   * neither starts nor ends one.
+   * The host owns this span: it starts and ends it, and owns its attributes.
+   * Passing it here does NOT hand the lifecycle to core — this client never
+   * starts or ends the span, never writes the input-message or
+   * resolved-request attributes, and only records activity on it. This is the
+   * one field that turns core's own span bookkeeping off
+   * (`startInteractionSpan`, `addAgentInputMessageAttributes`,
+   * `addUserPromptAttributes`, and `endCurrentInteraction` all step aside), so
+   * a caller that passes a span it does not own gets no lifecycle at all.
    */
-  interactionSpanByHost?: boolean;
+  interactionSpan?: Span;
   /**
    * The host runs its own tool-call guards and exploration budget and builds
    * the tool-result message with its todo reminder, so this send checks no
@@ -582,13 +671,15 @@ type MainSessionPromptConfig = Pick<
 
 export function getMainSessionBaseSystemPrompt(
   config: MainSessionPromptConfig,
+  model = config.getModel(),
+  source?: CoreSystemPromptSource,
 ): string {
   const overrideSystemPrompt = config.getSystemPrompt();
   return overrideSystemPrompt
     ? getCustomSystemPrompt(overrideSystemPrompt)
     : getCoreSystemPrompt(
         undefined,
-        config.getModel(),
+        model,
         undefined,
         resolveInteractionMode(config),
         // The prompt and the per-turn reminder must agree on which style is
@@ -606,12 +697,14 @@ export function getMainSessionBaseSystemPrompt(
           executionSandboxBackend:
             config.getShellExecutionSandbox?.()?.effectiveBackend,
           executionSandboxNetwork: config.getShellExecutionSandbox?.()?.network,
+          ...(source && { source }),
         },
       );
 }
 
 export class LlmClient {
   private chat?: LlmChat;
+  private coreSystemPromptSource?: CoreSystemPromptSource;
   private readonly trustedUserAnswers = new TrustedUserAnswers();
   private initializedSessionId: string | undefined;
   /**
@@ -1309,8 +1402,10 @@ export class LlmClient {
    * no-clone rationale as {@link getHistoryFunctionResponseIds}. See
    * `LlmChat.getHistoryToolCallFingerprints` for the implementation.
    */
-  getHistoryToolCallFingerprints(): Map<string, string> {
-    return this.getChat().getHistoryToolCallFingerprints();
+  getHistoryToolCallFingerprints(
+    onlyCallIds?: ReadonlySet<string>,
+  ): Map<string, string> {
+    return this.getChat().getHistoryToolCallFingerprints(onlyCallIds);
   }
 
   /**
@@ -2271,8 +2366,20 @@ export class LlmClient {
     return this.cachedGitStatus;
   }
 
-  private getMainSessionSystemInstruction(): string {
-    const base = getMainSessionBaseSystemPrompt(this.config);
+  private getMainSessionSystemInstruction(
+    model = getSystemPromptModel(
+      this.config.getContentGeneratorConfig() ?? {},
+      this.config.getModel(),
+    ),
+  ): string {
+    const base = getMainSessionBaseSystemPrompt(
+      this.config,
+      model,
+      this.coreSystemPromptSource,
+    );
+    if (!this.coreSystemPromptSource && !this.config.getSystemPrompt()) {
+      this.coreSystemPromptSource = loadCoreSystemPromptSource();
+    }
     const stableLayers = {
       base,
       // Progressive media understanding contract: WHY deliveries carry
@@ -2294,7 +2401,15 @@ export class LlmClient {
     // the repository does, and providers that only cache at the end of the
     // system message (DashScope) would lose the whole system prompt across
     // sessions. It is announced in the startup prelude instead.
-    this.config.setStaticSystemPrefix(assembleSystemPrompt(stableLayers));
+    if (
+      model ===
+      getSystemPromptModel(
+        this.config.getContentGeneratorConfig() ?? {},
+        this.config.getModel(),
+      )
+    ) {
+      this.config.setStaticSystemPrefix(assembleSystemPrompt(stableLayers));
+    }
     return assembleSystemPrompt({
       ...stableLayers,
       autoMemory: this.config.getAutoMemoryPrompt(),
@@ -2397,6 +2512,7 @@ export class LlmClient {
       return;
     }
     await this.config.getToolRegistry().warmAll();
+    this.coreSystemPromptSource = undefined;
     this.chat.setSystemInstruction(this.getMainSessionSystemInstruction());
     if (this.lastSessionStartContext && this.lastSessionStartSource) {
       this.chat.applySessionStartContext(
@@ -3070,6 +3186,7 @@ export class LlmClient {
       await profiler.time('agent_reminder_seed', () =>
         this.seedAgentReminderDedupFromCurrent(),
       );
+      this.coreSystemPromptSource = undefined;
       const systemInstruction = profiler.timeSync('system_instruction', () =>
         this.getMainSessionSystemInstruction(),
       );
@@ -3087,6 +3204,9 @@ export class LlmClient {
             uiTelemetryService,
             this.recordedExperienceCallIds,
           ),
+      );
+      chat.setSystemInstructionResolver((model) =>
+        this.getMainSessionSystemInstruction(model),
       );
       chat.enableManualPlanExitNotices();
       chat.setCompressionObserver(
@@ -3996,11 +4116,15 @@ export class LlmClient {
       messageType === SendMessageType.Notification ||
       messageType === SendMessageType.Teammate ||
       messageType === SendMessageType.Goal;
-    const interactionSpanByHost = options?.interactionSpanByHost === true;
+    const userTurn =
+      options?.userTurn?.promptId === prompt_id ? options.userTurn : undefined;
+    const hasUserTurnRecord = userTurn !== undefined;
+    const hasTodoWorkChain = userTurn?.todoWorkChain?.promptId === prompt_id;
+    const hasFileHistory = userTurn?.fileHistory?.promptId === prompt_id;
+    const hostInteractionSpan = options?.interactionSpan;
     let interactionOwner =
-      startsInteraction || interactionSpanByHost
-        ? undefined
-        : getActiveInteractionSpan(prompt_id);
+      hostInteractionSpan ??
+      (startsInteraction ? undefined : getActiveInteractionSpan(prompt_id));
     if (interactionOwner) {
       recordInteractionActivity(prompt_id, interactionOwner);
     }
@@ -4010,6 +4134,10 @@ export class LlmClient {
       errorMessage?: string,
       errorType?: string,
     ) => {
+      if (hostInteractionSpan) {
+        this.interactionStartTypes.delete(prompt_id);
+        return;
+      }
       if (
         interactionOwner &&
         getActiveInteractionSpan(prompt_id) !== interactionOwner
@@ -4365,7 +4493,7 @@ export class LlmClient {
       // New input starts this interaction, so its first Stop is not
       // hook-forced even when a retry or goal turn reuses the prompt id.
       this.clearStopHookChain(prompt_id);
-      if (!interactionSpanByHost) {
+      if (!hostInteractionSpan) {
         startInteractionSpan(this.config, {
           promptId: prompt_id,
           model: options?.modelOverride ?? this.config.getModel(),
@@ -4377,6 +4505,7 @@ export class LlmClient {
       this.interactionStartTypes.set(prompt_id, messageType);
       if (
         interactionOwner &&
+        !hostInteractionSpan &&
         messageType === SendMessageType.UserQuery &&
         typeof options?.submittedPrompt === 'string'
       ) {
@@ -4708,7 +4837,7 @@ export class LlmClient {
       // under them without losing the resumed info item this record exists to
       // restore. See `ChatRecord.deliveredTurn` for that accepted imprecision
       // and the test pinning it.
-      if (!options?.userTurnRecordedByHost) {
+      if (!hasUserTurnRecord) {
         this.config
           .getChatRecordingService()
           ?.recordNotification(
@@ -4726,7 +4855,7 @@ export class LlmClient {
     // LoopDetected early on the notification turn.
     if (messageType === SendMessageType.UserQuery) {
       this.activeAutomaticTodoWorkChainPromptIds.clear();
-      if (!options?.userTurnRecordedByHost) {
+      if (!hasTodoWorkChain) {
         // A registered reminder means the previous chain's plan still has
         // unfinished items (todo_write deletes it on completion): continue
         // that chain instead of discarding its context with the very turn
@@ -4745,7 +4874,7 @@ export class LlmClient {
       }
       this.activeTodoWorkChainPromptId = prompt_id;
     } else if (messageType === SendMessageType.Retry) {
-      if (!options?.userTurnRecordedByHost) {
+      if (!hasTodoWorkChain) {
         this.config.startActiveTodoWorkChain(
           prompt_id,
           this.activeTodoWorkChainPromptId,
@@ -4770,7 +4899,7 @@ export class LlmClient {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
     }
-    if (startsInteraction) {
+    if (startsInteraction && !hostInteractionSpan) {
       const interactionSpan = interactionOwner;
       if (
         interactionSpan &&
@@ -4837,7 +4966,7 @@ export class LlmClient {
     let messageDisplay: MessageDisplayDispatcher | null = null;
     try {
       if (messageType === SendMessageType.Goal) {
-        if (!options?.userTurnRecordedByHost) {
+        if (!hasUserTurnRecord) {
           this.config
             .getChatRecordingService()
             ?.recordGoalRuntimeMessage(request, goalPermit!);
@@ -4875,7 +5004,7 @@ export class LlmClient {
 
         // record user/cron message for session management
         if (messageType === SendMessageType.Cron) {
-          if (!options?.userTurnRecordedByHost) {
+          if (!hasUserTurnRecord) {
             this.config
               .getChatRecordingService()
               ?.recordCronPrompt(
@@ -4884,7 +5013,7 @@ export class LlmClient {
                 goalPermit,
               );
           }
-        } else if (!options?.userTurnRecordedByHost) {
+        } else if (!hasUserTurnRecord) {
           const recorder = this.config.getChatRecordingService();
           recorder?.recordUserMessage(
             request,
@@ -4947,10 +5076,7 @@ export class LlmClient {
 
         this.sessionTurnCount++;
 
-        if (
-          messageType === SendMessageType.UserQuery &&
-          !options?.userTurnRecordedByHost
-        ) {
+        if (messageType === SendMessageType.UserQuery && !hasFileHistory) {
           try {
             await this.config.getFileHistoryService().makeSnapshot(prompt_id);
             try {
@@ -6610,20 +6736,6 @@ export class LlmClient {
     let currentAttemptModel: string = model;
 
     try {
-      const finalSystemInstruction = generationConfig.systemInstruction
-        ? assembleSystemPrompt({
-            base: getCustomSystemPrompt(generationConfig.systemInstruction),
-            contextFiles: this.config.getUserMemory(),
-            autoMemory: this.config.getAutoMemoryPrompt(),
-          })
-        : this.getMainSessionSystemInstruction();
-
-      const requestConfig: GenerateContentConfig = {
-        abortSignal,
-        ...generationConfig,
-        systemInstruction: finalSystemInstruction,
-      };
-
       // When the requested model differs from the main model (e.g. fast model
       // side queries for session recap / title / summary), resolve the target
       // model's own ContentGeneratorConfig so that per-model settings like
@@ -6638,6 +6750,22 @@ export class LlmClient {
         retryErrorCodes,
         model: requestModel,
       } = await this.config.getBaseLlmClient().resolveForModel(model);
+      const finalSystemInstruction = generationConfig.systemInstruction
+        ? assembleSystemPrompt({
+            base: getCustomSystemPrompt(generationConfig.systemInstruction),
+            contextFiles: this.config.getUserMemory(),
+            autoMemory: this.config.getAutoMemoryPrompt(),
+          })
+        : this.getMainSessionSystemInstruction(
+            getSystemPromptModel(contentGeneratorConfig ?? {}, requestModel),
+          );
+
+      const requestConfig: GenerateContentConfig = {
+        abortSignal,
+        ...generationConfig,
+        systemInstruction: finalSystemInstruction,
+      };
+
       const requestContents = appendAutoMemoryContext(
         slimCompactionInput(contents, contentGeneratorConfig?.modalities ?? {})
           .slimmedHistory,
