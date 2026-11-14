@@ -148,8 +148,8 @@ export interface GroupedServers {
 export interface ServerListStepProps {
   /** 服务器列表 */
   servers: MCPServerDisplayInfo[];
-  /** 选择回调 */
-  onSelect: (index: number) => void;
+  /** 选择回调；传服务器本身，避免显示序与配置序两套索引混淆 */
+  onSelect: (server: MCPServerDisplayInfo) => void;
 }
 
 /**
