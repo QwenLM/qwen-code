@@ -1,0 +1,99 @@
+name: 'PR 15959 ordinary MySQL OSS fixture'
+on:
+  push:
+    branches: ['codex/verify-pr-15959-oss-fixture-ci']
+permissions:
+  contents: read
+jobs:
+  oss-fixture:
+    runs-on: [self-hosted, linux, x64, ecs-qwen]
+    container: maven:3.9.11-eclipse-temurin-21
+    timeout-minutes: 55
+    env:
+      NODE_OPTIONS: '--max-old-space-size=6144'
+      MAVEN_OPTS: '-Xmx2048m'
+      MAVEN_ARGS: '-Dmaven.repo.local=/tmp/pr15959-m2'
+    services:
+      mysql:
+        image: mysql:8.4.6
+        env:
+          MYSQL_ROOT_PASSWORD: verify-fixture
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: qwen_verify
+        options: >-
+          --tmpfs /var/lib/mysql
+          --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root --password=verify-fixture --silent"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 'dba785979eac0a109f7b6201b6e8f017c7947e06'
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Prepare and attest isolated tools and database
+        timeout-minutes: 6
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq python3 default-mysql-client
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          mkdir -p .verify-evidence
+          test "$(git rev-parse HEAD)" = 'dba785979eac0a109f7b6201b6e8f017c7947e06'
+          git rev-parse HEAD | tee .verify-evidence/source-sha.txt
+          java -version 2>&1 | tee .verify-evidence/java-version.txt
+          mvn -version | tee .verify-evidence/maven-version.txt
+          mysql --host=mysql --user=root --password=verify-fixture -e 'SET GLOBAL max_allowed_packet = 134217728; SELECT VERSION(), @@transaction_isolation, @@innodb_use_native_aio, @@GLOBAL.max_allowed_packet; SHOW GRANTS;' | tee .verify-evidence/mysql-settings.txt
+          printf '%s\n' 'Task service uses image default AIO/binlog; selected cases do not exercise large-object or server-wide deadlock counters. Full CI retains its normal flags.' > .verify-evidence/service-deviation.txt
+      - name: Install sibling SDK from candidate source
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install 2>&1 | tee .verify-evidence/sdk-install.log
+      - name: Execute OSS integration with ordinary MySQL properties and verify consumers
+        timeout-minutes: 32
+        run: |
+          python3 - <<'PY'
+          import json, shutil, subprocess, xml.etree.ElementTree as ET
+          from pathlib import Path
+          out=Path('.verify-evidence')
+          module=Path('packages/managed-agent-server')
+          command=['mvn','--batch-mode','--no-transfer-progress','-Pmysql-integration',
+              '-Dtest=SessionOssStorageTest,O4MySqlDatabaseTest,MySqlForkRoutingListenerTest',
+              '-Dsurefire.failIfNoSpecifiedTests=false','-Dit.test=SessionOssStorageMySqlIT',
+              '-Dmysql.url=jdbc:mysql://mysql:3306/qwen_verify?allowPublicKeyRetrieval=true&useSSL=false',
+              '-Dmysql.user=root','-Dmysql.password=verify-fixture','clean','verify','checkstyle:check']
+          (out/'command.json').write_text(json.dumps(command)+'\n')
+          with (out/'maven.log').open('wb') as log:
+              run=subprocess.run(command,cwd=module,stdout=log,stderr=subprocess.STDOUT,timeout=1800)
+          (out/'maven.rc').write_text(str(run.returncode)+'\n')
+          cases=[]
+          for kind in ['surefire-reports','failsafe-reports']:
+              reports=module/'verification/target'/kind
+              if not reports.exists():continue
+              shutil.copytree(reports,out/kind)
+              for xml in reports.glob('TEST-*.xml'):
+                  for c in ET.parse(xml).getroot().iter('testcase'):
+                      cases.append({'class':c.attrib['classname'],'name':c.attrib['name'],
+                          'failures':[x.attrib.get('message','') for x in c.findall('failure')],
+                          'errors':[x.attrib.get('message','') for x in c.findall('error')],
+                          'skipped':c.find('skipped') is not None})
+          (out/'cases.json').write_text(json.dumps(cases,indent=2)+'\n')
+          groups={}
+          for c in cases:groups[c['class'].split('.')[-1]]=groups.get(c['class'].split('.')[-1],0)+1
+          print(json.dumps({'exit':run.returncode,'groups':groups}),flush=True)
+          assert run.returncode==0
+          assert set(groups)=={'SessionOssStorageTest','O4MySqlDatabaseTest','MySqlForkRoutingListenerTest','SessionOssStorageMySqlIT'}
+          assert groups['SessionOssStorageMySqlIT']==1
+          assert not any(c['failures'] or c['errors'] or c['skipped'] for c in cases)
+          subprocess.run(['git','diff','--exit-code'],check=True)
+          print('Real MySQL OSS case executed successfully, without O4 configuration or skipped tests.',flush=True)
+          PY
+      - name: Preserve executed evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr15959-oss-mysql-fixture
+          path: .verify-evidence/
+          include-hidden-files: true
