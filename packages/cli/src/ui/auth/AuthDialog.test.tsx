@@ -401,6 +401,18 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         await moveDownAndWaitForSelection(stdin, lastFrame, label);
         expectReadableSelection(label);
       }
+
+      // Every top-level entry stays painted; the menu never collapses to the
+      // highlighted row alone.
+      for (const label of [
+        'QwenCloud',
+        'Alibaba ModelStudio',
+        'Third-party Providers',
+        'Custom Provider',
+      ]) {
+        expect(lastFrame()).toContain(label);
+      }
+
       expect(lastFrame()?.replace(/[│\s]/g, '')).toContain(
         'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/',
       );

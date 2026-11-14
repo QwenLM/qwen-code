@@ -38,7 +38,17 @@ const createUIState = (overrides: Partial<UIState>): UIState =>
 
 const dialogTree = (uiState: UIState) => (
   <UIStateContext.Provider value={uiState}>
-    <UIActionsContext.Provider value={{ auth: {} } as UIActions}>
+    <UIActionsContext.Provider
+      value={
+        {
+          auth: {
+            closeAuthDialog: vi.fn(),
+            handleProviderSubmit: vi.fn(),
+            onAuthError: vi.fn(),
+          },
+        } as unknown as UIActions
+      }
+    >
       <DialogManager addItem={vi.fn()} terminalWidth={100} />
     </UIActionsContext.Provider>
   </UIStateContext.Provider>
@@ -183,6 +193,33 @@ describe('DialogManager', () => {
         expect(lastFrame()).toContain('Token Plan');
         expect(lastFrame()).toContain('› 1. Update all');
       });
+    });
+  });
+
+  describe('auth dialog', () => {
+    it('renders the full provider menu at 36 columns in a short terminal', async () => {
+      const { lastFrame } = renderDialogManager(
+        createUIState({
+          terminalHeight: 14,
+          mainAreaWidth: 36,
+          auth: {
+            isAuthDialogOpen: true,
+          } as unknown as UIState['auth'],
+        }),
+        {
+          getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
+          getAuthType: vi.fn().mockReturnValue(undefined),
+        },
+      );
+
+      await vi.waitFor(
+        () => {
+          const frame = lastFrame() ?? '';
+          expect(frame).toContain('QwenCloud');
+          expect(frame).toContain('Custom Provider');
+        },
+        { timeout: 5000 },
+      );
     });
   });
 });
