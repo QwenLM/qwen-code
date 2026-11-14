@@ -177,12 +177,12 @@ boundSessions?: {
 ## 验证计划
 
 - **单测**：路由扫描（trusted/untrusted、归档排除、sidecar 损坏容忍）；适配器选择（主机过滤、状态过滤、channel-source 排除、更新时间 tie-break）；投递拦截（绑定 → 注入、未绑定 → channel 路径、404 回退、队满重试、恢复尊重持久化 delivery）；监视迁移（各事件类型、按 head 去重、null-mergeable 守卫、首次观测静默、先写状态再投递的顺序）；配置校验。
-- **E2E**（daemon + 本地构建）：经 PATCH metadata 把 PR 绑定到会话；用 stub 的 GitHub API 层模拟事件；断言绑定会话每个迁移恰好收到一条注入 prompt、回复留在会话内、未绑定 PR 仍创建 channel 会话。计划详见 `.qwen/e2e-tests/github-channel-bound-session-events.md`。
+- **E2E**（daemon + 本地构建）：经 PATCH metadata 把 PR 绑定到会话；用 stub 的 GitHub API 层模拟事件；断言每个**被投递**的迁移恰好一条注入 prompt，每个被取代实例一条带 reason 的死信行且**无** prompt（退役不注入任何内容——断言「会话收到退役」不可满足，仅「无 prompt」又会在折叠被删时照样通过）；合并后的 pending 跳变留一条 `watch_coalesced` 行且仍投递一条净变化 prompt。回复留在会话内、未绑定 PR 仍创建 channel 会话。见[启动积压设计](2026-11-14-bound-delivery-startup-backlog.zh-CN.md)。计划详见 `.qwen/e2e-tests/github-channel-bound-session-events.md`。
 
 ## 验收标准
 
 1. 两个字段开启后，绑定 PR 上的新评论以 prompt 形式进入绑定会话（而非 channel 会话），且会话回复不自动发布到 GitHub。
-2. 绑定 PR head 的 CI 失败、`mergeable_state: dirty` 迁移、head 前进、合入/关闭，每个迁移实例恰好产生一条注入 prompt，daemon 重启后不重放；合法复发（dirty → clean → dirty、close → reopen → close、`head_change` 的 SHA 回访、新 head 失败）会再次触发，已 settled head 的 check 复跑变红由周期复查捕获。`ci_failure` 在 fired 环窗口内每个 head SHA 只触发一次——被回访的 SHA 的 CI 失败在该 head 的键仍留在环内时被抑制，回访本身由 `head_change` 承载。
+2. 绑定 PR head 的 CI 失败、`mergeable_state: dirty` 迁移、head 前进、合入/关闭，每个迁移实例恰好产生一条注入 prompt **或一次可见的被取代退役**，daemon 重启后不重放；合法复发（dirty → clean → dirty、close → reopen → close、新 head 失败）会再次触发，已 settled head 的 check 复跑变红由周期复查捕获。`ci_failure` 在 fired 环窗口内每个 head SHA 只触发一次——被回访的 SHA 的 CI 失败在该 head 的键仍留在环内时被抑制，回访本身由 `head_change` 承载。经[启动积压设计](2026-11-14-bound-delivery-startup-backlog.zh-CN.md)修订：事实被后续观测取代的实例（被取代 head 的 CI 失败、已解决的冲突、重开 PR 的关闭事件、已恢复的 CI）以死信 + journal 痕迹退役而非投递；pending head 跳变**合并**——中间跳变折叠进幸存跳变，后者仍投递**一条**净变化 prompt 加一条 `watch_coalesced` 行；回到仍 pending 跳变的起点是 carved-out 例外（无目标收到该跳变时以零 prompt 退役，有目标收到时排入反向跳变）。未投递的同 head CI 恢复退役释放该 head 的抑制，使之后真正的失败再次 fire。
 3. 完整快照下无绑定会话时，评论事件行为与今天完全一致（创建/复用 channel 会话，公开回复契约不变）；partial 快照或刷新失败期间回退推迟，直到完整快照确立缺席（关键决策 11）；watch 事件记日志退役，绝不发布。
 4. 字段关闭（默认）时，行为与 API 调用量不变。
 5. 队满、限流（429）与暂不可用路径推迟事件、不丢失、不冻结共享游标；会话消失的评论路径无丢失回退；watch 路径私密退役；耗尽事件进死信（死信写失败时保留任务）；daemon 生命周期内任何崩溃窗口都不重放已受理的注入——受理标记丢失或 202 丢失后的重试携带相同幂等键、去重为原受理结果；去重在两个 FIFO 上限（每会话 128 键、1024 会话）下尽力而为，环与内存 prompt 队列同生共死，重启后重新注入正是正确的恢复（关键决策 10）——也不静默消费迁移；空 partial 冷启动快照绝不公开路由事件，观测到的解绑即使在 partial 答案下也停止私密投递。
