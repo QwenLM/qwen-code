@@ -13,6 +13,7 @@ import {
   DEFAULT_MAX_RECENT_IMAGES,
   DEFAULT_SCREENSHOT_TRIGGER_ENABLED,
   DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD,
+  DEFAULT_IMAGE_PAYLOAD_THRESHOLD,
   estimateContentChars,
   estimatePartChars,
   resolveCompactionTuning,
@@ -24,6 +25,7 @@ import {
 
 const COMPACTION_ENV_KEYS = [
   'QWEN_IMAGE_TOKEN_ESTIMATE',
+  'QWEN_IMAGE_PAYLOAD_THRESHOLD',
   'QWEN_COMPACT_MAX_RECENT_FILES',
   'QWEN_COMPACT_MAX_RECENT_IMAGES',
   'QWEN_COMPACT_SCREENSHOT_TRIGGER',
@@ -108,21 +110,34 @@ describe('compactionInputSlimming', () => {
       expect(t.maxRecentImages).toBe(0);
     });
 
+    it('accepts 0 for the image payload threshold (eviction disabled)', () => {
+      expect(
+        resolveCompactionTuning({ imagePayloadThreshold: 0 })
+          .imagePayloadThreshold,
+      ).toBe(0);
+      expect(resolveCompactionTuning(undefined).imagePayloadThreshold).toBe(
+        DEFAULT_IMAGE_PAYLOAD_THRESHOLD,
+      );
+    });
+
     it('env overrides settings for every knob', () => {
       process.env['QWEN_COMPACT_MAX_RECENT_FILES'] = '7';
       process.env['QWEN_COMPACT_MAX_RECENT_IMAGES'] = '9';
       process.env['QWEN_COMPACT_SCREENSHOT_TRIGGER'] = '0';
       process.env['QWEN_COMPACT_SCREENSHOT_THRESHOLD'] = '99';
+      process.env['QWEN_IMAGE_PAYLOAD_THRESHOLD'] = '0';
       const t = resolveCompactionTuning({
         maxRecentFilesToRetain: 1,
         maxRecentImagesToRetain: 1,
         enableScreenshotTrigger: true,
         screenshotTriggerThreshold: 5,
+        imagePayloadThreshold: 5,
       });
       expect(t.maxRecentFiles).toBe(7);
       expect(t.maxRecentImages).toBe(9);
       expect(t.enableScreenshotTrigger).toBe(false);
       expect(t.screenshotTriggerThreshold).toBe(99);
+      expect(t.imagePayloadThreshold).toBe(0);
     });
 
     it('rejects fractional count-like env values', () => {

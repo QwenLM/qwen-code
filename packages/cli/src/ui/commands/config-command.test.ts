@@ -444,6 +444,24 @@ describe('configCommand', () => {
       });
     });
 
+    it('lists integer settings with an untruncated key', async () => {
+      const { ctx } = createMockContext({});
+      const result = await configCommand.action!(ctx, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining(
+          'model.chatCompression.maxRecentImagesToRetain',
+        ),
+      });
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.not.stringContaining('maxRecentImages...'),
+      });
+    });
+
     it('masks sensitive values in listing', async () => {
       const { ctx } = createMockContext({
         proxy: 'http://my-secret-proxy:8080',

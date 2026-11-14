@@ -129,6 +129,7 @@ export interface ResolvedCompactionTuning {
    * Inline image count at or above which historical image payloads
    * are replaced with text references and only recent images are
    * reattached. Below this threshold images stay in-place untouched.
+   * `0` disables eviction entirely.
    */
   imagePayloadThreshold: number;
 }
@@ -177,7 +178,7 @@ export function resolveCompactionTuning(
       process.env['QWEN_IMAGE_PAYLOAD_THRESHOLD'],
       settings?.imagePayloadThreshold,
       DEFAULT_IMAGE_PAYLOAD_THRESHOLD,
-      { integer: true, minInclusive: 1 },
+      { integer: true, minInclusive: 0 },
     ),
   };
 }

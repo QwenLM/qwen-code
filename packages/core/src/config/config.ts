@@ -787,7 +787,8 @@ export interface ChatCompressionSettings {
   /**
    * Inline image count at or above which historical image payloads are
    * replaced with text references and only recent images are reattached.
-   * Below this threshold images stay in-place untouched. Default 20.
+   * Below this threshold images stay in-place untouched. `0` disables
+   * eviction entirely. Default 20.
    * Env override: `QWEN_IMAGE_PAYLOAD_THRESHOLD`.
    */
   imagePayloadThreshold?: number;
