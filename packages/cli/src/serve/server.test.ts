@@ -1182,9 +1182,7 @@ interface FakeBridgeOpts {
     sessionId: string,
     opts?: { detail?: boolean },
   ) => Promise<ServeSessionContextUsageStatus>;
-  sessionWakeupImpl?: (
-    sessionId: string,
-  ) => Promise<ServeSessionWakeupStatus>;
+  sessionWakeupImpl?: (sessionId: string) => Promise<ServeSessionWakeupStatus>;
   sessionSupportedCommandsImpl?: (
     sessionId: string,
   ) => Promise<ServeSessionSupportedCommandsStatus>;

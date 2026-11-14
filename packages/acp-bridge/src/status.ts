@@ -786,15 +786,13 @@ export interface ServeSessionWakeupStatus {
    * armed. Session-only state: lost when the session (or its ACP child) ends.
    * `prompt` is truncated to its first 200 characters.
    */
-  pendingWakeup:
-    | null
-    | {
-        id: string;
-        fireAtMs: number;
-        createdAt: number;
-        prompt: string;
-        todoWorkChainId?: string;
-      };
+  pendingWakeup: null | {
+    id: string;
+    fireAtMs: number;
+    createdAt: number;
+    prompt: string;
+    todoWorkChainId?: string;
+  };
 }
 
 export interface ServeSessionSupportedCommandsStatus {
