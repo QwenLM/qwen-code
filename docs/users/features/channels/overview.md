@@ -4,6 +4,11 @@ Channels let you interact with a Qwen Code agent from messaging platforms like T
 
 Code-hosting platforms (starting with [GitHub](./github)) and authenticated workspace accounts (starting with [DingTalk Workspace](./dws)) are also supported through channels. [Email](./email) connects a dedicated mailbox through IMAP and SMTP.
 
+For sending results without a conversational bot, [DingTalk Webhook Sending](./dingtalk-webhook)
+and [Feishu Webhook Sending](./feishu-webhook) use a custom bot's configured
+group destination. They share the daemon's Channel delivery path and do not
+listen for incoming messages.
+
 ## How It Works
 
 When you run `qwen channel start`, Qwen Code:
@@ -51,7 +56,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 | Option              | Required         | Description                                                                                                                                                                                                                                                                                                                                           |
 | ------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`              | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dws`, `wecom`, `wecom-callback`, `feishu`, `github`, `gitlab`, `email`, or a custom type from an extension (see [Plugins](./plugins))                                                                                                                                                          |
+| `type`              | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dingtalk-webhook`, `dws`, `wecom`, `wecom-callback`, `feishu`, `feishu-webhook`, `github`, `gitlab`, `email`, or a custom type from an extension (see [Plugins](./plugins))                                                                                                                    |
 | `token`             | See description  | Required for Telegram (bot token) and WeCom Callback (verification token). Supports `$ENV_VAR` syntax. See [WeCom Callback](./wecom-callback) for application credentials                                                                                                                                                                             |
 | `clientId`          | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                                                                                                                                                                                                          |
 | `clientSecret`      | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                                                                                                                                                                                                   |

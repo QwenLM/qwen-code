@@ -29,6 +29,7 @@ import type {
   WebShellUnavailableModel,
   WebShellUnavailableModelTooltipMount,
 } from './unavailableModels';
+import type { WebShellModelPickerOptions } from './model-picker';
 import './styles/globals.css';
 import {
   useMessageNavigation,
@@ -157,11 +158,11 @@ import {
   isRetryableTurnErrorKind,
   transcriptBlocksToDaemonMessages,
 } from './adapters/transcriptToMessages';
-import type {
-  MessageListProps,
-  MessageListHandle,
-} from './components/MessageList';
-import { TranscriptViewport } from './components/TranscriptViewport';
+import type { MessageListHandle } from './components/MessageList';
+import {
+  TranscriptViewport,
+  type TranscriptViewportProps,
+} from './components/TranscriptViewport';
 import { reorderChildrenUnderParents } from './components/messages/agentForest';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { TurnCallsProvider } from './turnCallsContext';
@@ -1290,7 +1291,7 @@ function buildDisplayMessages(
 }
 
 type LiveMessageListProps = Omit<
-  MessageListProps,
+  TranscriptViewportProps,
   'messages' | 'transcriptBlockCount'
 > & {
   baselineBlocks: readonly DaemonTranscriptBlock[];
@@ -1456,6 +1457,8 @@ export interface WebShellProps {
   settings?: WebShellSettingsOptions;
   /** Model add/delete interactions across WebShell. Not a backend permission policy. */
   modelManagement?: WebShellModelManagementOptions;
+  /** Host-owned header and per-model display content in composer pickers. */
+  modelPicker?: WebShellModelPickerOptions;
   /** Extra catalog models shown disabled in the composer picker. */
   unavailableModels?: readonly WebShellUnavailableModel[];
   /** Host-owned hint for a disabled model. DOM/Solid hosts mount into the container. */
@@ -2885,11 +2888,16 @@ function getChatWidthStyle(
   chatMaxWidth: number | undefined,
 ): CSSProperties {
   const contentWidth = `${getChatMaxWidth(chatMaxWidth)}px`;
-  const shellWidth = `calc(${contentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
+  // Reserve timeline gutters where they fit without over-shrinking phone layouts.
+  const responsiveContentWidth = `min(${contentWidth}, clamp(440px, 85cqw, calc(100cqw - 128px)))`;
+  const regularShellWidth = `calc(${contentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
+  const shellWidth = `calc(${responsiveContentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
   return {
     '--chat-regular-content-width': contentWidth,
-    '--chat-regular-shell-width': shellWidth,
+    '--chat-regular-shell-width': regularShellWidth,
     '--chat-content-width': mode === 'wide' ? '100%' : contentWidth,
+    '--chat-responsive-content-width':
+      mode === 'wide' ? '100%' : responsiveContentWidth,
     '--chat-shell-width': mode === 'wide' ? '100%' : shellWidth,
   } as CSSProperties;
 }
@@ -3679,6 +3687,7 @@ export function App({
   sidebar,
   settings: settingsPresentation,
   modelManagement,
+  modelPicker,
   unavailableModels,
   mountUnavailableModelTooltip,
   header,
@@ -4041,6 +4050,7 @@ export function App({
   const customization = useMemo(
     () => ({
       onRefreshModels,
+      modelPicker,
       allowedApprovalModes,
       artifact,
       filterArtifact,
@@ -4083,6 +4093,7 @@ export function App({
     }),
     [
       onRefreshModels,
+      modelPicker,
       allowedApprovalModes,
       artifact,
       filterArtifact,
@@ -4987,6 +4998,21 @@ export function App({
     resolveWorkspaceMaintenanceTargetCwd,
     workspaceContextActive,
   ]);
+  const composerWorkspaceCwd = workspaceContextActive
+    ? (ordinaryWorkspaces.find((entry) => entry.cwd === lockedWorkspaceCwd)
+        ?.cwd ??
+      (connection.sessionId
+        ? connection.workspaceCwd
+        : resolveWorkspaceMaintenanceTargetCwd()))
+    : undefined;
+  const modelPickerScope = useMemo(
+    () => ({
+      sessionId: connection.sessionId,
+      workspaceCwd: composerWorkspaceCwd,
+      daemonBaseUrl: workspace.baseUrl,
+    }),
+    [connection.sessionId, composerWorkspaceCwd, workspace.baseUrl],
+  );
   // The chat header always answers "which workspace is this session in?": the
   // workspace's name when there is one, and nothing when the session lives
   // outside every workspace (standalone, Live), which the header shows as the
@@ -11066,31 +11092,7 @@ export function App({
         if (item === 'workflows') return workflowsEnabled;
         if (item === 'prWatches') return prWatchesAvailable;
         return true;
-      }) ||
-        (sidebarOptions.footer !== false &&
-          sidebarOptions.footer?.items?.some((item) => {
-            if (item === 'collapse') return false;
-            if (item === 'settings') return settingsAvailable;
-            if (item === 'sessionsOverview' || item === 'splitView') {
-              return isSidebarFooterItemAvailable(
-                item,
-                projectFeaturesAvailable,
-                isLargeScreen,
-              );
-            }
-            if (item === 'workspacesOverview') return !lockedWorkspaceCwd;
-            if (item === 'localFiles' || item === 'desktopRelay')
-              return isPageOriginDaemon(workspace.baseUrl);
-            if (item === 'update') {
-              return (
-                !isDesktopShell() &&
-                Boolean(
-                  connection.capabilities?.features?.includes('daemon_update'),
-                )
-              );
-            }
-            return true;
-          })),
+      }),
     );
   const navigationRailVisible =
     sidebarOptions.enabled &&
@@ -22895,8 +22897,6 @@ export function App({
   }, [artifactPanelOpen, environmentPanelFits]);
   const environmentPanelMounted =
     !isChatEmptyState && !activePanel && mainView === 'chat';
-  const chatWidthToggleMin = getChatMaxWidth(chatMaxWidth);
-
   const appClassName = [
     styles.app,
     styles.appChat,
@@ -24637,7 +24637,10 @@ export function App({
                           configurations: modelConfigurations.models,
                           onUpdateContextWindow: handleModelContextWindowUpdate,
                           currentModelId:
-                            connection.currentModel ?? undefined,
+                            (connection.sessionId
+                              ? connection.currentModel
+                              : currentModel || connection.currentModel) ??
+                            undefined,
                           loading:
                             providersState.loading ||
                             modelConfigurations.loading,
@@ -24769,6 +24772,13 @@ export function App({
                             : returnToChat
                         }
                         initialFocusRef={panelHeadingRef}
+                        // A cleared session keeps clientId and workspaceCwd,
+                        // so the workspace comparison alone would still send
+                        // an id the daemon no longer knows (400).
+                        clientId={
+                          connection.sessionId ? connection.clientId : undefined
+                        }
+                        sessionWorkspaceCwd={connection.workspaceCwd}
                       />
                     ) : activePanel === 'channel-events' ? (
                       <ChannelEventsPage
@@ -25437,6 +25447,9 @@ export function App({
               <div
                 className={[
                   styles.chatViewWrap,
+                  approvalOverlayActive && mainView === 'chat'
+                    ? styles.chatViewWithApproval
+                    : undefined,
                   hasMobileComposerBottom
                     ? styles.chatViewWithMobileComposerBottom
                     : undefined,
@@ -25537,6 +25550,7 @@ export function App({
                                   terminalBackgroundShellTaskIds
                                 }
                                 pendingApproval={pendingToolApproval}
+                                approvalOverlayActive={approvalOverlayActive}
                                 onShowContextDetail={
                                   contextUsageAvailable
                                     ? openCurrentContextUsagePanel
@@ -25835,7 +25849,8 @@ export function App({
                       {/* Workspace-level hooks trust decision uses the same
                           approval slot and card as tool approvals; it is not
                           a session permission request. */}
-                      {!managedMode &&
+                      {workspaceContextActive &&
+                        !managedMode &&
                         !pendingToolApproval &&
                         mainView === 'chat' && (
                           <div className={styles.approvalOverlay}>
@@ -26364,7 +26379,6 @@ export function App({
                           }
                           chatWidthMode={chatWidthMode}
                           showChatWidthToggle={!isChatEmptyState}
-                          chatWidthToggleMin={chatWidthToggleMin}
                           visibleToolbarActions={visibleComposerToolbarActions}
                           // Before the session exists the workspace and git
                           // chips sit under the composer, next to the prompt
@@ -26392,6 +26406,7 @@ export function App({
                           }
                           modelRefresh={modelRefresh}
                           availableModels={availableModels}
+                          modelPickerScope={modelPickerScope}
                           unavailableModels={unavailableModels}
                           mountUnavailableModelTooltip={
                             mountUnavailableModelTooltip
@@ -26455,16 +26470,7 @@ export function App({
                           workspaceSelectionDisabled={
                             !composerWorkspaceSelectEnabled
                           }
-                          atWorkspaceCwd={
-                            workspaceContextActive
-                              ? (ordinaryWorkspaces.find(
-                                  (entry) => entry.cwd === lockedWorkspaceCwd,
-                                )?.cwd ??
-                                (connection.sessionId
-                                  ? connection.workspaceCwd
-                                  : resolveWorkspaceMaintenanceTargetCwd()))
-                              : undefined
-                          }
+                          atWorkspaceCwd={composerWorkspaceCwd}
                           composerScopeKey={
                             effectiveSessionContext?.kind === 'standalone'
                               ? 'standalone'

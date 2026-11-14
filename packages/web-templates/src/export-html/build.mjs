@@ -97,8 +97,14 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_130_000;
 // The patched Zod 4 upgrade (#16434) adds 43,494 bytes when rebuilt against
 // the same candidate with Zod 3. Merged main 754792b8d1 measures 2,129,325
 // bytes and the forbidden-input guard still passes, leaving 2,675 bytes below
-// this ceiling.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_132_000;
+// the previous 2,132,000-byte ceiling.
+// Main 0eb27d3b measures 2,132,531 bytes on Node 22.23.2 and 24.19.0,
+// with the forbidden-input guard passing, leaving 3,469 bytes below this cap.
+// The cross-project Todos page (PR #14237) adds i18n keys and daemon actions
+// reachable from the document entry; the merged tree measures 2,136,046 bytes
+// with the forbidden-input guard passing, so the ceiling lifts to match —
+// the same deliberate bump #16774 and #17153 made for merged-main growth.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_137_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

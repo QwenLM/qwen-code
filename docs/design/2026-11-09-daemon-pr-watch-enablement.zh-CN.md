@@ -2,17 +2,17 @@
 
 [English](2026-11-09-daemon-pr-watch-enablement.md) | [简体中文](2026-11-09-daemon-pr-watch-enablement.zh-CN.md)
 
-状态：proposed（2026-11-09），部分已落地（#16732 与本增量）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md)（下称「主设计」）中继 [投递 drain](2026-11-08-daemon-pr-watch-drain.md)（已合入 #16656）之后的增量，覆盖 drain 增量延后到启用的四项：共享 restore（§1）、resume 后 drain 钩子（§2）、lifecycle close 重排（§3）、daemon 级 deps 填充（§4）。**已落地：完整的 §3 与 §4 中的 host 枚举器（#16732），外加本增量的 §1 共享 restore。**§2、§4 的其余部分与 §5 仍在后面；下文各节均按此标注。**off 开关仍为 `false`，`sessionPrWatch` 设置仍不读取**——配置（§6）、channel 别名与打开开关（§7）仍属 PR B。任何构建都绝不能同时跑两个 poller。
+状态：proposed（2026-11-09），部分已落地（#16732 与本增量）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md)（下称「主设计」）中继 [投递 drain](2026-11-08-daemon-pr-watch-drain.md)（已合入 #16656）之后的增量，覆盖 drain 增量延后到启用的四项：共享 restore（§1）、resume 后 drain 钩子（§2）、lifecycle close 重排（§3）、daemon 级 deps 填充（§4）。**已落地：完整的 §3 与 §4 中的 host 枚举器（#16732）；§1 共享 restore（#16810）；§5 listing 写入与 `listedKeys`（#16847）；以及本增量的 §2 与 §4 其余部分。**§2 与 §4 一起落地——因为 §4 提供 §2 所需的消费者；下文各节均按此标注。**off 开关仍为 `false`，`sessionPrWatch` 设置仍不读取**——配置（§6）、channel 别名与打开开关（§7）仍属 PR B。任何构建都绝不能同时跑两个 poller。
 
 ## 问题
 
 drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、registry 与自推访问都作为注入依赖，而生产中没有任何东西填充它们：`getPrWatchDeps` 与 `getPrDrainDeps` 没有生产调用方，`defaultPrWatchDir()` 与 `releasePrWatchOwnershipSync()` 只被测试引用。PR B 打开开关后有三个后果——两个是正确性问题，一个是延迟问题：
 
 - 休眠接收者永远无法被唤醒。真实 restore 原先位于 `restoreSessionHandler`——`registerSessionRoutes` 内的一个路由闭包，只能经 HTTP 到达；§1 已把它的可复用核心移入 `server/session-restore.ts`。channel 经 SDK 调用它（`commands/channel/daemon-worker.ts:1057-1063`），而 daemon 不能用这条跨进程路径做自己的进程内投递。
-- `wakeDormant: false` 会把投递推迟最多一个 refresh interval，**不会**永久搁浅条目：drain 在每个 tick 的观测之后运行、重新读取每个 watch 文件的 `pending` 列表，且只有 `isSessionLive` 为假时才进休眠分支——所以会话一旦 live，下一个 tick 就投递。缺的是即时性：没有任何东西在 resume 那一刻触发 drain，因此一条转换可能要为一个用户正在看的会话等满一个 interval（默认 5 分钟）。
+- `wakeDormant: false` 会把投递推迟最多一个 refresh interval，对**接收者未被标记 `Gone`** 的条目**不会**永久搁浅：drain 在每个 tick 的观测之后运行、重新读取每个 watch 文件的 `pending` 列表，且只有 `isSessionLive` 为假时才进休眠分支——所以会话一旦 live，下一个 tick 就投递。被早先失败投递标记 `Gone` 的接收者是例外：候选过滤与存活无关地把它丢掉，直到 rejoin 窗口到期，这正是 §2 那处重置要解决的。其余情况下缺的是即时性：没有任何东西在 resume 那一刻触发 drain，因此一条转换可能要为一个用户正在看的会话等满一个 interval（默认 5 分钟）。
 - 关停会与后继者重叠。没有任何东西停止 watch 或释放 owner 记录，因此后继 daemon 可能在前任的 restore 与准入仍在途时就 claim（主 §2）。
 
-另有两处缺口关乎正确性而非可达性：观测丢弃了绑定扫描的 `partial` 标志（其自身注释明写启用增量必须在任何负面决策前透传它），以及 slim listing 从不把 `state` 写进 watch 文件、也不提供 `listedKeys`，因此 listing 已返回的 closed PR 会永远留在 view 轮转里。
+另有两处缺口曾关乎正确性而非可达性，现均已在 §5 定案：观测丢弃的 `partial` 标志无需透传（它不做任何负面决策，加选项不会有任何读取方），而 slim listing 现在会把 `state` 写进 watch 文件并提供 `listedKeys`，因此 listing 已返回的 closed PR 会离开 view 轮转。该写入还会触发它所替代的那次 view 本会触发的 `state_change`。
 
 ## 现状
 
@@ -31,7 +31,7 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 - 给 drain 一个真实的 `wakeSession`，铸造并释放 client registration，并按 channel 的方式划分结果。
 - 在 resume 那一刻触发 drain，使 `wakeDormant: false` 的条目在会话变 live 时立即投递，而不是等到下一个 refresh tick。
 - 关停时停止 watch 并释放 owner 记录，且在途工作落定之后才释放。
-- 填充两个 deps 接缝：watch 目录与锁 registry、allowed hosts、准入、restore、自推账本，以及扫描的 `partial`。
+- 填充两个 deps 接缝：watch 目录与锁 registry、allowed hosts、准入、restore 与自推账本。扫描的 `partial` 无需透传进观测——见 §5。
 - 把 slim listing 的 `state` 写进 watch 文件并提供 `listedKeys`。
 - 保持开关关闭、设置不读：生产中零行为与零 API 量变化。
 
@@ -60,15 +60,15 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 - **worktree 复挂与它的两个锁 helper 一起搬移。** `reconcileRestoredSessionWorktree` 虽是模块级，却并非全参数注入：它调用 `ownershipLockKeyForWorktree` 与 `assertWorktreeOwnershipLockHeld`，而这两者的其他消费者只有 restore 核心与一个仅供测试的别名。三者一并搬移，`server/worktree-ownership-op.test.ts` 改从新家导入该别名。
 - **响应 shaping 在最后一次共享态读取处切分。** `withPromptTerminals` 与 `readRecentPromptTerminals` 留在核心，因为它们在持有 worktree 锁时读取 prompt 账本；路由只做脱敏与写响应。唯一的顺序差异是 reservation 与锁改为在 `res.json` 之前而非之后释放——该写入不触碰任何共享态，因为 payload 已是本地快照。
 
-**没有调用方就不加接缝。** 核心暂不返回释放所铸造 client registration 的 `release()`，也不接受 `onRestored` 钩子。两者各随其首个消费者落地——`release()` 随 §4 的 restore 映射，`onRestored` 随 §2——因为没有调用方设置的可选参数就是死开关。
+**没有调用方就不加接缝。** drain 用 `restored.clientId` 为所铸造的 client registration 造出 `release()`——`SessionRestoreResult` 自身不带 release，所以这次 detach 属于 drain，不属于核心——路由则触发 `onSessionRestored` 钩子。两者各随其首个消费者落地——`release()` 随 §4 的 restore 映射，钩子随 §2——因为没有调用方设置的可选参数就是死开关。
 
-### 2. resume 后 drain 钩子（尚未落地）
+### 2. resume 后 drain 钩子（已落地）
 
-这是**延迟优化，不是正确性修复**。没有它投递也会发生：drain 每个 tick 都跑、重读 `pending`，并在 `isSessionLive` 为真时投递给该接收者。钩子消除的是「用户 resume」到「下一个 tick」之间的等待。
+这**主要是延迟优化，另带一处正确性重置**。对已具备投递资格的接收者，没有它投递也会发生：drain 每个 tick 都跑、重读 `pending`，并在 `isSessionLive` 为真时投递，所以钩子消除的是「用户 resume」到「下一个 tick」之间的等待。那处重置是 `Gone` 标记：被早先归档或 worktree 丢失排除的会话，会被一直过滤到 `PR_WATCH_GONE_REJOIN_MS`（一小时）到期，因此没有钩子的清除，已重新存活的被恢复会话可能在这整个窗口内都收不到投递。
 
-共享 restore 接受可选的 `onRestored` 回调，在会话已 live 且 generation 断言通过之后调用。**真正要紧的调用方是路由，不是 drain。** 若只由 drain 自己的 `wakeSession` 填充传钩子，它只会在 `wakeDormant: true` 路径（drain 自己恢复会话）上触发，永远不会在用户 resume 时触发，也就覆盖不了本节存在的理由。因此接线需要一个路由→drain 的接缝：给会话路由注入一个 `onSessionRestored` 式依赖，由与 drain deps 相同的 late-bound getter 填充，为该会话所绑定的 PR 调度一次 drain。在该接缝存在之前这个回调没有调用方，所以它要么与接缝一起落地，要么不落。
+接缝是路由侧的 `onSessionRestored` 依赖，在 `restoreSessionCore` 返回已恢复会话之后触发。早先的稿子把 `onRestored` 回调放在核心内；改为路由在 await 之后触发是等价且更小的做法——那时核心的 `finally` 已释放 reservation 与 worktree 锁，而每条非成功退出（cancelled、抛错）都会跳过钩子，与核心内标志位的效果完全一致。给核心加选项属单次使用的抽象。**真正要紧的调用方是路由，不是 drain。** 若只由 drain 自己的 `wakeSession` 填充传钩子，它只会在 `wakeDormant: true` 路径（drain 自己恢复会话）上触发，永远不会在用户 resume 时触发，也就覆盖不了本节存在的理由。因此接线需要一个路由→drain 的接缝：给会话路由注入一个 `onSessionRestored` 式依赖，由与 drain deps 相同的 late-bound getter 填充，为被恢复会话所在的 workspace 调度一次定向 drain。落地的正是这个接缝：路由接受 `onSessionRestored`，serve 根用 timer 的 `drainNow` 填充它，钩子只在核心返回之后触发。drain 的行是 workspace 范围的——它扫描该 workspace 的绑定，而不只是被恢复会话的绑定——所以接缝传 workspace。它**同时还传被恢复会话的 session id**，且 drain 依赖它：`drainNow(workspaceCwd, sessionId?)` 在派发前清除该会话的陈旧 `Gone` 标记。只传 workspace 的第二个调用方能得到扫描、却得不到这处重置，于是先前被标记 `Gone` 的被恢复会话会一直被排除到 rejoin 窗口到期。
 
-钩子**绝不能在 restore 内被 await**。`PathMutexRegistry.runExclusive` 不可重入，而 drain 自己的 `restoreAndAdmit` 在 wake 之后会重新取同一把 per-PR 锁。从「由 drain 派发的 restore」内部 await 一个 drain 会反转 await 方向并可能死锁。因此钩子不等待地触发 drain（`void`，自带失败日志），正如 drain 已经不等待地触发 restore。它还在核心的 `finally` 释放 reservation 与 worktree 锁之后运行——§1 已把两处释放移入核心，故钩子必须排在该 `finally` 之后而非之前——因此重新进入同一会话 restore 的 drain 不会撞上 pending reservation 计数。
+定向 drain 同样施加 tick 的**信任过滤**——只有 trusted-or-primary 的 workspace 会被观测，因此不可信非 primary 也不能被按需 drain，因为自推账本会在其 checkout 里跑 git。它与 tick 受**同一个关闭开关**门控：watch 关闭时 resume 根本不读 drain deps，因此不会从上一个 owner 留下的 watch 文件里投递。钩子**绝不能在 restore 内被 await**。`PathMutexRegistry.runExclusive` 不可重入，而 drain 自己的 `restoreAndAdmit` 在 wake 之后会重新取同一把 per-PR 锁。从「由 drain 派发的 restore」内部 await 一个 drain 会反转 await 方向并可能死锁。因此钩子不等待地触发 drain（`void`，自带失败日志），正如 drain 已经不等待地触发 restore。因为它在核心返回之后才触发，两处释放都已完成，因此重新进入同一会话 restore 的 drain 不会撞上 pending reservation 计数。
 
 ### 3. lifecycle close 重排（已落地于 #16732）
 
@@ -84,44 +84,57 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 
 「不拥有」按 **claim 自己的身份规则**判定，且次序相同：先 `isLocalIdentity`，再 `isSameProcess`。两侧共用同一个谓词（`isOwnedByThisProcess`），因此将来扩展判别式不会只落在其中一侧。释放返回原因（`released` / `absent` / `foreign` / `unreadable` / `lock`）而非裸布尔，关停对除 `absent` 外的每种拒绝都记一行——`absent` 是「从未 claim」的常态，保持静默。PID 号相同并不授权删除来自共享同一 home 的另一次启动、另一台机器或另一个 PID namespace 的记录；而单靠 `isSameProcess` 在读不到 process token 的平台（macOS/Windows）会退化为 PID 存活检查——那就会删掉 claim 明确拒绝认领的记录。
 
-### 4. deps 填充（host 枚举器已落地于 #16732，其余尚未）
+### 4. deps 填充（已落地）
 
 `run-qwen-serve.ts` 在 `getArchiveCoordinator` 旁经 late-bound getter 填充两个接缝：
 
 - **watch 目录与锁**：`defaultPrWatchDir()`，一个由观测与 drain 共享的 `PathMutexRegistry`，使 owner 的进程内锁对每个文件都权威（主 §2）。
-- **allowed hosts**：`github.com`、daemon 自己 `gh` 配置中的 hosts，以及本 daemon 托管的每个 GitHub channel 的 web origin。新 helper 按 go-gh 的 ConfigDir 优先级（`GH_CONFIG_DIR`、`XDG_CONFIG_HOME`、`%AppData%\GitHub CLI`、`HOME/.config/gh`）枚举 `gh` 的 `hosts.yml` 键，用仓库的 `node yaml` 经 `parseDocument(text, { logLevel: 'error' })` 读 YAML，**绝不用 `parse`**：库会自己把 warning 交给 `process.emitWarning` 并附上出错的源文本，绕过 catch 与调用方的 log，而 `hosts.yml` 的行携带 oauth token。有两条这样的路径——未解析的 tag，以及 `toJS()` 把集合值的映射键字符串化——两者都不进入 `doc.errors`/`doc.warnings`。`'error'` 关闭整类且仍收集诊断；**不可用 `'silent'`**，因为它连 `MULTIPLE_DOCS` 错误也会吞掉。error 与 warning 都从 document 上收集，只记不回显的 code 加行号；无法解析的文档不产出 host，有 warning 仍产出 host 名。托管 channel 来自 `resolveChannelWorkspaceGroups`，因此非受信 workspace 的设置绝不贡献；`resolveGithubWebOrigin` 给出各自的主机。每个主机都用 `normalizeWatchHost` 归一化。读取失败降级为 `github.com` 加托管 channel，并记一行日志——绝不降级为会静默禁用所有 view 的空集。
+- **allowed hosts**：`github.com`、daemon 自己 `gh` 配置中的 hosts，以及本 daemon 托管的每个 GitHub channel 的 web origin。新 helper 按 go-gh 的 ConfigDir 优先级（`GH_CONFIG_DIR`、`XDG_CONFIG_HOME`、`%AppData%\GitHub CLI`、`HOME/.config/gh`）枚举 `gh` 的 `hosts.yml` 键，用仓库的 `node yaml` 经 `parseDocument(text, { logLevel: 'error' })` 读 YAML，**绝不用 `parse`**：库会自己把 warning 交给 `process.emitWarning` 并附上出错的源文本，绕过 catch 与调用方的 log，而 `hosts.yml` 的行携带 oauth token。有两条这样的路径——未解析的 tag，以及 `toJS()` 把集合值的映射键字符串化——两者都不进入 `doc.errors`/`doc.warnings`。`'error'` 关闭整类且仍收集诊断；**不可用 `'silent'`**，因为它连 `MULTIPLE_DOCS` 错误也会吞掉。error 与 warning 都从 document 上收集，只记不回显的 code 加行号；无法解析的文档不产出 host，有 warning 仍产出 host 名。托管 channel 来自 `resolveChannelWorkspaceGroups`，因此非受信 workspace 的设置绝不贡献；`resolveGithubWebOrigin` 给出各自的 web **origin**（`https://host`），因此要先从中取 hostname 再归一化——`normalizeWatchHost` 不剥 scheme，而 watch identity 携带的是不带端口的裸 hostname。每个主机都用 `normalizeWatchHost` 归一化。该集合在 hosted channel 变化时重算，而不是在启动时冻结：deps 的异步加载通常早于 channel 在 listen 时提交，一次性构建会漏掉全部 hosted 主机。读取失败降级为 `github.com` 加托管 channel，并记一行日志——绝不降级为会静默禁用所有 view 的空集。
 - **准入**：`admitSessionPrompt` 配 app 的 archive coordinator，沿用 bound relay 的 classification（`channelPrompt: true`），使注入文本不跑 PR-binding backfill（主 §4）。
 - **restore**：§1 的共享 restore，把其 typed 结果映射为 `PrWatchWakeOutcome`——成功映射为带 registration `release` 的 `restored`，Gone 集映射为 `gone`，其余映射为 `unavailable`。`session_writer_conflict` 属临时，正如 drain 自己的划分已要求。
-- **自推账本**：从候选者的 clone（bridge live summary 的 `worktree.path`，否则绑定的 `workspaceCwd`）跑 `cloneWorktreesOf`，然后 `vouchedScanRoots`、`autofixPrPaths`、`readState`，仅在 `sameRepository` 与 `sessionId` 匹配时接受。untrusted primary 仅用坐标——其检出里不跑 git。任何拒绝意味着无账本、转换照常投递。
+- **自推账本**：从候选者的 clone（bridge live summary 的 `worktree.path`，否则绑定的 `workspaceCwd`）跑 `cloneWorktreesOf`，然后 `vouchedScanRoots`、`autofixPrPaths`、`readState`，仅在 `sameRepository` 与 `sessionId` 匹配时接受。untrusted primary 根本得不到账本——查询在其检出里跑任何 git 之前就返回。任何拒绝意味着无账本、转换照常投递，这是安全方向：缺账本只会多投递，而不会压制一次真实的外部 head 变更。
 - **actions**：不填充。`sessionPrWatch.actions` 属 PR B；drain 的空 map 归一化已把缺失的 map 当作通用 prompt。
 
-### 5. listing 写入、listedKeys 与 partial（尚未落地）
+### 5. listing 写入与 listedKeys（已落地）
 
 refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下、且仅当 daemon 持有 owner 记录时，在该 PR 的 per-PR 锁内把 `state` 与 `observedAt` 写进其 watch 文件——与观测相同的原子写，无文件时静默初始化。把被列出的键收集为 `listedKeys` 传给观测，使 listing 已返回的 closed PR 离开 view 轮转（主 §1）。
 
-把绑定扫描的 `partial` 标志透传进观测选项。观测今天不做负面决策，但 drain 已经做，且该标志必须来自同一次扫描而不是重新计算。drain 调用方的 `coveragePartial`（#16656 新增）保留：它覆盖 `listAll()` 略过的 registry 条目，那是扫描自身标志看不到的。
+**`partial` 那一项已经满足，不需要写代码。** 本节早先的稿子要求把绑定扫描的 `partial` 透传进观测选项。读代码可知：drain 已经把每个 workspace 扫描自身的 `partial` OR 进它以调用方 `coveragePartial` 起头的那个标志，并已在两处负面决策上消费它——watch 文件删除守卫与 pending 丢弃守卫。而观测根本不做任何负面决策，因此在那里新增 `partial` 选项不会有任何读取方：那是死开关。所以观测 tick 里丢弃该标志是正确的现状，其注释应改为「要求已满足」而非「尚待完成」。调用方的 `coveragePartial`（#16656 新增）仍覆盖单个 workspace 扫描看不到的东西——`listAll()` 略过的 registry 条目。
+
+**tick 次序决定了键从哪来。** timer 先跑观测再跑 refresh，所以产出 `listedKeys` 的 listing 在消费它的观测**之后**运行。因此 refresh 返回它列出的键，timer 按 workspace 把它们带进下一个 tick 的观测。state 写入是即时的；只有「退出 view 轮转」滞后一个 tick，而这本就是轮转的工作间隔。两个机制互补而非冗余：存下的 `state` 让 `effectiveState` 无需花一次 view 就变成 closed 或 merged，而 `listedKeys` 区分「listing 覆盖到的 closed PR」与「没覆盖到的」——后者留在轮转里以捕捉 reopen。
+
+**listing 是跃迁的生产者，不只是 state 的记录者。** 写入 `state` 会让观测跳过那次本会检测到同一变更的 view，而该 view 是 `detectPrTransitions` 唯一的另一个调用方——也是 `pending` 唯一的生产者，而 drain 只投递 `pending`。所以「第一个观测者是 listing」的关闭或合并必须自己触发 `state_change`，否则它被记成既成事实、永不投递。因此该写入运行同一个检测器，并把先前的 `headSha` 与 `checks` 前向携带，使得只可能触发 `state_change`——不会有 `head_change`、`ci_failure` 或 `merge_conflict`。没有 `headSha` 的文件不算已建基线，静默初始化，与 view 路径完全一致。这不限于同 tick 的窄窗口：而是该 tick 观测未触及的每个 PR——view 上限、deadline 截断、view 失败、或已被别的 workspace 先 view 掉。
+
+**只有共享 scan 认定有绑定、且主机在允许集合内的 PR 才写文件。** binder 集合取共享绑定扫描自己的答案，而不是对它的再推导：该扫描排除归档、hidden-catalog 与不可读的会话，而 drain 会删除它没有列出的 watch 文件。近似它——例如直接枚举 active sidecar——会为漏掉的那扇排除门重新制造抖动，所以 refresh 直接调用该扫描。写入还施加观测的 `allowedHosts` 门控：drain 投递 `pending` 时自己不做任何主机检查，所以为「观测拒绝 view 的主机」写跃迁就会为它投递事件。`listedKeys` 仍报告 listing 的完整覆盖——观测只对自己扫到的绑定查键，因此它从不查的键是无害的。
 
 ## 涉及文件
 
-| 文件                                                             | 改动                                                                                                               |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `packages/cli/src/serve/server/session-restore.ts`（新）         | 共享 restore 核心、typed error、必填 `isCancelled`、可选 telemetry sink；worktree 复挂与它的两个锁 helper 搬移至此 |
-| `packages/cli/src/serve/routes/session.ts`                       | 路由委托给共享核心；保留解析、runtime 解析、virtual-subagent 与 legacy standalone 分支、telemetry、脱敏、错误映射  |
-| `packages/cli/src/serve/server/worktree-ownership-op.test.ts`    | 改从新家导入锁 key 别名；断言不变                                                                                  |
-| `packages/cli/src/serve/server/session-restore.test.ts`（新）    | 核心直调用例，钉住两条取消臂、telemetry sink 与 reservation 释放                                                   |
-| `packages/cli/src/serve/server/worktree-ownership-op.ts`         | 锁 key 的反向引用改为指向真正拥有该推导的模块                                                                      |
-| `packages/cli/src/serve/server.test.ts`                          | worktree double 移到 core 深模块，barrel mock 重导出它们；断言、标题与计数均不变                                   |
-| `packages/cli/src/serve/routes/session-worktree-reset.test.ts`   | sidecar spy 同样重指，并改在该处捕获真实实现                                                                       |
-| `packages/cli/src/serve/server/pr-watch-drain.ts`                | drain state 上的 `idle()` 落定信号，以及 `stopPrWatch`（停止、等待、再释放）                                       |
-| `packages/cli/src/serve/server/pr-watch-store.ts`                | `releaseOwnedPrWatchSync`：只释放本进程持有的记录                                                                  |
-| `packages/cli/src/serve/server/pr-watch-gh-hosts.ts`（新）       | 枚举 daemon 的 `gh` 已配置 hosts                                                                                   |
-| `packages/cli/src/serve/server/pr-watch-deps.ts`（新）           | 构建观测与 drain 的 deps：hosts、准入、restore 映射、账本                                                          |
-| `packages/cli/src/serve/run-qwen-serve.ts`                       | 经 late-bound getter 填充两个接缝；注册关停 drain                                                                  |
-| `packages/cli/src/serve/serve-app-lifecycle.ts`                  | 形状不变；新 drain 经既有 `addAppDrain` 注册                                                                       |
-| `packages/cli/src/serve/server/session-pr-refresh.ts`            | listing→watch 写入、`listedKeys`、`partial` 透传；`stopWatch` 与 tick 落定信号                                     |
-| `docs/design/2026-11-09-daemon-pr-watch-enablement.md`（+zh-CN） | 本设计                                                                                                             |
+| 文件                                                              | 改动                                                                                                                                                       |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/cli/src/serve/server/session-restore.ts`（新）          | 共享 restore 核心、typed error、必填 `isCancelled`、可选 telemetry sink；worktree 复挂与它的两个锁 helper 搬移至此                                         |
+| `packages/cli/src/serve/routes/session.ts`                        | 路由委托给共享核心；保留解析、runtime 解析、virtual-subagent 与 legacy standalone 分支、telemetry、脱敏、错误映射                                          |
+| `packages/cli/src/serve/server/worktree-ownership-op.test.ts`     | 改从新家导入锁 key 别名；断言不变                                                                                                                          |
+| `packages/cli/src/serve/server/session-restore.test.ts`（新）     | 核心直调用例，钉住两条取消臂、telemetry sink 与 reservation 释放                                                                                           |
+| `packages/cli/src/serve/server/worktree-ownership-op.ts`          | 锁 key 的反向引用改为指向真正拥有该推导的模块                                                                                                              |
+| `packages/cli/src/serve/server.test.ts`                           | worktree double 移到 core 深模块，barrel mock 重导出它们；断言、标题与计数均不变                                                                           |
+| `packages/cli/src/serve/routes/session-worktree-reset.test.ts`    | sidecar spy 同样重指，并改在该处捕获真实实现                                                                                                               |
+| `packages/cli/src/serve/server/pr-watch-drain.ts`                 | drain state 上的 `idle()` 落定信号，以及 `stopPrWatch`（停止、等待、再释放）                                                                               |
+| `packages/cli/src/serve/server/pr-watch-store.ts`                 | `releaseOwnedPrWatchSync`：只释放本进程持有的记录                                                                                                          |
+| `packages/cli/src/serve/server/pr-watch-gh-hosts.ts`（新）        | 枚举 daemon 的 `gh` 已配置 hosts                                                                                                                           |
+| `packages/cli/src/serve/server/pr-watch-deps.ts`（新）            | 构建观测与 drain 的 deps：hosts、准入、restore 映射、账本（随本片 §2 与 §4 落地）                                                                          |
+| `packages/cli/src/serve/run-qwen-serve.ts`                        | 经 late-bound getter 填充两个接缝（hosted channel 变化时重建）；注册关停 drain 与 resume 钩子                                                              |
+| `packages/cli/src/serve/server.ts`                                | 把路由的 session-id 准入与 live-conversation materialize 共享给进程内 wake                                                                                 |
+| `packages/cli/src/serve/process-env-guard.test.ts`                | 登记 deps 模块那处 process-scoped 的 `gh` 配置读取                                                                                                         |
+| `packages/cli/src/serve/server/pr-watch-deps.test.ts`（新）       | 逐接缝用例：允许集、wake 映射、release、准入与账本                                                                                                         |
+| `packages/cli/src/serve/server/session-pr-refresh.test.ts`        | `drainNow` 用例：覆盖声明、关闭开关、信任过滤、惰性、owner 记录交还、按 session id 清除 `Gone`、以及另一 workspace 的 leader 保持优先                      |
+| `packages/cli/src/serve/run-qwen-serve.pr-watch-shutdown.test.ts` | 真实 daemon 启动：有序停止、托管 channel 的 settings 加载及其信任/env 退出项、带锁承接的重建、serve 根对 drain local 的安装                                |
+| `packages/cli/src/serve/multi-workspace-sessions.test.ts`         | 路由侧钩子对着真正成功的 restore：带 workspace 与 session id 触发；在核心内部失败的 restore 不调度；永不落定的 drain 不阻塞                                |
+| `packages/cli/src/serve/serve-app-lifecycle.ts`                   | 形状不变；新 drain 经既有 `addAppDrain` 注册                                                                                                               |
+| `packages/cli/src/serve/server/pr-watch-observation.ts`           | 按 workspace 把 listing 的键带进轮转决策的 tick 选项（已落地）                                                                                             |
+| `packages/cli/src/serve/server/session-pr-refresh.ts`             | listing→watch 写入与 `listedKeys`（#16847）；`stopWatch` 与 tick 落定信号（#16732）；`drainNow` 受同一开关与信任过滤门控（§2）。无需 `partial` 透传，见 §5 |
+| `docs/design/2026-11-09-daemon-pr-watch-enablement.md`（+zh-CN）  | 本设计                                                                                                                                                     |
 
-`session-restore.ts`、`routes/session.ts`、`worktree-ownership-op.ts` 与四个测试文件的行不属于 #16732——它们随 §1 在本增量落地。`pr-watch-deps.ts` 随 §4 的其余部分落地。另有两行是部分的：`session-pr-refresh.ts` 已落地 `stopWatch` 与 tick 落定信号，但 listing 写入、`listedKeys` 与 `partial` 透传尚未；`run-qwen-serve.ts` 已落地关停 drain 注册，但两个接缝尚未。
+`session-restore.ts`、`worktree-ownership-op.ts` 与四个 §1 测试文件的行不属于 #16732——它们随 §1 落地（#16810）。`pr-watch-deps.ts`、`run-qwen-serve.ts` 的两个接缝、`drainNow` 句柄与路由的 `onSessionRestored` 接缝随本片落地（§2 与 §4）。`server.ts` 把路由的 session-id 准入与 live-conversation materialize 共享给进程内 wake；`process-env-guard.test.ts` 登记新模块那处 process-scoped 的 `gh` 配置读取。
 
 ## 关键设计决策
 
@@ -147,7 +160,7 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 - 单元（共享 restore 核心）：同源共置的套件直接驱动 `restoreSessionCore`，不经 HTTP。它按**位置**钉住每条取消臂——复挂之前只读一次 sidecar，之后读两次——并按**清理语义**钉住 `void` 与 `await` 的区别，用一个受控闸门的 kill 观测，使断言完全不依赖时序。它同时钉住 internal runtime 的 telemetry sink，以及成功与失败两条路径上的 reservation 释放。六个变异体死亡：两条臂各自永不取消、telemetry sink 被删、reservation 永不释放、以及 `void`/`await` 两个方向的互换；只改日志措辞的对照存活。刻意不走 HTTP 断连——`server.test.ts:18935` 的注释记录了 supertest 加 Node 的 close 事件时序在 CI 上 flaky，该注释现已指向本套件。
 - 单元（随 §2 与 §4）：`release()` 恰好 detach 一次；`onRestored` 在锁释放后触发且不被 await。这两者在那之前没有调用方，故 §1 不为它们加测试。`isCancelled` **不属于**这一组——它是必填的、路由今天就在传，上面的核心套件已覆盖它。
 - 单元（wake 映射）：每个 Gone 码映射为 `gone`，每个临时码映射为 `unavailable`，成功映射为带「恰好 detach 一次」release 的 `restored`。
-- 单元（钩子）：resume 会 drain 该会话绑定的 PR；挂起的 drain 不拉长 restore；per-PR 锁绝不被重入。
+- 单元（钩子）：resume 会 drain 被恢复会话所在的 workspace 并带上它的 id；已到达核心之后失败的 restore 不调度任何 drain；永不落定的 drain 不拉长 restore。最后这条钉住的是用户可见性质，而非仅路由的 `void`：`server.ts` 的包装器不返回 local 的结果，所以即便把钩子改成 await 也会立即落定——不阻塞这一保证由两层共同成立，因此「把路由改成 await」这个变异在端到端不可观测。per-PR 锁不被重入同样由上文的结构性论证给出，而不是由某条用例钉住。
 - 单元（lifecycle）：close 停 timer、等在途工作、然后释放记录；挂起的 restore 超时而非阻塞；非 owner 不释放。两个次序用例承重：关停落在 observation 中途（此时 drain 空闲已为真），以及关停落在 observation 中途、该 tick 随后派发一个比它活得更久的 restore——记录必须存活到那个 restore 落定。身份：claim 拒绝的记录（外部 boot，或 process token 仍匹配的外部 PID namespace）在任何平台都绝不删除；由另一个存活 PID 持有、且没有 process token 的记录同样拒绝。停止 timer 的**两条臂**都按效果而非机制钉住：开关打开时，`stopWatch` 之后再推进三个 interval，不得产生 view、listing 或重新 claim；开关关闭时，早退分支的 `dispose()` 用「在任何 tick 之前停止、再推进一整天且无 listing」来钉。关闭态用例必须在 tick 之前停止——一旦有 sweep 在途，其 `running` 守卫会在 fake timer 下跳过后续 tick，因此 sweep 之后的计数无法区分 timer 是上膛还是已停。被拒绝的释放要记日志，从未 claim 的保持静默。接线：一次真实 daemon 启动（refresh timer 打桩）必须经 `close()` 到达 `stopWatch`——兄弟 serve 套件把 refresh chunk mock 成抛错，所以这条放在自己的文件里。Windows 的 `%AppData%` 分支用平台打桩来执行，而不是按平台门控，因为 PR 的 CI profile 跳过 Windows 车道。
 - 单元（hosts）：无 channel 时只有 `github.com`；`hosts.yml` 条目；托管 channel 的企业 web origin；非受信 workspace 的 channel 不贡献；读取失败降级为已知安全集并记日志。凭据围堵覆盖每一条 emit 路径：被抛出的解析错误、未解析 tag 的 warning，以及 `toJS()` 把集合值键字符串化（三种拼写，按 token 前缀断言，因为库会截短长键）——每种都同时对 log 与 `process.emitWarning` 断言。symlink 拒绝与 FIFO 一样按 POSIX 门控，因为 Windows 上不存在 `O_NOFOLLOW`。
 - 单元（listing）：被列出的 closed PR 离开 view 轮转；listing 的 `state` 写入静默初始化并取得 per-PR 锁；`partial` 到达 drain。

@@ -314,34 +314,52 @@ export function createDaemonWorkspaceActions({
     },
 
     channelQrLogin: {
-      async start(name) {
+      async start(name, clientId) {
         const workspace = requireWorkspaceClient(
           getClient,
           getWorkspaceCwd,
           'Start channel QR login failed',
         );
-        return workspace.startWorkspaceChannelQrLogin(name);
+        return workspace.startWorkspaceChannelQrLogin(name, { clientId });
       },
 
-      async state(loginId) {
+      async state(loginId, clientId) {
         const workspace = requireWorkspaceClient(
           getClient,
           getWorkspaceCwd,
           'Load channel QR login failed',
         );
         return withActionTimeout(
-          workspace.workspaceChannelQrLogin(loginId),
+          workspace.workspaceChannelQrLogin(loginId, { clientId }),
           'Load channel QR login timed out',
         );
       },
 
-      async cancel(loginId) {
+      async cancel(loginId, clientId) {
         const workspace = requireWorkspaceClient(
           getClient,
           getWorkspaceCwd,
           'Cancel channel QR login failed',
         );
-        return workspace.cancelWorkspaceChannelQrLogin(loginId);
+        return workspace.cancelWorkspaceChannelQrLogin(loginId, { clientId });
+      },
+
+      async release(loginId, clientId, workspaceCwd) {
+        // A raw REST call rather than the SDK method: the release must survive
+        // the document, and only `keepalive` does that. Same shape as
+        // detachDaemonClient, which exists for the same reason.
+        const cwd = workspaceCwd ?? getWorkspaceCwd();
+        if (!cwd) return;
+        const path = `/workspaces/${encodeURIComponent(cwd)}/channel-qr-logins/${encodeURIComponent(loginId)}`;
+        const headers: Record<string, string> = {
+          ...(createDaemonHeaders(token) as Record<string, string>),
+        };
+        if (clientId) headers['X-Qwen-Client-Id'] = clientId;
+        await requestRest(createDaemonRequestUrl(baseUrl, path), {
+          method: 'DELETE',
+          keepalive: true,
+          headers,
+        });
       },
     },
 

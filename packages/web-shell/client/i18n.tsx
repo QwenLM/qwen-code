@@ -516,19 +516,14 @@ const EN: Messages = {
   'managed.model.optionsError': 'Could not load available models.',
   'managed.model.reload': 'Reload models',
   'managed.model.nextTurn':
-    'Change the model while idle. Your next message uses the selected model; conversation history is kept.',
+    'Your next message uses the selected model. An already running task keeps its model; conversation history is kept.',
   'managed.model.changing': 'Changing model…',
-  'managed.model.unconfirmed':
-    'The model change is not confirmed. Continue confirming the original request.',
-  'managed.model.confirm': 'Continue confirming',
   'managed.model.busy':
-    'Finish the active task, approval or unconfirmed request before changing model.',
-  'managed.model.storage':
-    'Browser session storage is unavailable. The model change cannot start safely.',
+    'Model changes are temporarily unavailable for this session. Try again shortly.',
   'managed.model.conflict':
     'The model has changed. Review the current selection and try again.',
   'managed.model.failed':
-    'The model change was refused. Review the available models and try again.',
+    'Could not change the model. Check the current selection and try again.',
   'managed.approvalOptionsLoading': 'Loading approval modes…',
   'managed.approvalOptionsLoadFailed': 'Could not load approval modes.',
   'managed.approvalOptionsInvalid':
@@ -840,6 +835,17 @@ const EN: Messages = {
   'githubPrs.checksFailing': 'Checks failing',
   'githubPrs.checksPending': 'Checks pending',
   'githubPrs.open': (v) => `Open pull request #${v?.number ?? ''} on GitHub`,
+  'sessionsOverview.bindPr': 'Bind PR',
+  'sessionsOverview.bindPrPlaceholder': 'PR number or URL',
+  'sessionsOverview.bindPrSubmit': 'Bind',
+  'sessionsOverview.bindPrInvalid': 'Enter a PR number or a full PR URL.',
+  'sessionsOverview.bindPrNotInList': (v) =>
+    `PR #${v?.number ?? ''} is not in the open PR list. Paste its full URL instead.`,
+  'sessionsOverview.bindPrListFailed':
+    'Could not load the PR list. Paste the full PR URL instead.',
+  'sessionsOverview.bindPrFailed': 'Bind PR failed',
+  'sessionsOverview.bindPrUnavailable':
+    'This workspace is not a git repository, so PR numbers cannot be looked up. Paste the full PR URL instead.',
   'workspace.paneLabel': (v) => `Workspace: ${v?.name ?? ''}`,
   'about.auth': 'Auth',
   'about.baseUrl': 'Base URL',
@@ -1465,6 +1471,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'markdownTable.selection.selected': 'Selected',
   'markdownTable.selection.nonEmpty': 'Non-empty',
   'markdownTable.selection.numeric': 'Numeric',
+  'markdownTable.selection.statistics': 'Numeric selection statistics',
   'markdownTable.selection.sum': 'Sum',
   'markdownTable.selection.average': 'Average',
   'markdownTable.selection.min': 'Min',
@@ -2139,6 +2146,14 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'scheduledTasks.group.nameRequired': 'Enter a name for the new group.',
   'scheduledTasks.routing.loading': 'Loading models and groups…',
   'scheduledTasks.delivery.channel': 'Delivery Channel',
+  'scheduledTasks.delivery.configuredGroupHint':
+    'Messages are sent to the group configured for this Channel.',
+  'scheduledTasks.delivery.configuredHint':
+    'Messages are sent to the destination configured for this Channel.',
+  'scheduledTasks.delivery.useConfiguredDestination':
+    'Use configured destination',
+  'scheduledTasks.delivery.differentConfiguredDestination':
+    'This saved destination differs from the Channel’s configured destination.',
   'scheduledTasks.delivery.off': 'Delivery off',
   'scheduledTasks.delivery.hint':
     'Send the final response of a successful scheduled run to this destination. Delivery depends on the Channel and does not guarantee receipt.',
@@ -2303,6 +2318,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'terminal.notice.error': (v) => `Error: ${v?.message ?? ''}`,
   'terminal.notice.unknownError': 'Unknown error',
   'terminal.notice.reconnecting': 'Connection lost — reconnecting…',
+  'terminal.notice.lost': 'This terminal is no longer available.',
   'terminal.notice.protocolMismatch':
     'Terminal protocol changed; restart the daemon and reload this page.',
   'localFiles.title': 'Local files',
@@ -2657,11 +2673,21 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.collapse': 'Collapse',
   'sidebar.expand': 'Expand',
   'sidebar.showAllSessions': 'Show all',
+  'sidebar.showMoreSessions': (v) => `Show ${v?.['count'] ?? 0} more`,
   'sidebar.subSessions': (v) => plural(v?.['count'], 'sub-session'),
   'sidebar.collapseProject': 'Collapse workspace',
   'sidebar.expandProject': 'Expand workspace',
   'sidebar.search': 'Search sessions',
   'sidebar.searchPlaceholder': 'Search sessions',
+  'sidebar.searchResults': 'Sessions',
+  'sidebar.searchLoading': 'Searching sessions…',
+  'sidebar.searchEmpty': 'No sessions found',
+  'sidebar.searchEmptyHint':
+    'Try a different title or a phrase from a conversation.',
+  'sidebar.searchRecentEmpty': 'Your recent sessions will appear here.',
+  'sidebar.searchPartialFailure': 'Some sessions could not be searched.',
+  'sidebar.searchNavigate': 'Navigate',
+  'sidebar.searchOpen': 'Open',
   'sidebar.rename': 'Rename',
   'sidebar.export': 'Export conversation record',
   'sidebar.exportFailed': 'Failed to export session',
@@ -3018,6 +3044,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'local.effort': 'Set reasoning effort for capable models',
   'local.export': 'Export the current session history to a file',
   'local.forget': 'Remove matching entries from managed auto-memory',
+  'local.pr': 'Bind a GitHub pull request to this session',
   'local.hooks': 'Manage Qwen Code hooks',
   'local.importConfig': 'Import MCP servers from Claude configs',
   'local.init': 'Analyze the project and create a QWEN.md file',
@@ -3505,6 +3532,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'goal.failed': 'Goal could not be achieved',
   'goal.judge': 'Judge',
   'goal.label': 'Goal',
+  'goal.expandDetails': 'Expand details',
+  'goal.collapseDetails': 'Collapse details',
   'goal.lastCheck': 'Last check',
   'goal.notYetMet': 'not yet met',
   'goal.set': 'Goal set',
@@ -4690,6 +4719,25 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.platform.available': 'Available',
   'channels.platform.configure': 'Configure',
   'channels.platform.add': 'Add connection',
+  'channels.platform.name.dingtalk': 'DingTalk',
+  'channels.platform.name.feishu': 'Feishu',
+  'channels.method.title': (v) =>
+    `Choose a ${v?.platform ?? 'Channel'} connection`,
+  'channels.method.description': (v) =>
+    `Choose how this Channel connects to ${v?.platform ?? 'the platform'}.`,
+  'channels.method.applicationBot': 'Application bot',
+  'channels.method.applicationBot.description':
+    'Receive messages and reply using an application bot.',
+  'channels.method.webhook': 'Webhook (send only)',
+  'channels.method.webhook.description':
+    'Send notifications to the group configured by a custom bot webhook.',
+  'channels.status.readyToSend': 'Ready to send',
+  'channels.statusDescription.readyToSend':
+    'Ready locally. Remote credentials are checked when sending.',
+  'channels.statusDescription.notReadyToSend':
+    'Not ready to send notifications.',
+  'channels.statusDescription.outbound':
+    'Sends notifications to the configured destination.',
   'channels.platform.configureNamed': (v) =>
     `Configure ${v?.platform ?? 'Channel'}`,
   'channels.status.stopped': 'Stopped',
@@ -4791,6 +4839,12 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.qrLogin.error': 'Could not complete the QR binding.',
   'channels.editor.field.dingtalk.clientId': 'Client ID (AppKey)',
   'channels.editor.field.dingtalk.clientSecret': 'Client Secret (AppSecret)',
+  'channels.editor.field.webhook.webhookUrl': 'Webhook URL',
+  'channels.editor.field.webhook.webhookUrl.description':
+    'The secret webhook address of your custom bot.',
+  'channels.editor.field.webhook.signingSecret': 'Signing secret',
+  'channels.editor.field.webhook.signingSecret.description':
+    'Required if signature verification is enabled for the custom bot.',
   'channels.editor.field.weixin.groupPolicy': 'Group policy',
   'channels.editor.field.weixin.groupPolicy.description':
     'WeChat iLink Bot only supports direct messages, so groups stay disabled.',
@@ -4837,6 +4891,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.editor.field.github.allowedRepos.description':
     'Comma-separated repository full names, for example owner/repo.',
   'channels.editor.field.github.allowedRepos.placeholder': 'owner/repo',
+  'channels.editor.field.gitlab.allowedRepos': 'Allowed projects',
+  'channels.editor.field.gitlab.allowedRepos.description':
+    'Comma-separated project paths, for example group/subgroup/project.',
+  'channels.editor.field.gitlab.allowedRepos.placeholder': 'group/project',
   'channels.editor.field.github.useLocalGh':
     'Use local GitHub CLI authentication',
   'channels.editor.field.github.useLocalGh.description':
@@ -4870,6 +4928,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'GitHub logins allowed to start tasks in this repository. Empty means nobody.',
   'channels.editor.field.github.repositorySpeakers.inherited':
     'GitHub logins allowed in this repository. Leave empty to use the channel-wide list.',
+  'channels.editor.field.gitlab.repositorySpeakers.description':
+    'GitLab usernames allowed to start tasks in this project. Empty means nobody.',
+  'channels.editor.field.gitlab.repositorySpeakers.inherited':
+    'GitLab usernames allowed in this project. Leave empty to use the channel-wide list.',
   'channels.editor.field.github.retainedRepositorySettings.title':
     'Repository settings still apply',
   'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
@@ -5194,8 +5256,12 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Enter a group ID other than __proto__, constructor, or prototype.',
   'channels.editor.validation.invalidRepoId':
     'Enter each repository as owner/repo.',
+  'channels.editor.validation.invalidProjectPath':
+    'Enter each project as a path, for example group/subgroup/project.',
   'channels.editor.validation.conflictingRepoAliases':
     'This channel lists one repository twice with different settings, spelled differently (for example Owner/repo and owner/repo). Remove one of the entries from settings.json before saving.',
+  'channels.editor.validation.conflictingProjectAliases':
+    'This channel lists one project twice with different settings, spelled differently (for example Group/Project and group/project). Remove one of the entries from settings.json before saving.',
   'channels.editor.validation.invalidGroupEntry': (v) =>
     `This channel stores a group entry that is not an object: ${v?.repositories ?? ''}. The daemon refuses every save while it is there, and the form has no row for it. Fix or remove that entry in settings.json, then reload the channel.`,
   'channels.editor.validation.invalidOption':
@@ -5677,15 +5743,11 @@ const ZH: Messages = {
   'managed.model.optionsError': '加载可用模型失败。',
   'managed.model.reload': '重新加载模型',
   'managed.model.nextTurn':
-    '空闲时可切换模型；下一条消息使用所选模型，对话历史保留。',
+    '下一条消息使用所选模型；已经运行的任务保持原模型，对话历史保留。',
   'managed.model.changing': '正在切换模型…',
-  'managed.model.unconfirmed': '模型切换尚未确认，请继续确认原请求。',
-  'managed.model.confirm': '继续确认',
-  'managed.model.busy':
-    '请先完成正在执行的任务、审批或未确认请求，再切换模型。',
-  'managed.model.storage': '浏览器会话存储不可用，无法安全发起模型切换。',
+  'managed.model.busy': '当前会话暂时无法切换模型，请稍后重试。',
   'managed.model.conflict': '当前模型已变化，请检查选择后重试。',
-  'managed.model.failed': '模型切换被拒绝，请检查可用模型后重试。',
+  'managed.model.failed': '模型切换失败，请检查当前模型后重试。',
   'managed.approvalOptionsLoading': '正在加载审批策略…',
   'managed.approvalOptionsLoadFailed': '加载审批策略失败。',
   'managed.approvalOptionsInvalid': '服务返回了不支持的审批策略。',
@@ -5977,6 +6039,16 @@ const ZH: Messages = {
   'githubPrs.checksFailing': '检查失败',
   'githubPrs.checksPending': '检查进行中',
   'githubPrs.open': (v) => `在 GitHub 上打开拉取请求 #${v?.number ?? ''}`,
+  'sessionsOverview.bindPr': '绑定 PR',
+  'sessionsOverview.bindPrPlaceholder': 'PR 编号或 URL',
+  'sessionsOverview.bindPrSubmit': '绑定',
+  'sessionsOverview.bindPrInvalid': '请输入 PR 编号或完整 PR URL。',
+  'sessionsOverview.bindPrNotInList': (v) =>
+    `PR #${v?.number ?? ''} 不在开放 PR 列表中。请改用其完整 URL。`,
+  'sessionsOverview.bindPrListFailed': '无法加载 PR 列表。请改用完整 PR URL。',
+  'sessionsOverview.bindPrFailed': '绑定 PR 失败',
+  'sessionsOverview.bindPrUnavailable':
+    '当前工作区不是 git 仓库，无法按编号查询 PR。请改用完整 PR URL。',
   'workspace.paneLabel': (v) => `工作区：${v?.name ?? ''}`,
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via
@@ -6639,6 +6711,7 @@ const ZH: Messages = {
   'markdownTable.selection.selected': '已选',
   'markdownTable.selection.nonEmpty': '非空',
   'markdownTable.selection.numeric': '数值',
+  'markdownTable.selection.statistics': '数值选区统计',
   'markdownTable.selection.sum': '求和',
   'markdownTable.selection.average': '平均',
   'markdownTable.selection.min': '最小',
@@ -7264,6 +7337,11 @@ const ZH: Messages = {
   'scheduledTasks.group.nameRequired': '请输入新分组名称。',
   'scheduledTasks.routing.loading': '正在加载模型和分组…',
   'scheduledTasks.delivery.channel': '投递频道',
+  'scheduledTasks.delivery.configuredGroupHint': '消息会发送到此频道配置的群。',
+  'scheduledTasks.delivery.configuredHint': '消息会发送到此频道配置的目标。',
+  'scheduledTasks.delivery.useConfiguredDestination': '使用已配置的目标',
+  'scheduledTasks.delivery.differentConfiguredDestination':
+    '已保存的目标与此频道配置的目标不同。',
   'scheduledTasks.delivery.off': '不投递',
   'scheduledTasks.delivery.hint':
     '将成功完成的定时任务的最终回复发送到此目标。投递依赖频道，不保证送达。',
@@ -7419,6 +7497,7 @@ const ZH: Messages = {
   'terminal.notice.error': (v) => `错误：${v?.message ?? ''}`,
   'terminal.notice.unknownError': '未知错误',
   'terminal.notice.reconnecting': '连接已断开，正在重连…',
+  'terminal.notice.lost': '此终端已不可用。',
   'terminal.notice.protocolMismatch':
     '终端协议已更新，请重启 daemon 并刷新页面。',
   'localFiles.title': '本地文件',
@@ -7742,11 +7821,20 @@ const ZH: Messages = {
   'sidebar.collapse': '收起',
   'sidebar.expand': '展开',
   'sidebar.showAllSessions': '展开显示',
+  'sidebar.showMoreSessions': (v) => `再显示 ${v?.['count'] ?? 0} 个`,
   'sidebar.subSessions': (v) => `${v?.['count'] ?? 0} 个子会话`,
   'sidebar.collapseProject': '收起工作区',
   'sidebar.expandProject': '展开工作区',
   'sidebar.search': '搜索会话',
   'sidebar.searchPlaceholder': '搜索会话',
+  'sidebar.searchResults': '会话',
+  'sidebar.searchLoading': '正在搜索会话…',
+  'sidebar.searchEmpty': '未找到相关会话',
+  'sidebar.searchEmptyHint': '试试其他标题或会话中的文字。',
+  'sidebar.searchRecentEmpty': '最近的会话会显示在这里。',
+  'sidebar.searchPartialFailure': '部分会话暂时无法搜索。',
+  'sidebar.searchNavigate': '选择',
+  'sidebar.searchOpen': '打开',
   'sidebar.rename': '重命名',
   'sidebar.export': '导出对话记录',
   'sidebar.exportFailed': '导出会话失败',
@@ -8072,6 +8160,7 @@ const ZH: Messages = {
   'local.effort': '设置推理模型的思考强度',
   'local.export': '将当前会话历史导出到文件',
   'local.forget': '从托管的自动记忆中移除匹配的条目',
+  'local.pr': '将 GitHub 拉取请求绑定到本会话',
   'local.hooks': '管理 Qwen Code 钩子',
   'local.importConfig': '从 Claude 配置导入 MCP 服务器',
   'local.init': '分析项目并创建 QWEN.md 文件',
@@ -8516,6 +8605,8 @@ const ZH: Messages = {
   'goal.failed': '目标未能达成',
   'goal.judge': '判断',
   'goal.label': '目标',
+  'goal.expandDetails': '展开详情',
+  'goal.collapseDetails': '收起详情',
   'goal.lastCheck': '上次检查',
   'goal.notYetMet': '尚未满足',
   'goal.set': '目标已设置',
@@ -9613,6 +9704,22 @@ const ZH: Messages = {
   'channels.platform.available': '已开放',
   'channels.platform.configure': '配置',
   'channels.platform.add': '添加连接',
+  'channels.platform.name.dingtalk': '钉钉',
+  'channels.platform.name.feishu': '飞书',
+  'channels.method.title': (v) => `选择${v?.platform ?? '此频道'}的连接方式`,
+  'channels.method.description': (v) =>
+    `选择此频道连接${v?.platform ?? '平台'}的方式。`,
+  'channels.method.applicationBot': '应用机器人',
+  'channels.method.applicationBot.description':
+    '通过应用机器人接收消息并回复。',
+  'channels.method.webhook': 'Webhook（仅发送）',
+  'channels.method.webhook.description':
+    '通过自定义机器人 Webhook，向配置的群发送通知。',
+  'channels.status.readyToSend': '可发送',
+  'channels.statusDescription.readyToSend':
+    '本地已就绪，远程凭证会在发送时验证。',
+  'channels.statusDescription.notReadyToSend': '尚未就绪，暂时无法发送通知。',
+  'channels.statusDescription.outbound': '向配置的目标发送通知。',
   'channels.platform.configureNamed': (v) => `配置${v?.platform ?? '频道'}`,
   'channels.status.stopped': '已停止',
   'channels.status.starting': '启动中',
@@ -9703,6 +9810,12 @@ const ZH: Messages = {
   'channels.qrLogin.cancelled': '已取消绑定。',
   'channels.qrLogin.error': '无法完成扫码绑定。',
   'channels.editor.field.dingtalk.clientId': 'Client ID（原 AppKey）',
+  'channels.editor.field.webhook.webhookUrl': 'Webhook 地址',
+  'channels.editor.field.webhook.webhookUrl.description':
+    '自定义机器人的私密 Webhook 地址。',
+  'channels.editor.field.webhook.signingSecret': '加签密钥',
+  'channels.editor.field.webhook.signingSecret.description':
+    '自定义机器人启用加签验证时需填写。',
   'channels.editor.field.dingtalk.clientSecret':
     'Client Secret（原 AppSecret）',
   'channels.editor.field.weixin.groupPolicy': '群聊策略',
@@ -9751,6 +9864,10 @@ const ZH: Messages = {
   'channels.editor.field.github.allowedRepos.description':
     '逗号分隔的仓库全名，例如 owner/repo。',
   'channels.editor.field.github.allowedRepos.placeholder': 'owner/repo',
+  'channels.editor.field.gitlab.allowedRepos': '允许的项目',
+  'channels.editor.field.gitlab.allowedRepos.description':
+    '逗号分隔的项目路径，例如 group/subgroup/project。',
+  'channels.editor.field.gitlab.allowedRepos.placeholder': 'group/project',
   'channels.editor.field.github.useLocalGh': '使用本地 GitHub CLI 认证',
   'channels.editor.field.github.useLocalGh.description':
     '未配置令牌时，显式复用 daemon 主机上账户级的 gh 登录',
@@ -9782,6 +9899,10 @@ const ZH: Messages = {
     '可以在该仓库发起任务的 GitHub 登录名。留空表示没有人。',
   'channels.editor.field.github.repositorySpeakers.inherited':
     '可以在该仓库发言的 GitHub 登录名。留空则使用渠道级列表。',
+  'channels.editor.field.gitlab.repositorySpeakers.description':
+    '可以在该项目发起任务的 GitLab 用户名。留空表示没有人。',
+  'channels.editor.field.gitlab.repositorySpeakers.inherited':
+    '可以在该项目发言的 GitLab 用户名。留空则使用渠道级列表。',
   'channels.editor.field.github.retainedRepositorySettings.title':
     '按仓库设置仍然生效',
   'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
@@ -10086,8 +10207,12 @@ const ZH: Messages = {
   'channels.editor.validation.invalidGroupId':
     '群聊 ID 不能是 __proto__、constructor 或 prototype。',
   'channels.editor.validation.invalidRepoId': '仓库需写成 owner/repo 形式。',
+  'channels.editor.validation.invalidProjectPath':
+    '项目需写成路径形式，例如 group/subgroup/project。',
   'channels.editor.validation.conflictingRepoAliases':
     '该渠道把同一个仓库以不同大小写写了两次且设置不同（例如 Owner/repo 与 owner/repo）。请先在 settings.json 里删掉其中一条再保存。',
+  'channels.editor.validation.conflictingProjectAliases':
+    '该渠道把同一个项目以不同大小写写了两次且设置不同（例如 Group/Project 与 group/project）。请先在 settings.json 里删掉其中一条再保存。',
   'channels.editor.validation.invalidGroupEntry': (v) =>
     `该渠道把以下群组条目存成了非对象：${v?.repositories ?? ''}。只要它还在，daemon 就会拒绝每次保存，而表单里没有对应的行。请在 settings.json 里修正或删除该条目，然后重新加载渠道。`,
   'channels.editor.validation.invalidOption': '请移除不在允许列表中的值。',
@@ -10170,6 +10295,8 @@ const RU: Messages = {
   'goal.failed': 'Цель не достигнута',
   'goal.judge': 'Оценка',
   'goal.label': 'Цель',
+  'goal.expandDetails': 'Показать подробности',
+  'goal.collapseDetails': 'Скрыть подробности',
   'goal.lastCheck': 'Последняя проверка',
   'goal.notYetMet': 'условие не выполнено',
   'goal.set': 'Цель задана',
@@ -10243,6 +10370,7 @@ const RU: Messages = {
   'goals.error.clearFailed': 'Не удалось снять цель',
   'goals.error.controlBusy':
     'Другое управление целью ещё выполняется. Повторите, когда оно завершится.',
+  'terminal.notice.lost': 'Этот терминал больше недоступен.',
 };
 
 const MESSAGES: Record<WebShellLanguage, Messages> = {

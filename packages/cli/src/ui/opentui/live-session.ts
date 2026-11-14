@@ -67,7 +67,6 @@ import {
 import { allocateCanonicalHistoryId } from './live-session-model.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
-  runToolBatch,
   type AgentLoopDuplicateState,
   type AgentLoopSettledCall,
   type ToolBatchResult,
@@ -79,11 +78,11 @@ import { getInteractiveModSession } from '../../services/interactive-mod-session
 import type {
   AgentResultDisplay,
   Config,
+  LlmClient,
   ServerLlmStreamEvent,
   SteerInput,
   ToolCallConfirmationDetails,
   ToolCallRequestInfo,
-  ToolCallResponseInfo,
   ToolResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -544,6 +543,29 @@ async function applyPromptVisionBridge(
   return { parts: textOnly.length > 0 ? textOnly : null, events };
 }
 
+/**
+ * A retried continuation can pair a tool result the pre-send snapshot did not
+ * yet see. Only its real results and their aliases join `handled`.
+ */
+function admitRetriedResults(
+  client: LlmClient,
+  { handled }: AgentLoopDuplicateState,
+  prompt: PartListUnion,
+): void {
+  const retryIds = normalizeParts(prompt).flatMap(({ functionResponse }) => {
+    const id = functionResponse?.id;
+    return id && !handled.has(id) ? [id] : [];
+  });
+  if (retryIds.length === 0) return;
+  const repaired = client.getSynthesizedRepairCallIds();
+  const fingerprints = client.getHistoryToolCallFingerprints(
+    new Set(retryIds.filter((id) => !repaired.has(id))),
+  );
+  for (const [id, fingerprint] of fingerprints) {
+    if (!handled.has(id)) handled.set(id, fingerprint);
+  }
+}
+
 /** Rejects as soon as `signal` fires, so a read that ignores it cannot park the boundary. */
 function abortRejection(signal: AbortSignal): Promise<never> {
   return new Promise<never>((_, reject) => {
@@ -724,10 +746,15 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
       throw err;
     })
     .then(async () => {
-      await getInteractiveModSession(config)?.initialize(['AbovePrompt'], {
-        prompts: true,
-        runsPrompts: true,
-      });
+      // Every OpenTUI transcript row is drawn again on change, so reply rows
+      // are offered in both screen modes.
+      await getInteractiveModSession(config)?.initialize(
+        ['AbovePrompt', 'AssistantMessage'],
+        {
+          prompts: true,
+          runsPrompts: true,
+        },
+      );
     });
   // Fire-and-forget callers (the entry) must not trip unhandled-rejection
   // handling; awaiters still receive the rejection.
@@ -1076,23 +1103,39 @@ export async function* livePromptEvents(
       let round: SharedModelRoundResult | undefined;
       options?.onPreparedRequest?.(prepared);
       dualOutput?.startAssistantMessage();
+      // Set once the turn read the round to its end; a turn that leaves
+      // before then closes the shared round.
+      let roundRead = false;
       try {
-        // On the shared agent loop (`experimental.unifiedAgentLoop`),
-        // `runModelRound` sends the round and collects its calls.
-        sharedRound = config.isUnifiedAgentLoopEnabled?.()
-          ? sharedModelRound(
-              client,
-              { parts: nextPrompt, promptId, options: sendOptions },
-              abort,
-            )
-          : undefined;
+        // On the shared agent loop (`experimental.unifiedAgentLoop`), the
+        // round and its batch run in one `runAgentLoop` call.
+        const onSharedLoop = config.isUnifiedAgentLoopEnabled?.() === true;
         // Seeded before the turn's first round is sent, so the calls it
         // makes are not taken for replays.
-        if (sharedRound && !duplicates)
+        if (onSharedLoop && !duplicates)
           duplicates = {
             handled: new Map(client.getHistoryToolCallFingerprints()),
             responded: new Set<string>(),
           };
+        const roundDuplicates = duplicates;
+        const useEventBus = config.isEventBusAgentLoopEnabled?.() === true;
+        sharedRound =
+          onSharedLoop && roundDuplicates
+            ? sharedModelRound(
+                client,
+                { parts: nextPrompt, promptId, options: sendOptions },
+                abort,
+                {
+                  config,
+                  duplicates: roundDuplicates,
+                  useEventBus,
+                  beforeBatch: () => {
+                    if (sendOptions.type === SendMessageType.Retry)
+                      admitRetriedResults(client, roundDuplicates, nextPrompt);
+                  },
+                },
+              )
+            : undefined;
         if (sharedRound)
           liveLogger.debug(
             `model round on the shared agent loop (prompt ${promptId})`,
@@ -1129,10 +1172,12 @@ export async function* livePromptEvents(
           }
         }
         round = sharedRound?.result();
+        roundRead = true;
       } catch (error) {
         for (const event of acceptedSteerEvents.splice(0)) yield event;
         throw error;
       } finally {
+        if (!roundRead) void sharedRound?.close();
         // Covers a synchronous call failure or an unsettled early exit. A
         // carrier already accepted/restored by core makes this a no-op.
         carrier?.restore();
@@ -1155,7 +1200,13 @@ export async function* livePromptEvents(
           }
         }
       }
-      for (const event of acceptedSteerEvents.splice(0)) yield event;
+      let flushed = false;
+      try {
+        for (const event of acceptedSteerEvents.splice(0)) yield event;
+        flushed = true;
+      } finally {
+        if (!flushed) void sharedRound?.close();
+      }
       if (!streamFailed) options?.onPreparedRequest?.(undefined);
       if (round?.stop) {
         // These calls already have visible cards, but will never be scheduled.
@@ -1175,28 +1226,9 @@ export async function* livePromptEvents(
       pending.length === 0 ||
       abort.aborted ||
       (sharedRound && !isCurrentSession())
-    )
+    ) {
+      void sharedRound?.close();
       return;
-
-    if (duplicates && sendOptions.type === SendMessageType.Retry) {
-      const { handled } = duplicates;
-      const retryIds = normalizeParts(nextPrompt).flatMap(
-        ({ functionResponse }) => {
-          const id = functionResponse?.id;
-          return id && !handled.has(id) ? [id] : [];
-        },
-      );
-      if (retryIds.length > 0) {
-        // A retried continuation can pair a tool result the pre-send snapshot
-        // did not yet see. Only import its real results and their aliases.
-        const repaired = client.getSynthesizedRepairCallIds();
-        const fingerprints = client.getHistoryToolCallFingerprints(
-          new Set(retryIds.filter((id) => !repaired.has(id))),
-        );
-        for (const [id, fingerprint] of fingerprints) {
-          if (!handled.has(id)) handled.set(id, fingerprint);
-        }
-      }
     }
 
     const interactionOwner = sharedRound
@@ -1222,6 +1254,7 @@ export async function* livePromptEvents(
     // chunks are mapped to neutral events and yielded WHILE the tools run.
     const live = createEventQueue<OpenTuiStreamEvent>();
     const taskStarted = new Set<string>();
+    const runningTurnTasks = new Set<string>();
     const taskToolsSeen = new Map<string, Set<string>>();
     const mapOutputChunk = (
       callId: string,
@@ -1257,6 +1290,12 @@ export async function* livePromptEvents(
             id: callId,
             line: `↳ ${tc.description || tc.name}`,
           });
+        }
+        // A background agent is still owned by this turn until it detaches.
+        if (agent.status === 'running') {
+          runningTurnTasks.add(callId);
+        } else {
+          runningTurnTasks.delete(callId);
         }
         if (agent.status !== 'running' && agent.status !== 'background') {
           out.push({ type: 'task-end', id: callId });
@@ -1366,22 +1405,40 @@ export async function* livePromptEvents(
         response: createNotStartedToolErrorResponse(request, message),
       }));
     let shellOwnerOpen = true;
+    const closeShellOwner = () => {
+      if (!shellOwnerOpen) return;
+      shellOwnerOpen = false;
+      options?.onExecutingShells?.([]);
+    };
+    let isBatchFinished: (() => boolean) | undefined;
+    let schedulerCompleted = false;
+    let displayedCancelledBatch = false;
+    const lastToolCalls = new Map<string, InteractiveToolCall>();
     // Settles the shared batch once the scheduler completed it.
     let settleBatch: (() => void) | undefined;
     const scheduler = new InteractiveModToolScheduler({
       config,
-      onNativeAttempt: (call) =>
-        observeInteractiveModTool(
+      isFinished: () => isBatchFinished?.() === true,
+      onNativeAttempt: async (call) => {
+        if (isBatchFinished?.()) return;
+        return observeInteractiveModTool(
           config,
           call,
           options?.refreshContextFilesOnWrite === true,
-        ),
+        );
+      },
       getPreferredEditor: () => undefined,
       onEditorClose: () => {},
       outputUpdateHandler: (callId, chunk) => {
+        if (isBatchFinished?.()) return;
         for (const ev of mapOutputChunk(callId, chunk)) live.push(ev);
       },
       onToolCallsUpdate: (calls) => {
+        if (isBatchFinished?.()) return;
+        if (sharedRound) {
+          for (const call of calls)
+            lastToolCalls.set(call.request.callId, call);
+        }
         if (shellOwnerOpen)
           options?.onExecutingShells?.(
             current() && !abort.aborted
@@ -1495,10 +1552,12 @@ export async function* livePromptEvents(
         }
       },
       onAllToolCallsComplete: async (calls) => {
-        if (shellOwnerOpen) {
-          shellOwnerOpen = false;
-          options?.onExecutingShells?.([]);
+        if (isBatchFinished?.()) {
+          settleBatch?.();
+          return;
         }
+        schedulerCompleted = true;
+        closeShellOwner();
         publishToolHistory(calls);
         emitPermissionTransitions(calls);
         completed = calls.filter(
@@ -1512,10 +1571,8 @@ export async function* livePromptEvents(
       },
     });
     const onScheduleFailed = (error: unknown) => {
-      if (shellOwnerOpen) {
-        shellOwnerOpen = false;
-        options?.onExecutingShells?.([]);
-      }
+      if (isBatchFinished?.()) return;
+      closeShellOwner();
       const cancelled =
         abort.aborted ||
         (error instanceof Error && error.name === 'AbortError');
@@ -1541,73 +1598,121 @@ export async function* livePromptEvents(
     let scheduled: Promise<unknown>;
     let batch: Promise<ToolBatchResult> | undefined;
     // The results the batch answered without running a call.
-    const answered: Array<{
-      request: ToolCallRequestInfo;
-      response: ToolCallResponseInfo;
-    }> = [];
-    if (sharedRound && duplicates) {
+    const answered = sharedRound?.answered ?? [];
+    if (sharedRound) {
       liveLogger.debug(
         `tool batch on the shared agent loop (prompt ${promptId}, ${pending.length} call(s))`,
       );
-      batch = runToolBatch(pending, {
-        config,
-        client,
-        signal: abort,
-        duplicates,
-        // Esc keeps the results, which the turn pairs into history.
-        keepCancelledResults: true,
-        // The turn records the results only while it is current.
-        deferRecording: true,
-        executor: {
-          run: (requests, signal, hooks) => {
-            const launched = requests.filter((request) =>
-              hooks.beforeLaunch(request, []),
-            );
-            if (launched.length === 0) return Promise.resolve([]);
-            publishToolHistory(
-              launched.map((request) => ({ status: 'scheduled', request })),
-            );
-            // The batch settles when the scheduler completes it: `schedule`
-            // returns as soon as a call waits for approval.
-            return new Promise<AgentLoopSettledCall[]>((resolve, reject) => {
-              settleBatch = () =>
-                resolve(
-                  completed.map(
-                    (call): AgentLoopSettledCall => ({
-                      status: call.status,
-                      request: call.request,
-                      response: call.response,
-                      // Check ownership when the shared loop reads the count
-                      // flag, since the session can change after settlement.
-                      get recorded() {
-                        return (
-                          !isCurrentSession() ||
-                          call.nativeAttemptsObserved === true ||
-                          call.status === 'cancelled'
-                        );
-                      },
-                    }),
-                  ),
-                );
-              void scheduler.schedule(launched as never, signal).catch(reject);
-            }).catch((error: unknown) => {
-              onScheduleFailed(error);
-              throw error;
-            });
-          },
-        },
-        host: {
-          onToolResult: ({ request, response, origin }) => {
-            if (origin !== 'executed') answered.push({ request, response });
-          },
+      batch = sharedRound.runBatch({
+        run: (requests, signal, hooks) => {
+          isBatchFinished = hooks.isFinished;
+          const launched = requests.filter((request) =>
+            hooks.beforeLaunch(request, []),
+          );
+          if (launched.length === 0) return Promise.resolve([]);
+          publishToolHistory(
+            launched.map((request) => ({ status: 'scheduled', request })),
+          );
+          // The batch settles when the scheduler completes it: `schedule`
+          // returns as soon as a call waits for approval.
+          return new Promise<AgentLoopSettledCall[]>((resolve, reject) => {
+            settleBatch = () =>
+              resolve(
+                completed.map(
+                  (call): AgentLoopSettledCall => ({
+                    status: call.status,
+                    request: call.request,
+                    response: call.response,
+                    // Check ownership when the shared loop reads the count
+                    // flag, since the session can change after settlement.
+                    get recorded() {
+                      return (
+                        !isCurrentSession() ||
+                        call.nativeAttemptsObserved === true ||
+                        call.status === 'cancelled'
+                      );
+                    },
+                  }),
+                ),
+              );
+            void scheduler.schedule(launched as never, signal).catch(reject);
+          }).catch((error: unknown) => {
+            onScheduleFailed(error);
+            throw error;
+          });
         },
       });
-      scheduled = batch;
       // A batch that runs no call never completes the scheduler.
-      void batch.then(
-        () => live.close(),
-        () => live.close(),
-      );
+      const closeBatch = (result?: ToolBatchResult) => {
+        try {
+          if (isBatchFinished?.()) {
+            closeShellOwner();
+            if (current() && dualOutput?.isConnected) {
+              for (const requestId of permissionRequests.values()) {
+                dualOutput.emitControlResponse(requestId, false);
+              }
+            }
+            permissionRequests.clear();
+          }
+          if (
+            result?.stop === 'cancelled' &&
+            !schedulerCompleted &&
+            isCurrentSession()
+          ) {
+            displayedCancelledBatch = true;
+            const replayed = new Map(
+              answered.map(({ request, response }) => [
+                request.callId,
+                response,
+              ]),
+            );
+            const settled = skippedCalls(
+              'cancelled',
+              'Tool call cancelled.',
+            ).map((skipped): InteractiveCompletedToolCall => {
+              const id = skipped.request.callId;
+              const response = replayed.get(id);
+              if (response)
+                return response.error
+                  ? { ...skipped, response, status: 'error' }
+                  : { ...skipped, response, status: 'success' };
+              const last = lastToolCalls.get(id);
+              return last?.status === 'success' ||
+                last?.status === 'error' ||
+                last?.status === 'cancelled'
+                ? last
+                : skipped;
+            });
+            publishToolHistory(settled);
+            for (const { request, response, status } of settled) {
+              const id = request.callId;
+              if (queuedSeen.delete(id))
+                live.push({ type: 'tool-queued', id, queued: false });
+              if (waitingSeen.delete(id))
+                live.push({
+                  type: 'confirm-resolved',
+                  id,
+                  outcome: 'rejected',
+                });
+              const display = toolResultEvent(id, response.resultDisplay);
+              if (status !== 'cancelled' && display) live.push(display);
+              live.push({
+                type: 'tool-end',
+                id,
+                success: status === 'success',
+                summary: status === 'success' ? 'ok' : status,
+              });
+            }
+          }
+        } finally {
+          live.close();
+        }
+      };
+      scheduled = batch.then(closeBatch, (error: unknown) => {
+        closeBatch();
+        throw error;
+      });
+      void scheduled.catch(() => {});
     } else {
       publishToolHistory(
         pending.map((request) => ({ status: 'scheduled', request })),
@@ -1662,6 +1767,9 @@ export async function* livePromptEvents(
     }
     await scheduled;
     const shared = batch ? await batch : undefined;
+    if (shared?.stop === 'cancelled' && isCurrentSession()) {
+      for (const id of runningTurnTasks) yield { type: 'task-end', id };
+    }
     if (shared?.stop === 'duplicate_provider_call') {
       // The batch ran nothing: the model repeated a call id it was already
       // answered for, which stops the turn as a loop, as Ink does.
@@ -1832,9 +1940,9 @@ export async function* livePromptEvents(
     const displayed = new Map(
       completed.map((call) => [call.request.callId, call]),
     );
-    const answeredOnly = answered.filter(
-      ({ request }) => !displayed.has(request.callId),
-    );
+    const answeredOnly = displayedCancelledBatch
+      ? []
+      : answered.filter(({ request }) => !displayed.has(request.callId));
     if (shared) {
       if (answeredOnly.length > 0) {
         for (const { request, response } of answeredOnly) {

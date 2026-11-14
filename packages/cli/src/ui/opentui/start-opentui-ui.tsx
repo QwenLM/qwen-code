@@ -106,6 +106,7 @@ import {
   type ForegroundShellOwner,
 } from './live-turn.js';
 import type { LiveHistoryItem } from './live-session-model.js';
+import type { OpenTuiStreamEvent } from './event-adapter.js';
 import { ensureConfigInitialized } from './live-session.js';
 import { consumeLastRenderError } from './opentui-error-boundary.js';
 import { createExitGuard, exitGuardHint } from './exit-guard.js';
@@ -177,8 +178,25 @@ function OpenTuiEntryApp({
     onPromptReturned: (submission) =>
       returnToComposer(composerHandle, submission),
   });
-  const { applyEvent, submit, interrupt, resetTranscript, settleWaitingCall } =
-    live;
+  const {
+    applyEvent,
+    submit,
+    interrupt,
+    resetTranscript: resetLiveTranscript,
+    settleWaitingCall,
+  } = live;
+  // The session the transcript belongs to, taken each time it is replaced:
+  // a session switch replaces it after the core adopted the new session.
+  const [transcriptSessionId, setTranscriptSessionId] = useState(() =>
+    config.getSessionId(),
+  );
+  const resetTranscript = useCallback(
+    (events: OpenTuiStreamEvent[]) => {
+      resetLiveTranscript(events);
+      setTranscriptSessionId(config.getSessionId());
+    },
+    [config, resetLiveTranscript],
+  );
   // The Mods' band above the prompt. OpenTUI has no session survey.
   useEffect(() => {
     getInteractiveModSession(config)?.setRenderInput(
@@ -380,6 +398,11 @@ function OpenTuiEntryApp({
   });
 
   // --- seams handed to the shell ---------------------------------------------
+  // The main transcript's reply rows, which the Mods may draw.
+  const modRows = useMemo(
+    () => ({ config, sessionId: transcriptSessionId }),
+    [config, transcriptSessionId],
+  );
   const renderMain = useCallback(
     (shell?: { owner: ForegroundShellOwner | null; focused: boolean }) => (
       <box flexDirection="column">
@@ -387,6 +410,7 @@ function OpenTuiEntryApp({
             its content budget is 4 short of the terminal width. */}
         <OpenTuiTranscriptView
           items={live.items}
+          modRows={modRows}
           availableWidth={Math.max(0, width - 4)}
           availableTerminalHeight={height}
           thoughtsExpanded={thoughtsExpanded}
@@ -402,7 +426,15 @@ function OpenTuiEntryApp({
         />
       </box>
     ),
-    [live.items, live.waitingCalls, width, height, thoughtsExpanded, settings],
+    [
+      live.items,
+      live.waitingCalls,
+      width,
+      height,
+      thoughtsExpanded,
+      settings,
+      modRows,
+    ],
   );
 
   const handleRenderError = useCallback(

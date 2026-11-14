@@ -19,7 +19,6 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 import java.io.InputStream;
-import java.net.URI;
 import java.time.Duration;
 
 /** Private single-publication ACK command; credentials and identity come from trusted records. */
@@ -46,24 +45,28 @@ public final class WorkspaceCsiWorkerAckMain {
                 required("K2_JDBC_PASSWORD"));
         var jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
-        var bindings = new JdbcRuntimeBindingRepository(source, AesGcmSecretProtector.fromBase64(
+        var protector = AesGcmSecretProtector.fromBase64(
                 required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID"),
-                required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY")));
-        var runtimeSessions = new JdbcRuntimeSessionRepository(source);
-        var executions = new JdbcToolExecutionRepository(source);
-        var sessionStore = new JdbcManagedSessionStore(jdbc,
-                new JdbcManagedExtensionRecordStore(jdbc), null,
-                new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(),
-                com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
-                null, null, null, null, null,
-                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
-        var grants = new ToolPublicationStore(jdbc, manager, sessionStore, executions, bindings,
-                new ToolPublicationStore.Capacity(16L * 1024 * 1024, 64L * 1024 * 1024,
-                        256L * 1024 * 1024, 64));
-        com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient oss = "inspect".equals(args[0]) ? null : oss();
+                required("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY"));
+        com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient oss =
+                "inspect".equals(args[0]) ? null : MaintenanceObjectStores.k2Oss();
         try {
-            ToolPublicationObjectStore objects = oss == null ? inlineObjects()
+            ToolPublicationObjectStore realObjects = oss == null ? null
                     : oss.objects(required("QWEN_MANAGED_AGENT_TOOL_PUBLICATION_OSS_BUCKET"));
+            var bindings = new JdbcRuntimeBindingRepository(source, protector,
+                    MaintenanceObjectStores.readPacks(jdbc, realObjects));
+            var runtimeSessions = new JdbcRuntimeSessionRepository(source);
+            var executions = new JdbcToolExecutionRepository(source, bindings);
+            var sessionStore = new JdbcManagedSessionStore(jdbc,
+                    new JdbcManagedExtensionRecordStore(jdbc), null,
+                    new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(),
+                    com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
+                    null, null, null, null, null,
+                    com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null, null);
+            var grants = new ToolPublicationStore(jdbc, manager, sessionStore, executions, bindings,
+                    new ToolPublicationStore.Capacity(16L * 1024 * 1024, 64L * 1024 * 1024,
+                            256L * 1024 * 1024, 64));
+            ToolPublicationObjectStore objects = realObjects == null ? inlineObjects() : realObjects;
             var data = new ToolPublicationDataStore(jdbc, manager, grants, sessionStore, objects,
                     Duration.ofSeconds(30), Duration.ofSeconds(10),
                     new ToolPublicationDataStore.VerificationBudget(1024 * 1024, Duration.ofMinutes(25)));
@@ -80,24 +83,6 @@ public final class WorkspaceCsiWorkerAckMain {
         }
     }
 
-    private static com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient oss() throws Exception {
-        String endpointValue = System.getenv("QWEN_MANAGED_AGENT_TOOL_PUBLICATION_OSS_ENDPOINT");
-        if (endpointValue == null && System.getenv("QWEN_MANAGED_AGENT_TOOL_PUBLICATION_OSS_REGION") == null
-                && System.getenv("QWEN_MANAGED_AGENT_TOOL_PUBLICATION_OSS_BUCKET") == null) {
-            return null;
-        }
-        URI endpoint = URI.create(required("QWEN_MANAGED_AGENT_TOOL_PUBLICATION_OSS_ENDPOINT"));
-        String region = required("QWEN_MANAGED_AGENT_TOOL_PUBLICATION_OSS_REGION");
-        required("QWEN_MANAGED_AGENT_TOOL_PUBLICATION_OSS_BUCKET");
-        if (!"https".equals(endpoint.getScheme()) || endpoint.getRawUserInfo() != null
-                || endpoint.getRawQuery() != null || endpoint.getRawFragment() != null
-                || endpoint.getPort() != -1 || endpoint.getRawPath() != null && !endpoint.getRawPath().isEmpty()
-                || !endpoint.getHost().equals("oss-" + region + ".aliyuncs.com")) {
-            throw new IllegalArgumentException("Private regional OSS endpoint is required");
-        }
-        return com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreClient.regional(endpoint, region);
-    }
-
     private static ToolPublicationObjectStore inlineObjects() {
         return new ToolPublicationObjectStore() {
             @Override
@@ -107,6 +92,11 @@ public final class WorkspaceCsiWorkerAckMain {
 
             @Override
             public InputStream open(String key) {
+                throw new IllegalStateException("External publication objects require OSS configuration");
+            }
+
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
                 throw new IllegalStateException("External publication objects require OSS configuration");
             }
 
