@@ -299,6 +299,57 @@ describe('auto-memory extraction', () => {
     ).toBe(cursorBefore);
   });
 
+  it('skips without forking when every write tool is denied', async () => {
+    const denied = {
+      ...mockConfig,
+      getPermissionsDeny: vi
+        .fn()
+        .mockReturnValue(['run_shell_command', 'write_file', 'edit']),
+    } as unknown as Config;
+    const cursorBefore = await fs.readFile(
+      getAutoMemoryExtractCursorPath(projectRoot),
+      'utf-8',
+    );
+
+    const result = await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: denied,
+      history: [{ role: 'user', parts: [{ text: 'Always use pnpm.' }] }],
+    });
+
+    expect(result.skippedReason).toBe('writes_denied');
+    expect(result.touchedTopics).toEqual([]);
+    expect(runAutoMemoryExtractionByAgent).not.toHaveBeenCalled();
+    expect(
+      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+    ).toBe(cursorBefore);
+  });
+
+  it('still extracts when only one write tool is denied', async () => {
+    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      hasToolActivity: true,
+      systemMessage: undefined,
+    });
+    const partlyDenied = {
+      ...mockConfig,
+      getPermissionsDeny: vi.fn().mockReturnValue(['write_file']),
+    } as unknown as Config;
+
+    const result = await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: partlyDenied,
+      history: [{ role: 'user', parts: [{ text: 'Always use pnpm.' }] }],
+    });
+
+    expect(result.skippedReason).toBeUndefined();
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalled();
+  });
+
   it('skips an existing session mismatch before scaffold IO', async () => {
     vi.mocked(getCacheSafeParamsSessionId).mockReturnValue('session-2');
     const uncreatedProjectRoot = path.join(tempDir, 'not-created');
