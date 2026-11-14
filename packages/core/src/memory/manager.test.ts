@@ -2496,9 +2496,12 @@ describe('MemoryManager', () => {
       );
 
       debugWarn.mockClear();
-      // The slot is held past the flush's 1ms budget, so the run that finally
-      // takes it finds its own deadline already expired.
-      await expect(mgr.flushPendingExtract('sess', 1)).resolves.toBe(false);
+      // A zero budget expires the run's deadline at creation, so whichever
+      // way the slot-wait interleaves — parked on the held run, or slipping
+      // past the wait in the starting millisecond — the body always finds
+      // its deadline already expired (#17068: a 1ms budget let the check
+      // race the clock on loaded runners and take the silent fork path).
+      await expect(mgr.flushPendingExtract('sess', 0)).resolves.toBe(false);
       release();
       await direct;
       await mgr.drain();
