@@ -35,7 +35,9 @@ import { DiscoveredMCPTool } from './mcp-tool.js';
 import type { McpToolAnnotations } from './mcp-tool.js';
 import { SdkControlClientTransport } from './sdk-control-client-transport.js';
 import {
+  markMCPServerTeardownIntent,
   MCPServerStatus,
+  recordMCPConnectionStatus,
   recordMCPServerLastError,
   updateMCPServerStatus,
 } from './mcp-status.js';
@@ -44,6 +46,7 @@ export {
   getAllMCPServerStatuses,
   getMCPServerLastError,
   getMCPServerStatus,
+  markMCPServerTeardownIntent,
   MCPServerStatus,
   recordMCPServerLastError,
   removeMCPServerStatus,
@@ -866,6 +869,15 @@ export class McpClient {
     // `discover()` reading `this.status` would otherwise see the stale
     // CONNECTED value and try to register tools that we're about to drop.
     this.status = MCPServerStatus.DISCONNECTED;
+    // Record the intent BEFORE the registry notifies listeners: a cancelled
+    // invocation's abort-repair listener fires synchronously inside the
+    // `updateMCPServerStatus` call below and must be able to tell this
+    // deliberate teardown from abort damage (issue #12160).
+    markMCPServerTeardownIntent(this.serverName);
+    // Record the per-connection truth too: this write skips `updateStatus()`,
+    // but an abort repair holding this client reads the connection, not the
+    // name-keyed registry, so it would otherwise keep a stale CONNECTED.
+    recordMCPConnectionStatus(this.client, MCPServerStatus.DISCONNECTED);
     updateMCPServerStatus(this.serverName, MCPServerStatus.DISCONNECTED);
     this.isDisconnecting = true;
     if (this.transport) {
@@ -985,6 +997,11 @@ export class McpClient {
 
   private updateStatus(status: MCPServerStatus): void {
     this.status = status;
+    // Record the per-connection truth alongside the name-keyed write: the
+    // registry is shared by every connection for a name, so an abort repair
+    // holding this client must be able to tell its own transport's drop from
+    // a sibling's.
+    recordMCPConnectionStatus(this.client, status);
     // Once disconnect has begun, don't propagate further status changes to
     // the global registry. An in-flight `connect()` whose catch block fires
     // after `disableMcpServer` has already removed the entry would otherwise
@@ -1551,6 +1568,7 @@ export async function connectAndDiscover(
         return;
       }
       debugLogger.error(`MCP ERROR (${mcpServerName}):`, error.toString());
+      recordMCPConnectionStatus(mcpClient!, MCPServerStatus.DISCONNECTED);
       updateMCPServerStatus(mcpServerName, MCPServerStatus.DISCONNECTED);
     };
 
@@ -1584,6 +1602,7 @@ export async function connectAndDiscover(
     }
 
     // If we found anything, the server is connected
+    recordMCPConnectionStatus(mcpClient, MCPServerStatus.CONNECTED);
     updateMCPServerStatus(mcpServerName, MCPServerStatus.CONNECTED);
     // A successful connect proves authentication works now — clear the sticky
     // 401 marker so later unrelated outages aren't mislabeled as auth failures.
@@ -1602,6 +1621,9 @@ export async function connectAndDiscover(
         error,
       )}`,
     );
+    if (mcpClient) {
+      recordMCPConnectionStatus(mcpClient, MCPServerStatus.DISCONNECTED);
+    }
     updateMCPServerStatus(mcpServerName, MCPServerStatus.DISCONNECTED);
   }
 }

@@ -52,6 +52,68 @@ export function getMCPServerLastError(serverName: string): string | undefined {
 }
 
 /**
+ * Servers whose owner is tearing them down on purpose: operator Disconnect,
+ * Clear OAuth, `disableMcpServer`, pool eviction, session shutdown. A
+ * deliberate teardown and abort damage both write `CONNECTED -> DISCONNECTED`,
+ * so the transition alone cannot tell them apart; the owner records the
+ * intent here BEFORE it starts closing the transport, and abort recovery
+ * reads it back to stay out of the way. Cleared by `updateMCPServerStatus`
+ * when the server next reaches `CONNECTED`, and by `removeMCPServerStatus`
+ * when it leaves the registry, so the marker never outlives the teardown it
+ * describes.
+ */
+const deliberateTeardownServers: Set<string> = new Set();
+
+/**
+ * Record that `serverName` is being torn down on purpose. Call this before
+ * the transport actually closes: an abort repair that runs inside the status
+ * notification otherwise sees the transition as unrequested damage. The
+ * marker is dropped inside `updateMCPServerStatus` once the server reaches
+ * `CONNECTED` again, and in `removeMCPServerStatus` when it leaves the
+ * registry, so it never outlives the teardown it describes.
+ */
+export function markMCPServerTeardownIntent(serverName: string): void {
+  deliberateTeardownServers.add(serverName);
+}
+
+/** Whether `serverName` is currently being torn down on purpose. */
+export function isMCPServerTeardownIntent(serverName: string): boolean {
+  return deliberateTeardownServers.has(serverName);
+}
+
+/**
+ * Per-connection status, keyed by the SDK `Client` instance that owns the
+ * transport. The name-keyed registry above cannot tell two live connections
+ * for the same server name apart — the pool intentionally keeps one entry per
+ * `serverName + fingerprint` — so an abort repair reading only the name would
+ * attribute a sibling connection's drop to the invocation that armed it.
+ */
+const connectionStatuses: WeakMap<object, MCPServerStatus> = new WeakMap();
+
+/**
+ * Record the status of one connection. Called by the owner of the SDK
+ * `Client` alongside each name-keyed write, so consumers that hold the client
+ * can read their own connection's truth rather than the shared name.
+ */
+export function recordMCPConnectionStatus(
+  connection: object,
+  status: MCPServerStatus,
+): void {
+  connectionStatuses.set(connection, status);
+}
+
+/**
+ * The most recent status recorded for `connection`, or `undefined` when the
+ * connection is not tracked (legacy single-connection paths).
+ */
+export function getMCPConnectionStatus(
+  connection: object | undefined,
+): MCPServerStatus | undefined {
+  if (!connection) return undefined;
+  return connectionStatuses.get(connection);
+}
+
+/**
  * Event listeners for MCP server status changes.
  * `status` is `undefined` when the server has been removed from the registry
  * (e.g. disabled via `/mcp`), so consumers can drop it from their snapshots
@@ -96,6 +158,9 @@ export function updateMCPServerStatus(
     // A live connection invalidates any previously recorded failure cause;
     // keeping it would let a stale error shadow a recovered server.
     serverLastErrors.delete(serverName);
+    // Same for a teardown marker: a server that answers again is not being
+    // torn down, so a repair listener must not skip its next real drop.
+    deliberateTeardownServers.delete(serverName);
   }
   // Snapshot the listener list so a listener that detaches itself (or
   // attaches a new one) during dispatch doesn't mutate the array we're
@@ -112,6 +177,7 @@ export function updateMCPServerStatus(
  */
 export function removeMCPServerStatus(serverName: string): void {
   serverLastErrors.delete(serverName);
+  deliberateTeardownServers.delete(serverName);
   if (!serverStatuses.has(serverName)) {
     return;
   }

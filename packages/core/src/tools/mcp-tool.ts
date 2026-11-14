@@ -45,9 +45,13 @@ import {
 } from '../utils/image-view.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import {
+  addMCPStatusChangeListener,
   getAllMCPServerStatuses,
+  getMCPConnectionStatus,
   getMCPServerStatus,
+  isMCPServerTeardownIntent,
   MCPServerStatus,
+  removeMCPStatusChangeListener,
 } from './mcp-status.js';
 import {
   getInvocationContext,
@@ -364,6 +368,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ToolParams,
   ToolResult
 > {
+  /** How long a post-abort repair listener waits for the teardown to surface. */
+  private static readonly REPAIR_LISTENER_TTL_MS = 60_000;
   private static readonly MAX_RECONNECT_RETRIES = 3;
   private static readonly UNSAFE_REPLAY_ERROR_MESSAGE =
     'MCP tool execution may have completed before the connection failed. Automatic replay was skipped because the call could not be verified as safe to replay. Do not retry automatically; verify the outcome before trying again.';
@@ -491,6 +497,95 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
   }
 
+  /**
+   * An abort tore this transport down. Do not wait for the disconnect: the
+   * cancelled invocation must reject immediately, and the transport reports
+   * the failure later. Watch the status registry and repair when the server
+   * actually leaves `CONNECTED`, leaving a session that survives the cancel
+   * with a live connection instead of a dead one (issue #12160).
+   */
+  private repairConnectionOnDisconnectAfterAbort(): void {
+    if (!this.cliConfig) {
+      return;
+    }
+    // Every deliberate teardown that goes through `McpClient.disconnect()` --
+    // operator Disconnect, Clear OAuth, `disableMcpServer` -- also writes
+    // `CONNECTED -> DISCONNECTED` to the same process-wide registry, so the
+    // transition alone cannot tell abort damage apart. The owner records its
+    // intent before closing the transport; read that instead of a status
+    // field, which the tool's client (the raw SDK `Client`) does not have.
+    // A pooled session's shutdown is not in that set: it only releases the
+    // connection and detaches the session, so it records no intent.
+    //
+    // The name-keyed registry also cannot tell two live connections for the
+    // same server apart, and the pool keeps one entry per `serverName +
+    // fingerprint`. A sibling connection's drop writes the same name, so
+    // provenance comes from this invocation's own connection when one is
+    // tracked; the name is only the fallback for legacy single-connection
+    // paths.
+    const connection: object | undefined = this.mcpClient;
+    const currentStatus = () =>
+      getMCPConnectionStatus(connection) ?? getMCPServerStatus(this.serverName);
+    let wasConnected = currentStatus() === MCPServerStatus.CONNECTED;
+    const detach = () => {
+      clearTimeout(expiry);
+      removeMCPStatusChangeListener(listener);
+    };
+    const listener = (
+      serverName: string,
+      status: MCPServerStatus | undefined,
+    ) => {
+      if (serverName !== this.serverName) {
+        return;
+      }
+      // Only a live connection dropping to DISCONNECTED is the teardown the
+      // abort causes. A move into CONNECTING is an ordinary reconnect, and
+      // `undefined` means the server was disabled or removed.
+      const connectionStatus = getMCPConnectionStatus(connection);
+      const connected =
+        (connectionStatus ?? status) === MCPServerStatus.CONNECTED;
+      const tornDown = wasConnected && status === MCPServerStatus.DISCONNECTED;
+      wasConnected = connected;
+      if (!tornDown) {
+        return;
+      }
+      // A transition that left this invocation's own connection CONNECTED
+      // belongs to a sibling that shares the name: it is not this abort's
+      // damage, and repairing it would restart a healthy transport another
+      // session is using. Keep listening; the expiry still bounds it.
+      if (
+        connectionStatus !== undefined &&
+        connectionStatus !== MCPServerStatus.DISCONNECTED
+      ) {
+        return;
+      }
+      // A server its owner is stopping on purpose must stay stopped:
+      // resurrecting it would leave a connected but untracked transport that
+      // nothing ever closes. Keep the listener armed for this one: the
+      // teardown may belong to a sibling connection that shares the name, and
+      // detaching here would spend this invocation's only listener on someone
+      // else's transition — the later drop that is this abort's damage would
+      // then never be repaired. The expiry still bounds the listener.
+      if (isMCPServerTeardownIntent(this.serverName)) {
+        return;
+      }
+      detach();
+      // Best-effort and detached from the caller: `attemptReconnect` needs
+      // this invocation only for its name and config, and a late failure must
+      // not surface anywhere.
+      void this.attemptReconnect().catch(() => undefined);
+    };
+    // A cancel whose teardown never reaches this process (the server kept the
+    // connection, or the session ends first) must not leak a registry
+    // listener for the life of the process.
+    const expiry = setTimeout(
+      detach,
+      DiscoveredMCPToolInvocation.REPAIR_LISTENER_TTL_MS,
+    );
+    expiry.unref?.();
+    addMCPStatusChangeListener(listener);
+  }
+
   private async handleReconnectOnError(
     error: unknown,
     signal: AbortSignal,
@@ -499,6 +594,14 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     debugLogger.error(`MCP server error '${this.serverName}': ${error}`);
 
     if (signal.aborted) {
+      // The cancelled call must not be replayed, but an abort can tear the
+      // transport down. The status cannot be read here: the transport only
+      // reports the failure after the server reacts to
+      // `notifications/cancelled`, one round trip after the local rejection,
+      // so a read at this point always sees the stale `connected` value.
+      // Repair on the later transition instead, and never make this
+      // invocation's rejection wait for a reconnect (issue #12160).
+      this.repairConnectionOnDisconnectAfterAbort();
       throw error;
     }
 
@@ -810,7 +913,13 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       };
     } catch (error) {
       if (this.onAppResult) {
-        if (signal.aborted) throw createToolCallAbortError();
+        if (signal.aborted) {
+          // The App branch classifies the abort before reaching
+          // handleReconnectOnError, so arm the same repair here or an aborted
+          // App call keeps the dead transport for the health monitor's budget.
+          this.repairConnectionOnDisconnectAfterAbort();
+          throw createToolCallAbortError();
+        }
         if (
           idleTimeoutWon ||
           isExecutionTimeoutFailure(error, this.serverName, signal)

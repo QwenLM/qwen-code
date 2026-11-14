@@ -7,6 +7,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   getMCPServerLastError,
+  isMCPServerTeardownIntent,
+  markMCPServerTeardownIntent,
   MCPServerStatus,
   recordMCPServerLastError,
   removeMCPServerStatus,
@@ -57,5 +59,45 @@ describe('mcp-status last-error carrier (issue #9944)', () => {
     recordMCPServerLastError(serverName, 'spawn ENOENT');
     removeMCPServerStatus(serverName);
     expect(getMCPServerLastError(serverName)).toBeUndefined();
+  });
+});
+
+describe('mcp-status teardown intent (issue #12160)', () => {
+  // A deliberate teardown and abort damage both write
+  // `CONNECTED -> DISCONNECTED`; the owner records its intent so abort
+  // recovery can tell them apart.
+  const serverName = 'teardown-intent-server';
+
+  afterEach(() => {
+    removeMCPServerStatus(serverName);
+  });
+
+  it('reports no intent by default', () => {
+    expect(isMCPServerTeardownIntent(serverName)).toBe(false);
+  });
+
+  it('reports the intent once the owner records it', () => {
+    markMCPServerTeardownIntent(serverName);
+    expect(isMCPServerTeardownIntent(serverName)).toBe(true);
+  });
+
+  it('survives the DISCONNECTED write the teardown itself performs', () => {
+    updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+    markMCPServerTeardownIntent(serverName);
+    updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+    expect(isMCPServerTeardownIntent(serverName)).toBe(true);
+  });
+
+  it('drops the intent when the server reaches CONNECTED again', () => {
+    markMCPServerTeardownIntent(serverName);
+    updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+    expect(isMCPServerTeardownIntent(serverName)).toBe(false);
+  });
+
+  it('drops the intent when the server is removed from the registry', () => {
+    updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+    markMCPServerTeardownIntent(serverName);
+    removeMCPServerStatus(serverName);
+    expect(isMCPServerTeardownIntent(serverName)).toBe(false);
   });
 });

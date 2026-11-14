@@ -9,6 +9,7 @@ import type { Config, MCPServerConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   addMCPStatusChangeListener,
+  markMCPServerTeardownIntent,
   MCPServerStatus,
   removeMCPStatusChangeListener,
   type DiscoveredMCPPrompt,
@@ -775,6 +776,10 @@ export class PoolEntry {
     // entry mid-teardown (zombie connection). Now any concurrent
     // attach sees 'closed' immediately and rejects.
     this.state = 'closed';
+    // Record the intent before `sweepAndDisconnect` below lets the close reach
+    // `McpClient.disconnect()`: the entry fails a live server on purpose, and
+    // an abort repair reading the resulting transition must not revive it.
+    markMCPServerTeardownIntent(this.serverName);
     // missed sibling of
     // C4 fix. Pre-fix `localStatus = DISCONNECTED` happened AFTER
     // `await sweepAndDisconnect` — during that async yield,

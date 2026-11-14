@@ -29,6 +29,10 @@ import {
   updateMCPServerStatus,
 } from './mcp-client.js';
 import {
+  recordMCPConnectionStatus,
+  markMCPServerTeardownIntent,
+} from './mcp-status.js';
+import {
   INVOCATION_CONTEXT_META_KEY,
   runWithInvocationContext,
   type InvocationContextV1,
@@ -2394,8 +2398,8 @@ describe('DiscoveredMCPTool', () => {
       );
 
       expect(client.callTool).toHaveBeenCalledTimes(1);
-      expect(discoverToolsForServer).not.toHaveBeenCalled();
       expect(ensureTool).not.toHaveBeenCalled();
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
       expect(retryClient.callTool).not.toHaveBeenCalled();
     };
     // The first call fails with `error` under `status`; the reconnect runs.
@@ -2931,6 +2935,378 @@ describe('DiscoveredMCPTool', () => {
       await expectNoRetry(MCPServerStatus.DISCONNECTED, abortError);
     });
 
+    // A cancelled call must not be replayed, but the connection it tore down
+    // is still repairable: otherwise every later MCP call in a session that
+    // survives the cancel inherits the dead transport (issue #12160). The
+    // transport reports the teardown one round trip AFTER the local abort
+    // rejection, so the repair has to hang off the status transition rather
+    // than a read inside the abort catch.
+    it('repairs the connection the abort tore down once the server reports it', async () => {
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const retryClient = okClient();
+      const { config, discoverToolsForServer } = registry({
+        ensured: mkTool({ client: retryClient }),
+      });
+      const abortController = new AbortController();
+      const client: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              abortController.signal.addEventListener(
+                'abort',
+                () => reject(abortError),
+                { once: true },
+              );
+            }),
+        ),
+      };
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const executePromise = exec(
+        mkTool({ config, client }),
+        'test',
+        abortController.signal,
+      );
+      abortController.abort();
+
+      await expect(executePromise).rejects.toThrow('Tool call aborted');
+
+      // Nothing reconnected while the status still claimed CONNECTED.
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+
+      // The transport dies after the cancel, as it does on the wire.
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      await vi.waitFor(() => {
+        expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      });
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+      expect(retryClient.callTool).not.toHaveBeenCalled();
+    });
+
+    it('repairs an App call the abort tore down once the server reports it', async () => {
+      // The App branch classifies the abort before `handleReconnectOnError`
+      // is reached, so the arm has to be explicit there too; without it an
+      // aborted App call keeps the dead transport for the health monitor's
+      // budget while every other App error class gets repaired.
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const retryClient = okClient();
+      const { config, discoverToolsForServer } = registry({
+        ensured: mkTool({ client: retryClient }),
+      });
+      const abortController = new AbortController();
+      const client: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              abortController.signal.addEventListener(
+                'abort',
+                () => reject(abortError),
+                { once: true },
+              );
+            }),
+        ),
+      };
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const appTool = mkTool({ config, client });
+      const execution = appTool
+        .buildForApp({ param: 'test' }, vi.fn())
+        .execute(abortController.signal);
+      abortController.abort();
+
+      // The abort stays an abort: the App path is not replayable and keeps
+      // its classification.
+      await expect(execution).rejects.toThrow('Tool call aborted');
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      await vi.waitFor(() => {
+        expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      });
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+      expect(retryClient.callTool).not.toHaveBeenCalled();
+    });
+
+    it('does not repair the connection when the abort left it connected', async () => {
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const retryClient = okClient();
+      const { config, discoverToolsForServer } = registry({
+        ensured: mkTool({ client: retryClient }),
+      });
+      const abortController = new AbortController();
+      const client: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              abortController.signal.addEventListener(
+                'abort',
+                () => reject(abortError),
+                { once: true },
+              );
+            }),
+        ),
+      };
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const executePromise = exec(
+        mkTool({ config, client }),
+        'test',
+        abortController.signal,
+      );
+      abortController.abort();
+
+      await expect(executePromise).rejects.toThrow('Tool call aborted');
+
+      // A later disconnect that walked through CONNECTING (an ordinary
+      // reconnect, not a teardown of a live session) must not trigger it
+      // either.
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTING);
+      await Promise.resolve();
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+
+      // Finish the sequence: the latch has to clear on the CONNECTING step or
+      // this drop looks like abort damage and fires a second reconnect on top
+      // of the one already in flight.
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      await Promise.resolve();
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+      expect(retryClient.callTool).not.toHaveBeenCalled();
+    });
+
+    it('drops the repair listener when the status never reports the teardown', async () => {
+      // A cancel whose teardown never reaches this process must not leak a
+      // registry listener (and the invocation it captures) for the life of
+      // the process.
+      vi.useFakeTimers();
+      try {
+        const abortError = new Error('The operation was aborted');
+        abortError.name = 'AbortError';
+        const retryClient = okClient();
+        const { config, discoverToolsForServer } = registry({
+          ensured: mkTool({ client: retryClient }),
+        });
+        const abortController = new AbortController();
+        const client: McpDirectClient = {
+          callTool: vi.fn().mockImplementation(
+            () =>
+              new Promise((_resolve, reject) => {
+                abortController.signal.addEventListener(
+                  'abort',
+                  () => reject(abortError),
+                  { once: true },
+                );
+              }),
+          ),
+        };
+        updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+        const executePromise = exec(
+          mkTool({ config, client }),
+          'test',
+          abortController.signal,
+        );
+        abortController.abort();
+        await expect(executePromise).rejects.toThrow('Tool call aborted');
+
+        await vi.advanceTimersByTimeAsync(60_001);
+
+        // The listener is gone, so the late teardown no longer repairs.
+        updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+        await Promise.resolve();
+        expect(discoverToolsForServer).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not repair a server the operator disconnected after the abort', async () => {
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const retryClient = okClient();
+      const { config, discoverToolsForServer } = registry({
+        ensured: mkTool({ client: retryClient }),
+      });
+      const abortController = new AbortController();
+      // Deliberate teardown writes the same CONNECTED -> DISCONNECTED
+      // transition, so the transition alone cannot tell it apart. The owner
+      // records the intent before it closes the transport; this client has no
+      // `getStatus` method, exactly like the raw SDK `Client` production
+      // passes to the tool.
+      const client: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              abortController.signal.addEventListener(
+                'abort',
+                () => reject(abortError),
+                { once: true },
+              );
+            }),
+        ),
+      };
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const executePromise = exec(
+        mkTool({ config, client }),
+        'test',
+        abortController.signal,
+      );
+      abortController.abort();
+      await expect(executePromise).rejects.toThrow('Tool call aborted');
+
+      // Operator Disconnect / disable / shutdown: `McpClient.disconnect()`
+      // records the intent, then writes DISCONNECTED.
+      markMCPServerTeardownIntent(serverName);
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      await Promise.resolve();
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not repair a drop that belongs to a sibling connection sharing the name', async () => {
+      // The pool keeps one entry per `serverName + fingerprint`, so two live
+      // connections can share a name. A sibling's transport error writes
+      // DISCONNECTED for the shared name; this invocation's own connection is
+      // still CONNECTED, so that drop is not its damage and must not restart
+      // a healthy transport other sessions are using.
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const retryClient = okClient();
+      const { config, discoverToolsForServer } = registry({
+        ensured: mkTool({ client: retryClient }),
+      });
+      const abortController = new AbortController();
+      const client: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              abortController.signal.addEventListener(
+                'abort',
+                () => reject(abortError),
+                { once: true },
+              );
+            }),
+        ),
+      };
+      // Both connections are live: this invocation's client and the sibling.
+      recordMCPConnectionStatus(client, MCPServerStatus.CONNECTED);
+      recordMCPConnectionStatus({ id: 'sibling' }, MCPServerStatus.CONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const executePromise = exec(
+        mkTool({ config, client }),
+        'test',
+        abortController.signal,
+      );
+      abortController.abort();
+      await expect(executePromise).rejects.toThrow('Tool call aborted');
+
+      // The sibling reports a transport error for the shared name. This
+      // connection records nothing, so its own status stays CONNECTED.
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      await Promise.resolve();
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+
+      // This invocation's own transport is the one that dies.
+      recordMCPConnectionStatus(client, MCPServerStatus.DISCONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      await vi.waitFor(() => {
+        expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      });
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+      expect(retryClient.callTool).not.toHaveBeenCalled();
+    });
+
+    it('keeps the listener armed when a teardown it declined precedes its own drop', async () => {
+      // The intent marker is name-keyed and process-wide, so a sibling
+      // connection's deliberate teardown can land inside this invocation's
+      // window. Declining that transition must not consume the one-shot
+      // listener: the abort damage follows it, and after it the marker is
+      // cleared by the reconnect that a *healthy* sibling completes.
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const retryClient = okClient();
+      const { config, discoverToolsForServer } = registry({
+        ensured: mkTool({ client: retryClient }),
+      });
+      const abortController = new AbortController();
+      const client: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              abortController.signal.addEventListener(
+                'abort',
+                () => reject(abortError),
+                { once: true },
+              );
+            }),
+        ),
+      };
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const executePromise = exec(
+        mkTool({ config, client }),
+        'test',
+        abortController.signal,
+      );
+      abortController.abort();
+      await expect(executePromise).rejects.toThrow('Tool call aborted');
+
+      markMCPServerTeardownIntent(serverName);
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      await Promise.resolve();
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+
+      // A sibling came back up and cleared the marker; this invocation's own
+      // dead transport now reports the drop. The listener has to still be
+      // there to repair it.
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      await vi.waitFor(() => {
+        expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      });
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+    });
+
+    it('repairs again once the deliberate teardown marker is gone', async () => {
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      const retryClient = okClient();
+      const { config, discoverToolsForServer } = registry({
+        ensured: mkTool({ client: retryClient }),
+      });
+      const abortController = new AbortController();
+      const client: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              abortController.signal.addEventListener(
+                'abort',
+                () => reject(abortError),
+                { once: true },
+              );
+            }),
+        ),
+      };
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const executePromise = exec(
+        mkTool({ config, client }),
+        'test',
+        abortController.signal,
+      );
+      abortController.abort();
+      await expect(executePromise).rejects.toThrow('Tool call aborted');
+
+      // A stale marker from an earlier teardown that has since been undone by
+      // a fresh CONNECTED must not suppress the repair for this abort.
+      markMCPServerTeardownIntent(serverName);
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      await vi.waitFor(() => {
+        expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
+      });
+      expect(client.callTool).toHaveBeenCalledTimes(1);
+    });
+
     it('should not reconnect for an MCP isError result', async () => {
       const initialClient: McpDirectClient = {
         callTool: vi.fn().mockResolvedValueOnce({
@@ -3113,7 +3489,11 @@ describe('DiscoveredMCPTool', () => {
 
       const rejection = await executePromise.catch((error) => error);
       expect(rejection).toMatchObject({ name: 'AbortError' });
+      // Repaired, not replayed: the cancelled request is not re-issued, and
+      // the repair runs detached from this rejection, so nothing reconnects
+      // before the transport has actually reported the teardown (#12160).
       expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(client.callTool).toHaveBeenCalledTimes(1);
       expect(rejection).not.toMatchObject({
         errorType: ToolErrorType.EXECUTION_TIMEOUT,
       });
