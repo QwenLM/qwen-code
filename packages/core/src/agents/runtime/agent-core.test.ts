@@ -868,9 +868,9 @@ describe.each(LOOPS)(
           .mockReturnValue(Number.POSITIVE_INFINITY),
         getToolResultBytesWritten: vi.fn().mockReturnValue(0),
         getSessionId: vi.fn().mockReturnValue(`${slug}-session`),
-        isUnifiedAgentLoopEnabled: () => shared,
+        isUnifiedAgentLoopEnabled: vi.fn(() => shared),
         getSkipLoopDetection: () => false,
-        isEventBusAgentLoopEnabled: () => kernel,
+        isEventBusAgentLoopEnabled: vi.fn(() => kernel),
         ...overrides,
       } as unknown as Config;
       const core = new AgentCore(
@@ -926,6 +926,26 @@ describe.each(LOOPS)(
         const result = await running;
         settle('late-call', 'success', 20);
         expect(results).toHaveLength(1);
+        // Every AgentCore surface read must pass 'agent-core'. The legacy arm
+        // runs the tool batch directly with no loop read; the shared arms go
+        // through the round gate and the shared round, which must name this
+        // surface for both switches.
+        if (shared) {
+          const runtime = core.runtimeContext as unknown as {
+            isUnifiedAgentLoopEnabled: ReturnType<typeof vi.fn>;
+            isEventBusAgentLoopEnabled: ReturnType<typeof vi.fn>;
+          };
+          const loopCalls = runtime.isUnifiedAgentLoopEnabled.mock.calls;
+          expect(loopCalls.length).toBeGreaterThan(0);
+          expect(loopCalls.every(([surface]) => surface === 'agent-core')).toBe(
+            true,
+          );
+          const kernelCalls = runtime.isEventBusAgentLoopEnabled.mock.calls;
+          expect(kernelCalls.length).toBeGreaterThan(0);
+          expect(
+            kernelCalls.every(([surface]) => surface === 'agent-core'),
+          ).toBe(true);
+        }
         // The cancelled call's result stays for the next round's check.
         expect(result.messages[0].parts).toEqual([
           {

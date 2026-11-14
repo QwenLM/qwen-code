@@ -72,8 +72,11 @@ public class JdbcWakeRecoveryStore
          * progress itself is cacheable — refusing the answer, not the pages
          * read, is what keeps a wake input past the page window reachable. */
         private boolean deferred;
-        /** The earliest deferred notBefore. At or past it the cached proof is
-         * discarded so the input is re-read as due (counted), not skipped. */
+        /** The earliest deferred notBefore. At or past it a cached proof that
+         * certifies nothing is discarded so the input is re-read as due
+         * (counted), not skipped. A proof that is also complete answers true
+         * from the complete shortcut before this expiry is consulted; it is
+         * invalidated by the journal revision advancing, not by the fire time. */
         private long deferredUntil = Long.MAX_VALUE;
     }
 
@@ -264,10 +267,9 @@ public class JdbcWakeRecoveryStore
             }
         }
         // A complete proof attaches even beside a deferred wakeup: its pending
-        // input needs recovery now, regardless of the wakeup's fire time.
-        if (proof.deferred && proof.complete) {
-            return Optional.of(true);
-        }
+        // input needs recovery now, regardless of the wakeup's fire time. It
+        // falls through to the put below so the proven prefix is memoized —
+        // returning here would re-prove from revision zero on every scan.
         // The complete Candidate fences every continuation to the same immutable
         // prefix. Losing it restarts proof at zero; it never clears a durable hint.
         if (pendingProofs.size() == 128) {
@@ -326,9 +328,11 @@ public class JdbcWakeRecoveryStore
      * A loop wakeup whose fire time is still in the future is deferred, not
      * parked: it must not make wake recovery attach the Harness. A due or
      * immediate loop input (no notBefore, or one already past) still counts.
-     * A deferred proof keeps its progress cached but never answers false; the
-     * cache expires at the earliest deferred fire time so the input is
-     * re-read as due, and a settlement drops it from the deferred latch.
+     * A deferred proof keeps its progress cached but never answers false; a
+     * proof that certifies nothing expires at the earliest deferred fire time
+     * so the input is re-read as due, while one that is also complete answers
+     * true from the complete shortcut and stays memoized until the journal
+     * advances. A settlement drops it from the deferred latch.
      */
     private boolean isDeferredLoopInput(JsonNode event) {
         JsonNode payload = event.path("payload");
