@@ -2887,6 +2887,9 @@ export class Config {
   private sessionSourceType?: string;
   private sessionSourceId?: string;
   private sessionData?: ResumedSessionData;
+  private agentLoopKernelEligibility?: (
+    surface: AgentLoopSurface,
+  ) => boolean | undefined;
   private readonly workflowModeContext = new WorkflowModeContext();
   private initialWorkflowMode: boolean | undefined;
   private workflowModeReady = false;
@@ -10889,14 +10892,31 @@ export class Config {
   }
 
   /**
-   * The loop path a surface runs, derived from the same two switches the
-   * surface reads so the reported path cannot drift from the path taken:
-   * unified off -> legacy; unified on with the kernel on -> kernel; else
-   * shared.
+   * Lets a surface's session report whether its execution branch can actually
+   * enter the event-bus kernel, so the reported path matches the path taken.
+   * Returning false for a surface caps its path at `shared`; undefined leaves
+   * the switch resolution unchanged.
+   */
+  setAgentLoopKernelEligibilityProvider(
+    provider: (surface: AgentLoopSurface) => boolean | undefined,
+  ): void {
+    this.agentLoopKernelEligibility = provider;
+  }
+
+  /**
+   * The loop path a surface runs: unified off -> legacy; otherwise the kernel
+   * only when the event-bus switch is on AND the surface's execution branch
+   * actually enters it, else shared. Speculation never reads the event-bus
+   * switch (its rounds always run on the shared loop), and an ACP session may
+   * keep its own tool step, so both are capped at shared even with both
+   * switches on.
    */
   getAgentLoopPath(surface: AgentLoopSurface): AgentLoopPath {
     if (!this.isUnifiedAgentLoopEnabled(surface)) return 'legacy';
-    return this.isEventBusAgentLoopEnabled(surface) ? 'kernel' : 'shared';
+    if (!this.isEventBusAgentLoopEnabled(surface)) return 'shared';
+    if (surface === 'speculation') return 'shared';
+    if (this.agentLoopKernelEligibility?.(surface) === false) return 'shared';
+    return 'kernel';
   }
 
   /**

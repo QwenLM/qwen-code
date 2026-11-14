@@ -99,6 +99,15 @@ vi.mock('./opentui/renderer-selection.js', () => ({
   selectTuiRenderer: mockSelectTuiRenderer,
 }));
 
+const { mockGetTuiRendererOfRecord } = vi.hoisted(() => ({
+  mockGetTuiRendererOfRecord: vi.fn(
+    (): 'ink' | 'opentui' | undefined => undefined,
+  ),
+}));
+vi.mock('./tui-renderer-of-record.js', () => ({
+  getTuiRendererOfRecord: mockGetTuiRendererOfRecord,
+}));
+
 describe('systemInfo', () => {
   let mockContext: CommandContext;
   const originalPlatform = process.platform;
@@ -577,6 +586,7 @@ describe('systemInfo', () => {
         getDetectedIdeDisplayName: vi.fn().mockReturnValue(''),
       } as unknown as IdeClient);
       setExecFileStdout('10.0.0');
+      mockGetTuiRendererOfRecord.mockReturnValue(undefined);
       mockContext.services.config = {
         ...(mockContext.services.config ?? {}),
         getScreenReader: vi.fn().mockReturnValue(false),
@@ -612,6 +622,24 @@ describe('systemInfo', () => {
       mockSelectTuiRenderer.mockImplementationOnce(() => {
         throw new Error('strict mode forbids the fallback');
       });
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.agentLoop).toBe('ink: legacy');
+    });
+
+    it('reports the mounted renderer after an OpenTUI-to-ink boot fallback', async () => {
+      // A requested OpenTUI failed to boot and ink is serving; the env still
+      // requests opentui and the per-surface switches differ, so re-deriving
+      // the gate would name the wrong renderer and the wrong loop.
+      mockContext.executionMode = 'interactive';
+      mockGetTuiRendererOfRecord.mockReturnValue('ink');
+      mockSelectTuiRenderer.mockReturnValue({
+        renderer: 'opentui',
+        reason: 'test',
+        strict: false,
+      });
+      (mockContext.services.config as unknown as Record<string, unknown>)[
+        'getAgentLoopPath'
+      ] = vi.fn((surface: string) => (surface === 'ink' ? 'legacy' : 'kernel'));
       const info = await getExtendedSystemInfo(mockContext);
       expect(info.agentLoop).toBe('ink: legacy');
     });

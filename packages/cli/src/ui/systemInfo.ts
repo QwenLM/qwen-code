@@ -21,6 +21,7 @@ import {
 import type { AgentLoopSurface } from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { GIT_COMMIT_INFO } from '../generated/git-commit.js';
 import { selectTuiRenderer } from './opentui/renderer-selection.js';
+import { getTuiRendererOfRecord } from './tui-renderer-of-record.js';
 
 const debugLogger = createDebugLogger('STATUS');
 
@@ -270,9 +271,10 @@ export async function getExtendedSystemInfo(
 /**
  * The current surface and the loop path it resolves to, for /about and /bug.
  * The surface comes from the execution mode; the interactive surface is the
- * renderer of record, re-derived with the same gate the entry uses. Returns
- * undefined when there is no execution mode (Settings dialog) or no config,
- * so the line is omitted rather than guessed. Read-only: never throws.
+ * renderer that actually mounted (recorded by the entry after a successful
+ * boot, so an OpenTUI-to-ink fallback is reported as ink). Returns undefined
+ * when there is no execution mode (Settings dialog) or no config, so the line
+ * is omitted rather than guessed. Read-only: never throws.
  */
 function getAgentLoopInfo(context: SystemInfoContext): string | undefined {
   const config = context.services.config;
@@ -286,18 +288,27 @@ function getAgentLoopInfo(context: SystemInfoContext): string | undefined {
     case 'acp':
       surface = 'acp';
       break;
-    case 'interactive':
-      try {
-        surface = selectTuiRenderer(
-          undefined,
-          undefined,
-          process.env,
-          config.getScreenReader(),
-        ).renderer;
-      } catch {
-        surface = 'ink';
+    case 'interactive': {
+      // Prefer the renderer that actually mounted: a requested OpenTUI can
+      // fail to boot and fall back to ink without the environment changing,
+      // and re-deriving the gate would then name the wrong renderer and loop.
+      const mounted = getTuiRendererOfRecord();
+      if (mounted) {
+        surface = mounted;
+      } else {
+        try {
+          surface = selectTuiRenderer(
+            undefined,
+            undefined,
+            process.env,
+            config.getScreenReader(),
+          ).renderer;
+        } catch {
+          surface = 'ink';
+        }
       }
       break;
+    }
     default:
       return undefined;
   }

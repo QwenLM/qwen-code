@@ -1151,6 +1151,7 @@ describe('Session', () => {
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getSessionSourceType: vi.fn().mockReturnValue(undefined),
+      setAgentLoopKernelEligibilityProvider: vi.fn(),
       isProvisionalWorkspace: vi.fn().mockReturnValue(false),
       setLiveAppendSystemPrompt: vi.fn(),
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
@@ -1298,6 +1299,33 @@ describe('Session', () => {
       mockClient,
       mockSettings,
     );
+  });
+
+  describe('agent loop diagnostic kernel eligibility', () => {
+    it('excludes an Agent Host session from the kernel', () => {
+      // An Agent Host session keeps ACP's own tool step, so its model rounds
+      // stay on the shared loop even with both rollout switches on.
+      mockConfig.getSessionSourceType = vi.fn().mockReturnValue('agent-host');
+      const agentHostSession = new Session(
+        'agent-host-session',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      expect(agentHostSession).toBeDefined();
+      const provider = vi
+        .mocked(mockConfig.setAgentLoopKernelEligibilityProvider)
+        .mock.calls.at(-1)?.[0];
+      expect(provider?.('acp')).toBe(false);
+      expect(provider?.('headless')).toBeUndefined();
+    });
+
+    it('admits a regular session to the kernel', () => {
+      const provider = vi
+        .mocked(mockConfig.setAgentLoopKernelEligibilityProvider)
+        .mock.calls.at(-1)?.[0];
+      expect(provider?.('acp')).toBe(true);
+    });
   });
 
   describe('session agent records', () => {

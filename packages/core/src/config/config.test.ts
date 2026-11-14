@@ -7574,6 +7574,50 @@ describe('Server Config (config.ts)', () => {
         expect(config.getAgentLoopPath('headless')).toBe('kernel');
         expect(config.getAgentLoopPath('acp')).toBe('legacy');
       });
+
+      it('caps speculation at shared even with both switches on', () => {
+        // runSpeculationModelRound only calls runModelRound and never reads
+        // the event-bus switch, so speculation cannot enter the kernel.
+        const config = makeConfig({
+          unifiedAgentLoopEnabled: true,
+          eventBusAgentLoopEnabled: true,
+        });
+        expect(config.getAgentLoopPath('speculation')).toBe('shared');
+      });
+
+      it('caps a surface at shared when its session reports kernel-ineligible', () => {
+        // A live / Agent Host ACP session keeps its own tool step, so its
+        // model rounds stay on the shared loop even with both switches on.
+        const config = makeConfig({
+          unifiedAgentLoopEnabled: true,
+          eventBusAgentLoopEnabled: true,
+        });
+        config.setAgentLoopKernelEligibilityProvider((surface) =>
+          surface === 'acp' ? false : undefined,
+        );
+        expect(config.getAgentLoopPath('acp')).toBe('shared');
+        expect(config.getAgentLoopPath('headless')).toBe('kernel');
+      });
+
+      it('keeps kernel when the session reports kernel-eligible', () => {
+        const config = makeConfig({
+          unifiedAgentLoopEnabled: true,
+          eventBusAgentLoopEnabled: true,
+        });
+        config.setAgentLoopKernelEligibilityProvider((surface) =>
+          surface === 'acp' ? true : undefined,
+        );
+        expect(config.getAgentLoopPath('acp')).toBe('kernel');
+      });
+
+      it('leaves the path unchanged when the provider returns undefined', () => {
+        const config = makeConfig({
+          unifiedAgentLoopEnabled: true,
+          eventBusAgentLoopEnabled: true,
+        });
+        config.setAgentLoopKernelEligibilityProvider(() => undefined);
+        expect(config.getAgentLoopPath('acp')).toBe('kernel');
+      });
     });
 
     describe('bundled review workflow activation', () => {
