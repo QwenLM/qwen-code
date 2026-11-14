@@ -25,6 +25,10 @@ export function isVoiceModelId(id: string): boolean {
   return (
     /^qwen3-asr-flash-realtime(?:-|$)/.test(s) ||
     /^qwen3-asr-flash(?:-\d{4}-\d{2}-\d{2})?$/.test(s) ||
+    /^qwen-audio-[\d.]+-(?:asr-flash-(?:realtime|streaming)|realtime)(?:-|$)/.test(
+      s,
+    ) ||
+    /^qwen-audio-[\d.]+-asr-flash(?:-\d{4}-\d{2}-\d{2})?$/.test(s) ||
     /^(fun-asr|paraformer).*realtime(?:-|$)/.test(s)
   );
 }
