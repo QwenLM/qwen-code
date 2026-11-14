@@ -20,6 +20,7 @@ import {
 import {
   ignoreBrokenPipe,
   writeStderrLine,
+  writeStderrLineSafe,
   writeStdoutLine,
 } from '../utils/stdioHelpers.js';
 import { resolveProxy } from './channel/proxy.js';
@@ -220,9 +221,45 @@ async function run(fn: () => Promise<void>): Promise<void> {
   await Promise.all(
     [process.stdout, process.stderr].map(
       (stream) =>
-        new Promise<void>((resolve) => stream.write('', () => resolve())),
+        new Promise<void>((resolve, reject) => {
+          const finish = (error?: Error | null) => {
+            const code = (error as NodeJS.ErrnoException | undefined)?.code;
+            const previousCode = (
+              stream.errored as NodeJS.ErrnoException | null
+            )?.code;
+            if (
+              error &&
+              code !== 'EPIPE' &&
+              code !== 'EBADF' &&
+              !(
+                code === 'ERR_STREAM_DESTROYED' &&
+                (previousCode === 'EPIPE' || previousCode === 'EBADF')
+              )
+            ) {
+              reject(error);
+            } else {
+              resolve();
+            }
+          };
+          try {
+            stream.write('', finish);
+          } catch (error) {
+            finish(error as Error);
+          }
+        }),
     ),
   );
+}
+
+function loadLocalBatchEnvironment(): void {
+  // Load env-file values for QWEN_BATCH_HOME without rewriting invalid
+  // workspace settings or blocking local task inspection and cleanup.
+  try {
+    loadSettings(process.cwd(), { preserveInvalidWorkspaceSettings: true });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    writeStderrLineSafe(`warning: Could not load batch settings: ${reason}`);
+  }
 }
 
 // A session's auto-collector holds a task lock for a few seconds at most;
@@ -373,6 +410,8 @@ const cleanWorkflowCommand: CommandModule = {
   // Local only: no endpoint or credentials needed.
   handler: (argv) =>
     run(async () => {
+      ignoreBrokenPipe();
+      loadLocalBatchEnvironment();
       await cleanTask(
         {
           env: process.env,
@@ -429,6 +468,7 @@ export const listWorkflowCommand: CommandModule = {
       // too, so a reader that leaves (`batch list | head -1`) must not turn a
       // completed listing into a crash-class exit.
       ignoreBrokenPipe();
+      loadLocalBatchEnvironment();
       await listTasks({
         env: process.env,
         out: writeStdoutLine,
