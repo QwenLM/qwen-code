@@ -28,11 +28,12 @@
 - `scripts/verify-pr-check.mjs <dir>` 把发布侧的规则套到本地产物目录：必需文件、四个判定词、为正且自洽的断言三元组、以及不允许带失败断言的 `merge-ready`。报告形态与证据命名只作为警告，因为纯文档轮次没有截图，检查器也无法知道是否跑过 harness。带 `--context <snapshot>` 时期望 head 来自该宿主持有的文件，而不是产物里可写的 `context.json`；不可用快照是硬性 exit 1 而非警告：产物目录可被轮次刚执行的 PR 代码写入。
 - `scripts/verify-pr-guard.mjs` 接管发布前守卫的两个半程。`--pr <n> --repo <owner>/<repo> --snapshot <file>` 抓取 head、PR 状态以及三个评论列表（带 `--paginate`），只有每次调用都成功才写文件。`--compare --start <a> --now <b>` 列出本轮 dirty 的全部原因并退出 1。
 
-检查器在产物契约要求轮次写出的产物上新增三条规则。产物契约里三者都要点名：产物清单没要求的文件，轮次就不会产出，而对一个不存在的文件做检查是静默的。
+检查器在产物契约要求轮次写出的产物上新增四条规则。产物契约里四者都要点名：产物清单没要求的文件，轮次就不会产出，而对一个不存在的文件做检查是静默的。
 
 - `assertions.json` 在 `fail` 非零时带 `failures: [{ id, attribution }]`，每条失败断言一项，归因为 `pr`、`harness` 或 `environment`。若 `findings`/`blocked` 的账本里没有任何一条归因为 `pr`，报错；账本长度与 `fail` 不一致，同样报错。有失败但没有账本只报警告，因此旧产物仍能通过。
 - `mutations.json` 可以声明 `coverageClaim: "per-commit"`，并给出来自 `git log --no-merges <previous>..<head> --not <target>` 的 `productionCommits` 与 `rows[].commit`。列出的提交没有对应行时报错，并点名这些提交；列表为空同样报错——对空集合做的声明恒真。
 - `assertions.json` 可以带 `gates: [{ suite, pass, fail, skipped? }]`，轮次作为定向门禁运行的每个已有测试套件一项。这些计数不进 `pass`/`fail`/`total`——后者只统计本轮自己写的检查，每次套件运行算其中一条；发布端把门禁合计单独印成一行。列表格式不对报错。断言超过 1000 条却没有记录任何门禁结果只报警告：最近 18 份 CI 产物里这样的 4 轮都把整个 workspace 的测试套件算了进去。
+- `boundary.json` 声明不可信 PR 代码跑在哪里：`mode: "container"` 加非空 `detail`，或 `mode: "waived"` 写明批准维护者（`by`）、批准评论的永久链接（`approval`）与 `reason`。与上面三条不同，文件仅仅缺失就是错误：隔离规则在 PR #16866 的两个本地轮次于宿主无门禁无豁免跑完整电池之前只是文字。container 声明还必须有 `boundary-gate.json` 支撑——那是 `verify-pr-prepare.mjs --require-isolation --artifact-dir <round-dir>` 通过时写下的记录——因此声明不能在没有门禁运行的情况下自行铸出；waiver 的 `approval` 必须是读者能打开的 GitHub 评论永久链接，而非自由文本。CI 发布作业在运行检查器前自写 CI 车道的声明与 `ci-lane` 门禁记录，因此轮次无法伪造，base 钉住的旧 skill 也仍能通过。产物树可被 PR 写入，所以门禁记录佐证的是「运营方跳过了门禁」（事故的形状），而非「PR 代码伪造记录」；发布方持有的 CI 路径才是权威路径。
 
 每个已准备的产物目录保存带完整坐标的 `context.json`——`repo`、`pr`、`baseRefOid` 与 `headRefOid`——本地轮次因此从一个文件读出两个 OID，而不是从 `HEAD` 推导。prepare 只在当前树是 `headRefOid` 的干净检出时才写它：轮次复用这棵树作为 A/B 的 head 侧，所以 HEAD 不对会退出 3 并点名要跑的 `git checkout`，树脏会退出 3 并要求维护者自己提交或 stash——脚本绝不代为 stash，且拒绝时不创建任何产物目录。检查器优先使用该轮快照，并注明实际使用的来源。旧目录回退到按 PR 共享的快照；该轮快照不可读或无效时只报警告，不会改用后续轮次的共享提交号。
 

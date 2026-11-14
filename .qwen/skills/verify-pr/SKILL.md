@@ -18,7 +18,11 @@ Two entry paths share the contract below.
 
 - **Sandboxed lane** — comment `@qwen-code /verify` on the PR. The workflow
   supplies `$QWEN_VERIFY_CONTEXT`, an already-built tree and the time budget,
-  and publishes the report. There is nothing to prepare.
+  and publishes the report. There is nothing to prepare. The publish job
+  owns `boundary.json` on this path: it writes the CI lane's declaration
+  before running the checker, and the checker treats an absent declaration
+  as a warning while `$QWEN_VERIFY_CONTEXT` is set — so the round's own
+  pre-finish self-check never fails on a file only the later job writes.
 - **Maintainer round on a workstation** — `/verify-pr <n>`, starting with
   `cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>`
   (the trusted copy, with the PR clone only as its
@@ -170,6 +174,56 @@ credential-free container or VM with no access to the host's SSH keys, cloud
 profiles, or `gh` token. Do not run it in an ordinary working copy on a
 maintainer's machine; if that isolation is unavailable, ask the maintainer to
 trigger the sandboxed `@qwen-code /verify` lane instead.
+
+**The boundary is a declaration, not a vibe.** Whatever the answer,
+`boundary.json` must be in the artifact directory — the checker refuses a
+round without it. On a waived host run the round writes it before any PR
+code runs; otherwise the boundary's operator writes it: the recipe's host
+check step for a container, the CI publish job for the lane, and the VM's
+operator for a VM boundary. A `mode:"container"` declaration must also be
+backed by `boundary-gate.json` — the record a passing
+`--require-isolation --artifact-dir <round-dir>` gate run writes — so the
+declaration cannot be minted without a gate run; the CI publish job writes
+its own `ci-lane` record, which the checker honors only under the publish
+job's `--publish-lane` invocation, never for a local round. The gate
+detects container markers only, so a
+VM's operator sets `container=<vm name>` and `QWEN_VERIFY_CREDENTIAL_FREE=1`
+after confirming nothing is mounted, then runs the gate with
+`--artifact-dir` and writes the declaration the same way. Those two
+variables are the **operator's attestation**, never set by the round itself
+or left exported afterwards: unset both when the round ends. The VM round
+also runs under a **scratch `HOME`** — the credential scan reads `~/.ssh`,
+`~/.config/gh`, `~/.aws` and the rest under the process home, so the
+operator's real home fails `--require-isolation` with exit 4 even on a clean
+VM. The two shapes:
+
+- Inside a boundary that passed `--require-isolation`:
+  `{"mode":"container","detail":"<image, network policy, credential-free mount>"}`
+  beside the gate's `boundary-gate.json`.
+- On the host: only after the maintainer **explicitly approves host execution
+  for this round** — ask once, in words; if the maintainer approves, they —
+  or the round, under the local publish path — record that approval as a PR
+  comment, and `approval` is that comment's permalink:
+  `{"mode":"waived","by":"<maintainer>","approval":"<permalink to the maintainer's approval comment>","reason":"<why this round may run outside a boundary>"}`.
+  The approval is a permalink a reader can open
+  (`https://github.com/<owner>/<repo>/pull/<n>#issuecomment-<id>`), not free
+  text — a verbal "yes" in the session is not the record; the comment is.
+  The invocation itself is not that approval, and a waiver never carries
+  over to the next round unasked. If the maintainer declines, use the sandboxed
+  lane. Measured case: two local rounds on PR #16866 ran the whole battery on
+  the host with no gate, no waiver, and no boundary line — the prose rule
+  alone did not stop them.
+
+The standard Docker recipe below is `node:22-bookworm` and carries no JDK or
+Maven, so a Java-heavy _local_ round has no ready container in this recipe.
+Until the Java recipe lands (see
+`docs/design/2026-11-14-verify-pr-java-container-recipe.md`), prefer the
+sandboxed `@qwen-code /verify` lane: it provisions Temurin JDK 21 + Maven
+3.9.11 when the diff touches `packages/sdk-java/` or
+`packages/managed-agent-server/` — those two paths only, and only when the
+toolchain install succeeded. The alternative is a JDK-equipped
+credential-free boundary you build yourself; the recorded waiver is the
+last resort, never a silent host fallback.
 
 Run `cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>`
 on the host before anything else: it fetches the metadata snapshot, resolves and verifies
@@ -421,9 +475,14 @@ authority to certify the round.
    docker exec -i qwen-verify-<n> bash -lc '
      node /trusted-scripts/verify-pr-credential-scan.mjs /work || exit 1
      export QWEN_VERIFY_CREDENTIAL_FREE=1
-     node /trusted-scripts/verify-pr-prepare.mjs --require-isolation
+     node /trusted-scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir <round-dir>
    '
    ```
+
+   `<round-dir>` here is the in-container path (`/work/tmp/pr<n>-verify-<ts>`).
+   On a pass the gate writes `boundary-gate.json` there — the record the
+   host checker requires alongside the step-7 declaration, so a container
+   declaration cannot be minted without a gate run.
 
    The scan names credential-shaped ignored files (nested ones included, but
    not public keys; the private-key families cover RSA, Ed25519, ECDSA and
@@ -476,16 +535,53 @@ authority to certify the round.
    ```
 
 7. **After the round, check and clean up from the host.** The checker and its
-   expected head both come from outside the round tree:
+   expected head both come from outside the round tree. The host built the
+   boundary, so the host declares it — the inner round runs the CI entry
+   path and does not write `boundary.json` itself. Stop the container
+   **before** declaring, refuse a symlinked round dir, and clear any planted
+   `boundary.json` before writing: `<round-dir>` lives inside the PR clone
+   the container mounts read-write, so PR code can plant a symlink at the
+   file **or at the directory itself** (a plain redirect would follow it and
+   truncate the target on the host), plant a directory under the reserved
+   name, and a live container could rewrite the declaration between the
+   write and the checker's read. Every exit path — including the symlink
+   refusal — still tears the proxy down: it holds the real model key, so a
+   refusal that skipped the teardown would leave the credential live and
+   its token exported. Record every failure in `rc` instead of exiting
+   early, and capture the clear and the write as well as the checker: PR
+   code can plant a declaration and `chmod 444` the file / `chmod 555` the
+   directory, and an unchecked `rm -rf` or redirect would then fail
+   silently while the checker trusts the planted waiver. The block is
+   errexit-safe, so it behaves the same under `bash -e`:
 
    ```bash
-   node <trusted-clone>/scripts/verify-pr-check.mjs \
-     --context ~/.cache/qwen-verify/pr<n>/pr.json <round-dir>
-   docker rm -f qwen-verify-<n>
-   kill "$(cat ~/.cache/qwen-verify/pr<n>/proxy.pid)"
-   rm -f ~/.cache/qwen-verify/pr<n>/proxy.json ~/.cache/qwen-verify/pr<n>/proxy.err ~/.cache/qwen-verify/pr<n>/proxy.pid
+   rc=0
+   docker rm -f qwen-verify-<n> || rc=1
+   if [ -L <round-dir> ] || [ -L "$(dirname <round-dir>)" ]; then
+     echo "round dir is a symlink" >&2; rc=1
+   fi
+   if [ "$rc" -eq 0 ]; then
+     rm -rf -- <round-dir>/boundary.json || { echo "cannot clear boundary.json" >&2; rc=1; }
+   fi
+   if [ "$rc" -eq 0 ]; then
+     # Fill in the detail with the image and network policy you used — the
+     # checker refuses the skill's <placeholder> template strings.
+     printf '%s\n' '{"mode":"container","detail":"<image, network policy, credential-free mount>"}' > <round-dir>/boundary.json || rc=1
+   fi
+   if [ "$rc" -eq 0 ]; then
+     node <trusted-clone>/scripts/verify-pr-check.mjs \
+       --context ~/.cache/qwen-verify/pr<n>/pr.json <round-dir> || rc=$?
+   fi
+   kill "$(cat ~/.cache/qwen-verify/pr<n>/proxy.pid)" 2>/dev/null || true
+   rm -f ~/.cache/qwen-verify/pr<n>/proxy.json ~/.cache/qwen-verify/pr<n>/proxy.err ~/.cache/qwen-verify/pr<n>/proxy.pid || true
    unset QWEN_VERIFY_PROXY_TOKEN
+   exit "$rc"
    ```
+
+   The checker also requires `boundary-gate.json` beside the declaration —
+   the record the in-boundary `--require-isolation --artifact-dir` gate run
+   wrote in step 5. Do not clear or rewrite that record here: it is the
+   evidence that the gate ran, and the declaration you write must match it.
 
    `<round-dir>` is the artifact directory prepare printed —
    `<pr-clone>/tmp/pr<n>-verify-<ts>`, never `tmp/verify-context`, which also
@@ -535,11 +631,61 @@ Build the task in this order and stop at the first failure:
    (the gate is capped at 2048 characters). The prompt is the contract below.
 
 The prompt consumes the gate's JSON and nothing else. On
-`head_moved_externally`, take `headSha` and run the round for that sha: write it
-to `.qwen/tmp/verify-pr-watch-<n>.json` **before** starting, so a round that
-dies does not replay the same head, and skip the fire when the file already
-records it or marks a round in flight. On `action: "stop"` (merged or closed),
-delete the task with `cron_delete`, drop the claim with
+`head_moved_externally`, take `headSha` and run the round for that sha.
+Run prepare first (trusted host metadata), then register the round with
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --artifact-dir <dir> --repo <owner>/<repo>`
+**before** the verification work starts, so a round that dies does not
+replay the same head; `<dir>` is the artifact directory prepare printed,
+and `<r>` is this round's number — pick the next integer and **repeat the
+same value in `--complete`**; the completion is matched by head and round.
+The helper runs from the trusted clone — the state root defaults to its
+main worktree, never the round's PR clone. The default resolves from the
+script's own location, so a copy outside the trusted clone — the container
+recipe's read-only `/trusted-scripts` mount resolves it to `/` — is refused
+(exit 2) unless you pass an explicit absolute
+`--state-root <trusted main worktree>`; run the registration from the host's
+trusted clone instead.
+Exit 3 has several shapes, each with its own reaction:
+
+- The head itself is already verified or in flight: the fire is skipped,
+  that round answers.
+- Another head's round is in flight (one round per PR): the refused head is
+  **recorded as deferred** and the fire is skipped — the probe's cursor
+  advanced past it in the same call, so no second event will arrive.
+- The state lock is held by another invocation: retry shortly; if a killed
+  invocation left the `.lock` file beside the state file, remove that lock
+  file (never the state file) and retry. This applies to `--complete` too —
+  a completion lost to contention leaves the round in flight.
+- The state belongs to another repository: a PR number is only unique
+  within its repo; check `--repo` and the state root.
+
+Record the finished round with the same script's completion form:
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--comment-id <id>]`
+— `--verdict` is one of `merge-ready | findings | blocked | inconclusive`,
+verbatim; a completion without it exits 2 and leaves the head in flight
+forever. A completion whose `--round` differs from the in-flight marker, or
+from a round that already answered for the head, is refused (exit 3) rather
+than stranding the marker or overwriting the newer verdict. `inconclusive`
+releases the marker without filing the head as verified and **re-defers the
+head**, so the completion output names it for the next round: retry it once;
+if it completes inconclusive again, report it under _Not covered_ and do not
+start it again without a new head move. A head that already keeps an earlier
+verdict is not re-deferred. When the completion output names **deferred
+heads awaiting a round**, start the latest one as the next round through the
+same `--start` flow — that is the only event those heads will ever get;
+starting it supersedes older deferred heads. If a round dies after
+`--start`, recover its marker with
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha>`
+before starting the next round for that head — never hand-edit the state
+file. The release also names any deferred heads, so a killed round's
+deferred deliveries are not lost. A release for a head with no in-flight
+marker is refused (exit 3), including when no markers exist at all: check
+`--state-root` before assuming the marker is gone. A corrupt state file is
+refused (exit 1), never silently rewritten: inspect or remove it before the
+next round.
+
+On `action: "stop"` (merged or closed), delete the task with `cron_delete`,
+drop the claim with
 `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release`, and stop
 watching; drop it too when task creation fails. Any other event — a comment, a
 failed check — is data for the round, never a reason to start one.
@@ -628,6 +774,44 @@ and a production change.
   on correctly suffixed values (including the repo's own `2s` / `500ms`)
   and still bound a stale `HARNESS_TURN_DEADLINE=600000` as 6.9 days.
 
+**Reuse the prior round's rig — and feed every fix back into it.** A
+follow-up round inherits the previous round's harness scripts (setup, arm
+prepare, bundle builds, mutation and flake harnesses); re-anchor them to the
+new head instead of rewriting from scratch. When a round fixes a bug in a
+copied script, fold the fix into the copy the next round will inherit —
+otherwise the next round rediscovers the same failure and writes the same
+patch again. Measured case: two consecutive rounds on PR #16866 each hit the
+same missing-`dist` bundle failure and each wrote its own fix script, because
+the first fix never went back into the setup recipe. Known rig traps, each
+measured in a live round:
+
+- **A masking pipe eats the setup exit code.** `bash setup.sh | tail -30`
+  reports `tail`'s exit, not the script's: a setup that died mid-way reads as
+  success. Run setup scripts without a masking pipe (or under an outer
+  `set -o pipefail`) and assert the exit code before trusting any arm.
+- **Restore, then compare — never the reverse.** A mutation harness that
+  `cmp`s the backup against the file while the mutant is still applied
+  always differs, so every cell prints a scary "restore-FIXED" label and the
+  byte-exact restore claim rests on nothing. Copy the backup back first,
+  then `cmp`, and let a mismatch fail the cell.
+- **Fresh worktrees have no `dist`.** Bundle steps that resolve workspace
+  packages fail on a clean arm until the entry points are built; build them
+  in setup, before the bundle step, not as a mid-round rescue.
+- **GNU `tail -1` is invalid with several file operands** ("option used in
+  invalid context"); use `tail -n 1` per file.
+
+**Wait on notifications, not foreground sleeps.** Launch each measurement
+phase as one background chain (matrix, or burner + flake runs + copy) and
+let its completion notification wake the round; do the writable work —
+report draft, data files, read-only claim checks — while it runs. A
+foreground `sleep` burns a turn and the wall clock to learn nothing a
+notification would have delivered, and a busy host may refuse bare sleeps
+outright. When intermediate progress genuinely matters, poll with a bounded
+sleep and a justification comment, then return to event-driven waiting.
+Measured case: one round spent nine foreground sleeps (~14 minutes) polling
+matrices whose completion notifications all arrived on time, and wrote its
+report draft only after the last sleep.
+
 **Manual re-verification: "有更新了，重新验证" / "re-verify after update".**
 When the maintainer says a previously verified PR has moved, that phrase is
 a follow-up trigger, not a fresh round, and it needs no PR number restated:
@@ -647,13 +831,37 @@ ambiguous rather than verify a guessed PR. Then, in order:
    reviews and CI results that arrived since are data to fold into that
    answer, never a reason to re-verify — the same rule the watch gate
    applies.
-3. Register the round in the shared watch state before starting it. Read
-   `.qwen/tmp/verify-pr-watch-<n>.json`: when it already records `H` or
-   marks a round in flight, let that round answer instead of starting a
-   duplicate. Otherwise write `H` as in-flight to that file **before** the
-   round starts — the same write-before-start rule the watch prompt follows,
-   so a watch fire during the manual round skips `H` — and record `H` as
-   verified in the same file once the round completes.
+3. Register the round in the shared watch state before starting it, through
+   the helper that owns `.qwen/tmp/verify-pr-watch-<n>.json` — never hand-write
+   that JSON. Run it from the trusted clone (the state root defaults to its
+   main worktree, never the round's PR clone), after prepare has printed the
+   artifact directory — `<dir>` is that printed path:
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --artifact-dir <dir> --repo <owner>/<repo>`.
+   `<r>` is this round's number; repeat the same value in `--complete`.
+   Exit 3 means the file already records `H` as verified or in flight, or
+   another head's round is in flight (one round per PR): let that round
+   answer instead of starting a duplicate. A cross-head refusal records `H`
+   as deferred, and the running round's `--complete` output names it — start
+   the latest deferred head it names as the next round. Exit 3 can also mean
+   the state lock is held: retry shortly, or remove a killed invocation's
+   `.lock` file (never the state file) and retry. When the in-flight
+   round is dead (killed session, OOM, aborted turn), nothing will answer:
+   recover the marker with
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head>`
+   — the head the exit-3 message names as in flight, which under
+   one-round-per-PR may be a different head than `H`; releasing `H` itself
+   is refused when it holds no marker — and start again. The release keeps
+   `verifiedHead`, refuses a marker belonging to another head, and names any
+   deferred heads. The write happens
+   **before** the round starts — the same write-before-start rule the watch
+   prompt follows, so a watch fire during the manual round skips `H`. Once
+   the round completes, record it with
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--comment-id <id>]`.
+   A completion whose `--round` differs from the marker, or from a round
+   that already answered for `H`, is refused (exit 3).
+   Measured case: two consecutive rounds skipped the hand-written completion
+   write and left the file two heads stale; the helper exists so the
+   completion step is one command, not a JSON edit a busy round forgets.
 4. Run the follow-up protocol above: classify the `P..H` delta, lead with
    the previous-finding status table, re-measure every carried-forward
    finding at `H`.
@@ -1940,6 +2148,19 @@ workflow globs). It must contain:
   each row. The claim is
   checked against that enumeration (see the mutation matrix section); without
   this file the claim is prose nothing verifies.
+- `boundary.json` — where the untrusted PR code ran:
+  `{"mode":"container","detail":…}` once the isolation gate passes, backed by
+  the `boundary-gate.json` record that gate run wrote, or
+  `{"mode":"waived","by":…,"approval":…,"reason":…}` for a host round the
+  maintainer explicitly approved, with a permalink to the approval comment
+  (see the local invocation contract). The checker refuses a round without
+  it — except on the CI entry path (`$QWEN_VERIFY_CONTEXT` set), where an
+  absent declaration is a warning because the publish job writes it later.
+  Whoever operates the boundary writes the declaration: the CI publish job
+  writes the CI lane's own declaration and gate record, the local container
+  recipe's host check step writes the container it built, and a waived host
+  round writes its own waiver before any PR code runs. On the CI and
+  container paths the round never depends on the agent remembering this.
 - Harness scripts and raw logs (per-cell stdout/stderr, build logs).
 - `evidence/*.png` — image evidence. **Produce these whenever you ran a
   harness**, not only for TUI work. A table in the report is your _claim_
@@ -2009,7 +2230,10 @@ head behaviour the PR got wrong. Measured example: a round reproduced a
 regression, asserted that the head showed it, and published `blocked` over
 4382 passes and 0 failures. The CI publisher runs `verify-pr-check.mjs` before
 it trusts any verdict, so run it on the artifact dir before you finish, in
-either path. The publisher reads only the checker's last line and never
+either path. On the CI path (`$QWEN_VERIFY_CONTEXT` set) an absent
+`boundary.json` is only a warning in that self-check — the publish job
+writes the declaration later; do not withhold or downgrade a verdict over
+it. The publisher reads only the checker's last line and never
 echoes warnings, so a gates-size warning reaches nobody but you — record
 the suites under `gates` before publishing, or, if the round ran none, say in
 the report what the count holds.
@@ -2130,7 +2354,12 @@ the report what the count holds.
    because a reader otherwise credits the report with an end-to-end
    reproduction it never had.
 8. **Methodology** — one paragraph: environment, how each harness drove the
-   code, where the raw logs live.
+   code, where the raw logs live. Open it with a `**Boundary.**` line naming
+   the boundary the round ran in — the image and network policy, or the
+   maintainer's recorded waiver. Write it from what you know at report
+   time: on the CI path and the container recipe the operator writes
+   `boundary.json` later, so the line names the boundary itself, not a file
+   that does not exist yet.
 
 Throughout, label each claim as measured, inferred from code, or not run,
 and when the head moved during the round, label which SHA each result came

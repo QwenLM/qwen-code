@@ -6611,16 +6611,36 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('ask when that is ambiguous');
     // An unchanged head gets an answer, not a round.
     expect(flat).toContain('the head has not moved since');
-    // The shared state is checked and registered before the round runs.
+    // The shared state is checked and registered before the round runs,
+    // through the helper that owns the file: two consecutive rounds skipped
+    // the hand-written completion write and left the file two heads stale,
+    // so the contract now names one command per step instead of a JSON edit.
     expect(flat).toContain(
       'Register the round in the shared watch state before starting it',
     );
-    expect(flat).toContain('write `H` as in-flight');
+    expect(flat).toContain('never hand-write');
+    expect(flat).toContain(
+      'verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --artifact-dir <dir> --repo <owner>/<repo>',
+    );
+    expect(flat).toContain(
+      'Exit 3 means the file already records `H` as verified or in flight',
+    );
+    // The cross-head/deferred continuation is the manual section's only
+    // statement of what to do with a deferred head; deleting it must red.
+    expect(flat).toContain(
+      "A cross-head refusal records `H` as deferred, and the running round's `--complete` output names it — start the latest deferred head it names as the next round",
+    );
+    // Under one-round-per-PR the blocking marker may belong to another
+    // head: recovery releases the head the error names, not `H` itself.
+    expect(flat).toContain(
+      'verify-pr-watch-state.mjs <n> --release --head <blocking head>',
+    );
+    expect(flat).toContain('the head the exit-3 message names as in flight');
     expect(flat).toContain(
       'the same write-before-start rule the watch prompt follows',
     );
     expect(flat).toContain(
-      'record `H` as verified in the same file once the round completes',
+      'verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word>',
     );
     // Registration is a step of its own ahead of the round, not an
     // afterthought behind it.
@@ -6672,6 +6692,360 @@ describe('qwen-triage verify hardening round 2', () => {
       'a published comment found on the PR is evidence of a past round',
     );
     expect(flat).toContain('not consent for this one');
+  });
+
+  // The watch prompt must spell out the completion form: a fire that follows
+  // "the same script's --complete form" literally exits 2 (no --verdict) and
+  // strands the head in flight forever. <headSha> is unique to the prompt —
+  // the manual section's identical command uses <H> and cannot satisfy this.
+  it('spells out the watch prompt completion and release forms', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    // The full registration form, every required flag included.
+    expect(flat).toContain(
+      'verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --artifact-dir <dir> --repo <owner>/<repo>',
+    );
+    expect(flat).toContain(
+      'verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word>',
+    );
+    // The duty, not just the command string: deleting the consequence
+    // sentence while keeping the command must go red too.
+    expect(flat).toContain('Record the finished round');
+    expect(flat).toContain(
+      'a completion without it exits 2 and leaves the head in flight forever',
+    );
+    expect(flat).toContain(
+      'verify-pr-watch-state.mjs <n> --release --head <headSha>',
+    );
+    // The state root is the trusted clone's main worktree, and <dir> is
+    // the directory prepare printed — not a value invented at registration.
+    expect(flat).toContain(
+      "The helper runs from the trusted clone — the state root defaults to its main worktree, never the round's PR clone",
+    );
+    expect(flat).toContain('`<dir>` is the artifact directory prepare printed');
+    // A copy outside the trusted clone resolves the default root to the
+    // mount's parent — the container's /trusted-scripts mount resolves it
+    // to / — so the prompt must demand an explicit absolute --state-root.
+    expect(flat).toContain(
+      "the container recipe's read-only `/trusted-scripts` mount resolves it to `/`",
+    );
+    expect(flat).toContain('--state-root <trusted main worktree>');
+    // One round per PR: a cross-head refusal is deferred, not dropped —
+    // the probe's cursor already advanced, so no second event arrives —
+    // and the completion output is the deferred head's only delivery.
+    expect(flat).toContain('recorded as deferred');
+    expect(flat).toContain('no second event will arrive');
+    expect(flat).toContain('deferred heads awaiting a round');
+    expect(flat).toContain('start the latest one as the next round');
+    // inconclusive releases the marker without deduping the head away.
+    expect(flat).toContain(
+      '`inconclusive` releases the marker without filing the head as verified',
+    );
+    // A release with no marker is a refusal, not a silent success.
+    expect(flat).toContain('including when no markers exist at all');
+    // The round number is defined once and repeated in --complete; a
+    // mismatched or stale completion is refused, not a success line.
+    expect(flat).toContain('repeat the same value in `--complete`');
+    expect(flat).toContain(
+      'A completion whose `--round` differs from the in-flight marker',
+    );
+    // The held-lock exit-3 shape has its own reaction (retry / remove a
+    // killed holder's .lock), for --complete as well as --start.
+    expect(flat).toContain('The state lock is held by another invocation');
+    expect(flat).toContain('This applies to `--complete` too');
+    // A default root outside a git worktree is refused, not a shadow state.
+    expect(flat).toContain('is refused (exit 2) unless you pass an explicit');
+    // The release delivers deferred heads too, and corrupt state is refused.
+    expect(flat).toContain('The release also names any deferred heads');
+    expect(flat).toContain('A corrupt state file is refused (exit 1)');
+  });
+
+  // Two local rounds on PR #16866 ran the whole battery on the host with no
+  // isolation gate and no waiver: the prose rule alone did not stop them.
+  // The declaration is the artifact the checker refuses to do without, and
+  // the waiver is an explicit per-round decision, never a silent fallback.
+  it('makes the isolation boundary a recorded declaration', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain('The boundary is a declaration, not a vibe');
+    expect(flat).toContain('`boundary.json` must be in the artifact directory');
+    expect(flat).toContain('the checker refuses a round without it');
+    // The boundary's operator owns the declaration, not the inner round —
+    // container, CI lane, and VM alike.
+    expect(flat).toContain("the boundary's operator writes it");
+    expect(flat).toContain("the VM's operator for a VM boundary");
+    // The credential scan reads the process home: a VM round under the
+    // operator's real home fails --require-isolation even on a clean VM.
+    expect(flat).toContain('The VM round also runs under a **scratch `HOME`**');
+    expect(flat).toContain(
+      '{"mode":"container","detail":"<image, network policy, credential-free mount>"}',
+    );
+    // A container declaration is backed by a gate record, not minted.
+    expect(flat).toContain('backed by `boundary-gate.json`');
+    // Pin the in-container command with its interpreter prefix: the bare
+    // flag string also appears in prose, so deleting it from the command
+    // alone must red this.
+    expect(flat).toContain(
+      'node /trusted-scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir <round-dir>',
+    );
+    // The ci-lane record is honored only under the publish invocation.
+    expect(flat).toContain(
+      "which the checker honors only under the publish job's `--publish-lane` invocation, never for a local round",
+    );
+    expect(flat).toContain(
+      '{"mode":"waived","by":"<maintainer>","approval":"<permalink to the maintainer\'s approval comment>","reason":"<why this round may run outside a boundary>"}',
+    );
+    // The waiver's approval channel is named: the maintainer (or the round
+    // under the local publish path) posts the comment the permalink points at.
+    expect(flat).toContain(
+      'or the round, under the local publish path — record that approval as a PR comment',
+    );
+    // The completion duty is a top-level paragraph, not folded into the
+    // last exit-3 bullet by a two-space indent.
+    expect(verifySkill).toContain('\nRecord the finished round');
+    // The VM attestation variables are the operator's, never the round's,
+    // and are unset when the round ends.
+    expect(flat).toContain(
+      "the **operator's attestation**, never set by the round itself",
+    );
+    expect(flat).toContain('unset both when the round ends');
+    expect(flat).toContain('explicitly approves host execution for this round');
+    expect(flat).toContain('The invocation itself is not that approval');
+    expect(flat).toContain(
+      'a waiver never carries over to the next round unasked',
+    );
+    // The Java gap is named, not left as a silent host fallback.
+    expect(flat).toContain('carries no JDK or Maven');
+    expect(flat).toContain('never a silent host fallback');
+    // The local container recipe's host check step declares the container
+    // it built — after stopping the container, refusing a symlinked round
+    // dir, and clearing any planted boundary.json (any node type), before
+    // the checker runs on the round dir.
+    expect(flat).toContain('> <round-dir>/boundary.json');
+    expect(flat).toContain('rm -rf -- <round-dir>/boundary.json');
+    expect(flat).toContain('[ -L <round-dir> ]');
+    // Presence guards first: indexOf returns -1 for a deleted line, and -1
+    // is less than any positive index, so the ordering alone is vacuous.
+    expect(flat).toContain('docker rm -f qwen-verify-<n>');
+    const stop = flat.indexOf('docker rm -f qwen-verify-<n>');
+    const symlinkGuard = flat.indexOf('[ -L <round-dir> ]');
+    const clear = flat.indexOf('rm -rf -- <round-dir>/boundary.json');
+    const write = flat.indexOf('> <round-dir>/boundary.json');
+    // The step-7 checker call, not the earlier generic mentions of the
+    // script: this exact context path appears only in the cleanup block.
+    // Whitespace flattening keeps the line-continuation backslash.
+    const checker = flat.indexOf(
+      'verify-pr-check.mjs \\ --context ~/.cache/qwen-verify/pr<n>/pr.json <round-dir>',
+    );
+    expect(stop).toBeGreaterThan(-1);
+    expect(symlinkGuard).toBeGreaterThan(-1);
+    expect(clear).toBeGreaterThan(-1);
+    expect(write).toBeGreaterThan(-1);
+    expect(checker).toBeGreaterThan(-1);
+    // Stop the container, refuse a symlinked round dir, clear the planted
+    // name, write the declaration, then run the checker — in that order.
+    expect(stop).toBeLessThan(symlinkGuard);
+    expect(symlinkGuard).toBeLessThan(clear);
+    expect(clear).toBeLessThan(write);
+    expect(write).toBeLessThan(checker);
+    // The symlink refusal records rc instead of exiting early, and checks
+    // the parent as well as the round dir itself.
+    expect(flat).toContain(
+      'if [ -L <round-dir> ] || [ -L "$(dirname <round-dir>)" ]; then echo "round dir is a symlink" >&2; rc=1 fi',
+    );
+    // Every write's status is captured: a planted chmod 444/555 declaration
+    // that resists removal must fail the block, not feed the checker.
+    expect(flat).toContain('docker rm -f qwen-verify-<n> || rc=1');
+    expect(flat).toContain(
+      'rm -rf -- <round-dir>/boundary.json || { echo "cannot clear boundary.json" >&2; rc=1; }',
+    );
+    expect(flat).toContain('> <round-dir>/boundary.json || rc=1');
+    expect(flat).toContain('<round-dir> || rc=$?');
+    // Control flow, not just text: the clear/write/checker sit behind the
+    // rc gate, the teardown is unconditional (fi immediately before kill),
+    // and unset precedes the final exit.
+    expect(flat).toContain('if [ "$rc" -eq 0 ]; then rm -rf');
+    const teardown = flat.indexOf(
+      'kill "$(cat ~/.cache/qwen-verify/pr<n>/proxy.pid)"',
+    );
+    expect(teardown).toBeGreaterThan(-1);
+    expect(flat).toContain(
+      'fi kill "$(cat ~/.cache/qwen-verify/pr<n>/proxy.pid)"',
+    );
+    expect(flat.indexOf('rc=1')).toBeLessThan(teardown);
+    expect(checker).toBeLessThan(teardown);
+    expect(flat).toContain('unset QWEN_VERIFY_PROXY_TOKEN exit "$rc"');
+    // The report carries the boundary for human readers too.
+    expect(flat).toContain('Open it with a `**Boundary.**` line');
+  });
+
+  // The step-7 block driven verbatim, not just pinned as text: every
+  // failure path (planted chmod-resistant declaration, failing docker,
+  // read-only round dir) must fail the block WITHOUT running the checker,
+  // and the proxy teardown — kill AND the removal of the token-bearing
+  // files — must still run, under bash -e as well. Removing any `|| rc=1`
+  // capture or any of the three proxy-file removals reds these tests.
+  describe.skipIf(process.platform === 'win32')('step 7 block replay', () => {
+    const replay = ({
+      planted = false,
+      dockerFails = false,
+      readOnlyRound = false,
+    } = {}) => {
+      const root = mkdtempSync(join(tmpdir(), 'verify-step7-'));
+      const round = join(root, 'round');
+      const home = join(root, 'home');
+      const trusted = join(root, 'trusted');
+      const shim = join(root, 'shim');
+      const proxyDir = join(home, '.cache', 'qwen-verify', 'pr16866');
+      mkdirSync(round, { recursive: true });
+      mkdirSync(proxyDir, { recursive: true });
+      mkdirSync(trusted, { recursive: true });
+      mkdirSync(shim, { recursive: true });
+      // All three token-bearing files exist, so their removal is witnessed.
+      writeFileSync(join(proxyDir, 'proxy.pid'), '424242\n');
+      writeFileSync(join(proxyDir, 'proxy.json'), '{"token":"bearer"}');
+      writeFileSync(join(proxyDir, 'proxy.err'), '');
+      const calls = join(root, 'calls.log');
+      for (const [tool, body] of [
+        [
+          'docker',
+          `echo "docker $*" >> "${calls}"\n${dockerFails ? 'exit 1\n' : ''}`,
+        ],
+        ['kill', `echo "kill $*" >> "${calls}"\n`],
+        ['node', `echo "node $*" >> "${calls}"\nexit 0\n`],
+      ]) {
+        writeFileSync(join(shim, tool), `#!/usr/bin/env bash\n${body}`, {
+          mode: 0o755,
+        });
+      }
+      if (planted) {
+        writeFileSync(
+          join(round, 'boundary.json'),
+          '{"mode":"waived","by":"PR-code","reason":"forged"}',
+        );
+        chmodSync(join(round, 'boundary.json'), 0o444);
+        chmodSync(round, 0o555);
+      } else if (readOnlyRound) {
+        // No declaration to clear: the rm succeeds, the WRITE fails.
+        chmodSync(round, 0o555);
+      }
+      const step7 = verifySkill.slice(
+        verifySkill.indexOf('7. **After the round'),
+      );
+      const block = /```bash\n([\s\S]*?)```/.exec(step7)[1];
+      // kill is a bash builtin: disable it so the PATH shim records it.
+      const script =
+        'enable -n kill\n' +
+        block
+          .replaceAll('<n>', '16866')
+          .replaceAll('<round-dir>', round)
+          .replaceAll('<trusted-clone>', trusted);
+      const res = spawnSync(
+        'bash',
+        ['--noprofile', '--norc', '-e', '-c', script],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            HOME: home,
+            PATH: `${shim}:${process.env.PATH}`,
+          },
+        },
+      );
+      if (planted || readOnlyRound) chmodSync(round, 0o755);
+      const log = existsSync(calls) ? readFileSync(calls, 'utf8') : '';
+      return { res, log, round, root, proxyDir };
+    };
+
+    it('runs the checker and tears the proxy down on the normal path', () => {
+      const { res, log, round, root, proxyDir } = replay();
+      try {
+        expect(res.status).toBe(0);
+        expect(log).toMatch(/^node /m);
+        expect(log).toMatch(/kill 424242/);
+        expect(readFileSync(join(round, 'boundary.json'), 'utf8')).toContain(
+          '"mode":"container"',
+        );
+        // The token-bearing files are gone, not just the process killed.
+        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+          expect(existsSync(join(proxyDir, f))).toBe(false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it.skipIf(!arePermissionBitsEnforced())(
+      'refuses a declaration it cannot clear, without running the checker',
+      () => {
+        const { res, log, round, root, proxyDir } = replay({ planted: true });
+        try {
+          expect(res.status).toBe(1);
+          expect(res.stderr).toMatch(/cannot clear boundary.json/);
+          // The checker never ran on the planted waiver.
+          expect(log).not.toMatch(/^node /m);
+          // The proxy was still torn down on the refusal path.
+          expect(log).toMatch(/kill 424242/);
+          for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+            expect(existsSync(join(proxyDir, f))).toBe(false);
+          }
+          // The planted declaration is untouched, not silently trusted.
+          expect(readFileSync(join(round, 'boundary.json'), 'utf8')).toContain(
+            'forged',
+          );
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it('a failing docker stop skips the checker but still tears the proxy down', () => {
+      const { res, log, root, proxyDir } = replay({ dockerFails: true });
+      try {
+        expect(res.status).toBe(1);
+        expect(log).not.toMatch(/^node /m);
+        expect(log).toMatch(/kill 424242/);
+        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+          expect(existsSync(join(proxyDir, f))).toBe(false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it.skipIf(!arePermissionBitsEnforced())(
+      'a write it cannot perform skips the checker but still tears the proxy down',
+      () => {
+        const { res, log, root, proxyDir } = replay({ readOnlyRound: true });
+        try {
+          expect(res.status).toBe(1);
+          expect(log).not.toMatch(/^node /m);
+          expect(log).toMatch(/kill 424242/);
+          for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+            expect(existsSync(join(proxyDir, f))).toBe(false);
+          }
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      },
+    );
+  });
+
+  // The rig traps and the waiting strategy are measured round behaviour,
+  // not advice: each cost a live round real time before it was written down.
+  it('teaches the rig backfill rule and event-driven waiting', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain(
+      "Reuse the prior round's rig — and feed every fix back into it",
+    );
+    expect(flat).toContain(
+      'fold the fix into the copy the next round will inherit',
+    );
+    expect(flat).toContain('A masking pipe eats the setup exit code');
+    expect(flat).toContain('Restore, then compare — never the reverse');
+    expect(flat).toContain('Fresh worktrees have no `dist`');
+    expect(flat).toContain('Wait on notifications, not foreground sleeps');
+    expect(flat).toContain(
+      'do the writable work — report draft, data files, read-only claim checks — while it runs',
+    );
   });
 
   // The TUI renders `argument-hint` beside the command name; without the field
@@ -6981,6 +7355,151 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(body).toContain('results unavailable');
       expect(body).not.toContain('A/B against the base build');
       expect(body).not.toContain('merge-ready');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The checker refuses a round without a boundary declaration, and the CI
+  // agent's base-pinned skill may predate boundary.json — so the workflow
+  // declares the lane itself, before the checker runs, and the verdict is
+  // still trusted.
+  it('overwrites a round-authored boundary declaration before the artifact check', () => {
+    const dir = fixture();
+    try {
+      const art = join(dir, 'work', 'verify-results', 'prA-verify-1');
+      // A PR-authored waiver in the uploaded artifacts must be overwritten,
+      // not trusted: pin the overwrite, not merely the creation, so a
+      // `[ -f … ] ||` guard on the production write goes red.
+      writeFileSync(
+        join(art, 'boundary.json'),
+        JSON.stringify({
+          mode: 'waived',
+          by: 'pr-author',
+          reason: 'forged host approval',
+        }),
+      );
+      const body = render(dir, {
+        NAME: 'boundary',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(
+        JSON.parse(readFileSync(join(art, 'boundary.json'), 'utf8')),
+      ).toEqual({
+        mode: 'container',
+        detail: 'CI verify lane (credential-free container)',
+      });
+      // The checker ties the declaration to a gate record; the publish job
+      // writes the ci-lane record itself, overwriting any planted one.
+      expect(
+        JSON.parse(readFileSync(join(art, 'boundary-gate.json'), 'utf8')),
+      ).toEqual({ gate: 'ci-lane', passed: true });
+      // The trusted headline, not just the word: a demotion note quotes
+      // `merge-ready` too, so the bare word cannot tell trust from demotion.
+      expect(body).toContain('merge-ready (agent verdict)');
+      expect(body).not.toContain('was not trusted');
+      expect(body).not.toContain('reported as not passed');
+      const script = publishScript();
+      expect(script.indexOf('CI verify lane')).toBeGreaterThan(-1);
+      // The clear must precede the write, and the write the checker: a
+      // plain redirect into the PR-writable artifact tree would follow a
+      // planted symlink instead of replacing it.
+      expect(
+        script.indexOf('rm -rf -- "$(dirname "$REPORT")/boundary.json"'),
+      ).toBeGreaterThan(-1);
+      expect(
+        script.indexOf('rm -rf -- "$(dirname "$REPORT")/boundary.json"'),
+      ).toBeLessThan(script.indexOf('CI verify lane'));
+      expect(script.indexOf('CI verify lane')).toBeLessThan(
+        script.indexOf('VERIFY_PR_CHECK'),
+      );
+      // The gate record is cleared and written before the checker too.
+      expect(
+        script.indexOf('rm -rf -- "$(dirname "$REPORT")/boundary-gate.json"'),
+      ).toBeGreaterThan(-1);
+      expect(
+        script.indexOf('rm -rf -- "$(dirname "$REPORT")/boundary-gate.json"'),
+      ).toBeLessThan(script.indexOf('"gate":"ci-lane"'));
+      expect(script.indexOf('"gate":"ci-lane"')).toBeLessThan(
+        script.indexOf('VERIFY_PR_CHECK'),
+      );
+      // The publish job passes its own --publish-lane signal: only under
+      // it does the checker honor the ci-lane record.
+      expect(script).toContain('--publish-lane "$(dirname "$REPORT")"');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The artifact tree is PR-writable: a boundary.json symlink planted there
+  // must not turn the host's declaration write into a truncation of the
+  // link target. The unlink makes the write replace the link itself.
+  it('does not follow a planted boundary.json symlink in the artifacts', () => {
+    const dir = fixture();
+    try {
+      const art = join(dir, 'work', 'verify-results', 'prA-verify-1');
+      const victim = join(dir, 'victim.txt');
+      writeFileSync(victim, 'host data');
+      symlinkSync(victim, join(art, 'boundary.json'));
+      const gateVictim = join(dir, 'gate-victim.txt');
+      writeFileSync(gateVictim, 'gate host data');
+      symlinkSync(gateVictim, join(art, 'boundary-gate.json'));
+      const body = render(dir, {
+        NAME: 'symlink',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(readFileSync(victim, 'utf8')).toBe('host data');
+      expect(readFileSync(gateVictim, 'utf8')).toBe('gate host data');
+      expect(lstatSync(join(art, 'boundary.json')).isSymbolicLink()).toBe(
+        false,
+      );
+      expect(
+        JSON.parse(readFileSync(join(art, 'boundary.json'), 'utf8')),
+      ).toEqual({
+        mode: 'container',
+        detail: 'CI verify lane (credential-free container)',
+      });
+      expect(
+        JSON.parse(readFileSync(join(art, 'boundary-gate.json'), 'utf8')),
+      ).toEqual({ gate: 'ci-lane', passed: true });
+      expect(body).toContain('merge-ready (agent verdict)');
+      expect(body).not.toContain('was not trusted');
+      expect(body).not.toContain('reported as not passed');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A directory named boundary.json survives the artifact staging (find
+  // -type f recreates it) and the scrub (links and specials only). rm -f
+  // aborts on it under set -euo pipefail, killing the verdict with no
+  // report; rm -rf clears the reserved name whatever node type was planted.
+  it('clears a planted boundary.json directory and still posts the verdict', () => {
+    const dir = fixture();
+    try {
+      const art = join(dir, 'work', 'verify-results', 'prA-verify-1');
+      mkdirSync(join(art, 'boundary.json', 'x'), { recursive: true });
+      mkdirSync(join(art, 'boundary-gate.json', 'x'), { recursive: true });
+      const body = render(dir, {
+        NAME: 'planted-dir',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(lstatSync(join(art, 'boundary.json')).isDirectory()).toBe(false);
+      expect(lstatSync(join(art, 'boundary-gate.json')).isDirectory()).toBe(
+        false,
+      );
+      expect(
+        JSON.parse(readFileSync(join(art, 'boundary.json'), 'utf8')),
+      ).toEqual({
+        mode: 'container',
+        detail: 'CI verify lane (credential-free container)',
+      });
+      expect(
+        JSON.parse(readFileSync(join(art, 'boundary-gate.json'), 'utf8')),
+      ).toEqual({ gate: 'ci-lane', passed: true });
+      expect(body).toContain('merge-ready (agent verdict)');
+      expect(body).not.toContain('was not trusted');
+      expect(body).not.toContain('reported as not passed');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -8081,6 +8600,10 @@ describe('qwen-triage verify publish fidelity', () => {
             report: `merge-ready · 10 passed · 0 failed · 10 total · ${'b'.repeat(40)}\n\n# Report\n`,
             verdict: 'merge-ready\n',
             assertions: f.text,
+            boundary: JSON.stringify({
+              mode: 'container',
+              detail: 'CI verify lane (credential-free container)',
+            }),
           },
         });
         const gatesError = result.errors.some((e) =>

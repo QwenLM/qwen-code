@@ -5,13 +5,20 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   checkArtifacts,
+  checkBoundary,
   checkMutationCoverage,
 } from '../../scripts/verify-pr-check.mjs';
 
@@ -20,11 +27,26 @@ const SCRIPT = fileURLToPath(
 );
 const HEAD = 'b'.repeat(40);
 
+const GATE_RECORD = JSON.stringify({
+  gate: 'require-isolation',
+  passed: true,
+  at: '2026-11-14T02:00:00.000Z',
+  signals: ['container=qwen-verify'],
+  credentialFree: true,
+});
+const APPROVAL =
+  'https://github.com/QwenLM/qwen-code/pull/17185#issuecomment-1234567890';
+
 function validFiles(overrides = {}) {
   return {
-    report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n`,
+    report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n\n## Methodology\n\n**Boundary.** node:22-bookworm, --network none, credential-free.\n`,
     verdict: 'merge-ready\n',
     assertions: JSON.stringify({ pass: 4, fail: 0, total: 4 }),
+    boundary: JSON.stringify({
+      mode: 'container',
+      detail: 'node:22-bookworm, --network none, credential-free',
+    }),
+    boundaryGate: GATE_RECORD,
     ...overrides,
   };
 }
@@ -47,6 +69,12 @@ function makeArtifactDir(files, evidence = []) {
   writeFileSync(join(dir, 'assertions.json'), files.assertions);
   if (files.comment !== undefined) {
     writeFileSync(join(dir, 'comment.md'), files.comment);
+  }
+  if (files.boundary !== undefined) {
+    writeFileSync(join(dir, 'boundary.json'), files.boundary);
+  }
+  if (files.boundaryGate !== undefined) {
+    writeFileSync(join(dir, 'boundary-gate.json'), files.boundaryGate);
   }
   if (evidence.length > 0) {
     mkdirSync(join(dir, 'evidence'));
@@ -530,6 +558,307 @@ describe('checkMutationCoverage', () => {
   });
 });
 
+// Two local rounds on PR #16866 executed the whole battery on the
+// maintainer's host with no isolation gate, no waiver, and no boundary line
+// in the report: the isolation rule existed only as prose. The declaration
+// is the artifact that makes a host round a visible exception.
+describe('checkBoundary', () => {
+  it('accepts a container declaration backed by a gate record', () => {
+    expect(
+      checkBoundary(
+        JSON.stringify({ mode: 'container', detail: 'node:22-bookworm' }),
+        GATE_RECORD,
+      ).errors,
+    ).toEqual([]);
+  });
+
+  // The declaration is a value the round can mint for itself; the gate
+  // record ties it to a gate run. Without one, container mode is refused.
+  it('refuses a container declaration with no gate record', () => {
+    expect(
+      checkBoundary(
+        JSON.stringify({ mode: 'container', detail: 'node:22-bookworm' }),
+      ).errors.join('\n'),
+    ).toMatch(/boundary-gate\.json is missing/);
+    for (const gate of [
+      '{',
+      '[]',
+      JSON.stringify({ gate: 'other', passed: true }),
+      JSON.stringify({ gate: 'require-isolation', passed: false }),
+    ]) {
+      expect(
+        checkBoundary(
+          JSON.stringify({ mode: 'container', detail: 'node:22-bookworm' }),
+          gate,
+        ).errors.join('\n'),
+      ).toMatch(/boundary-gate\.json/);
+    }
+  });
+
+  it('accepts the CI lane gate record only under the publish invocation', () => {
+    expect(
+      checkBoundary(
+        JSON.stringify({ mode: 'container', detail: 'CI verify lane' }),
+        JSON.stringify({ gate: 'ci-lane', passed: true }),
+        { publishLane: true },
+      ).errors,
+    ).toEqual([]);
+    // A local round cannot claim the lane by writing the record itself.
+    expect(
+      checkBoundary(
+        JSON.stringify({ mode: 'container', detail: 'CI verify lane' }),
+        JSON.stringify({ gate: 'ci-lane', passed: true }),
+      ).errors.join('\n'),
+    ).toMatch(/does not record a passed isolation gate/);
+  });
+
+  it('accepts a waiver naming the maintainer, the approval and the reason', () => {
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'waived',
+          by: 'maintainer',
+          approval: APPROVAL,
+          reason: 'Java battery needs the host JDK; approved in words',
+        }),
+      ).errors,
+    ).toEqual([]);
+  });
+
+  it('refuses a waiver without a verifiable approval permalink', () => {
+    for (const approval of [
+      undefined,
+      '',
+      'approved in words',
+      'https://github.com/QwenLM/qwen-code/pull/17185',
+    ]) {
+      expect(
+        checkBoundary(
+          JSON.stringify({
+            mode: 'waived',
+            by: 'maintainer',
+            approval,
+            reason: 'why',
+          }),
+        ).errors.join('\n'),
+      ).toMatch(/mode waived needs approval/);
+    }
+  });
+
+  // A git identity `Name <email>` is a filled-in value, not a placeholder.
+  it('accepts a maintainer written as a git identity', () => {
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'waived',
+          by: 'Wenshao <wenshao@example.com>',
+          approval: APPROVAL,
+          reason: 'why',
+        }),
+      ).errors,
+    ).toEqual([]);
+  });
+
+  it.each([null, undefined, '', '   '])(
+    'refuses a round without a declaration (%s)',
+    (text) => {
+      expect(checkBoundary(text).errors.join('\n')).toMatch(
+        /boundary\.json is missing/,
+      );
+    },
+  );
+
+  it('refuses malformed JSON and non-object shapes', () => {
+    expect(checkBoundary('{').errors).toContain(
+      'boundary.json is not valid JSON',
+    );
+    for (const text of ['null', '[]', '"container"']) {
+      expect(checkBoundary(text).errors).toContain(
+        'boundary.json must be an object with a mode',
+      );
+    }
+  });
+
+  it('refuses an unknown mode', () => {
+    expect(
+      checkBoundary(JSON.stringify({ mode: 'host' })).errors.join('\n'),
+    ).toMatch(/mode must be one of container \| waived/);
+  });
+
+  it('refuses a container declaration without a detail', () => {
+    for (const detail of [undefined, '', '  ', 42]) {
+      expect(
+        checkBoundary(
+          JSON.stringify({ mode: 'container', detail }),
+        ).errors.join('\n'),
+      ).toMatch(/mode container needs a non-empty detail/);
+    }
+  });
+
+  it('refuses a waiver missing the approver or the reason', () => {
+    for (const waiver of [
+      { mode: 'waived' },
+      { mode: 'waived', by: 'maintainer' },
+      { mode: 'waived', reason: 'why' },
+      { mode: 'waived', by: ' ', reason: 'why' },
+      { mode: 'waived', by: 'maintainer', reason: '' },
+    ]) {
+      expect(checkBoundary(JSON.stringify(waiver)).errors.join('\n')).toMatch(
+        /mode waived needs non-empty by .* and reason/,
+      );
+    }
+  });
+
+  it('reaches the verdict through checkArtifacts, not just on its own', () => {
+    const result = checkArtifacts({
+      files: validFiles({ boundary: null }),
+      evidence: ['01-ab-cells.png'],
+    });
+    expect(result.errors.join('\n')).toMatch(/boundary\.json is missing/);
+  });
+
+  // On the CI entry path the publish job writes the declaration after the
+  // round finishes; a base-pinned skill still tells the round to self-check
+  // before finishing, and that check must not see an error it cannot clear.
+  it('warns instead of erroring when the publisher owns the declaration', () => {
+    const result = checkArtifacts({
+      files: validFiles({ boundary: null }),
+      evidence: ['01-ab-cells.png'],
+      publisherOwnsBoundary: true,
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.join('\n')).toMatch(/CI entry path/);
+  });
+
+  it('still refuses a malformed declaration when the publisher owns it', () => {
+    const result = checkArtifacts({
+      files: validFiles({ boundary: '{' }),
+      evidence: ['01-ab-cells.png'],
+      publisherOwnsBoundary: true,
+    });
+    expect(result.errors.join('\n')).toMatch(/not valid JSON/);
+  });
+
+  // A declaration copied from the skill's template without filling it in
+  // declares nothing; the <placeholder> shape is the tell.
+  it('refuses unfilled template placeholders in either mode', () => {
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'container',
+          detail: '<image, network policy, credential-free mount>',
+        }),
+      ).errors.join('\n'),
+    ).toMatch(/detail still carries a <placeholder>/);
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'waived',
+          by: '<maintainer>',
+          reason: 'approved in words',
+        }),
+      ).errors.join('\n'),
+    ).toMatch(/waiver still carries a <placeholder>/);
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'waived',
+          by: 'shaojin.wensj',
+          reason: '<why this round may run outside a boundary>',
+        }),
+      ).errors.join('\n'),
+    ).toMatch(/waiver still carries a <placeholder>/);
+  });
+});
+
+describe('boundary line in the report', () => {
+  it('warns when there is no Methodology section', () => {
+    const result = check({
+      report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n`,
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.join('\n')).toMatch(/has no Methodology section/);
+  });
+
+  it('warns when the Methodology does not open with the Boundary line', () => {
+    const result = check({
+      report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\nWe ran the battery.\n`,
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.join('\n')).toMatch(
+      /first line after the Methodology opening must be the \*\*Boundary\.\*\* line/,
+    );
+  });
+
+  // A prose mention of the rule is not a declaration: the token search
+  // this replaces passed a report that discussed the requirement while
+  // reporting nothing about where the PR code ran.
+  it('warns when the Boundary token appears only in prose', () => {
+    const result = check({
+      report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\nThe skill requires a **Boundary.** line; see the rule.\n`,
+    });
+    expect(result.warnings.join('\n')).toMatch(
+      /first line after the Methodology opening must be the \*\*Boundary\.\*\* line/,
+    );
+  });
+
+  it('stays quiet when the Boundary line opens the Methodology', () => {
+    expect(check({}).warnings).toEqual([]);
+  });
+
+  // The skill's report structure prescribes the numbered bold label, not
+  // an H2; a compliant report must not draw a permanent false warning.
+  it('accepts the numbered **Methodology** label with a Boundary line', () => {
+    const result = check({
+      report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n8. **Methodology** — one paragraph.\n\n**Boundary.** node:22-bookworm, --network none.\n`,
+    });
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('accepts the Boundary line on the numbered label line itself', () => {
+    const result = check({
+      report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n8. **Methodology** — **Boundary.** node:22-bookworm, --network none. The round ran the battery.\n`,
+    });
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('warns when the label line only mentions the Boundary rule in prose', () => {
+    const result = check({
+      report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n8. **Methodology** — we discuss the **Boundary.** rule here.\n`,
+    });
+    expect(result.warnings.join('\n')).toMatch(
+      /first line after the Methodology opening must be the \*\*Boundary\.\*\* line/,
+    );
+  });
+
+  it('warns when the numbered label has no Boundary line after it', () => {
+    const result = check({
+      report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n8. **Methodology** — one paragraph.\n\nWe ran the battery.\n`,
+    });
+    expect(result.warnings.join('\n')).toMatch(
+      /first line after the Methodology opening must be the \*\*Boundary\.\*\* line/,
+    );
+  });
+
+  // The posted body is what the maintainer reads: the same disclosure
+  // rule applies to comment.md, not only report.md.
+  it('warns when the posted body has no Methodology section', () => {
+    const result = check({
+      comment: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n_— test-model via Qwen Code /verify-pr (v0.1.2; skill 0123456789ab)_\n`,
+    });
+    expect(result.warnings.join('\n')).toMatch(
+      /comment\.md has no Methodology section/,
+    );
+  });
+
+  it('stays quiet when the posted body opens its Methodology with Boundary', () => {
+    const result = check({
+      comment: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\n**Boundary.** node:22-bookworm, --network none.\n\n_— test-model via Qwen Code /verify-pr (v0.1.2; skill 0123456789ab)_\n`,
+    });
+    expect(result.warnings).toEqual([]);
+  });
+});
+
 // Three rounds of PR #15984 opened with the title and the whole verdict
 // paragraph merged into one `#` line. The Markdown is structurally valid;
 // GitHub renders it as a single giant H1, a wall of bold text. The shape is
@@ -547,7 +876,9 @@ describe('verdict line shape', () => {
   });
 
   it('accepts the same line as a plain paragraph', () => {
-    const result = check({ report: `${shippedLead.slice(2)}\n` });
+    const result = check({
+      report: `${shippedLead.slice(2)}\n\n## Methodology\n\n**Boundary.** test boundary.\n`,
+    });
     expect(result.warnings).toEqual([]);
   });
 
@@ -570,7 +901,9 @@ describe('verdict line shape', () => {
     expect(heading.warnings.join('\n')).toMatch(
       /report\.md opens with a heading carrying the verdict/,
     );
-    const plain = check({ report: `${shippedLead.slice(2)}\r\n` });
+    const plain = check({
+      report: `${shippedLead.slice(2)}\r\n\r\n## Methodology\r\n\r\n**Boundary.** test boundary.\r\n`,
+    });
     expect(plain.warnings).toEqual([]);
   });
 
@@ -595,7 +928,7 @@ describe('verdict line shape', () => {
 describe('comment.md footer', () => {
   const footer =
     '_— test-model via Qwen Code /verify-pr (v0.1.2; skill 0123456789ab)_';
-  const body = `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n`;
+  const body = `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\n**Boundary.** test boundary.\n`;
 
   it('accepts a body ending in the resolved footer', () => {
     const result = check({ comment: `${body}\n${footer}\n` });
@@ -665,8 +998,110 @@ describe('comment.md footer', () => {
 
 // The CLI is the path a maintainer runs, so the exit codes are the contract.
 describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
+  // Hermetic: the skill's own container recipe sets QWEN_VERIFY_CONTEXT,
+  // which flips the boundary rule to the publisher-owned warning path —
+  // inheriting it would red these local-semantics tests in that boundary.
   const run = (dir) =>
-    spawnSync(process.execPath, [SCRIPT, dir], { encoding: 'utf8' });
+    spawnSync(process.execPath, [SCRIPT, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+
+  it('downgrades an absent declaration to a warning under QWEN_VERIFY_CONTEXT', () => {
+    const dir = makeArtifactDir(validFiles({ boundary: undefined }), [
+      '01-ab-cells.png',
+    ]);
+    const ci = spawnSync(process.execPath, [SCRIPT, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '/verify-context/pr.json' },
+    });
+    expect(ci.status).toBe(0);
+    expect(ci.stdout).toMatch(/warn.*CI entry path/);
+    const local = spawnSync(process.execPath, [SCRIPT, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+    expect(local.status).toBe(1);
+    expect(local.stdout).toMatch(/boundary\.json is missing/);
+  });
+
+  // A whitespace-only declaration is absent for the publisher-owned
+  // downgrade too: the trim() that keeps the two paths agreeing is load-
+  // bearing, not cosmetic.
+  it('downgrades a whitespace-only declaration on the CI entry path', () => {
+    const dir = makeArtifactDir(validFiles({ boundary: '   ' }), [
+      '01-ab-cells.png',
+    ]);
+    const ci = spawnSync(process.execPath, [SCRIPT, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '/verify-context/pr.json' },
+    });
+    expect(ci.status).toBe(0);
+    expect(ci.stdout).toMatch(/warn.*CI entry path/);
+  });
+
+  // A host round cannot claim the CI lane by writing the record itself:
+  // only the publish job's --publish-lane invocation honors ci-lane.
+  it('refuses a self-minted ci-lane record locally, accepts it under --publish-lane', () => {
+    const dir = makeArtifactDir(
+      validFiles({
+        boundaryGate: JSON.stringify({ gate: 'ci-lane', passed: true }),
+      }),
+      ['01-ab-cells.png'],
+    );
+    const local = run(dir);
+    expect(local.status).toBe(1);
+    expect(local.stdout).toMatch(/does not record a passed isolation gate/);
+    const publish = spawnSync(
+      process.execPath,
+      [SCRIPT, '--publish-lane', dir],
+      { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
+    );
+    expect(publish.status).toBe(0);
+    expect(publish.stdout).toContain(
+      'ok: verdict=merge-ready (4 passed · 0 failed · 4 total)',
+    );
+  });
+
+  // The artifact directory is writable by the PR code the round executed:
+  // a directory in place of an artifact must degrade to a clean refusal,
+  // not crash with EISDIR before any check runs — and an unreadable
+  // artifact is reported as unreadable, not silently treated as absent.
+  it('refuses a directory in place of boundary.json instead of crashing', () => {
+    const dir = makeArtifactDir(validFiles({ boundary: undefined }), [
+      '01-ab-cells.png',
+    ]);
+    mkdirSync(join(dir, 'boundary.json'));
+    const result = run(dir);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toMatch(/boundary\.json is unreadable/);
+    expect(result.stderr).not.toMatch(/EISDIR/);
+  });
+
+  it('refuses a directory in place of report.md instead of crashing', () => {
+    const dir = makeArtifactDir(validFiles(), ['01-ab-cells.png']);
+    unlinkSync(join(dir, 'report.md'));
+    mkdirSync(join(dir, 'report.md'));
+    const result = run(dir);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toMatch(/report\.md is unreadable/);
+    expect(result.stderr).not.toMatch(/EISDIR/);
+  });
+
+  // A damaged optional artifact must not silently drop its check: an
+  // unreadable mutations.json is an error, not a free pass.
+  it('refuses an unreadable mutations.json instead of dropping its check', () => {
+    const dir = makeArtifactDir(validFiles(), ['01-ab-cells.png']);
+    writeFileSync(
+      join(dir, 'mutations.json'),
+      '{"productionCommits":["' + HEAD + '"],"rows":[]}',
+    );
+    unlinkSync(join(dir, 'mutations.json'));
+    mkdirSync(join(dir, 'mutations.json'));
+    const result = run(dir);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toMatch(/mutations\.json is unreadable/);
+  });
 
   it('exits 0 on a consistent round and 1 on a contradiction', () => {
     const ok = run(makeArtifactDir(validFiles(), ['01-ab-cells.png']));
@@ -740,6 +1175,11 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
       join(artifacts, 'assertions.json'),
       JSON.stringify({ pass: 1, fail: 0, total: 1 }),
     );
+    writeFileSync(
+      join(artifacts, 'boundary.json'),
+      JSON.stringify({ mode: 'container', detail: 'test boundary' }),
+    );
+    writeFileSync(join(artifacts, 'boundary-gate.json'), GATE_RECORD);
     writeFileSync(
       join(artifacts, 'report.md'),
       `merge-ready · 1 passed · 0 failed · 1 total · ${base}\n`,

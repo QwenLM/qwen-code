@@ -6796,7 +6796,26 @@ jobs:
             if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ] && [ -n "${AGENT_VERDICT:-}" ]; then
               check_log="${RUNNER_TEMP:-/tmp}/verify-pr-check.log"
               check_status=0
-              node "${VERIFY_PR_CHECK:-scripts/verify-pr-check.mjs}" "$(dirname "$REPORT")" > "$check_log" 2> "$check_log.err" || check_status=$?
+              # The boundary is the verify job's credential-free container;
+              # this publish-verify job holds the PAT and only writes the
+              # declaration. Declare it from the workflow, not the agent: a
+              # round whose base-pinned skill predates boundary.json still
+              # passes the checker's boundary rule, and a PR-authored file in
+              # the uploaded artifacts is overwritten, not trusted. Clear the
+              # reserved name first whatever node type was planted — a plain
+              # redirect follows a symlink, and rm -f aborts on a directory
+              # under set -euo pipefail, killing the verdict with no report.
+              rm -rf -- "$(dirname "$REPORT")/boundary.json"
+              printf '%s\n' '{"mode":"container","detail":"CI verify lane (credential-free container)"}' > "$(dirname "$REPORT")/boundary.json"
+              # The checker ties a container declaration to a gate record.
+              # This job IS the lane's operator: the verify job ran in the
+              # credential-free container, so the publish job writes the
+              # ci-lane record itself, alongside the declaration it owns.
+              rm -rf -- "$(dirname "$REPORT")/boundary-gate.json"
+              printf '%s\n' '{"gate":"ci-lane","passed":true}' > "$(dirname "$REPORT")/boundary-gate.json"
+              # --publish-lane is the publish job's own signal: only under it
+              # does the checker honor the ci-lane record written above.
+              node "${VERIFY_PR_CHECK:-scripts/verify-pr-check.mjs}" --publish-lane "$(dirname "$REPORT")" > "$check_log" 2> "$check_log.err" || check_status=$?
               case "${check_status}:$(tail -n 1 "$check_log")" in
                 "0:  ok: verdict=${AGENT_VERDICT} ("*) ARTIFACT_CHECK=ok ;;
                 '1:  failed: verdict='*)

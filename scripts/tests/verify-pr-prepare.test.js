@@ -619,7 +619,15 @@ describe('parseArgs', () => {
     expect(parseArgs(['--require-isolation'])).toMatchObject({
       requireIsolation: true,
     });
+    expect(
+      parseArgs(['--require-isolation', '--artifact-dir', 'd']),
+    ).toMatchObject({ requireIsolation: true, artifactDir: 'd' });
     expect(parseArgs(['--help'])).toMatchObject({ help: true });
+    // The flag is load-bearing only for the gate: alone it must not
+    // silently succeed on the coordinate path writing nothing.
+    expect(
+      parseArgs(['42', '--repo', REPO, '--artifact-dir', 'd']).error,
+    ).toMatch(/--artifact-dir only applies with --require-isolation/);
   });
 
   it('rejects a missing PR, a missing repo, and a stray argument', () => {
@@ -756,7 +764,11 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(result.stdout).toContain(
       `isolation  ${isolation.signals.join(', ')}`,
     );
-    expect(result.stdout).toContain('--require-isolation');
+    // The printed next-step command must carry the flag the checker's
+    // gate-record requirement now depends on.
+    expect(result.stdout).toContain(
+      'node scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir',
+    );
 
     const root = realpathSync(dir);
     const contextPath = join(root, 'tmp', 'verify-context', 'pr42.json');
@@ -868,6 +880,14 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
       join(artifacts, 'assertions.json'),
       JSON.stringify({ pass: 1, fail: 0, total: 1 }),
     );
+    writeFileSync(
+      join(artifacts, 'boundary.json'),
+      JSON.stringify({ mode: 'container', detail: 'test boundary' }),
+    );
+    writeFileSync(
+      join(artifacts, 'boundary-gate.json'),
+      JSON.stringify({ gate: 'require-isolation', passed: true }),
+    );
     const writeReport = (oid) =>
       writeFileSync(join(artifacts, 'report.md'), `merge-ready · ${oid}\n`);
     const check = () =>
@@ -958,6 +978,48 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     });
     expect(attested.status).toBe(0);
     expect(attested.stdout).toContain('credential-free per attestation');
+  });
+
+  // The gate record ties a container declaration to a gate run: it is
+  // written only on a pass, and only when --artifact-dir is given.
+  it('writes boundary-gate.json on a pass with --artifact-dir', () => {
+    const { dir } = makeRepo();
+    const art = makeTmpDir();
+    const env = {
+      PATH: process.env.PATH ?? '',
+      HOME: makeTmpDir(),
+      SANDBOX: 'docker',
+      QWEN_VERIFY_CREDENTIAL_FREE: '1',
+    };
+    const passed = runPrepare(
+      dir,
+      ['--require-isolation', '--artifact-dir', art],
+      env,
+    );
+    expect(passed.status).toBe(0);
+    const record = JSON.parse(
+      readFileSync(join(art, 'boundary-gate.json'), 'utf8'),
+    );
+    expect(record).toMatchObject({
+      gate: 'require-isolation',
+      passed: true,
+      credentialFree: true,
+    });
+    expect(typeof record.at).toBe('string');
+
+    // A failed gate writes no record: the checker must not see a pass.
+    const art2 = makeTmpDir();
+    const failed = runPrepare(
+      dir,
+      ['--require-isolation', '--artifact-dir', art2],
+      { ...env, QWEN_VERIFY_CREDENTIAL_FREE: '' },
+    );
+    expect(failed.status).toBe(4);
+    expect(existsSync(join(art2, 'boundary-gate.json'))).toBe(false);
+
+    // Without --artifact-dir the gate still passes but writes nothing.
+    const noDir = runPrepare(dir, ['--require-isolation'], env);
+    expect(noDir.status).toBe(0);
   });
 
   it('refuses an attested boundary that still shows credentials', () => {
