@@ -1142,6 +1142,68 @@ describe('ci flaky rerun patrol', () => {
     expect(evidence).not.toContain('npm_ABCDEFGHIJKLMNOPQRSTUV0123');
   });
 
+  it('redacts a welded credential whose leading boundary the strip also removed', () => {
+    // The strip deletes the CR in front of the token as well as the one inside
+    // it, so the second pass sees `xnpm_…`: the first pass had a boundary but
+    // no token, and \b has nothing to match once the fragments are welded.
+    const evidence = skillLog(
+      '##[error]Downloading x\rnpm_\rABCDEFGHIJKLMNOPQRSTUV0123 installed\n',
+    );
+    expect(evidence).toContain('[redacted]');
+    expect(evidence).not.toContain('npm_ABCDEFGHIJKLMNOPQRSTUV0123');
+  });
+
+  it('keeps the failure line that follows a CR-terminated header', () => {
+    // The header rules are bounded by \r as well as \n, which is what keeps
+    // them off the next line. Re-running them after the strip deleted every
+    // \r would swallow everything up to the next newline — including the
+    // ##[error] line the excerpt exists to show, leaving only noise.
+    const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
+      '\n',
+    );
+    const evidence = skillLog(
+      `${noise}\nCookie: sid=abc\r##[error]AssertionError: real failure\n${noise}`,
+    );
+    expect(evidence).toContain('##[error]AssertionError: real failure');
+    expect(evidence).toContain('Cookie: [redacted]');
+    expect(evidence).not.toContain('sid=abc');
+  });
+
+  it('strips every control and Bidi_Control code point, keeping tab and newline', () => {
+    // Pin the extent of the class, not the points a fixture happens to sample:
+    // every member is fed, and the assertion asks Unicode itself, so narrowing
+    // the class to a sample cannot stay green. \n and \t must survive.
+    const controls = [
+      ...Array.from({ length: 0x20 }, (_, i) => i).filter(
+        (i) => i !== 0x09 && i !== 0x0a,
+      ),
+      ...Array.from({ length: 0x21 }, (_, i) => 0x7f + i),
+    ].map((i) => String.fromCharCode(i));
+    const bidi = [
+      '\u061C',
+      '\u200E',
+      '\u200F',
+      '\u202A',
+      '\u202B',
+      '\u202C',
+      '\u202D',
+      '\u202E',
+      '\u2066',
+      '\u2067',
+      '\u2068',
+      '\u2069',
+    ];
+    const evidence = skillLog(
+      `##[error]AssertionError: real failure${[...controls, ...bidi].join('')}\ttail\nsecond line`,
+    );
+    expect(evidence).toContain('real failure');
+    expect(evidence).toContain('\ttail');
+    expect(evidence).toContain('second line');
+    expect(evidence).not.toMatch(/\p{Bidi_Control}/u);
+    // eslint-disable-next-line no-control-regex -- the class under test is the control set
+    expect(evidence).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/u);
+  });
+
   it('keeps fallback errors', () => {
     expect(skillLog('Error: connect ECONNREFUSED')).toContain(
       'Error: connect ECONNREFUSED',
