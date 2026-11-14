@@ -1808,7 +1808,9 @@ function testBootstrapBridgeConfiguration() {
     'allow-choose-workspace',
     'allow-install-update',
     'allow-open-logs',
+    'allow-request-turn-notification-authorization',
     'allow-restart-runtime',
+    'allow-show-turn-notification',
   ]);
 
   // Declaring an app ACL manifest makes every app command opt-in, so one that
@@ -1874,9 +1876,10 @@ function testBootstrapBridgeConfiguration() {
     urls: ['http://127.0.0.1:*'],
   });
   assert.deepEqual(webShellCapability.windows, ['main']);
-  // The daemon-served page reaches exactly two things: the external-URL opener
-  // and the zoom shortcut. The workspace, updater, and log commands stay
-  // bootstrap-only.
+  // The daemon-served page reaches exactly three things: the external-URL
+  // opener, the zoom shortcut, and the macOS host turn notifications (asking
+  // for authorization and posting one). The workspace, updater, and log
+  // commands stay bootstrap-only.
   assert.deepEqual(webShellCapability.permissions, [
     'core:window:allow-start-dragging',
     {
@@ -1884,11 +1887,21 @@ function testBootstrapBridgeConfiguration() {
       allow: [{ url: 'http://*' }, { url: 'https://*' }, { url: 'mailto:*' }],
     },
     'allow-change-zoom',
+    'allow-request-turn-notification-authorization',
+    'allow-show-turn-notification',
   ]);
 
   assert.match(main, /title_bar_style\(tauri::TitleBarStyle::Overlay\)/);
   assert.match(main, /hidden_title\(true\)/);
   assert.match(main, /initialization_script\(MACOS_TITLEBAR_INIT_SCRIPT\)/);
+  // The Web Shell routes turn notifications through the macOS host only when
+  // the host says it is macOS; without this flag it falls back to Web
+  // Notifications, which WKWebView never grants.
+  assert.match(main, /initialization_script\(MACOS_PLATFORM_INIT_SCRIPT\)/);
+  assert.match(
+    main,
+    /const MACOS_PLATFORM_INIT_SCRIPT: &str =\s*"window\.__QWEN_CODE_DESKTOP_PLATFORM__ = 'macos';";/,
+  );
 }
 
 function testZoomHotkeyScript() {

@@ -273,7 +273,7 @@ describe('browser task notifications', () => {
       expect((open.mock.calls[0]![0] as CustomEvent).detail).toEqual(target);
       expect(notifications[0]?.close).toHaveBeenCalledOnce();
       await settle(capture);
-      expect(notifications).toHaveLength(2);
+      await vi.waitFor(() => expect(notifications).toHaveLength(2));
       expect(notifications[1]?.options.tag).not.toBe(
         notifications[0]?.options.tag,
       );
@@ -315,7 +315,7 @@ describe('browser task notifications', () => {
         });
       });
       await settle(capture, 'quiet-marker');
-      expect(notifications).toHaveLength(1);
+      await vi.waitFor(() => expect(notifications).toHaveLength(1));
       expect(notifications[0]?.options.body).toBe('This turn has completed.');
     },
   );
@@ -1019,5 +1019,229 @@ describe('browser task notifications', () => {
     await act(() => standalone.settings!.setEnabled(true));
     expect(standalone.settings!.enabled).toBe(false);
     expect(FakeNotification.requestPermission).not.toHaveBeenCalled();
+  });
+});
+
+describe('desktop host notifications', () => {
+  type DesktopWindow = Window & {
+    __TAURI__?: unknown;
+    __QWEN_CODE_DESKTOP_PLATFORM__?: string;
+  };
+  function stubDesktopShell(
+    platform?: 'macos',
+    invoke = vi.fn(async (_command: string, _args?: unknown) => {}),
+  ) {
+    (window as DesktopWindow).__TAURI__ = { core: { invoke } };
+    if (platform)
+      (window as DesktopWindow).__QWEN_CODE_DESKTOP_PLATFORM__ = platform;
+    return invoke;
+  }
+  function renderDefaultEnabled(capture: Capture) {
+    return render(capture, (node) => (
+      <BrowserTurnNotifications
+        language="en"
+        options={{ defaultEnabled: true }}
+      >
+        {node}
+      </BrowserTurnNotifications>
+    ));
+  }
+  function shown(invoke: ReturnType<typeof stubDesktopShell>) {
+    return invoke.mock.calls.filter(
+      ([command]) => command === 'show_turn_notification',
+    );
+  }
+  afterEach(() => {
+    delete (window as DesktopWindow).__TAURI__;
+    delete (window as DesktopWindow).__QWEN_CODE_DESKTOP_PLATFORM__;
+  });
+
+  it('keeps the toggle on, authorizes on opt-in and posts host notifications when WebKit denies in the macOS desktop shell', async () => {
+    FakeNotification.permission = 'denied';
+    const invoke = stubDesktopShell('macos');
+    const capture: Capture = {};
+    render(capture);
+    expect(invoke).not.toHaveBeenCalled();
+    await act(async () => capture.settings!.setEnabled(true));
+    expect(window.localStorage.getItem(BROWSER_NOTIFICATIONS_STORAGE_KEY)).toBe(
+      'true',
+    );
+    expect(capture.settings!.enabled).toBe(true);
+    expect(capture.settings!.persistent).toBe(false);
+    expect(capture.settings!.error).toBe(false);
+    expect(FakeNotification.requestPermission).not.toHaveBeenCalled();
+    expect(invoke.mock.calls).toEqual([
+      ['request_turn_notification_authorization'],
+    ]);
+    attach(capture);
+    await settle(capture);
+    expect(shown(invoke)).toEqual([
+      [
+        'show_turn_notification',
+        { title: 'QwenCode', body: 'This turn has completed.' },
+      ],
+    ]);
+    expect(notifications).toHaveLength(0);
+  });
+
+  it('composes the host notification from the session title, prompt and reply', async () => {
+    FakeNotification.permission = 'denied';
+    const invoke = stubDesktopShell('macos');
+    const capture: Capture = {};
+    render(capture);
+    await act(async () => capture.settings!.setEnabled(true));
+    attach(capture);
+    await act(async () => {
+      capture.observer!.observe(
+        'scope',
+        'session',
+        {
+          type: 'turn_complete',
+          data: {
+            sessionId: 'session',
+            promptId: 'done',
+            stopReason: 'end_turn',
+          },
+        },
+        false,
+        {
+          sessionTitle: '  Fix **notifications**\n on macOS ',
+          promptText: '**Please** fix\n[alerts](https://example.com/private)',
+          responseText:
+            '# Result\n**Fixed** the [notification](https://example.com/private).',
+        },
+      );
+      capture.observer!.observe(
+        'scope',
+        'session',
+        {
+          type: 'turn_error',
+          data: { sessionId: 'session', promptId: 'failed' },
+        },
+        false,
+        {
+          sessionTitle: 'Failed task',
+          promptText: 'Run the tests',
+          responseText: 'partial private answer',
+        },
+      );
+      await vi.waitFor(() => expect(shown(invoke)).toHaveLength(2));
+    });
+    expect(shown(invoke)).toEqual(
+      expect.arrayContaining([
+        [
+          'show_turn_notification',
+          {
+            title: 'QwenCode · Fix notifications on macOS',
+            body: 'This turn has completed.\nPrompt: Please fix alerts\nReply: Result Fixed the notification.',
+          },
+        ],
+        [
+          'show_turn_notification',
+          {
+            title: 'QwenCode · Failed task',
+            body: 'This turn failed. Return to view the details.\nPrompt: Run the tests',
+          },
+        ],
+      ]),
+    );
+    expect(notifications).toHaveLength(0);
+  });
+
+  it('stays off in the macOS desktop shell until the user opts in, even when the shell defaults notifications on', async () => {
+    FakeNotification.permission = 'default';
+    const invoke = stubDesktopShell('macos');
+    function Panel() {
+      const request = useBrowserNotificationSettings()?.requestPermissionOnce;
+      useEffect(() => request?.(), [request]);
+      return null;
+    }
+    const capture: Capture = {};
+    render(capture, (node) => (
+      <BrowserTurnNotifications
+        language="en"
+        options={{ defaultEnabled: true }}
+      >
+        <Panel />
+        {node}
+      </BrowserTurnNotifications>
+    ));
+    await act(async () => {});
+    expect(capture.settings!.enabled).toBe(false);
+    expect(FakeNotification.requestPermission).not.toHaveBeenCalled();
+    expect(
+      window.localStorage.getItem(BROWSER_NOTIFICATIONS_STORAGE_KEY),
+    ).toBeNull();
+    attach(capture);
+    await settle(capture);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(notifications).toHaveLength(0);
+  });
+
+  it('keeps an opt-out after the per-launch origin loses its stored preference', async () => {
+    FakeNotification.permission = 'denied';
+    const invoke = stubDesktopShell('macos');
+    const first: Capture = {};
+    const root = render(first);
+    await act(async () => first.settings!.setEnabled(true));
+    await act(async () => first.settings!.setEnabled(false));
+    act(() => root.unmount());
+    // The next launch serves the shell from a new loopback port: a new origin
+    // with empty localStorage.
+    window.localStorage.clear();
+    invoke.mockClear();
+    const next: Capture = {};
+    renderDefaultEnabled(next);
+    expect(next.settings!.enabled).toBe(false);
+    attach(next);
+    await settle(next);
+    expect(shown(invoke)).toHaveLength(0);
+  });
+
+  it('reports a host delivery failure', async () => {
+    FakeNotification.permission = 'denied';
+    const invoke = stubDesktopShell(
+      'macos',
+      vi.fn(async (command: string) => {
+        if (command === 'show_turn_notification')
+          throw new Error('notification centre refused');
+      }),
+    );
+    const capture: Capture = {};
+    render(capture);
+    await act(async () => capture.settings!.setEnabled(true));
+    expect(capture.settings!.error).toBe(false);
+    attach(capture);
+    await settle(capture);
+    expect(shown(invoke)).toHaveLength(1);
+    expect(capture.settings!.error).toBe(true);
+  });
+
+  it('keeps the standard Web Notification path on desktop shells without the macOS host flag', async () => {
+    FakeNotification.permission = 'denied';
+    const invoke = stubDesktopShell();
+    const capture: Capture = {};
+    render(capture);
+    await act(async () => capture.settings!.setEnabled(true));
+    expect(
+      window.localStorage.getItem(BROWSER_NOTIFICATIONS_STORAGE_KEY),
+    ).toBeNull();
+    expect(capture.settings!.enabled).toBe(false);
+    attach(capture);
+    await settle(capture);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(notifications).toHaveLength(0);
+  });
+
+  it('prefers Web Notifications over the host when granted in the macOS desktop shell', async () => {
+    FakeNotification.permission = 'granted';
+    const invoke = stubDesktopShell('macos');
+    window.localStorage.setItem(BROWSER_NOTIFICATIONS_STORAGE_KEY, 'true');
+    const capture: Capture = {};
+    render(capture);
+    attach(capture);
+    await settle(capture);
+    expect(notifications).toHaveLength(1);
+    expect(invoke).not.toHaveBeenCalled();
   });
 });

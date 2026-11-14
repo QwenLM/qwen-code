@@ -44,6 +44,7 @@ import {
   webShellThemeToSettingValue,
   type WebShellTheme,
 } from '../../themeContext';
+import { isMacOSDesktopShell } from '../../utils/externalOpen';
 import {
   ModelManagementSection,
   type ModelManagementProps,
@@ -1243,18 +1244,27 @@ export function SettingsMessage({
                             item.localKey === 'browserNotifications' &&
                             notifications
                           ) {
+                            // WebKit never grants Web Notification
+                            // permission in the macOS desktop shell; the host
+                            // posts the notification itself, so there the
+                            // status follows the preference alone.
+                            const host =
+                              isMacOSDesktopShell() &&
+                              notifications.permission !== 'granted';
                             const unavailable =
-                              notifications.permission === 'unavailable';
+                              notifications.permission === 'unavailable' &&
+                              !host;
                             const status = unavailable
                               ? 'unavailable'
                               : notifications.pending
                                 ? 'requesting'
-                                : notifications.permission === 'denied'
+                                : notifications.permission === 'denied' && !host
                                   ? 'denied'
                                   : notifications.error
                                     ? 'error'
                                     : notifications.enabled
-                                      ? notifications.permission === 'granted'
+                                      ? notifications.permission ===
+                                          'granted' || host
                                         ? 'enabled'
                                         : 'waiting'
                                       : 'disabled';
@@ -1273,6 +1283,7 @@ export function SettingsMessage({
                                   control={
                                     <div className="flex items-center gap-2">
                                       {notifications.enabled &&
+                                        !host &&
                                         notifications.permission ===
                                           'default' && (
                                           <Button
