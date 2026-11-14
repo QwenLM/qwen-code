@@ -387,10 +387,6 @@
   opacity: 0.8;
 }
 
-.inlineInputFieldInvalid {
-  border-color: var(--warning-color, #f59e0b);
-}
-
 .remotesHeader {
   display: flex;
   align-items: center;

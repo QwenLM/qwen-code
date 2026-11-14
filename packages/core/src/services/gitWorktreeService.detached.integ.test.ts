@@ -318,10 +318,41 @@ describe('GitWorktreeService — detached managed worktrees', () => {
       deleteBranch: true,
     });
     expect(result.success).toBe(true);
+    expect(result.branchSkipped).toBe(true);
     expect(git(repoRoot, 'branch', '--list', 'worktree-sess-renamed')).toBe(
       'worktree-sess-renamed',
     );
     expect(git(repoRoot, 'branch', '--list', 'feat/x')).toBe('feat/x');
+  });
+
+  it('removeUserWorktree reports branchSkipped when the agent switched branches', async () => {
+    git(repoRoot, 'branch', 'worktree-sess-switched');
+    const worktree = await createDetached('sess-switched');
+    git(worktree.path, 'checkout', '-q', '-b', 'fix');
+    const result = await service.removeUserWorktree('sess-switched', {
+      deleteBranch: true,
+    });
+    expect(result.success).toBe(true);
+    expect(result.branchSkipped).toBe(true);
+    expect(result.branchPreserved).toBeUndefined();
+    expect(git(repoRoot, 'branch', '--list', 'worktree-sess-switched')).toBe(
+      'worktree-sess-switched',
+    );
+    await expect(fs.lstat(worktree.path)).rejects.toThrow();
+  });
+
+  it('removeUserWorktree reports branchSkipped when the directory is already gone', async () => {
+    git(repoRoot, 'branch', 'worktree-sess-gone');
+    const worktree = await createDetached('sess-gone');
+    await fs.rm(worktree.path, { recursive: true, force: true });
+    const result = await service.removeUserWorktree('sess-gone', {
+      deleteBranch: true,
+    });
+    expect(result.success).toBe(true);
+    expect(result.branchSkipped).toBe(true);
+    expect(git(repoRoot, 'branch', '--list', 'worktree-sess-gone')).toBe(
+      'worktree-sess-gone',
+    );
   });
 
   it('prepared finalize with branchOwned=false keeps a same-slug branch at base', async () => {

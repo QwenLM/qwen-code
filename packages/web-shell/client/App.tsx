@@ -3592,6 +3592,9 @@ function isSameGitStatus(
     current.workspaceCwd === next.workspaceCwd &&
     current.branch === next.branch &&
     current.detached === next.detached &&
+    // ?? true: the field is optional on the wire; a one-sided absence is
+    // not a change, but the first-commit false → true transition must be.
+    (current.hasHead ?? true) === (next.hasHead ?? true) &&
     current.staged === next.staged &&
     current.unstaged === next.unstaged &&
     current.untracked === next.untracked &&

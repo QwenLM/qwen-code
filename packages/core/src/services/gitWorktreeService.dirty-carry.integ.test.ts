@@ -117,8 +117,8 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     expect(git(repoRoot, 'check-ignore', '-q', worktree.path)).toBe('');
   });
 
-  it('carries untracked files with non-ASCII, quoted, and newline names', async () => {
-    const names = ['中文.txt', 'quote"name.txt', 'nl\nname.txt', ' pad.txt '];
+  it('carries untracked files with non-ASCII names', async () => {
+    const names = ['中文.txt'];
     for (const name of names) {
       await fs.writeFile(path.join(repoRoot, name), `content:${name}\n`);
     }
@@ -129,6 +129,24 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
       );
     }
   });
+
+  // Quotes, newlines, and trailing spaces are not representable in a Win32
+  // path component; fs.writeFile would throw before the carry is exercised.
+  it.skipIf(process.platform === 'win32')(
+    'carries untracked files with quoted, newline, and padded names',
+    async () => {
+      const names = ['quote"name.txt', 'nl\nname.txt', ' pad.txt '];
+      for (const name of names) {
+        await fs.writeFile(path.join(repoRoot, name), `content:${name}\n`);
+      }
+      const worktree = await create('special-names-win', true);
+      for (const name of names) {
+        expect(await read(path.join(worktree.path, name))).toBe(
+          `content:${name}\n`,
+        );
+      }
+    },
+  );
 
   it('keeps the worktree HEAD at the base commit (no baseline commit)', async () => {
     await makeDirty(repoRoot);
@@ -253,12 +271,11 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     expect(removed.error).toBe('Worktree contains changes');
   });
 
-  it('prepared rollback removes a carried overlay with special-character names', async () => {
-    // core.quotepath C-quotes these names in line-based status output;
-    // the exemption compares raw carried paths, so a quoted form would
-    // strand the worktree and its journal forever.
+  // core.quotepath C-quotes these names in line-based status output; the
+  // exemption compares raw carried paths, so a quoted form would strand
+  // the worktree and its journal forever.
+  const rollbackWithNames = async (slug: string, names: string[]) => {
     await makeDirty(repoRoot);
-    const names = ['中文.txt', 'quote"name.txt', 'nl\nname.txt', ' pad.txt '];
     for (const name of names) {
       await fs.writeFile(path.join(repoRoot, name), `content:${name}\n`);
     }
@@ -267,17 +284,13 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     git(repoRoot, 'mv', 'tracked.txt', 'renamed.txt');
     const base = git(repoRoot, 'rev-parse', 'HEAD');
     const service = new GitWorktreeService(repoRoot);
-    const created = await service.createUserWorktree(
-      'prepared-special',
-      'main',
-      {
-        detached: true,
-        carryDirtyState: true,
-      },
-    );
+    const created = await service.createUserWorktree(slug, 'main', {
+      detached: true,
+      carryDirtyState: true,
+    });
     expect(created.success).toBe(true);
     const removed = await service.removePreparedUserWorktree(
-      'prepared-special',
+      slug,
       null,
       base,
       undefined,
@@ -286,7 +299,24 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     );
     expect(removed.success).toBe(true);
     await expect(fs.lstat(created.worktree!.path)).rejects.toThrow();
+  };
+
+  it('prepared rollback removes a carried overlay with special-character names', async () => {
+    await rollbackWithNames('prepared-special', ['中文.txt']);
   });
+
+  // Quotes, newlines, and trailing spaces are not representable in a Win32
+  // path component; fs.writeFile would throw before the carry is exercised.
+  it.skipIf(process.platform === 'win32')(
+    'prepared rollback removes a carried overlay with quoted/newline/padded names',
+    async () => {
+      await rollbackWithNames('prepared-special-win', [
+        'quote"name.txt',
+        'nl\nname.txt',
+        ' pad.txt ',
+      ]);
+    },
+  );
 
   it('prepared rollback removes a carried overlay with an untracked directory', async () => {
     // The carry records file-level paths; a directory-collapsing listing

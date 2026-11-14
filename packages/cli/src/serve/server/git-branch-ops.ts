@@ -7,8 +7,10 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { gitEnv, NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 
 const execFileAsync = promisify(execFile);
+const debugLogger = createDebugLogger('GIT_BRANCH_OPS');
 
 // Hard timeout for branch git operations. `git checkout -b` takes the
 // repository lock; without a bound, a stuck lock or slow hook would hang the
@@ -52,13 +54,40 @@ export async function isDirtyTree(cwd: string): Promise<boolean> {
 }
 
 export async function getHeadCommit(cwd: string): Promise<string | undefined> {
-  return execFileAsync('git', [...NO_EXEC_CONFIG, 'rev-parse', 'HEAD'], {
-    cwd,
-    timeout: GIT_BRANCH_TIMEOUT_MS,
-    env: gitEnv(),
-  })
-    .then(({ stdout }) => stdout.trim())
-    .catch(() => undefined);
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      [...NO_EXEC_CONFIG, 'rev-parse', 'HEAD'],
+      {
+        cwd,
+        timeout: GIT_BRANCH_TIMEOUT_MS,
+        env: gitEnv(),
+      },
+    );
+    return stdout.trim();
+  } catch (error) {
+    // Callers map undefined to "no commits yet" (an unborn HEAD). That is
+    // only true when --verify exits 1; a timeout, an unreadable .git, or a
+    // non-repository is an environment fault and must leave a log record
+    // instead of silently claiming an empty repository.
+    try {
+      await execFileAsync(
+        'git',
+        [...NO_EXEC_CONFIG, 'rev-parse', '--verify', '--quiet', 'HEAD'],
+        { cwd, timeout: GIT_BRANCH_TIMEOUT_MS, env: gitEnv() },
+      );
+      debugLogger.warn(
+        `getHeadCommit: rev-parse HEAD failed in ${cwd} but --verify succeeded: ${error}`,
+      );
+    } catch (probeError) {
+      if ((probeError as { code?: number }).code !== 1) {
+        debugLogger.warn(
+          `getHeadCommit: git fault reading HEAD in ${cwd}: ${error}`,
+        );
+      }
+    }
+    return undefined;
+  }
 }
 
 // A checkout runs the repository's own `post-checkout` hook whatever config it

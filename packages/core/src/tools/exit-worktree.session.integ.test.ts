@@ -168,6 +168,31 @@ describe('ExitWorktreeTool — WorktreeSession sidecar cleanup', () => {
     expect(await readWorktreeSession(sessionPath)).toBeNull();
   });
 
+  it('reports the branch kept when the checkout switched away from it', async () => {
+    await enterWorktree('switched-branch');
+    const wtPath = new GitWorktreeService(repoRoot).getUserWorktreePath(
+      'switched-branch',
+    );
+    execFileSync('git', ['checkout', '-q', '-b', 'fix'], { cwd: wtPath });
+
+    const result = await exit(removeParams('switched-branch'));
+
+    expect(result.error).toBeUndefined();
+    // The slug ref survives; the tool must not claim it was deleted.
+    const output = JSON.parse(String(result.llmContent)) as {
+      message: string;
+    };
+    expect(output.message).toContain('kept branch worktree-switched-branch');
+    expect(output.message).not.toContain('and deleted branch');
+    expect(String(result.returnDisplay)).toContain('kept');
+    expect(
+      execFileSync('git', ['branch', '--list', 'worktree-switched-branch'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      }).trim(),
+    ).toBe('worktree-switched-branch');
+  });
+
   it('does not clear the sidecar when slug does not match', async () => {
     await enterWorktree('tracked-slug');
     const sessionPath = sessionService.getWorktreeSessionPath(sessionId);

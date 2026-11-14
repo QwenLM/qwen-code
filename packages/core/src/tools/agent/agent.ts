@@ -2975,6 +2975,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             preservedBranch: isolation.branch,
           };
         }
+        if (result.branchSkipped) {
+          // The checkout no longer sat on the slug branch, so the ref was
+          // kept. Same shape as branchPreserved: the directory is gone,
+          // only the branch survives.
+          debugLogger.warn(
+            `[Agent] Removed worktree directory ${isolation.path} but kept ` +
+              `branch ${isolation.branch} (checkout no longer on it)`,
+          );
+          return {
+            preservedBranch: isolation.branch,
+          };
+        }
       } catch (error) {
         debugLogger.warn(
           `[Agent] Failed to remove ephemeral worktree ${isolation.path}: ${error}`,

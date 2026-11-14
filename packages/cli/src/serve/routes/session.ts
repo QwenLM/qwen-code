@@ -5206,6 +5206,7 @@ export function registerSessionRoutes(
               // the pre-handoff shape so a retry is not stranded.
               let autoBranch: string | null = null;
               let localOriginalBranch: string | null = null;
+              let detachedFrom: string | null = null;
               let copiedUntracked: string[] = [];
               const rollback = async () => {
                 if (copiedUntracked.length > 0) {
@@ -5233,6 +5234,15 @@ export function registerSessionRoutes(
                     ...sidecar,
                     worktreeBranch: '',
                   }).catch(() => undefined);
+                } else if (detachedFrom !== null) {
+                  // The worktree sat on a named branch the handoff did not
+                  // create ("Create branch here"). Re-attach it after the
+                  // local restore releases the ref, or the sidecar records
+                  // a branch the detached checkout no longer matches and
+                  // every retry 409s worktree_branch_mismatch.
+                  await wtService
+                    .checkoutBranchInCheckout(realTarget, detachedFrom)
+                    .catch(() => undefined);
                 }
               };
               // Capture the local ref before ANY mutation (the stash apply
@@ -5276,6 +5286,7 @@ export function registerSessionRoutes(
                   // The session is leaving, so the worktree stays detached
                   // at the same commit (its dirty state survives).
                   await wtService.detachCheckout(realTarget);
+                  detachedFrom = branch;
                   await localService.checkoutBranchInCheckout(localCwd, branch);
                 } catch (error) {
                   await rollback();
@@ -5332,15 +5343,6 @@ export function registerSessionRoutes(
           }
 
           // to === 'worktree'
-          const preRead = await readWorktreeSessionStrict(sidecarPath);
-          if (preRead.state === 'valid') {
-            res.status(409).json({
-              error: 'Session already has a managed worktree',
-              code: 'worktree_handoff_unsupported',
-              sessionId: storageSessionId,
-            });
-            return;
-          }
           const execution =
             runtime.bridge.getSessionExecutionSnapshot(storageSessionId);
           let sourceCwd: string;
@@ -5351,6 +5353,23 @@ export function registerSessionRoutes(
           }
           const releaseOwnership = await acquireWorktreeOwnershipOp(sourceCwd);
           try {
+            // Decide inside the ownership lock, mirroring the to=local and
+            // worktree-branch siblings: a pre-read outside it let two
+            // concurrent requests both create a worktree, and treating an
+            // invalid sidecar as "no worktree" overwrote the record and
+            // orphaned the previous checkout.
+            const preRead = await readWorktreeSessionStrict(sidecarPath);
+            if (preRead.state === 'valid') {
+              res.status(409).json({
+                error: 'Session already has a managed worktree',
+                code: 'worktree_handoff_unsupported',
+                sessionId: storageSessionId,
+              });
+              return;
+            }
+            if (preRead.state !== 'missing') {
+              throw new WorktreeResetInvalidStateError(storageSessionId);
+            }
             // Arm the admission fence FIRST, then read the busy gate: a
             // prompt admitted between the gate read and the arm would
             // slip past both. With the barrier armed, sendPrompt fails
@@ -5395,11 +5414,15 @@ export function registerSessionRoutes(
             // same root POST /session uses), not the session's effective
             // cwd — a /cd into a subdirectory must not move the managed
             // directory. Capture the dirty state from the session's own
-            // checkout, which may differ from the placement root.
+            // checkout, which may differ from the placement root. Base the
+            // worktree on the recorded SHA, not a branch name: the service
+            // resolves names in the placement repository, so a session cd'd
+            // into a sibling checkout would otherwise start at the wrong
+            // HEAD and the return trip would 409 local_head_moved forever.
             const placementService = new GitWorktreeService(workspaceCwd);
             const created = await placementService.createUserWorktree(
               slug,
-              currentBranch,
+              baseCommit,
               {
                 detached: true,
                 carryDirtyState: true,

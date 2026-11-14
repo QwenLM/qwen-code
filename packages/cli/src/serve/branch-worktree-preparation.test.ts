@@ -486,6 +486,47 @@ describe('branch worktree preparation journal', () => {
     );
   });
 
+  it('recovery reaps a dirty carried overlay via the journal carriedPaths', async () => {
+    // The prepared worktree carries the source's dirty overlay, so the
+    // cleanliness gate only passes when recovery forwards the journal's
+    // carriedPaths; dropping the argument strands the worktree forever.
+    await fs.writeFile(path.join(root, 'dirty.txt'), 'dirty\n');
+    const service = new GitWorktreeService(root);
+    const created = await service.createUserWorktree(
+      'branch-dirty',
+      baseCommit,
+      { detached: true, carryDirtyState: true },
+    );
+    if (!created.success || !created.worktree) {
+      throw new Error(created.error ?? 'worktree creation failed');
+    }
+    let journal = await createBranchWorktreeJournal({
+      journalPath,
+      targetSessionId,
+      slug: 'branch-dirty',
+      worktreePath: created.worktree.path,
+      worktreeBranch: '',
+      repoTop: root,
+      baseCommit,
+      sidecarPath,
+    });
+    journal = await updateBranchWorktreeJournal(
+      journalPath,
+      { ...journal, carriedPaths: created.carriedPaths },
+      'worktree-created',
+    );
+    await markJournalStale(journal);
+
+    await recoverStalePreparation(fakeSessionService(false));
+
+    await expect(fs.stat(created.worktree.path)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(fs.stat(journalPath)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
   it('finishes safe branch deletion after a worktree-removed checkpoint', async () => {
     const service = new GitWorktreeService(root);
     const created = await service.createUserWorktree(

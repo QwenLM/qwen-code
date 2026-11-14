@@ -91,9 +91,12 @@ projects, scheduled tasks run directly in the project directory").
 `POST /session` without `worktree` keeps its current meaning (run in the
 workspace directory). The default is applied where Codex applies it: the
 product surface. The client initializes `gitModeIntent` to `{ mode: 'worktree' }`
-when the workspace is eligible (trusted + Git branch present) and the effective
-setting is `true`. SDK, channel, and managed-session callers keep explicit
-control; no wire semantics change.
+when the workspace is eligible (trusted, a Git branch or detached HEAD present,
+and HEAD born — `hasHead !== false`, since an unborn HEAD has no worktree base)
+and the effective setting is `true`. A definitive `hasHead: false` also clears
+an intent armed by an earlier fast status that omitted the field. SDK, channel,
+and managed-session callers keep explicit control of the request; the
+`POST /session` `worktree` contract itself is described in Scope boundaries.
 
 The setting arrives through the existing workspace-settings route
 (`getAllowedKeys` → `buildSettingsResponse`, consumed as
@@ -331,11 +334,13 @@ deletes oldest-first beyond `worktree.maxRetained`, snapshotting each.
   copy failure fails open.
 - Acceptance: start a session worktree from a dirty checkout; the agent sees
   the same files the user has on disk.
-- Known limitation (nested case): the branch-worktree route captures dirty
-  state from `base.repoTop` (the main checkout). A session already inside a
-  worktree therefore carries the main checkout's dirty state, not its own;
-  when the HEADs differ the stash apply fails open to committed state (no
-  loss). P3's detached refactor revisits this route's capture source.
+- Capture source (shipped): the branch-worktree route passes
+  `dirtyStateSource: base.checkoutCwd`, so a session already inside a
+  worktree carries its own checkout's dirty state, not the main checkout's;
+  the worktree is still placed under the workspace's managed root. The
+  handoff `to:'worktree'` path does the same and bases the new worktree on
+  the session checkout's recorded HEAD SHA (a branch name would resolve in
+  the placement repository and could start at the wrong commit).
 
 ### P3 — Detached HEAD (core refactor) — implemented
 
@@ -391,16 +396,16 @@ A. Creation and metadata producers
 
 B. Lifecycle gates (highest risk — fail-closed leaks if missed)
 
-| Site                                                                     | Today                                                                 | P3 migration                                                                                                                                                                                                                    |
-| ------------------------------------------------------------------------ | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gitWorktreeService.ts` `removePreparedUserWorktree` `checkoutMatches`   | `HEAD == base && branch == worktree-<slug>`                           | `HEAD == base`; branch equality only in named mode                                                                                                                                                                              |
-| `gitWorktreeService.ts` `removePreparedUserWorktree` `atBase` tip checks | `for-each-ref refs/heads/worktree-<slug>` tip `== base`               | Detached: covered by HEAD equality; named: unchanged                                                                                                                                                                            |
-| `gitWorktreeService.ts` `finalizePreparedUserWorktreeBranch`             | Tip null → no-op; else `branch -d`                                    | `branchOwned` from the journal: named preparation owns its branch (`worktree add -b` refused a pre-existing one); detached preparation never deletes the slug-derived ref                                                       |
-| `gitWorktreeService.ts` `removeUserWorktree`                             | `-d`/`-D worktree-<slug>`; `branchPreserved`                          | Detached: refuse removal when HEAD carries unmerged commits (force opts out); never delete the slug-derived branch (never owned); named: unchanged                                                                              |
-| `gitWorktreeService.ts` `hasUnmergedWorktreeCommits`                     | `rev-parse worktree-<slug>`, fail-closed `true` on error              | Detached: judge by HEAD reachability — exemplar `cli/serve/routes/workspace-git-worktrees.ts` (`commitIsReachable`); named: unchanged                                                                                           |
-| `cli/serve/server/worktree-orphan-cleanup.ts` `executeWorktreeCleanup`   | `worktreeHasWork` gate + `removeUserWorktree` + `branchPreserved` log | Gate unchanged in P3 (dirty work preserved, see D3); a refused detached removal re-observes the filesystem and logs the preserve; P6 snapshot lifts the gate                                                                    |
-| `cli/serve/branch-worktree-preparation.ts` journal identity              | `worktreeBranch === worktreeBranchForSlug(slug)`                      | Accept the `''` detached convention alongside the named form                                                                                                                                                                    |
-| `cli/startup/worktreeStartup.ts` `setupStartupWorktree` reattach gate    | Expected branch; null → "Worktree already exists"                     | `getRegisteredWorktreeBranch` reports detached as `{branch: '', headCommit}`; the gate keeps refusing any occupant not on `worktree-<slug>`, including detached — session re-attach goes through session-restore, not this flag |
+| Site                                                                     | Today                                                                 | P3 migration                                                                                                                                                                                                                                                                       |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gitWorktreeService.ts` `removePreparedUserWorktree` `checkoutMatches`   | `HEAD == base && branch == worktree-<slug>`                           | `HEAD == base`; branch equality only in named mode                                                                                                                                                                                                                                 |
+| `gitWorktreeService.ts` `removePreparedUserWorktree` `atBase` tip checks | `for-each-ref refs/heads/worktree-<slug>` tip `== base`               | Detached: covered by HEAD equality; named: unchanged                                                                                                                                                                                                                               |
+| `gitWorktreeService.ts` `finalizePreparedUserWorktreeBranch`             | Tip null → no-op; else `branch -d`                                    | `branchOwned` from the journal: named preparation owns its branch (`worktree add -b` refused a pre-existing one); detached preparation never deletes the slug-derived ref                                                                                                          |
+| `gitWorktreeService.ts` `removeUserWorktree`                             | `-d`/`-D worktree-<slug>`; `branchPreserved`                          | Detached: refuse removal when HEAD carries unmerged commits (force opts out); never delete the slug-derived branch (never owned); when the checkout left the slug branch but the ref survives, report `branchSkipped` so callers say "kept", not "deleted"; named: unchanged       |
+| `gitWorktreeService.ts` `hasUnmergedWorktreeCommits`                     | `rev-parse worktree-<slug>`, fail-closed `true` on error              | Judge by the checkout's own HEAD tip and actual branch (`--abbrev-ref HEAD` → `ownRef`), excluding that ref from `for-each-ref --contains <tip> refs/heads refs/remotes`; slug-ref fallback when the checkout is unreadable. Covers detached and in-place-branched worktrees alike |
+| `cli/serve/server/worktree-orphan-cleanup.ts` `executeWorktreeCleanup`   | `worktreeHasWork` gate + `removeUserWorktree` + `branchPreserved` log | Gate unchanged in P3 (dirty work preserved, see D3); a refused detached removal re-observes the filesystem and logs the preserve; P6 snapshot lifts the gate                                                                                                                       |
+| `cli/serve/branch-worktree-preparation.ts` journal identity              | `worktreeBranch === worktreeBranchForSlug(slug)`                      | Accept the `''` detached convention alongside the named form                                                                                                                                                                                                                       |
+| `cli/startup/worktreeStartup.ts` `setupStartupWorktree` reattach gate    | Expected branch; null → "Worktree already exists"                     | `getRegisteredWorktreeBranch` reports detached as `{branch: '', headCommit}`; the gate keeps refusing any occupant not on `worktree-<slug>`, including detached — session re-attach goes through session-restore, not this flag                                                    |
 
 C. Sidecar, restore, and display
 
@@ -489,7 +494,12 @@ that property for a custom root.
 
 ## Scope boundaries
 
-- No change to `POST /session` wire semantics for callers that do not opt in.
+- `POST /session` without `worktree` is unchanged. With `worktree`, every
+  caller (Web Shell, SDK, channel, managed-session) gets a detached
+  worktree: `worktree.branch` is `''` and no `worktree-<slug>` ref is
+  created. Callers that need a named branch use
+  `POST /session/:id/worktree-branch` on the session worktree, or
+  `enter_worktree`, which keeps named branches.
 - No change to `enter_worktree` / `exit_worktree` tool behavior, agent
   isolation worktrees, or Arena worktrees (they keep named branches; Codex
   parity targets Web Shell session worktrees).

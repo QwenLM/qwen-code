@@ -10,6 +10,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -19,7 +20,7 @@ import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import express from 'express';
 import request from 'supertest';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   GitWorktreeService,
   SessionService,
@@ -30,6 +31,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import {
   SessionNotFoundError,
+  SessionResetPendingError,
   type AcpSessionBridge,
 } from '../acp-session-bridge.js';
 import { sendBridgeError } from '../server/error-response.js';
@@ -85,11 +87,17 @@ function makeFixture(opts: { subdir?: string } = {}) {
   const setWorktreeCalls: unknown[][] = [];
   const clearWorktreeCalls: string[] = [];
   const resetPendingCalls: Array<[string, string]> = [];
+  const gateOrder: string[] = [];
+  // Model the bridge's admission fence: the handoff routes arm it and then
+  // relocate with allowWhileResetPending — without the exemption the real
+  // bridge refuses every handoff, so the fixture must refuse it too.
+  const resetPending = new Set<string>();
   let effectiveCwd = workspaceDir;
   let cdGate: Promise<void> | null = null;
   let cdReject = false;
   const bridge = {
     getSessionSummary: (id: string) => {
+      gateOrder.push(`summary:${id}`);
       const summary = summaries.get(id);
       if (!summary) throw new SessionNotFoundError(id);
       return summary;
@@ -101,13 +109,16 @@ function makeFixture(opts: { subdir?: string } = {}) {
     }),
     changeSessionCwd: async (
       id: string,
-      req: { path: string },
+      req: { path: string; allowWhileResetPending?: boolean },
     ): Promise<{
       previousCwd: string;
       newCwd: string;
       warnings: string[];
     }> => {
       cdCalls.push({ sessionId: id, path: req.path });
+      if (resetPending.has(id) && req.allowWhileResetPending !== true) {
+        throw new SessionResetPendingError(id);
+      }
       if (cdGate) await cdGate;
       if (cdReject) {
         return {
@@ -128,10 +139,13 @@ function makeFixture(opts: { subdir?: string } = {}) {
     },
     setSessionResetPending: (id: string) => {
       resetPendingCalls.push(['set', id]);
+      gateOrder.push(`arm:${id}`);
+      resetPending.add(id);
       return true;
     },
     clearSessionResetPending: (id: string) => {
       resetPendingCalls.push(['clear', id]);
+      resetPending.delete(id);
     },
     markSessionCatalogChanged: () => {},
     deleteSessionAttachments: async () => {},
@@ -178,6 +192,7 @@ function makeFixture(opts: { subdir?: string } = {}) {
     setWorktreeCalls,
     clearWorktreeCalls,
     resetPendingCalls,
+    gateOrder,
     summaries,
     setCdGate(gate: Promise<void> | null) {
       cdGate = gate;
@@ -200,6 +215,28 @@ function makeFixture(opts: { subdir?: string } = {}) {
           slug,
           worktreePath: worktreeDir,
           worktreeBranch: '',
+          originalCwd: workspaceDir,
+          workspaceCwd: workspaceDir,
+          originalBranch: 'main',
+          originalHeadCommit: git(workspaceDir, 'rev-parse', 'HEAD'),
+        },
+      );
+    },
+    // The "Create branch here" shape: the worktree sits on a named branch
+    // the sidecar records, so the handoff skips the promotion block.
+    async createBranchedWorktree(branch: string): Promise<void> {
+      const result = await service.createUserWorktree(slug, 'main', {
+        detached: true,
+      });
+      if (!result.success) throw new Error(result.error);
+      git(worktreeDir, 'checkout', '-q', '-b', branch);
+      await createWorktreeSessionMarkerExclusive(worktreeDir, sessionId);
+      await writeWorktreeSession(
+        sessionService.getWorktreeSessionPath(sessionId),
+        {
+          slug,
+          worktreePath: worktreeDir,
+          worktreeBranch: branch,
           originalCwd: workspaceDir,
           workspaceCwd: workspaceDir,
           originalBranch: 'main',
@@ -828,5 +865,184 @@ describe('POST /session/:id/worktree-handoff', () => {
       .post(`/session/${fixture.sessionId}/worktree-handoff`)
       .send({ to: 'local' });
     expect(toLocal.status).toBe(200);
+  });
+
+  it('hands off a worktree that already sits on its recorded branch', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createBranchedWorktree('feat/agent');
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.worktree).toBeNull();
+    expect(git(fixture.workspaceDir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(
+      'feat/agent',
+    );
+    // The worktree stays detached at the same commit after releasing the
+    // branch to the local checkout.
+    expect(git(fixture.worktreeDir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(
+      'HEAD',
+    );
+    const sidecar = await fixture.readSidecar();
+    expect(sidecar.state).toBe('missing');
+  });
+
+  it('re-attaches the recorded branch when a named-branch handoff fails late', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createBranchedWorktree('feat/agent');
+    fixture.setCdReject(true);
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(500);
+    // Without the re-attach the worktree stays detached while the sidecar
+    // still records feat/agent, and every retry 409s branch_mismatch.
+    expect(git(fixture.worktreeDir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(
+      'feat/agent',
+    );
+    expect(git(fixture.workspaceDir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(
+      'main',
+    );
+    const sidecar = await fixture.readSidecar();
+    expect(sidecar.state).toBe('valid');
+    if (sidecar.state === 'valid') {
+      expect(sidecar.session.worktreeBranch).toBe('feat/agent');
+    }
+
+    fixture.setCdReject(false);
+    const retry = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+    expect(retry.status).toBe(200);
+  });
+
+  it('rolls back a failed to=worktree relocation', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    fixture.setCdReject(true);
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'worktree' });
+
+    expect(res.status).toBe(500);
+    const wtRoot = path.join(fixture.workspaceDir, '.qwen', 'worktrees');
+    expect(existsSync(wtRoot) ? readdirSync(wtRoot) : []).toHaveLength(0);
+    const sidecar = await fixture.readSidecar();
+    expect(sidecar.state).toBe('missing');
+
+    fixture.setCdReject(false);
+    const retry = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'worktree' });
+    expect(retry.status).toBe(200);
+  });
+
+  it('refuses to=worktree over a corrupt sidecar instead of orphaning it', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    const sidecarPath = fixture.sessionService.getWorktreeSessionPath(
+      fixture.sessionId,
+    );
+    mkdirSync(path.dirname(sidecarPath), { recursive: true });
+    writeFileSync(sidecarPath, '{', 'utf8');
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'worktree' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('worktree_reset_invalid_state');
+    const wtRoot = path.join(fixture.workspaceDir, '.qwen', 'worktrees');
+    expect(existsSync(wtRoot) ? readdirSync(wtRoot) : []).toHaveLength(0);
+  });
+
+  it('serializes concurrent to=worktree requests under the ownership lock', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fixture.setCdGate(gate);
+
+    const first = request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'worktree' })
+      .then((r) => r);
+    await vi.waitFor(() => expect(fixture.cdCalls).toHaveLength(1));
+    const second = request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'worktree' })
+      .then((r) => r);
+    release();
+
+    const [firstRes, secondRes] = await Promise.all([first, second]);
+    expect(firstRes.status).toBe(200);
+    expect(secondRes.status).toBe(409);
+    expect(secondRes.body.code).toBe('worktree_handoff_unsupported');
+    const wtRoot = path.join(fixture.workspaceDir, '.qwen', 'worktrees');
+    expect(readdirSync(wtRoot)).toHaveLength(1);
+  });
+
+  it('arms the barrier before reading the busy gate on to=worktree', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'worktree' });
+
+    expect(res.status).toBe(200);
+    // A prompt admitted between the gate read and the arm would slip past
+    // both; the arm must come first. Pin the sequence, not just the gate.
+    // (An earlier existence-check read may precede the arm; the busy gate
+    // is the last summary read before the relocation.)
+    const arm = fixture.gateOrder.indexOf(`arm:${fixture.sessionId}`);
+    const gateRead = fixture.gateOrder.lastIndexOf(
+      `summary:${fixture.sessionId}`,
+    );
+    expect(arm).toBeGreaterThanOrEqual(0);
+    expect(gateRead).toBeGreaterThan(arm);
+  });
+
+  it('bases the worktree on the session checkout HEAD, not the placement root', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    // A sibling checkout one commit ahead of the workspace root, reachable
+    // through /cd: the recorded base and the worktree start must agree.
+    const sibling = await fixture.service.createUserWorktree(
+      'sibling',
+      'main',
+      { detached: true },
+    );
+    expect(sibling.success).toBe(true);
+    const siblingPath = sibling.worktree!.path;
+    writeFileSync(path.join(siblingPath, 'ahead.txt'), 'ahead\n');
+    git(siblingPath, 'add', 'ahead.txt');
+    git(siblingPath, 'commit', '-qm', 'sibling work', '--no-verify');
+    const siblingHead = git(siblingPath, 'rev-parse', 'HEAD');
+    expect(siblingHead).not.toBe(
+      git(fixture.workspaceDir, 'rev-parse', 'HEAD'),
+    );
+    fixture.setEffectiveCwd(siblingPath);
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'worktree' });
+
+    expect(res.status).toBe(200);
+    expect(git(res.body.worktree.path, 'rev-parse', 'HEAD')).toBe(siblingHead);
+    const sidecar = await fixture.readSidecar();
+    expect(sidecar.state).toBe('valid');
+    if (sidecar.state === 'valid') {
+      expect(sidecar.session.originalHeadCommit).toBe(siblingHead);
+    }
   });
 });

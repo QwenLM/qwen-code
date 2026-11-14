@@ -29489,12 +29489,14 @@ describe('createServeApp', () => {
         });
         const baseCommit = stdout.trim();
         mockBranchOps.getHeadCommit = async () => baseCommit;
+        const createWorktreeCalls: unknown[][] = [];
         mockWt.impl = () => ({
           isGitRepository: async () => true,
           getRepoTopLevel: async () => repo,
           getCurrentBranch: async () => 'main',
           getUserWorktreePath: () => worktreePath,
-          createUserWorktree: async () => {
+          createUserWorktree: async (...args: unknown[]) => {
+            createWorktreeCalls.push(args);
             await fsp.mkdir(path.dirname(worktreePath), { recursive: true });
             await execFileAsync(
               'git',
@@ -29600,6 +29602,14 @@ describe('createServeApp', () => {
           currentCwd: worktreePath,
           worktree: { slug, path: worktreePath, branch: worktreeBranch },
         });
+        // The dirty capture must target the session's own checkout, not
+        // the placement root; dropping dirtyStateSource silently captures
+        // the main checkout's edits for a session living elsewhere.
+        expect(createWorktreeCalls[0]).toEqual([
+          slug,
+          baseCommit,
+          { carryDirtyState: true, detached: true, dirtyStateSource: repo },
+        ]);
         expect(res.body.sourceWarnings).toEqual([
           'Session sources could not be copied.',
         ]);

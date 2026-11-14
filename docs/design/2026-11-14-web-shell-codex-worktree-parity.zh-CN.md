@@ -83,9 +83,11 @@ projects, scheduled tasks run directly in the project directory」）。
 
 不带 `worktree` 的 `POST /session` 保持现有语义（在 workspace 目录运行）。
 缺省值施加在 Codex 施加它的地方：产品表面。客户端在 workspace 合格
-（受信任 + 存在 Git 分支）且生效设置为 `true` 时，把 `gitModeIntent` 初始化
-为 `{ mode: 'worktree' }`。SDK、channel、managed-session 调用方保持显式控制；
-wire 语义不变。
+（受信任、存在 Git 分支或 detached HEAD、且 HEAD 已出生——`hasHead !== false`，
+未出生 HEAD 没有 worktree base）且生效设置为 `true` 时，把 `gitModeIntent`
+初始化为 `{ mode: 'worktree' }`。确定的 `hasHead: false` 还会清掉早先省略
+该字段的快速状态所武装的意图。SDK、channel、managed-session 调用方保持对
+请求的显式控制；`POST /session` 的 `worktree` 契约本身见「范围边界」。
 
 设置经现有 workspace-settings 路由到达（`getAllowedKeys` →
 `buildSettingsResponse`，消费形式为
@@ -274,10 +276,11 @@ HEAD，或在记录的分支上），把快照解压覆盖，翻回 sidecar。�
   symlinks-integ 模式）——三态 dirty 携带、源检出与 index 不被触碰、HEAD
   停在 base、选项关闭 = 现状、悬空符号链接复制失败 fail-open。
 - 验收：从 dirty 检出启动会话 worktree，agent 看到与用户磁盘上一致的文件。
-- 已知限制（嵌套场景）：branch-worktree 路由从 `base.repoTop`（主检出）
-  捕获 dirty。已处于 worktree 中的会话因此携带的是主检出的 dirty 而非自身
-  的；两者 HEAD 不同时 stash apply fail-open 退化为已提交状态（不丢失）。
-  P3 的 detached 重构重新审视该路由的捕获源。
+- 捕获源（已实现）：branch-worktree 路由传入 `dirtyStateSource:
+base.checkoutCwd`，已处于 worktree 中的会话携带自身检出的 dirty 而非主
+  检出的；worktree 仍放置在 workspace 的托管根下。handoff `to:'worktree'`
+  路径同样如此，并以会话检出记录的 HEAD SHA 作为新 worktree 的 base
+  （分支名会在放置仓库中解析，可能落在错误的提交上）。
 
 ### P3 — Detached HEAD（核心重构）— 已实现
 
@@ -322,16 +325,16 @@ A. 创建与元数据生产者
 
 B. 生命周期门（风险最高——漏掉即 fail-closed 泄漏）
 
-| 站点                                                                   | 现状                                                                 | P3 迁移                                                                                                                                                                              |
-| ---------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `gitWorktreeService.ts` `checkoutMatches`                              | `HEAD == base && branch == worktree-<slug>`                          | `HEAD == base`；分支等值仅限命名模式                                                                                                                                                 |
-| `gitWorktreeService.ts` tip 检查（×2）                                 | `for-each-ref refs/heads/worktree-<slug>` tip `== base`              | detached：由 HEAD 等值覆盖；命名：不变                                                                                                                                               |
-| `gitWorktreeService.ts` `finalizePreparedUserWorktreeBranch`           | tip null → no-op；否则 `branch -d`                                   | journal 推导 `branchOwned`：命名 preparation 拥有其分支（`worktree add -b` 拒绝既有名）；detached preparation 绝不删除按 slug 推导的 ref                                             |
-| `gitWorktreeService.ts` `removeUserWorktree`                           | `-d`/`-D worktree-<slug>`；`branchPreserved`                         | detached：HEAD 携带未合并 commit 时拒绝删除（force 可退出）；绝不删除按 slug 推导的分支（从未拥有）；命名：不变                                                                      |
-| `gitWorktreeService.ts` `hasUnmergedWorktreeCommits`                   | `rev-parse worktree-<slug>`，出错 fail-closed `true`                 | detached：按 HEAD 可达性判定——范本 `cli/serve/routes/workspace-git-worktrees.ts`（`commitIsReachable`）；命名：不变                                                                  |
-| `cli/serve/server/worktree-orphan-cleanup.ts` `executeWorktreeCleanup` | `worktreeHasWork` 门 + `removeUserWorktree` + `branchPreserved` 日志 | P3 门不变（dirty 工作保留，见 D3）；detached 删除被拒时重察文件系统并记录保留；P6 快照解除该门                                                                                       |
-| `cli/serve/branch-worktree-preparation.ts` journal 身份                | `worktreeBranch === worktreeBranchForSlug(slug)`                     | 在命名形式之外接受 `''` detached 约定                                                                                                                                                |
-| `cli/startup/worktreeStartup.ts` `setupStartupWorktree` 重附着门       | 期望分支；null → 「Worktree already exists」                         | `getRegisteredWorktreeBranch` 将 detached 报告为 `{branch: '', headCommit}`；门继续拒绝不在 `worktree-<slug>` 上的任何占用者（含 detached）——会话重附着走 session-restore 而非该参数 |
+| 站点                                                                         | 现状                                                                 | P3 迁移                                                                                                                                                                                                             |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gitWorktreeService.ts` `removePreparedUserWorktree` `checkoutMatches`       | `HEAD == base && branch == worktree-<slug>`                          | `HEAD == base`；分支等值仅限命名模式                                                                                                                                                                                |
+| `gitWorktreeService.ts` `removePreparedUserWorktree` `atBase` tip 检查（×2） | `for-each-ref refs/heads/worktree-<slug>` tip `== base`              | detached：由 HEAD 等值覆盖；命名：不变                                                                                                                                                                              |
+| `gitWorktreeService.ts` `finalizePreparedUserWorktreeBranch`                 | tip null → no-op；否则 `branch -d`                                   | journal 推导 `branchOwned`：命名 preparation 拥有其分支（`worktree add -b` 拒绝既有名）；detached preparation 绝不删除按 slug 推导的 ref                                                                            |
+| `gitWorktreeService.ts` `removeUserWorktree`                                 | `-d`/`-D worktree-<slug>`；`branchPreserved`                         | detached：HEAD 携带未合并 commit 时拒绝删除（force 可退出）；绝不删除按 slug 推导的分支（从未拥有）；检出已离开 slug 分支但 ref 仍在时报告 `branchSkipped`，调用方说「保留」而非「已删除」；命名：不变              |
+| `gitWorktreeService.ts` `hasUnmergedWorktreeCommits`                         | `rev-parse worktree-<slug>`，出错 fail-closed `true`                 | 按检出自身 HEAD tip 与实际分支判定（`--abbrev-ref HEAD` → `ownRef`），从 `for-each-ref --contains <tip> refs/heads refs/remotes` 中排除该 ref；检出不可读时回退 slug ref。detached 与就地建分支的 worktree 同样覆盖 |
+| `cli/serve/server/worktree-orphan-cleanup.ts` `executeWorktreeCleanup`       | `worktreeHasWork` 门 + `removeUserWorktree` + `branchPreserved` 日志 | P3 门不变（dirty 工作保留，见 D3）；detached 删除被拒时重察文件系统并记录保留；P6 快照解除该门                                                                                                                      |
+| `cli/serve/branch-worktree-preparation.ts` journal 身份                      | `worktreeBranch === worktreeBranchForSlug(slug)`                     | 在命名形式之外接受 `''` detached 约定                                                                                                                                                                               |
+| `cli/startup/worktreeStartup.ts` `setupStartupWorktree` 重附着门             | 期望分支；null → 「Worktree already exists」                         | `getRegisteredWorktreeBranch` 将 detached 报告为 `{branch: '', headCommit}`；门继续拒绝不在 `worktree-<slug>` 上的任何占用者（含 detached）——会话重附着走 session-restore 而非该参数                                |
 
 C. Sidecar、恢复与展示
 
@@ -414,7 +417,11 @@ E. 钉住分支契约的测试（P3 更新）
 
 ## 范围边界
 
-- 不改变未显式 opt-in 调用方的 `POST /session` wire 语义。
+- 不带 `worktree` 的 `POST /session` 不变。带 `worktree` 时，所有调用方
+  （Web Shell、SDK、channel、managed-session）都得到 detached worktree：
+  `worktree.branch` 为 `''`，不创建 `worktree-<slug>` ref。需要命名分支的
+  调用方对会话 worktree 使用 `POST /session/:id/worktree-branch`，或使用
+  保持命名分支的 `enter_worktree`。
 - 不改变 `enter_worktree` / `exit_worktree` 工具行为、agent 隔离 worktree、
   Arena worktree（它们保留命名分支；Codex 对齐的目标是 Web Shell 会话
   worktree）。

@@ -377,6 +377,25 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
         returnDisplay: `Removed worktree directory **${this.params.name}**, branch \`${branch}\` preserved`,
       };
     }
+    if (result.branchSkipped) {
+      // The checkout no longer sat on the slug branch (the agent switched
+      // branches, or the directory was already gone), so the ref was kept
+      // rather than deleted. Say so instead of claiming a deletion.
+      await this.maybeClearWorktreeSession();
+      const output: ExitWorktreeOutput = {
+        action: 'remove',
+        worktreePath,
+        worktreeBranch: branch,
+        message:
+          `Removed worktree "${this.params.name}" but kept branch ${branch} ` +
+          `(the checkout no longer sat on it, so the branch was not this ` +
+          `worktree's to delete). Remove it with \`git branch -d ${branch}\` if you want it gone.`,
+      };
+      return {
+        llmContent: JSON.stringify(output),
+        returnDisplay: `Removed worktree **${this.params.name}**, branch \`${branch}\` kept`,
+      };
+    }
 
     debugLogger.debug(
       `Removed user worktree: ${worktreePath} (branch=${branch})`,

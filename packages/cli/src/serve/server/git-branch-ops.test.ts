@@ -18,6 +18,11 @@ import {
   isDirtyTree,
 } from './git-branch-ops.js';
 
+const warnMock = vi.hoisted(() => vi.fn());
+vi.mock('@qwen-code/qwen-code-core/utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({ warn: warnMock, debug: vi.fn() }),
+}));
+
 // `git-branch-ops.ts` captures `promisify(execFile)` at module load, which
 // `vi.mock('node:child_process')` cannot intercept, so these tests exercise the
 // real git binary against a throwaway repository. This verifies the actual
@@ -169,6 +174,31 @@ describe('getHeadCommit', () => {
     const notARepo = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-not-repo-'));
     try {
       await expect(getHeadCommit(notARepo)).resolves.toBeUndefined();
+    } finally {
+      fs.rmSync(notARepo, { recursive: true, force: true });
+    }
+  });
+
+  it('returns undefined for an unborn HEAD without logging a fault', async () => {
+    const unborn = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-unborn-'));
+    try {
+      git(unborn, 'init', '-q', '-b', 'main');
+      warnMock.mockClear();
+      await expect(getHeadCommit(unborn)).resolves.toBeUndefined();
+      expect(warnMock).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(unborn, { recursive: true, force: true });
+    }
+  });
+
+  it('logs a fault when HEAD is unreadable outside a repository', async () => {
+    const notARepo = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-not-repo-'));
+    try {
+      warnMock.mockClear();
+      await expect(getHeadCommit(notARepo)).resolves.toBeUndefined();
+      expect(warnMock).toHaveBeenCalledWith(
+        expect.stringContaining('git fault reading HEAD'),
+      );
     } finally {
       fs.rmSync(notARepo, { recursive: true, force: true });
     }

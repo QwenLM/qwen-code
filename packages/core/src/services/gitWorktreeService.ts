@@ -3337,6 +3337,11 @@ export class GitWorktreeService {
     success: boolean;
     error?: string;
     branchPreserved?: boolean;
+    /** The caller asked for the slug branch, but the checkout no longer
+     * sat on it (the agent switched branches, or the directory was
+     * already gone) and the ref still exists — it was kept, not deleted.
+     * Distinct from branchPreserved, which means the checkout survived. */
+    branchSkipped?: boolean;
   }> {
     const worktreePath = this.getUserWorktreePath(slug);
     const branchName = worktreeBranchForSlug(slug);
@@ -3379,6 +3384,16 @@ export class GitWorktreeService {
     // never created that ref; an existing one belongs to someone else
     // and must survive the cleanup.
     if (!options.deleteBranch || actualBranch !== branchName) {
+      // The caller asked for the branch but the checkout no longer sat on
+      // it, and the ref still exists: report the skip so no caller claims
+      // a deletion that never happened.
+      if (
+        options.deleteBranch &&
+        actualBranch !== branchName &&
+        (await this.localBranchExists(branchName))
+      ) {
+        return { success: true, branchSkipped: true };
+      }
       return { success: true };
     }
 

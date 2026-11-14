@@ -449,6 +449,10 @@ type ChatEditorTestProps = {
   }) => void;
   gitBranch?: string;
   gitStatus?: DaemonWorkspaceGitStatus;
+  gitWorktree?: boolean;
+  gitCwd?: string;
+  onCreateWorktreeBranch?: (name: string) => Promise<void>;
+  onHandoff?: (to: 'local' | 'worktree') => Promise<void>;
   onOpenGitDiff?: () => void;
   visibleToolbarActions?: string[];
   tokenCount?: number;
@@ -806,6 +810,18 @@ const {
     addArtifact: vi.fn().mockResolvedValue({}),
     loadSession: vi.fn().mockResolvedValue(undefined),
     reloadSession: vi.fn().mockResolvedValue(undefined),
+    handoffWorktree: vi.fn().mockResolvedValue({
+      sessionId: 'session-1',
+      worktree: null,
+      currentCwd: '/workspace',
+    }),
+    createWorktreeBranch: vi.fn().mockResolvedValue({
+      worktree: {
+        slug: 'feat-a',
+        path: '/workspace/.qwen/worktrees/feat-a',
+        branch: 'feat/new',
+      },
+    }),
   };
   const mockPaneSessionActions = {
     ...mockSessionActions,
@@ -25548,6 +25564,175 @@ describe('App session callbacks', () => {
     const request = mockSessionActions.createSession.mock.calls[0][0];
     expect(request.worktree).toBeUndefined();
     expect(request.branch).toBeUndefined();
+  });
+
+  it('drops an armed worktree intent when the fresh status reports an unborn HEAD', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    // The fast status omits hasHead (eligible — the default arms); the
+    // fresh status then reports the unborn HEAD. The intent must drop in
+    // the same render the chip hides, or the first prompt requests a
+    // worktree the daemon refuses with no control left to undo it.
+    let status: { branch: string; hasHead?: boolean; workspaceCwd?: string } = {
+      branch: 'main',
+      workspaceCwd: '/workspace',
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockImplementation(async () => status),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+
+    status = { branch: 'main', hasHead: false, workspaceCwd: '/workspace' };
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toBeUndefined();
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('unborn head session');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    const request = mockSessionActions.createSession.mock.calls[0][0];
+    expect(request.worktree).toBeUndefined();
+    expect(request.branch).toBeUndefined();
+  });
+
+  it('applies the branch and handoff responses to the worktree association', async () => {
+    mockConnection.sessionId = 'session-1';
+    mockConnection.workspaceCwd = '/workspace';
+    mockSessionActions.createWorktreeBranch.mockResolvedValue({
+      worktree: {
+        slug: 'feat-a',
+        path: '/workspace/.qwen/worktrees/feat-a',
+        branch: 'feat/new',
+      },
+    });
+    mockSessionActions.handoffWorktree.mockResolvedValue({
+      sessionId: 'session-1',
+      worktree: null,
+      currentCwd: '/workspace',
+    });
+    const worktreePath = '/workspace/.qwen/worktrees/feat-a';
+    mockWorkspace.client.sessionStatus.mockResolvedValue({
+      worktree: { slug: 'feat-a', path: worktreePath, branch: '' },
+    });
+    mockWorkspace.capabilities = {
+      features: ['session_worktree_handoff_v1', 'session_worktree_branch_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.onHandoff).toBeDefined();
+      expect(testState.latestChatEditorProps?.gitWorktree).toBe(true);
+    });
+    expect(testState.latestChatEditorProps?.gitCwd).toBe(worktreePath);
+    // A detached worktree with the capability offers "Create branch here".
+    expect(
+      testState.latestChatEditorProps?.onCreateWorktreeBranch,
+    ).toBeDefined();
+
+    // The callback's setSessionWorktree update is the only thing that
+    // retires the affordance once the branch exists.
+    await act(async () => {
+      await testState.latestChatEditorProps?.onCreateWorktreeBranch?.(
+        'feat/new',
+      );
+    });
+    await flush();
+    expect(mockSessionActions.createWorktreeBranch).toHaveBeenCalledWith(
+      'feat/new',
+    );
+    expect(
+      testState.latestChatEditorProps?.onCreateWorktreeBranch,
+    ).toBeUndefined();
+
+    // Handoff to local: the null worktree clears the association.
+    await act(async () => {
+      await testState.latestChatEditorProps?.onHandoff?.('local');
+    });
+    await flush();
+    expect(mockSessionActions.handoffWorktree).toHaveBeenCalledWith('local');
+    expect(testState.latestChatEditorProps?.gitWorktree).toBe(false);
+    expect(testState.latestChatEditorProps?.gitCwd).toBeUndefined();
+  });
+
+  it('ignores a handoff response that lands after a session switch', async () => {
+    mockConnection.sessionId = 'session-1';
+    mockConnection.workspaceCwd = '/workspace';
+    mockWorkspace.client.sessionStatus.mockResolvedValue({ worktree: null });
+    mockWorkspace.capabilities = {
+      features: ['session_worktree_handoff_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.onHandoff).toBeDefined();
+    });
+    expect(testState.latestChatEditorProps?.gitWorktree).toBe(false);
+
+    let resolveHandoff!: (value: unknown) => void;
+    mockSessionActions.handoffWorktree.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveHandoff = resolve;
+        }),
+    );
+    let pending: Promise<void> | undefined;
+    act(() => {
+      pending = testState.latestChatEditorProps?.onHandoff?.('worktree');
+    });
+    // The user switches sessions while the request is in flight; the
+    // response belongs to the old session and must not apply.
+    mockConnection.sessionId = 'session-2';
+    resolveHandoff({
+      sessionId: 'session-1',
+      worktree: { slug: 'stale', path: '/stale', branch: '' },
+      currentCwd: '/stale',
+    });
+    await act(async () => {
+      await pending;
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitWorktree).toBe(false);
+    mockConnection.sessionId = 'session-1';
   });
 
   it('re-arms the worktree default on New chat from an empty draft', async () => {

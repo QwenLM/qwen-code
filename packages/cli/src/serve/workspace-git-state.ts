@@ -82,9 +82,13 @@ function sameWorkingTreeStatus(
   // branch is compared even though materialize() overlays the watcher branch:
   // a status.branch delta is the first signal of a checkout the watcher has
   // not yet seen — publishing is intentionally conservative.
+  // hasHead compares with ?? true: the field is optional on the wire and a
+  // one-sided absence must not read as a change (the first-commit transition
+  // false → true is exactly the delta the worktree default waits for).
   return (
     a.branch === b.branch &&
     a.detached === b.detached &&
+    (a.hasHead ?? true) === (b.hasHead ?? true) &&
     a.hasUpstream === b.hasUpstream &&
     a.ahead === b.ahead &&
     a.behind === b.behind &&

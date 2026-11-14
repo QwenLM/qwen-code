@@ -166,6 +166,11 @@ export async function cleanupStaleAgentWorktrees(
         `Removed stale agent worktree ${worktreePath} but kept branch ` +
           `${worktreeBranchForSlug(entry.name)} (unmerged commits at delete time)`,
       );
+    } else if (result.branchSkipped) {
+      debugLogger.warn(
+        `Removed stale agent worktree ${worktreePath} but kept branch ` +
+          `${worktreeBranchForSlug(entry.name)} (checkout no longer on it)`,
+      );
     } else {
       debugLogger.debug(`Removed stale agent worktree ${worktreePath}`);
     }

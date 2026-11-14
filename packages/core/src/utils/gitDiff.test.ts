@@ -1305,13 +1305,17 @@ describe('parseStatusBranchLine', () => {
   });
 
   it('reads the branch from an unborn / initial-commit header', () => {
+    // hasHead:false is the single fact the worktree-eligibility gate rests
+    // on; pin it explicitly so flipping the arm cannot stay green.
     expect(parseStatusBranchLine('## No commits yet on main')).toMatchObject({
       branch: 'main',
       detached: false,
+      hasHead: false,
     });
     expect(parseStatusBranchLine('## Initial commit on dev')).toMatchObject({
       branch: 'dev',
       detached: false,
+      hasHead: false,
     });
   });
 });

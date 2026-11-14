@@ -468,5 +468,13 @@ export async function executeWorktreeCleanup(
         sidecar.worktreeBranch,
       )} reason=unmerged commits`,
     );
+  } else if (result.branchSkipped) {
+    logWarning(
+      `worktree cleanup removed checkout but kept branch action=delete session=${safeLogValue(
+        sessionId,
+      )} slug=${safeLogValue(sidecar.slug)} branch=${safeLogValue(
+        sidecar.worktreeBranch,
+      )} reason=checkout no longer on it`,
+    );
   }
 }

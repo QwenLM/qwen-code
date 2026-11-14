@@ -282,6 +282,33 @@ describe('POST /session/:id/worktree-branch', () => {
       .send({ name: 'feat/x' });
 
     expect(res.status).toBe(404);
+    // The route's own typed refusal, not Express's default HTML 404 if
+    // the registration were dropped.
+    expect(res.body.code).toBe('session_not_found');
+  });
+
+  it('refuses a legacy sidecar without workspaceCwd with 409', async () => {
+    const fixture = makeFixture();
+    await fixture.createDetachedWorktree();
+    await writeWorktreeSession(
+      fixture.sessionService.getWorktreeSessionPath(fixture.sessionId),
+      {
+        slug: fixture.slug,
+        worktreePath: fixture.worktreeDir,
+        worktreeBranch: '',
+        originalCwd: fixture.workspaceDir,
+        originalBranch: 'main',
+        originalHeadCommit: git(fixture.workspaceDir, 'rev-parse', 'HEAD'),
+      },
+    );
+    fixture.writeTranscript();
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-branch`)
+      .send({ name: 'feat/x' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('worktree_branch_unsupported');
   });
 
   it('refuses a superseded sidecar (checkout moved to a replacement)', async () => {
