@@ -2853,6 +2853,8 @@ export default {
     "No s'han pogut carregar les estadístiques. Premeu r per tornar-ho a provar.",
   '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
     "⚠️ Buit a l'historial: la conversa anterior s'ha perdut abans d'aquest punt (interrupció d'emmagatzematge) i no s'ha pogut recuperar.",
+  '⚠️ Earlier conversation was not loaded: this session is too large to restore in full, so only its most recent part is shown.':
+    "⚠️ La conversa anterior no s'ha carregat: aquesta sessió és massa gran per restaurar-la sencera i només se'n mostra la part més recent.",
 
   // ============================================================================
   // Tasques programades (cron)

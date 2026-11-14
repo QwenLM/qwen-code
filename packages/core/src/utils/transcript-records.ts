@@ -60,9 +60,17 @@ export interface UserTranscriptDisplayProjection<TPart = unknown> {
   readonly parts: readonly TPart[];
 }
 
+/**
+ * `transcript_window`: the parent is still on disk, before the window that an
+ * over-size transcript is indexed from.
+ */
+export type TranscriptGapReason = 'transcript_window';
+
 export interface TranscriptReplayGapInput {
   readonly childUuid: string;
   readonly missingParentUuid: string;
+  /** Absent when the parent is not in the file at all. */
+  readonly reason?: TranscriptGapReason;
 }
 
 export interface PreparedTranscriptRecords {
