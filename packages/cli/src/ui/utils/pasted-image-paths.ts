@@ -16,8 +16,8 @@ const PASTED_IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp)$/i;
  * space/newline-separated for multiple files) instead of routing through our
  * own Ctrl+V handler. Recognizing those lets Cmd+V (terminal-driven) converge
  * on the same attachment UX as Ctrl+V. Mirrors Claude Code's usePasteHandler:
- * split on newlines and on spaces that precede an absolute path (spaces inside
- * a path are shell-escaped), then normalize each token.
+ * split on newlines and on spaces that precede a path outside quotes, while
+ * preserving quoted or shell-escaped spaces, then normalize each token.
  *
  * @returns `imagePaths` (normalized tokens with an image extension) and
  *   `allImages` (true only when every token is such a path), so the caller can
@@ -27,11 +27,37 @@ export function classifyPastedImagePaths(pasted: string): {
   imagePaths: string[];
   allImages: boolean;
 } {
-  const tokens = pasted
-    .split(/ (?=@?\/|@?[A-Za-z]:\\)/)
-    .flatMap((part) => part.split('\n'))
-    .map((token) => token.trim())
-    .filter(Boolean);
+  const input = pasted.trim();
+  const tokens: string[] = [];
+  const pathStart = /@?["']?(?:\/|[A-Za-z]:\\|\\\\|file:)/iy;
+  let start = 0;
+  let quote = '';
+  for (let i = 0; i < input.length; i++) {
+    const char = input[i];
+    if (quote) {
+      if (char === quote) quote = '';
+      continue;
+    }
+    if (
+      (char === '"' || char === "'") &&
+      (i === start || (i === start + 1 && input[start] === '@'))
+    ) {
+      quote = char;
+      continue;
+    }
+    if (char === '\\' && input[i + 1] === ' ') {
+      i++;
+      continue;
+    }
+    if (char !== '\n' && char !== ' ') continue;
+    pathStart.lastIndex = i + 1;
+    if (char === ' ' && !pathStart.test(input)) continue;
+    const token = input.slice(start, i).trim();
+    if (token) tokens.push(token);
+    start = i + 1;
+  }
+  const lastToken = input.slice(start).trim();
+  if (lastToken) tokens.push(lastToken);
   const imagePaths: string[] = [];
   let allImages = tokens.length > 0;
   for (const token of tokens) {

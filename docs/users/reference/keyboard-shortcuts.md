@@ -55,6 +55,10 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `Ctrl+Z`                                              | Undo the last input edit.                                                                                                                                                                                                                                                                                                 |
 | `Ctrl+Shift+Z`                                        | Redo the last undone input edit.                                                                                                                                                                                                                                                                                          |
 
+### Pasting image paths
+
+When your terminal pastes image file paths as text, you can paste several absolute paths separated by spaces or newlines. Wrap each path containing spaces in single or double quotes, or use shell-escaped spaces. For example, `"/images/first shot.png" "/images/second shot.jpg"` attaches both images. A paste containing other text stays on the normal text-input path; remote `file://` hosts and UNC shares are not promoted to image attachments.
+
 ## Foreground Shell
 
 These shortcuts apply while an interactive foreground shell command is running.
