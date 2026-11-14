@@ -234,7 +234,25 @@ describe('FileManagedSessionInbox', () => {
       const input = userMessage('long-lived');
       await inbox.admit(input, limits);
       await inbox.markActivationReady(input);
-      for (let epoch = 1; epoch <= 1024; epoch++) {
+      // Each fence append is one fsync'd journal line. A fixed 1024-epoch
+      // loop crossed the 64 KiB compaction threshold with room to spare on
+      // a fast disk, but on the fleet's container storage each fsync costs
+      // tens of milliseconds and the loop alone outlasted the flat 60s
+      // budget (#16937: three 60s timeouts, no assertion). Derive the epoch
+      // count from one measured entry instead — guaranteed to cross the
+      // compaction boundary with margin, at a fraction of the durable
+      // appends.
+      await inbox.beginProcessing(input, activationFence(input.messageId, 1));
+      const firstEntry = (await readFile(filePath, 'utf8'))
+        .trimEnd()
+        .split('\n')
+        .pop()!;
+      const perEntryBytes = Buffer.byteLength(firstEntry) + 1;
+      const epochs = Math.max(
+        64,
+        Math.ceil((MANAGED_JOURNAL_COMPACT_BYTES * 1.25) / perEntryBytes),
+      );
+      for (let epoch = 2; epoch <= epochs; epoch++) {
         await inbox.beginProcessing(
           input,
           activationFence(input.messageId, epoch),
@@ -254,13 +272,13 @@ describe('FileManagedSessionInbox', () => {
       await expect(
         reopened.finish(
           input,
-          activationFence(input.messageId, 1023),
+          activationFence(input.messageId, epochs - 1),
           'completed',
         ),
       ).rejects.toBeInstanceOf(ManagedSessionMessageStaleFenceError);
       await reopened.finish(
         input,
-        activationFence(input.messageId, 1024),
+        activationFence(input.messageId, epochs),
         'completed',
       );
       expect((await openInbox()).get(input)?.state).toBe('finished');
