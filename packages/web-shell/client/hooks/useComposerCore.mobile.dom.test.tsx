@@ -593,6 +593,44 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(document.activeElement).toBe(content);
   });
 
+  it.each([
+    { expanded: false, draft: '' },
+    { expanded: true, draft: '' },
+    { expanded: false, draft: '/fork ' },
+    { expanded: true, draft: '/fork ' },
+  ])(
+    'handles image source URLs in the touch composer (expanded: $expanded, draft: $draft)',
+    async ({ expanded, draft }) => {
+      mockTouchDevice();
+      await mount({ expanded });
+      act(() => latest!.setText(draft));
+      const image = new File(['png'], 'image.png', { type: 'image/png' });
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files: [image],
+          items: [],
+          types: ['Files', 'text/plain'],
+          getData: () => 'https://example.com/image.png',
+        },
+      });
+      act(() =>
+        container!
+          .querySelector(expanded ? '[data-expanded]' : 'textarea')!
+          .dispatchEvent(event),
+      );
+      await vi.waitFor(async () => {
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+        expect(latest!.pendingImageBatchCount).toBe(0);
+      });
+      expect(event.defaultPrevented).toBe(draft === '');
+      expect(latest!.pastedImages).toHaveLength(draft ? 0 : 1);
+      expect(latest!.mobileComposer!.value).toBe(draft);
+    },
+  );
+
   it('collects image-only paste and lets mixed text/image paste natively', async () => {
     mockTouchDevice();
     await mount();

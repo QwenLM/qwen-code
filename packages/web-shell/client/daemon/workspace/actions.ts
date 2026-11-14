@@ -6,7 +6,7 @@
 
 import {
   EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
-  type DaemonClient,
+  DaemonClient,
   type GoalControlRequest,
   type GoalSnapshotV2,
   type GoalStateResponse,
@@ -15,6 +15,7 @@ import { withActionTimeout } from '../timing.js';
 import { createDaemonRestRequest } from '../rest-request.js';
 import type {
   DaemonAutofixPrWatchList,
+  DaemonChannelObservedContacts,
   DaemonDirectoryListing,
   DaemonFileStat,
   DaemonGoal,
@@ -55,6 +56,17 @@ export function createDaemonWorkspaceActions({
   baseUrl,
   token,
 }: CreateDaemonWorkspaceActionsArgs): DaemonWorkspaceActions {
+  // Login cleanup must outlive disposal of the workspace transport.
+  const subscriptionRequest = async <T>(
+    run: (client: DaemonClient) => Promise<T>,
+  ): Promise<T> => {
+    const client = new DaemonClient({ baseUrl, token });
+    try {
+      return await run(client);
+    } finally {
+      client.dispose();
+    }
+  };
   const requestRest = (url: URL, init: RequestInit) =>
     createDaemonRestRequest(
       baseUrl,
@@ -62,6 +74,18 @@ export function createDaemonWorkspaceActions({
       getClient(),
     )(daemonRoutePath(url, baseUrl), init);
   return {
+    async setUiLanguage(language, scope, workspaceCwd) {
+      const client = requireClient(getClient, 'Change UI language failed');
+      if (scope === 'workspace' && !workspaceCwd) {
+        throw new Error('The selected workspace is unavailable');
+      }
+      return withActionTimeout(
+        scope === 'workspace' && workspaceCwd
+          ? client.workspaceByCwd(workspaceCwd).setUiLanguage(language)
+          : client.setUserLanguage(language),
+        'Change UI language timed out',
+      );
+    },
     async listSessions(options) {
       const client = requireClient(getClient, 'List sessions failed');
       const cwd = getWorkspaceCwd();
@@ -206,6 +230,35 @@ export function createDaemonWorkspaceActions({
       return { catalog, snapshot };
     },
 
+    async listChannelObservedContacts(workspaceId) {
+      requireClient(getClient, 'Load observed channel contacts failed');
+      const path = workspaceId
+        ? `/workspaces/${encodeURIComponent(workspaceId)}/channel/observed-contacts`
+        : '/workspace/channel/observed-contacts';
+      const res = await withActionTimeout(
+        requestRest(createDaemonRequestUrl(baseUrl, path), {
+          headers: createDaemonHeaders(token),
+        }),
+        'Load observed channel contacts timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, `GET ${path}`));
+      }
+      return (await res.json()) as DaemonChannelObservedContacts;
+    },
+
+    async listChannelEvents(query) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load channel events failed',
+      );
+      return withActionTimeout(
+        workspace.workspaceChannelEvents(query),
+        'Load channel events timed out',
+      );
+    },
+
     async upsertChannel(name, request) {
       const workspace = requireWorkspaceClient(
         getClient,
@@ -258,6 +311,56 @@ export function createDaemonWorkspaceActions({
         'Restart channel failed',
       );
       return workspace.restartWorkspaceChannel(name);
+    },
+
+    channelQrLogin: {
+      async start(name, clientId) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Start channel QR login failed',
+        );
+        return workspace.startWorkspaceChannelQrLogin(name, { clientId });
+      },
+
+      async state(loginId, clientId) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Load channel QR login failed',
+        );
+        return withActionTimeout(
+          workspace.workspaceChannelQrLogin(loginId, { clientId }),
+          'Load channel QR login timed out',
+        );
+      },
+
+      async cancel(loginId, clientId) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Cancel channel QR login failed',
+        );
+        return workspace.cancelWorkspaceChannelQrLogin(loginId, { clientId });
+      },
+
+      async release(loginId, clientId, workspaceCwd) {
+        // A raw REST call rather than the SDK method: the release must survive
+        // the document, and only `keepalive` does that. Same shape as
+        // detachDaemonClient, which exists for the same reason.
+        const cwd = workspaceCwd ?? getWorkspaceCwd();
+        if (!cwd) return;
+        const path = `/workspaces/${encodeURIComponent(cwd)}/channel-qr-logins/${encodeURIComponent(loginId)}`;
+        const headers: Record<string, string> = {
+          ...(createDaemonHeaders(token) as Record<string, string>),
+        };
+        if (clientId) headers['X-Qwen-Client-Id'] = clientId;
+        await requestRest(createDaemonRequestUrl(baseUrl, path), {
+          method: 'DELETE',
+          keepalive: true,
+          headers,
+        });
+      },
     },
 
     channelPairing: {
@@ -1147,6 +1250,48 @@ export function createDaemonWorkspaceActions({
         client.cancelDeviceFlow(deviceFlowId),
         'Cancel device flow timed out',
       );
+    },
+
+    activateSubscription(options) {
+      const { workspaceCwd, ...request } = options ?? {};
+      const workspace = requireWorkspaceClient(
+        getClient,
+        () => workspaceCwd ?? getWorkspaceCwd(),
+        'Connect Qwen Subscription failed',
+      );
+      return workspace.activateSubscription(request);
+    },
+
+    getSubscriptionConfig(options) {
+      return subscriptionRequest((client) =>
+        client.getSubscriptionConfig(options),
+      );
+    },
+    startSubscriptionLogin() {
+      return subscriptionRequest((client) => client.startSubscriptionLogin());
+    },
+    getSubscriptionLogin(id, options) {
+      return subscriptionRequest((client) =>
+        client.getSubscriptionLogin(id, options),
+      );
+    },
+    cancelSubscriptionLogin(id) {
+      return subscriptionRequest((client) =>
+        client.cancelSubscriptionLogin(id),
+      );
+    },
+    getSubscriptionUserInfo(options) {
+      return subscriptionRequest((client) =>
+        client.getSubscriptionUserInfo(options),
+      );
+    },
+    getSubscriptionDefaultModel(options) {
+      return subscriptionRequest((client) =>
+        client.getSubscriptionDefaultModel(options),
+      );
+    },
+    signOutSubscription() {
+      return subscriptionRequest((client) => client.signOutSubscription());
     },
 
     async getAuthStatus() {

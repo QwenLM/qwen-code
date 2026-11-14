@@ -253,7 +253,8 @@ function summarizeTranscript(
       if (
         payload?.uiEvent &&
         payload.uiEvent['event.name'] !== 'request_lifecycle' &&
-        payload.uiEvent['event.name'] !== 'tool_lifecycle'
+        payload.uiEvent['event.name'] !== 'tool_lifecycle' &&
+        payload.uiEvent['event.name'] !== 'hook_lifecycle'
       ) {
         telemetry.addEvent(payload.uiEvent);
         hasEvents = true;
