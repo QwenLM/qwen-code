@@ -627,7 +627,8 @@ final class AgentSessionPolicies {
         if (!supported || session.agentDefinitionDigest() != null && !agentDefinitionSupported
                 || !workspaceFilesEnabled || !WorkspaceToolProfiles.supportsApprovalSelection(session)
                 || WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
-                        && (!workspaces.externalFilesAllowed(session.workspace()) || sessionQueries.findChildLineage(tenantId, sessionId) != null)
+                        && (!ExternalWorkspaceSessionPolicies.externalFilesAllowedOrRefuse(workspaces, session.workspace())
+                                || sessionQueries.findChildLineage(tenantId, sessionId) != null)
                 || WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !workspaceShellEnabled) {
             throw new ManagedAgentException(409, "unsupported_feature", "Approval selection is unavailable");
         }
