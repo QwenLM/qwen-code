@@ -143,6 +143,19 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
+const mockTakeUsageStatisticsNotice = vi.hoisted(() =>
+  vi.fn().mockReturnValue(null),
+);
+vi.mock(
+  './nonInteractive/usage-statistics-notice.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('./nonInteractive/usage-statistics-notice.js')
+    >()),
+    takeUsageStatisticsNotice: mockTakeUsageStatisticsNotice,
+  }),
+);
+
 const mockGetCommands = vi.hoisted(() => vi.fn());
 const mockGetCommandsForMode = vi.hoisted(() => vi.fn());
 const mockCommandServiceCreate = vi.hoisted(() => vi.fn());
@@ -1226,6 +1239,113 @@ describe('runNonInteractive', () => {
       }
     },
   );
+
+  describe('usage statistics notice', () => {
+    const notice = 'usage statistics notice text';
+    const finished: ServerLlmStreamEvent = {
+      type: LlmEventType.Finished,
+      value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+    };
+
+    beforeEach(() => {
+      setupMetricsMock();
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([finished]),
+      );
+    });
+
+    it('emits nothing when no notice is pending', async () => {
+      await runNonInteractive(mockConfig, mockSettings, 'test', 'notice-none');
+      expect(mockTakeUsageStatisticsNotice).toHaveBeenCalled();
+      expect(processStderrSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('usage statistics'),
+      );
+    });
+
+    it('emits the notice before the error result when Mod startup fails', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);
+      mockTakeUsageStatisticsNotice.mockReturnValueOnce(notice);
+      vi.spyOn(ModSession, 'create').mockReturnValue({
+        initialize: vi.fn().mockRejectedValue(new Error('mod startup failed')),
+        close: vi.fn().mockResolvedValue(undefined),
+        flushOutput: vi.fn().mockResolvedValue(undefined),
+        flushLogs: vi.fn(),
+        syncSession: vi.fn().mockResolvedValue(undefined),
+        hasToolHooks: false,
+        toolCall: () => undefined,
+        takeSubmittedPrompt: () => undefined,
+        discardSubmittedPrompts: () => {},
+        notePersonPrompt: vi.fn(),
+      } as unknown as ModSession);
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'test',
+        'notice-mod-fail',
+      ).catch(() => undefined);
+
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      const messages: Array<{ type?: string; subtype?: string }> =
+        JSON.parse(stdout);
+      const types = messages.map((m) => `${m.type}/${m.subtype ?? ''}`);
+      expect(types[0]).toBe('system/init');
+      const noticeIndex = types.indexOf('system/usage_statistics_notice');
+      const resultIndex = types.findIndex((t) => t.startsWith('result/'));
+      expect(noticeIndex).toBeGreaterThan(0);
+      expect(resultIndex).toBeGreaterThan(noticeIndex);
+    });
+
+    it('writes the notice to stderr in text mode', async () => {
+      mockTakeUsageStatisticsNotice.mockReturnValueOnce(notice);
+      await runNonInteractive(mockConfig, mockSettings, 'test', 'notice-text');
+      expect(processStderrSpy).toHaveBeenCalledWith(`${notice}\n`);
+      const stdout = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      expect(stdout).not.toContain(notice);
+    });
+
+    it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+      'emits the notice as a system message after init in %s mode',
+      async (format) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+        mockTakeUsageStatisticsNotice.mockReturnValueOnce(notice);
+        await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'test',
+          'notice-json',
+        );
+        expect(processStderrSpy).not.toHaveBeenCalledWith(`${notice}\n`);
+        const stdout = processStdoutSpy.mock.calls
+          .map((call) => String(call[0]))
+          .join('');
+        const messages: Array<{
+          type?: string;
+          subtype?: string;
+          data?: unknown;
+        }> =
+          format === OutputFormat.JSON
+            ? JSON.parse(stdout)
+            : stdout
+                .trim()
+                .split('\n')
+                .map((line) => JSON.parse(line));
+        const initIndex = messages.findIndex(
+          (m) => m.type === 'system' && m.subtype === 'init',
+        );
+        const noticeIndex = messages.findIndex(
+          (m) => m.type === 'system' && m.subtype === 'usage_statistics_notice',
+        );
+        expect(initIndex).toBe(0);
+        expect(noticeIndex).toBeGreaterThan(initIndex);
+        expect(messages[noticeIndex].data).toEqual({ notice });
+      },
+    );
+  });
 
   it('repairs a discarded tool when a drain attempt falls back models', async () => {
     vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.JSON);

@@ -78,9 +78,8 @@ import { sanitizeHookName } from '../sanitize.js';
 import { InstallationManager } from '../../config/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
+import { USAGE_STATS_HOSTNAME } from '../constants.js';
 
-// Usage statistics collection endpoint
-const USAGE_STATS_HOSTNAME = 'gb4w8c3ygj-default-sea.rum.aliyuncs.com';
 const USAGE_STATS_PATH = '/';
 
 /**

@@ -206,6 +206,11 @@ import {
   insertAfterFunctionResponses,
 } from './nonInteractive/nonInteractiveHelpers.js';
 import { LoopReason } from '@qwen-code/qwen-code-core/telemetry/types.js';
+import {
+  USAGE_STATISTICS_NOTICE_SUBTYPE,
+  recordUsageStatisticsNoticeShown,
+  takeUsageStatisticsNotice,
+} from './nonInteractive/usage-statistics-notice.js';
 import { formatLoopDetectedMessage } from './utils/loop-detected-message.js';
 import type { LoopStop } from './utils/loop-detected-message.js';
 
@@ -602,6 +607,15 @@ export async function runNonInteractive(
       adapter = new JsonOutputAdapter(config);
     }
     const ownsAdapter = options.adapter === undefined;
+    // Out-of-band notices: stderr in text mode so stdout stays the answer,
+    // a system message in the JSON modes.
+    const emitNotice = (subtype: string, notice: string) => {
+      if (outputFormat === OutputFormat.TEXT) {
+        process.stderr.write(`${notice}\n`);
+      } else {
+        adapter.emitSystemMessage(subtype, { notice });
+      }
+    };
     const modSession =
       options.modSession ?? ModSession.create(config, settings, adapter);
     const ownsModSession = options.modSession === undefined;
@@ -1218,12 +1232,29 @@ export async function runNonInteractive(
       process.on('SIGINT', shutdownHandler);
       process.on('SIGTERM', shutdownHandler);
 
+      // Headless runs render no auth dialog, so they never see the privacy
+      // notice link. The entry path decided before `config.initialize()`
+      // whether to disclose default-on usage statistics; text mode already
+      // printed it there, and the JSON modes deliver it right after `init`,
+      // on both the success and the failure path below.
+      const usageStatisticsNotice = takeUsageStatisticsNotice();
+      const emitUsageStatisticsNotice = () => {
+        if (!usageStatisticsNotice) return;
+        emitNotice(USAGE_STATISTICS_NOTICE_SUBTYPE, usageStatisticsNotice);
+        // Stream-JSON writes each message at once; buffered JSON records it
+        // when the document is written.
+        if (outputFormat !== OutputFormat.JSON) {
+          recordUsageStatisticsNoticeShown();
+        }
+      };
+
       try {
         await modSession?.initialize(abortController.signal);
       } catch (error) {
         adapter.emitMessage(
           await buildSystemMessage(config, sessionId, permissionMode, settings),
         );
+        emitUsageStatisticsNotice();
         modSession?.flushLogs();
         throw error;
       }
@@ -1262,6 +1293,8 @@ export async function runNonInteractive(
       );
       adapter.emitMessage(systemMessage);
       modSession?.flushLogs();
+
+      emitUsageStatisticsNotice();
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
@@ -1686,13 +1719,6 @@ export async function runNonInteractive(
       let initialParts = normalizePartList(initialPartList);
       let fullTurnModelOverride: string | undefined;
       let fullTurnRuntimeView: RuntimeContentGeneratorView | undefined;
-      const emitVisionNotice = (subtype: string, notice: string) => {
-        if (outputFormat === OutputFormat.TEXT) {
-          process.stderr.write(`${notice}\n`);
-        } else {
-          adapter.emitSystemMessage(subtype, { notice });
-        }
-      };
       if (
         inlineModelOverride === undefined &&
         shouldRunVisionBridge(config) &&
@@ -1712,7 +1738,7 @@ export async function runNonInteractive(
               .resolveForModel(fullTurnModelOverride.slice(0, -1), {
                 failClosed: true,
               });
-            emitVisionNotice(
+            emitNotice(
               'vision_routing',
               formatFullTurnVisionNotice(fullTurnModel),
             );
@@ -1728,7 +1754,7 @@ export async function runNonInteractive(
               bridgeResult.status !== 'skipped' ||
               bridgeResult.egressOccurred
             ) {
-              emitVisionNotice(
+              emitNotice(
                 'vision_bridge',
                 formatVisionBridgeNotice(bridgeResult),
               );
@@ -1743,7 +1769,7 @@ export async function runNonInteractive(
                 error instanceof Error ? error.message : String(error)
               }`,
             );
-            emitVisionNotice(
+            emitNotice(
               'vision_bridge_failed',
               'Vision bridge failed; proceeding without the image(s).',
             );

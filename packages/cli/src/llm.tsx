@@ -1609,6 +1609,13 @@ export async function main() {
           ),
         );
       }
+      // Disclose default-on usage statistics before `config.initialize()`
+      // sends the first event, so a run that exits early (no auth, a crash)
+      // still names the collection host and the opt-out (#17052).
+      const { discloseUsageStatisticsForHeadlessRun } = await import(
+        './nonInteractive/usage-statistics-notice.js'
+      );
+      discloseUsageStatisticsForHeadlessRun(config, settings);
     }
 
     // For non-stream-json mode, initialize config here. Stream-json defers

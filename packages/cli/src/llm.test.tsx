@@ -176,6 +176,7 @@ vi.mock('./config/config.js', () => ({
     getQuestion: vi.fn(() => ''),
     isInteractive: () => false,
     isProjectHooksPendingApproval: () => false,
+    getUsageStatisticsEnabled: () => false,
     isLspEnabled: () => false,
     getLspClient: () => undefined,
     getWarnings: vi.fn(() => []),
@@ -587,6 +588,7 @@ describe('llm.tsx main function', () => {
       return {
         isInteractive: () => false,
         isProjectHooksPendingApproval: () => false,
+        getUsageStatisticsEnabled: () => false,
         getQuestion: () => '',
         getSandbox: () => false,
         getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -700,6 +702,7 @@ describe('llm.tsx main function', () => {
       return {
         isInteractive: () => false,
         isProjectHooksPendingApproval: () => false,
+        getUsageStatisticsEnabled: () => false,
         getQuestion: () => '',
         getSandbox: () => false,
         getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -792,6 +795,7 @@ describe('llm.tsx main function', () => {
         ({
           isInteractive: () => false,
           isProjectHooksPendingApproval: () => false,
+          getUsageStatisticsEnabled: () => false,
           getQuestion: () => '',
           getSandbox: () => false,
           getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -910,6 +914,7 @@ describe('llm.tsx main function', () => {
         ({
           isInteractive: () => false,
           isProjectHooksPendingApproval: () => false,
+          getUsageStatisticsEnabled: () => false,
           getQuestion: () => '',
           getSandbox: () => false,
           getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -1015,6 +1020,7 @@ describe('llm.tsx main function', () => {
         ({
           isInteractive: () => false,
           isProjectHooksPendingApproval: () => false,
+          getUsageStatisticsEnabled: () => false,
           getQuestion: () => '',
           getSandbox: () => false,
           getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -1870,6 +1876,7 @@ describe('llm.tsx main function', () => {
     const configStub = {
       isInteractive: () => false,
       isProjectHooksPendingApproval: () => false,
+      getUsageStatisticsEnabled: () => false,
       getQuestion: () => 'bare prompt',
       getSandbox: () => false,
       getApprovalMode: () => ApprovalMode.DEFAULT,
@@ -2114,6 +2121,146 @@ describe('llm.tsx main function', () => {
         'Invalid JSON in .lsp.json; existing LSP runtime state is unchanged.',
       );
     });
+  });
+
+  it('discloses usage statistics before config initialization, even when auth then fails', async () => {
+    const originalNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
+    const originalIsTTY = Object.getOwnPropertyDescriptor(
+      process.stdin,
+      'isTTY',
+    );
+    process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    Object.defineProperty(process.stdin, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const validatorModule = await import('./validateNonInterActiveAuth.js');
+    const nonInteractiveModule = await import('./nonInteractiveCli.js');
+    const noticeModule = await import(
+      './nonInteractive/usage-statistics-notice.js'
+    );
+    const initializerModule = await import('./core/initializer.js');
+    const startupWarningsModule = await import('./utils/startupWarnings.js');
+    const userStartupWarningsModule = await import(
+      './utils/userStartupWarnings.js'
+    );
+
+    vi.mocked(cleanupModule.runExitCleanup).mockResolvedValue(undefined);
+    vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      memoryFileCount: 0,
+    });
+    vi.spyOn(startupWarningsModule, 'getStartupWarnings').mockResolvedValue([]);
+    vi.spyOn(
+      userStartupWarningsModule,
+      'getUserStartupWarnings',
+    ).mockResolvedValue([]);
+    const runNonInteractiveSpy = vi
+      .spyOn(nonInteractiveModule, 'runNonInteractive')
+      .mockResolvedValue(0);
+
+    const order: string[] = [];
+    const discloseSpy = vi
+      .spyOn(noticeModule, 'discloseUsageStatisticsForHeadlessRun')
+      .mockImplementation(() => {
+        order.push('disclose');
+      });
+    const configStub = {
+      isInteractive: () => false,
+      isProjectHooksPendingApproval: () => false,
+      getUsageStatisticsEnabled: () => true,
+      getQuestion: () => 'say hi',
+      getSandbox: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      getModelProvidersConfig: () => undefined,
+      initialize: vi.fn().mockImplementation(async () => {
+        order.push('initialize');
+      }),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getFailedMcpServerNames: () => [],
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getMemoryFileCount: () => 0,
+      getProjectRoot: () => '/',
+      getOutputFormat: () => OutputFormat.TEXT,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getContentGeneratorConfig: () => undefined,
+      getSessionId: () => 'test-session-id',
+      getProxy: () => undefined,
+    } as unknown as Config;
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: [],
+    } as unknown as CliArgs);
+    const settingsStub = {
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getSystemHooks: () => undefined,
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    };
+    vi.mocked(loadSettings).mockReturnValue(settingsStub as never);
+    vi.mocked(loadCliConfig).mockResolvedValue(configStub);
+    // The run #17052 captured: no auth type, so the process exits at the
+    // auth check, after `config.initialize()` has sent the first event.
+    vi.spyOn(validatorModule, 'validateNonInteractiveAuth').mockImplementation(
+      async () => {
+        order.push('auth');
+        throw new MockProcessExitError(1);
+      },
+    );
+
+    try {
+      await main();
+    } catch (error) {
+      if (!(error instanceof MockProcessExitError)) {
+        throw error;
+      }
+    } finally {
+      processExitSpy.mockRestore();
+      if (originalIsTTY) {
+        Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+      } else {
+        delete (process.stdin as { isTTY?: unknown }).isTTY;
+      }
+      if (originalNoRelaunch !== undefined) {
+        process.env['QWEN_CODE_NO_RELAUNCH'] = originalNoRelaunch;
+      } else {
+        delete process.env['QWEN_CODE_NO_RELAUNCH'];
+      }
+    }
+
+    expect(discloseSpy).toHaveBeenCalledWith(configStub, settingsStub);
+    expect(order).toEqual(['disclose', 'initialize', 'auth']);
+    expect(runNonInteractiveSpy).not.toHaveBeenCalled();
+    discloseSpy.mockRestore();
   });
 
   it('writes non-interactive warnings discovered during config initialization', async () => {
