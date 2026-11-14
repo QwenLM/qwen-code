@@ -116,7 +116,7 @@ interface Run {
 const PROMPT_TIMEOUT_MS = 60_000;
 
 /** What the session logs for each round it runs in a `runAgentLoop` call. */
-const SHARED_ROUND_LOG = 'model round on the shared agent loop';
+const SHARED_ROUND_LOG = 'round in its own runAgentLoop call';
 
 /**
  * The session's rounds the event-bus adapter ran, matched to the session's
@@ -127,7 +127,7 @@ function countKernelRounds(debugLog: string): number {
   const promptIds = new Set(
     Array.from(
       debugLog.matchAll(
-        /model round on the shared agent loop \(prompt ([^)]+)\)/g,
+        /round in its own runAgentLoop call \(prompt ([^)]+)\)/g,
       ),
       ([, promptId]) => promptId,
     ),

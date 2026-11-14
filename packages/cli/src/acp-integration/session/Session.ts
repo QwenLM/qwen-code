@@ -7653,7 +7653,7 @@ export class Session implements SessionContext {
               if (promptAdmission.blocked) {
                 // The first round reports the block without sending anything.
                 debugLogger.debug(
-                  `model round on the shared agent loop (prompt ${promptId})`,
+                  `round in its own runAgentLoop call (prompt ${promptId})`,
                 );
                 await runAgentLoop({
                   client: this.config.getLlmClient(),
@@ -8992,7 +8992,7 @@ export class Session implements SessionContext {
     const sendRound: typeof runModelRound = round.sharedToolBatch
       ? (_client, request, roundSignal, host) => {
           debugLogger.debug(
-            `model round on the shared agent loop (prompt ${request.promptId})`,
+            `round in its own runAgentLoop call (prompt ${request.promptId})`,
           );
           const loop = startSharedLoopRound(
             this.config.getLlmClient(),
