@@ -24563,6 +24563,54 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           ).not.toBe('2026-07-01T00:00:00.000Z');
         });
 
+        it('a repaired ring keeps failing closed for pre-corruption events', async () => {
+          // The repair latches separately and must NOT clear the unreadable
+          // verdict: the keys lost with the file stay unknown, so the public-
+          // duplicate suppression callers keep failing closed for them.
+          // Clearing the verdict globally would flip a pre-corruption event
+          // from "delivered" to "not delivered" and open the public path.
+          mkdirSync(dirname(boundDeliveredRingPath()), { recursive: true });
+          writeFileSync(boundDeliveredRingPath(), '{invalid json', 'utf-8');
+          await initChannel(commentOnlyConfig, { boundSessions });
+          boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+          setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+          seedCommentEntry();
+          mockPull({});
+          routeCommentPaginate();
+          mockOctokit.rest.issues.listComments.mockResolvedValue(
+            gapComments(3),
+          );
+          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockImplementation(() => true);
+          try {
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+          // The digest drained once via the repaired ring.
+          expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+          const ch = channel as unknown as {
+            boundDeliveredUnreadable: boolean;
+            boundDeliveredRepaired: boolean;
+            boundEventAlreadyDelivered: (envelope: unknown) => boolean;
+          };
+          // The repair is latched, but the unreadable verdict is NOT cleared.
+          expect(ch.boundDeliveredRepaired).toBe(true);
+          expect(ch.boundDeliveredUnreadable).toBe(true);
+          // A pre-corruption event (its key lost with the file) still reads as
+          // delivered for the suppression callers — fail-closed, not "not
+          // delivered" — so the public fallback stays suppressed.
+          expect(
+            ch.boundEventAlreadyDelivered({
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId: 'pre-corruption-event',
+            }),
+          ).toBe(true);
+        });
+
         it('a gap while comment watch is disabled does not arm the digest', async () => {
           await initChannel(
             { ...commentOnlyConfig, prCommentWatch: false },

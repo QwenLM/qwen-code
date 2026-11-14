@@ -1554,9 +1554,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private boundDeliveredOrder: string[] = [];
   /**
    * An unreadable ring cannot prove a negative: fail CLOSED for the public
-   * fallback (suppress it) rather than risk an irreversible duplicate.
+   * fallback (suppress it) rather than risk an irreversible duplicate. This
+   * verdict is NEVER cleared by a repair: the keys lost with the file stay
+   * unknown, so the suppression callers must keep failing closed for them.
    */
   private boundDeliveredUnreadable = false;
+  /**
+   * A successful ring write after a startup-unreadable ring. Lets the digest
+   * prove its OWN acceptance from the freshly written key without clearing
+   * boundDeliveredUnreadable (which would convert the lost history from
+   * "unknown" to "not delivered" and open the public-duplicate window for
+   * every pre-corruption event). Suppression stays fail-closed; only the
+   * digest's delivered check consults this latch.
+   */
+  private boundDeliveredRepaired = false;
   /**
    * Tasks retired privately during the current runInboundTask call (role
    * lost its match, siblings already delivered, ring suppression). Their
@@ -6579,12 +6590,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         `${JSON.stringify({ keys: this.boundDeliveredOrder })}\n`,
         { encoding: 'utf-8', mode: 0o600 },
       );
-      // A successful write repairs the ring: clear the unreadable flag so the
-      // digest's known-positive delivery check (and the suppression callers)
-      // see the ring as readable again. Otherwise a startup-unreadable ring
-      // would keep the digest's delivered check false forever, re-delivering
-      // the same backlog every poll even though each delivery repairs the file.
-      this.boundDeliveredUnreadable = false;
+      // A successful write repairs the ring for the digest's own acceptance
+      // check: latch the repair so the digest can prove its freshly written
+      // key. Do NOT clear boundDeliveredUnreadable — the keys lost with the
+      // file stay unknown, and the public-duplicate suppression callers must
+      // keep failing closed for them (clearing it would open an irreversible
+      // public-reply window for every pre-corruption event).
+      this.boundDeliveredRepaired = true;
     } catch (err) {
       process.stderr.write(
         `[Channel:${this.name}] failed to persist bound-delivered ring (in-memory suppression still active): ${sanitizeLogText(
@@ -8111,14 +8123,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // A retired verdict (e.g. preflight rejection) consumes the task
         // and returns settled WITHOUT recording a delivery: treat it as
         // unconsumed so the cursor never advances past members that were
-        // never delivered. The durable delivery ring is the evidence — and
-        // an UNREADABLE ring is unknown, not positive evidence, so it must
-        // hold the cursor too. The ring's fail-open direction is load-bearing
-        // for the suppression callers, so gate it at this site only.
+        // never delivered. The durable delivery ring is the evidence. An
+        // unreadable ring is unknown, not positive evidence — but once a
+        // successful write latches the repair, the digest may prove its OWN
+        // acceptance from the freshly written key. The unreadable verdict
+        // itself is never cleared: the suppression callers keep failing
+        // closed for the keys lost with the file (gate the repair here only).
         const delivered =
           settled &&
-          !this.boundDeliveredUnreadable &&
-          this.boundEventAlreadyDelivered(envelope);
+          (this.boundDeliveredUnreadable
+            ? this.boundDeliveredRepaired &&
+              this.boundDeliveredKeys.has(this.boundEventKey(envelope))
+            : this.boundEventAlreadyDelivered(envelope));
         if (!delivered) {
           // Undo the claim-time member recording: otherwise the next pass
           // filters every member as already dispatched, the empty candidate

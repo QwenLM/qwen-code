@@ -157,9 +157,14 @@ member keys>` (content-hash identity over what was actually delivered,
   that were never delivered and the next pass re-lists them. Without the undo,
   the claim-time keys would hide every member from the retry and the next pass's
   empty candidate set would consume the backlog with zero prompts. A successful
-  delivery rewrites the ring and clears the unreadable flag, so a
+  delivery rewrites the ring and LATCHES a separate repair flag, so a
   startup-unreadable ring is repaired by the first accepted digest and the
-  backlog drains once instead of re-delivering every poll.
+  backlog drains once instead of re-delivering every poll. The repair is gated
+  at the digest's delivered check only: the unreadable verdict itself is never
+  cleared, because the keys lost with the file stay unknown and the public-
+  duplicate suppression callers must keep failing closed for them — clearing it
+  globally would flip every pre-corruption event from "delivered" to "not
+  delivered" and open an irreversible public-reply window.
 - Cursor: commits `nowIso` (clearing the arm) when the dispatch delivered and
   nothing was omitted; holds before the backlog head (keeping the arm) when
   members were omitted; holds `since` (keeping the arm) when nothing was
@@ -250,7 +255,8 @@ backlog)` suite): gap digest vs per-comment no-gap, legacy cursor, interval
   in-process outage recovery, budget exhaustion, group sender allowlist,
   retired verdict (with a second poll after the gate clears), unreadable
   delivery ring, a repaired ring draining an accepted digest once over three
-  polls, size arm (neutral lead + omitted-tail arm + neutral follow-up lead),
+  polls, a repaired ring keeping the suppression fail-closed for pre-corruption
+  events, size arm (neutral lead + omitted-tail arm + neutral follow-up lead),
   a gap resetting a size-armed drain to the offline lead, disabled-watch
   no-arm, a disabled restart clearing a persisted arm before re-enable, a
   drained PR not re-armed when a later pass aborts, a held digest deduping
