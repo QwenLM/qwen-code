@@ -385,11 +385,16 @@ void memoryManager
   });
 ```
 
-Do not await either task and do not store their promises in
-`LlmClient.pendingMemoryTaskPromises`; ACP has no TUI `memory_saved` item to
-consume that queue. `MemoryManager` already tracks the work. The two rejection
-handlers are required to prevent unhandled background rejections, not to add a
-fallback path.
+Do not await either task. `MemoryManager` already tracks the work. The two
+rejection handlers are required to prevent unhandled background rejections, not
+to add a fallback path.
+
+The skill review queued by `runManagedAutoSkillReview()` is the one exception
+that does go through `LlmClient.pendingMemoryTaskPromises`: it is queued by the
+same client, so the ACP branch consumes and awaits that queue immediately after
+scheduling. Leaving it there would retain a promise for the life of a
+long-running `qwen serve` process, and ACP has no TUI `memory_saved` item to
+consume it.
 
 There is no new "once" field. The scheduling code has exactly one reachable
 callsite, after the one `#handleStopHookLoop()` that terminates a fresh logical
@@ -414,8 +419,10 @@ are both counted, matching the interactive path. No ACP-specific recent-tool
 collection is added.
 
 This also updates the method's existing tool-call count and skill-write marker.
-ACP does not invoke the interactive auto-skill scheduler, so this PR adds no ACP
-auto-skill behavior.
+The shared model round leaves auto-skill review to `LlmClient`, which runs it on
+its own tool turns; the legacy round never reaches that path, so the ACP branch
+that owns post-turn work calls `runManagedAutoSkillReview()` itself and drains
+the promise it queues.
 
 ## End-to-end flow
 
@@ -444,6 +451,7 @@ sequenceDiagram
     end
 
     S->>S: final MessageDisplay + Stop-hook loop
+    S->>G: runManagedAutoSkillReview(), then drain its queued promise
     S->>M: scheduleExtract(final history)
     S->>M: scheduleDream()
     S->>G: finishRecall()
@@ -454,10 +462,10 @@ sequenceDiagram
 
 ### Production
 
-| File                                                  | Change                                                                                                                                                                                                                                                                                     |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `packages/core/src/core/client.ts`                    | Extract the existing Recall begin/consume/finalize operations into public methods and migrate the current UserQuery/ToolResult callsites to them. No behavior change for interactive use.                                                                                                  |
-| `packages/cli/src/acp-integration/session/Session.ts` | Classify fresh user turns, call the shared Recall API, inject initial/refined results at safe send points, finalize Recall, preserve graceful loop-stop provenance, record completed tools, and schedule Extract/Dream once after clean completion of a turn that is not a channel prompt. |
+| File                                                  | Change                                                                                                                                                                                                                                                                                                                                                                               |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `packages/core/src/core/client.ts`                    | Extract the existing Recall begin/consume/finalize operations into public methods and migrate the current UserQuery/ToolResult callsites to them. Split `runManagedAutoSkillReview()` out of `runManagedAutoMemoryBackgroundTasks()` as a public method so a host that schedules the memory tasks itself can run the same skill-review gate. No behavior change for interactive use. |
+| `packages/cli/src/acp-integration/session/Session.ts` | Classify fresh user turns, call the shared Recall API, inject initial/refined results at safe send points, finalize Recall, preserve graceful loop-stop provenance, record completed tools, schedule auto-skill review and drain its queued promise, and schedule Extract/Dream once after clean completion of a turn that is not a channel prompt.                                  |
 
 No other production file should be necessary. In particular, do not add a file
 under `packages/core/src/memory/`: the memory algorithms and manager API already
@@ -589,8 +597,9 @@ cancellation listeners, terminal telemetry, and every future Recall change.
 Rejected. ACP has the authoritative complete-turn boundary, while
 `LlmClient.sendMessageStream()` is a physical model-send boundary in
 interactive flows. Forcing ACP to call the interactive background-task method
-would also enqueue TUI-only notification promises and couple this change to
-auto-skill scheduling.
+would also enqueue TUI-only notification promises and couple Extract and Dream
+to auto-skill scheduling. Auto-skill review is scheduled through its own public
+method instead, so the two stay independent.
 
 ### Consume refined Recall in `#buildNextMessageAfterToolRun()`
 
