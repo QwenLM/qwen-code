@@ -5,6 +5,11 @@ import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import { SystemMessage } from './SystemMessage';
+import {
+  createContextUsageMessageData,
+  serializeContextUsageMessage,
+} from './ContextUsageMessage';
+import type { DaemonSessionContextUsageStatus } from '@qwen-code/web-shell/daemon-react-sdk';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -33,6 +38,44 @@ function render(node: ReactNode, language: 'en' | 'zh-CN' = 'en'): HTMLElement {
 }
 
 describe('SystemMessage — prompt_cancelled marker', () => {
+  it('uses shared quota copy in the Chinese Desktop and VS Code message component', () => {
+    const container = render(
+      <SystemMessage
+        content="You've used up your weekly credits. Your credits are expected to reset in 3 hours. Please try again after the reset."
+        variant="error"
+        source="turn_error"
+        data={{
+          subscriptionQuota: {
+            type: 'subscription_quota',
+            memberType: 'pro',
+            resetAt: Math.floor(Date.now() / 1000) + 3 * 3600,
+          },
+        }}
+      />,
+      'zh-CN',
+    );
+    expect(container.textContent).toContain(
+      '周额度已用完，预计将于3小时后恢复，请在额度恢复后重试。',
+    );
+    expect(container.textContent).not.toContain('/upgrade');
+  });
+
+  it('preserves backend public text in the Chinese error component', () => {
+    const container = render(
+      <SystemMessage content="Backend public text" variant="error" />,
+      'zh-CN',
+    );
+    expect(container.textContent).toContain('Backend public text');
+  });
+  it('does not infer quota errors from backend message wording', () => {
+    const message =
+      "You've used up your weekly credits. Please try again after the reset.";
+    const container = render(
+      <SystemMessage content={message} variant="error" />,
+      'zh-CN',
+    );
+    expect(container.textContent).toContain(message);
+  });
   it.each([
     ['zh-CN', 10999, '你在 11s 后取消了请求'],
     ['zh-CN', 999, '你在 1s 后取消了请求'],
@@ -154,9 +197,17 @@ describe('SystemMessage — goal status', () => {
       );
 
       expect(container.textContent).toContain(title);
-      expect(container.textContent).toContain(reason);
+      expect(container.textContent).not.toContain(reason);
       expect(container.textContent).not.toContain('Goal aborted');
       expect(container.textContent).not.toContain('目标已中止');
+
+      const toggle = container.querySelector<HTMLButtonElement>(
+        'button[aria-expanded="false"]',
+      );
+      expect(toggle).not.toBeNull();
+      act(() => toggle?.click());
+      expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+      expect(container.textContent).toContain(reason);
     },
   );
 });
@@ -1036,4 +1087,82 @@ describe('background continuation', () => {
       ).toBe(`Background task ${status}`);
     },
   );
+});
+
+describe('SystemMessage — context usage instruction files', () => {
+  function contextUsageStatus(): DaemonSessionContextUsageStatus {
+    return {
+      v: 1,
+      sessionId: 's-1',
+      workspaceCwd: '/repo/.qwen/worktrees/task',
+      workspaceRoot: '/repo',
+      formattedText: '',
+      usage: {
+        modelName: 'm',
+        totalTokens: 50,
+        contextWindowSize: 100,
+        breakdown: {
+          systemPrompt: 10,
+          builtinTools: 10,
+          mcpTools: 0,
+          instructionFiles: 5,
+          memoryFiles: 0,
+          skills: 0,
+          messages: 25,
+          freeSpace: 40,
+          autocompactBuffer: 10,
+        },
+        builtinTools: [],
+        mcpTools: [],
+        instructionFiles: [
+          {
+            path: 'AGENTS.md',
+            tokens: 5,
+            absolutePath: '/repo/.qwen/worktrees/task/AGENTS.md',
+          },
+        ],
+        memoryFiles: [],
+        skills: [],
+        showDetails: true,
+      },
+    };
+  }
+
+  it('opens an instruction file through the admission root, like the panel', () => {
+    const status = contextUsageStatus();
+    const onOpenMemoryFile = vi.fn();
+    const container = render(
+      <SystemMessage
+        content={serializeContextUsageMessage(status)}
+        variant="info"
+        data={createContextUsageMessageData(status)}
+        onOpenMemoryFile={onOpenMemoryFile}
+      />,
+    );
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[title="AGENTS.md"]',
+    );
+    expect(button).not.toBeNull();
+    act(() => button!.click());
+    expect(onOpenMemoryFile).toHaveBeenCalledTimes(1);
+    expect(onOpenMemoryFile).toHaveBeenCalledWith(
+      status.usage.instructionFiles![0],
+      '/repo',
+    );
+  });
+
+  it('renders instruction rows as plain text when no opener is supplied', () => {
+    const status = contextUsageStatus();
+    const container = render(
+      <SystemMessage
+        content={serializeContextUsageMessage(status)}
+        variant="info"
+        data={createContextUsageMessageData(status)}
+      />,
+    );
+    expect(container.querySelector('button[title="AGENTS.md"]')).toBeNull();
+    expect(container.querySelector('[title="AGENTS.md"]')?.tagName).toBe(
+      'SPAN',
+    );
+  });
 });

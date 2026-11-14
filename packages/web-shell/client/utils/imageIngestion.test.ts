@@ -87,6 +87,25 @@ describe('image ingestion', () => {
     });
   });
 
+  it('claims an advertised file payload and reports unavailable paste data', () => {
+    const dataTransfer = transfer({ types: ['Files'] });
+    expect(extractFileTransfer(dataTransfer, 'paste')).toEqual({
+      claimed: true,
+      imageCandidates: [],
+      fileCandidates: [],
+      rejected: [{ reason: 'unavailable' }],
+    });
+    expect(extractFileTransfer(dataTransfer, 'drop').claimed).toBe(true);
+    expect(
+      extractFileTransfer(transfer({ types: ['text/plain'] }), 'paste'),
+    ).toEqual({
+      claimed: false,
+      imageCandidates: [],
+      fileCandidates: [],
+      rejected: [],
+    });
+  });
+
   it('reads supported files in selection order and reports lifecycle settlement', async () => {
     const first = new File(['first'], 'first.png', { type: 'image/png' });
     const second = new File(['second'], 'second.bmp', { type: 'image/x-bmp' });

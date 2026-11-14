@@ -1,0 +1,145 @@
+{
+  "contractVersion": 1,
+  "path": "/internal/managed-runtime/v3/terminals",
+  "runtimeSessionId": "runtime-session-1",
+  "cases": [
+    {
+      "name": "running-status",
+      "request": {
+        "protocolVersion": 1,
+        "runtimeSessionId": "runtime-session-1",
+        "operation": {
+          "kind": "terminal-status",
+          "operationId": "op-running-status",
+          "sessionKey": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "sessionId": "session-a"
+          },
+          "targetOperationId": "term-running"
+        }
+      },
+      "response": {
+        "protocolVersion": 1,
+        "runtimeSessionId": "runtime-session-1",
+        "operation": {
+          "operationId": "term-running",
+          "state": "running",
+          "unitName": "term-running"
+        }
+      }
+    },
+    {
+      "name": "released-terminate",
+      "request": {
+        "protocolVersion": 1,
+        "runtimeSessionId": "runtime-session-1",
+        "operation": {
+          "kind": "terminal-terminate",
+          "operationId": "op-released-terminate",
+          "sessionKey": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "sessionId": "session-a"
+          },
+          "targetOperationId": "term-release"
+        }
+      },
+      "response": {
+        "protocolVersion": 1,
+        "runtimeSessionId": "runtime-session-1",
+        "operation": {
+          "operationId": "term-release",
+          "state": "exited",
+          "evidence": {
+            "exitCode": 143,
+            "exitSignal": null
+          }
+        }
+      }
+    },
+    {
+      "name": "released-status",
+      "request": {
+        "protocolVersion": 1,
+        "runtimeSessionId": "runtime-session-1",
+        "operation": {
+          "kind": "terminal-status",
+          "operationId": "op-released-status",
+          "sessionKey": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "sessionId": "session-a"
+          },
+          "targetOperationId": "term-release"
+        }
+      },
+      "response": {
+        "protocolVersion": 1,
+        "runtimeSessionId": "runtime-session-1",
+        "operation": {
+          "operationId": "term-release",
+          "state": "exited",
+          "evidence": {
+            "exitCode": 143,
+            "exitSignal": null
+          }
+        }
+      }
+    },
+    {
+      "name": "failed-spawn-status",
+      "request": {
+        "protocolVersion": 1,
+        "runtimeSessionId": "runtime-session-1",
+        "operation": {
+          "kind": "terminal-status",
+          "operationId": "op-failed-spawn-status",
+          "sessionKey": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "sessionId": "session-a"
+          },
+          "targetOperationId": "term-failure"
+        }
+      },
+      "response": {
+        "protocolVersion": 1,
+        "runtimeSessionId": "runtime-session-1",
+        "operation": {
+          "operationId": "term-failure",
+          "state": "exited",
+          "evidence": {
+            "exitCode": 1,
+            "exitSignal": null
+          }
+        }
+      }
+    },
+    {
+      "name": "unknown-status",
+      "request": {
+        "protocolVersion": 1,
+        "runtimeSessionId": "runtime-session-1",
+        "operation": {
+          "kind": "terminal-status",
+          "operationId": "op-unknown-status",
+          "sessionKey": {
+            "tenantId": "tenant-a",
+            "workspaceId": "workspace-a",
+            "sessionId": "session-a"
+          },
+          "targetOperationId": "term-unknown"
+        }
+      },
+      "response": {
+        "protocolVersion": 1,
+        "runtimeSessionId": "runtime-session-1",
+        "operation": {
+          "operationId": "term-unknown",
+          "state": "unknown"
+        }
+      }
+    }
+  ]
+}

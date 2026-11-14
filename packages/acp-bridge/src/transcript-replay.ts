@@ -5,6 +5,11 @@
  */
 
 import {
+  parseHookLifecycle,
+  type HookLifecycleEvent,
+} from '@qwen-code/qwen-code-core/telemetry/hook-lifecycle-contract.js';
+
+import {
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   parseBackgroundNotificationTurn,
 } from './bridgeTypes.js';
@@ -32,6 +37,10 @@ import {
   EVENT_API_RESPONSE,
   EVENT_TOOL_CALL,
 } from '@qwen-code/qwen-code-core/telemetryConstants';
+// Node-free like the subpaths above: the compaction utils' only runtime
+// import is the pure shell-result helper, so the browser replay bundle
+// stays Node-free.
+import { compactToolResultDisplayForRecording } from '@qwen-code/qwen-code-core/utils/toolResultDisplayCompaction.js';
 import {
   GOAL_PAUSE_REASON_COMMAND,
   isGoalCheckpointBookkeepingRecord,
@@ -48,6 +57,7 @@ import type {
   SessionAgentAuthor,
   SessionAgentStep,
   SessionAgentTerminalStatus,
+  ToolResultDisplay,
 } from '@qwen-code/qwen-code-core';
 
 export const MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE =
@@ -840,6 +850,20 @@ export function parseExecutionLifecycle(
   };
 }
 
+export function createTranscriptHookLifecycleUpdate(
+  hookLifecycle: HookLifecycleEvent,
+  options: UpdateMetaOptions = {},
+): SessionUpdate {
+  return {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '' },
+    _meta: buildUpdateMeta({
+      ...options,
+      extra: { ...(options.extra ?? {}), hookLifecycle },
+    }),
+  } as SessionUpdate;
+}
+
 export function createTranscriptExecutionLifecycleUpdate(
   executionLifecycle: TranscriptExecutionLifecycle,
   options: UpdateMetaOptions = {},
@@ -1005,7 +1029,17 @@ export function createTranscriptToolCallResultUpdate(
   options: TranscriptToolCallResultOptions,
 ): SessionUpdate {
   const provenance = resolveToolProvenance(options.toolName);
-  const content = buildToolResultContent(options);
+  // Live results reach the daemon's replay journal uncompacted, and every
+  // session/load embeds that journal. A single edit of a large file carries
+  // the whole old and new file contents twice (diff content + rawOutput),
+  // which ballooned one observed load response to ~40 MB (#16171). Emit the
+  // same bounded display the recorder persists, so warm replay matches what
+  // cold replay from the transcript already shows. Idempotent for the
+  // already-sanitized displays cold replay passes in.
+  const resultDisplay = compactToolResultDisplayForRecording(
+    options.resultDisplay as ToolResultDisplay | undefined,
+  );
+  const content = buildToolResultContent({ ...options, resultDisplay });
   const update: Record<string, unknown> = {
     sessionUpdate: 'tool_call_update',
     toolCallId: options.callId,
@@ -1026,7 +1060,7 @@ export function createTranscriptToolCallResultUpdate(
       },
     }),
   };
-  const rawOutput = getReplayRawOutput(options.resultDisplay);
+  const rawOutput = getReplayRawOutput(resultDisplay);
   if (rawOutput !== undefined) update['rawOutput'] = rawOutput;
   return update as unknown as SessionUpdate;
 }
@@ -1723,6 +1757,15 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       if (!this.options.includeTiming) return;
       const payload = record.systemPayload;
       const uiEvent = isObjectRecord(payload) ? payload['uiEvent'] : undefined;
+      if (
+        isObjectRecord(uiEvent) &&
+        uiEvent['event.name'] === 'hook_lifecycle'
+      ) {
+        const lifecycle = parseHookLifecycle(uiEvent);
+        if (lifecycle)
+          yield emit(createTranscriptHookLifecycleUpdate(lifecycle, meta));
+        return;
+      }
       if (
         isObjectRecord(uiEvent) &&
         uiEvent['event.name'] === 'request_lifecycle'

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { userPromptTimestamp } from './last-user-prompt-time.js';
 import { shellResultText } from '../utils/shell-result.js';
 import type { SessionSourcesSnapshot } from './session-sources.js';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
@@ -11,6 +12,7 @@ import type { ContentBlock } from '@agentclientprotocol/sdk';
 import { type Config } from '../config/config.js';
 import type { ToolLifecycleRecord } from '../telemetry/tool-lifecycle.js';
 import type { RequestLifecycleRecord } from '../telemetry/request-lifecycle.js';
+import type { HookLifecycleRecord } from '../telemetry/hook-lifecycle-contract.js';
 import {
   backgroundTurnContext,
   type BackgroundNotificationTurn,
@@ -48,7 +50,13 @@ import {
 import { compactToolResultDisplayForRecording } from '../utils/toolResultDisplayCompaction.js';
 import { stripRuntimeSnapshotPrefix } from '../utils/runtimeModelPrefix.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
-import { tryGenerateSessionTitle } from './sessionTitle.js';
+import { modPromptTitleKey, tryGenerateSessionTitle } from './sessionTitle.js';
+import {
+  readSessionTitleSidecar,
+  sessionTitleSidecarPath,
+  truncateTitleForList,
+  writeSessionTitleSidecar,
+} from './session-title-sidecar.js';
 import type {
   ChatCompressionInfo,
   ToolCallResponseInfo,
@@ -79,7 +87,10 @@ import {
 } from '../utils/api-history-metadata.js';
 import { getStartupContextLength } from '../core/environmentContext.js';
 import { getRecordRewindId } from './session-api-history.js';
-import { computeInitialTurnFromHistory } from './session-turn-state.js';
+import {
+  collectSessionTurnState,
+  computeInitialTurnFromHistory,
+} from './session-turn-state.js';
 import {
   deleteTranscriptMessageGroups,
   getTranscriptMessageGroups,
@@ -301,10 +312,12 @@ export type ChatRecordProvenance =
   | 'goal_runtime'
   | 'system'
   /** Written on behalf of a workspace agent (session multi-agent). */
-  | 'external_agent';
+  | 'external_agent'
+  /** A prompt a Mod submitted with `$.prompt.submit`, not the person's. */
+  | 'mod_prompt';
 
 export type RecordToolResultOptions = {
-  subtype?: 'code_mode_tool_result';
+  subtype?: 'code_mode_tool_result' | 'tool_loop_end';
 } & (
   | {
       goalContext?: GoalTurnPermit;
@@ -315,6 +328,36 @@ export type RecordToolResultOptions = {
       provenance: 'goal_runtime' | 'execution_output';
     }
 );
+
+// A prompt a Mod submitted keeps its turn's place in the title projection but
+// offers the title nothing, since the user did not type it. It is `null`, not
+// `''`, so it does not switch the title to the projection on its own.
+function titleText(record: ChatRecord): string | null | undefined {
+  if (record.provenance === 'mod_prompt') return null;
+  return (record.systemPayload as UserPromptRecordPayload | undefined)
+    ?.displayText;
+}
+
+/**
+ * The label a transcript's first user turn supports, under the same policy
+ * the list reader uses to derive that label from an intact transcript: an
+ * explicitly empty `displayText` projection offers nothing and lets a later
+ * prompt label the session, a record without a projection falls back to its
+ * own text parts, and a Mod-submitted prompt is not filtered out (the reader
+ * does not filter it either). Both sidecar writers go through this one
+ * function so a live write and a resume seed cannot disagree.
+ */
+function firstPromptLabelText(record: ChatRecord): string | undefined {
+  const payload = record.systemPayload as UserPromptRecordPayload | undefined;
+  if (payload?.displayText !== undefined) {
+    return payload.displayText.trim() || undefined;
+  }
+  return (
+    record.message?.parts
+      ?.find((part): part is { text: string } => 'text' in part)
+      ?.text?.trim() || undefined
+  );
+}
 
 function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
   return {
@@ -423,6 +466,7 @@ export interface ChatRecord {
     | 'goal_runtime'
     | 'goal_turn_end'
     | 'code_mode_tool_result'
+    | 'tool_loop_end'
     | 'realtime_message'
     | 'turn_result'
     | 'turn_attempt'
@@ -612,6 +656,10 @@ export interface UserPromptRecordPayload {
   displayText: string;
   /** Sanitized hook context duplicated from the tagged model-bound part. */
   hookContext: string;
+  /** The Mod that submitted the prompt; the record's provenance says so too. */
+  mod?: string;
+  /** The Mod sent the prompt as the person's own words, so it is unframed. */
+  asUser?: true;
   /** UI-only annotations; interpreted by transcript consumers, not the model. */
   inputAnnotations?: unknown[];
   /** Daemon-owned attachment references used to restore prompt previews. */
@@ -904,7 +952,11 @@ export function sessionModelPayloadsEqual(
  * Stored payload for UI telemetry replay.
  */
 export interface UiTelemetryRecordPayload {
-  uiEvent: UiEvent | RequestLifecycleRecord | ToolLifecycleRecord;
+  uiEvent:
+    | UiEvent
+    | RequestLifecycleRecord
+    | ToolLifecycleRecord
+    | HookLifecycleRecord;
 }
 
 /**
@@ -1239,6 +1291,8 @@ export class ChatRecordingService {
   private topologyFence: TranscriptTopologyFence | undefined;
   private readonly deletedTelemetryPromptIds = new Set<string>();
   private readonly deletedTelemetryCallIds = new Set<string>();
+  private readonly invalidatedHookExecutions = new Set<string>();
+  private readonly pendingHookTurnParents = new Map<string, string | null>();
   /** First async JSONL write failure; permanently degrades this recorder. */
   private writeFailure: Error | undefined;
   private integrityFailure: Error | undefined;
@@ -1275,7 +1329,17 @@ export class ChatRecordingService {
   private currentSessionApprovalMode:
     | SessionApprovalModeRecordPayload
     | undefined;
-  private readonly userDisplayTextsForTitle: Array<string | undefined> = [];
+  private readonly userDisplayTextsForTitle: Array<string | null | undefined> =
+    [];
+  /**
+   * Set when the recorder attached through the projected restore, which
+   * carries no record stream. The session's first prompt (if any) is unknown
+   * there, so a later prompt must not become its label.
+   */
+  private firstPromptUnknown = false;
+  // The Mods' prompts as the model read them, which a title drawn from the
+  // conversation leaves out, as the projection does.
+  private readonly modPromptKeysForTitle = new Set<string>();
   /**
    * How many auto-title attempts have been made this process.
    *
@@ -1447,6 +1511,90 @@ export class ChatRecordingService {
     return conversationFile;
   }
 
+  private titleSidecarPath(): string {
+    return sessionTitleSidecarPath(this.ensureChatsDir(), this.getSessionId());
+  }
+
+  /**
+   * Keeps the session list label independent of the transcript's head. A
+   * transcript can be rebuilt without its first records (the writer recreates
+   * a missing file on the next append), and the list otherwise degrades to a
+   * bare session id. Managed logs own their metadata and are skipped.
+   */
+  private persistListTitle(
+    displayName: string,
+    source: 'manual' | 'auto' | 'prompt',
+  ): void {
+    if (this.managedSink) return;
+    try {
+      writeSessionTitleSidecar(this.titleSidecarPath(), displayName, source);
+    } catch {
+      // Best-effort: a missing sidecar must never fail a rename.
+    }
+  }
+
+  private persistPromptDerivedTitle(record: ChatRecord): void {
+    if (this.managedSink) return;
+    // The projected restore carries no record stream, so the session's first
+    // prompt is unknown. Inventing a label from a later prompt would name the
+    // session after the wrong turn as soon as its transcript loses its head.
+    if (this.firstPromptUnknown) return;
+    try {
+      const sidecarPath = this.titleSidecarPath();
+      // Any persisted label wins: a later prompt must not replace the first
+      // prompt's label, a rename, or an auto title. This also lets an
+      // image-only first prompt leave the slot open for the next text prompt.
+      if (readSessionTitleSidecar(sidecarPath)) return;
+      const text = firstPromptLabelText(record);
+      if (!text) return;
+      writeSessionTitleSidecar(
+        sidecarPath,
+        truncateTitleForList(text),
+        'prompt',
+      );
+    } catch {
+      // Best-effort: recording the prompt itself must not depend on the label
+      // sidecar, which can be unwritable (read-only home, partial Config).
+    }
+  }
+
+  /**
+   * Restores the list label from a resolved transcript on resume. Without
+   * this, sessions created before the sidecar existed (or before the current
+   * writer attached) would only gain one on their next prompt, which a resumed
+   * session never gets because the first prompt is already in its history.
+   */
+  private seedTitleSidecar(promptDisplayText?: string): void {
+    if (this.managedSink) return;
+    try {
+      const sidecarPath = this.titleSidecarPath();
+      const existing = readSessionTitleSidecar(sidecarPath);
+      const customTitle = this.currentCustomTitle?.trim();
+      if (customTitle) {
+        const source = this.currentTitleSource ?? 'manual';
+        if (
+          existing?.source === source &&
+          existing.displayName === customTitle
+        ) {
+          return;
+        }
+        writeSessionTitleSidecar(sidecarPath, customTitle, source);
+        return;
+      }
+      // An explicit name already on disk outranks a prompt-derived guess.
+      if (existing && existing.source !== 'prompt') return;
+      const prompt = promptDisplayText?.trim();
+      if (!prompt) return;
+      const label = truncateTitleForList(prompt);
+      if (existing?.source === 'prompt' && existing.displayName === label) {
+        return;
+      }
+      writeSessionTitleSidecar(sidecarPath, label, 'prompt');
+    } catch {
+      // Best-effort: a missing sidecar is a label gap, not a resume failure.
+    }
+  }
+
   private restoreSessionState(
     sessionData?: {
       conversation: { messages: ChatRecord[] };
@@ -1469,14 +1617,19 @@ export class ChatRecordingService {
     this.activeBranchBaseUuid = null;
     this.pendingBranchToolCalls = [];
     this.userDisplayTextsForTitle.length = 0;
+    this.modPromptKeysForTitle.clear();
+    this.firstPromptUnknown = false;
     if (!sessionData) return;
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
+    // Tracked separately from `userDisplayTextsForTitle`: that buffer keeps
+    // only the newest 20 prompts, so its head is not the session's first turn.
+    let firstPromptText: string | undefined;
     for (const record of sessionData.conversation.messages) {
       if (record.type === 'user' && record.subtype === undefined) {
-        this.trackUserDisplayTextForTitle(
-          (record.systemPayload as UserPromptRecordPayload | undefined)
-            ?.displayText,
-        );
+        this.trackTitleText(record);
+        if (firstPromptText === undefined) {
+          firstPromptText = firstPromptLabelText(record);
+        }
       }
       if (record.type !== 'system') continue;
       if (record.subtype === 'custom_title') {
@@ -1523,16 +1676,38 @@ export class ChatRecordingService {
     if (this.currentSourceType) {
       this.bytesSinceSourceAnchor = METADATA_REANCHOR_BYTES;
     }
+    this.seedTitleSidecar(firstPromptText);
   }
 
-  private trackUserDisplayTextForTitle(displayText: string | undefined): void {
-    this.userDisplayTextsForTitle.push(displayText);
+  private trackTitleText(record: ChatRecord): void {
+    this.userDisplayTextsForTitle.push(titleText(record));
     if (this.userDisplayTextsForTitle.length > MAX_TITLE_USER_DISPLAY_TEXTS) {
       this.userDisplayTextsForTitle.shift();
+    }
+    // A prompt sent as the person's words reads as theirs to the model too,
+    // and its bare text would also match a prompt the person typed alike.
+    const key =
+      record.provenance === 'mod_prompt' &&
+      !(record.systemPayload as UserPromptRecordPayload | undefined)?.asUser
+        ? modPromptTitleKey(record.message?.parts ?? [])
+        : undefined;
+    if (key?.trim()) {
+      // A key submitted again is the newest, so it is evicted last.
+      this.modPromptKeysForTitle.delete(key);
+      this.modPromptKeysForTitle.add(key);
+      // Only recent messages reach a title.
+      if (this.modPromptKeysForTitle.size > MAX_TITLE_USER_DISPLAY_TEXTS) {
+        const [oldest] = this.modPromptKeysForTitle;
+        this.modPromptKeysForTitle.delete(oldest!);
+      }
     }
   }
 
   private restoreProjectedState(state: ChatRecordingRestoreState): void {
+    // A projection only exists for a transcript that is already on disk, so
+    // the first prompt (if any) predates this recorder. No record stream is
+    // carried here, so the seed cannot recover it.
+    this.firstPromptUnknown = true;
     this.lastRecordUuid = state.lastCompletedUuid;
     this.lastPersistedRecordUuid = state.lastCompletedUuid;
     this.resetExternalRecordIndex();
@@ -1566,6 +1741,7 @@ export class ChatRecordingService {
     if (this.currentSourceType) {
       this.bytesSinceSourceAnchor = METADATA_REANCHOR_BYTES;
     }
+    this.seedTitleSidecar();
   }
 
   activate(
@@ -1743,6 +1919,9 @@ export class ChatRecordingService {
     legacyConversationFile?: string,
     updateActiveTail = true,
   ): Promise<void> {
+    const promptTime = userPromptTimestamp(record);
+    const changesPromptTime =
+      promptTime !== undefined || record.subtype === 'rewind';
     const pendingWrite = this.operationTail.then(async () => {
       if (this.writeFailure) throw this.writeFailure;
       const managedSink = this.managedSink;
@@ -1764,6 +1943,9 @@ export class ChatRecordingService {
         }
       } catch (error) {
         throw this.enterWriteFailure(error, record.sessionId);
+      }
+      if (changesPromptTime) {
+        this.notifyLastUserPromptRecorded(promptTime, record.sessionId);
       }
       if (managedSink) await this.anchorManagedMetadata(managedSink);
     });
@@ -2216,13 +2398,12 @@ export class ChatRecordingService {
         const active = prepareTranscriptRecords(records)
           .records as ChatRecord[];
         this.rebuildTurnBoundaries(active);
+        this.notifyLastUserPromptRecorded(undefined, this.getSessionId());
         this.userDisplayTextsForTitle.length = 0;
+        this.modPromptKeysForTitle.clear();
         for (const record of active) {
           if (record.type === 'user' && record.subtype === undefined) {
-            this.trackUserDisplayTextForTitle(
-              (record.systemPayload as UserPromptRecordPayload | undefined)
-                ?.displayText,
-            );
+            this.trackTitleText(record);
           }
         }
         return result;
@@ -2551,6 +2732,9 @@ export class ChatRecordingService {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
+        ...(promptPayload?.mod !== undefined && {
+          provenance: 'mod_prompt' as const,
+        }),
         executionContext: this.getExecutionContext(),
         ...(daemonPromptId ? { daemonPromptId } : {}),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
@@ -2560,18 +2744,34 @@ export class ChatRecordingService {
       };
       // Advance rewind associations only after the record is built, so a
       // rejected message cannot skew the projection.
-      this.trackUserDisplayTextForTitle(promptPayload?.displayText);
-      this.turnParentUuids.push(record.parentUuid ?? null);
-      this.turnPromptIds.push(getRecordRewindId(record));
+      this.trackTitleText(record);
+      const turnId = getRecordRewindId(record);
+      this.turnParentUuids.push(
+        turnId && this.pendingHookTurnParents.has(turnId)
+          ? this.pendingHookTurnParents.get(turnId)!
+          : (record.parentUuid ?? null),
+      );
+      if (turnId) this.pendingHookTurnParents.delete(turnId);
+      this.turnPromptIds.push(turnId);
       this.turnDaemonPromptIds.push(record.daemonPromptId);
       this.appendRecord(record);
+      // The sidecar write is best-effort and runs after the transcript
+      // append, so an unwritable label path can never drop the message. It
+      // only fills a missing label: a persisted prompt or custom title is
+      // never replaced by a later prompt.
+      this.persistPromptDerivedTitle(record);
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
     }
   }
 
-  getUserDisplayTextsForTitle(): ReadonlyArray<string | undefined> {
+  getUserDisplayTextsForTitle(): ReadonlyArray<string | null | undefined> {
     return this.userDisplayTextsForTitle;
+  }
+
+  /** The keys of the messages the Mods submitted, which a title leaves out. */
+  getModPromptKeysForTitle(): ReadonlySet<string> {
+    return this.modPromptKeysForTitle;
   }
 
   /** User turns in the active transcript: the boundaries `/rewind` uses. */
@@ -3091,6 +3291,7 @@ export class ChatRecordingService {
           this.config,
           controller.signal,
           this.userDisplayTextsForTitle,
+          this.modPromptKeysForTitle,
         );
         if (!outcome.ok) return;
         if (controller.signal.aborted) return;
@@ -3369,32 +3570,16 @@ export class ChatRecordingService {
       return pending;
     };
     const projectTurns = (records: readonly ChatRecord[]) => {
-      this.turnParentUuids = [];
-      this.turnPromptIds = [];
-      this.turnDaemonPromptIds = [];
+      const turns = collectSessionTurnState(records, this.getSessionId());
+      this.turnParentUuids = turns.turnParentUuids;
+      this.turnPromptIds = turns.turnPromptIds;
+      this.turnDaemonPromptIds = turns.turnDaemonPromptIds;
+      this.pendingHookTurnParents.clear();
       this.userDisplayTextsForTitle.length = 0;
+      this.modPromptKeysForTitle.clear();
       for (const record of records) {
-        if (
-          record.type === 'user' &&
-          ![
-            'goal_runtime',
-            'notification',
-            'cron',
-            'mid_turn_user_message',
-            'realtime_message',
-            'agent_mention',
-            'agent_message',
-          ].includes(record.subtype ?? '')
-        ) {
-          this.turnParentUuids.push(record.parentUuid ?? null);
-          this.turnPromptIds.push(getRecordRewindId(record));
-          this.turnDaemonPromptIds.push(record.daemonPromptId);
-        }
         if (record.type === 'user' && record.subtype === undefined)
-          this.trackUserDisplayTextForTitle(
-            (record.systemPayload as UserPromptRecordPayload | undefined)
-              ?.displayText,
-          );
+          this.trackTitleText(record);
       }
     };
     let committed = false;
@@ -3613,7 +3798,11 @@ export class ChatRecordingService {
    * Records a UI telemetry event for replaying metrics on resume.
    */
   recordUiTelemetryEvent(
-    uiEvent: UiEvent | RequestLifecycleRecord | ToolLifecycleRecord,
+    uiEvent:
+      | UiEvent
+      | RequestLifecycleRecord
+      | ToolLifecycleRecord
+      | HookLifecycleRecord,
   ): void {
     try {
       const record: ChatRecord = {
@@ -3622,7 +3811,24 @@ export class ChatRecordingService {
         subtype: 'ui_telemetry',
         systemPayload: { uiEvent },
       };
+      if (
+        uiEvent['event.name'] === 'hook_lifecycle' &&
+        uiEvent.sessionId !== record.sessionId
+      )
+        return;
       if (this.isDeletedTelemetry(record)) return;
+      if (uiEvent['event.name'] === 'hook_lifecycle') {
+        if (this.invalidatedHookExecutions.has(uiEvent.executionId)) return;
+        if (
+          !this.turnPromptIds.includes(uiEvent.promptId) &&
+          !this.pendingHookTurnParents.has(uiEvent.promptId)
+        ) {
+          this.pendingHookTurnParents.set(
+            uiEvent.promptId,
+            record.parentUuid ?? null,
+          );
+        }
+      }
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving ui telemetry record:', error);
@@ -3678,6 +3884,22 @@ export class ChatRecordingService {
         this.currentSessionApprovalMode =
           normalizeSessionApprovalModePayload(sessionApprovalMode);
       }
+      const removedPromptIds = new Set(
+        this.turnPromptIds.slice(targetTurnIndex),
+      );
+      for (const previous of this.activeBranchRecords) {
+        if (previous.subtype !== 'ui_telemetry') continue;
+        const event = (
+          previous.systemPayload as UiTelemetryRecordPayload | undefined
+        )?.uiEvent;
+        if (
+          event?.['event.name'] === 'hook_lifecycle' &&
+          removedPromptIds.has(event.promptId)
+        ) {
+          this.invalidatedHookExecutions.add(event.executionId);
+        }
+      }
+      this.pendingHookTurnParents.clear();
       // Re-root: point back to the record just before the target user turn.
       this.lastRecordUuid = this.turnParentUuids[targetTurnIndex] ?? null;
       const projectionStart = Math.max(
@@ -3757,36 +3979,43 @@ export class ChatRecordingService {
    */
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
     this.resetExternalRecordIndex();
-    this.turnParentUuids = [];
-    this.turnPromptIds = [];
-    this.turnDaemonPromptIds = [];
+    const turns = collectSessionTurnState(messages, this.getSessionId());
+    this.turnParentUuids = turns.turnParentUuids;
+    this.turnPromptIds = turns.turnPromptIds;
+    this.turnDaemonPromptIds = turns.turnDaemonPromptIds;
+    this.pendingHookTurnParents.clear();
     this.activeBranchRecords = [...messages];
     this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;
     this.pendingBranchToolCalls = collectPendingBranchToolCalls(messages);
 
-    for (let i = 0; i < messages.length; i++) {
-      const record = messages[i];
-      if (
-        record.type === 'user' &&
-        record.subtype !== 'goal_runtime' &&
-        record.subtype !== 'notification' &&
-        record.subtype !== 'cron' &&
-        record.subtype !== 'mid_turn_user_message' &&
-        record.subtype !== 'realtime_message' &&
-        record.subtype !== 'agent_mention' &&
-        record.subtype !== 'agent_message'
-      ) {
-        // Reconstructed histories can start mid-chain; the persisted edge is
-        // the source of truth, not the previous item in this sliced list.
-        this.turnParentUuids.push(record.parentUuid ?? null);
-        this.turnPromptIds.push(getRecordRewindId(record));
-        this.turnDaemonPromptIds.push(record.daemonPromptId);
-      }
-    }
     // Ensure lastRecordUuid points to the end of the reconstructed chain.
     if (messages.length > 0) {
       this.lastRecordUuid = messages[messages.length - 1].uuid;
       this.lastPersistedRecordUuid = this.lastRecordUuid;
+    }
+  }
+
+  private lastUserPromptRecordedCallback?: (
+    timestamp: string | undefined,
+    sessionId: string,
+  ) => void;
+
+  setLastUserPromptRecordedCallback(
+    callback:
+      | ((timestamp: string | undefined, sessionId: string) => void)
+      | undefined,
+  ): void {
+    this.lastUserPromptRecordedCallback = callback;
+  }
+
+  private notifyLastUserPromptRecorded(
+    timestamp: string | undefined,
+    sessionId: string,
+  ): void {
+    try {
+      this.lastUserPromptRecordedCallback?.(timestamp, sessionId);
+    } catch (error) {
+      debugLogger.debug('Last user prompt listener failed:', error);
     }
   }
 
@@ -3874,6 +4103,7 @@ export class ChatRecordingService {
       );
       this.currentCustomTitle = customTitle;
       this.currentTitleSource = titleSource;
+      this.persistListTitle(customTitle, titleSource);
       try {
         this.titleRecordedCallback?.(
           customTitle,

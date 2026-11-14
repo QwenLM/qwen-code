@@ -27,7 +27,7 @@ import {
   parseManagedCsiFileJson,
   type ManagedCsiFileBoot,
 } from './managed-csi-file-envelope.js';
-import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
+import { matchesCsiFilesProfile } from './managed-csi-file-profile.js';
 
 export const CSI_NATIVE_READBACK_PATH =
   '/internal/runtime-broker/csi/v1/native:read';
@@ -283,8 +283,7 @@ function commonContext(value: Record<string, unknown>): void {
     'capabilityDigest',
   ]);
   ensure(
-    identity['profile'] === 'csi-files-retirement/1' &&
-      identity['capabilityDigest'] === CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
+    matchesCsiFilesProfile(identity['profile'], identity['capabilityDigest']),
   );
   uuid(identity['sessionId']);
   const context = closed(value['context'], [

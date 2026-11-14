@@ -228,6 +228,39 @@ test('keeps yaml-dependent helper suites on the full profile', () => {
   );
 });
 
+test('runs ESLint on github_ci_only, which whitelists lintable scripts', () => {
+  // The whitelist's own contract: add a path only when a lane covers it.
+  // Three members are `.mjs` under .github/scripts, which ESLint's scope
+  // covers (`eslint .` plus lint-scope.js selecting every .[cm]?[jt]sx?).
+  // `Run ESLint` used to be full-gated, so a PR editing only one of them
+  // passed the required Lint & Static and reddened the next main push lint —
+  // the class #16899/#16920 closed for Prettier (#16958 item 3).
+  //
+  // Read the gate from ci.yml rather than restating it: this suite runs in
+  // the dependency-free lane, so it must not import `yaml`. Anchored to the
+  // step's own block so a commented-out copy cannot satisfy it.
+  const lintable = [...GITHUB_CI_ONLY_FILES].filter((file) =>
+    /\.[cm]?[jt]sx?$/.test(file),
+  );
+  assert.ok(
+    lintable.length > 0,
+    'the whitelist no longer contains a lintable script; this pin is moot',
+  );
+  const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
+  const step = /^ {6}- name: 'Run ESLint'\n((?: {8}.*\n|\n)*)/m.exec(ci);
+  assert.ok(step, 'Run ESLint step not found in ci.yml');
+  const gate = /^ {8}if: "(.*)"$/m.exec(step[1]);
+  assert.ok(gate, 'Run ESLint has no gate');
+  assert.ok(
+    gate[1].includes("steps.ci_profile.outputs.ci_profile == 'github_ci_only'"),
+    `Run ESLint must run on github_ci_only, which whitelists ${lintable.join(', ')}`,
+  );
+  assert.ok(
+    gate[1].includes("steps.ci_profile.outputs.ci_profile == 'full'"),
+    'widening the gate must not drop the full profile',
+  );
+});
+
 test('falls back to full for case-mismatched GitHub CI helper paths', () => {
   assert.equal(
     classifyChangedFiles(['.GITHUB/SCRIPTS/PR-SAFETY-PRECHECK.MJS']),
@@ -299,6 +332,59 @@ test('keeps docs mixed with helper files or Markdown off application tests', () 
   assert.equal(
     classifyChangedFiles(['.github/CODEOWNERS', 'README.md']),
     'github_ci_only',
+  );
+});
+
+test('uses java_only for changes confined to the Java packages', () => {
+  assert.equal(
+    classifyChangedFiles([
+      'packages/managed-agent-server/server/src/main/java/A.java',
+      'packages/managed-agent-server/pom.xml',
+      'packages/sdk-java/qwencode/src/main/java/B.java',
+    ]),
+    'java_only',
+  );
+  // Java Markdown no suite reads needs no tests beside the Java change.
+  assert.equal(
+    classifyChangedFiles([
+      'packages/managed-agent-server/docs/notes.md',
+      'packages/managed-agent-server/pom.xml',
+    ]),
+    'java_only',
+  );
+  assert.equal(
+    classifyChangedFiles([
+      'docs/usage.md',
+      '.github/CODEOWNERS',
+      'packages/sdk-java/client/pom.xml',
+    ]),
+    'java_only',
+  );
+});
+
+test('keeps Java files that TypeScript suites read on the full profile', () => {
+  for (const file of [
+    'packages/managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public.yaml',
+    'packages/managed-agent-server/verification/src/test/resources/capability-parity/managed-surface.txt',
+  ]) {
+    assert.equal(classifyChangedFiles([file]), 'full', file);
+  }
+  assert.equal(
+    classifyChangedFiles([
+      'packages/managed-agent-server/pom.xml',
+      'packages/cli/src/index.ts',
+    ]),
+    'full',
+  );
+  assert.equal(
+    classifyChangedFiles([
+      {
+        filename: 'packages/sdk-java/client/src/A.java',
+        status: 'renamed',
+        previous_filename: 'packages/cli/src/A.java',
+      },
+    ]),
+    'full',
   );
 });
 
