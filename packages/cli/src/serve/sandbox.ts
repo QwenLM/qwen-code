@@ -100,6 +100,10 @@ export function getSandboxPassthroughEnvArgs(
     // otherwise read only the mounted settings and ignore the exported switch.
     'QWEN_CODE_ENABLE_WORKFLOWS',
     'QWEN_CODE_DISABLE_WORKFLOWS',
+    // Same precedent for the agent-loop switches: the documented env force
+    // on/off must reach the inner CLI, not be shadowed by the mounted settings.
+    'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+    'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
   ].flatMap((envVar) =>
     env[envVar] === undefined ? [] : ['--env', `${envVar}=${env[envVar]}`],
   );
