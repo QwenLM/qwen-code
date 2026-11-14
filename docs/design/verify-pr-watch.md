@@ -65,8 +65,11 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   for a different head is refused — and **recorded as deferred**, not
   dropped. The probe's cursor advances to the new head in the very call
   that emits the transition, so no second event will arrive; the deferred
-  list is that head's only delivery. `--complete` prints the deferred
-  heads, and the watch prompt starts the latest one as the next round. A
+  list is that head's only delivery. `--complete` and `--release` print
+  the deferred heads, and the watch prompt starts the latest one as the
+  next round; starting a deferred head supersedes every head deferred no
+  later than it (events arrive in push order), and a redelivery updates
+  the entry in place so the tail stays push order, not write order. A
   redelivery of the in-flight head itself is simply skipped: the running
   round answers it. The local recipe's clone, base copy, proxy files and
   container name are per PR, so overlapping rounds would clobber each
@@ -80,20 +83,28 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   by timestamp. The state root resolves from the script's own clone (its
   main worktree), not the caller's cwd, so a round whose session directory
   is its PR clone still writes the trusted clone's state; `--state-root`
-  overrides it and must be an absolute path. A copy of the helper outside
-  the trusted clone — the container recipe's `/trusted-scripts` mount
-  resolves the default to `/` — needs that explicit `--state-root`.
-  `--complete` removes only its own round's in-flight entry (matched by
-  head **and** round, so a stale round completing after its replacement
-  started cannot erase the replacement's marker) and upserts its verified
-  entry — except `inconclusive`, which releases the marker without filing
-  the head as verified, so a later round can still verify it. A late
-  completion by an older round changes the top-level view but erases no
-  verification. `--start` writes the sha **before** the round begins, so a
-  round that dies still does not replay the same head. A round that dies
-  after `--start` is recovered with `--release --head <oid>` (the head is
-  mandatory), which removes only the named head's in-flight entry without
-  recording a verdict and refuses a head with no entry — including when no
+  overrides it and must be an absolute path. A default root that is not a
+  git worktree — the container recipe's `/trusted-scripts` mount resolves
+  it to `/` — is refused (exit 2) rather than writing a shadow state the
+  host never reads; the explicit `--state-root` accepts any directory. A
+  start whose `--repo` differs from the recorded one is refused too: a PR
+  number is only unique within its repository.
+  `--complete` must repeat the `--start` round: it removes only its own
+  round's in-flight entry (matched by head **and** round) and upserts its
+  verified entry. A completion whose round differs from the in-flight
+  marker is refused, and a completion from a round older than the one that
+  already answered for the head is refused as stale — neither strands the
+  real marker nor overwrites the newer verdict and comment id.
+  `inconclusive` releases the marker without filing the head as verified,
+  so a later round can still verify it, and keeps the head's deferred
+  entry. A late completion for a _different_ head changes the top-level
+  view but erases no verification. A corrupt state body is refused (exit
+  1), never silently rewritten from empty lists. `--start` writes the sha
+  **before** the round begins, so a round that dies still does not replay
+  the same head. A round that dies after `--start` is recovered with
+  `--release --head <oid>` (the head is mandatory), which removes only the
+  named head's in-flight entry without recording a verdict, names any
+  deferred heads, and refuses a head with no entry — including when no
   markers exist at all, so a release aimed at the wrong state root cannot
   read as success. Under one-round-per-PR the blocking marker may belong to
   a different head than the one being started: recovery releases the head

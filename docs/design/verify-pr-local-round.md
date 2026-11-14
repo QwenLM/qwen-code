@@ -108,12 +108,21 @@ silent:
   18 recent CI artifacts had each counted whole workspace suites.
 - `boundary.json` declares where the untrusted PR code ran: `mode:
 "container"` with a non-empty `detail`, or `mode: "waived"` naming the
-  approving maintainer (`by`) and the `reason`. Unlike the three above, a
-  merely absent file is an error: the isolation rule existed only as prose
-  until two local rounds on PR #16866 ran the whole battery on the host with
-  no gate and no waiver. The CI publish job writes the CI lane's own
-  declaration before running the checker, so a round cannot forge it and
-  older base-pinned skills still pass.
+  approving maintainer (`by`), a permalink to the approval comment
+  (`approval`), and the `reason`. Unlike the three above, a merely absent
+  file is an error: the isolation rule existed only as prose until two local
+  rounds on PR #16866 ran the whole battery on the host with no gate and no
+  waiver. A container declaration must also be backed by `boundary-gate.json`
+  — the record a passing `verify-pr-prepare.mjs --require-isolation
+  --artifact-dir <round-dir>` writes — so the declaration cannot be minted
+  without a gate run; the waiver's `approval` must be a GitHub comment
+  permalink a reader can open, not free text. The CI publish job writes the
+  CI lane's own declaration and `ci-lane` gate record before running the
+  checker, so a round cannot forge them and older base-pinned skills still
+  pass. The artifact tree is PR-writable, so the gate record corroborates
+  against an operator who skipped the gate (the incident's shape), not
+  against PR code that forges it; the publisher-owned CI path is the
+  authoritative one.
 
 Each prepared artifact directory keeps `context.json` with the round's full
 coordinates — `repo`, `pr`, `baseRefOid` and `headRefOid` — so a local round

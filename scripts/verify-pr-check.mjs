@@ -80,11 +80,15 @@ Checks a local round against the rules the CI publisher enforces:
   - a mutations.json claiming per-commit coverage covers every commit it lists,
     and lists at least one commit (an empty set makes the claim vacuous)
   - boundary.json declares where the untrusted PR code ran: mode container
-    with a non-empty detail, or mode waived with the approving maintainer (by)
-    and the reason; a round without the declaration is refused. On the CI
-    entry path ($QWEN_VERIFY_CONTEXT set) an absent declaration is only a
-    warning: the publish job writes the CI lane's own before trusting the
-    verdict
+    with a non-empty detail, backed by the boundary-gate.json record a passing
+    --require-isolation --artifact-dir gate run wrote (the CI publish job
+    writes its own ci-lane record), or mode waived with the approving
+    maintainer (by), a permalink to the approval comment (approval) and the
+    reason; a round without the declaration is refused. On the CI entry path
+    ($QWEN_VERIFY_CONTEXT set) an absent declaration is only a warning: the
+    publish job writes the CI lane's own before trusting the verdict
+  - an unreadable artifact (a directory or permission-denied file in its
+    place) is reported as unreadable, not silently treated as absent
 
 and warns (without failing) when the report does not lead with its verdict and
 head OID, when the verdict line is a heading (GitHub renders the whole
@@ -102,14 +106,17 @@ Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
 
 // The artifact directory is writable by the PR code the round executed, so
-// a path may be a directory or otherwise unreadable. Degrade to "missing"
-// (the checks below refuse incomplete artifacts) instead of crashing with
-// EISDIR before any check runs.
+// a path may be a directory or otherwise unreadable. Degrade to a sentinel
+// instead of crashing with EISDIR before any check runs — but an unreadable
+// artifact is NOT an absent one: main() reports it as an error, so a damaged
+// mutations.json or comment.md cannot silently drop its check.
+const UNREADABLE = '\u0000unreadable';
 function readIfExists(path) {
+  if (!existsSync(path)) return null;
   try {
-    return existsSync(path) ? readFileSync(path, 'utf8') : null;
+    return readFileSync(path, 'utf8');
   } catch {
-    return null;
+    return UNREADABLE;
   }
 }
 
@@ -193,11 +200,43 @@ export function checkMutationCoverage(text) {
  * existed only as prose. The declaration is the artifact that makes the
  * exception visible; the checker refuses a round without one.
  */
-export function checkBoundary(text) {
+// A container declaration must be backed by a gate run, not minted by the
+// round: the record is written by verify-pr-prepare.mjs --require-isolation
+// (gate "require-isolation") or by the CI publish job (gate "ci-lane").
+const GATE_VALUES = ['require-isolation', 'ci-lane'];
+function gateRecordErrors(gateText) {
+  if (gateText === null || gateText === undefined || gateText.trim() === '') {
+    return [
+      'boundary-gate.json is missing: a mode:"container" declaration must be backed by a gate run — verify-pr-prepare.mjs --require-isolation --artifact-dir <round-dir> inside the boundary (the CI publish job writes its own ci-lane record)',
+    ];
+  }
+  let gate;
+  try {
+    gate = JSON.parse(gateText);
+  } catch {
+    return ['boundary-gate.json is not valid JSON'];
+  }
+  if (!gate || typeof gate !== 'object' || Array.isArray(gate)) {
+    return ['boundary-gate.json must be an object'];
+  }
+  if (!GATE_VALUES.includes(gate.gate) || gate.passed !== true) {
+    return [
+      `boundary-gate.json does not record a passed isolation gate (gate: ${GATE_VALUES.join(' | ')}, passed: true)`,
+    ];
+  }
+  return [];
+}
+
+// A waiver's approval must be a permalink a reader can open, not free text:
+// the maintainer's approval comment on the PR or an issue.
+const APPROVAL_PERMALINK =
+  /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(?:issues|pull)\/\d+#issuecomment-\d+$/;
+
+export function checkBoundary(text, gateText = null) {
   if (text === null || text === undefined || text.trim() === '') {
     return {
       errors: [
-        'boundary.json is missing: every round declares where the untrusted PR code ran — {"mode":"container","detail":…} once the isolation gate passes, or {"mode":"waived","by":…,"reason":…} for a host round the maintainer explicitly approved',
+        'boundary.json is missing: every round declares where the untrusted PR code ran — {"mode":"container","detail":…} once the isolation gate passes, or {"mode":"waived","by":…,"approval":…,"reason":…} for a host round the maintainer explicitly approved',
       ],
     };
   }
@@ -219,9 +258,21 @@ export function checkBoundary(text) {
   }
   const nonEmpty = (value) => typeof value === 'string' && value.trim() !== '';
   // The skill's template strings are <placeholder> shaped; a declaration
-  // that still carries one was copied, not filled in.
+  // that still carries one was copied, not filled in. The tell is the
+  // skill's own tokens or a wholly-<…> value — not any angle brackets: a
+  // maintainer written as the standard git identity `Name <email>` is a
+  // filled-in value, not a placeholder.
+  const TEMPLATE_TOKENS = [
+    '<maintainer>',
+    '<why this round may run outside a boundary>',
+    '<image, network policy, credential-free mount>',
+    '<owner>/<repo>',
+    '<round-dir>',
+  ];
   const placeholder = (value) =>
-    typeof value === 'string' && /<[^>]+>/.test(value);
+    typeof value === 'string' &&
+    (/^<[^>]+>$/.test(value.trim()) ||
+      TEMPLATE_TOKENS.some((token) => value.includes(token)));
   if (parsed.mode === 'container' && !nonEmpty(parsed.detail)) {
     return {
       errors: [
@@ -235,6 +286,10 @@ export function checkBoundary(text) {
         'boundary.json detail still carries a <placeholder>: name the actual image and network policy',
       ],
     };
+  }
+  if (parsed.mode === 'container') {
+    const gateErrors = gateRecordErrors(gateText);
+    if (gateErrors.length > 0) return { errors: gateErrors };
   }
   if (
     parsed.mode === 'waived' &&
@@ -256,8 +311,18 @@ export function checkBoundary(text) {
       ],
     };
   }
+  if (
+    parsed.mode === 'waived' &&
+    !APPROVAL_PERMALINK.test(parsed.approval ?? '')
+  ) {
+    return {
+      errors: [
+        "boundary.json mode waived needs approval: a permalink to the maintainer's approval comment (https://github.com/<owner>/<repo>/pull/<n>#issuecomment-<id>) — free-text by is a claim, not a verifiable reference",
+      ],
+    };
+  }
   // `by` is a recorded claim, not an identity the checker can verify; the
-  // publish guard and the maintainer's review are the enforcement there.
+  // approval permalink and the maintainer's review are the enforcement there.
   return { errors: [] };
 }
 
@@ -282,6 +347,30 @@ function leadShapeWarnings(text, verdict, label) {
   return [
     `${label} opens with a heading${holdsVerdict ? ' carrying the verdict' : ` of ${first.length} characters`}: GitHub renders the whole line as one giant H1 — the verdict line is a plain paragraph (no leading #), and a heading is a short title on its own line`,
   ];
+}
+
+/**
+ * The Methodology must OPEN with the Boundary line, not merely mention the
+ * rule somewhere: a bare token search passes a report that discusses the
+ * requirement while reporting nothing about where the PR code actually ran.
+ */
+function boundaryLineWarnings(text, label) {
+  const lines = text.split('\n');
+  const idx = lines.findIndex((line) =>
+    /^##\s+Methodology\s*$/.test(line.trim()),
+  );
+  if (idx === -1) {
+    return [
+      `${label} has no ## Methodology section: it opens with a **Boundary.** line naming where the untrusted PR code ran (the image and network policy, or the recorded waiver)`,
+    ];
+  }
+  const first = lines.slice(idx + 1).find((line) => line.trim() !== '');
+  if (!first || !first.trim().startsWith('**Boundary.**')) {
+    return [
+      `${label}: the first line after ## Methodology must be the **Boundary.** line — a prose mention of the rule elsewhere does not declare where the untrusted PR code ran`,
+    ];
+  }
+  return [];
 }
 
 /**
@@ -472,7 +561,7 @@ export function checkArtifacts({
       'boundary.json is absent on the CI entry path ($QWEN_VERIFY_CONTEXT): the publish job writes the CI lane declaration before it trusts the verdict',
     );
   } else {
-    errors.push(...checkBoundary(files.boundary).errors);
+    errors.push(...checkBoundary(files.boundary, files.boundaryGate).errors);
   }
 
   if (files.report && files.report.trim() !== '') {
@@ -499,11 +588,7 @@ export function checkArtifacts({
       );
     }
     warnings.push(...leadShapeWarnings(report, verdict, 'report.md'));
-    if (!report.includes('**Boundary.**')) {
-      warnings.push(
-        'report.md has no **Boundary.** line: the Methodology opens with where the untrusted PR code ran (the image and network policy, or the recorded waiver)',
-      );
-    }
+    warnings.push(...boundaryLineWarnings(report, 'report.md'));
   }
 
   // comment.md is the exact body a local round posts: report content plus
@@ -514,6 +599,7 @@ export function checkArtifacts({
   if (files.comment && files.comment.trim() !== '') {
     const comment = normalizeNewlines(files.comment);
     warnings.push(...leadShapeWarnings(comment, verdict, 'comment.md'));
+    warnings.push(...boundaryLineWarnings(comment, 'comment.md'));
     const lines = comment.split('\n').filter((line) => line.trim() !== '');
     if (!FOOTER.test(lines[lines.length - 1] ?? '')) {
       warnings.push(
@@ -581,7 +667,28 @@ function main(argv) {
     mutations: readIfExists(join(dir, 'mutations.json')),
     comment: readIfExists(join(dir, 'comment.md')),
     boundary: readIfExists(join(dir, 'boundary.json')),
+    boundaryGate: readIfExists(join(dir, 'boundary-gate.json')),
   };
+  // An unreadable artifact is a refusal, not an absent one: a damaged
+  // mutations.json must not silently drop its coverage check.
+  const ARTIFACT_NAMES = {
+    report: 'report.md',
+    verdict: 'verdict.txt',
+    assertions: 'assertions.json',
+    mutations: 'mutations.json',
+    comment: 'comment.md',
+    boundary: 'boundary.json',
+    boundaryGate: 'boundary-gate.json',
+  };
+  const unreadableErrors = [];
+  for (const [key, name] of Object.entries(ARTIFACT_NAMES)) {
+    if (files[key] === UNREADABLE) {
+      unreadableErrors.push(
+        `${name} is unreadable (a directory or permission-denied file is not an absent artifact)`,
+      );
+      files[key] = null;
+    }
+  }
   const evidenceDir = join(dir, 'evidence');
   const evidence = existsSync(evidenceDir)
     ? readdirSync(evidenceDir).filter((name) =>
@@ -648,6 +755,7 @@ function main(argv) {
     expectedHead,
     publisherOwnsBoundary: !!process.env.QWEN_VERIFY_CONTEXT,
   });
+  result.errors.unshift(...unreadableErrors);
   if (snapshotWarning) result.warnings.unshift(snapshotWarning);
   const lines = [`verify-pr check: ${dir}`];
   if (expectedHead) lines.push(`  head source: ${snapshotPath}`);

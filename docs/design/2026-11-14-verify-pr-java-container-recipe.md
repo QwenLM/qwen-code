@@ -59,7 +59,8 @@ without `boundary.json`); this design removes the reason for it.
 ## Proposed solution
 
 A second recipe in the skill, selected when the delta touches
-`packages/managed-agent-server/`:
+`packages/sdk-java/` or `packages/managed-agent-server/` — the same two
+paths the CI lane's Java gate matches:
 
 1. **Image.** A Maven image bundling the lane's Maven and JDK, such as
    `maven:3.9.11-eclipse-temurin-21`. Verify the exact tag exists at
@@ -72,27 +73,41 @@ A second recipe in the skill, selected when the delta touches
    project-model extensions, not lifecycle-bound `<build><plugins>`
    executions. Instead, the host prepares a sanitized copy of the PR tree
    (strip list below) and the **seed runs inside a credential-free container
-   whose egress is limited to the configured mirror**, with a
-   credential-free mirror configuration; the resulting repository is copied
-   out. The seed runs `mvn dependency:go-offline` and installs the PR's
-   `packages/sdk-java` reactor artifacts (`mvn install -DskipTests
--Dgpg.skip=true -Dmaven.javadoc.skip=true` on the SDK modules, as the CI
-   lane does inside its own job boundary): the managed-agent build resolves
-   them from the local repo, so a fresh seed without them cannot resolve,
-   and a reused seed with stale ones compiles against the wrong jar. The
-   reuse key is one rule everywhere in this recipe: **reuse the seeded
-   repository only when the pom set and the SDK sources are both
-   unchanged**; a change to either re-seeds, under the same
-   built-for-this-head reuse rule the skill applies to installs and
-   builds. Strip the `_remote.repositories`
-   tracking files afterwards (or seed with `-Dmaven.legacyLocalRepo=true`):
-   they record which mirror served each artifact, and offline resolution
-   against a different repo id otherwise re-resolves and fails. The battery
-   container mounts that repository directory only — never `settings.xml`,
-   which can carry mirror credentials — and runs with
-   `-Dmaven.repo.local=/m2 --network none` — stricter than the JS recipe,
-   which keeps network for the model proxy, because the Java battery needs
-   no model access. Offline resolution keeps the credential-free boundary
+   whose egress is limited to the configured mirror**; the resulting
+   repository is copied out. Mirror-only egress is enforced, not assumed:
+   the seed's settings use `<mirrorOf>*</mirrorOf>` (the lane's
+   `<mirrorOf>central</mirrorOf>` does not redirect a pom-declared
+   `<repositories>` entry), the strip list removes
+   `<repositories>`/`<pluginRepositories>` from every pom, and the container
+   runs with a network-level mirror allowlist — Maven settings cannot bound
+   code executing inside the project lifecycle, so the containment lives at
+   the Docker layer. The seed runs `mvn dependency:go-offline` and installs
+   the one SDK module the lane and the consumer actually use,
+   `packages/sdk-java/qwencode` (`mvn install -DskipTests -Dgpg.skip=true
+-Dmaven.javadoc.skip=true` on that module's pom, as the CI lane does
+   inside its own job boundary; `packages/sdk-java` has no root reactor, and
+   the managed-agent build resolves `qwencode-sdk` only): the managed-agent
+   build resolves it from the local repo, so a fresh seed without it cannot
+   resolve, and a reused seed with a stale one compiles against the wrong
+   jar. The reuse key is one rule everywhere in this recipe: **reuse the
+   seeded repository only when the pom set, the SDK sources and `.mvn/` are
+   all unchanged**; a change to any re-seeds, under the same
+   built-for-this-head reuse rule the skill applies to installs and builds.
+   (The seed builds without the PR's `.mvn/` — the strip list removes it —
+   so a PR that edits `.mvn/` gets a seed jar built without that config; the
+   reuse key re-seeds on such a change, and the round records the deviation.)
+   Strip the `_remote.repositories` tracking files afterwards (or seed with
+   `-Dmaven.legacyLocalRepo=true`): they record which mirror served each
+   artifact, and offline resolution against a different repo id otherwise
+   re-resolves and fails. The battery container mounts the seeded repository
+   **read-only** — never `settings.xml`, which can carry mirror credentials —
+   and runs with `-Dmaven.repo.local=/m2 --network none` — stricter than the
+   JS recipe, which keeps network for the model proxy, because the Java
+   battery needs no model access. A row that must write (a mutation
+   installing a mutated SDK jar) gets its own copy of the repository and its
+   own `-Dmaven.repo.local`, as the skill's mutation rules already require;
+   a writing round invalidates the reuse key, so the shared seed never holds
+   a mutant jar. Offline resolution keeps the credential-free boundary
    intact: no network means no exfiltration path and no mirror auth inside.
 3. **Trusted scripts, PR clone, model proxy.** Same layout as the JS recipe:
    scripts come from the trusted clone, the round runs in a standalone PR
@@ -100,7 +115,12 @@ A second recipe in the skill, selected when the delta touches
    `verify-pr-model-proxy.mjs` relay. The offline battery container cannot
    reach that proxy, so the round's own model turns run in a separate
    proxy-connected container (the JS recipe's shape) or not at all; the
-   battery itself needs no model access.
+   battery itself needs no model access. The two containers are driven by an
+   **operator-owned host relay**: the host runs `docker exec` into the
+   battery container on the round's behalf and returns the output. The
+   round never receives the Docker socket — that would hand untrusted PR
+   code host-root while `--require-isolation` still exits 0 (the gate
+   inspects environment and credential signals, not sockets).
 4. **Declaration.** The operator writes the declaration after the gate
    passes — the same operator-owned rule as the JS recipe, not the round
    itself. It names **both** containers when the round uses two: the
@@ -119,35 +139,43 @@ A second recipe in the skill, selected when the delta touches
   host never runs a goal against PR poms: lifecycle-bound plugin executions
   are PR code too, and no strip list can enumerate them. Cost: a seed step
   per round (minutes, cached across rounds of the same PR by reusing the
-  repository directory when the pom set and the SDK sources are both
+  repository directory when the pom set, the SDK sources and `.mvn/` are all
   unchanged — the same reuse rule the skill already applies to installs
   and builds).
 - **Bundled image over JDK-on-node.** Layering a JDK onto `node:22-bookworm`
   would serve mixed PRs in one container, but drifts from the CI lane's
-  runtime and grows the image the round must trust. Mixed rounds can run the
-  JS suites in the Java image (it carries Node via a pinned install) or in
-  two containers; that choice is left to the implementation.
+  runtime and grows the image the round must trust. The stock Maven+JDK
+  image carries no Node, and a Java+Node derivative is a declared non-goal;
+  a mixed round runs its JS suites in the JS recipe's container and its Java
+  battery in this one, sharing the artifact directory through the host.
 
 ## Constraints
 
-- The container sees no host credentials; the mounted repository is
-  dependency jars only.
+- The container sees no host credentials; the shared seeded repository is
+  dependency jars only, mounted read-only — a writing row uses its own copy
+  (see step 2), so the shared seed never holds a round-installed artifact.
 - `--require-isolation` must exit 0 inside; a container marker alone does not
   pass (existing rule).
 - No host step executes PR code — not even "resolution only": the host
   prepares the sanitized copy and copies the repository out, and every
   Maven goal against the PR's poms runs inside the seed container. The
-  sanitized copy removes the **whole `.mvn/` directory**: the launcher
-  honours core extensions, `jvm.config` (concatenated into `MAVEN_OPTS`
-  before the JVM starts — a `-javaagent:` there runs during the seed), and
+  sanitized copy is made **without dereferencing symlinks** (`cp -a` /
+  `rsync -a`, never `-L`), and any symlink whose target escapes the tree is
+  refused: a dereferencing copy would write host file content into a tree
+  that is then mounted into a container with PR-authored Maven code in it.
+  The copy removes the **whole `.mvn/` directory**: the launcher honours
+  core extensions, `jvm.config` (concatenated into `MAVEN_OPTS` before the
+  JVM starts — a `-javaagent:` there runs during the seed), and
   `maven.config` alike. It also refuses pom-declared build extensions
   (`<build><extensions>`, and any `<plugin>` with
   `<extensions>true</extensions>`, in the root and every module pom), which
-  resolve and load while the project model is built — before any goal runs.
-  Lifecycle-bound `<build><plugins>` executions cannot be enumerated, which
-  is why the seed runs inside the boundary rather than on the host. The
-  trusted mirror settings stay host-side; the seed container gets a
-  credential-free mirror configuration, never the host's `settings.xml`.
+  resolve and load while the project model is built — before any goal runs,
+  and strips `<repositories>`/`<pluginRepositories>` so a PR pom cannot
+  point the seed at an arbitrary host. Lifecycle-bound `<build><plugins>`
+  executions cannot be enumerated, which is why the seed runs inside the
+  boundary rather than on the host. The trusted mirror settings stay
+  host-side; the seed container gets a credential-free mirror configuration
+  with `<mirrorOf>*</mirrorOf>`, never the host's `settings.xml`.
 
 ## Risks
 
@@ -158,8 +186,9 @@ A second recipe in the skill, selected when the delta touches
 - **Repository reuse staleness.** A reused repository built for another head
   can mask a dependency change, and stale SDK jars compile against the wrong
   code. Mitigation: the skill's existing built-for-this-head reuse rule
-  applies with the single reuse key above — the pom set and the SDK sources
-  must both be unchanged; a change to either re-seeds.
+  applies with the single reuse key above — the pom set, the SDK sources and
+  `.mvn/` must all be unchanged; a change to any re-seeds, and a writing
+  round invalidates the key outright.
 - **Image drift.** Digest pinning plus a documented refresh step.
 
 ## Validation plan
@@ -167,13 +196,19 @@ A second recipe in the skill, selected when the delta touches
 - One live Java-heavy round (a `managed-agent-server` PR) runs compile +
   battery + at least one mutation inside the recipe; the gate exits 0 and
   `boundary.json` records container mode.
-- A/B parity: the same battery's counts match a host run of the same head
-  (the recipe changes the boundary, not the measurements).
+- A/B parity: the same battery's counts match a baseline run of the same
+  head (the recipe changes the boundary, not the measurements). A host
+  baseline is itself a `waived` round with the maintainer's approval recorded
+  — the checker refuses any other mode for host execution — or the baseline
+  runs inside the boundary too.
 - Negative control: `--require-isolation` still exits 4 outside the boundary.
 - Negative control (seed): a fixture pom whose build extension writes a
   marker file when loaded, and a second fixture whose `<build><plugins>`
-  execution bound to `compile` writes one; the documented seed procedure
-  must leave no marker on the host for either.
+  execution bound to `compile` writes one. The sanitized copy reaches the
+  seed container by **copy-in** (`docker cp`), not a bind mount, so an
+  in-boundary write stays inside the container: the control asserts no
+  marker in the host copy, which a bind mount would make indistinguishable
+  from a phantom host execution.
 
 ## Acceptance criteria
 
@@ -187,7 +222,5 @@ A second recipe in the skill, selected when the delta touches
 
 ## Open questions
 
-- Mixed Java + JS rounds: one container with Node installed, or two
-  containers sharing the artifact directory?
 - Does the seed step belong in `verify-pr-prepare.mjs` (host side) or in a
   separate recipe script?

@@ -50,6 +50,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -71,7 +72,7 @@ const FIELDS = [
 ].join(',');
 
 const HELP = `Usage: node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
-       node scripts/verify-pr-prepare.mjs --require-isolation
+       node scripts/verify-pr-prepare.mjs --require-isolation [--artifact-dir <round-dir>]
 
 Resolves the coordinates a local /verify-pr round needs and writes the
 metadata snapshot the round reads as $QWEN_VERIFY_CONTEXT:
@@ -95,7 +96,10 @@ isolated and must not execute PR code. A container marker alone does not pass:
 the CLI's own Docker/Podman launcher mounts ~/.config/gcloud and the ADC file
 and copies model API keys, so the check also requires the credential-free
 attestation and refuses when a known credential signal is visible. The
-built-in macOS sandbox (SANDBOX=sandbox-exec) never counts.
+built-in macOS sandbox (SANDBOX=sandbox-exec) never counts. With
+--artifact-dir, a pass also writes boundary-gate.json there — the record the
+checker requires alongside a mode:"container" declaration, so the declaration
+cannot be minted without a gate run.
 `;
 
 /** Returns `{owner, name}` for a GitHub repository slug, or null. */
@@ -315,6 +319,7 @@ export function parseArgs(argv) {
     pr: null,
     repo: null,
     requireIsolation: false,
+    artifactDir: null,
     help: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -323,6 +328,11 @@ export function parseArgs(argv) {
       options.help = true;
     } else if (arg === '--require-isolation') {
       options.requireIsolation = true;
+    } else if (arg === '--artifact-dir') {
+      options.artifactDir = argv[(index += 1)] ?? null;
+      if (!options.artifactDir) {
+        return { error: '--artifact-dir needs <round-dir>' };
+      }
     } else if (arg === '--repo') {
       options.repo = argv[(index += 1)] ?? null;
       if (!options.repo) return { error: '--repo needs <owner>/<repo>' };
@@ -529,7 +539,7 @@ function main(argv) {
     process.stdout.write(HELP);
     return 0;
   }
-  if (options.requireIsolation) return requireBoundary();
+  if (options.requireIsolation) return requireBoundary(options.artifactDir);
 
   const { owner, name } = parseRepo(options.repo);
   const slug = `${owner}/${name}`;
@@ -726,8 +736,16 @@ function main(argv) {
  * The in-boundary check, and the only place its answer means anything: the
  * coordinate path necessarily runs on the host, so a gate there would fire
  * every round and teach the maintainer to ignore it.
+ *
+ * On a pass with `artifactDir`, writes `boundary-gate.json` there: the
+ * record that the gate actually ran and exited 0, which the checker
+ * requires alongside a `mode:"container"` declaration. The declaration is
+ * a value a round can mint for itself; this record ties it to a gate run.
+ * (The artifact tree is PR-writable, so the record corroborates against an
+ * operator who skipped the gate — the incident's shape — not against PR
+ * code that forges it; the CI publisher writes its own lane record.)
  */
-function requireBoundary() {
+function requireBoundary(artifactDir = null) {
   const isolation = detectIsolation();
   const credentials = detectCredentialSignals();
   const attested = process.env[CREDENTIAL_FREE_ATTESTATION] === '1';
@@ -762,6 +780,20 @@ function requireBoundary() {
   report([
     `verify-pr boundary: ${isolation.signals.join(', ')}; credential-free per attestation, no known credential signal`,
   ]);
+  if (artifactDir) {
+    const record = {
+      gate: 'require-isolation',
+      passed: true,
+      at: new Date().toISOString(),
+      signals: isolation.signals,
+      credentialFree: true,
+    };
+    mkdirSync(artifactDir, { recursive: true });
+    const path = join(artifactDir, 'boundary-gate.json');
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`);
+    renameSync(tmp, path);
+  }
   return 0;
 }
 

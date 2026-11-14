@@ -6807,6 +6807,12 @@ jobs:
               # under set -euo pipefail, killing the verdict with no report.
               rm -rf -- "$(dirname "$REPORT")/boundary.json"
               printf '%s\n' '{"mode":"container","detail":"CI verify lane (credential-free container)"}' > "$(dirname "$REPORT")/boundary.json"
+              # The checker ties a container declaration to a gate record.
+              # This job IS the lane's operator: the verify job ran in the
+              # credential-free container, so the publish job writes the
+              # ci-lane record itself, alongside the declaration it owns.
+              rm -rf -- "$(dirname "$REPORT")/boundary-gate.json"
+              printf '%s\n' '{"gate":"ci-lane","passed":true}' > "$(dirname "$REPORT")/boundary-gate.json"
               node "${VERIFY_PR_CHECK:-scripts/verify-pr-check.mjs}" "$(dirname "$REPORT")" > "$check_log" 2> "$check_log.err" || check_status=$?
               case "${check_status}:$(tail -n 1 "$check_log")" in
                 "0:  ok: verdict=${AGENT_VERDICT} ("*) ARTIFACT_CHECK=ok ;;
