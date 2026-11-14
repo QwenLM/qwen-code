@@ -60,6 +60,11 @@ import {
 } from './dialog-data.js';
 import type { McpServerInfo } from './dialogs-mcp.js';
 import {
+  recordMCPServerLastError,
+  removeMCPServerStatus,
+  updateMCPServerStatus,
+} from '@qwen-code/qwen-code-core/tools/mcp-status.js';
+import {
   buildModelSelectionKey,
   type OpenTuiModelEntry,
 } from './dialogs-model.js';
@@ -1555,6 +1560,7 @@ vi.mock('../../config/mcpApprovals.js', () => ({
 
 describe('applyMcpServerAction (real server actions)', () => {
   afterEach(() => {
+    removeMCPServerStatus('srv');
     vi.restoreAllMocks();
   });
 
@@ -1575,7 +1581,10 @@ describe('applyMcpServerAction (real server actions)', () => {
   }
 
   it('reconnect rediscovers the server tools', async () => {
-    const discoverToolsForServer = vi.fn(async () => {});
+    const discoverToolsForServer = vi.fn(async () => {
+      updateMCPServerStatus('srv', MCPServerStatus.CONNECTED);
+      recordMCPServerLastError('srv', 'old connection failure');
+    });
     const config = stubConfig({
       getToolRegistry: (() => ({
         discoverToolsForServer,
@@ -1589,8 +1598,56 @@ describe('applyMcpServerAction (real server actions)', () => {
       'reconnect',
     );
     expect(discoverToolsForServer).toHaveBeenCalledWith('srv');
+    expect(result.message).toBe("Reconnected 'srv'.");
     expect(result.changed).toBe(true);
   });
+
+  it('reports a recorded failure when best-effort discovery resolves disconnected', async () => {
+    const discoverToolsForServer = vi.fn(async () => {
+      updateMCPServerStatus('srv', MCPServerStatus.DISCONNECTED);
+      recordMCPServerLastError('srv', 'initialize request refused');
+    });
+    const config = stubConfig({
+      getToolRegistry: (() => ({
+        discoverToolsForServer,
+      })) as unknown as Config['getToolRegistry'],
+    } as Partial<Config>);
+    const { settings } = createFakeSettings();
+    const result = await applyMcpServerAction(
+      config,
+      settings,
+      serverInfo({}),
+      'reconnect',
+    );
+    expect(discoverToolsForServer).toHaveBeenCalledWith('srv');
+    expect(result.message).toContain('status: disconnected');
+    expect(result.message).toContain('initialize request refused');
+    expect(result.changed).toBe(true);
+  });
+
+  it.each([MCPServerStatus.DISCONNECTED, MCPServerStatus.CONNECTING])(
+    'reports %s after discovery when no connection error was recorded',
+    async (status) => {
+      const config = stubConfig({
+        getToolRegistry: (() => ({
+          discoverToolsForServer: async () => {
+            updateMCPServerStatus('srv', status);
+          },
+        })) as unknown as Config['getToolRegistry'],
+      } as Partial<Config>);
+      const { settings } = createFakeSettings();
+      const result = await applyMcpServerAction(
+        config,
+        settings,
+        serverInfo({}),
+        'reconnect',
+      );
+      expect(result.message).toBe(
+        `Reconnect to 'srv' finished without a live connection (status: ${status}).`,
+      );
+      expect(result.changed).toBe(true);
+    },
+  );
 
   it('disable writes mcp.excluded to the user scope and disables the server', async () => {
     const disableMcpServer = vi.fn(async () => {});
