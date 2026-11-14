@@ -5,6 +5,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import type { Settings } from '../../settings.js';
+import { isFolderTrustEnabled } from '../../trustedFolders.js';
 import { V1ToV2Migration } from './v1-to-v2.js';
 
 describe('V1ToV2Migration', () => {
@@ -67,6 +69,70 @@ describe('V1ToV2Migration', () => {
   });
 
   describe('migrate', () => {
+    it.each([true, false])(
+      'preserves the legacy folder-trust feature setting %s at its active path',
+      (enabled) => {
+        const input = { folderTrustFeature: enabled };
+        expect(migration.shouldMigrate(input)).toBe(true);
+        const { settings } = migration.migrate(input, 'user');
+        expect(settings).toEqual({
+          $version: 2,
+          security: { folderTrust: { enabled } },
+        });
+        expect(isFolderTrustEnabled(settings as Settings)).toBe(enabled);
+        expect(input).toEqual({ folderTrustFeature: enabled });
+      },
+    );
+
+    it.each([true, false])(
+      'keeps an explicit legacy folderTrust value %s ahead of the feature alias',
+      (enabled) => {
+        const { settings } = migration.migrate(
+          { folderTrustFeature: !enabled, folderTrust: enabled },
+          'user',
+        );
+        expect(settings).toEqual({
+          $version: 2,
+          security: { folderTrust: { enabled } },
+        });
+        expect(isFolderTrustEnabled(settings as Settings)).toBe(enabled);
+      },
+    );
+
+    it.each([
+      { value: 'false' },
+      { value: 1 },
+      { value: null },
+      { value: [] },
+      { value: { enabled: true } },
+    ])(
+      'ignores the non-boolean legacy folder-trust feature value $value',
+      ({ value }) => {
+        const input = { folderTrustFeature: value };
+        const { settings, warnings } = migration.migrate(input, 'user');
+        expect(settings).toEqual({ $version: 2 });
+        expect(isFolderTrustEnabled(settings as Settings)).toBe(false);
+        expect(warnings).toEqual([
+          "Ignored legacy setting 'folderTrustFeature' in user settings because the value is not a boolean.",
+        ]);
+        expect(input).toEqual({ folderTrustFeature: value });
+      },
+    );
+
+    it.each([
+      { folderTrust: true },
+      { security: { folderTrust: { enabled: true } } },
+    ])(
+      'preserves an enabled trust policy beside an invalid alias: %j',
+      (policy) => {
+        const { settings } = migration.migrate(
+          { folderTrustFeature: 'false', ...policy },
+          'user',
+        );
+        expect(isFolderTrustEnabled(settings as Settings)).toBe(true);
+      },
+    );
+
     it('should migrate flat V1 keys to nested V2 structure', () => {
       const v1Settings = {
         theme: 'dark',

@@ -123,7 +123,7 @@ export class V1ToV2Migration implements SettingsMigration {
    */
   migrate(
     settings: unknown,
-    _scope: string,
+    scope: string,
   ): { settings: unknown; warnings: string[] } {
     if (typeof settings !== 'object' || settings === null) {
       throw new Error('Settings must be an object');
@@ -138,6 +138,14 @@ export class V1ToV2Migration implements SettingsMigration {
     for (const [v1Key, v2Path] of Object.entries(V1_TO_V2_MIGRATION_MAP)) {
       if (v1Key in source) {
         const value = source[v1Key];
+
+        if (v1Key === 'folderTrustFeature' && typeof value !== 'boolean') {
+          processedKeys.add(v1Key);
+          warnings.push(
+            `Ignored legacy setting '${v1Key}' in ${scope} settings because the value is not a boolean.`,
+          );
+          continue;
+        }
 
         // Safety check: If this key is a V2 container (like 'model') and it's
         // already an object, it's likely already in V2 format. Skip migration

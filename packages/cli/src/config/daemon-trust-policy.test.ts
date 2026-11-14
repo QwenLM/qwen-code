@@ -300,6 +300,24 @@ describe('daemon trust policy', () => {
     });
   });
 
+  it('ignores a non-boolean legacy feature alias before evaluation', async () => {
+    installFiles({
+      '/config/user.json': JSON.stringify({ folderTrustFeature: 'false' }),
+      '/config/system.json': '{}',
+    });
+
+    const snapshot = await readDaemonTrustPolicySnapshot();
+    expect(snapshot.folderTrustEnabled).toBe(false);
+    expect(snapshot.settingsError).toBeUndefined();
+    expect(
+      evaluateDaemonWorkspaceTrust(snapshot, '/work/project'),
+    ).toMatchObject({
+      state: 'trusted',
+      targetTrusted: true,
+      source: 'disabled',
+    });
+  });
+
   it('confirms a missing trusted-folders file before treating it as empty', async () => {
     const files = {
       '/config/user.json': JSON.stringify({

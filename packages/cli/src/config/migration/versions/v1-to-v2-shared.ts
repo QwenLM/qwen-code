@@ -32,7 +32,7 @@ export const V1_TO_V2_MIGRATION_MAP: Record<string, string> = {
   excludedProjectEnvVars: 'advanced.excludedEnvVars',
   extensions: 'extensions',
   fileFiltering: 'context.fileFiltering',
-  folderTrustFeature: 'security.folderTrust.featureEnabled',
+  folderTrustFeature: 'security.folderTrust.enabled',
   folderTrust: 'security.folderTrust.enabled',
   hasSeenIdeIntegrationNudge: 'ide.hasSeenNudge',
   hideWindowTitle: 'ui.hideWindowTitle',
