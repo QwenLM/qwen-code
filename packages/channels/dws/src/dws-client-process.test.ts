@@ -138,7 +138,7 @@ describe('DWS command process', () => {
     expect(sanitizeLogText(error.message, 300)).toContain(
       'sender is not in the conversation',
     );
-    expect(sanitizeLogText(error.message, 200)).toContain(
+    expect(sanitizeLogText(error.message, DWS_CALLER_HEAD_BUDGET)).toContain(
       'sender is not in the conversation',
     );
   });
@@ -252,17 +252,19 @@ describe('DWS command process', () => {
   });
 
   it('never cuts a surrogate pair in half', () => {
-    // The composed message fits DWS_CALLER_HEAD_BUDGET minus the 55 code points
-    // this argv's prefix and ellipsis reserve, so the reason is cut at 144 code
-    // points. 143 `a`s put the 144th on the high half of the first pair, which
-    // is where a code-unit cut leaves a lone surrogate — sanitizeLogText then
-    // blanks it to a space exactly where the reason was cut.
+    // `DWS command failed: `, the backticked subcommand, ` (exit 1)`, `: ` and
+    // the ellipsis reserve 55 of the caller's 200 code points, so the reason is
+    // cut at 144. 143 `a`s put the astral pair's high half on that boundary, so
+    // a code-unit cut leaves a lone surrogate while the code-point cut (the
+    // fix) drops the pair whole. The trailing `b`s force the cut: without them
+    // the reason fits and nothing is truncated.
     const message = describeDwsCommandFailure(
       ['chat', 'message', 'send'],
       1,
-      `${'a'.repeat(143)}${'\u{1f389}'.repeat(20)}`,
+      `${'a'.repeat(143)}\u{1f389}${'b'.repeat(5)}`,
     );
 
+    expect(Array.from(message).length).toBe(DWS_CALLER_HEAD_BUDGET - 1);
     expect(message).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
     expect(message).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
   });
