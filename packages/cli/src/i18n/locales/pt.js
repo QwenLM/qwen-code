@@ -990,6 +990,26 @@ export default {
     'Uso: /forget <texto de memória a remover>',
   'No managed auto-memory entries matched: {{query}}':
     'Nenhuma entrada de memória automática gerenciada correspondeu: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'Vincular um pull request do GitHub a esta sessão',
+  'Usage: /pr <number | url>': 'Uso: /pr <número | url>',
+  'No PRs bound to this session.': 'Nenhum PR vinculado a esta sessão.',
+  'Bound PRs: {{list}}': 'PRs vinculados: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Referência de PR inválida. Uso: /pr <número | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'Não foi possível resolver o PR #{{number}} via gh. Informe a URL completa do PR.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} vinculado a esta sessão: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'O PR #{{number}} já está vinculado a esta sessão: {{url}}',
+  'Failed to bind PR #{{number}}.': 'Falha ao vincular o PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'Falha ao vincular o PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'Não foi possível ler as vinculações de PR desta sessão.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'O GitHub CLI (gh) está indisponível ou excedeu o tempo limite. Informe a URL completa do PR para vincular sem ele.',
   'Consolidate managed auto-memory topic files.':
     'Consolidar arquivos de tópicos de memória automática gerenciada.',
   'Could not retrieve tool registry.':
@@ -2033,6 +2053,8 @@ export default {
   'Advisor review failed: {{error}}': 'Falha na revisão do assessor: {{error}}',
   'No conversation context available for /advisor':
     'Nenhum contexto de conversa disponível para /advisor',
+  'No conversation context available for /btw':
+    'Nenhum contexto de conversa disponível para /btw',
   'Focus too long (max {{max}} chars)':
     'Foco muito longo (máx. {{max}} caracteres)',
   'Another operation is in progress, wait for it to complete before running /advisor':

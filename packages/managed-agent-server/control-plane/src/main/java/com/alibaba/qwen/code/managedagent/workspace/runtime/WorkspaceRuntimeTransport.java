@@ -27,6 +27,7 @@ import com.alibaba.qwen.code.runtimebroker.transport.ManagedHookProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMcpProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMonitorProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedShellProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedTerminalProtocol;
 
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
@@ -261,6 +262,63 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     @Override
+    public CompletionStage<Map<String, Object>> executeV4(
+            RuntimeLease lease,
+            RuntimeSession session,
+            Map<String, Object> reference,
+            Map<String, Object> payload,
+            Map<String, Object> capture) {
+        requireOwnedWorkspace(lease, session);
+        if (capture == null && v3(reference)) {
+            Context original = context(lease, session, true);
+            Context held = requireLocalCapture(original);
+            capture =
+                    Map.of(
+                            "tenantId",
+                            session.getScope().getTenantId(),
+                            "sessionId",
+                            session.getHarnessSessionId(),
+                            "turnId",
+                            reference.get("promptId"),
+                            "executionCallId",
+                            reference.get("executionCallId"),
+                            "bindingGeneration",
+                            Long.toString(held.runtime().getGeneration()),
+                            "capturePolicy",
+                            "complete_required");
+        }
+        return delegate.executeV4(lease, session, reference, payload, capture);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> statusV4(
+            RuntimeLease lease,
+            RuntimeSession session,
+            Map<String, Object> reference,
+            long afterSequence) {
+        requireOriginalRuntime(lease, session);
+        return delegate.statusV4(lease, session, reference, afterSequence);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> cancelV4(
+            RuntimeLease lease, RuntimeSession session, Map<String, Object> reference) {
+        requireOriginalRuntime(lease, session);
+        return delegate.cancelV4(lease, session, reference);
+    }
+
+    @Override
+    public CompletionStage<Void> acknowledgeV4(
+            RuntimeLease lease,
+            RuntimeSession session,
+            Map<String, Object> reference,
+            Map<String, Object> result,
+            Map<String, Object> receipt) {
+        requireOriginalRuntime(lease, session);
+        return delegate.acknowledgeV4(lease, session, reference, result, receipt);
+    }
+
+    @Override
     public CompletionStage<Map<String, Object>> acknowledgeV3(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference,
             Map<String, Object> receipt) {
@@ -420,7 +478,8 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         if (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)
                 || ManagedExtensionCommandProtocol.isOperation(operation)
                 || ManagedShellProtocol.isOperation(operation)
-                || ManagedMonitorProtocol.isOperation(operation)) {
+                || ManagedMonitorProtocol.isOperation(operation)
+                || ManagedTerminalProtocol.isOperation(operation)) {
             if (!managed(session)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
@@ -432,13 +491,16 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 ManagedShellProtocol.validateSession(session, operation);
             } else if (ManagedMonitorProtocol.isOperation(operation)) {
                 ManagedMonitorProtocol.validateSession(session, operation);
+            } else if (ManagedTerminalProtocol.isOperation(operation)) {
+                ManagedTerminalProtocol.validateSession(session, operation);
             } else {
                 ManagedMcpProtocol.validateSession(session, operation);
             }
             boolean recovery = ManagedMcpProtocol.isRecovery(operation) || ManagedHookProtocol.isRecovery(operation)
                     || ManagedExtensionCommandProtocol.isRecovery(operation)
                     || ManagedShellProtocol.isRecovery(operation)
-                    || ManagedMonitorProtocol.isRecovery(operation);
+                    || ManagedMonitorProtocol.isRecovery(operation)
+                    || ManagedTerminalProtocol.isRecovery(operation);
             Context context = context(lease, session, !recovery, ManagedHookProtocol.isOperation(operation));
             if (context.runtime().getState() != RuntimeBindingRecord.State.READY
                     && !(recovery && context.runtime().getState() == RuntimeBindingRecord.State.DRAINING)) {
@@ -575,7 +637,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         if (authorize) {
             var resolved = hook ? resolver.resolveHook(session.getHarnessSessionId(), session.getScope().getLifecycleAuthority())
                     : resolver.resolve(session.getHarnessSessionId(), session.getScope().getLifecycleAuthority());
-            if (!resolved.scope().equals(session.getScope())) {
+            if (!WorkspaceRuntimeResolver.matchesRecordedScope(resolved.scope(), session.getScope())) {
                 throw WorkspaceExecutionStore.unavailable();
             }
             binding = resolved.binding();

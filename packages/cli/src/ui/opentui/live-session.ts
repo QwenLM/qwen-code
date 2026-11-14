@@ -32,14 +32,45 @@ import {
   type InteractiveCompletedToolCall,
   type InteractiveToolCall,
 } from '../../services/interactive-mod-tool-scheduler.js';
+import {
+  createNotStartedToolErrorResponse,
+  LlmEventType,
+  TOOL_LOOP_SKIPPED_MESSAGE,
+  TOOL_LOOP_SKIPPED_METADATA,
+} from '@qwen-code/qwen-code-core/core/turn.js';
+import {
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalPauseReasonForFailure,
+  type GoalTurnPermit,
+} from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
+import {
+  LoopReason,
+  LoopType,
+} from '@qwen-code/qwen-code-core/telemetry/types.js';
+import {
+  endInteractionSpan,
+  getActiveInteractionSpan,
+} from '@qwen-code/qwen-code-core/telemetry/session-tracing.js';
+import { canonicalToolName } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import { clearLoadedSkillTracking } from '@qwen-code/qwen-code-core/tools/skill-utils.js';
+import { FILE_PATH_TOOLS } from '@qwen-code/qwen-code-core/services/microcompaction/microcompact.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
 import { appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { mapToDisplay } from '../hooks/useReactToolScheduler.js';
 import { writeToolCheckpoint } from './tool-checkpoint.js';
+import {
+  sharedModelRound,
+  type SharedModelRoundResult,
+} from './shared-model-round.js';
 import { allocateCanonicalHistoryId } from './live-session-model.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import {
+  type AgentLoopDuplicateState,
+  type AgentLoopSettledCall,
+  type ToolBatchResult,
+} from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
 import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import { buildPermissionSuggestions } from '../../nonInteractive/permission-suggestions.js';
@@ -47,6 +78,7 @@ import { getInteractiveModSession } from '../../services/interactive-mod-session
 import type {
   AgentResultDisplay,
   Config,
+  LlmClient,
   ServerLlmStreamEvent,
   SteerInput,
   ToolCallConfirmationDetails,
@@ -98,6 +130,7 @@ import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/ima
 import type { OpenTuiInputSubmission } from './input-submission.js';
 
 const checkpointLogger = createDebugLogger('OPENTUI_CHECKPOINT');
+const liveLogger = createDebugLogger('OPENTUI_LIVE');
 
 export interface OpenTuiSteeringSubmission extends OpenTuiInputSubmission {
   content: PartListUnion;
@@ -510,6 +543,29 @@ async function applyPromptVisionBridge(
   return { parts: textOnly.length > 0 ? textOnly : null, events };
 }
 
+/**
+ * A retried continuation can pair a tool result the pre-send snapshot did not
+ * yet see. Only its real results and their aliases join `handled`.
+ */
+function admitRetriedResults(
+  client: LlmClient,
+  { handled }: AgentLoopDuplicateState,
+  prompt: PartListUnion,
+): void {
+  const retryIds = normalizeParts(prompt).flatMap(({ functionResponse }) => {
+    const id = functionResponse?.id;
+    return id && !handled.has(id) ? [id] : [];
+  });
+  if (retryIds.length === 0) return;
+  const repaired = client.getSynthesizedRepairCallIds();
+  const fingerprints = client.getHistoryToolCallFingerprints(
+    new Set(retryIds.filter((id) => !repaired.has(id))),
+  );
+  for (const [id, fingerprint] of fingerprints) {
+    if (!handled.has(id)) handled.set(id, fingerprint);
+  }
+}
+
 /** Rejects as soon as `signal` fires, so a read that ignores it cannot park the boundary. */
 function abortRejection(signal: AbortSignal): Promise<never> {
   return new Promise<never>((_, reject) => {
@@ -690,10 +746,15 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
       throw err;
     })
     .then(async () => {
-      await getInteractiveModSession(config)?.initialize(['AbovePrompt'], {
-        prompts: true,
-        runsPrompts: true,
-      });
+      // Every OpenTUI transcript row is drawn again on change, so reply rows
+      // are offered in both screen modes.
+      await getInteractiveModSession(config)?.initialize(
+        ['AbovePrompt', 'AssistantMessage'],
+        {
+          prompts: true,
+          runsPrompts: true,
+        },
+      );
     });
   // Fire-and-forget callers (the entry) must not trip unhandled-rejection
   // handling; awaiters still receive the rejection.
@@ -707,6 +768,87 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
 // initializing still reports its own error instead of hanging the prompt.
 export const STARTUP_CHAT_WAIT_MS = 15_000;
 const STARTUP_CHAT_POLL_MS = 100;
+
+async function finishToolGoalTurn(
+  config: Config,
+  promptId: string,
+  permit: GoalTurnPermit,
+  signal: AbortSignal,
+  isCurrentSession: () => boolean,
+): Promise<ServerLlmStreamEvent[]> {
+  if (!isCurrentSession()) return [];
+  const runtime = config.getGoalRuntime();
+  const ownsPermit = () => {
+    if (!isCurrentSession()) return false;
+    const admitted = runtime.permitForTurn(promptId);
+    return (
+      admitted?.turnId === permit.turnId &&
+      admitted.goalId === permit.goalId &&
+      admitted.revision === permit.revision
+    );
+  };
+  if (!ownsPermit()) return [];
+
+  const events: ServerLlmStreamEvent[] = [];
+  const unsubscribe = runtime.subscribe((value, cause) => {
+    if (
+      value.goal?.goalId === permit.goalId &&
+      value.goal.revision === permit.revision
+    )
+      events.push({ type: LlmEventType.GoalState, value, cause });
+  });
+  let finishing = false;
+  const pauseGoal = async (reason: string) => {
+    try {
+      if (!isCurrentSession()) return;
+      if (!ownsPermit()) {
+        // The runtime releases the permit before awaiting its verifier.
+        if (!finishing) return;
+        const { goal, activity } = runtime.getSnapshot();
+        if (
+          activity !== 'verifying' ||
+          goal?.goalId !== permit.goalId ||
+          goal.revision !== permit.revision
+        )
+          return;
+      }
+      await runtime.dispatch({
+        action: 'pause',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+        reason,
+      });
+    } catch (error) {
+      liveLogger.warn('Failed to pause the interrupted Goal', error);
+    }
+  };
+  let pauseOnAbort: Promise<void> | undefined;
+  const onAbort = () => {
+    pauseOnAbort ??= pauseGoal(GOAL_PAUSE_REASON_USER_INTERRUPT);
+  };
+  signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    if (signal.aborted) onAbort();
+    else {
+      // The verifier reads the recorded tool results from this turn.
+      await config.getChatRecordingService()?.flush();
+      if (!signal.aborted && ownsPermit()) {
+        finishing = true;
+        await runtime.finishTurn(permit);
+      }
+    }
+  } catch (error) {
+    if (!signal.aborted && isCurrentSession()) {
+      await pauseGoal(goalPauseReasonForFailure(getErrorMessage(error)));
+      throw error;
+    }
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+    await pauseOnAbort;
+    unsubscribe();
+  }
+  return events;
+}
 
 /**
  * Sends one user prompt through the real client and yields neutral events.
@@ -760,6 +902,8 @@ export async function* livePromptEvents(
   }
   const sessionId = config.getSessionId();
   const current = () => options?.isCurrentTurn?.() !== false;
+  const isCurrentSession = () =>
+    current() && config.getSessionId() === sessionId;
   const dualOutput = options?.dualOutput;
   const promptId = options?.promptId ?? nextLivePromptId(config);
   const abort = signal ?? new AbortController().signal;
@@ -854,6 +998,9 @@ export async function* livePromptEvents(
   const acceptedSteerEvents: OpenTuiStreamEvent[] = [];
   let first = true;
   const waitingSeen = new Set<string>();
+  // The calls history and this turn already answered, for the shared tool
+  // batch, which answers a replay of one in place.
+  let duplicates: AgentLoopDuplicateState | undefined;
   for (;;) {
     if (!current() || abort.aborted) {
       pendingSteer?.restore();
@@ -951,16 +1098,51 @@ export async function* livePromptEvents(
       if (args) yield { type: 'tool-args', id: request.callId, args };
     }
     let streamFailed = false;
+    let sharedRound: ReturnType<typeof sharedModelRound> | undefined;
     if (!initialTool) {
+      let round: SharedModelRoundResult | undefined;
       options?.onPreparedRequest?.(prepared);
       dualOutput?.startAssistantMessage();
+      // Set once the turn read the round to its end; a turn that leaves
+      // before then closes the shared round.
+      let roundRead = false;
       try {
-        const stream = client.sendMessageStream(
-          nextPrompt,
-          abort,
-          promptId,
-          sendOptions,
-        );
+        // On the shared agent loop (`experimental.unifiedAgentLoop`), the
+        // round and its batch run in one `runAgentLoop` call.
+        const onSharedLoop = config.isUnifiedAgentLoopEnabled?.() === true;
+        // Seeded before the turn's first round is sent, so the calls it
+        // makes are not taken for replays.
+        if (onSharedLoop && !duplicates)
+          duplicates = {
+            handled: new Map(client.getHistoryToolCallFingerprints()),
+            responded: new Set<string>(),
+          };
+        const roundDuplicates = duplicates;
+        const useEventBus = config.isEventBusAgentLoopEnabled?.() === true;
+        sharedRound =
+          onSharedLoop && roundDuplicates
+            ? sharedModelRound(
+                client,
+                { parts: nextPrompt, promptId, options: sendOptions },
+                abort,
+                {
+                  config,
+                  duplicates: roundDuplicates,
+                  useEventBus,
+                  beforeBatch: () => {
+                    if (sendOptions.type === SendMessageType.Retry)
+                      admitRetriedResults(client, roundDuplicates, nextPrompt);
+                  },
+                },
+              )
+            : undefined;
+        if (sharedRound)
+          liveLogger.debug(
+            `model round on the shared agent loop (prompt ${promptId})`,
+          );
+        const stream =
+          sharedRound?.events ??
+          client.sendMessageStream(nextPrompt, abort, promptId, sendOptions);
         for await (const ev of stream) {
           options?.onStreamEvent?.(ev);
           if (!current() || abort.aborted) return;
@@ -976,35 +1158,103 @@ export async function* livePromptEvents(
               /* ignore */
             }
           }
-          if (ev.type === 'retry' || ev.type === 'model_fallback') {
-            pending.length = 0;
-          }
-          if ((ev as { type?: string }).type === 'tool_call_request') {
-            pending.push((ev as { value: ToolCallRequestInfo }).value);
+          if (!sharedRound) {
+            if (ev.type === 'retry' || ev.type === 'model_fallback') {
+              pending.length = 0;
+            }
+            if ((ev as { type?: string }).type === 'tool_call_request') {
+              pending.push((ev as { value: ToolCallRequestInfo }).value);
+            }
           }
           for (const neutral of map(ev)) {
             if (neutral.type === 'error') streamFailed = true;
             yield neutral;
           }
         }
+        round = sharedRound?.result();
+        roundRead = true;
       } catch (error) {
         for (const event of acceptedSteerEvents.splice(0)) yield event;
         throw error;
       } finally {
+        if (!roundRead) void sharedRound?.close();
         // Covers a synchronous call failure or an unsettled early exit. A
         // carrier already accepted/restored by core makes this a no-op.
         carrier?.restore();
-        if (current()) dualOutput?.finalizeAssistantMessage();
+        if (current()) {
+          dualOutput?.finalizeAssistantMessage();
+          if (round?.stop && round.calls.length > 0) {
+            liveLogger.debug('model round stopped before running tools', {
+              promptId,
+              reason: round.stop,
+              callIds: round.calls.map(({ callId }) => callId),
+            });
+            // Close this attempt's tool uses before yielding the cancelled cards.
+            const message = `Tool skipped because the model round stopped (${round.stop}).`;
+            for (const call of round.calls) {
+              dualOutput?.emitToolResult(
+                call,
+                createNotStartedToolErrorResponse(call, message),
+              );
+            }
+          }
+        }
       }
-      for (const event of acceptedSteerEvents.splice(0)) yield event;
+      let flushed = false;
+      try {
+        for (const event of acceptedSteerEvents.splice(0)) yield event;
+        flushed = true;
+      } finally {
+        if (!flushed) void sharedRound?.close();
+      }
       if (!streamFailed) options?.onPreparedRequest?.(undefined);
+      if (round?.stop) {
+        // These calls already have visible cards, but will never be scheduled.
+        for (const { callId } of round.calls) {
+          yield {
+            type: 'tool-end',
+            id: callId,
+            success: false,
+            summary: 'cancelled',
+          };
+        }
+        return;
+      }
+      if (round) pending.push(...round.calls);
     }
-    if (pending.length === 0 || abort.aborted) return;
+    if (
+      pending.length === 0 ||
+      abort.aborted ||
+      (sharedRound && !isCurrentSession())
+    ) {
+      void sharedRound?.close();
+      return;
+    }
+
+    const interactionOwner = sharedRound
+      ? getActiveInteractionSpan(promptId)
+      : undefined;
+    const endBatchInteraction = (
+      status: 'ok' | 'cancelled' | 'error',
+      failure?: { errorMessage: string; errorType: string },
+    ) => {
+      if (
+        !interactionOwner ||
+        getActiveInteractionSpan(promptId) !== interactionOwner
+      )
+        return;
+      if (abort.aborted || !isCurrentSession()) {
+        endInteractionSpan('cancelled', { promptId });
+      } else {
+        endInteractionSpan(status, { promptId, ...failure });
+      }
+    };
 
     // Live output bridge (ink outputUpdateHandler parity): scheduler output
     // chunks are mapped to neutral events and yielded WHILE the tools run.
     const live = createEventQueue<OpenTuiStreamEvent>();
     const taskStarted = new Set<string>();
+    const runningTurnTasks = new Set<string>();
     const taskToolsSeen = new Map<string, Set<string>>();
     const mapOutputChunk = (
       callId: string,
@@ -1040,6 +1290,12 @@ export async function* livePromptEvents(
             id: callId,
             line: `↳ ${tc.description || tc.name}`,
           });
+        }
+        // A background agent is still owned by this turn until it detaches.
+        if (agent.status === 'running') {
+          runningTurnTasks.add(callId);
+        } else {
+          runningTurnTasks.delete(callId);
         }
         if (agent.status !== 'running' && agent.status !== 'background') {
           out.push({ type: 'task-end', id: callId });
@@ -1119,9 +1375,11 @@ export async function* livePromptEvents(
     >();
     const groupId = options?.checkpointHistory?.allocateId();
     const batchId = `tool-batch-${randomUUID()}`;
-    const publishToolHistory = (calls: InteractiveToolCall[]) => {
+    const toolHistoryEvent = (
+      calls: InteractiveToolCall[],
+    ): OpenTuiStreamEvent | undefined => {
       if (groupId === undefined || calls.length === 0) return;
-      live.push({
+      return {
         type: 'tool-history',
         item: {
           ...mapToDisplay(calls, config.getProjectRoot()),
@@ -1134,23 +1392,53 @@ export async function* livePromptEvents(
             call.status !== 'error' &&
             call.status !== 'cancelled',
         ),
-      });
+      };
     };
+    const publishToolHistory = (calls: InteractiveToolCall[]) => {
+      const event = toolHistoryEvent(calls);
+      if (event) live.push(event);
+    };
+    const skippedCalls = (status: 'cancelled' | 'error', message: string) =>
+      pending.map((request) => ({
+        request,
+        status,
+        response: createNotStartedToolErrorResponse(request, message),
+      }));
     let shellOwnerOpen = true;
+    const closeShellOwner = () => {
+      if (!shellOwnerOpen) return;
+      shellOwnerOpen = false;
+      options?.onExecutingShells?.([]);
+    };
+    let isBatchFinished: (() => boolean) | undefined;
+    let schedulerCompleted = false;
+    let displayedCancelledBatch = false;
+    const lastToolCalls = new Map<string, InteractiveToolCall>();
+    // Settles the shared batch once the scheduler completed it.
+    let settleBatch: (() => void) | undefined;
     const scheduler = new InteractiveModToolScheduler({
       config,
-      onNativeAttempt: (call) =>
-        observeInteractiveModTool(
+      isFinished: () => isBatchFinished?.() === true,
+      onNativeAttempt: async (call) => {
+        if (isBatchFinished?.()) return;
+        return observeInteractiveModTool(
           config,
           call,
           options?.refreshContextFilesOnWrite === true,
-        ),
+        );
+      },
       getPreferredEditor: () => undefined,
       onEditorClose: () => {},
       outputUpdateHandler: (callId, chunk) => {
+        if (isBatchFinished?.()) return;
         for (const ev of mapOutputChunk(callId, chunk)) live.push(ev);
       },
       onToolCallsUpdate: (calls) => {
+        if (isBatchFinished?.()) return;
+        if (sharedRound) {
+          for (const call of calls)
+            lastToolCalls.set(call.request.callId, call);
+        }
         if (shellOwnerOpen)
           options?.onExecutingShells?.(
             current() && !abort.aborted
@@ -1264,10 +1552,12 @@ export async function* livePromptEvents(
         }
       },
       onAllToolCallsComplete: async (calls) => {
-        if (shellOwnerOpen) {
-          shellOwnerOpen = false;
-          options?.onExecutingShells?.([]);
+        if (isBatchFinished?.()) {
+          settleBatch?.();
+          return;
         }
+        schedulerCompleted = true;
+        closeShellOwner();
         publishToolHistory(calls);
         emitPermissionTransitions(calls);
         completed = calls.filter(
@@ -1276,21 +1566,19 @@ export async function* livePromptEvents(
             call.status === 'error' ||
             call.status === 'cancelled',
         );
+        settleBatch?.();
         live.close();
       },
     });
-    publishToolHistory(
-      pending.map((request) => ({ status: 'scheduled', request })),
-    );
-    const scheduled = scheduler.schedule(pending as never, abort);
-    void scheduled.catch((error: unknown) => {
-      if (shellOwnerOpen) {
-        shellOwnerOpen = false;
-        options?.onExecutingShells?.([]);
-      }
+    const onScheduleFailed = (error: unknown) => {
+      if (isBatchFinished?.()) return;
+      closeShellOwner();
       const cancelled =
         abort.aborted ||
         (error instanceof Error && error.name === 'AbortError');
+      const summary = cancelled ? 'cancelled' : 'error';
+      if (sharedRound)
+        publishToolHistory(skippedCalls(summary, getErrorMessage(error)));
       const ids = new Set([
         ...pending.map((call) => call.callId),
         ...waitingSeen,
@@ -1300,15 +1588,138 @@ export async function* livePromptEvents(
       for (const id of ids) {
         live.push({ type: 'tool-queued', id, queued: false });
         live.push({ type: 'confirm-resolved', id, outcome: 'rejected' });
-        live.push({
-          type: 'tool-end',
-          id,
-          success: false,
-          summary: cancelled ? 'cancelled' : 'error',
-        });
+        live.push({ type: 'tool-end', id, success: false, summary });
       }
       live.close();
-    });
+    };
+    // On the shared agent loop (`experimental.unifiedAgentLoop`), the round's
+    // calls run as one batch of the loop on this scheduler: the batch answers
+    // a replay in place, and finalizes, counts and records the results.
+    let scheduled: Promise<unknown>;
+    let batch: Promise<ToolBatchResult> | undefined;
+    // The results the batch answered without running a call.
+    const answered = sharedRound?.answered ?? [];
+    if (sharedRound) {
+      liveLogger.debug(
+        `tool batch on the shared agent loop (prompt ${promptId}, ${pending.length} call(s))`,
+      );
+      batch = sharedRound.runBatch({
+        run: (requests, signal, hooks) => {
+          isBatchFinished = hooks.isFinished;
+          const launched = requests.filter((request) =>
+            hooks.beforeLaunch(request, []),
+          );
+          if (launched.length === 0) return Promise.resolve([]);
+          publishToolHistory(
+            launched.map((request) => ({ status: 'scheduled', request })),
+          );
+          // The batch settles when the scheduler completes it: `schedule`
+          // returns as soon as a call waits for approval.
+          return new Promise<AgentLoopSettledCall[]>((resolve, reject) => {
+            settleBatch = () =>
+              resolve(
+                completed.map(
+                  (call): AgentLoopSettledCall => ({
+                    status: call.status,
+                    request: call.request,
+                    response: call.response,
+                    // Check ownership when the shared loop reads the count
+                    // flag, since the session can change after settlement.
+                    get recorded() {
+                      return (
+                        !isCurrentSession() ||
+                        call.nativeAttemptsObserved === true ||
+                        call.status === 'cancelled'
+                      );
+                    },
+                  }),
+                ),
+              );
+            void scheduler.schedule(launched as never, signal).catch(reject);
+          }).catch((error: unknown) => {
+            onScheduleFailed(error);
+            throw error;
+          });
+        },
+      });
+      // A batch that runs no call never completes the scheduler.
+      const closeBatch = (result?: ToolBatchResult) => {
+        try {
+          if (isBatchFinished?.()) {
+            closeShellOwner();
+            if (current() && dualOutput?.isConnected) {
+              for (const requestId of permissionRequests.values()) {
+                dualOutput.emitControlResponse(requestId, false);
+              }
+            }
+            permissionRequests.clear();
+          }
+          if (
+            result?.stop === 'cancelled' &&
+            !schedulerCompleted &&
+            isCurrentSession()
+          ) {
+            displayedCancelledBatch = true;
+            const replayed = new Map(
+              answered.map(({ request, response }) => [
+                request.callId,
+                response,
+              ]),
+            );
+            const settled = skippedCalls(
+              'cancelled',
+              'Tool call cancelled.',
+            ).map((skipped): InteractiveCompletedToolCall => {
+              const id = skipped.request.callId;
+              const response = replayed.get(id);
+              if (response)
+                return response.error
+                  ? { ...skipped, response, status: 'error' }
+                  : { ...skipped, response, status: 'success' };
+              const last = lastToolCalls.get(id);
+              return last?.status === 'success' ||
+                last?.status === 'error' ||
+                last?.status === 'cancelled'
+                ? last
+                : skipped;
+            });
+            publishToolHistory(settled);
+            for (const { request, response, status } of settled) {
+              const id = request.callId;
+              if (queuedSeen.delete(id))
+                live.push({ type: 'tool-queued', id, queued: false });
+              if (waitingSeen.delete(id))
+                live.push({
+                  type: 'confirm-resolved',
+                  id,
+                  outcome: 'rejected',
+                });
+              const display = toolResultEvent(id, response.resultDisplay);
+              if (status !== 'cancelled' && display) live.push(display);
+              live.push({
+                type: 'tool-end',
+                id,
+                success: status === 'success',
+                summary: status === 'success' ? 'ok' : status,
+              });
+            }
+          }
+        } finally {
+          live.close();
+        }
+      };
+      scheduled = batch.then(closeBatch, (error: unknown) => {
+        closeBatch();
+        throw error;
+      });
+      void scheduled.catch(() => {});
+    } else {
+      publishToolHistory(
+        pending.map((request) => ({ status: 'scheduled', request })),
+      );
+      scheduled = scheduler.schedule(pending as never, abort);
+      void scheduled.catch(onScheduleFailed);
+    }
     for (;;) {
       const ev = await live.next();
       if (ev === undefined) break;
@@ -1355,24 +1766,133 @@ export async function* livePromptEvents(
       }
     }
     await scheduled;
+    const shared = batch ? await batch : undefined;
+    if (shared?.stop === 'cancelled' && isCurrentSession()) {
+      for (const id of runningTurnTasks) yield { type: 'task-end', id };
+    }
+    if (shared?.stop === 'duplicate_provider_call') {
+      // The batch ran nothing: the model repeated a call id it was already
+      // answered for, which stops the turn as a loop, as Ink does.
+      endBatchInteraction('error', {
+        errorMessage: 'loop detected',
+        errorType: 'loop_detected',
+      });
+      if (!isCurrentSession()) return;
+
+      const skipped = skippedCalls('cancelled', TOOL_LOOP_SKIPPED_MESSAGE);
+      for (const { response } of skipped) {
+        for (const part of response.responseParts) {
+          part.partMetadata = {
+            ...part.partMetadata,
+            [TOOL_LOOP_SKIPPED_METADATA]: true,
+          };
+        }
+      }
+      const last = skipped.at(-1)!;
+      const chat = client.getChat();
+      chat.addHistory({
+        role: 'user',
+        parts: skipped.flatMap(({ response }) => response.responseParts),
+      });
+      chat.setCompletedToolCallIds([
+        ...chat.getCompletedToolCallIds(),
+        last.request.callId,
+      ]);
+      const recorder = config.getChatRecordingService();
+      for (const call of skipped) {
+        const { request, response, status } = call;
+        recorder?.recordToolResult(
+          response.responseParts,
+          {
+            callId: request.callId,
+            status,
+            resultDisplay: response.resultDisplay,
+            error: response.error,
+            errorType: response.errorType,
+            executionStatus: response.executionStatus,
+          },
+          call === last ? { subtype: 'tool_loop_end' } : undefined,
+        );
+      }
+      const loopEvent = {
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          loopReason: LoopReason.PROVIDER_DUPLICATE_ID,
+        },
+      } satisfies ServerLlmStreamEvent;
+      options?.onStreamEvent?.(loopEvent);
+
+      const history = toolHistoryEvent(skipped);
+      if (history) yield history;
+      for (const { request, response } of skipped) {
+        if (isCurrentSession()) dualOutput?.emitToolResult(request, response);
+        yield {
+          type: 'tool-end',
+          id: request.callId,
+          success: false,
+          summary: 'cancelled',
+        };
+      }
+      if (isCurrentSession()) dualOutput?.processEvent(loopEvent);
+      yield* map(loopEvent);
+      return;
+    }
+    const sharedParts = new Map(
+      (shared?.responses ?? []).map(({ callId, parts }) => [callId, parts]),
+    );
+    if (shared && isCurrentSession()) {
+      const clippedTools = new Set<string>();
+      for (const { request, response, tool } of completed) {
+        // The finalizer only replaces parts whose text it shortens, including
+        // error payloads a Mod may have used to return a native result.
+        if (
+          sharedParts
+            .get(request.callId)
+            ?.some((part, index) => part !== response.responseParts[index])
+        ) {
+          clippedTools.add(canonicalToolName(tool?.name ?? request.name));
+        }
+      }
+      if ([...clippedTools].some((name) => FILE_PATH_TOOLS.has(name))) {
+        // Keep prior-read rights while letting the model get the full body.
+        config.getFileReadCache().markAllReadsEvictedFromHistory();
+      }
+      if (
+        clippedTools.has(ToolNames.SKILL) ||
+        clippedTools.has(ToolNames.EXEC)
+      ) {
+        clearLoadedSkillTracking(
+          config.getToolRegistry(),
+          'OpenTUI shared tool-output shrink',
+        );
+      }
+    }
 
     const usesMods = completed.some((call) => call.nativeAttemptsObserved);
-    const finalResponses = usesMods
-      ? await finalizeToolResponses(
-          config,
-          completed.map((call) => ({
-            callId: call.request.callId,
-            toolName: call.request.name,
-            responseParts: call.response?.responseParts ?? [],
-            persistedOutputFiles: call.response?.persistedOutputFiles,
-            artifacts: call.response?.artifacts,
-          })),
-        )
-      : completed.map((call) => ({
-          responseParts: call.response.responseParts,
+    const finalResponses = shared
+      ? completed.map((call) => ({
+          responseParts:
+            sharedParts.get(call.request.callId) ?? call.response.responseParts,
           persistedOutputFiles: call.response.persistedOutputFiles,
           artifacts: call.response.artifacts,
-        }));
+        }))
+      : usesMods
+        ? await finalizeToolResponses(
+            config,
+            completed.map((call) => ({
+              callId: call.request.callId,
+              toolName: call.request.name,
+              responseParts: call.response?.responseParts ?? [],
+              persistedOutputFiles: call.response?.persistedOutputFiles,
+              artifacts: call.response?.artifacts,
+            })),
+          )
+        : completed.map((call) => ({
+            responseParts: call.response.responseParts,
+            persistedOutputFiles: call.response.persistedOutputFiles,
+            artifacts: call.response.artifacts,
+          }));
     const responseParts: Part[] = [];
     for (const [index, call] of completed.entries()) {
       const resp = call.response;
@@ -1393,7 +1913,12 @@ export async function* livePromptEvents(
       if (resp) {
         const final = finalResponses[index];
         responseParts.push(...final.responseParts);
-        if (!initialTool && current() && config.getSessionId() === sessionId)
+        if (
+          !shared &&
+          !initialTool &&
+          current() &&
+          config.getSessionId() === sessionId
+        )
           config.getChatRecordingService()?.recordToolResult(
             final.responseParts,
             {
@@ -1408,6 +1933,47 @@ export async function* livePromptEvents(
             },
             goalToolResultProvenance(call.request, final.responseParts),
           );
+      }
+    }
+    // The batch's results: in request order and finalized, with the answers
+    // to the calls it did not run, which close their cards here.
+    const displayed = new Map(
+      completed.map((call) => [call.request.callId, call]),
+    );
+    const answeredOnly = displayedCancelledBatch
+      ? []
+      : answered.filter(({ request }) => !displayed.has(request.callId));
+    if (shared) {
+      if (answeredOnly.length > 0) {
+        for (const { request, response } of answeredOnly) {
+          displayed.set(
+            request.callId,
+            response.error
+              ? { request, response, status: 'error' }
+              : { request, response, status: 'success' },
+          );
+        }
+        const ordered = new Set(
+          pending.map(({ callId }) => displayed.get(callId)),
+        );
+        const history = toolHistoryEvent(
+          [...ordered].filter((call) => call !== undefined),
+        );
+        if (history) yield history;
+      }
+      for (const { request, response } of answeredOnly) {
+        const result = toolResultEvent(request.callId, response.resultDisplay);
+        if (result) yield result;
+        yield {
+          type: 'tool-end',
+          id: request.callId,
+          success: !response.error,
+          summary: response.error ? 'error' : 'ok',
+        };
+      }
+      responseParts.splice(0, responseParts.length, ...shared.parts);
+      if (isCurrentSession()) {
+        for (const response of shared.responses ?? []) response.record?.();
       }
     }
     // Client-initiated slash tools finish locally in Ink. Leave queued user
@@ -1453,32 +2019,73 @@ export async function* livePromptEvents(
       }
       return;
     }
-    // ink use-llm-stream parity (:5328): when every tool in the batch was
-    // cancelled, the cancelled responses go to history only — no follow-up
-    // model request. Checked before the steering drain so surviving steered
-    // texts stay parked for the post-turn queue drain instead of riding a
-    // request that will never be sent.
-    if (completed.every((call) => call.status === 'cancelled')) {
-      if (responseParts.length > 0) {
-        await client.addHistory({ role: 'user', parts: responseParts });
-      }
-      options?.onToolsCancelled?.();
+    if (shared && !isCurrentSession()) {
+      endBatchInteraction('cancelled');
       return;
     }
-    if (!turnModel.inline && !turnModel.current?.endsWith('\0')) {
+    // Replay answers keep a declined batch going. Esc stops the whole batch
+    // and pairs its retained results without sending another request.
+    const cancelled =
+      (shared !== undefined && abort.aborted) ||
+      (answeredOnly.length === 0 &&
+        completed.every((call) => call.status === 'cancelled'));
+    if (!cancelled && !turnModel.inline && !turnModel.current?.endsWith('\0')) {
       for (const call of completed) {
         if ('modelOverride' in call.response)
           turnModel.current = call.response.modelOverride;
       }
     }
 
-    if (!abort.aborted && current()) {
+    if (!cancelled && !abort.aborted && current()) {
       for (const [index, call] of completed.entries()) {
         dualOutput?.emitToolResult(call.request, {
           ...call.response,
           ...finalResponses[index],
         });
       }
+      for (const { request, response } of answeredOnly)
+        dualOutput?.emitToolResult(request, response);
+    }
+    if (cancelled || shared?.stop === 'tool_ended_turn') {
+      const permit =
+        shared &&
+        completed.find((call) => call.response.terminateTurn)?.request
+          .goalContext;
+      let events: ServerLlmStreamEvent[] = [];
+      try {
+        if (responseParts.length > 0) {
+          await client.addHistory({ role: 'user', parts: responseParts });
+        }
+        if (cancelled && (!shared || isCurrentSession()))
+          options?.onToolsCancelled?.();
+        if (permit) {
+          events = await finishToolGoalTurn(
+            config,
+            promptId,
+            permit,
+            abort,
+            isCurrentSession,
+          );
+        }
+      } catch (error) {
+        endBatchInteraction(
+          'error',
+          permit
+            ? {
+                errorMessage: 'Goal tool continuation could not finish',
+                errorType: 'continuation_goal_finish_failed',
+              }
+            : undefined,
+        );
+        throw error;
+      }
+      endBatchInteraction(cancelled ? 'cancelled' : 'ok');
+      for (const event of events) {
+        if (!isCurrentSession()) return;
+        dualOutput?.processEvent(event);
+        yield* map(event);
+      }
+      return;
     }
     // Sampling boundary: drained steering rides after the tool responses as
     // genuine user content (original useGeminiStream mid-turn drain).

@@ -23,6 +23,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -216,6 +217,16 @@ class HostedWorkspaceToolTurnIT {
     private static void registerUnicodePublication(GenericApplicationContext context) {
         var objects = new ConcurrentHashMap<String, byte[]>();
         context.registerBean("unicodeObjects", ToolPublicationObjectStore.class, () -> new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 byte[] previous = objects.putIfAbsent(key, bytes.clone());
@@ -681,21 +692,24 @@ class HostedWorkspaceToolTurnIT {
         String storageId = "storage-" + index;
         String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage"
                 + " WHERE alias_key = ? AND tenant_id = ? AND storage_id = ?", String.class,
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storageId),
+                RuntimeAdmissionFences.storageAliasKey(tenant, storageId),
                 tenant, storageId);
         assertThat(physical).isNotBlank();
         Map<String, Object> member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id,"
                 + " session_state, execution_storage_key, is_rewind_pending FROM ma_runtime_session"
                 + " WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ?",
                 tenant, session.get("sessionId"), report.path("promptId").asText());
-        boolean released = storeFaults ? fault.equals("turn-reply") : List.of("prepare", "start", "release").contains(fault);
+        boolean released = storeFaults ? fault.equals("turn-reply")
+                : List.of("prepare", "start", "release", "release-before-forward").contains(fault);
         // #13800: a turn that recovery-blocks no longer parks its mount
         // forever — its handback clears membership once nothing is
         // unproven (every execution SETTLED, no control in flight) and the
         // Runtime Session stays READY for the fleet. The one family whose
         // work genuinely never settles here — the PREPARED prepare-twice
         // execution — retains its original membership until its outcome
-        // is known.
+        // is known. A settled turn's owed release is paid by the detach's
+        // terminal drain (#16484), so release-before-forward ends RELEASED
+        // like release; only the never-settled turns above stay READY.
         boolean retained = !storeFaults && fault.equals("prepare-twice");
         assertThat(member.get("execution_storage_key")).as(fault + " execution membership")
                 .isEqualTo(retained ? physical : null);
@@ -704,7 +718,7 @@ class HostedWorkspaceToolTurnIT {
             assertThat(member.get("binding_id")).isEqualTo(executions.getFirst().get("binding_id"));
             assertThat(member.get("runtime_generation")).isEqualTo(executions.getFirst().get("runtime_generation"));
         }
-        assertThat(member.get("session_state")).isEqualTo(released ? "RELEASED" : "READY");
+        assertThat(member.get("session_state")).as(fault + " owner state").isEqualTo(released ? "RELEASED" : "READY");
         if (storeFaults) {
             assertStoreJournal(jdbc, tenant, session, report);
         }

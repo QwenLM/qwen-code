@@ -985,6 +985,27 @@ export default {
     'Verwendung: /forget <zu entfernender Erinnerungstext>',
   'No managed auto-memory entries matched: {{query}}':
     'Keine verwalteten Auto-Speicher-Einträge gefunden: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'GitHub-Pull-Request an diese Sitzung binden',
+  'Usage: /pr <number | url>': 'Verwendung: /pr <Nummer | url>',
+  'No PRs bound to this session.': 'An diese Sitzung sind keine PRs gebunden.',
+  'Bound PRs: {{list}}': 'Gebundene PRs: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Ungültiger PR-Verweis. Verwendung: /pr <Nummer | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'PR #{{number}} konnte über gh nicht aufgelöst werden. Geben Sie stattdessen die vollständige PR-URL an.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} wurde an diese Sitzung gebunden: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} ist bereits an diese Sitzung gebunden: {{url}}',
+  'Failed to bind PR #{{number}}.':
+    'PR #{{number}} konnte nicht gebunden werden.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'PR #{{number}} konnte nicht gebunden werden: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'Die PR-Bindungen dieser Sitzung konnten nicht gelesen werden.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) ist nicht verfügbar oder hat das Zeitlimit überschritten. Geben Sie die vollständige PR-URL an, um ohne gh zu binden.',
   'Consolidate managed auto-memory topic files.':
     'Verwaltete Auto-Speicher-Themendateien konsolidieren.',
   'Could not retrieve tool registry.':
@@ -2053,6 +2074,8 @@ export default {
     'Berater-Überprüfung fehlgeschlagen: {{error}}',
   'No conversation context available for /advisor':
     'Kein Gesprächskontext für /advisor verfügbar',
+  'No conversation context available for /btw':
+    'Kein Gesprächskontext für /btw verfügbar',
   'Focus too long (max {{max}} chars)': 'Fokus zu lang (max. {{max}} Zeichen)',
   'Another operation is in progress, wait for it to complete before running /advisor':
     'Ein anderer Vorgang läuft gerade. Warten Sie, bis er abgeschlossen ist, bevor Sie /advisor ausführen',

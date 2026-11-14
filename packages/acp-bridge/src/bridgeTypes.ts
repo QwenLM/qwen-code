@@ -5,6 +5,7 @@
  */
 
 import type { BundledGeneratedUiStatus } from '@qwen-code/qwen-code-core/config/generated-ui.js';
+import type { ChannelWorkflowOrigin } from '@qwen-code/qwen-code-core/utils/invocation-context.js';
 import type {
   ApprovalMode,
   McpAppToolResult,
@@ -1432,6 +1433,7 @@ export interface BridgeClientRequestContext {
    * wire key from untrusted callers and re-injects it only from this flag.
    */
   channelPrompt?: boolean;
+  channelWorkflowOrigin?: ChannelWorkflowOrigin;
   /** Trusted Channel delivery correlation injected by the daemon prompt
    * route. Never populated from caller-controlled ACP metadata. */
   channelDelivery?: {
@@ -1530,10 +1532,12 @@ export const IMAGE_ONLY_PROMPT_TEXT = '[image]';
 // (`sdk-typescript/src/daemon/ui/types.ts`) and already-written transcripts
 // pin the value, so it must stay `inputAnnotations`.
 export const DAEMON_INPUT_ANNOTATIONS_META_KEY = 'inputAnnotations';
-// Wire twin of channel-base's CHANNEL_PROMPT_META_KEY; the packages have no
-// dependency path between them, so a cross-package test pins the value.
+// Wire twins of channel-base's keys of the same names; the packages have no
+// dependency path between them, so a cross-package test
+// (`channel-prompt-wire-key.test.ts`) pins all three values.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
 export const CHANNEL_OUTPUT_MODE_META_KEY = 'qwen.channel.outputMode';
+export const CHANNEL_WORKFLOW_ORIGIN_META_KEY = 'qwen.channel.workflowOrigin';
 
 /**
  * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side
@@ -1891,6 +1895,11 @@ export type BridgeGenerationStreamEvent =
       requestId: string;
       seq: number;
       text: string;
+    }
+  | {
+      /** A retry restarted the answer; text from earlier deltas is void. */
+      type: 'reset';
+      requestId: string;
     }
   | {
       type: 'done';
@@ -3238,6 +3247,16 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * session has no other live attaches/subscribers.
    */
   detachClient(sessionId: string, clientId?: string): Promise<void>;
+
+  /**
+   * Suspend one disconnected ACP registration for designated workflow
+   * approvals while its foreground prompt finishes. Returns the release
+   * callback used on stream reattach or before detaching that registration.
+   */
+  suspendClientWorkflowApprovals(
+    sessionId: string,
+    clientId: string,
+  ): (() => void) | undefined;
 
   /** Test/inspection hook: number of live sessions. */
   readonly sessionCount: number;

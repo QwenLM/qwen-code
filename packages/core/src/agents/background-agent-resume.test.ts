@@ -2657,6 +2657,7 @@ describe('BackgroundAgentResumeService', () => {
     );
     register(agentId, 'Isolated result', {
       status: 'running',
+      workspacePinned: true,
       outputFile,
       metaPath,
     });
@@ -2670,7 +2671,7 @@ describe('BackgroundAgentResumeService', () => {
 
     await expect(
       service.reviveCompletedBackgroundAgent(agentId, 'continue'),
-    ).resolves.toBeDefined();
+    ).resolves.toMatchObject({ workspacePinned: false });
     await waitForStatus(agentId, 'completed');
 
     expect(subagentManager.createAgentHeadless).toHaveBeenCalledOnce();

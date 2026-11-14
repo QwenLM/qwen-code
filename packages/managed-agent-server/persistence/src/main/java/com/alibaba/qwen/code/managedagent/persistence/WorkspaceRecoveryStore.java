@@ -591,8 +591,8 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
         // Missing keys gap-lock other tenants; the retention authority lock prevents new writers here.
         boolean lockHead = lockSources && count(jdbc,
                 "SELECT COUNT(*) FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.harnessDrainKey(session)) != 0;
+                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey(tenant),
+                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey(session)) != 0;
         var heads = jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION'"
                 + (lockHead ? " FOR UPDATE" : ""),
                 (result, index) -> {
@@ -602,8 +602,8 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
                     value.put("writer_lease_fingerprint", lease == null ? null
                             : LocalDateTime.ofInstant(lease.toInstant(), java.time.ZoneOffset.UTC).toString());
                     return value;
-                }, com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.harnessDrainKey(session));
+                }, com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey(tenant),
+                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey(session));
         check(heads.size() <= 1, "source_drift");
         if (heads.isEmpty()) {
             source.putNull("head");
@@ -613,7 +613,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
             Timestamp lease = (Timestamp) head.get("writer_lease_until");
             check(!"ACTIVE".equals(head.get("state")) || lease != null && !lease.after(now(jdbc)), "source_drift");
             check(Set.of("ACTIVE", "SEALED", "DELETED").contains(head.get("state"))
-                    && List.of(1, 2, 3, 4).contains(((Number) head.get("storage_version")).intValue())
+                    && List.of(1, 2, 3, 4, 5).contains(((Number) head.get("storage_version")).intValue())
                     && ((Number) head.get("compacted_through_revision")).longValue() >= 0
                     && ((Number) head.get("compacted_through_revision")).longValue() <= ((Number) head.get("journal_revision")).longValue()
                     && "READY".equals(head.get("recovery_status")), "source_drift");
