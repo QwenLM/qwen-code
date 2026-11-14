@@ -1354,7 +1354,7 @@ async function runPreparedHostedHarnessTextTurn(
           // (durable-feed retraction, usage, model-scope attempts) stay here in
           // onModelEvent. The outer loop keeps its cap, hooks and tool turn.
           const recovery = preparedRecovery;
-          const source: ModelRoundSource = recovery
+          const source: ModelRoundSource | typeof client = recovery
             ? {
                 sendRound: (_round, signal) => {
                   const turn = new Turn(
@@ -1376,15 +1376,7 @@ async function runPreparedHostedHarnessTextTurn(
                   })();
                 },
               }
-            : {
-                sendRound: (round_, signal) =>
-                  client.sendMessageStream(
-                    round_.parts,
-                    signal,
-                    round_.promptId,
-                    round_.options,
-                  ),
-              };
+            : client;
           const result = await runModelRound(
             source,
             { parts: request, promptId: input.promptId, options: sendOptions },

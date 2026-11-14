@@ -3749,4 +3749,77 @@ describe('Hosted model-round-only migration parity (#17248)', () => {
     expect(onResult.text).toBe(offResult.text);
     expect(on.requests).toEqual(off.requests);
   });
+
+  it('observes the durable-feed retraction on a non-continuation retry, as the legacy path', async () => {
+    const events = [
+      { type: LlmEventType.Content, value: 'orphan' },
+      { type: LlmEventType.Retry },
+      { type: LlmEventType.Content, value: 'final' },
+      { type: LlmEventType.Finished },
+    ];
+    const offDeltas = {
+      delta: vi.fn(),
+      retract: vi.fn(async () => undefined),
+    };
+    config(events);
+    const offResult = await runHostedHarnessTextTurn({
+      ...input,
+      textDeltas: offDeltas,
+    });
+    const onDeltas = {
+      delta: vi.fn(),
+      retract: vi.fn(async () => undefined),
+    };
+    config(events);
+    state.config['isUnifiedAgentLoopEnabled'] = () => true;
+    const onResult = await runHostedHarnessTextTurn({
+      ...input,
+      textDeltas: onDeltas,
+    });
+    expect(offResult.text).toBe('final');
+    expect(onResult.text).toBe(offResult.text);
+    expect(offDeltas.retract).toHaveBeenCalledTimes(1);
+    expect(onDeltas.retract).toHaveBeenCalledTimes(1);
+    expect(onDeltas.delta.mock.calls).toEqual(offDeltas.delta.mock.calls);
+  });
+
+  it('runs a prepared-recovery resume through the shared round, as the legacy path', async () => {
+    const prepared = {
+      request: { model: 'saved-model', config: {}, contents: [] },
+    } as unknown as LlmPreparedRequest;
+    const resumeModel = { round: 0, prepared } as HostedModelRequest;
+    const replay = vi
+      .spyOn(Turn.prototype, 'run')
+      .mockImplementation(async function* () {
+        yield { type: LlmEventType.Content, value: 'recovered' };
+        yield {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: undefined },
+        };
+      });
+    try {
+      config([]);
+      const offResult = await runHostedHarnessTextTurn({
+        ...input,
+        resumeModel,
+      });
+      const offReplayCalls = replay.mock.calls.length;
+
+      config([]);
+      state.config['isUnifiedAgentLoopEnabled'] = () => true;
+      const onSpy = vi.spyOn(agentLoop, 'runModelRound');
+      const onResult = await runHostedHarnessTextTurn({
+        ...input,
+        resumeModel,
+      });
+      expect(onSpy).toHaveBeenCalledTimes(1);
+      onSpy.mockRestore();
+
+      expect(offResult.text).toBe('recovered');
+      expect(onResult.text).toBe(offResult.text);
+      expect(replay.mock.calls.length).toBe(offReplayCalls * 2);
+    } finally {
+      replay.mockRestore();
+    }
+  });
 });
