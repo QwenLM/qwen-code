@@ -2,7 +2,7 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）与 OpenTUI（PR 4，#16743–#16820）的迁移均已合入；各 surface 的默认开启等待 nightly 统一 loop E2E 门控（#16192）。PR 5（AgentCore）正在进行：5a（#16880）和 5b（#17035）已合入。其余步骤在 #17045 中跟踪。PR 6a（speculation 的模型轮，#17029）正在评审。
+- **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）与 OpenTUI（PR 4，#16743–#16820）的迁移均已合入；各 surface 的默认开启等待 nightly 统一 loop E2E 门控（#16192）。PR 5（AgentCore）正在进行：5a（#16880）和 5b（#17035）已合入。其余步骤在 #17045 中跟踪。PR 6a（speculation 的模型轮，#17029）已合入。
 - **日期**：2026-10-23，基于 upstream `779a4d5d0d`。
 - **相关**：
   - tracking issue #15327；
@@ -581,7 +581,7 @@ speculation 的 `runSpeculativeLoop`（`speculation.ts`）在用户确认前，�
 | 5d    | AgentCore：默认开启，然后移除现有 loop                                                                    |
 | 6a    | speculation：每一模型轮走 loop 的模型轮，在 forked chat 的 `Turn` 上；speculation 保留其工具门与直接执行  |
 | 6b    | speculation：默认开启，然后删除其现有模型轮                                                               |
-| —     | Hosted Harness：单独评估                                                                                  |
+| —     | Hosted Harness：单独评估——见[迁移评估](2026-11-14-hosted-harness-loop-evaluation.md)                      |
 
 PR 6b 是 speculation 的默认开启与删除步骤。
 
@@ -790,4 +790,4 @@ PR 6b 是 speculation 的默认开启与删除步骤。
 ## 后续工作
 
 - 会话层调度：用同一处逻辑决定通知、cron、Goal 轮次或 teammate 消息何时启动一轮 loop。
-- Hosted Harness 评估：它写日志的调度是否可以变成符合同一 `schedule` 契约的 scheduler。
+- Hosted Harness 评估：它写日志的调度是否可以变成符合同一 `schedule` 契约的 scheduler。已由[迁移评估](2026-11-14-hosted-harness-loop-evaluation.md)回答：journal 化派发保留，仅模型轮可迁到共享轮。
