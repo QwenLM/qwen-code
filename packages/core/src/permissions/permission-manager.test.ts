@@ -3543,6 +3543,91 @@ describe('PermissionManager — compound shell write attribution', () => {
     expect(await pm.evaluate(ctx)).toBe('deny');
   });
 
+  it.each([
+    [
+      String.raw`D=sub; sh -c "printf {} > \"$D\"/../.qwen/settings.json"`,
+      'deny',
+    ],
+    [String.raw`sh -c 'printf {} > "$OUTPUT"'`, 'ask'],
+  ])(
+    'does not allow an unresolved wrapper redirect: %s',
+    async (command, restrictiveDecision) => {
+      const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe(restrictiveDecision);
+      const broadPm = repoPm({
+        permissionsAllow: ['Bash(*)', 'WriteFileTool(*)'],
+      });
+      expect(await broadPm.evaluate(sh(command, '/repo'))).toBe('ask');
+    },
+  );
+
+  it('keeps a known deny beside an unresolved redirect', async () => {
+    const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+    const command = 'printf ok > "$OUT"; printf {} > .qwen/settings.json';
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+  });
+
+  it('matches a known literal redirect after quote removal', async () => {
+    const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+    const command = String.raw`printf ok > '$OUT'/../.qwen/settings.json`;
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+  });
+
+  it('keeps a protected write visible beside an undecodable wrapper argument', async () => {
+    const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+    const ctx = sh(
+      String.raw`sh -c $'echo {} > .qwen/settings.json; cat \xff'`,
+      '/repo',
+    );
+    expect(await pm.evaluate(ctx)).toBe('deny');
+  });
+
+  it('does not certify paths after a cd whose uncertainty normalization erased', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)', 'ReadFileTool(*)', 'WriteFileTool(*)'],
+      permissionsDeny: [
+        'ReadFileTool(victim.txt)',
+        'WriteFileTool(.qwen/settings.json)',
+      ],
+    });
+    for (const [command, expected] of [
+      [String.raw`cd $'\xff'/../dir; cat > settings.json`, 'ask'],
+      [String.raw`cd $'\xff'/..; cat victim.txt`, 'deny'],
+    ] as const) {
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe(expected);
+    }
+  });
+
+  it.each([
+    [String.raw`cat $'\xff'`, 'ask'],
+    [String.raw`cat $'\xff'/../victim.txt`, 'ask'],
+    [String.raw`printf x > $'\uD800'`, 'ask'],
+    [String.raw`cat $'\U00110000'`, 'ask'],
+    ["sh -c 'cat \uD800'" + String.raw`$'\xff'`, 'ask'],
+    [String.raw`bash -c "printf ok > $'\\xff'"`, 'ask'],
+    [String.raw`bash -c "printf $VALUE > $'\\xff'"`, 'ask'],
+    ['cat ' + String.fromCharCode(0xd800, 0x5c, 0xdcff), 'ask'],
+    [String.raw`sh -c $'printf ok > $\x27\xff\x27'`, 'ask'],
+    [String.raw`sh -c $'printf ok > $\047\xff\047'`, 'ask'],
+    ["cat '\uD800'\uDCFF", 'ask'],
+    ["printf ok > '\uD800'\uDCFF", 'ask'],
+    [String.raw`cat $'\xc3\xa9'`, 'allow'],
+    [String.raw`sh -c 'cat 😀'$'\x41'`, 'allow'],
+  ] as const)(
+    'undecodable paths ask instead of matching an allow rule: %s → %s',
+    async (command, expected) => {
+      const pm = repoPm({
+        permissionsAllow: [
+          'Bash(*)',
+          'ReadFileTool(*)',
+          'WriteFileTool(*)',
+          'Edit',
+        ],
+      });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe(expected);
+    },
+  );
+
   // #15600: `>&file` writes `file`, so it must hit that file's deny rule, while
   // fd duplication (`2>&1`, `>&2`) writes nothing and must not be denied.
   it.each<[command: string, expected: 'allow' | 'deny']>([

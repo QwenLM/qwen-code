@@ -564,8 +564,10 @@ describe('extractShellOperations', () => {
     expect(ops(command)).toEqual([write(`${CWD}/${file}`)]);
   });
 
-  it('>&$VAR keeps the literal write: it may name a file', () => {
-    expect(ops('printf TXT >&$OUT')).toEqual([write(`${CWD}/&$OUT`)]);
+  it('>&$VAR keeps an unresolved write: it may name a file', () => {
+    expect(ops('printf TXT >&$OUT')).toEqual([
+      { ...write(`${CWD}/&$OUT`), pathUnknown: true },
+    ]);
   });
 
   // Only a whole number or `-` is a descriptor; anything else names a file.
@@ -613,7 +615,10 @@ describe('extractShellOperations', () => {
     ['tee >&-2', [write(`${CWD}/&-2`)]],
     ['tee 2>&-2', [write(`${CWD}/&-2`)]],
     ['cat <&-2', [read(`${CWD}/&-2`)]],
-    ['tee >&-$HOME/.bashrc', [write(`${CWD}/&-$HOME/.bashrc`)]],
+    [
+      'tee >&-$HOME/.bashrc',
+      [{ ...write(`${CWD}/&-$HOME/.bashrc`), pathUnknown: true }],
+    ],
     ['tee >&-{a,b}', [write(`${CWD}/&-{a,b}`)]],
     ['my-tool >&-notes.txt', [write(`${CWD}/&-notes.txt`)]],
     ['rm -- >&--x', [write(`${CWD}/&--x`)]],
@@ -1060,10 +1065,103 @@ describe('ANSI-C bytes that are not valid UTF-8', () => {
     [String.raw`cat $'\xc3'`, '/repo/\udcc3'],
     [String.raw`cat $'\uD800'`, '/repo/\udced\udca0\udc80'],
     [String.raw`cat $'\U00110000'`, '/repo/\udcf4\udc90\udc80\udc80'],
-  ])('keeps one character per byte: %s', (command, path) => {
-    expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
-      read(path),
+  ])(
+    'keeps one character per byte but marks the path unresolved: %s',
+    (command, path) => {
+      expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+        { ...read(path), pathUnknown: true },
+      ]);
+    },
+  );
+  it('does not pair a raw lone high surrogate with a decoded invalid byte', () => {
+    const command = 'cat \uD800' + String.raw`$'\xff'`;
+    expect(extractShellOperations(command, '/repo')).toEqual([
+      { ...read('/repo/\uDC00\uDCFF'), pathUnknown: true },
     ]);
+  });
+
+  it('does not pair a raw lone high surrogate across a wrapper byte boundary', () => {
+    const command = "sh -c 'cat \uD800'" + String.raw`$'\xff'`;
+    expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+      { ...read('/repo/\uDC00\uDCFF'), pathUnknown: true },
+    ]);
+  });
+
+  it.each([
+    [
+      'a double-quoted wrapper payload',
+      String.raw`bash -c "printf ok > $'\\xff'"`,
+      'write_file',
+    ],
+    [
+      'a double-quoted payload with an expansion',
+      String.raw`bash -c "printf $VALUE > $'\\xff'"`,
+      'write_file',
+    ],
+    [
+      'a backslash between raw surrogate fragments',
+      'cat ' + String.fromCharCode(0xd800, 0x5c, 0xdcff),
+      'read_file',
+    ],
+    [
+      'a hex-quoted wrapper payload',
+      String.raw`sh -c $'printf ok > $\x27\xff\x27'`,
+      'write_file',
+    ],
+    [
+      'an octal-quoted wrapper payload',
+      String.raw`sh -c $'printf ok > $\047\xff\047'`,
+      'write_file',
+    ],
+    ['raw surrogates separated by quotes', "cat '\uD800'\uDCFF", 'read_file'],
+    [
+      'a raw redirect target separated by quotes',
+      "printf ok > '\uD800'\uDCFF",
+      'write_file',
+    ],
+  ])(
+    'keeps an undecodable path unresolved through %s',
+    (_label, command, tool) => {
+      const operations = extractShellOperationsAcrossCommand(command, '/repo');
+      expect(operations).toHaveLength(1);
+      expect(operations[0]).toMatchObject({
+        virtualTool: tool,
+        pathUnknown: true,
+      });
+    },
+  );
+
+  it('marks a redirect-only undecodable target unresolved', () => {
+    expect(extractShellOperations(String.raw`> $'\xff'`, '/repo')).toEqual([
+      { ...write('/repo/\udcff'), pathUnknown: true },
+    ]);
+  });
+
+  it('keeps an undecodable argument unresolved after .. normalization', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        String.raw`cat $'\xff'/../etc/passwd`,
+        '/repo',
+      ),
+    ).toEqual([{ ...read('/repo/etc/passwd'), pathUnknown: true }]);
+  });
+
+  it('keeps later relative writes uncertain after an undecodable cd', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        String.raw`cd $'\xff'/../dir; cat > settings.json`,
+        '/repo',
+      ),
+    ).toEqual([uncertainWrite('/repo/dir/settings.json')]);
+  });
+
+  it('keeps absolute-looking writes uncertain after an undecodable cd', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        String.raw`cd $'\xff'/..; cat > /repo/victim.txt`,
+        '/repo',
+      ),
+    ).toEqual([uncertainWrite('/repo/victim.txt', false)]);
   });
 });
 
@@ -1071,6 +1169,9 @@ describe('ANSI-C wrapper payloads', () => {
   it.each([
     [String.raw`cat $'\xc3\xa9'`, [read('/repo/é')]],
     [String.raw`cat $'\xc3'$'\xa9'`, [read('/repo/é')]],
+    ["sh -c 'cat 😀'$'\\x41'", [read('/repo/😀A')]],
+    [String.raw`cat \😀`, [read('/repo/😀')]],
+    ["cat '😀'", [read('/repo/😀')]],
     [String.raw`cat $'a\c\\tb'`, [read('/repo/a\x1ctb')]],
     [String.raw`cat $'\c?'`, [read('/repo/\x7f')]],
     [String.raw`cat $'\x3e'/etc/passwd`, [read('/repo/>/etc/passwd')]],
@@ -1118,6 +1219,21 @@ describe('ANSI-C wrapper payloads', () => {
     expect(across(command)).toEqual([write('/etc/motd')]);
   });
 
+  it('keeps a protected write visible beside an undecodable wrapper argument', () => {
+    expect(
+      across(String.raw`sh -c $'echo {} > .qwen/settings.json; cat \xff'`),
+    ).toEqual([
+      write(REPO_SETTINGS),
+      { ...read('/repo/\udcff'), pathUnknown: true },
+    ]);
+  });
+
+  it('extracts writes from a multi-word payload carrying an undecodable byte', () => {
+    expect(
+      across(String.raw`sh -c $'printf x > secrets/real_file \xff'`),
+    ).toEqual([write('/repo/secrets/real_file')]);
+  });
+
   it('treats a decoded operator as data, not a redirect', () => {
     // `$'\x3e'` decodes to `>` and is a `>` argument to `cat`: the read of
     // the file named `>` plus the real write, not a phantom write to `>`.
@@ -1126,6 +1242,64 @@ describe('ANSI-C wrapper payloads', () => {
       write('/tmp/t'),
     ]);
   });
+});
+
+describe('unresolved redirect targets', () => {
+  it.each([
+    String.raw`D=sub; sh -c "printf {} > \"$D\"/../.qwen/settings.json"`,
+    String.raw`sh -c 'printf {} > "$OUTPUT"'`,
+    String.raw`printf ok > "😀$OUT"/../.qwen/settings.json`,
+    String.raw`printf ok > dir/"$OUT"`,
+    String.raw`printf ok > "$(pwd)/out"`,
+    'printf ok > `pwd`/out',
+    String.raw`printf '>'>"$OUT"`,
+    String.raw`cd sub > "$OUT"`,
+  ])('keeps an expanding redirect visible: %s', (command) => {
+    const operations = across(command);
+    expect(operations).toHaveLength(1);
+    expect(operations[0]).toMatchObject({
+      virtualTool: 'write_file',
+      pathUnknown: true,
+    });
+  });
+
+  it.each(['>', '1>', '>>', '2>', '2>>', '&>', '&>>', '>|', '2>|', '<'])(
+    'keeps an unresolved %s target in both token layouts',
+    (operator) => {
+      for (const space of ['', ' ']) {
+        expect(across(`unknown-command ${operator}${space}"$OUT"`)).toEqual([
+          {
+            virtualTool: operator === '<' ? 'read_file' : 'write_file',
+            filePath: '/repo/$OUT',
+            pathUnknown: true,
+          },
+        ]);
+      }
+    },
+  );
+
+  it.each([
+    [String.raw`'$OUT'`, '$OUT'],
+    [String.raw`\$OUT`, '$OUT'],
+    [String.raw`"\$OUT"`, '$OUT'],
+    [String.raw`$'\x24OUT'`, '$OUT'],
+    [String.raw`$'\x60OUT'`, '`OUT'],
+    [String.raw`dir/'$OUT'`, 'dir/$OUT'],
+    [String.raw`😀'$OUT'`, '😀$OUT'],
+    [String.raw`'$OUT'/../.qwen/settings.json`, '.qwen/settings.json'],
+  ])('keeps a literal target known: %s', (target, file) => {
+    expect(across(`printf ok > ${target}`)).toEqual([write(`/repo/${file}`)]);
+  });
+
+  it.each([
+    String.raw`printf "$VALUE" > .qwen/settings.json`,
+    String.raw`printf "$VALUE>">.qwen/settings.json`,
+  ])(
+    'does not attribute argument expansion to a static redirect: %s',
+    (command) => {
+      expect(across(command)).toEqual([write(REPO_SETTINGS)]);
+    },
+  );
 });
 
 describe('quoted and decoded tilde targets', () => {

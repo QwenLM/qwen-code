@@ -165,6 +165,16 @@ You can review each proposed change and approve or reject it individually.
 }
 ```
 
+### Shell redirection targets
+
+Shell redirections are also checked against file permissions. A target such as
+`> "$OUTPUT"` needs confirmation when its expansion cannot be resolved, even
+when broad shell and file allow rules match. Undecodable filename bytes also
+require confirmation. A matching deny still wins; single-quoted or
+backslash-escaped dollar signs in ordinary redirection filenames remain literal
+characters. Auto Mode sends these unresolved operations to manual approval rather
+than its classifier.
+
 ## 3. Auto Edits Mode
 
 Auto-Edit Mode instructs Qwen Code to automatically approve file edits while requiring manual approval for shell commands, ideal for accelerating development workflows while maintaining system safety.

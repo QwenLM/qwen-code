@@ -20,6 +20,7 @@ import {
   getCommandRoots,
   getShellConfiguration,
   hasNonFinalTopLevelBackgroundOperator,
+  hasUnpairedSurrogate,
   hasUnsafeMonitorBackgroundOperator,
   isCommandAllowed,
   isCommandNeedsPermission,
@@ -769,12 +770,40 @@ describe('stripShellWrapper', () => {
     expect(stripShellWrapper('sh -c --')).toEqual('--');
   });
 
-  // Invalid UTF-8 keeps one character per byte instead of U+FFFD.
-  it('keeps undecodable ANSI-C bytes distinct', () => {
+  // Invalid UTF-8 is decoded losslessly for the operation scanner. The path
+  // layer separately marks it unknown instead of treating it as an expansion.
+  it('decodes undecodable ANSI-C words without treating them as expansions', () => {
     expect(stripShellWrapper(String.raw`sh -c $'\xff'`)).toEqual('\udcff');
     expect(stripShellWrapper(String.raw`sh -c $'\uD800'`)).toEqual(
       '\udced\udca0\udc80',
     );
+  });
+
+  it('does not pair a raw lone high surrogate across a wrapper byte boundary', () => {
+    const command = "sh -c 'cat \uD800'" + String.raw`$'\xff'`;
+    expect(stripShellWrapper(command)).toEqual('cat \uDC00\uDCFF');
+  });
+
+  it('keeps raw surrogate fragments undecodable after wrapper quote removal', () => {
+    const command = `sh -c 'cat ${String.fromCharCode(0xd800)}'${String.fromCharCode(0xdcff)}`;
+    expect(hasUnpairedSurrogate(stripShellWrapper(command))).toBe(true);
+  });
+
+  it('preserves undecodable text when an ANSI-C payload is decoded again', () => {
+    const opaqueByte = String.fromCharCode(0xdcff);
+    expect(stripShellWrapper(`sh -c $'cat ${opaqueByte}'`)).toBe(
+      `cat ${opaqueByte}`,
+    );
+  });
+
+  it('removes wrapper quoting without discarding literal fragments beside expansions', () => {
+    expect(
+      stripShellWrapper(String.raw`bash -c "printf $VALUE > $'\\xff'"`),
+    ).toBe(String.raw`printf $VALUE > $'\xff'`);
+  });
+
+  it('keeps valid surrogate pairs beside decoded ASCII in a wrapper', () => {
+    expect(stripShellWrapper("sh -c 'cat 😀'$'\\x41'")).toEqual('cat 😀A');
   });
 
   it.each(RESOLVED_PAYLOADS)(
@@ -807,6 +836,15 @@ describe('stripTrailingBackgroundAmp', () => {
   });
 });
 
+describe('hasUnpairedSurrogate', () => {
+  it('detects lone high and low surrogates without rejecting valid pairs', () => {
+    expect(hasUnpairedSurrogate('a\uD800b')).toBe(true);
+    expect(hasUnpairedSurrogate('\uD800')).toBe(true);
+    expect(hasUnpairedSurrogate('\uDCFF')).toBe(true);
+    expect(hasUnpairedSurrogate('a\u{1F600}b')).toBe(false);
+  });
+});
+
 describe('detectSelfKillCommand', () => {
   it('detects broad Windows taskkill patterns that target qwen-code hosts', () => {
     expectEach(detectSelfKillCommand, true, [
@@ -823,6 +861,7 @@ describe('detectSelfKillCommand', () => {
       'pkill -f /usr/bin/node',
       'pkill -9f node',
       "bash -lc 'pkill -f qwen'",
+      String.raw`sh -c $'pkill -f qwen; cat \xff'`,
     ]);
   });
 

@@ -34,8 +34,10 @@
 import nodePath from 'node:path';
 import os from 'node:os';
 import {
+  concatAnsiCText,
   decodeAnsiCBytes,
   decodeAnsiCEscape,
+  hasUnpairedSurrogate,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -79,6 +81,8 @@ export interface ShellOperation {
    * do not depend on cwd; relative redirect/path arguments do.
    */
   pathMayDependOnCwd?: boolean;
+  /** True when expansion or undecodable bytes prevent a statically known path. */
+  pathUnknown?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -105,12 +109,12 @@ function tokenize(
   command: string,
   fdRedirects?: Set<number>,
   fdCloses?: Set<number>,
-  /** Parallel bare marks per pushed token; '1' = typed unquoted and unescaped. */
+  /** Parallel marks: '1' = bare, '0' = quoted/escaped, '2' = expansion syntax. */
   bares?: string[],
 ): string[] {
   const tokens: string[] = [];
   let current = '';
-  // One char per char of `current`: '1' if typed unquoted and unescaped.
+  // One mark per UTF-16 code unit; expansion marks survive quote removal.
   let bare = '';
   let wordStarted = false;
   let tildeQuoted = false;
@@ -118,7 +122,7 @@ function tokenize(
   const flushAnsiC = () => {
     if (ansiCBytes.length === 0) return;
     const text = decodeAnsiCBytes(ansiCBytes);
-    current += text;
+    current = concatAnsiCText(current, text);
     bare += '0'.repeat(text.length);
     ansiCBytes = [];
   };
@@ -184,7 +188,13 @@ function tokenize(
         continue;
       }
       const literal = String.fromCodePoint(command.codePointAt(i)!);
-      for (const byte of Buffer.from(literal)) ansiCBytes.push(byte);
+      if (hasUnpairedSurrogate(literal)) {
+        flushAnsiC();
+        current = concatAnsiCText(current, literal);
+        bare += '0'.repeat(literal.length);
+      } else {
+        for (const byte of Buffer.from(literal)) ansiCBytes.push(byte);
+      }
       i += literal.length - 1;
       continue;
     }
@@ -197,8 +207,10 @@ function tokenize(
       wordStarted = true;
     }
     if (escaped) {
-      current += ch;
-      bare += '0';
+      const literal = String.fromCodePoint(command.codePointAt(i)!);
+      current = concatAnsiCText(current, literal);
+      bare += '0'.repeat(literal.length);
+      i += literal.length - 1;
       escaped = false;
       continue;
     }
@@ -252,9 +264,17 @@ function tokenize(
       }
       continue;
     }
-    current += ch;
+    const literal = String.fromCodePoint(command.codePointAt(i)!);
+    current = concatAnsiCText(current, literal);
     wordStarted = true;
-    bare += inSingle || inDouble ? '0' : '1';
+    const mark =
+      !inSingle && (ch === '$' || ch === '`')
+        ? '2'
+        : inSingle || inDouble
+          ? '0'
+          : '1';
+    bare += mark.repeat(literal.length);
+    i += literal.length - 1;
   }
   flushAnsiC();
   if (tildeQuoted && current.startsWith('~')) bare = '0' + bare.slice(1);
@@ -386,6 +406,29 @@ function isShellAbsolutePath(p: string): boolean {
   return p.startsWith('/') || /^[A-Za-z]:\//.test(p.replace(/\\/g, '/'));
 }
 
+function isUncertainPath(word: string, bare?: string): boolean {
+  return bare?.includes('2') || hasUnpairedSurrogate(word);
+}
+
+function markUncertainArgs(
+  ops: ShellOperation[],
+  args: string[],
+  cwd: string,
+  bares?: string[],
+): ShellOperation[] {
+  const uncertainPaths = new Set(
+    args
+      .filter((word, index) => isUncertainPath(word, bares?.[index]))
+      .map((word) => resolvePath(word, cwd)),
+  );
+  if (uncertainPaths.size === 0) return ops;
+  return ops.map((op) =>
+    op.filePath && uncertainPaths.has(op.filePath)
+      ? { ...op, pathUnknown: true }
+      : op,
+  );
+}
+
 function isEnvAssignmentToken(token: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
 }
@@ -414,8 +457,8 @@ function looksLikePath(s: string): boolean {
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface RedirectResult {
-  readFiles: string[];
-  writeFiles: string[];
+  readFiles: ShellOperation[];
+  writeFiles: ShellOperation[];
 }
 
 /**
@@ -481,7 +524,7 @@ function fdRedirectFile(word: string): string | undefined {
  * Extract I/O redirections from a token array.
  *
  * Modifies `tokens` in-place to remove redirect operators and their targets.
- * Returns the absolute paths of redirect targets as read / write operations.
+ * Retains redirect operations and their path uncertainty before normalization.
  *
  * Handles:
  *   `> file`   `>> file`  `< file`   (with or without space)
@@ -500,9 +543,24 @@ function extractRedirects(
   fdCloses: ReadonlySet<number> = new Set(),
   bares?: string[],
 ): RedirectResult {
-  const readFiles: string[] = [];
-  const writeFiles: string[] = [];
+  const readFiles: ShellOperation[] = [];
+  const writeFiles: ShellOperation[] = [];
   const toRemove = new Set<number>();
+  const pushRedirect = (
+    virtualTool: 'read_file' | 'write_file',
+    target: string,
+    bare?: string,
+  ): void => {
+    const operation: ShellOperation = {
+      virtualTool,
+      filePath: resolvePath(target, cwd, bare),
+    };
+    // Keep uncertainty before `..` normalization can remove its source word.
+    if (isUncertainPath(target, bare)) {
+      operation.pathUnknown = true;
+    }
+    (virtualTool === 'read_file' ? readFiles : writeFiles).push(operation);
+  };
 
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i]!;
@@ -543,8 +601,10 @@ function extractRedirects(
         ? `&${tok.slice(fdOp.length)}`
         : fdRedirectFile(tok.slice(fdOp.length));
       if (file !== undefined) {
-        (fdOp === '<&' ? readFiles : writeFiles).push(
-          resolvePath(file, cwd, tokBare?.slice(fdOp.length)),
+        pushRedirect(
+          fdOp === '<&' ? 'read_file' : 'write_file',
+          file,
+          tokBare?.slice(fdOp.length),
         );
       }
       continue;
@@ -561,9 +621,9 @@ function extractRedirects(
       syntax === '1>|'
     ) {
       const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
+      if (target) {
         if (!isNetworkPseudoDevice(target)) {
-          writeFiles.push(resolvePath(target, cwd, targetBare(i + 1)));
+          pushRedirect('write_file', target, targetBare(i + 1));
         }
         toRemove.add(i);
         toRemove.add(i + 1);
@@ -571,9 +631,9 @@ function extractRedirects(
       }
     } else if (syntax === '>>' || syntax === '1>>') {
       const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
+      if (target) {
         if (!isNetworkPseudoDevice(target)) {
-          writeFiles.push(resolvePath(target, cwd, targetBare(i + 1)));
+          pushRedirect('write_file', target, targetBare(i + 1));
         }
         toRemove.add(i);
         toRemove.add(i + 1);
@@ -587,9 +647,9 @@ function extractRedirects(
       }
     } else if (syntax === '<') {
       const target = tokens[i + 1];
-      if (target && looksLikePath(target)) {
+      if (target) {
         if (!isNetworkPseudoDevice(target)) {
-          readFiles.push(resolvePath(target, cwd, targetBare(i + 1)));
+          pushRedirect('read_file', target, targetBare(i + 1));
         }
         toRemove.add(i);
         toRemove.add(i + 1);
@@ -605,12 +665,8 @@ function extractRedirects(
       // stderr / combined redirect — consume target
       const target = tokens[i + 1];
       if (target) {
-        if (
-          target !== '/dev/null' &&
-          looksLikePath(target) &&
-          !isNetworkPseudoDevice(target)
-        ) {
-          writeFiles.push(resolvePath(target, cwd, targetBare(i + 1)));
+        if (target !== '/dev/null' && !isNetworkPseudoDevice(target)) {
+          pushRedirect('write_file', target, targetBare(i + 1));
         }
         toRemove.add(i);
         toRemove.add(i + 1);
@@ -626,8 +682,10 @@ function extractRedirects(
       if (fdOp) {
         const file = fdRedirectFile(redirectText.slice(fdOp.length));
         if (file !== undefined) {
-          (fdOp === '<&' ? readFiles : writeFiles).push(
-            resolvePath(file, cwd, redirectBare?.slice(fdOp.length)),
+          pushRedirect(
+            fdOp === '<&' ? 'read_file' : 'write_file',
+            file,
+            redirectBare?.slice(fdOp.length),
           );
         }
         tokens[i] = tok.slice(0, split);
@@ -655,17 +713,12 @@ function extractRedirects(
           }
           continue;
         }
-        if (
-          target !== '/dev/null' &&
-          looksLikePath(target) &&
-          !isNetworkPseudoDevice(target)
-        ) {
-          const file = resolvePath(target, cwd, tokBare?.slice(targetStart));
-          if (op === '<') {
-            readFiles.push(file);
-          } else {
-            writeFiles.push(file);
-          }
+        if (target !== '/dev/null' && !isNetworkPseudoDevice(target)) {
+          pushRedirect(
+            op === '<' ? 'read_file' : 'write_file',
+            target,
+            tokBare?.slice(targetStart),
+          );
         }
         if (split > 0) {
           tokens[i] = tok.slice(0, split);
@@ -2314,10 +2367,12 @@ export function extractShellOperations(
   const cmdName = tokens[0];
   if (!cmdName) {
     // Only assignments and/or redirections were present.
-    return toRedirectOperations({
-      readFiles: redirectReads,
-      writeFiles: redirectWrites,
-    });
+    return markUndecodablePathOps(
+      toRedirectOperations({
+        readFiles: redirectReads,
+        writeFiles: redirectWrites,
+      }),
+    );
   }
 
   const ops: ShellOperation[] = [];
@@ -2368,7 +2423,8 @@ export function extractShellOperations(
     const handler = COMMANDS[cmdName];
     if (handler) {
       const args = tokens.slice(1);
-      ops.push(...handler(args, cwd));
+      const argBares = bares.slice(1);
+      ops.push(...markUncertainArgs(handler(args, cwd), args, cwd, argBares));
     }
     // Unknown commands: return no ops (safe — we don't guess what we don't know)
   }
@@ -2381,7 +2437,7 @@ export function extractShellOperations(
     }),
   );
 
-  return ops;
+  return markUndecodablePathOps(ops);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2481,7 +2537,10 @@ function resolveCdTargetCwd(
   return {
     kind: 'static',
     cwd: resolvePath(target, cwd, targetBare),
-    cwdUnknown: targetIsDecoded || (cwdUnknown && !isShellAbsolutePath(target)),
+    cwdUnknown:
+      targetIsDecoded ||
+      isUncertainPath(target, targetBare) ||
+      (cwdUnknown && !isShellAbsolutePath(target)),
     redirects,
   };
 }
@@ -2490,16 +2549,15 @@ function toRedirectOperations({
   readFiles,
   writeFiles,
 }: RedirectResult): ShellOperation[] {
-  return [
-    ...readFiles.map((filePath) => ({
-      virtualTool: 'read_file' as const,
-      filePath,
-    })),
-    ...writeFiles.map((filePath) => ({
-      virtualTool: 'write_file' as const,
-      filePath,
-    })),
-  ];
+  return [...readFiles, ...writeFiles];
+}
+
+function markUndecodablePathOps(ops: ShellOperation[]): ShellOperation[] {
+  return ops.map((op) =>
+    op.filePath && hasUnpairedSurrogate(op.filePath)
+      ? { ...op, pathUnknown: true }
+      : op,
+  );
 }
 
 /**
@@ -2541,7 +2599,7 @@ export function extractShellOperationsAcrossCommand(
   command: string,
   cwd: string,
 ): ShellOperation[] {
-  return walkCompoundCommand(command, cwd, 0, false);
+  return markUndecodablePathOps(walkCompoundCommand(command, cwd, 0, false));
 }
 
 function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
