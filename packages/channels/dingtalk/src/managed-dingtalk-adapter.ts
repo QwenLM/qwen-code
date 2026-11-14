@@ -142,6 +142,7 @@ export class ManagedDingtalkAdapter {
   private stream?: ManagedDingtalkStreamClient;
   private releaseLock?: () => Promise<void>;
   private running = false;
+  private ownershipLost = false;
   private loop?: Promise<void>;
   private abort?: AbortController;
   private registeredGeneration?: number;
@@ -196,6 +197,10 @@ export class ManagedDingtalkAdapter {
       throw new Error('Managed DingTalk adapter is already connected.');
     try {
       this.releaseLock = await this.deps.lock(this.store.directory, () => {
+        // A reaped stale lock means a second owner won the state directory.
+        // Stop, and stop persisting: an in-flight tick or the shutdown drain
+        // must not rewrite the file the new owner now holds.
+        this.ownershipLost = true;
         this.log(
           'Managed DingTalk state ownership was lost to another process; adapter stopped.',
         );
@@ -621,6 +626,11 @@ export class ManagedDingtalkAdapter {
   }
 
   private async pullOutbox(): Promise<void> {
+    // Guard before the claim, not in the per-delivery loop: the claim itself
+    // moves up to CLAIM_BATCH deliveries to sending server-side, so a stop that
+    // lands mid-tick must not claim a batch it would then abandon to settle
+    // unknown. The email reference guards the phase the same way.
+    if (!this.running || !this.state) return;
     let claimed: ManagedClaimedDelivery[];
     try {
       claimed = await this.controlPlane.claimDeliveries(CLAIM_BATCH);
@@ -782,6 +792,9 @@ export class ManagedDingtalkAdapter {
   }
 
   private persist(): void {
+    // Once the lock is compromised the state file belongs to another process;
+    // never rewrite it, even from an in-flight tick or the shutdown drain.
+    if (this.ownershipLost) return;
     if (this.state) this.store.save(this.state);
   }
 

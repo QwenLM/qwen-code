@@ -266,4 +266,33 @@ describe('managed DingTalk webhook proxy (R6-1)', () => {
     expect(destroySpy).toHaveBeenCalledTimes(1);
     destroySpy.mockRestore();
   });
+
+  it('constructs the dispatcher from the default namespace, as the bundled CJS interop exposes it (R6-1)', async () => {
+    // In the bundled CLI a dynamic import of the CJS undici package is
+    // default-only; a named destructure binds undefined and throws before the
+    // POST. Simulate that shape so reverting to the named destructure reds.
+    vi.resetModules();
+    vi.doMock('undici', () => ({
+      default: {
+        EnvHttpProxyAgent: class {
+          async destroy() {}
+        },
+      },
+    }));
+    try {
+      const fetchMock = vi.fn(async () => jsonResponse({ errcode: 0 }));
+      vi.stubGlobal('fetch', fetchMock);
+      const fresh = await import('./managed-dingtalk-deps.js');
+      const { sendWebhook } = fresh.createManagedDingtalkDeps(
+        'http://proxy.internal:8080',
+      );
+      await expect(sendWebhook(WEBHOOK, 'hello')).resolves.toBeUndefined();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const init = fetchMock.mock.calls[0]![1] as { dispatcher?: unknown };
+      expect(init.dispatcher).toBeDefined();
+    } finally {
+      vi.doUnmock('undici');
+      vi.resetModules();
+    }
+  });
 });

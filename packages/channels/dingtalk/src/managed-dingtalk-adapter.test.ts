@@ -1037,4 +1037,74 @@ describe('managed DingTalk adapter review fixes', () => {
     expect(second.plane.submit.map((event) => event.text)).toEqual(['race']);
     await second.adapter.disconnect();
   });
+
+  it('does not claim deliveries when a stop lands mid-tick (R7-1)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    plane.enqueue([delivery('d-1', 1), delivery('d-2', 1)]);
+    // Park the tick inside submitInbound so a stop can land mid-tick.
+    let releaseSubmit!: () => void;
+    const submitGate = new Promise<void>((resolve) => {
+      releaseSubmit = resolve;
+    });
+    const originalSubmit = plane.controlPlane.submitInbound.bind(
+      plane.controlPlane,
+    );
+    plane.controlPlane.submitInbound = async (event) => {
+      await submitGate;
+      return originalSubmit(event);
+    };
+    let claimCalls = 0;
+    const originalClaim = plane.controlPlane.claimDeliveries.bind(
+      plane.controlPlane,
+    );
+    plane.controlPlane.claimDeliveries = async (limit) => {
+      claimCalls += 1;
+      return originalClaim(limit);
+    };
+    fake.push('m1', messageData({ msgId: 'm1' }));
+    const ticking = adapter.tick();
+    await new Promise((resolve) => setImmediate(resolve));
+    await adapter.disconnect(); // stop while the tick is parked
+    releaseSubmit();
+    await ticking;
+    // The claim itself moves deliveries to sending server-side; a stopped tick
+    // must not claim a batch it would abandon to settle unknown.
+    expect(claimCalls).toBe(0);
+    // The deliveries are still queued, re-claimable on the next start.
+    const leftover = await originalClaim(16);
+    expect(leftover).toHaveLength(2);
+  });
+
+  it('stops persisting after the state lock is compromised (R7-2)', async () => {
+    const cwd = tempCwd();
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    let compromise!: () => void;
+    const deps: ManagedDingtalkAdapterDeps = {
+      ...fake.deps,
+      lock: async (_directory, onCompromised) => {
+        compromise = onCompromised;
+        return async () => {};
+      },
+    };
+    const adapter = new ManagedDingtalkAdapter({
+      name: 'ding-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps,
+      pollLoop: false,
+    });
+    await adapter.connect();
+    const store = (
+      adapter as unknown as { store: { save: (state: unknown) => void } }
+    ).store;
+    const saveSpy = vi.spyOn(store, 'save');
+    // An acked frame the shutdown drain would otherwise persist.
+    fake.push('m1', messageData({ msgId: 'm1' }));
+    saveSpy.mockClear();
+    compromise(); // a second owner won the state directory
+    await adapter.disconnect(); // the shutdown drain must not rewrite the file
+    expect(saveSpy).not.toHaveBeenCalled();
+  });
 });

@@ -169,8 +169,12 @@ async function sendWebhook(
   let dispatcher: import('undici').Dispatcher | undefined;
   try {
     if (proxy) {
-      const { EnvHttpProxyAgent } = await import('undici');
-      dispatcher = new EnvHttpProxyAgent({
+      // Read the constructor off the default namespace: in the bundled CLI a
+      // dynamic import of the CJS undici package is default-only, so a named
+      // destructure would bind undefined and throw before the POST. The Legacy
+      // sender uses this same shape.
+      const { default: undici } = await import('undici');
+      dispatcher = new undici.EnvHttpProxyAgent({
         httpProxy: proxy,
         httpsProxy: proxy,
       });
