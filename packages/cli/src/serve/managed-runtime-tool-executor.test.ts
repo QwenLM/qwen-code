@@ -20,6 +20,9 @@ import os, { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import { GlobTool } from '@qwen-code/qwen-code-core/tools/glob.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { LocalShellCaptureRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
 import { formatRecordArtifactReminder } from '@qwen-code/qwen-code-core/tools/artifact/workspace-auto-record.js';
@@ -27,6 +30,7 @@ import { isPdftotextAvailable } from '@qwen-code/qwen-code-core/utils/pdf.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { AnyDeclarativeTool } from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
+  registerSessionProjectDir,
   unregisterSessionModel,
   unregisterSessionProjectDir,
 } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
@@ -2816,6 +2820,210 @@ describe('readWorkspaceContext', () => {
       );
     } finally {
       await rm(mount, { recursive: true, force: true });
+    }
+  });
+
+  it('lists a root-bound Session whose mount holds a sibling estate', async () => {
+    // `glob` returns directories, so the sibling's estate directory is itself
+    // a hit. Its own name reveals nothing of the sibling's contents — only a
+    // hit inside the estate does — so the ownership arm must not refuse it.
+    const mount = await fs.promises.realpath(
+      await mkdtemp(path.join(os.tmpdir(), 'ctx-estate-')),
+    );
+    try {
+      await writeFile(path.join(mount, 'AGENTS.md'), 'own instructions');
+      await mkdir(path.join(mount, 'b'));
+      await writeFile(path.join(mount, 'b', 'private.txt'), 'sibling private');
+      await mkdir(path.join(mount, 'plaindir'));
+
+      const siblingReal = await fs.promises.realpath(path.join(mount, 'b'));
+      const config = new Config({
+        sessionId: 'session-root',
+        targetDir: mount,
+        cwd: mount,
+        includeDirectories: [mount],
+        model: 'managed-runtime-worker',
+        debugMode: false,
+        usageStatisticsEnabled: false,
+        approvalMode: ApprovalMode.YOLO,
+        fileCheckpointingEnabled: false,
+        fileReadCacheDisabled: true,
+        todoWriteEnabled: true,
+        artifactRecordingSupported: false,
+      });
+      registerSessionProjectDir('session-root', config.storage.getProjectDir());
+      const contains = (directory: string, target: string): boolean => {
+        const relative = path.relative(directory, target);
+        return (
+          relative !== '..' &&
+          !relative.startsWith(`..${path.sep}`) &&
+          !path.isAbsolute(relative)
+        );
+      };
+      // Mirrors the supplier: a caller bound at the mount root owns no private
+      // estate, so every sibling binding owns its own directory and below.
+      const ownsAnotherSessionDir = async (
+        _sessionId: string,
+        realPath: string,
+        ownDirectory: string,
+      ): Promise<boolean> =>
+        contains(siblingReal, realPath) && ownDirectory !== siblingReal;
+      const tools: ManagedToolSet = {
+        sessionId: 'session-root',
+        directory: mount,
+        workspaceRoot: mount,
+        admitsDirectory: () => true,
+        // No `executionTimeoutMs`: the worker needs `import.meta.resolve`,
+        // which vitest's SSR runtime does not provide, so the walk runs
+        // in-process exactly as it does when no budget is configured.
+        tools: new Map([
+          ['glob', new GlobTool(config, { containmentRoot: mount })],
+        ]),
+      };
+      const executor = new ManagedToolExecutor(
+        async () => tools,
+        undefined,
+        undefined,
+        undefined,
+        ownsAnotherSessionDir,
+      );
+      const input = { pattern: '*' };
+      try {
+        const result = await executor.execute(
+          {
+            sessionId: 'session-root',
+            promptId: 'turn-root',
+            callId: 'glob-root',
+            argsDigest: managedToolDigest(input),
+          },
+          'glob',
+          input,
+        );
+        expect(result.executionStatus).toBe('success');
+        const parts = JSON.stringify(result.responseParts);
+        expect(parts).toContain('AGENTS.md');
+        expect(parts).toContain('plaindir');
+        expect(parts).not.toContain('private.txt');
+
+        // A hit inside the estate still belongs to the sibling and is refused
+        // with the same message the file tools use for it.
+        const inside = await executor.execute(
+          {
+            sessionId: 'session-root',
+            promptId: 'turn-root',
+            callId: 'glob-inside',
+            argsDigest: managedToolDigest({ pattern: 'b/*' }),
+          },
+          'glob',
+          { pattern: 'b/*' },
+        );
+        expect(inside.executionStatus).toBe('error');
+        expect(inside.error?.message).toBe(
+          'Glob results must stay within the Session working directory.',
+        );
+      } finally {
+        await executor.close();
+      }
+    } finally {
+      await rm(mount, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the Session own directory when a sibling is bound at its parent', async () => {
+    // `nodir: false` makes the search root itself a hit, so `glob '.'` collects
+    // `<mount>/team/app`. Judging it by its parent's realpath asks the
+    // ownership arm about `<mount>/team`, where a sibling binding lives, and
+    // the whole result set is then discarded — including the caller's own
+    // directory. The Session's own directory is never another Session's estate.
+    for (const siblingBound of [true, false]) {
+      const mount = await fs.promises.realpath(
+        await mkdtemp(path.join(os.tmpdir(), 'ctx-ownroot-')),
+      );
+      try {
+        const app = path.join(mount, 'team', 'app');
+        await mkdir(app, { recursive: true });
+        await writeFile(path.join(app, 'AGENTS.md'), 'own instructions');
+        await mkdir(path.join(app, 'plaindir'));
+
+        const config = new Config({
+          sessionId: 'session-app',
+          targetDir: app,
+          cwd: app,
+          includeDirectories: [app],
+          model: 'managed-runtime-worker',
+          debugMode: false,
+          usageStatisticsEnabled: false,
+          approvalMode: ApprovalMode.YOLO,
+          fileCheckpointingEnabled: false,
+          fileReadCacheDisabled: true,
+          todoWriteEnabled: true,
+          artifactRecordingSupported: false,
+        });
+        registerSessionProjectDir(
+          'session-app',
+          config.storage.getProjectDir(),
+        );
+        const contains = (directory: string, target: string): boolean => {
+          const relative = path.relative(directory, target);
+          return (
+            relative !== '..' &&
+            !relative.startsWith(`..${path.sep}`) &&
+            !path.isAbsolute(relative)
+          );
+        };
+        const teamReal = await fs.promises.realpath(path.join(mount, 'team'));
+        // Mirrors the supplier: a sibling bound at the ancestor is not the
+        // caller's own estate, and an unlocatable sibling cannot be resolved
+        // either way. Both leave the caller's own directory intact.
+        const ownsAnotherSessionDir = async (
+          _sessionId: string,
+          realPath: string,
+          ownDirectory: string,
+        ): Promise<boolean> => {
+          if (!siblingBound) return false;
+          const ownEstate =
+            contains(ownDirectory, realPath) && ownDirectory !== teamReal;
+          return contains(teamReal, realPath) && !ownEstate;
+        };
+        const tools: ManagedToolSet = {
+          sessionId: 'session-app',
+          directory: app,
+          workspaceRoot: app,
+          admitsDirectory: () => true,
+          tools: new Map([
+            ['glob', new GlobTool(config, { containmentRoot: app })],
+          ]),
+        };
+        const executor = new ManagedToolExecutor(
+          async () => tools,
+          undefined,
+          undefined,
+          undefined,
+          ownsAnotherSessionDir,
+        );
+        try {
+          const result = await executor.execute(
+            {
+              sessionId: 'session-app',
+              promptId: 'turn-app',
+              callId: 'glob-own-root',
+              argsDigest: managedToolDigest({ pattern: '.' }),
+            },
+            'glob',
+            { pattern: '.' },
+          );
+          expect(result.executionStatus).toBe('success');
+          // The caller's own directory is the collected hit; without the fix
+          // the whole set is discarded and this reports an error instead.
+          expect(JSON.stringify(result.responseParts)).toContain(
+            'Found 1 file(s) matching',
+          );
+        } finally {
+          await executor.close();
+        }
+      } finally {
+        await rm(mount, { recursive: true, force: true });
+      }
     }
   });
 

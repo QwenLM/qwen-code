@@ -2713,22 +2713,26 @@ export class ManagedToolExecutor {
           const realRoot = await realpathDeepestExisting(root);
           for (const hit of resultPaths) {
             if (typeof hit !== 'string') continue;
-            const effective = path.join(
-              await realpathDeepestExisting(path.dirname(hit)),
-              path.basename(hit),
-            );
+            const realParent = await realpathDeepestExisting(path.dirname(hit));
+            const effective = path.join(realParent, path.basename(hit));
             const relative = path.relative(realRoot, effective);
             if (
               escapesSession(relative) ||
-              (await this.ownsAnotherSessionDir?.(
-                tools.sessionId,
-                effective,
-                realRoot,
-              ))
+              (relative !== '' &&
+                (await this.ownsAnotherSessionDir?.(
+                  tools.sessionId,
+                  realParent,
+                  realRoot,
+                )))
             ) {
               // The sibling-ownership arm carries the same message: it names
               // no hit, and a root-bound caller's effective boundary excludes
               // sibling estates even though they sit inside its own root.
+              // It judges the hit's parent, not the hit: directories are hits
+              // now, and a sibling estate's own name is a direct child of the
+              // caller's root whose listing reveals nothing of the estate's
+              // contents. Everything inside that estate has an owned parent
+              // and is still refused.
               throw new Error(
                 'Glob results must stay within the Session working directory.',
               );
