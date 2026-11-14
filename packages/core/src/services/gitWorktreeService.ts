@@ -2608,6 +2608,28 @@ export class GitWorktreeService {
   }
 
   /**
+   * Turns a detached worktree into a named branch at its current HEAD
+   * ("Create branch here", Codex parity). Throws when the checkout is not
+   * detached or the branch name is already taken — callers validate first
+   * and map the failure to a typed refusal.
+   */
+  async createWorktreeBranch(
+    worktreePath: string,
+    branchName: string,
+  ): Promise<void> {
+    const { simpleGit } = await loadSimpleGit();
+    const wtGit = simpleGit(worktreePath).env(gitEnv());
+    const abbrev = (await wtGit.revparse(['--abbrev-ref', 'HEAD'])).trim();
+    if (abbrev !== 'HEAD') {
+      throw new Error(`Worktree at ${worktreePath} is not detached`);
+    }
+    if (await this.localBranchExists(branchName)) {
+      throw new Error(`Branch ${branchName} already exists`);
+    }
+    await wtGit.raw(['switch', '-c', branchName]);
+  }
+
+  /**
    * Configures `core.hooksPath` inside `worktreePath` to point at the main
    * repository's hooks directory. Prefers `.husky/` over `.git/hooks/` to
    * match the convention most JS projects use (husky's prepare script
@@ -2979,7 +3001,7 @@ export class GitWorktreeService {
    * fast path attempts the create (which itself will fail loudly if the
    * branch exists for some reason this check missed).
    */
-  private async localBranchExists(branchName: string): Promise<boolean> {
+  async localBranchExists(branchName: string): Promise<boolean> {
     try {
       const out = await (
         await this.getGit()

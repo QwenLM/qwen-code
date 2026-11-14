@@ -186,4 +186,30 @@ describe('GitWorktreeService — detached managed worktrees', () => {
     expect(info!.branch).toBe('');
     expect(info!.headCommit).toBe(git(repoRoot, 'rev-parse', 'HEAD'));
   });
+
+  it('createWorktreeBranch branches a detached worktree at its HEAD', async () => {
+    const worktree = await createDetached('sess-branch');
+    const head = git(worktree.path, 'rev-parse', 'HEAD');
+
+    await service.createWorktreeBranch(worktree.path, 'feat/from-detached');
+
+    expect(git(worktree.path, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(
+      'feat/from-detached',
+    );
+    expect(git(worktree.path, 'rev-parse', 'HEAD')).toBe(head);
+  });
+
+  it('createWorktreeBranch refuses a named worktree and a taken name', async () => {
+    const named = await service.createUserWorktree('sess-named-2', 'main');
+    expect(named.success).toBe(true);
+    await expect(
+      service.createWorktreeBranch(named.worktree!.path, 'feat/x'),
+    ).rejects.toThrow(/not detached/);
+
+    const detached = await createDetached('sess-branch-2');
+    git(repoRoot, 'branch', 'feat/taken');
+    await expect(
+      service.createWorktreeBranch(detached.path, 'feat/taken'),
+    ).rejects.toThrow(/already exists/);
+  });
 });

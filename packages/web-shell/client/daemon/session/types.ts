@@ -8,6 +8,7 @@ import type { ReactNode } from 'react';
 import type {
   CreateSessionRequest,
   DaemonBranchSessionRequest,
+  DaemonWorktreeBranchResult,
   DaemonCapabilities,
   DaemonBackgroundTurn,
   DaemonEvent,
@@ -376,6 +377,7 @@ export type DaemonNoticeOperation =
   | 'generate_session_content'
   | 'btw_session'
   | 'branch_session'
+  | 'create_worktree_branch'
   | 'fork_session'
   | 'record_session'
   | 'stream'
@@ -854,6 +856,8 @@ export interface DaemonSessionActions {
     switchStarted: boolean;
     sourceWarnings?: string[];
   }>;
+  /** "Create branch here" on the session's detached managed worktree. */
+  createWorktreeBranch(name: string): Promise<DaemonWorktreeBranchResult>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
 

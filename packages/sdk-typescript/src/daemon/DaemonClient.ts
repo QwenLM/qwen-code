@@ -76,6 +76,7 @@ import type {
   DaemonForkSessionResult,
   DaemonRestoredSession,
   DaemonSession,
+  DaemonWorktreeBranchResult,
   DaemonSessionArchiveState,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,
@@ -4028,6 +4029,43 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /session/:id/worktree-reset');
         }
         return (await res.json()) as DaemonSession;
+      },
+      this.resolveSessionSpawnTimeoutMs(),
+    );
+  }
+
+  /**
+   * Turn a detached managed worktree into a named branch at its current HEAD
+   * ("Create branch here", `POST /session/:id/worktree-branch`, capability
+   * `session_worktree_branch_v1`). The session, checkout, and marker owner
+   * stay; only the branch metadata changes. Typed 409 bodies:
+   * `worktree_branch_unsupported` (not a managed worktree session),
+   * `worktree_already_branched` (the worktree already has a branch), and
+   * `branch_already_exists` (the requested name is taken).
+   */
+  async createWorktreeBranch(
+    sessionId: string,
+    name: string,
+    req: { workspaceCwd?: string } = {},
+  ): Promise<DaemonWorktreeBranchResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/worktree-branch`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          name,
+          ...(req.workspaceCwd !== undefined ? { cwd: req.workspaceCwd } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/worktree-branch',
+          );
+        }
+        return (await res.json()) as DaemonWorktreeBranchResult;
       },
       this.resolveSessionSpawnTimeoutMs(),
     );

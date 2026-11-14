@@ -13745,6 +13745,17 @@ export function App({
       view: 'log',
     });
   }, [connection.sessionId, gitDiffWorkspaceCwd, sessionWorktree]);
+  // "Create branch here": the daemon branches the detached checkout in
+  // place; only the local branch metadata changes.
+  const handleCreateWorktreeBranch = useCallback(
+    async (name: string) => {
+      const result = await sessionActions.createWorktreeBranch(name);
+      setSessionWorktree((current) =>
+        current ? { ...current, branch: result.worktree.branch } : current,
+      );
+    },
+    [sessionActions],
+  );
   // Every modal the shell itself tracks, plus host-registered interaction
   // blocks. View navigation hotkeys gate on this rather than dialogOpen,
   // because dialogOpen also counts activePanel and the Session Overview is
@@ -26361,6 +26372,15 @@ export function App({
                           onOpenLog={
                             gitDiffWorkspaceCwd
                               ? handleOpenLog
+                              : undefined
+                          }
+                          onCreateWorktreeBranch={
+                            sessionWorktree &&
+                            !sessionWorktree.branch &&
+                            workspace.capabilities?.features?.includes(
+                              'session_worktree_branch_v1',
+                            )
+                              ? handleCreateWorktreeBranch
                               : undefined
                           }
                           chatWidthMode={chatWidthMode}

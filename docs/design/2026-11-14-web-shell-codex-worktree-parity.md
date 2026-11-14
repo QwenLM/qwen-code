@@ -178,11 +178,21 @@ listed there for reference but migrate in P7, not P3.
 ### D5 — "Create branch here" is a session-scoped mutation
 
 New route `POST /session/:id/worktree-branch` with `{ name }`: validates the
-name with the same predicate as branch sessions, refuses when the worktree
-already has a branch or the name exists, runs `git switch -c <name>` inside
-the worktree, updates sidecar + marker + bridge metadata, and broadcasts the
-change. The UI affordance sits in the chat header next to the worktree chip
-and is visible only for detached worktree sessions.
+name with the same predicate as branch sessions (shared
+`isValidGitBranchName`), refuses when the worktree already has a branch
+(`worktree_already_branched`) or the name exists (`branch_already_exists`),
+runs `git switch -c <name>` inside the worktree via
+`GitWorktreeService.createWorktreeBranch`, and updates the sidecar and live
+bridge metadata under the worktree-keyed ownership lock (the marker stores
+only the owner id, so it needs no change). Session resolution normalizes
+persisted ids via the transcript store and falls back to the live bridge
+summary for freshly created sessions that have no transcript yet (the user
+can branch before the first prompt). Capability:
+`session_worktree_branch_v1`. The UI affordance is a "Create branch here"
+item in the branch picker popover (the worktree chip's menu), with an
+inline name input; it is visible only when the popover serves a detached
+worktree session (`gitSessionId` + fetched `detached` status) and the daemon
+advertises the capability.
 
 ### D6 — Handoff moves the session, carrying the work
 
@@ -346,11 +356,12 @@ Hardcoded `.qwen/worktrees` root sites (migrate in P7, listed for reference):
 because `.qwen/worktrees` sits inside the session root; P7 must re-derive
 that property for a custom root.
 
-### P4 — Create branch here
+### P4 — Create branch here — implemented
 
-- Route `POST /session/:id/worktree-branch` (D5); SDK method; client button.
-- Tests: name validation, already-branched refusal, metadata/sidecar update,
-  UI visibility rules.
+- Route `POST /session/:id/worktree-branch` (D5); SDK
+  `createWorktreeBranch`; branch-picker menu item with inline name input.
+- Tests: route suite (success + 400/409 taxonomy + 404), core
+  `createWorktreeBranch` cases, popover visibility/submit/validation cases.
 - Acceptance: detached worktree session → click → named branch, chip updates,
   commit/push flow works.
 

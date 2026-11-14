@@ -4149,6 +4149,30 @@ export function createDaemonSessionActions({
       }
     },
 
+    async createWorktreeBranch(name: string) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Create worktree branch failed',
+        'create_worktree_branch',
+      );
+      try {
+        return await withActionTimeout(
+          session.client.createWorktreeBranch(session.sessionId, name, {
+            workspaceCwd: session.workspaceCwd,
+          }),
+          'Create worktree branch timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Create worktree branch failed',
+          error,
+          'create_worktree_branch',
+        );
+      }
+    },
+
     async forkSession(directive: string): Promise<DaemonForkSessionResult> {
       const session = requireSessionForAction(
         addNotice,

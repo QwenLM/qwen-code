@@ -312,6 +312,28 @@ function redactSdkSurfaceReplay<
 const MAX_BRANCH_NAME_BYTES = 1000;
 const MAX_BRANCH_COMPONENT_BYTES = 200;
 
+// Mirrors validateBranchName in GitModePopover.tsx; keep the two in sync.
+function isValidGitBranchName(name: string): boolean {
+  return !(
+    /[^\p{L}\p{N}._/-]/u.test(name) ||
+    name.includes('..') ||
+    name.includes('//') ||
+    name.startsWith('.') ||
+    name.startsWith('-') ||
+    name.startsWith('/') ||
+    name.endsWith('/') ||
+    name.endsWith('.') ||
+    name.endsWith('.git') ||
+    name.includes('@{') ||
+    name.split('/').some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
+    name.toUpperCase() === GIT_RESERVED_BRANCH ||
+    Buffer.byteLength(name, 'utf8') > MAX_BRANCH_NAME_BYTES ||
+    name
+      .split('/')
+      .some((c) => Buffer.byteLength(c, 'utf8') > MAX_BRANCH_COMPONENT_BYTES)
+  );
+}
+
 interface RegisterSessionRoutesDeps {
   boundWorkspace: string;
   bridge: AcpSessionBridge;
@@ -3143,29 +3165,7 @@ export function registerSessionRoutes(
           return;
         }
         // Validate git branch name characters and reserved names.
-        // Mirrors validateBranchName in GitModePopover.tsx; keep in sync.
-        if (
-          /[^\p{L}\p{N}._/-]/u.test(branchName) ||
-          branchName.includes('..') ||
-          branchName.includes('//') ||
-          branchName.startsWith('.') ||
-          branchName.startsWith('-') ||
-          branchName.startsWith('/') ||
-          branchName.endsWith('/') ||
-          branchName.endsWith('.') ||
-          branchName.endsWith('.git') ||
-          branchName.includes('@{') ||
-          branchName
-            .split('/')
-            .some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
-          branchName.toUpperCase() === GIT_RESERVED_BRANCH ||
-          Buffer.byteLength(branchName, 'utf8') > MAX_BRANCH_NAME_BYTES ||
-          branchName
-            .split('/')
-            .some(
-              (c) => Buffer.byteLength(c, 'utf8') > MAX_BRANCH_COMPONENT_BYTES,
-            )
-        ) {
+        if (!isValidGitBranchName(branchName)) {
           res.status(400).json({
             error: `Invalid branch name: ${branchName}`,
             code: 'branch_invalid_name',
@@ -4784,6 +4784,159 @@ export function registerSessionRoutes(
     }
   };
   app.post('/session/:id/worktree-reset', mutate(), worktreeResetHandler);
+
+  // "Create branch here" (Codex parity): turn a detached managed worktree
+  // into a named branch at its current HEAD, in place. No session transfer —
+  // the checkout, marker owner, and session id all stay; only the branch
+  // metadata changes. Serialized against reset/restore by the same
+  // worktree-keyed ownership lock.
+  const worktreeBranchHandler = async (
+    req: Request,
+    res: Response,
+  ): Promise<void> => {
+    const route = 'POST /session/:id/worktree-branch';
+    const sessionId = requireSessionId(req, res);
+    if (!sessionId) return;
+    if (parseVirtualSubagentSessionId(sessionId)) {
+      res.status(400).json({
+        error:
+          'Virtual subagent sessions do not support worktree branch creation',
+        code: 'unsupported_action',
+        sessionId,
+      });
+      return;
+    }
+    const body = safeBody(req);
+    const name = body['name'];
+    if (
+      typeof name !== 'string' ||
+      name.length === 0 ||
+      !isValidGitBranchName(name)
+    ) {
+      res.status(400).json({
+        error: '`name` must be a valid git branch name',
+        code: 'branch_invalid_name',
+      });
+      return;
+    }
+    let resolvedRuntime:
+      | { runtime: WorkspaceRuntime; workspaceCwd: string }
+      | undefined;
+    try {
+      resolvedRuntime = await resolveRuntimeForSessionRestore(
+        body,
+        res,
+        route,
+        sessionId,
+      );
+    } catch (err) {
+      if (sendConversationRuntimeError(res, err)) return;
+      sendBridgeError(res, err, { route, sessionId });
+      return;
+    }
+    if (resolvedRuntime === undefined) return;
+    const { runtime, workspaceCwd } = resolvedRuntime;
+    const assertRuntimeGenerationOpen =
+      captureRuntimeGenerationAssertion(runtime);
+    try {
+      await runOwnerRuntimeActivity(runtime, () =>
+        archiveCoordinator.runSharedMany([sessionId], async () => {
+          const sessionService = createWorkspaceRuntimeSessionService(runtime);
+          let storageSessionId = await resolveSessionIdForRestore(
+            sessionService,
+            sessionId,
+          );
+          if (storageSessionId === undefined) {
+            // A freshly created session may have no transcript yet (the
+            // user branches before the first prompt); the live bridge
+            // summary is authoritative for it. Throws when unknown.
+            runtime.bridge.getSessionSummary(sessionId);
+            storageSessionId = sessionId;
+          }
+          if (runtime.bridge.setSessionWorktree === undefined) {
+            throw new Error('Bridge does not support worktree branch creation');
+          }
+          const sidecarPath =
+            sessionService.getWorktreeSessionPath(storageSessionId);
+          const preRead = await readWorktreeSessionStrict(sidecarPath);
+          if (
+            preRead.state === 'missing' ||
+            (preRead.state === 'valid' &&
+              preRead.session.workspaceCwd === undefined)
+          ) {
+            res.status(409).json({
+              error: 'Session has no managed worktree',
+              code: 'worktree_branch_unsupported',
+              sessionId: storageSessionId,
+            });
+            return;
+          }
+          if (preRead.state !== 'valid') {
+            throw new WorktreeResetInvalidStateError(storageSessionId);
+          }
+          const { realTarget } = await resolveWorktreeOwnershipTarget(
+            runtime,
+            workspaceCwd,
+            preRead.session,
+            storageSessionId,
+          );
+          const releaseOwnership = await acquireWorktreeOwnershipOp(realTarget);
+          try {
+            // Re-read under the lock: a concurrent reset may have moved
+            // ownership or branched the checkout since the pre-read.
+            const lockedRead = await readWorktreeSessionStrict(sidecarPath);
+            if (lockedRead.state !== 'valid') {
+              throw new WorktreeResetInvalidStateError(storageSessionId);
+            }
+            const sidecar = lockedRead.session;
+            if (sidecar.worktreeBranch !== '') {
+              res.status(409).json({
+                error: 'Worktree already has a branch',
+                code: 'worktree_already_branched',
+                sessionId: storageSessionId,
+              });
+              return;
+            }
+            const wtService = new GitWorktreeService(workspaceCwd);
+            if (await wtService.localBranchExists(name)) {
+              res.status(409).json({
+                error: `Branch ${name} already exists`,
+                code: 'branch_already_exists',
+                sessionId: storageSessionId,
+              });
+              return;
+            }
+            assertRuntimeGenerationOpen?.();
+            await wtService.createWorktreeBranch(realTarget, name);
+            await writeWorktreeSession(sidecarPath, {
+              ...sidecar,
+              worktreeBranch: name,
+            });
+            runtime.bridge.setSessionWorktree(storageSessionId, {
+              slug: sidecar.slug,
+              path: realTarget,
+              branch: name,
+            });
+            res.status(200).json({
+              sessionId: storageSessionId,
+              worktree: {
+                slug: sidecar.slug,
+                path: realTarget,
+                branch: name,
+              },
+            });
+          } finally {
+            releaseOwnership();
+          }
+        }),
+      );
+    } catch (err) {
+      if (!res.headersSent) {
+        sendBridgeError(res, err, { route, sessionId });
+      }
+    }
+  };
+  app.post('/session/:id/worktree-branch', mutate(), worktreeBranchHandler);
 
   app.get('/session/:id/subagents/:subagentRef', async (req, res) => {
     const route = 'GET /session/:id/subagents/:subagentRef';

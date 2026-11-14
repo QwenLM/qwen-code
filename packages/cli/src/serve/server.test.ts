@@ -843,6 +843,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
+  'session_worktree_branch_v1',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -955,6 +956,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_session_metadata' &&
       f !== 'session_worktree_persistence_v1' &&
       f !== 'session_worktree_reset_v1' &&
+      f !== 'session_worktree_branch_v1' &&
       f !== 'voice_transcribe' &&
       f !== 'realtime_voice' &&
       f !== 'realtime_voice_web',
@@ -1037,6 +1039,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
+  'session_worktree_branch_v1',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',

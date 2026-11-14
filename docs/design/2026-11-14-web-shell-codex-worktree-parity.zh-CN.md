@@ -156,9 +156,17 @@ branch here」就地填充真实分支名并更新 sidecar 与在线元数据。
 ### D5 — 「Create branch here」是会话级 mutation
 
 新路由 `POST /session/:id/worktree-branch`，携带 `{ name }`：用与 branch
-会话相同的谓词校验分支名，worktree 已有分支或名字已存在时拒绝，在 worktree
-内执行 `git switch -c <name>`，更新 sidecar + marker + bridge 元数据并广播。
-UI 入口位于 chat 头部 worktree chip 旁，仅对 detached worktree 会话可见。
+会话相同的谓词校验分支名（共享 `isValidGitBranchName`），worktree 已有分支
+（`worktree_already_branched`）或名字已存在（`branch_already_exists`）时
+拒绝，经 `GitWorktreeService.createWorktreeBranch` 在 worktree 内执行
+`git switch -c <name>`，在 worktree 键控所有权锁下更新 sidecar 与在线
+bridge 元数据（marker 只存所有者 id，无需变更）。会话解析对持久化 id 经
+transcript 存储归一化，对尚无 transcript 的新建会话回退到 bridge 在线
+summary（用户可以在首条 prompt 前就建分支）。能力标志：
+`session_worktree_branch_v1`。UI 入口是分支选择器弹层（worktree chip 的
+菜单）中的「在此创建分支」项，带内联名称输入；仅当弹层服务于 detached
+worktree 会话（`gitSessionId` + 拉取到的 `detached` 状态）且 daemon 声明
+该能力时可见。
 
 ### D6 — Handoff 移动会话并携带工作
 
@@ -305,10 +313,12 @@ E. 钉住分支契约的测试（P3 更新）
 （`daemon-git-worktree-guard.ts:3288-3331`）今天无需根豁免，因为
 `.qwen/worktrees` 在会话根内；P7 必须为自定义根重新推导该性质。
 
-### P4 — Create branch here
+### P4 — Create branch here — 已实现
 
-- 路由 `POST /session/:id/worktree-branch`（D5）；SDK 方法；客户端按钮。
-- 测试：分支名校验、已有分支拒绝、元数据/sidecar 更新、UI 可见性规则。
+- 路由 `POST /session/:id/worktree-branch`（D5）；SDK
+  `createWorktreeBranch`；分支选择器菜单项 + 内联名称输入。
+- 测试：路由套件（成功 + 400/409 分类 + 404）、core
+  `createWorktreeBranch` 用例、弹层可见性/提交/校验用例。
 - 验收：detached worktree 会话 → 点击 → 命名分支，chip 更新，commit/push
   流程可用。
 
