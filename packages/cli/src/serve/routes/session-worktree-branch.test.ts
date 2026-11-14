@@ -5,7 +5,13 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -31,7 +37,12 @@ import {
 } from '../workspace-registry.js';
 import { registerSessionRoutes } from './session.js';
 
-const tmpRoot = mkdtempSync(path.join(tmpdir(), 'session-worktree-branch-'));
+// Canonicalize: macOS's default TMPDIR is a /var -> /private/var symlink,
+// and the routes realpath their targets while plain fixture paths would
+// not match.
+const tmpRoot = realpathSync(
+  mkdtempSync(path.join(tmpdir(), 'session-worktree-branch-')),
+);
 afterAll(() => {
   rmSync(tmpRoot, { recursive: true, force: true });
 });
@@ -110,6 +121,7 @@ function makeFixture() {
     app,
     sessionId,
     setSessionWorktreeCalls,
+    summaries,
     async createDetachedWorktree(): Promise<void> {
       const result = await service.createUserWorktree(slug, 'main', {
         detached: true,
@@ -316,5 +328,21 @@ describe('POST /session/:id/worktree-branch', () => {
 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('worktree_reset_invalid_state');
+  });
+
+  it('refuses to branch while a prompt is active', async () => {
+    const fixture = makeFixture();
+    await fixture.createDetachedWorktree();
+    await fixture.writeSidecar('');
+    fixture.writeTranscript();
+    fixture.summaries.set(fixture.sessionId, { hasActivePrompt: true });
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-branch`)
+      .send({ name: 'feat/x' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('branch_while_prompt_active');
+    expect(fixture.setSessionWorktreeCalls).toHaveLength(0);
   });
 });

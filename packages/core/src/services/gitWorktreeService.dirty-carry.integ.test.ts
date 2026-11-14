@@ -88,23 +88,37 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
 
   it('leaves the source checkout and index untouched', async () => {
     await makeDirty(repoRoot);
-    // createUserWorktree itself adds .qwen/worktrees + a .gitignore to the
-    // source repo; exclude that mechanism-owned entry from the comparison.
-    const statusOf = () =>
-      git(repoRoot, 'status', '--porcelain')
-        .split('\n')
-        .filter((line) => line !== '?? .qwen/')
-        .join('\n');
+    // Provisioning ignores the worktrees directory through info/exclude,
+    // so it must add no status entry of its own — not even a daemon
+    // bookkeeping file. Compare the raw status, unfiltered.
+    const statusOf = () => git(repoRoot, 'status', '--porcelain');
     const statusBefore = statusOf();
     const stashBefore = git(repoRoot, 'stash', 'list');
 
-    await create('source-intact', true);
+    const worktree = await create('source-intact', true);
 
     expect(statusOf()).toBe(statusBefore);
     expect(git(repoRoot, 'stash', 'list')).toBe(stashBefore);
     expect(await read(path.join(repoRoot, 'README.md'))).toBe(
       'dirty-unstaged\n',
     );
+    await expect(
+      fs.lstat(path.join(repoRoot, '.qwen', '.gitignore')),
+    ).rejects.toThrow();
+    expect(git(repoRoot, 'check-ignore', '-q', worktree.path)).toBe('');
+  });
+
+  it('carries untracked files with non-ASCII, quoted, and newline names', async () => {
+    const names = ['中文.txt', 'quote"name.txt', 'nl\nname.txt', ' pad.txt '];
+    for (const name of names) {
+      await fs.writeFile(path.join(repoRoot, name), `content:${name}\n`);
+    }
+    const worktree = await create('special-names', true);
+    for (const name of names) {
+      expect(await read(path.join(worktree.path, name))).toBe(
+        `content:${name}\n`,
+      );
+    }
   });
 
   it('keeps the worktree HEAD at the base commit (no baseline commit)', async () => {

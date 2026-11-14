@@ -116,8 +116,19 @@ wire 语义不变。
 P2 将其抽为共享的 `captureDirtyState` / `applyDirtyState` helper，并通过
 `createUserWorktree` 的可选参数（`carryDirtyState`）在会话 worktree 创建
 路径调用，`enter_worktree` 与 agent 隔离调用方保持现有行为。捕获用
-`--full-name` 列出 untracked 文件并从仓库顶层复制，因此根在子目录的服务
-仍能把文件放到 worktree 的正确偏移（抽取前的模式会放错位置）。仓库顶层无法解析时，跳过 untracked overlay 并发告警，而非静默丢失每一次复制。
+`--full-name -z` 列出 untracked 文件（原始 NUL 分隔路径——不带 `-z` 时
+git 会对非 ASCII、引号、换行文件名做 C 风格转义，携带会静默丢失它们）
+并从仓库顶层复制，因此根在子目录的服务仍能把文件放到 worktree 的正确
+偏移（抽取前的模式会放错位置）。仓库顶层无法解析时，跳过 untracked
+overlay 并发告警，而非静默丢失每一次复制。
+
+provisioning 通过仓库的 `info/exclude` 忽略托管 worktrees 目录，而不是
+写 `.qwen/.gitignore`：检出里的簿记文件本身就是 untracked 工作，曾让
+handoff 的本地干净门拒绝每一个干净仓库、cleanup 的有工作门保留每一个
+干净 worktree。`info/exclude` 不新增任何 status 条目；含斜杠的模式锚定
+在仓库根，规则按仓库顶层相对计算，根在子目录的服务也能忽略自己的
+`.qwen/worktrees`。早期构建写入的、逐字节等于 daemon 生成内容的
+`.qwen/.gitignore` 会被移除，用户自行维护的文件原样保留。
 
 与 `setupWorktrees` 不同，会话路径**不**创建 baseline commit：Codex 以
 未提交状态应用改动，Changes 视图原样呈现用户已有的改动。这也让 detached
@@ -177,7 +188,11 @@ worktree 会话（`gitSessionId` + 拉取到的 `detached` 状态）且 daemon �
 的是 chat，不是替代会话）。迁移用 bridge 的 `changeSessionCwd` 作用于在线
 会话——它排在在途 prompt 之后、prompt 活跃时拒绝——全程持 worktree 键控
 所有权锁，并施加与 D5 相同的 superseded-sidecar 与 marker 所有权守卫
-（作用于被离开的 worktree）。能力标志：`session_worktree_handoff_v1`。
+（作用于被离开的 worktree）。两个方向还在最前面拒绝繁忙会话
+（`cd_while_prompt_active`，与 worktree-reset 同一道门）：快照/建分支/
+checkout 步骤不在 bridge 的 prompt 队列上执行，否则在途 turn 可能在复制
+之后继续写文件，把最后的编辑留在旧检出。worktree-branch 路由带同样的门
+（`branch_while_prompt_active`）。能力标志：`session_worktree_handoff_v1`。
 
 - **Worktree → Local**（`to: 'local'`）：本地检出（`sidecar.originalCwd`）
   不干净时拒绝（`local_checkout_dirty`）。先携带工作：命名 worktree 分支在
@@ -189,18 +204,25 @@ worktree 会话（`gitSessionId` + 拉取到的 `detached` 状态）且 daemon �
   目录（连同 marker）留给保留清理（P6）或手动删除。每条 worktree 创建路径
   （会话创建与 Local → Worktree 移交）都把 base 分支与 HEAD commit 记入
   sidecar（`originalBranch` / `originalHeadCommit`）；超出 base 的判定读取
-  该记录 base，base 为空会静默跳过建分支。
+  该记录 base。worktree HEAD 或记录 base 无法核实时，移交以
+  `worktree_handoff_base_unavailable` 拒绝，而不是在工作留在原处时报告成功。
 - **Local → Worktree**（`to: 'worktree'`）：会话已有 worktree sidecar 时
   拒绝。从本地 HEAD 创建 detached 托管 worktree 并施加 dirty overlay（D3），
   写 sidecar + marker，把会话迁入，设置 bridge worktree 元数据。迁移失败时
-  回滚新建的 worktree、sidecar、marker。本地检出保持原样。自动创建的分支名
-  与显式名字一样获得类型化 `branch_already_exists` 拒绝；「移入 worktree」
-  动作带提示：本地检出保留其 dirty 状态，移交回本地需要本地检出干净。
+  回滚新建的 worktree、sidecar、marker。本地检出保持原样。base 直接读源
+  检出的 HEAD（`getHeadCommit`），不走只在检出根才应答的 registered-worktree
+  探针——合法的子目录 workspace 也必须记下可用 base；HEAD 不可读时以
+  `worktree_handoff_base_unavailable` 拒绝移交。自动创建的分支名与显式名字
+  一样获得类型化 `branch_already_exists` 拒绝；「移入 worktree」动作带提示：
+  本地检出保留其 dirty 状态，移交回本地需要本地检出干净。
 
 v1 限制（成文而非静默）：以「本地干净」要求代替「无其他活跃会话占用本地
-检出」（bridge 无会话列表探针可查占用）；handoff 不实现 `worktree-reset`
-的崩溃窗口原子回滚——中途崩溃留下可恢复形态（sidecar/marker 仍命名该会话，
-worktree 管理器可见该检出），而非自愈转移。
+检出」（bridge 无会话列表探针可查占用）；繁忙门是 git 修改前的检查而非
+队列持有——检查之后才开始的 prompt 仍可能与复制重叠（bridge 没有串行化
+操作接缝；`changeSessionCwd` 在队列尾部复查并拒绝，留下与崩溃相同的可恢复
+部分形态）；handoff 不实现 `worktree-reset` 的崩溃窗口原子回滚——中途崩溃
+留下可恢复形态（sidecar/marker 仍命名该会话，worktree 管理器可见该检出），
+而非自愈转移。
 
 ### D7 — 快照是工作归档，恢复重建 worktree
 
@@ -263,9 +285,13 @@ HEAD，或在记录的分支上），把快照解压覆盖，翻回 sidecar。�
   删除时 `branchPreserved` 报告 `false`（没有分支可保留）。
   `removeUserWorktree` 另在 detached worktree 携带未合并 commit 时拒绝删除
   本身：命名分支路径的保护来自 `git branch -d` 的拒绝，无分支时它永远不会
-  触发，故 detached 路径需要显式守卫（显式 force 删除可退出）。`--worktree`
-  启动重附着门继续拒绝外部占用者（含 detached 检出）——启动 worktree 总是
-  命名分支，会话重附着走 session-restore 而非该参数。
+  触发，故 detached 路径需要显式守卫（显式 force 删除可退出）。detached
+  清理也绝不删除按 slug 推导的 `worktree-<slug>` 分支：检出以
+  `worktree add --detach` 创建，该名字的既有 ref 属于用户而非会话。
+  （prepared-worktree 的 finalization 已是所有权安全的：`worktree add -b`
+  拒绝既有分支，故其随后删除的分支必是 preparation 自己创建的。）
+  `--worktree` 启动重附着门继续拒绝外部占用者（含 detached 检出）——启动
+  worktree 总是命名分支，会话重附着走 session-restore 而非该参数。
 - 测试：逐消费方迁移测试；detached 形态的 journal 恢复；detached 形态的
   reset/restore；命名分支 worktree 仍可用（两种形态处处容忍）。
 - 验收：新会话 worktree 无分支（`git branch --list 'worktree-*'` 不变）；

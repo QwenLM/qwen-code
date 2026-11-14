@@ -127,9 +127,23 @@ P2 extracts this into shared `captureDirtyState` / `applyDirtyState` helpers
 and invokes them from the session worktree creation path via an opt-in
 option on `createUserWorktree` (`carryDirtyState`), so `enter_worktree` and
 agent-isolation callers keep their current behavior. The capture lists
-untracked files with `--full-name` and copies from the repository top, so a
-service rooted at a subdirectory still lands files at the correct worktree
-offset (the pre-extraction pattern misplaced them). When the repository top cannot be resolved, the untracked overlay is skipped with a warning rather than silently missing every copy.
+untracked files with `--full-name -z` (raw NUL-terminated paths — without
+`-z`, git C-quotes non-ASCII, quoted, and newline names and the carry
+silently drops them) and copies from the repository top, so a service
+rooted at a subdirectory still lands files at the correct worktree offset
+(the pre-extraction pattern misplaced them). When the repository top
+cannot be resolved, the untracked overlay is skipped with a warning rather
+than silently missing every copy.
+
+Provisioning ignores the managed worktrees directory through the
+repository's `info/exclude`, not a daemon-written `.qwen/.gitignore`: a
+bookkeeping file in the checkout is itself untracked work, which made the
+handoff's local-clean gate refuse every pristine checkout and the
+cleanup's has-work gate preserve every clean worktree. `info/exclude`
+adds no status entry; the rule is anchored at the repository top and
+computed relative to it, so a subdirectory-rooted service ignores its own
+`.qwen/worktrees`. A byte-exact daemon-generated `.qwen/.gitignore` from
+an earlier build is removed, a user-curated one is left untouched.
 
 Unlike `setupWorktrees`, the session path does **not** create a baseline
 commit: Codex applies the changes as uncommitted state, and the Changes view
@@ -205,7 +219,13 @@ One route, `POST /session/:id/worktree-handoff` with
 `changeSessionCwd` on the live session — it queues behind in-flight prompts
 and refuses while a prompt is active — under the worktree-keyed ownership
 lock, with the same superseded-sidecar and marker-ownership guards as D5
-(applied to the worktree being left). Capability: `session_worktree_handoff_v1`.
+(applied to the worktree being left). Both directions additionally refuse
+a busy session up front (`cd_while_prompt_active`, the same gate as
+worktree-reset): the snapshot/branch/checkout steps do not run on the
+bridge's prompt queue, so an in-flight turn could otherwise write files
+after the copy and leave its last edits behind. The worktree-branch route
+carries the same gate (`branch_while_prompt_active`). Capability:
+`session_worktree_handoff_v1`.
 
 - **Worktree → Local** (`to: 'local'`): refuse unless the local checkout
   (`sidecar.originalCwd`) is clean (`local_checkout_dirty`). Carry the work
@@ -220,24 +240,36 @@ create` snapshot applied in the local checkout after the checkout. Then
   marker) for retention cleanup (P6) or manual removal. Every worktree
   creation path (session create and Local → Worktree handoff) records the
   base branch and HEAD commit in the sidecar (`originalBranch` /
-  `originalHeadCommit`); the beyond-base test reads that recorded base, so
-  an empty base would silently skip the promotion.
+  `originalHeadCommit`); the beyond-base test reads that recorded base.
+  When the worktree HEAD or the recorded base cannot be verified, the
+  handoff refuses with `worktree_handoff_base_unavailable` instead of
+  reporting success while the work stays behind.
 - **Local → Worktree** (`to: 'worktree'`): refuse if the session already has
   a worktree sidecar. Create a detached managed worktree from the local
   HEAD with the dirty overlay (D3), write the sidecar + marker, relocate the
   session into it, and set the bridge worktree metadata. On relocation
   failure the fresh worktree, sidecar, and marker are rolled back. The local
-  checkout is left as it was. The auto-created branch name receives the
-  same typed `branch_already_exists` refusal as an explicit name, and the
-  "Move to worktree" action carries a hint that the local checkout keeps
-  its dirty state and handing back requires a clean local checkout.
+  checkout is left as it was. The base is read straight from the source
+  checkout's HEAD (`getHeadCommit`), not from the registered-worktree probe
+  that only answers at a checkout root — a legitimate subdirectory workspace
+  must still record a usable base; an unreadable HEAD refuses the handoff
+  with `worktree_handoff_base_unavailable`. The auto-created branch name
+  receives the same typed `branch_already_exists` refusal as an explicit
+  name, and the "Move to worktree" action carries a hint that the local
+  checkout keeps its dirty state and handing back requires a clean local
+  checkout.
 
 v1 limitations (documented, not silent): the local-clean requirement stands
 in for "no other active session owns the local checkout" (the bridge has no
-session-list probe to check occupancy); and the handoff does not implement
-`worktree-reset`'s crash-window atomic rollback — a crash mid-handoff leaves
-a recoverable shape (the sidecar/marker still name the session, and the
-worktree manager shows the checkout), not a self-healing transfer.
+session-list probe to check occupancy); the busy gate is a check before the
+git mutations, not a queue hold — a prompt that starts after the check can
+still overlap the copy (the bridge exposes no serialized-operation seam;
+`changeSessionCwd` re-checks at the queue tail and refuses, leaving the
+same recoverable partial shape as a crash); and the handoff does not
+implement `worktree-reset`'s crash-window atomic rollback — a crash
+mid-handoff leaves a recoverable shape (the sidecar/marker still name the
+session, and the worktree manager shows the checkout), not a self-healing
+transfer.
 
 ### D7 — Snapshots are work archives, restore recreates the worktree
 
@@ -314,10 +346,15 @@ deletes oldest-first beyond `worktree.maxRetained`, snapshotting each.
   detached worktree carries unmerged commits: the named-branch path gets
   that protection from `git branch -d`'s refusal, which can never fire
   without a branch, so the detached path needs an explicit guard (an
-  explicit force delete opts out). The `--worktree` startup re-attach gate
-  keeps refusing foreign occupants including detached checkouts — startup
-  worktrees are always named, and session re-attach goes through
-  session-restore, not the flag.
+  explicit force delete opts out). Detached cleanup also never deletes the
+  slug-derived `worktree-<slug>` branch: the checkout was created with
+  `worktree add --detach`, so a pre-existing ref of that name belongs to
+  the user, not the session. (The prepared-worktree finalization is already
+  ownership-safe: `worktree add -b` refuses a pre-existing branch, so the
+  branch it later deletes is one the preparation itself created.) The
+  `--worktree` startup re-attach gate keeps refusing foreign occupants
+  including detached checkouts — startup worktrees are always named, and
+  session re-attach goes through session-restore, not the flag.
 - Tests: per-consumer migration tests; journal recovery on detached shape;
   reset/restore on detached shape; named-branch worktrees still work
   (both shapes tolerated everywhere).

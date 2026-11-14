@@ -9,6 +9,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -37,7 +38,12 @@ import {
 } from '../workspace-registry.js';
 import { registerSessionRoutes } from './session.js';
 
-const tmpRoot = mkdtempSync(path.join(tmpdir(), 'session-worktree-handoff-'));
+// Canonicalize: macOS's default TMPDIR is a /var -> /private/var symlink,
+// and the routes realpath their targets while plain fixture paths would
+// not match.
+const tmpRoot = realpathSync(
+  mkdtempSync(path.join(tmpdir(), 'session-worktree-handoff-')),
+);
 afterAll(() => {
   rmSync(tmpRoot, { recursive: true, force: true });
 });
@@ -46,18 +52,26 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 }
 
-function makeFixture() {
-  const workspaceDir = mkdtempSync(path.join(tmpRoot, 'ws-'));
-  git(workspaceDir, 'init', '-q', '-b', 'main');
-  git(workspaceDir, 'config', 'user.email', 't@e.com');
-  git(workspaceDir, 'config', 'user.name', 't');
-  git(workspaceDir, 'config', 'commit.gpgsign', 'false');
-  writeFileSync(path.join(workspaceDir, 'README.md'), 'base\n');
-  // Real repos ignore the CLI metadata tree; without this the mechanism's
-  // own .qwen/ would read as a dirty local checkout.
-  writeFileSync(path.join(workspaceDir, '.gitignore'), '.qwen/\n');
-  git(workspaceDir, 'add', '.');
-  git(workspaceDir, 'commit', '-qm', 'init', '--no-verify');
+function makeFixture(opts: { subdir?: string } = {}) {
+  const repoRoot = mkdtempSync(path.join(tmpRoot, 'ws-'));
+  git(repoRoot, 'init', '-q', '-b', 'main');
+  git(repoRoot, 'config', 'user.email', 't@e.com');
+  git(repoRoot, 'config', 'user.name', 't');
+  git(repoRoot, 'config', 'commit.gpgsign', 'false');
+  writeFileSync(path.join(repoRoot, 'README.md'), 'base\n');
+  if (opts.subdir) {
+    mkdirSync(path.join(repoRoot, opts.subdir), { recursive: true });
+    writeFileSync(path.join(repoRoot, opts.subdir, 'README.md'), 'sub\n');
+  }
+  // Deliberately no committed `.qwen/` ignore rule: a pristine repo must
+  // stay clean through worktree provisioning (the mechanism ignores its
+  // own worktrees directory via info/exclude), so the handoff local-clean
+  // gate is exercised on the real first-use shape.
+  git(repoRoot, 'add', '.');
+  git(repoRoot, 'commit', '-qm', 'init', '--no-verify');
+  const workspaceDir = opts.subdir
+    ? path.join(repoRoot, opts.subdir)
+    : repoRoot;
 
   const runtimeBaseDir = mkdtempSync(path.join(tmpRoot, 'rt-'));
   const sessionService = new SessionService(workspaceDir, { runtimeBaseDir });
@@ -133,6 +147,7 @@ function makeFixture() {
 
   return {
     workspaceDir,
+    repoRoot,
     worktreeDir,
     slug,
     service,
@@ -142,6 +157,7 @@ function makeFixture() {
     cdCalls,
     setWorktreeCalls,
     clearWorktreeCalls,
+    summaries,
     async createDetachedWorktree(): Promise<void> {
       const result = await service.createUserWorktree(slug, 'main', {
         detached: true,
@@ -337,5 +353,114 @@ describe('POST /session/:id/worktree-handoff', () => {
 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('worktree_reset_invalid_state');
+  });
+
+  it('hands a pristine-repo session back to local with an auto branch', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    writeFileSync(path.join(fixture.worktreeDir, 'work.txt'), 'work\n');
+    git(fixture.worktreeDir, 'add', 'work.txt');
+    git(fixture.worktreeDir, 'commit', '-qm', 'agent work', '--no-verify');
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    // The local checkout never had a user edit: provisioning must not
+    // count as dirty, and the auto branch must carry the commit back.
+    expect(res.status).toBe(200);
+    expect(git(fixture.workspaceDir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(
+      `worktree-${fixture.slug}`,
+    );
+    expect(existsSync(path.join(fixture.workspaceDir, 'work.txt'))).toBe(true);
+  });
+
+  it('refuses handoff to local while a prompt is active', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    fixture.summaries.set(fixture.sessionId, { hasActivePrompt: true });
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('cd_while_prompt_active');
+    expect(fixture.cdCalls).toHaveLength(0);
+  });
+
+  it('refuses handoff to worktree while a prompt is active', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    fixture.summaries.set(fixture.sessionId, { hasActivePrompt: true });
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'worktree' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('cd_while_prompt_active');
+    expect(fixture.cdCalls).toHaveLength(0);
+  });
+
+  it('refuses handoff to local when the recorded base is missing', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    await writeWorktreeSession(
+      fixture.sessionService.getWorktreeSessionPath(fixture.sessionId),
+      {
+        slug: fixture.slug,
+        worktreePath: fixture.worktreeDir,
+        worktreeBranch: '',
+        originalCwd: fixture.workspaceDir,
+        workspaceCwd: fixture.workspaceDir,
+        originalBranch: 'main',
+        originalHeadCommit: '',
+      },
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('worktree_handoff_base_unavailable');
+  });
+
+  it('carries work back from a subdirectory workspace', async () => {
+    const fixture = makeFixture({ subdir: 'sub' });
+    fixture.writeTranscript();
+
+    const toWorktree = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'worktree' });
+    expect(toWorktree.status).toBe(200);
+    const wtPath = toWorktree.body.worktree.path as string;
+    const sidecar = await fixture.readSidecar();
+    expect(sidecar.state).toBe('valid');
+    if (sidecar.state === 'valid') {
+      expect(sidecar.session.originalHeadCommit).toBe(
+        git(fixture.repoRoot, 'rev-parse', 'HEAD'),
+      );
+    }
+
+    writeFileSync(path.join(wtPath, 'sub', 'new.txt'), 'work\n');
+    git(wtPath, 'add', 'sub/new.txt');
+    git(wtPath, 'commit', '-qm', 'agent work', '--no-verify');
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local', name: 'feat/sub' });
+
+    expect(res.status).toBe(200);
+    expect(git(fixture.workspaceDir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(
+      'feat/sub',
+    );
+    // workspaceDir is already <repo>/sub; the tracked path sub/new.txt
+    // lands at <repo>/sub/new.txt = workspaceDir/new.txt.
+    expect(existsSync(path.join(fixture.workspaceDir, 'new.txt'))).toBe(true);
   });
 });

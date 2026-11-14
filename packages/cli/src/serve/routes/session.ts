@@ -105,6 +105,7 @@ import {
   canonicalizeWorkspace,
   BranchWhilePromptActiveError,
   BridgeChannelQuarantinedError,
+  CdWhilePromptActiveError,
   InvalidClientIdError,
   InvalidSessionMetadataError,
   SessionArtifactValidationError,
@@ -4860,6 +4861,13 @@ export function registerSessionRoutes(
             runtime.bridge.getSessionSummary(sessionId);
             storageSessionId = sessionId;
           }
+          // Same busy gate as worktree-reset: branching reads HEAD and
+          // writes a ref, which must not race an in-flight turn.
+          if (
+            runtime.bridge.getSessionSummary(storageSessionId).hasActivePrompt
+          ) {
+            throw new BranchWhilePromptActiveError(storageSessionId);
+          }
           if (runtime.bridge.setSessionWorktree === undefined) {
             throw new Error('Bridge does not support worktree branch creation');
           }
@@ -5091,6 +5099,18 @@ export function registerSessionRoutes(
                 });
                 return;
               }
+              // Refuse a busy session before any git mutation: the
+              // snapshot/branch/checkout below do not run on the bridge's
+              // prompt queue, so an in-flight turn could write files after
+              // the copy and leave its last edits behind. Same gate as the
+              // worktree-reset route; changeSessionCwd re-checks at the
+              // queue tail for the race window after this read.
+              if (
+                runtime.bridge.getSessionSummary(storageSessionId)
+                  .hasActivePrompt
+              ) {
+                throw new CdWhilePromptActiveError(storageSessionId);
+              }
               const wtService = new GitWorktreeService(workspaceCwd);
               // Carry the work before moving the session: branch checkout
               // first, then the tracked dirty snapshot. Untracked files stay
@@ -5101,7 +5121,19 @@ export function registerSessionRoutes(
                 await wtService.getRegisteredWorktreeBranch(realTarget);
               const head = info?.headCommit ?? '';
               const base = sidecar.originalHeadCommit;
-              if (!branch && head && base && head !== base) {
+              // Fail closed when the worktree HEAD or its recorded base
+              // cannot be verified: skipping the promotion would report
+              // success while the agent's commits stay in the worktree.
+              if (!branch && (!head || !base)) {
+                res.status(409).json({
+                  error:
+                    'Cannot verify the worktree HEAD against its recorded base',
+                  code: 'worktree_handoff_base_unavailable',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
+              if (!branch && head !== base) {
                 branch = name ?? worktreeBranchForSlug(sidecar.slug);
                 // Same typed refusal as the explicit-name path: an occupied
                 // auto name must not degrade into a generic bridge error.
@@ -5184,12 +5216,30 @@ export function registerSessionRoutes(
           }
           const releaseOwnership = await acquireWorktreeOwnershipOp(sourceCwd);
           try {
+            // Same busy gate as the to=local direction: the dirty capture
+            // and worktree creation must not race an in-flight turn.
+            if (
+              runtime.bridge.getSessionSummary(storageSessionId).hasActivePrompt
+            ) {
+              throw new CdWhilePromptActiveError(storageSessionId);
+            }
             const sourceService = new GitWorktreeService(sourceCwd);
             const currentBranch = await sourceService
               .getCurrentBranch()
               .catch(() => undefined);
-            const sourceInfo =
-              await sourceService.getRegisteredWorktreeBranch(sourceCwd);
+            // Read the source HEAD directly: getRegisteredWorktreeBranch
+            // only answers at a checkout root, so a legitimate subdirectory
+            // workspace would record an empty base and the return trip
+            // would silently skip the branch promotion.
+            const baseCommit = await getHeadCommit(sourceCwd);
+            if (!baseCommit) {
+              res.status(409).json({
+                error: 'Cannot read the local HEAD to record the handoff base',
+                code: 'worktree_handoff_base_unavailable',
+                sessionId: storageSessionId,
+              });
+              return;
+            }
             const slug = GitWorktreeService.generateAutoSlug();
             const created = await sourceService.createUserWorktree(
               slug,
@@ -5217,7 +5267,7 @@ export function registerSessionRoutes(
                 originalCwd: sourceCwd,
                 workspaceCwd,
                 originalBranch: currentBranch ?? '',
-                originalHeadCommit: sourceInfo?.headCommit ?? '',
+                originalHeadCommit: baseCommit,
               });
               assertRuntimeGenerationOpen?.();
               const changed = await runtime.bridge.changeSessionCwd(

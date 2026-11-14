@@ -270,4 +270,40 @@ describe('GitWorktreeService — detached managed worktrees', () => {
     expect(result.success).toBe(true);
     await expect(fs.lstat(worktree.path)).rejects.toThrow();
   });
+
+  it('removeUserWorktree keeps a pre-existing worktree-<slug> branch it never owned', async () => {
+    // The detached checkout is created with `worktree add --detach`, so
+    // the slug-derived branch name may already belong to the user.
+    git(repoRoot, 'branch', 'worktree-sess-owned');
+    const worktree = await createDetached('sess-owned');
+
+    const result = await service.removeUserWorktree('sess-owned', {
+      deleteBranch: true,
+    });
+
+    expect(result.success).toBe(true);
+    await expect(fs.lstat(worktree.path)).rejects.toThrow();
+    expect(git(repoRoot, 'branch', '--list', 'worktree-sess-owned')).toBe(
+      'worktree-sess-owned',
+    );
+  });
+
+  it('removeUserWorktree keeps an unrelated worktree-<slug> branch with its own commits', async () => {
+    git(repoRoot, 'branch', 'worktree-sess-diverged');
+    git(repoRoot, 'checkout', '-q', 'worktree-sess-diverged');
+    await fs.writeFile(path.join(repoRoot, 'user.txt'), 'user work\n');
+    git(repoRoot, 'add', 'user.txt');
+    git(repoRoot, 'commit', '-qm', 'user work', '--no-verify');
+    const userTip = git(repoRoot, 'rev-parse', 'HEAD');
+    git(repoRoot, 'checkout', '-q', 'main');
+    const worktree = await createDetached('sess-diverged');
+
+    const result = await service.removeUserWorktree('sess-diverged', {
+      deleteBranch: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(git(repoRoot, 'rev-parse', 'worktree-sess-diverged')).toBe(userTip);
+    await expect(fs.lstat(worktree.path)).rejects.toThrow();
+  });
 });
