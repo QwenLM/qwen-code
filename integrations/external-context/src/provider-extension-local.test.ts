@@ -513,6 +513,15 @@ describe('local provider extension example', () => {
           import.meta.url,
         ),
       );
+      // A proxied runner exports lowercase http_proxy/https_proxy/all_proxy.
+      // The spawned example spreads process.env, so it would read those valid
+      // values instead of the invalid uppercase HTTP_PROXY under test and hang
+      // instead of failing fast (killed: true) — the same masking #17176 fixed
+      // in proxy.test.ts. Clear them so the uppercase value under test is the
+      // one the proxy agent reads; afterEach unstubAllEnvs restores them.
+      vi.stubEnv('http_proxy', undefined);
+      vi.stubEnv('https_proxy', undefined);
+      vi.stubEnv('all_proxy', undefined);
       for (const [baseUrl, token, httpProxy, stderr] of [
         ['', '', '', 'Provider configuration is unavailable.\n'],
         ['not-a-url', 'secret', '', 'Provider configuration is invalid.\n'],

@@ -1109,7 +1109,8 @@ export async function* livePromptEvents(
       try {
         // On the shared agent loop (`experimental.unifiedAgentLoop`), the
         // round and its batch run in one `runAgentLoop` call.
-        const onSharedLoop = config.isUnifiedAgentLoopEnabled?.() === true;
+        const onSharedLoop =
+          config.isUnifiedAgentLoopEnabled?.('opentui') === true;
         // Seeded before the turn's first round is sent, so the calls it
         // makes are not taken for replays.
         if (onSharedLoop && !duplicates)
@@ -1118,7 +1119,8 @@ export async function* livePromptEvents(
             responded: new Set<string>(),
           };
         const roundDuplicates = duplicates;
-        const useEventBus = config.isEventBusAgentLoopEnabled?.() === true;
+        const useEventBus =
+          config.isEventBusAgentLoopEnabled?.('opentui') === true;
         sharedRound =
           onSharedLoop && roundDuplicates
             ? sharedModelRound(

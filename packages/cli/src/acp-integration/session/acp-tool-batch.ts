@@ -645,7 +645,10 @@ export async function runAcpToolBatch(
         results: kept,
       };
     }
-    if (!signal.aborted || config.isEventBusAgentLoopEnabled?.() !== true) {
+    if (
+      !signal.aborted ||
+      config.isEventBusAgentLoopEnabled?.('acp') !== true
+    ) {
       await Promise.all(approvals);
     }
     await emissions;
