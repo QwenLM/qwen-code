@@ -868,15 +868,54 @@ interface TryCompressOptions {
   requestPayloadTooLarge?: boolean;
 }
 
-// Model-output validation errors (protocol tag leaks, malformed tool calls)
-// and transient stream anomalies (empty streams, no usable text, missing
-// finish reason) use an independent retry budget so they do not consume each
-// other's or HTTP retries' budgets.
+// Model-output validation errors (protocol tag leaks, malformed tool calls,
+// format mismatches) and transient stream anomalies (empty streams, no usable
+// text, missing finish reason) use an independent retry budget so they do not
+// consume each other's or HTTP retries' budgets.
+//
+// These are recoverable, transient failures — the model occasionally fails to
+// produce output in the expected format — so the retry is the DEFAULT and is
+// bounded by an exponential-backoff ladder (2s, 4s, 8s, …) rather than a
+// linear one. Whether the retry runs at all and how many attempts it allows are
+// driven per-config by the caller (the model/generation config opt-out and
+// `maxOutputValidationRetries`), defaulting to ON so an unattended YOLO run
+// recovers automatically instead of stalling on `Ctrl+Y`.
 const INVALID_STREAM_RETRY_CONFIG = {
-  transientMaxRetries: 4,
+  transientMaxRetries: 5,
   protocolTagLeakMaxRetries: 2,
   initialDelayMs: 2000,
+  /**
+   * Exponential-backoff multiplier applied to `initialDelayMs` after each
+   * failed attempt. A value of 2 yields the ladder 2000ms, 4000ms, 8000ms,
+   * … — the recovery backoff the user requested (2s first, doubled each time)
+   * instead of the previous linear `initialDelayMs * attempt`.
+   */
+  backoffMultiplier: 2,
+  /**
+   * Upper bound on the exponential backoff per attempt (ms). The first retry
+   * is `initialDelayMs` (2s); later retries double until this cap.
+   */
+  maxDelayMs: 32000,
 };
+
+/**
+ * Exponential-backoff delay for a model-output validation retry. `attempt` is
+ * the 1-based retry number (the first retry is attempt 1 → `initialDelayMs`),
+ * so the ladder is `initialDelayMs`, `initialDelayMs * backoffMultiplier`,
+ * … capped at `maxDelayMs` — the recovery backoff the user requested (2s
+ * first, doubled each time). The cap keeps a single long generation from
+ * parking for minutes if the model keeps producing malformed output.
+ */
+function invalidStreamRetryDelayMs(
+  attempt: number,
+  config: typeof INVALID_STREAM_RETRY_CONFIG,
+): number {
+  const exponent = Math.max(0, attempt - 1);
+  return Math.min(
+    config.maxDelayMs,
+    config.initialDelayMs * Math.pow(config.backoffMultiplier, exponent),
+  );
+}
 
 const STREAM_RETRY_CONFIG = {
   maxRetries: 2,
@@ -4384,9 +4423,12 @@ export class LlmChat {
           // transient budget entitles the next attempt to acceptance. A
           // tag-leak-only exhaustion must not arm — a quiet ending still
           // has its full retry-first budget ahead of it (#7039).
+          // Compare against the effective budget, not the built-in default:
+          // the retry loop below counts against `modelOutputValidationRetries`
+          // (config-overridable), so arming on the hard-coded default would
+          // desync the two whenever the model sets a different cap (#16146).
           if (
-            transientInvalidStreamRetryCount >=
-            INVALID_STREAM_RETRY_CONFIG.transientMaxRetries
+            transientInvalidStreamRetryCount >= modelOutputValidationRetries
           ) {
             acceptQuietToolResultCompletionOnNextAttempt = true;
           }
@@ -4441,6 +4483,18 @@ export class LlmChat {
         const retryMaxDelayMs =
           cgConfig?.retryMaxDelayMs ?? RATE_LIMIT_RETRY_OPTIONS.maxDelayMs;
         const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
+
+        // Model-output validation retry (InvalidStreamError: protocol-tag leak,
+        // malformed tool call, format mismatch, empty/finish-reason-less
+        // stream) uses a separate budget from HTTP + rate-limit retries, so it
+        // never consumes their budgets. Default ON so an unattended YOLO run
+        // recovers automatically instead of stalling; the per-model generation
+        // config can opt out entirely or cap the number of attempts.
+        const skipModelOutputValidationRetry =
+          cgConfig?.outputValidationRetryDisabled === true;
+        const modelOutputValidationRetries =
+          cgConfig?.maxOutputValidationRetries ??
+          INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
 
         // Max output tokens escalation: when no user/env override is set and
         // the model hits MAX_TOKENS, retry once with the escalated limit.
@@ -5368,13 +5422,16 @@ export class LlmChat {
             const maxInvalidStreamRetries =
               isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
                 ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
-                : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
+                : modelOutputValidationRetries;
             const invalidStreamRetryCount =
               isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
                 ? protocolTagLeakRetryCount
                 : transientInvalidStreamRetryCount;
+            // An opt-out in the model's generation config surfaces the
+            // InvalidStreamError to the caller instead of retrying.
             if (
               isInvalidStreamError &&
+              !skipModelOutputValidationRetry &&
               invalidStreamRetryCount < maxInvalidStreamRetries
             ) {
               self.popPendingPartialAssistantTurn();
@@ -5391,9 +5448,10 @@ export class LlmChat {
               // Transient-keyed, so a tag-leak-only exhaustion never arms
               // prematurely (#9026, #7039 retry-first).
               rearmQuietAcceptanceIfBudgetSpent();
-              const delayMs =
-                INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
-                nextInvalidStreamRetryCount;
+              const delayMs = invalidStreamRetryDelayMs(
+                nextInvalidStreamRetryCount,
+                INVALID_STREAM_RETRY_CONFIG,
+              );
               debugLogger.warn(
                 `Invalid stream [${(error as InvalidStreamError).type}] ` +
                   `(retry ${nextInvalidStreamRetryCount}/${maxInvalidStreamRetries}). ` +
@@ -5507,11 +5565,16 @@ export class LlmChat {
               if (attemptState.params.config?.abortSignal?.aborted) throw error;
               attemptState.rollback();
               if (!(error instanceof InvalidStreamError)) throw error;
+              // Honour the same generation-config opt-out as the main send
+              // loop: with output validation retry disabled, surface the
+              // invalid stream to the caller instead of retrying the
+              // continuation (the main loop guards this at the retry branch).
+              if (skipModelOutputValidationRetry) throw error;
 
               const maxContinuationRetries =
                 error.type === 'PROTOCOL_TAG_LEAK'
                   ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
-                  : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
+                  : modelOutputValidationRetries;
               const continuationRetryCount =
                 error.type === 'PROTOCOL_TAG_LEAK'
                   ? protocolTagLeakRetryCount
@@ -5529,16 +5592,16 @@ export class LlmChat {
               // Same arming rule as the main send loop (#9026): keyed to
               // the transient bucket only (quiet completions surface as a
               // transient-type error), so a tag-leak-only exhaustion does
-              // not arm prematurely (#7039 retry-first).
-              if (
-                transientRetryCount >=
-                INVALID_STREAM_RETRY_CONFIG.transientMaxRetries
-              ) {
+              // not arm prematurely (#7039 retry-first). Compare against the
+              // effective budget, not the built-in default, to stay in sync
+              // with `maxContinuationRetries` above when the cap is overridden.
+              if (transientRetryCount >= modelOutputValidationRetries) {
                 acceptQuietToolResultCompletionOnNextAttempt = true;
               }
-              const delayMs =
-                INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
-                nextContinuationRetryCount;
+              const delayMs = invalidStreamRetryDelayMs(
+                nextContinuationRetryCount,
+                INVALID_STREAM_RETRY_CONFIG,
+              );
               debugLogger.warn(
                 `Invalid stream [${error.type}] during output continuation ` +
                   `(retry ${nextContinuationRetryCount}/${maxContinuationRetries}). ` +

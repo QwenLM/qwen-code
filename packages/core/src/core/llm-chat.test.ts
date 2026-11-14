@@ -407,7 +407,10 @@ describe('LlmChat', async () => {
       }
     })();
     await vi.advanceTimersByTimeAsync(0);
-    await vi.advanceTimersByTimeAsync(35_000);
+    // The model-output validation retry now uses an exponential ladder
+    // (2s, 4s, 8s, 16s, 32s); the full 5-retry budget totals 62s, so the
+    // advance must clear that to reach exhaustion.
+    await vi.advanceTimersByTimeAsync(70_000);
     await resultPromise;
   }
 
@@ -2760,14 +2763,14 @@ describe('LlmChat', async () => {
       );
       const { events } = await runToolResult(
         'prompt-id-tool-result-empty-response-exhausted',
-        35_000,
+        70_000,
         chat,
       );
 
       // Retries still run first (#7039): the quiet completion is only
       // accepted once the budget is spent, never on first occurrence.
-      expectStreamCalls(5);
-      expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+      expectStreamCalls(6);
+      expect(mockLogContentRetry).toHaveBeenCalledTimes(5);
       expect(hasRetry(events)).toBe(true);
       // Completes instead of aborting (#9026); the thought-only turn survives.
       expect(chat.getHistory().at(-1)).toEqual({
@@ -2783,14 +2786,37 @@ describe('LlmChat', async () => {
       streamMock().mockImplementation(async () => streamOf(stopResponse([])));
       const { events, recordAssistantTurn, runChat } = await runToolResult(
         'prompt-id-tool-result-quiet-completion',
-        35_000,
+        70_000,
       );
 
-      expectStreamCalls(5);
-      expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+      expectStreamCalls(6);
+      expect(mockLogContentRetry).toHaveBeenCalledTimes(5);
       expect(hasRetry(events)).toBe(true);
       // Not ending on the user's functionResponse: a placeholder model turn
       // keeps alternation, and the JSONL record carries the same text.
+      expect(runChat.getHistory().at(-1)).toEqual(modelText('(empty content)'));
+      expectRecordedMessage(recordAssistantTurn, [{ text: '(empty content)' }]);
+    });
+
+    // #16146: the quiet-acceptance arming must track the effective budget, not
+    // the built-in default. With a model that caps maxOutputValidationRetries
+    // below the default, the retry loop stops earlier, so arming on the fixed
+    // default would never fire and the quiet completion would fail instead of
+    // being accepted on its own final attempt.
+    it('arms quiet acceptance at a configured sub-default retry budget (#16146)', async () => {
+      vi.useFakeTimers();
+      mockGeneratorConfig({ maxOutputValidationRetries: 2 });
+      streamMock().mockImplementation(async () => streamOf(stopResponse([])));
+      const { events, recordAssistantTurn, runChat } = await runToolResult(
+        'prompt-id-tool-result-quiet-budget-two',
+        70_000,
+      );
+
+      // Budget 2, not the built-in default of 5: one initial + two retries,
+      // then the armed final attempt accepts the quiet completion.
+      expectStreamCalls(3);
+      expect(mockLogContentRetry).toHaveBeenCalledTimes(2);
+      expect(hasRetry(events)).toBe(true);
       expect(runChat.getHistory().at(-1)).toEqual(modelText('(empty content)'));
       expectRecordedMessage(recordAssistantTurn, [{ text: '(empty content)' }]);
     });
@@ -2813,27 +2839,27 @@ describe('LlmChat', async () => {
         // Dies at the socket before its first chunk: replayable.
         'still accepts a quiet completion when the armed attempt is transport-replayed (#9026)',
         'prompt-id-tool-result-armed-transport-replay',
-        5,
+        6,
         () => streamThenThrow([], socketReset()),
         120_000,
-        6,
+        7,
       ],
       [
         // PROTOCOL_TAG_LEAK is rescheduled by the tag-leak retry branch with
         // the transient budget already spent (rearm keyed to that bucket).
         'still accepts a quiet completion when the armed attempt leaks protocol tags (#9026)',
         'prompt-id-tool-result-armed-tag-leak',
-        5,
+        6,
         () => streamThenThrow([], tagLeak()),
         120_000,
-        6,
+        7,
       ],
       [
         // Throttled (429) and rescheduled by the rate-limit branch; the
         // rescheduled attempt is still the final one.
         'still accepts a quiet completion when the armed attempt hits a rate limit (#9026)',
         'prompt-id-tool-result-armed-rate-limit',
-        5,
+        6,
         () =>
           streamThenThrow(
             [],
@@ -2842,17 +2868,17 @@ describe('LlmChat', async () => {
             ),
           ),
         180_000,
-        6,
+        7,
       ],
       [
         // A non-NO_TOOL_RESULT_PROGRESS transient error takes the final
         // retry slot; the budget is shared, so the last attempt is armed.
         'arms the quiet completion when a mixed error type exhausts the budget (#9026)',
         'prompt-id-tool-result-mixed-final-error',
-        4,
+        5,
         () => streamOf({} as GenerateContentResponse),
         120_000,
-        5,
+        6,
       ],
     ])(
       '%s',
@@ -2893,8 +2919,8 @@ describe('LlmChat', async () => {
         120_000,
       );
 
-      // Calls 3-6 exhaust the transient budget; only the 7th is armed.
-      expectStreamCalls(7);
+      // Calls 3-7 exhaust the transient budget; only the 8th is armed.
+      expectStreamCalls(8);
       expect(runChat.getHistory().at(-1)).toEqual(modelText('(empty content)'));
       expect(recordAssistantTurn).toHaveBeenCalledOnce();
     });
@@ -2903,8 +2929,9 @@ describe('LlmChat', async () => {
       vi.useFakeTimers();
       // The armed attempt delivers text, then the socket dies: continuation
       // recovery must keep the one-shot acceptance (rearm at that branch).
+      // The armed attempt is the 6th call: 1 initial + 5 transient retries.
       quietExcept(
-        (call) => call === 5,
+        (call) => call === 6,
         () => streamThenThrow([textChunk('partial answer')], socketReset()),
       );
       const { recordAssistantTurn, runChat } = await runToolResult(
@@ -2912,7 +2939,7 @@ describe('LlmChat', async () => {
         120_000,
       );
 
-      expectStreamCalls(6);
+      expectStreamCalls(7);
       // The prefix survives; visible text means no placeholder is added.
       expect(runChat.getHistory().at(-1)).toEqual(modelText('partial answer'));
       expectRecordedMessage(recordAssistantTurn, [{ text: 'partial answer' }]);
@@ -2931,7 +2958,7 @@ describe('LlmChat', async () => {
         120_000,
       );
 
-      expectStreamCalls(5);
+      expectStreamCalls(6);
       expect(runChat.getHistory().at(-1)).toEqual(content('model', imagePart));
       // History and JSONL share a source: the record holds the inlineData.
       expectRecordedMessage(recordAssistantTurn, [imagePart]);
@@ -2961,7 +2988,8 @@ describe('LlmChat', async () => {
       await expectStreamExhaustion(await sendToolResult(promptId, target), {
         type,
       });
-      expectStreamCalls(5);
+      // 1 initial + 5 transient retries.
+      expectStreamCalls(6);
     }
 
     const needMoreTokens = () =>
@@ -3062,15 +3090,15 @@ describe('LlmChat', async () => {
         ),
       );
       await collectToolResult(
-        35_000,
+        70_000,
         'prompt-id-quiet-signed-episodes',
         recordingChat,
         'test-model',
         {},
       );
 
-      expectStreamCalls(5);
-      expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+      expectStreamCalls(6);
+      expect(mockLogContentRetry).toHaveBeenCalledTimes(5);
       expect(recordingChat.getHistory().at(-1)).toEqual(
         content('model', ...expectedParts),
       );
@@ -3157,17 +3185,17 @@ describe('LlmChat', async () => {
       vi.useFakeTimers();
       mockStreamsOnce(
         needMoreTokens(),
-        ...Array.from({ length: 5 }, () => streamOf(stopResponse([]))),
+        ...Array.from({ length: 6 }, () => streamOf(stopResponse([]))),
       );
 
       await collectToolResult(
-        35_000,
+        70_000,
         'prompt-id-tool-result-max-tokens-quiet-continuation',
         chat,
         'gemini-pro',
       );
 
-      expectStreamCalls(6);
+      expectStreamCalls(7);
       expect(chat.getHistory().at(-1)).toEqual(modelText('(empty content)'));
     });
 
@@ -7902,14 +7930,14 @@ describe('LlmChat', async () => {
 
       await expectStreamExhaustion(await send('test', 'prompt-id-retry-fail'));
 
-      // 1 initial + 4 transient retries.
-      expectStreamCalls(5);
-      expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+      // 1 initial + 5 transient retries.
+      expectStreamCalls(6);
+      expect(mockLogContentRetry).toHaveBeenCalledTimes(5);
       expect(mockLogContentRetryFailure).toHaveBeenCalledTimes(1);
       expect(mockLogContentRetryFailure).toHaveBeenCalledWith(
         mockConfig,
         expect.objectContaining({
-          total_attempts: 5,
+          total_attempts: 6,
           final_error_type: 'NO_FINISH_REASON',
           model: 'test-model',
         }),
@@ -7927,11 +7955,12 @@ describe('LlmChat', async () => {
       );
 
       const stream = await send('test', 'prompt-id-four-invalid-streams');
-      const events = await collectStreamWithFakeTimers(stream, 25_000);
+      const events = await collectStreamWithFakeTimers(stream, 70_000);
 
       expectStreamCalls(5);
       expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
-      for (const [index, retryDelayMs] of [2000, 4000, 6000, 8000].entries()) {
+      // Exponential ladder: 2s, 4s, 8s, 16s.
+      for (const [index, retryDelayMs] of [2000, 4000, 8000, 16000].entries()) {
         expect(mockLogContentRetry).toHaveBeenNthCalledWith(
           index + 1,
           mockConfig,
@@ -7976,7 +8005,7 @@ describe('LlmChat', async () => {
           ],
         },
         finishReason: 'tool_calls',
-        retryCount: 4,
+        retryCount: 5,
       },
     ] as const)(
       'should retry $name through the OpenAI pipeline',
@@ -17284,7 +17313,7 @@ describe('LlmChat', async () => {
           await expect(collecting).rejects.toThrow('finish reason');
         })();
         await vi.advanceTimersByTimeAsync(0);
-        await vi.advanceTimersByTimeAsync(35_000);
+        await vi.advanceTimersByTimeAsync(70_000);
         await resultPromise;
 
         // No synthetic tool-call chunk may be dispatched.

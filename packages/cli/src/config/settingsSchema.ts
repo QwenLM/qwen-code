@@ -2139,6 +2139,29 @@ const SETTINGS_SCHEMA = {
             parentKey: 'generationConfig',
             showInDialog: false,
           },
+          maxOutputValidationRetries: {
+            type: 'number',
+            label: 'Max Output Validation Retries',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as number | undefined,
+            description:
+              'Maximum number of attempts for the model-output validation retry, which recovers the model occasionally producing output that does not match the expected format. Defaults to the built-in value. Set to 1 to retry only once, or omit for the default.',
+            minimum: 1,
+            parentKey: 'generationConfig',
+            showInDialog: false,
+          },
+          outputValidationRetryDisabled: {
+            type: 'boolean',
+            label: 'Disable Output Validation Retry',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: false,
+            description:
+              'Opt out of the model-output validation retry entirely. When true, the model-output validation retry is disabled and the resulting error is surfaced to the caller. When false (default), the retry runs with an exponential backoff (2s, 4s, 8s, ...) so unattended runs recover automatically.',
+            parentKey: 'generationConfig',
+            showInDialog: false,
+          },
           enableCacheControl: {
             type: 'boolean',
             label: 'Enable Cache Control',
