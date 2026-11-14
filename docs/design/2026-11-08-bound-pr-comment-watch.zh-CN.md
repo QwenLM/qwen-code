@@ -6,6 +6,8 @@
 
 修订 2026-11-08（评审）：watch 仅在把评论投递给至少一个绑定会话时才消费它——其较窄的 `comment` 类无法路由的评论保持未消费（不写共享去重键），好让通知 lane 仍按线程自身的 reason 投递；评论游标不会越过投递意图未被持久化认领的评论（`dispatchEnvelope` 返回 false 时保留 `commentSince` 以便重试）；两个评论抓取沿用状态 watch 的限流快速退出重试判断，并把共享凭据/限流错误交给本轮中止逻辑；归因要求写标志与评论集合同处一个管道段（链尾的 `stat -f` 或引号内的 `grep 'gh pr comment'` 属读取）、对显式 GET（即便带字段参数）一票否决、剥离引号片段、给 transcript 扫描缓存设上限、且只在有候选时才查询；每轮候选上限用于排出停机积压而不丢尾部。watch 记录 `dispatchedCommentTimes` 使其去重键可被逐出；仅评论的 channel（`prWatchEvents` 为空）跳过每轮 `pulls.get`。`prCommentWatch` 不带 `deliverToBoundSessions` 依赖校验，因为编辑器会为每个 channel 提交它的默认值。归因读活跃 transcript 及该会话的 subagent transcript（归档会话自己发的评论是已点名的尽力而为残余）。watch 将自身限定于同账号评论——即通知 lane 看不到的缺口；异账号评论仍由通知 lane 处理，因为若以 watch 较窄的 `comment` 类消费它们，可能只触达已配置角色的一个子集而饿死其余角色。作者排除先于每轮批次上限执行，避免一连串自己发的评论占满批次位、卡住游标。归因还识别纯数字的创建结果（`--jq '.id'`）与标志在 URL 之前的 curl 写入、否决带引号的 GET 方法值、并把换行视为命令边界。
 
+修订 2026-11-14（启动积压，见[绑定投递启动积压](2026-11-14-bound-delivery-startup-backlog.zh-CN.md)）：检测到停机缺口后——或可投递窗口超过 `MAX_WATCH_COMMENTS_PER_PASS` 时——watch 以私有**摘要** prompt 投递积压，而非每条评论一条。上文两处陈述仅就该路径修订：(1) 事件/幂等键不再是稳定评论 id，而是 `comment-digest:<n>:<排序后已渲染成员 key 的 sha256-40>`——对 prompt 实际携带内容的哈希，故游标保存前崩溃后的重列会去重已渲染成员，窗口长大时只派发新增余量；已渲染成员的稳定 id 仍记入 `dispatchedComments`。(2) 作者排除基于**已渲染片段**与绑定 follower 集计算：写了**每个**已渲染成员的 follower 被排除出该 digest（它已持有全部正文），部分作者仍收到——故缺口后写了数条中一条的会话会收到含其自身成员的 digest，并以自身为作者标注。digest 携带 channel 账号身份（发送者白名单豁免匹配它），最新成员优先分配共享正文预算，省略成员以更多 digest 补投（游标停留、其键不记录），retired 判定绝不推进游标。逐条投递（无缺口、窗口在上限内）不变。
+
 ## 问题
 
 绑定到某 PR 的会话——尤其是承担整个研发闭环的 `fix` 角色会话——必须听到该 PR 上的新评论，无论评论是谁发的：本人手工、另一个 Qwen Code 会话、或另一个 agent/模型，无论用的是同一个 GitHub 账号还是别的账号。今天做不到：

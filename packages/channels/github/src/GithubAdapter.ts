@@ -849,7 +849,9 @@ function isPrWatchEntryShape(value: unknown): value is PrWatchEntry {
     (item as PendingWatchEvent).envelope !== undefined &&
     isInboundEnvelope((item as PendingWatchEvent).envelope) &&
     ((item as PendingWatchEvent).delivery === undefined ||
-      isBoundDeliveryShape((item as PendingWatchEvent).delivery));
+      isBoundDeliveryShape((item as PendingWatchEvent).delivery)) &&
+    ((item as PendingWatchEvent).headChangeFrom === undefined ||
+      typeof (item as PendingWatchEvent).headChangeFrom === 'string');
   return (
     stringOrUndef(entry.headSha) &&
     stringOrUndef(entry.ci) &&
@@ -1407,7 +1409,7 @@ const BOUND_DELIVERY_COPY: Readonly<
     offlineCommentsLead: (count) =>
       `Offline backlog: ${count} new comment(s) on the PR while this channel was not running:`,
     offlineOmittedNotice: (count) =>
-      `${count} comment(s) omitted from this digest to fit the prompt budget; they will follow as individual deliveries`,
+      `${count} comment(s) omitted from this digest to fit the prompt budget; they will follow in further digests`,
     reviewRequestedInstruction:
       'Return a formal review summary with verified actionable findings, or a concise no-blocker result.',
     assignInstruction: 'Triage this issue and respond with the next action.',
@@ -1437,7 +1439,7 @@ const BOUND_DELIVERY_COPY: Readonly<
     offlineCommentsLead: (count) =>
       `离线积压：channel 停摆期间 PR 新增 ${count} 条评论：`,
     offlineOmittedNotice: (count) =>
-      `本摘要因篇幅省略了 ${count} 条评论，将逐条补投`,
+      `本摘要因篇幅省略了 ${count} 条评论，将分批摘要补投`,
     reviewRequestedInstruction:
       '请给出正式的评审总结，包含经核实的可操作发现；若没有阻塞问题，给出简洁的无阻塞结论。',
     assignInstruction: '请分诊该 issue 并给出下一步行动。',
@@ -5220,6 +5222,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             ))
         ) {
           this.removeInboundTask(task.id);
+          if (reason === 'superseded: CI recovered' && entry) {
+            this.releaseCiFailureSuppression(
+              entry,
+              task.issueNumber,
+              task.envelope.messageId.split(':')[3]!,
+            );
+            this.savePrWatchState();
+          }
           this.recordChannelEvent({
             type: 'inbound',
             outcome: 'skipped',
@@ -5952,6 +5962,28 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       return 'superseded: PR reopened';
     }
     return undefined;
+  }
+
+  /**
+   * Release the once-per-head ci_failure suppression for an UNDELIVERED
+   * retire on the same head (the CI-recovered arm): the pin and the fired-ring
+   * prefix exist so a delivered red suppresses a red→green→red flap, but a
+   * retire that never delivered must not spend the head's only firing slot —
+   * a later genuine failure on the same head has to fire again. A delivered
+   * red keeps both suppressors.
+   */
+  private releaseCiFailureSuppression(
+    entry: PrWatchEntry,
+    number: number,
+    sha: string,
+  ): void {
+    if (entry.ciFiredSha === sha) {
+      delete entry.ciFiredSha;
+    }
+    const prefix = `watch:ci_failure:${number}:${sha}:`;
+    if (entry.fired?.some((key) => key.startsWith(prefix))) {
+      entry.fired = entry.fired.filter((key) => !key.startsWith(prefix));
+    }
   }
 
   /**
@@ -8272,14 +8304,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // durable tasks in a single poll. PRs that find it spent keep their cursor
     // and resume next pass.
     const commentBudget = { remaining: MAX_WATCH_COMMENTS_PER_PASS };
-    // Arm the digest on every ACTIVE entry (not just the watched slice), so
-    // a PR excluded by the watch cap keeps its arm until it is watched. The
-    // per-entry flag is persisted and cleared only when that PR's backlog is
-    // actually consumed — a pass that digested nothing must not lose it.
+    // Arm the digest on EVERY persisted entry — not just this snapshot's
+    // active keys: a degraded (empty/partial) first poll must still arm the
+    // entries on disk, so a restart before a complete snapshot finds the arm
+    // and digests the backlog instead of flooding per comment. Entries
+    // outside the watch-cap slice keep their arm until watched. The per-entry
+    // flag is persisted and cleared only when that PR's backlog is consumed.
     if (this.startupDigestPending) {
-      for (const key of active.keys()) {
-        const entry = this.prWatchState.entries[key];
-        if (entry) entry.digestPending = true;
+      for (const entry of Object.values(this.prWatchState.entries)) {
+        entry.digestPending = true;
       }
     }
     // The task store is read once per pass, not once per watched PR; an
@@ -8603,6 +8636,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             threadId: pending.envelope.threadId ?? `pr:${number}`,
             delivery: pending.delivery,
           });
+          if (reason === 'superseded: CI recovered') {
+            this.releaseCiFailureSuppression(
+              next,
+              number,
+              pending.key.split(':')[3]!,
+            );
+          }
           continue;
         }
         keep.push(pending);
@@ -8657,6 +8697,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           threadId: task.source.threadId ?? `pr:${number}`,
           delivery: task.delivery,
         });
+        if (reason === 'superseded: CI recovered') {
+          this.releaseCiFailureSuppression(
+            next,
+            number,
+            messageKey.split(':')[3]!,
+          );
+        }
       }
     }
 
@@ -8688,10 +8735,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // NET change under the original key, not one prompt per intermediate
       // hop. Legacy pending items without headChangeFrom are not coalesced.
       if (event.type === 'head_change' && headSha !== undefined) {
+        // A dead-lettered pending key is already retired (e.g. a round-trip
+        // retire whose state save threw): absorbing into it would deliver
+        // the net change nowhere while the journal claims a live fold. Treat
+        // it as no candidate and append the new hop.
         const existing = next.pending?.find(
           (p) =>
             p.key.startsWith(`watch:head_change:${number}:`) &&
-            p.headChangeFrom !== undefined,
+            p.headChangeFrom !== undefined &&
+            !this.isDeadLettered(p.key),
         );
         if (existing) {
           if (existing.headChangeFrom !== headSha) {
@@ -8709,21 +8761,25 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             });
             continue;
           }
-          // Round trip A->B->A: the net change is nothing. Retire the pending
-          // hop visibly instead of delivering "head moved from A to A". A
-          // failed dead-letter write falls through to append the new hop
-          // (fail-closed: two factual prompts, never a lost transition).
+          // Round trip A->B->A: the net change is nothing — but only for
+          // targets that never received the intermediate hop. If any target
+          // already delivered it (role-aware fan-out leaves the event pending
+          // while one role is blocked), the revert must be queued so the
+          // delivered role learns the head went back. A failed dead-letter
+          // write also falls through to append the new hop (fail-closed:
+          // two factual prompts, never a lost transition).
           if (
-            this.isDeadLettered(existing.key) ||
-            this.appendWatchDeadLetter(
-              existing.key,
-              existing.issueNumber,
-              existing.envelope.chatId,
-              existing.envelope.threadId ?? `pr:${number}`,
-              existing.delivery,
-              existing.envelope.text,
-              'superseded: head returned to original',
-            )
+            !this.boundEventAlreadyDelivered(existing.envelope) &&
+            (this.isDeadLettered(existing.key) ||
+              this.appendWatchDeadLetter(
+                existing.key,
+                existing.issueNumber,
+                existing.envelope.chatId,
+                existing.envelope.threadId ?? `pr:${number}`,
+                existing.delivery,
+                existing.envelope.text,
+                'superseded: head returned to original',
+              ))
           ) {
             next.pending = next.pending!.filter((p) => p !== existing);
             supersededRetires.push({
@@ -8822,7 +8878,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
               encoding: 'utf-8',
               mode: 0o600,
             });
+            // Event-scoped record (no taskId): keep BOTH index scopes
+            // current so deadLetterCoversTask retires claimed tasks of this
+            // event in-process, not only after a restart reloads the log.
             this.deadLetteredKeys!.add(oldest.key);
+            this.deadLetterEventScoped!.add(oldest.key);
           } catch (err) {
             // The exhaustion surface cannot be written: keep the event queued
             // (over cap) and retry the overflow on the next detection instead
@@ -8919,10 +8979,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * Default-on with deliverToBoundSessions; `prCommentWatch: false` disables
    * it. Failures are isolated here so they never skip the state transitions.
    *
-   * `digestMode` (first complete watch pass after a detected downtime gap)
-   * delivers the whole deliverable backlog as ONE private summary prompt
-   * instead of one prompt per comment; the event class stays `comment`, so
-   * role routing is identical to individual deliveries.
+   * `digestMode` (the persisted per-entry arm set by a detected downtime gap,
+   * or a window larger than the per-comment pass cap) renders AT MOST the
+   * newest members that fit the shared body budget as ONE private summary
+   * prompt; the remainder is named in a front omission notice with its keys
+   * unrecorded and the cursor held before the backlog head, so the next pass
+   * digests the remainder. The event class stays `comment`, so role routing is
+   * identical to individual deliveries.
    */
   private async watchPrComments(
     key: string,
@@ -9313,43 +9376,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       return;
     }
 
-    if (digestMode) {
-      // One private summary for the whole downtime backlog instead of one
-      // prompt per comment. A target is excluded only if it authored EVERY
-      // deliverable member (it already holds the whole context); a partial
-      // author still receives the digest — the mutual-authorship case must
-      // not consume the bundle with zero prompts.
-      const exclude = new Set<string>();
-      for (const target of targets) {
-        if (
-          deliverable.every((candidate) =>
-            excludeFor(candidate).has(target.sessionId),
-          )
-        ) {
-          exclude.add(target.sessionId);
-        }
-      }
-      if (targets.every((target) => exclude.has(target.sessionId))) {
-        // Every target authored every member: genuinely target-less.
-        // Consumed with a trace, like the per-comment no-target path.
-        this.recordChannelEvent({
-          type: 'inbound',
-          outcome: 'skipped',
-          reason: 'comment_watch_no_target',
-          repository: chatId,
-          thread: threadId,
-          number,
-          messageId: `comment-digest:${number}`,
-        });
-        commitCursor(nowIso, true);
-        return;
-      }
+    // Digest mode is armed by a downtime gap (per-entry flag) OR by backlog
+    // size: a window larger than the per-comment pass cap would flood one
+    // prompt per comment however it accumulated (a healed endpoint after
+    // sustained per-PR fetch failures keeps the heartbeat fresh, so the gap
+    // alone never arms it).
+    const digesting =
+      digestMode || deliverable.length > MAX_WATCH_COMMENTS_PER_PASS;
+    if (digesting) {
       // Allocate the shared body ceiling NEWEST-FIRST: the cap keeps the
       // prefix, so rendering oldest-first would let it eat exactly the
       // newest, most actionable members. Members that do not fit are named
       // in the front omission notice, their keys are NOT recorded, and the
-      // cursor holds before the backlog head so they follow as individual
-      // deliveries — nothing is consumed without being delivered.
+      // cursor holds before the backlog head so the next pass digests the
+      // remainder — nothing is consumed without being delivered.
       const newest = deliverable.slice(-MAX_AGGREGATE_COMMENTS);
       const memberLine = (
         candidate: (typeof deliverable)[number],
@@ -9409,6 +9449,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         used += lineCp + 1;
       }
       if (rendered.length > 0) {
+        // Authorship exclusion is computed over the RENDERED slice (the
+        // body the session actually sees) and over the SAME follower
+        // population as the per-comment path, so the delivery-time Gone
+        // fallback cannot hand the digest back to a session that authored
+        // every rendered member. A follower is excluded only if it authored
+        // EVERY rendered member; a partial author still receives the digest
+        // (the mutual-authorship case must not consume with zero prompts).
+        // An all-targets exclusion is unreachable: every deliverable member
+        // has some target that did not author it.
+        const exclude = new Set<string>();
+        for (const sessionId of followerIds) {
+          if (
+            rendered.every((candidate) => excludeFor(candidate).has(sessionId))
+          ) {
+            exclude.add(sessionId);
+          }
+        }
         const omitted = deliverable.length - rendered.length;
         // Content-hash identity over the RENDERED members (the aggregate
         // lane's superset semantics): a crash before the cursor save
@@ -9423,10 +9480,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           )
           .digest('hex')
           .slice(0, 40)}`;
+        // The digest carries the CHANNEL ACCOUNT's identity, exactly like
+        // the per-comment envelopes on this same-account lane: a synthetic
+        // sender would fail the group sender allowlist preflight (the
+        // waiver matches the channel login), retiring the digest while the
+        // cursor advanced past the whole backlog.
         const envelope: Envelope = {
           channelName: this.name,
-          senderId: 'github',
-          senderName: 'GitHub',
+          senderId: this.botUsername?.toLowerCase() ?? 'github',
+          senderName: this.botUsername ?? 'GitHub',
           chatId,
           threadId,
           messageId: digestId,
@@ -9444,8 +9506,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           exclude,
           this.locale === 'en' ? undefined : renderFor(this.locale, rendered),
         );
-        if (!settled) {
-          // No durable claim: keep commentSince and the arm so the next pass
+        // A retired verdict (e.g. preflight rejection) consumes the task
+        // and returns settled WITHOUT recording a delivery: treat it as
+        // unconsumed so the cursor never advances past members that were
+        // never delivered. The durable delivery ring is the evidence.
+        const delivered = settled && this.boundEventAlreadyDelivered(envelope);
+        if (!delivered) {
+          // No delivery: keep commentSince and the arm so the next pass
           // re-fetches and retries; dispatchedComments dedupes any claim.
           commitCursor(since);
           return;
@@ -9453,14 +9520,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         if (omitted === 0) {
           commitCursor(nowIso, true);
         } else {
-          // Hold before the backlog head: the omitted prefix (and any
-          // budget-dropped members) re-lists next pass and delivers
-          // individually; the rendered suffix is deduped.
+          // Hold before the backlog head and KEEP the arm: the omitted
+          // prefix re-lists next pass and digests again (the notice promised
+          // further digests); the rendered suffix is deduped. Clearing the
+          // arm here would drain the remainder one prompt per comment.
           commitCursor(
             new Date(
               Date.parse(deliverable[0]!.createdAt) - 1000,
             ).toISOString(),
-            true,
           );
         }
         return;
@@ -9502,7 +9569,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // independent one). Keep commentSince so the next pass re-fetches and
       // retries; dispatchedComments dedupes anything already claimed. Advancing
       // here would skip the comment past with no task and no re-delivery chance.
-      commitCursor(since, digestMode);
+      commitCursor(since, digesting);
     } else {
       // Resume just before the last processed comment when capped so the
       // unprocessed tail is re-fetched next pass (a second of overlap is
@@ -9515,7 +9582,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         capped
           ? new Date(Date.parse(last.createdAt) - 1000).toISOString()
           : nowIso,
-        digestMode,
+        digesting,
       );
     }
   }

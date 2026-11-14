@@ -30235,27 +30235,67 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       });
 
       it('caps a deliverable burst at the batch size and resumes before the tail', async () => {
-        // 21 deliverable comments (none self-authored) must enter the capped
-        // branch: 20 dispatch this pass, and the cursor resumes before the last
-        // processed comment so the tail drains next pass instead of dropping.
+        // Two PRs with 15 deliverable comments each (within the per-comment
+        // pass cap, so no digest): the pass-wide budget of 20 lets the first
+        // PR deliver all 15, then caps the second at the remaining 5, and the
+        // second cursor resumes before its last processed comment so the tail
+        // drains next pass instead of dropping. (A burst OVER the cap digests
+        // instead — pinned by the startup-backlog suite.)
         await initChannel(commentWatchConfig, { boundSessions });
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                },
+                {
+                  number: 43,
+                  url: 'https://github.com/owner/repo/pull/43',
+                  state: 'open',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
         boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
-        seedCommentBaseline();
+        const seeded = {
+          headSha: 'sha-1',
+          prState: 'open',
+          commentBaseline: '2026-07-01T00:00:00.000Z',
+          commentSince: '2026-07-01T00:00:00.000Z',
+          commentLastFetchAt: 0,
+        };
+        seedWatchState({
+          'owner/repo#42': { ...seeded },
+          'owner/repo#43': { ...seeded },
+        });
         mockPull({});
-        routeCommentPaginate();
-        const burst = Array.from({ length: 21 }, (_, i) => ({
-          id: 1000 + i,
-          node_id: `IC_${1000 + i}`,
-          body: `finding ${i}`,
-          created_at: `2026-07-02T10:00:${String(i).padStart(2, '0')}.000Z`,
-          user: { login: 'test-bot' },
-        }));
-        mockOctokit.rest.issues.listComments.mockResolvedValue(burst);
-        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        const burstFor = (pr: number) =>
+          Array.from({ length: 15 }, (_, i) => ({
+            id: pr * 1000 + i,
+            node_id: `IC_${pr}_${i}`,
+            body: `finding ${i}`,
+            created_at: `2026-07-02T10:00:${String(i).padStart(2, '0')}.000Z`,
+            user: { login: 'test-bot' },
+          }));
+        mockOctokit.paginate.mockImplementation(
+          async (_fn: unknown, params: Record<string, unknown> = {}) => {
+            if ('pull_number' in params) return [];
+            if ('issue_number' in params)
+              return params['issue_number'] === 42
+                ? burstFor(42)
+                : burstFor(43);
+            return [];
+          },
+        );
         await pollOnce();
         expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(20);
-        expect(readWatchState().entries['owner/repo#42']!['commentSince']).toBe(
-          '2026-07-02T10:00:18.000Z',
+        expect(readWatchState().entries['owner/repo#43']!['commentSince']).toBe(
+          '2026-07-02T10:00:03.000Z',
         );
       });
 
@@ -30332,9 +30372,10 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
       });
 
       it('shares one burst budget across watched PRs in a pass', async () => {
-        // Two due PRs with 21 deliverable comments each: a per-PR cap would
-        // claim 40 tasks in one poll; the pass-wide budget claims 20 and leaves
-        // the second PR's cursor untouched so its tail resumes next pass.
+        // Two due PRs with 20 deliverable comments each (within the per-comment
+        // cap, so no digest): a per-PR cap would claim 40 tasks in one poll; the
+        // pass-wide budget claims 20 and leaves the second PR's cursor untouched
+        // so its tail resumes next pass.
         await initChannel(commentWatchConfig, { boundSessions });
         boundSessions.listPrBindings.mockResolvedValue({
           bindings: [
@@ -30369,7 +30410,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         });
         mockPull({});
         const burstFor = (pr: number) =>
-          Array.from({ length: 21 }, (_, i) => ({
+          Array.from({ length: 20 }, (_, i) => ({
             id: pr * 1000 + i,
             node_id: `IC_${pr}_${i}`,
             body: `finding ${i}`,
@@ -31086,6 +31127,24 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(readWatchState().entries['owner/repo#42']!['commentSince']).toBe(
           '2026-07-01T00:00:00.000Z',
         );
+        // The refused dispatch keeps the arm: once the audit is readable
+        // again, the next pass digests instead of flooding per comment.
+        expect(
+          readWatchState().entries['owner/repo#42']!['digestPending'],
+        ).toBe(true);
+        rmSync(auditPath, { recursive: true, force: true });
+        (
+          channel as unknown as {
+            prWatchState: {
+              entries: Record<string, { commentLastFetchAt?: number }>;
+            };
+          }
+        ).prWatchState.entries['owner/repo#42']!.commentLastFetchAt = 0;
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'Offline backlog: 3',
+        );
       });
 
       it('keeps digest mode across an aborted pass and clears it after a complete one', async () => {
@@ -31372,7 +31431,7 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         const prompt = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
         expect(prompt).toContain('Offline backlog: 25');
         expect(prompt).toContain(
-          '5 comment(s) omitted from this digest to fit the prompt budget; they will follow as individual deliveries',
+          '5 comment(s) omitted from this digest to fit the prompt budget; they will follow in further digests',
         );
         expect(prompt).toContain('member-24');
         // Newline-aware absence: entries are newline-terminated, so a
@@ -31695,10 +31754,14 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
         await pollOnce();
         expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
-        // Grace holds the cursor BEFORE the comment for one cycle.
+        // Grace holds the cursor BEFORE the comment for one cycle, and the
+        // digest arm survives the hold (a lost arm would flood per comment).
         expect(readWatchState().entries['owner/repo#42']!['commentSince']).toBe(
           '2026-07-02T10:00:00.000Z',
         );
+        expect(
+          readWatchState().entries['owner/repo#42']!['digestPending'],
+        ).toBe(true);
       });
 
       it('a coalesced head_change keeps the original key identity', async () => {
@@ -31793,8 +31856,12 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         await pollOnce();
         const afterDigest = boundSessions.deliverPrompt.mock.calls.length;
         expect(afterDigest).toBe(1);
-        // Next pass: the held cursor re-lists the window; rendered members
-        // dedupe, the omitted prefix delivers individually (digest cleared).
+        // The arm survives the omitted-tail hold: the next pass re-lists the
+        // window, dedupes the rendered suffix, and DIGESTS the remainder
+        // (clearing the arm here would flood one prompt per comment).
+        expect(
+          readWatchState().entries['owner/repo#42']!['digestPending'],
+        ).toBe(true);
         (
           channel as unknown as {
             prWatchState: {
@@ -31807,17 +31874,23 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
           (call) => call[1] as string,
         );
         expect(prompts.length).toBeGreaterThan(1);
-        for (const prompt of prompts.slice(afterDigest)) {
-          expect(prompt).not.toContain('Offline backlog');
-          expect(prompt).toContain('New comment by @test-bot');
+        for (const prompt of prompts) {
+          // Every follow-up is a digest, not a per-comment prompt (the
+          // member lead inside a digest also reads "New comment by", so
+          // the digest lead is the discriminator).
+          expect(prompt).toContain('Offline backlog');
         }
-        // Every backlog member is eventually recorded — nothing lost.
+        // Every backlog member is eventually recorded — nothing lost — and
+        // the arm clears once the whole backlog is consumed.
         const recorded = (
           channel as unknown as { cursor: { dispatchedComments?: string[] } }
         ).cursor.dispatchedComments!;
         for (let i = 0; i < 20; i += 1) {
           expect(recorded).toContain(`IC_${700 + i}`);
         }
+        expect(
+          readWatchState().entries['owner/repo#42']!['digestPending'],
+        ).toBe(false);
       });
 
       it('a per-task dead-letter record does not retire a sibling role task', async () => {
@@ -32428,6 +32501,481 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
           'Offline backlog: 3',
         );
+      });
+
+      it('a group sender allowlist still delivers the digest (channel-account identity)', async () => {
+        await initChannel(
+          {
+            ...commentOnlyConfig,
+            groupPolicy: 'allowlist',
+            groups: {
+              'owner/repo': {
+                senders: 'allowlist',
+                allowedUsers: ['operator-user'],
+              },
+            },
+          },
+          { boundSessions },
+        );
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(3));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        // The digest carries the channel account, so the sender waiver
+        // matches and the allowlist (which excludes the bot) cannot retire
+        // the whole backlog with zero prompts.
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'Offline backlog: 3',
+        );
+        const recorded = (
+          channel as unknown as { cursor: { dispatchedComments?: string[] } }
+        ).cursor.dispatchedComments!;
+        expect(recorded).toEqual(
+          expect.arrayContaining(['IC_555', 'IC_556', 'IC_557']),
+        );
+      });
+
+      it('a retired digest verdict never advances the cursor or clears the arm', async () => {
+        await initChannel(
+          {
+            ...commentOnlyConfig,
+            // The message-route gate runs BEFORE the sender waiver, so a
+            // route the digest text cannot match retires the channel-account
+            // digest at preflight even though its sender would be admitted.
+            messageRoutes: { '/review': 'Review the change.' },
+          },
+          { boundSessions },
+        );
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(3));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        let lines: string[] = [];
+        try {
+          await pollOnce();
+          lines = stderr.mock.calls.map((call) => String(call[0]));
+        } finally {
+          stderr.mockRestore();
+        }
+        // Positive control: the digest reached preflight and was retired by
+        // the route gate, so the absence assertions below are not vacuous.
+        expect(
+          lines.some(
+            (line) =>
+              line.includes('rejected by the channel preflight') &&
+              line.includes('comment-digest:42:'),
+          ),
+        ).toBe(true);
+        // A retired verdict settles the task WITHOUT a delivery: the cursor
+        // must hold before the backlog and the arm must survive, or the whole
+        // backlog is consumed with zero prompts.
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        expect(readWatchState().entries['owner/repo#42']!['commentSince']).toBe(
+          '2026-07-01T00:00:00.000Z',
+        );
+        expect(
+          readWatchState().entries['owner/repo#42']!['digestPending'],
+        ).toBe(true);
+      });
+
+      it('a green fold releases the head slot so a later real failure fires', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const staleKey = 'watch:ci_failure:42:sha-1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            ci: 'failure',
+            prState: 'open',
+            ciFiredSha: 'sha-1',
+            fired: [staleKey],
+          },
+        });
+        writeInboundTasks([parkedWatchTask(staleKey)]);
+        installWatchPaginateRouting();
+        // Green re-run on the SAME head: the parked failure retires undelivered.
+        mockPull({ updated_at: '2026-07-02T11:00:00.000Z' });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+        const records = readFileSync(boundDeadLetterPath(), 'utf-8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        expect(records[0]!['reason']).toBe('superseded: CI recovered');
+        const entry = readWatchState().entries['owner/repo#42']!;
+        expect(entry['ciFiredSha']).toBeUndefined();
+        expect(entry['fired']).not.toContain(staleKey);
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        // A genuine later failure on the same head must fire again.
+        mockPull({ updated_at: '2026-07-02T12:00:00.000Z' });
+        mockChecks([
+          { status: 'completed', conclusion: 'failure', name: 'build' },
+        ]);
+        await runWatchPass();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'CI failed on head sha-1',
+        );
+      });
+
+      it('the coalescer skips a dead-lettered pending hop and appends a new one', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const deadKey = 'watch:head_change:42:1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-B',
+            prState: 'open',
+            pending: [
+              {
+                ...makePendingWatch({
+                  key: deadKey,
+                  text: 'New commits pushed: head moved from sha-A to sha-B.',
+                }),
+                headChangeFrom: 'sha-A',
+              },
+            ],
+          },
+        });
+        // The key is already retired (e.g. a round-trip retire whose state
+        // save threw): absorbing into it would deliver the net change nowhere.
+        mkdirSync(dirname(boundDeadLetterPath()), { recursive: true });
+        writeFileSync(
+          boundDeadLetterPath(),
+          `${JSON.stringify({
+            retiredAt: '2026-07-02T10:00:00.000Z',
+            issueNumber: 42,
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId: deadKey,
+            },
+            reason: 'superseded: head returned to original',
+            text: 'New commits pushed: head moved from sha-A to sha-B.',
+          })}\n`,
+          'utf-8',
+        );
+        installWatchPaginateRouting();
+        mockPull({ head: { sha: 'sha-C' } });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'head moved from sha-B to sha-C',
+        );
+        expect(
+          readChannelEvents().filter((e) => e['reason'] === 'watch_coalesced'),
+        ).toHaveLength(0);
+      });
+
+      it('a round trip after a partial fan-out delivery queues the reverse hop', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const hopKey = 'watch:head_change:42:1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-B',
+            prState: 'open',
+            pending: [
+              {
+                ...makePendingWatch({
+                  key: hopKey,
+                  text: 'New commits pushed: head moved from sha-A to sha-B.',
+                }),
+                headChangeFrom: 'sha-A',
+              },
+            ],
+          },
+        });
+        // One target already received the hop (durable delivery ring); the
+        // revert must be queued so that target learns the head went back.
+        (
+          channel as unknown as { boundDeliveredKeys: Set<string> }
+        ).boundDeliveredKeys.add(`github:owner/repo:${hopKey}`);
+        installWatchPaginateRouting();
+        mockPull({ head: { sha: 'sha-A' } });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+        // The blocked target still receives the original hop, and the
+        // reverse hop is queued so the delivered target learns the revert.
+        const prompts = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[1] as string,
+        );
+        expect(prompts).toHaveLength(2);
+        expect(
+          prompts.some((p) => p.includes('head moved from sha-A to sha-B')),
+        ).toBe(true);
+        expect(
+          prompts.some((p) => p.includes('head moved from sha-B to sha-A')),
+        ).toBe(true);
+        expect(existsSync(boundDeadLetterPath())).toBe(false);
+      });
+
+      it('a degraded first poll arms the persisted entries for a later restart', async () => {
+        await initChannel(commentOnlyConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(3));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        boundSessions.listPrBindings.mockResolvedValueOnce({
+          bindings: [],
+          partial: true,
+        });
+        await pollOnce();
+        // The arm is persisted even though the snapshot listed nothing.
+        expect(
+          readWatchState().entries['owner/repo#42']!['digestPending'],
+        ).toBe(true);
+        // Restart: a fresh instance loads the persisted arm; the heartbeat is
+        // now fresh, so only the arm can produce the digest.
+        await initChannel(commentOnlyConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(gapComments(3));
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'Offline backlog: 3',
+        );
+      });
+
+      it('a malformed headChangeFrom drops the entry like any bad shape', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            prState: 'open',
+            pending: [
+              {
+                ...makePendingWatch({
+                  key: 'watch:head_change:42:1:1751446800000',
+                }),
+                headChangeFrom: null,
+              },
+            ],
+          },
+        });
+        installWatchPaginateRouting();
+        mockPull({ head: { sha: 'sha-2' } });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+        const prompts = boundSessions.deliverPrompt.mock.calls.map(
+          (call) => call[1] as string,
+        );
+        expect(prompts.some((p) => p.includes('from null'))).toBe(false);
+      });
+
+      it('the overflow retire keeps the event-scoped index current in-process', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const pending = Array.from({ length: 64 }, (_, i) =>
+          makePendingWatch({
+            key: `watch:merge_conflict:42:${i + 1}:17514468${String(i).padStart(2, '0')}000`,
+          }),
+        );
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            // Clean baseline so the dirty observation fires one more event,
+            // pushing the 64-deep queue over the cap and retiring the oldest.
+            mergeableState: 'clean',
+            prState: 'open',
+            pending,
+          },
+        });
+        installWatchPaginateRouting();
+        mockPull({ mergeable: false, mergeable_state: 'dirty' });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+        const oldestKey = pending[0]!.key;
+        const index = channel as unknown as {
+          deadLetterEventScoped: Set<string>;
+        };
+        expect(index.deadLetterEventScoped.has(oldestKey)).toBe(true);
+      });
+
+      it('exclusion is computed over the rendered slice and the follower set', async () => {
+        await initChannel(
+          {
+            ...commentOnlyConfig,
+            boundSessionActions: {
+              'fix:default': 'fix it',
+              'verify:default': 'verify it',
+            },
+          },
+          { boundSessions },
+        );
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              sessionId: 'fix-session',
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role: 'fix',
+                },
+              ],
+            }),
+            makeBinding({
+              sessionId: 'verify-session',
+              updatedAt: '2026-07-02T00:00:00.000Z',
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                  role: 'verify',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        // 25 members: the 20 newest authored by verify, the 5 oldest by fix.
+        const members = Array.from({ length: 25 }, (_, i) => ({
+          id: 800 + i,
+          node_id: `IC_${800 + i}`,
+          body: `member-${i}`,
+          created_at: `2026-07-02T10:${String(i).padStart(2, '0')}:00.000Z`,
+          user: { login: 'test-bot' },
+        }));
+        const verifyKeys = new Set(members.slice(5).map((m) => `ic:${m.id}`));
+        const fixKeys = new Set(members.slice(0, 5).map((m) => `ic:${m.id}`));
+        boundSessions.postedCommentIds = vi
+          .fn()
+          .mockImplementation(async (sessionId: string) =>
+            sessionId === 'verify-session' ? verifyKeys : fixKeys,
+          );
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(members);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        // The rendered slice is the 20 newest (all verify-authored): verify
+        // is excluded, fix receives the digest. Per-comment delivery would
+        // have sent verify nothing.
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![0]).toBe(
+          'fix-session',
+        );
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'Offline backlog: 25',
+        );
+      });
+
+      it('a window larger than the pass cap digests without a heartbeat gap', async () => {
+        await initChannel(commentOnlyConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        // Fresh heartbeat: no gap arm — the backlog SIZE arms the digest.
+        setLastPollAt(new Date(Date.now() - 5000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue(
+          Array.from({ length: 25 }, (_, i) => ({
+            id: 900 + i,
+            node_id: `IC_${900 + i}`,
+            body: `size-${i}`,
+            created_at: `2026-07-02T10:${String(i).padStart(2, '0')}:00.000Z`,
+            user: { login: 'test-bot' },
+          })),
+        );
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+          'Offline backlog: 25',
+        );
+      });
+
+      it('a persistent comment fetch failure runs the per-PR handler', async () => {
+        await initChannel(commentOnlyConfig, { boundSessions });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+        seedCommentEntry();
+        mockPull({});
+        routeCommentPaginate();
+        // Reject on EVERY attempt (502 is not fail-fast, so githubApi retries).
+        mockOctokit.rest.issues.listComments.mockRejectedValue(
+          Object.assign(new Error('Server Error'), { status: 502 }),
+        );
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        let lines: string[] = [];
+        try {
+          await pollOnce();
+          // Capture BEFORE mockRestore, which resets the spy's call log.
+          lines = stderr.mock.calls.map((call) => String(call[0]));
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        // The handler's own effects: its stderr line, the advanced fetch
+        // stamp, the unchanged cursor, and the retained arm.
+        expect(
+          lines.some((line) => line.includes('comment watch fetch failed')),
+        ).toBe(true);
+        const entry = readWatchState().entries['owner/repo#42']!;
+        expect(entry['commentSince']).toBe('2026-07-01T00:00:00.000Z');
+        expect(entry['commentLastFetchAt']).toBeGreaterThan(0);
+        expect(entry['digestPending']).toBe(true);
+      });
+
+      it('the parked-task fold is scoped to the repository, not just the PR number', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const foreignKey = 'watch:ci_failure:42:sha-1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': { headSha: 'sha-1', ci: 'failure', prState: 'open' },
+        });
+        // Same PR NUMBER, different repository: only the scoping guard can
+        // spare it (the fold predicate matches on the number in the key).
+        writeInboundTasks([
+          parkedWatchTask(foreignKey, {
+            source: {
+              chatId: 'other/repo',
+              threadId: 'pr:42',
+              messageId: foreignKey,
+            },
+          }),
+        ]);
+        installWatchPaginateRouting();
+        mockPull({ head: { sha: 'sha-2' } });
+        mockChecks([{ status: 'completed', conclusion: 'success' }]);
+        await runWatchPass();
+        const remaining = readInboundTasks().map(
+          (task) => (task['source'] as { chatId: string }).chatId,
+        );
+        expect(remaining).toContain('other/repo');
+        if (existsSync(boundDeadLetterPath())) {
+          const records = readFileSync(boundDeadLetterPath(), 'utf-8')
+            .trim()
+            .split('\n')
+            .map((line) => JSON.parse(line) as Record<string, unknown>);
+          expect(
+            records.some(
+              (r) =>
+                (r['source'] as { chatId: string }).chatId === 'other/repo',
+            ),
+          ).toBe(false);
+        }
       });
     });
   });
