@@ -321,6 +321,61 @@ describe('branch worktree preparation journal', () => {
     });
   });
 
+  it('removes a stale detached prepared worktree (empty branch convention)', async () => {
+    const service = new GitWorktreeService(root);
+    const created = await service.createUserWorktree(
+      'branch-detached',
+      baseCommit,
+      { detached: true },
+    );
+    if (!created.success || !created.worktree) {
+      throw new Error(created.error ?? 'worktree creation failed');
+    }
+    expect(created.worktree.branch).toBe('');
+    let journal = await createBranchWorktreeJournal({
+      journalPath,
+      targetSessionId,
+      slug: 'branch-detached',
+      worktreePath: created.worktree.path,
+      worktreeBranch: '',
+      repoTop: root,
+      baseCommit,
+      sidecarPath,
+    });
+    journal = await updateBranchWorktreeJournal(
+      journalPath,
+      journal,
+      'worktree-created',
+    );
+    await createWorktreeSessionMarker(created.worktree.path, targetSessionId);
+    journal = await updateBranchWorktreeJournal(
+      journalPath,
+      journal,
+      'marker-created',
+    );
+    await fs.writeFile(sidecarPath, '{}\n', 'utf8');
+    journal = await updateBranchWorktreeJournal(
+      journalPath,
+      journal,
+      'sidecar-ready',
+    );
+    await markJournalStale(journal);
+
+    const warn = vi.fn();
+    await recoverStalePreparation(fakeSessionService(false), { warn });
+
+    await expect(fs.stat(created.worktree.path)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    await expect(fs.stat(journalPath)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    expect(warn).not.toHaveBeenCalledWith(
+      'branch worktree recovery journal identity mismatch',
+      expect.anything(),
+    );
+  });
+
   it('reaps a stale preparation whose marker sits at nlink 2 in the publish window', async () => {
     // Crash residue: the daemon died between the publisher's link and
     // unlink, so `.qwen-session` sits at nlink 2 with complete, fsync'd

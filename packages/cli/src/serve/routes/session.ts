@@ -25,7 +25,6 @@ import {
   clearWorktreeSessionDurable,
   createWorktreeSession,
   createWorktreeSessionMarker,
-  worktreeBranchForSlug,
   SessionOrganizationError,
   SessionIdCaseConflictError,
   SessionStorageEntryError,
@@ -3387,6 +3386,7 @@ export function registerSessionRoutes(
         assertRuntimeGenerationOpen?.();
         const wtResult = await wtService.createUserWorktree(slug, baseBranch, {
           carryDirtyState: true,
+          detached: true,
         });
         if (!wtResult.success || !wtResult.worktree) {
           res.status(500).json({
@@ -5165,7 +5165,8 @@ export function registerSessionRoutes(
                   targetSessionId,
                   slug,
                   worktreePath,
-                  worktreeBranch: worktreeBranchForSlug(slug),
+                  // Detached managed worktree: no branch ref exists.
+                  worktreeBranch: '',
                   repoTop: base.repoTop,
                   baseCommit: base.headCommit,
                   sidecarPath,
@@ -5174,7 +5175,7 @@ export function registerSessionRoutes(
                 const worktreeResult = await worktreeService.createUserWorktree(
                   slug,
                   base.headCommit,
-                  { carryDirtyState: true },
+                  { carryDirtyState: true, detached: true },
                 );
                 if (!worktreeResult.success || !worktreeResult.worktree) {
                   await cleanupPrepared();

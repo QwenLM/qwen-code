@@ -96,7 +96,8 @@ export function SessionDetailsTooltip({
       : resolveSessionDetailsCollisionBoundary(anchorRef.current)
     : null;
   const folderPath = session.workspaceCwd;
-  const branch = session.worktree?.branch ?? session.branch?.name;
+  const branch =
+    session.worktree?.branch || session.worktree?.slug || session.branch?.name;
   const prs = openableSessionPrs([...(session.prs ?? [])].reverse());
   // Stacked PRs can close the same issue; list it once, under its newest PR.
   const seenIssueUrls = new Set<string>();

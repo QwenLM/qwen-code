@@ -22711,7 +22711,11 @@ export function App({
     ? getDefaultChatWidthMode()
     : chatWidthMode;
   const activeGitBranch = sessionWorktree
-    ? (selectedWorkspaceGitStatus?.branch ?? sessionWorktree.branch)
+    ? // A detached managed worktree has no branch (live status reports
+      // null, creation metadata ''); show its slug instead.
+      selectedWorkspaceGitStatus?.branch ||
+      sessionWorktree.branch ||
+      sessionWorktree.slug
     : sessionBranch
       ? (selectedWorkspaceGitStatus?.branch ?? sessionBranch.name)
       : connection.sessionId

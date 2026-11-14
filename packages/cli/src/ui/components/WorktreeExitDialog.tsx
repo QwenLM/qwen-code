@@ -206,7 +206,7 @@ export function WorktreeExitDialog({
     >
       <Box flexDirection="column" marginBottom={1}>
         <Text color={Colors.AccentBlue} bold>
-          {`⎇ Active worktree: "${slug}" (${branch})`}
+          {`⎇ Active worktree: "${slug}" (${branch || 'detached HEAD'})`}
         </Text>
       </Box>
 
@@ -225,7 +225,7 @@ export function WorktreeExitDialog({
         <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
           {newCommitCount > 0 && (
             <Text color={Colors.Gray}>
-              {`• ${newCommitCount} new commit(s) on ${branch}`}
+              {`• ${newCommitCount} new commit(s) on ${branch || 'detached HEAD'}`}
             </Text>
           )}
           {changedFilesCount > 0 && (

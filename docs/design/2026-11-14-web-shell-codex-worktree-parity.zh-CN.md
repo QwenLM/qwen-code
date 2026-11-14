@@ -220,7 +220,7 @@ HEAD，或在记录的分支上），把快照解压覆盖，翻回 sidecar。�
   的；两者 HEAD 不同时 stash apply fail-open 退化为已提交状态（不丢失）。
   P3 的 detached 重构重新审视该路由的捕获源。
 
-### P3 — Detached HEAD（核心重构）
+### P3 — Detached HEAD（核心重构）— 已实现
 
 - `createUserWorktree` 可选 detached 模式（D4）；会话路由使用它。
 - 迁移下文清单中的每个消费方（sidecar、marker、reset、清理/分支终结、
@@ -260,7 +260,7 @@ B. 生命周期门（风险最高——漏掉即 fail-closed 泄漏）
 | `gitWorktreeService.ts:3296-3330` `hasUnmergedWorktreeCommits`                 | `rev-parse worktree-<slug>`，出错 fail-closed `true`                 | detached：按 HEAD 可达性判定——范本 `cli/serve/routes/workspace-git-worktrees.ts:714-725`（`commitIsReachable`）；命名：不变 |
 | `cli/serve/server/worktree-orphan-cleanup.ts:427-469` `executeWorktreeCleanup` | `worktreeHasWork` 门 + `removeUserWorktree` + `branchPreserved` 日志 | P3 门不变（dirty 工作保留，见 D3）；日志容忍无分支；P6 快照解除该门                                                         |
 | `cli/serve/branch-worktree-preparation.ts:436` journal 身份                    | `worktreeBranch === worktreeBranchForSlug(slug)`                     | 在命名形式之外接受 `''` detached 约定                                                                                       |
-| `cli/startup/worktreeStartup.ts:250-282` 重附着                                | 期望分支；null → 「Worktree already exists」                         | detached 按路径 + marker 重附着，而非硬错                                                                                   |
+| `cli/startup/worktreeStartup.ts:250-282` 重附着                                | 期望分支；null → 「Worktree already exists」                         | `getRegisteredWorktreeBranch` 将 detached 报告为 `{branch: '', headCommit}`（保留身份校验）；重附着接受 `''`                |
 
 C. Sidecar、恢复与展示
 

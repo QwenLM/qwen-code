@@ -124,10 +124,10 @@ export async function resolveExternalWorktreeDir(
   }
   // Best-effort branch label only — never a gate. A detached-HEAD worktree
   // (`git worktree add --detach`, or a checkout of a bare commit) is
-  // legitimate with no branch, and `getRegisteredWorktreeBranch` returns null
-  // for it. `branch` is unused for caller-owned worktrees anyway (cleanup
-  // short-circuits on `externallyManaged`); it is carried only for parity
-  // with the isolation path.
+  // legitimate with no branch, and `getRegisteredWorktreeBranch` reports it
+  // with an empty branch. `branch` is unused for caller-owned worktrees
+  // anyway (cleanup short-circuits on `externallyManaged`); it is carried
+  // only for parity with the isolation path.
   const info = await wtService.getRegisteredWorktreeBranch(pinnedPath);
   return {
     path: pinnedPath,

@@ -268,7 +268,9 @@ export async function setupStartupWorktree(
     }
   }
   if (registered !== null) {
-    if (registered.branch !== expectedBranch) {
+    // '' is the detached managed-worktree convention (no branch ref);
+    // re-attach to it like any other registered worktree of this slug.
+    if (registered.branch !== '' && registered.branch !== expectedBranch) {
       // SOMETHING ELSE is occupying the path on a different branch —
       // refuse to clobber it.
       return {

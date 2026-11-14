@@ -255,7 +255,7 @@ deletes oldest-first beyond `worktree.maxRetained`, snapshotting each.
   when the HEADs differ the stash apply fails open to committed state (no
   loss). P3's detached refactor revisits this route's capture source.
 
-### P3 — Detached HEAD (core refactor)
+### P3 — Detached HEAD (core refactor) — implemented
 
 - `createUserWorktree` opt-in detached mode (D4); session route uses it.
 - Migrate every consumer in the inventory below (sidecar, marker, reset,
@@ -300,7 +300,7 @@ B. Lifecycle gates (highest risk — fail-closed leaks if missed)
 | `gitWorktreeService.ts:3296-3330` `hasUnmergedWorktreeCommits`                 | `rev-parse worktree-<slug>`, fail-closed `true` on error              | Detached: judge by HEAD reachability — exemplar `cli/serve/routes/workspace-git-worktrees.ts:714-725` (`commitIsReachable`); named: unchanged |
 | `cli/serve/server/worktree-orphan-cleanup.ts:427-469` `executeWorktreeCleanup` | `worktreeHasWork` gate + `removeUserWorktree` + `branchPreserved` log | Gate unchanged in P3 (dirty work preserved, see D3); log tolerates no-branch; P6 snapshot lifts the gate                                      |
 | `cli/serve/branch-worktree-preparation.ts:436` journal identity                | `worktreeBranch === worktreeBranchForSlug(slug)`                      | Accept the `''` detached convention alongside the named form                                                                                  |
-| `cli/startup/worktreeStartup.ts:250-282` reattach                              | Expected branch; null → "Worktree already exists"                     | Detached reattach by path + marker instead of hard error                                                                                      |
+| `cli/startup/worktreeStartup.ts:250-282` reattach                              | Expected branch; null → "Worktree already exists"                     | `getRegisteredWorktreeBranch` reports detached as `{branch: '', headCommit}` (identity validation kept); reattach accepts `''`                |
 
 C. Sidecar, restore, and display
 

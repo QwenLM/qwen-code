@@ -273,7 +273,10 @@ export function deriveSessionCards(
         currentContextKind,
       ),
       prs: session.prs,
-      gitBranch: session.worktree?.branch ?? session.branch?.name,
+      gitBranch:
+        session.worktree?.branch ||
+        session.worktree?.slug ||
+        session.branch?.name,
       workspaceCwd: session.workspaceCwd,
       sourceType: session.sourceType,
     };

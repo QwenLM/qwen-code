@@ -15789,6 +15789,7 @@ describe('createServeApp', () => {
         ]);
         expect(mockCreate).toHaveBeenCalledWith('my-task', 'main', {
           carryDirtyState: true,
+          detached: true,
         });
         expect(createMarker).toHaveBeenCalledWith(worktreePath, 'fake-0');
         expect(writeSidecar).toHaveBeenCalledWith(

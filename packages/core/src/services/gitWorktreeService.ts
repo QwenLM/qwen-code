@@ -2151,7 +2151,10 @@ export class GitWorktreeService {
       );
       return null;
     }
-    if (!branch || branch === 'HEAD') return null;
+    if (!branch) return null;
+    // A detached worktree is registered but has no branch ref; report it
+    // with the empty-string branch convention so callers can re-attach.
+    if (branch === 'HEAD') return { branch: '', headCommit };
     return { branch, headCommit };
   }
 
@@ -2491,6 +2494,13 @@ export class GitWorktreeService {
        * step; no baseline commit is created.
        */
       carryDirtyState?: boolean;
+      /**
+       * Create the worktree in detached HEAD instead of on a named
+       * `worktree-<slug>` branch (Codex-style managed worktrees: several
+       * sessions without polluting the branch list). The returned
+       * `WorktreeInfo.branch` is `''` while detached.
+       */
+      detached?: boolean;
     },
   ): Promise<CreateWorktreeResult> {
     const validationError = GitWorktreeService.validateUserWorktreeSlug(
@@ -2522,25 +2532,32 @@ export class GitWorktreeService {
       await this.ensureWorktreesGitignored();
 
       const base = baseBranch || (await this.getCurrentBranch());
-      const branchName = worktreeBranchForSlug(slug);
+      const detached = options?.detached === true;
+      const branchName = detached ? '' : worktreeBranchForSlug(slug);
 
-      // Refuse to clobber a pre-existing branch with the same name. Use
-      // `git show-ref --verify --quiet refs/heads/<branch>` (exit 0 →
-      // branch exists). The previous `-B` form would have force-reset
-      // such a branch and silently dropped unmerged commits.
-      const branchExists = await this.localBranchExists(branchName);
-      if (branchExists) {
-        const error =
-          `Cannot create worktree "${slug}": branch ${branchName} already exists. ` +
-          `Choose a different name, or delete the branch first ` +
-          `(e.g. \`git branch -d ${branchName}\`).`;
-        debugLogger.warn(`createUserWorktree: ${error}`);
-        return { success: false, error };
+      if (!detached) {
+        // Refuse to clobber a pre-existing branch with the same name. Use
+        // `git show-ref --verify --quiet refs/heads/<branch>` (exit 0 →
+        // branch exists). The previous `-B` form would have force-reset
+        // such a branch and silently dropped unmerged commits.
+        const branchExists = await this.localBranchExists(branchName);
+        if (branchExists) {
+          const error =
+            `Cannot create worktree "${slug}": branch ${branchName} already exists. ` +
+            `Choose a different name, or delete the branch first ` +
+            `(e.g. \`git branch -d ${branchName}\`).`;
+          debugLogger.warn(`createUserWorktree: ${error}`);
+          return { success: false, error };
+        }
       }
 
       await (
         await this.getGit()
-      ).raw(['worktree', 'add', '-b', branchName, worktreePath, base]);
+      ).raw(
+        detached
+          ? ['worktree', 'add', '--detach', worktreePath, base]
+          : ['worktree', 'add', '-b', branchName, worktreePath, base],
+      );
 
       // Configure core.hooksPath so commits inside the worktree run the
       // main repo's hooks (the new worktree's .git directory has no hooks
@@ -3050,6 +3067,12 @@ export class GitWorktreeService {
       return { success: true };
     }
 
+    // A detached worktree (Codex-style managed session) has no branch to
+    // delete; neither does a named worktree whose branch is already gone.
+    if (!(await this.localBranchExists(branchName))) {
+      return { success: true };
+    }
+
     // Try a safe (non-force) delete first. `git branch -d` refuses to
     // remove branches whose tip is not reachable from HEAD or any
     // upstream — preserving any commits the subagent made before
@@ -3166,9 +3189,28 @@ export class GitWorktreeService {
           worktreeGit.revparse(['HEAD']),
           worktreeGit.revparse(['--abbrev-ref', 'HEAD']),
         ]);
+        // A detached managed worktree reports 'HEAD'; a named one must
+        // still sit on its own worktree-<slug> branch.
         return (
           head.trim() === expectedBaseCommit &&
-          branch.trim() === worktreeBranchForSlug(slug)
+          (branch.trim() === 'HEAD' ||
+            branch.trim() === worktreeBranchForSlug(slug))
+        );
+      };
+      // The worktree still sits at the base commit: named worktrees are
+      // pinned by their branch ref, detached ones by HEAD itself.
+      const atBase = async () => {
+        const branch = (
+          await worktreeGit.revparse(['--abbrev-ref', 'HEAD'])
+        ).trim();
+        if (branch === 'HEAD') {
+          return (
+            (await worktreeGit.revparse(['HEAD'])).trim() === expectedBaseCommit
+          );
+        }
+        return (
+          (await this.getPreparedUserWorktreeBranchTip(slug)) ===
+          expectedBaseCommit
         );
       };
       if (!(await checkoutMatches())) {
@@ -3233,15 +3275,13 @@ export class GitWorktreeService {
       if (!(await isClean())) {
         return { success: false, error: 'Worktree contains changes' };
       }
-      let branchTip = await this.getPreparedUserWorktreeBranchTip(slug);
-      if (branchTip !== expectedBaseCommit) {
+      if (!(await atBase())) {
         return { success: false, error: 'Worktree branch changed' };
       }
       if (!(await isClean())) {
         return { success: false, error: 'Worktree contains changes' };
       }
-      branchTip = await this.getPreparedUserWorktreeBranchTip(slug);
-      if (branchTip !== expectedBaseCommit) {
+      if (!(await atBase())) {
         return { success: false, error: 'Worktree branch changed' };
       }
       const finalPath = await fs.realpath(expectedPath);
@@ -3345,11 +3385,30 @@ export class GitWorktreeService {
     const branchName = worktreeBranchForSlug(slug);
     try {
       const git = await this.getGit();
-      const tipSha = (await git.revparse([branchName])).trim();
+      // A detached managed worktree has no branch ref; judge by its HEAD
+      // instead. When the checkout is unreadable (already removed, etc.),
+      // fall back to the named branch ref below.
+      let detached = false;
+      let tipSha = '';
+      try {
+        const { simpleGit } = await loadSimpleGit();
+        const wtGit = simpleGit(this.getUserWorktreePath(slug)).env(gitEnv());
+        const abbrev = (await wtGit.revparse(['--abbrev-ref', 'HEAD'])).trim();
+        if (abbrev === 'HEAD') {
+          detached = true;
+          tipSha = (await wtGit.revparse(['HEAD'])).trim();
+        }
+      } catch {
+        // Fall through to the branch-ref probe.
+      }
+      if (!detached) {
+        tipSha = (await git.revparse([branchName])).trim();
+      }
       if (!tipSha) return true;
       // List every local branch and remote-tracking ref whose tip is at
-      // or above the worktree branch's tip. If anything other than the
-      // worktree branch itself appears, the commits are covered.
+      // or above the worktree's tip. If anything other than the worktree
+      // branch itself appears, the commits are covered. A detached HEAD
+      // has no own ref to exclude.
       const refs = (
         await git.raw([
           'for-each-ref',
@@ -3362,7 +3421,9 @@ export class GitWorktreeService {
       )
         .split('\n')
         .map((s) => s.trim())
-        .filter((s) => s.length > 0 && s !== `refs/heads/${branchName}`);
+        .filter(
+          (s) => s.length > 0 && (detached || s !== `refs/heads/${branchName}`),
+        );
       return refs.length === 0;
     } catch (error) {
       // Fail-closed but log so a corrupted ref store or permission
