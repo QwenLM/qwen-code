@@ -59,4 +59,13 @@ describe('randomUUID', () => {
     });
     expect(randomUUID()).toBe('ffffffff-ffff-4fff-bfff-ffffffffffff');
   });
+
+  it('mints distinct ids when the crypto global is absent', () => {
+    vi.stubGlobal('crypto', undefined);
+    const first = randomUUID();
+    const second = randomUUID();
+    expect(first).toBeTruthy();
+    expect(second).toBeTruthy();
+    expect(first).not.toBe(second);
+  });
 });
