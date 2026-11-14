@@ -4,10 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { RestSseTransport } from '../../src/daemon/RestSseTransport.js';
 import { DaemonTransportClosedError } from '../../src/daemon/DaemonTransport.js';
 import { DaemonHttpError } from '../../src/daemon/DaemonHttpError.js';
+import { resetSseBudgetRegistry } from '../../src/daemon/SseBudget.js';
+
+// The live-stream budget is per-JS-context (module state): reset it so
+// each test starts with all 4 slots free regardless of what earlier
+// tests left behind.
+beforeEach(() => {
+  resetSseBudgetRegistry();
+});
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -627,9 +635,9 @@ describe('RestSseTransport', () => {
       const ctrl = new AbortController();
       ctrl.abort();
 
-      // When the signal is pre-aborted, the fetch call will receive
-      // the aborted signal. The mock fetch proceeds anyway, but
-      // parseSseStream sees the aborted signal and returns immediately.
+      // When the signal is pre-aborted, the live-stream budget loop
+      // (see SseBudget.ts) completes the generator before any fetch is
+      // attempted, so the mock fetch is never called.
       const { fetch, calls } = recordingFetch(() =>
         sseResponse('data: {"type":"a","data":{},"id":1,"v":1}\n\n'),
       );
@@ -647,7 +655,8 @@ describe('RestSseTransport', () => {
       }
       // Either way, no events should be yielded
       expect(events).toHaveLength(0);
-      expect(calls[0].signal?.aborted).toBe(true);
+      // No network round-trip for an already-aborted subscription.
+      expect(calls).toHaveLength(0);
     });
 
     it('signal abort ends an active iteration', async () => {
