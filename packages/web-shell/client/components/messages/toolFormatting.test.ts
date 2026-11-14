@@ -4,6 +4,7 @@ import {
   EXPANDED_TOOL_PAYLOAD_LENGTH,
   extractRawOutputText,
   formatJsonPayload,
+  formatTokenCount,
   formatToolDisplayName,
   getAgentCurrentToolHint,
   getSubagentDetailsUnavailableReason,
@@ -763,4 +764,12 @@ it('reports launch failure before the tool status catches up', () => {
       }),
     ),
   ).toBe('subagent.failed');
+});
+
+describe('formatTokenCount', () => {
+  it('moves to M when rounding reaches a million', () => {
+    expect(formatTokenCount(999_949)).toBe('999.9k tokens');
+    expect(formatTokenCount(999_950)).toBe('1.0M tokens');
+    expect(formatTokenCount(2_000_000)).toBe('2.0M tokens');
+  });
 });
