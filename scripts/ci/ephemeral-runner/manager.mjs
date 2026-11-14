@@ -886,6 +886,7 @@ export function createManager(config, dependencies = {}) {
         let stoppedByExit = false;
         let exitCode;
         let waitWarningLogged = false;
+        let observationFailures = 0;
         // `docker top` observes processes, not the assignment queue, so an
         // idle probe alone cannot prove GitHub will not hand this online
         // runner a job in the gap before the container is removed. Deleting
@@ -914,26 +915,37 @@ export function createManager(config, dependencies = {}) {
           }
         };
         const controller = new AbortController();
-        const watch = () =>
+        const watch = () => {
+          const observation = {};
           run('docker', ['wait', id], {
             timeout: 0,
             signal: controller.signal,
           }).then(
             (output) => {
-              const status = output.trim();
-              return /^\d+$/.test(status) && Number(status) <= 255
-                ? { code: Number(status) }
-                : {};
+              try {
+                const status = output.trim();
+                observation.result =
+                  /^\d+$/.test(status) && Number(status) <= 255
+                    ? { code: Number(status) }
+                    : {};
+              } catch (error) {
+                observation.failure = { error };
+              }
             },
-            () => ({}),
+            () => {
+              observation.result = {};
+            },
           );
+          return observation;
+        };
         let watching = watch();
         try {
           while (Date.now() < stopAt) {
-            const result = await Promise.race([
-              watching,
-              wait(1000).then(() => null),
-            ]);
+            // Subscribe once per wait client; polling must not retain a new
+            // Promise reaction on a healthy container every second.
+            if (!watching.result && !watching.failure) await wait(1000);
+            if (watching.failure) throw watching.failure.error;
+            const result = watching.result;
             if (result) {
               if (result.code !== undefined) {
                 exitCode = result.code;
@@ -957,6 +969,7 @@ export function createManager(config, dependencies = {}) {
                   stoppedByExit = true;
                   break;
                 }
+                observationFailures = 0;
               } catch {
                 try {
                   if (!(await listContainers(slot)).includes(id)) {
@@ -964,8 +977,10 @@ export function createManager(config, dependencies = {}) {
                     stoppedByExit = true;
                     break;
                   }
+                  observationFailures = 0;
                 } catch {
                   // Docker being unavailable is not proof of container exit.
+                  observationFailures += 1;
                 }
               }
               if (!waitWarningLogged) {
@@ -974,8 +989,18 @@ export function createManager(config, dependencies = {}) {
                 );
                 waitWarningLogged = true;
               }
-              await wait(1000);
-              watching = watch();
+              let delay = 1000;
+              if (observationFailures) {
+                const ceiling = Math.min(
+                  1000 * 2 ** Math.min(observationFailures - 1, 6),
+                  60000,
+                );
+                delay = Math.round(ceiling / 2 + Math.random() * (ceiling / 2));
+              }
+              await interruptibleWait(delay);
+              // A drain still needs a poll cadence after backoff is interrupted.
+              if (stopping && Date.now() < stopAt) await wait(1000);
+              if (Date.now() < stopAt) watching = watch();
             }
             if (Date.now() >= nextHealthCheck) {
               nextHealthCheck = Date.now() + 300000;
