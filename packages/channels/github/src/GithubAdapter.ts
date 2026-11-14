@@ -9297,6 +9297,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             ),
           }),
         `postErrorComment(${chatId}#${issueNumber})`,
+        3,
+        isDefiniteNoWriteGithubError,
       );
       return true;
     } catch (err) {

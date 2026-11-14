@@ -8974,9 +8974,20 @@ describe('GithubChannel', () => {
       ).toEqual([]);
     });
 
-    it('records a last attempt whose error comment cannot be posted', async () => {
+    it.each([
+      { name: 'statusless error', error: new Error('comment creation outage') },
+      {
+        name: 'HTTP 502',
+        error: Object.assign(new Error('bad gateway'), { status: 502 }),
+      },
+    ])('does not repost after an ambiguous $name', async ({ error }) => {
       channel.handleInboundError = new Error('agent down');
       await initWithoutLoop();
+      (
+        channel as unknown as {
+          pendingFinalDeliveryRetryStopRequested: boolean;
+        }
+      ).pendingFinalDeliveryRetryStopRequested = false;
       (
         channel as unknown as {
           abortableSleep: (ms: number) => Promise<void>;
@@ -8985,9 +8996,7 @@ describe('GithubChannel', () => {
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification()])
         .mockResolvedValueOnce([makeComment()]);
-      mockOctokit.rest.issues.createComment.mockRejectedValue(
-        new Error('comment creation outage'),
-      );
+      mockOctokit.rest.issues.createComment.mockRejectedValue(error);
       const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
       try {
         await pollOnce();
@@ -9002,7 +9011,51 @@ describe('GithubChannel', () => {
         stderr.mockRestore();
       }
 
-      // One post on the last attempt, with its in-call retries.
+      expect(readInboundTasks()).toEqual([
+        expect.objectContaining({
+          state: 'failed',
+          attempts: 3,
+          errorCommentPosted: false,
+        }),
+      ]);
+      expect(
+        mockOctokit.rest.issues.createComment.mock.calls.filter((call) =>
+          String(call[0]?.body).includes('Failed to process'),
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('retries error comment publication on definite no-write errors', async () => {
+      channel.handleInboundError = new Error('agent down');
+      await initWithoutLoop();
+      (
+        channel as unknown as {
+          pendingFinalDeliveryRetryStopRequested: boolean;
+        }
+      ).pendingFinalDeliveryRetryStopRequested = false;
+      (
+        channel as unknown as {
+          abortableSleep: (ms: number) => Promise<void>;
+        }
+      ).abortableSleep = vi.fn().mockResolvedValue(undefined);
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification()])
+        .mockResolvedValueOnce([makeComment()]);
+      const rateLimitError = Object.assign(new Error('rate limited'), {
+        status: 429,
+        response: { headers: { 'x-ratelimit-remaining': '0' } },
+      });
+      mockOctokit.rest.issues.createComment.mockRejectedValue(rateLimitError);
+
+      await pollOnce();
+      mockOctokit.paginate.mockResolvedValue([]);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      await pollOnce();
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      await pollOnce();
+      await pollOnce();
+      await pollOnce();
+
       expect(readInboundTasks()).toEqual([
         expect.objectContaining({
           state: 'failed',
