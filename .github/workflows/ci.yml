@@ -102,8 +102,8 @@ env:
   # step re-runs every suite after `npm ci`, and a push to main always
   # classifies `full` (classify_pr computes a profile only for pull_request),
   # so what the fast lane skips is still re-checked post-merge.
-  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/autofix-check-evidence.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-host-load.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/autofix-check-evidence.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-host-load.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
+  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/autofix-check-evidence.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-host-load.test.mjs .github/scripts/ci/reap-isolated-home.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/autofix-check-evidence.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-host-load.test.mjs .github/scripts/ci/reap-isolated-home.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -123,20 +123,30 @@ jobs:
   classify_pr:
     name: 'Classify PR'
     if: "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' }}"
-    # Gate runs on ECS for EVERY event it accepts — pull requests (untrusted
-    # forks included), merge queue, pushes to main, and dispatch — unless the
-    # kill-switch forces hosted. classify executes only trusted base-SHA code
-    # with a read-only token; the residual PR-YAML risk is the same class
-    # accepted for lint_and_static (2026-10-31 decision, see
-    # docs/design/2026-10-31-lint-static-ecs-routing.md). Keeping the gate on
-    # hosted for forks queued the entire fork CI chain behind a scarce pool.
-    # The association routing for the downstream lanes lives in pick_runner
-    # (ubuntu_runner) below; sdk-java.yml and serve-ab.yml mirror that form
-    # (the routing tests hold the mirrors to it). test_windows deliberately
-    # does not: a pull_request run executes the PR's own YAML, so no runs-on
-    # trust clause is enforceable there and its lane never admits pull
-    # requests to the pool.
-    runs-on: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Association-gated ECS (kill-switch excepted): in-repo PRs, trusted
+    # associations, merge queue, push, and a maintainer dispatch — in THIS
+    # repository only (a fork named `qwen-code` would otherwise be sent to a pool
+    # it cannot reach, and classify_pr hangs before any lane is classified).
+    # Throughput policy, not a trust boundary: a pull_request run executes the
+    # PR's own YAML. The policy is stated once in
+    # docs/design/2026-10-31-lint-static-ecs-routing.md. Dispatch follows
+    # pick_runner's `linux_runner` for hosted vs self-hosted. The arm64 option
+    # is a residual with NO bound here: the gate has no arm64 labels, so an
+    # arm64 dispatch asks the x64 pool and, with no x64 runner online, queues —
+    # and `timeout-minutes` cannot cover that, because it starts only once a
+    # runner picks the job up (a REQUIRED context queued 110 minutes with no
+    # runner, job 128729488158; see `test_ubuntu` below and
+    # docs/design/windows-ecs-ci-validation.md). Because classify_pr is the
+    # `needs` prerequisite of every Linux lane, that state is a run showing a
+    # queued job with no failing check — not a timeout.
+    runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.repository == ''QwenLM/qwen-code'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association) || github.event_name == ''merge_group'' || github.event_name == ''push'' || (github.event_name == ''workflow_dispatch'' && github.event.inputs.linux_runner != ''hosted''))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Bounds a started-and-stalled classify at 10 minutes — this job declared no
+    # `timeout-minutes` before this PR, so its effective ceiling was GitHub's
+    # 360-minute default, as `.ci-budget` records (`13 320 4` → `13 330 3`).
+    # It does not bound the queue wait above: on dispatch the gate follows
+    # pick_runner's `linux_runner` for hosted vs self-hosted, and the arm64
+    # choice has no gate labels, so an arm64 dispatch runs the gate on x64.
+    timeout-minutes: 10
     continue-on-error: true
     permissions:
       contents: 'read'
@@ -2216,9 +2226,13 @@ jobs:
 
       # Reclaim the run-unique HOME (constructed path, never $HOME) before the
       # failure collector, which must stay last.
+      # The helper reaps this run's leftover daemons, then removes the home; its
+      # header records why. `always()` can reach here with no checkout, so a
+      # missing helper falls back to the plain removal, and neither reddens the
+      # job on its own.
       - name: 'Clean isolated HOME'
         if: '${{ always() }}'
-        run: 'rm -rf -- "${RUNNER_TEMP}/qwen-lint-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'
+        run: 'h="${RUNNER_TEMP}/qwen-lint-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"; { [ -f .github/scripts/ci/reap-isolated-home.sh ] && bash .github/scripts/ci/reap-isolated-home.sh "$h"; } || rm -rf -- "$h" || true'
 
       # State-at-failure dump for the 19 substantive steps after install: the
       # install sampler is reaped by that step's `trap … EXIT`, so a death in
@@ -3385,9 +3399,10 @@ jobs:
 
       # Reclaim the run-unique HOME (constructed path, never $HOME) so it
       # does not accumulate in RUNNER_TEMP on this persistent pool.
+      # Same helper and fallback as the lint lane.
       - name: 'Clean isolated HOME'
         if: '${{ always() }}'
-        run: 'rm -rf -- "${RUNNER_TEMP}/qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'
+        run: 'h="${RUNNER_TEMP}/qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"; { [ -f .github/scripts/ci/reap-isolated-home.sh ] && bash .github/scripts/ci/reap-isolated-home.sh "$h"; } || rm -rf -- "$h" || true'
 
   # The required check. It passes only when the build and every shard pass,
   # so a failed test_build (whose shards skip their steps) still fails it.

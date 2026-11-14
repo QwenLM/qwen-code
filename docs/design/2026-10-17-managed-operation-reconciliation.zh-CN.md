@@ -2,7 +2,7 @@
 
 [English](2026-10-17-managed-operation-reconciliation.md) | [简体中文](2026-10-17-managed-operation-reconciliation.zh-CN.md)
 
-状态：第一阶段已在 #14443 合入（契约 `1.59.0`），第二阶段（SSH Workspace 注册）已在 #14456 合入（契约 `1.60.0`），第三阶段（Session 标题）已在 #14475 合入。各阶段都不改 schema。决定 9 已在 #14669 合入、决定 10 已在 #14681 合入、`CANCELLING` 车道的取消已在 #14694 合入、跨 Harness kill 的故障门禁已在 #14750 合入。
+状态：第一阶段已在 #14443 合入（契约 `1.59.0`），第二阶段（SSH Workspace 注册）已在 #14456 合入（契约 `1.60.0`），第三阶段（Session 标题）已在 #14475 合入。各阶段都不改 schema。决定 9 已在 #14669 合入、决定 10 已在 #14681 合入、`CANCELLING` 车道的取消已在 #14694 合入、跨 Harness kill 的故障门禁已在 #14750 合入。Session 标题（RENAME）的对账分支已被 [2026-11-12-managed-rename-single-authority](2026-11-12-managed-rename-single-authority.zh-CN.md) 取代：改名在 SQL 中同步结算，不再产生需要对账的投递行。
 
 这是 [#14122](https://github.com/QwenLM/qwen-code/issues/14122)（[#12380](https://github.com/QwenLM/qwen-code/issues/12380) Stage D 的 D7 总 issue）的 **D7-2** 切片，由 [#14166](https://github.com/QwenLM/qwen-code/issues/14166) 跟踪。#12380 规定，Stage D 只有同时具备持久命令投递（D7-1，[#14168](https://github.com/QwenLM/qwen-code/issues/14168)）和原命令对账（本切片），才能暴露 `java_durable`。D7-3（[#14167](https://github.com/QwenLM/qwen-code/issues/14167)，可选开启的 profile）已在两者之后以 #14470 合入。本切片涉及的每一处代码，都在 #14166 的设计说明里做了分类。
 
