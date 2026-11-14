@@ -11709,6 +11709,26 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
   });
 
   describe('bound-session delivery', () => {
+    it('never routes a blocklisted repository to its bound session', async () => {
+      // The repo filter runs before bound routing: a binding does not exempt
+      // its repository from the operator's blocklist, and hoisting the bound
+      // route above the skip would publish it anyway.
+      await initChannel(
+        {
+          deliverToBoundSessions: true,
+          repoFilterMode: 'blocklist',
+          repoFilter: ['owner/repo'],
+        },
+        { boundSessions },
+      );
+      mockOctokit.paginate.mockResolvedValueOnce([prNotification()]);
+
+      await pollOnce();
+
+      expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+
     it('delivers a comment event into the bound session, not the channel path', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });
       mockOctokit.paginate
@@ -12220,9 +12240,10 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
     });
 
     it('accepts prWatchEvents without bound delivery and warns instead', async () => {
-      // The key is deprecated, not rejected: an operator who removes bound
-      // delivery keeps the alias's events for the daemon, and the channel
-      // says so once.
+      // The key is deprecated, not rejected: connect accepts it and warns
+      // once. The daemon requires deliverToBoundSessions before a channel
+      // contributes an alias, so a channel without delivery keeps these
+      // events only in its own config.
       const previous = channel;
       previous?.disconnect();
       channel = new TestableGithubChannel(
@@ -12240,6 +12261,30 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
         stderr.mockRestore();
       }
       expect(text).toContain('sessionPrWatch');
+    });
+
+    it('names the two retired limit knobs in the deprecation warning', async () => {
+      // Both knobs are honoured nowhere now: a silent acceptance would leave
+      // an operator who tuned the cap or disabled the reserve gate with no
+      // signal at all.
+      const previous = channel;
+      previous?.disconnect();
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ prWatchBudgetReserve: 0 }),
+        makeBridge(),
+        { boundSessions },
+      );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      let text = '';
+      try {
+        await channel.connect();
+      } finally {
+        text = stderr.mock.calls.map((call) => String(call[0])).join('');
+        stderr.mockRestore();
+      }
+      expect(text).toContain('prWatchBudgetReserve');
+      expect(text).toContain('ignored');
     });
 
     it('decouples the notification cursor from bound backpressure (F2)', async () => {
@@ -21297,6 +21342,51 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
         expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
       });
 
+      it('does not freeze the cursor when a retired watch task cannot be dead-lettered', async () => {
+        // The dead-letter is the retire's only record; if the append fails the
+        // task is kept and retried. It can never be replayed, so it must not
+        // hold the shared notification cursor for the daemon's lifetime.
+        await initChannel(commentConfig, { boundSessions });
+        const messageId = 'watch:ci_failure:42:sha-1:1';
+        writeInboundTasks([
+          makeInboundTaskRecord({
+            envelope: {
+              channelName: 'test-github',
+              senderId: 'github',
+              senderName: 'GitHub',
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId,
+              text: 'CI failed on head sha-1.',
+              isGroup: true,
+              isMentioned: true,
+              isReplyToBot: false,
+              metadata: 'Event: ci_failure.',
+            },
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId,
+            },
+            delivery: {
+              kind: 'bound-session',
+              sessionId: 'bound-session',
+            },
+          }),
+        ]);
+        // Occupying the dead-letter path with a directory makes every append
+        // fail with EISDIR, so the retirement keeps the task for a retry.
+        mkdirSync(boundDeadLetterPath(), { recursive: true });
+        routeCommentPaginate();
+        await pollOnce();
+        expect(readInboundTasks()).toHaveLength(1);
+        expect(
+          (
+            channel as unknown as { hasCursorBlockingTasks(): boolean }
+          ).hasCursorBlockingTasks(),
+        ).toBe(false);
+      });
+
       it('renders the last observed title for a comment template (%title%)', async () => {
         await initChannel(
           {
@@ -21373,15 +21463,28 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           {
             deliverToBoundSessions: true,
             prWatchEvents: ['head_change', 'ci_failure'],
-            prCommentWatch: false,
+            prCommentWatch: true,
           },
           { boundSessions },
         );
         mockPull({});
         mockNotificationsOnce([]);
+        // The comment watch makes the pass run, so a detector reintroduced
+        // behind prWatchEvents inside it would issue pulls.get. With the
+        // comment watch off the pass returns at its first guard and this
+        // assertion cannot see one.
+        seedWatchState({
+          'owner/repo#42': {
+            commentBaseline: '2026-07-01T00:00:00.000Z',
+            commentSince: '2026-07-01T00:00:00.000Z',
+            commentLastFetchAt: 0,
+          },
+        });
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
         await pollOnce();
-        // The pass is inert without the comment watch; even with it on no
-        // state detector runs, so pulls.get is never called.
+        expect(mockOctokit.rest.issues.listComments).toHaveBeenCalled();
         expect(mockOctokit.rest.pulls.get).not.toHaveBeenCalled();
       });
     });
@@ -22952,6 +23055,182 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
         await pollOnce();
         expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
         expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
+      it('aborts the pass on a shared credential failure', async () => {
+        // A 401 is not this PR's problem: issuing the same doomed request for
+        // every other watched PR just burns the budget. The pass stops after
+        // the first failure and the next poll retries the full set.
+        await initChannel(commentWatchConfig, { boundSessions });
+        const baseline = {
+          commentBaseline: '2026-07-01T00:00:00.000Z',
+          commentSince: '2026-07-01T00:00:00.000Z',
+          commentLastFetchAt: 0,
+        };
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                },
+                {
+                  number: 43,
+                  url: 'https://github.com/owner/repo/pull/43',
+                  state: 'open',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedWatchState({
+          'owner/repo#42': { ...baseline },
+          'owner/repo#43': { ...baseline },
+        });
+        routeCommentPaginate();
+        // paginate calls the mocked list without an argument object, so the
+        // failing PR is selected by call order, not by params.
+        let listCalls = 0;
+        mockOctokit.rest.issues.listComments.mockImplementation(async () => {
+          listCalls += 1;
+          if (listCalls === 1) {
+            throw Object.assign(new Error('Bad credentials'), {
+              status: 401,
+              response: { headers: {} },
+            });
+          }
+          return [];
+        });
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        const write = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        let text = '';
+        try {
+          await pollOnce();
+        } finally {
+          text = write.mock.calls.map((call) => String(call[0])).join('');
+          write.mockRestore();
+        }
+        expect(text).toContain('PR watch pass aborted');
+        // One attempt only: without the abort the second PR's list runs too.
+        expect(mockOctokit.rest.issues.listComments).toHaveBeenCalledTimes(1);
+      });
+
+      it('breaks mid-pass when the budget reaches the reserve', async () => {
+        // The check runs at the spend site: a pass entered above the reserve
+        // must yield as soon as a response brings the count down to it, and
+        // the cursors observed so far still reach savePrWatchState.
+        await initChannel(commentWatchConfig, { boundSessions });
+        const baseline = {
+          commentBaseline: '2026-07-01T00:00:00.000Z',
+          commentSince: '2026-07-01T00:00:00.000Z',
+          commentLastFetchAt: 0,
+        };
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                },
+                {
+                  number: 43,
+                  url: 'https://github.com/owner/repo/pull/43',
+                  state: 'open',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedWatchState({
+          'owner/repo#42': { ...baseline },
+          'owner/repo#43': { ...baseline },
+        });
+        routeCommentPaginate();
+        let listCalls = 0;
+        mockOctokit.rest.issues.listComments.mockImplementation(async () => {
+          listCalls += 1;
+          if (listCalls === 1) {
+            await feedBudget(200, Math.floor(Date.now() / 1000) + 3600);
+          }
+          return [];
+        });
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+        expect(listCalls).toBe(1);
+        expect(degradedRows('watch_budget_low')).toHaveLength(1);
+      });
+
+      it("keeps a merged binding's comment cursor and title across a complete snapshot", async () => {
+        // The binding refresh can record the terminal state before this poll
+        // observes it. The entry still belongs to the snapshot: dropping it
+        // would lose the comment cursor (a reopen re-baselines past the merged
+        // window) and the title, which has no other writer.
+        await initChannel(commentWatchConfig, { boundSessions });
+        const seeded = {
+          commentBaseline: '2026-07-01T00:00:00.000Z',
+          commentSince: '2026-07-01T00:00:00.000Z',
+          commentLastFetchAt: 0,
+          title: 'Merged title',
+        };
+        seedWatchState({ 'owner/repo#42': { ...seeded } });
+        routeCommentPaginate();
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'merged',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        await pollOnce();
+
+        const afterMerge = readWatchState().entries['owner/repo#42'];
+        expect(afterMerge).toBeDefined();
+        expect(afterMerge['commentBaseline']).toBe(seeded.commentBaseline);
+        expect(afterMerge['commentSince']).toBe(seeded.commentSince);
+        expect(afterMerge['title']).toBe('Merged title');
+        expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
+
+        // A reopen reuses the key; the surviving cursor keeps comments from
+        // the merged window eligible instead of re-baselining to "now".
+        boundSessions.listPrBindings.mockResolvedValue({
+          bindings: [
+            makeBinding({
+              prs: [
+                {
+                  number: 42,
+                  url: 'https://github.com/owner/repo/pull/42',
+                  state: 'open',
+                },
+              ],
+            }),
+          ],
+          partial: false,
+        });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        await pollOnce();
+
+        expect(
+          readWatchState().entries['owner/repo#42']?.['commentBaseline'],
+        ).toBe(seeded.commentBaseline);
+        expect(mockOctokit.rest.issues.listComments).toHaveBeenCalled();
       });
 
       it('shares one burst budget across watched PRs in a pass', async () => {

@@ -88,18 +88,51 @@ describe('resolveSessionPrWatchConfig', () => {
     expect([...config.events]).toEqual(['head_change']);
   });
 
-  it('warns and falls back to off for an unrecognized transition type', () => {
+  it('drops only the unrecognized transition type', () => {
     const onWarning = vi.fn();
     const config = resolveSessionPrWatchConfig(
       { events: ['head_change', 'not_a_type'] },
       {},
       onWarning,
     );
-    // The whole list falls back, not just the bad member: a partial
-    // subscription the operator did not write is worse than none.
-    expect(config.events.size).toBe(0);
+    // A bad member narrows the watch; emptying the list would silence it
+    // while `explicit` still suppresses the deprecated alias.
+    expect([...config.events]).toEqual(['head_change']);
     expect(onWarning).toHaveBeenCalledTimes(1);
     expect(onWarning.mock.calls[0]?.[0]).toContain('not_a_type');
+  });
+
+  it('still falls back to off when every member is unrecognized', () => {
+    const onWarning = vi.fn();
+    const config = resolveSessionPrWatchConfig(
+      { events: ['not_a_type', 'also_bad'] },
+      {},
+      onWarning,
+    );
+    expect(config.events.size).toBe(0);
+    expect(onWarning).toHaveBeenCalledTimes(2);
+  });
+
+  it('folds case like the channel alias does', () => {
+    const config = resolveSessionPrWatchConfig(
+      { events: ['HEAD_CHANGE', ' Ci_Failure '] },
+      {},
+    );
+    expect([...config.events]).toEqual(['head_change', 'ci_failure']);
+  });
+
+  it('warns about an unknown sub-key instead of going explicit with nothing', () => {
+    const onWarning = vi.fn();
+    const config = resolveSessionPrWatchConfig(
+      { event: ['head_change'] },
+      {},
+      onWarning,
+    );
+    expect(config.events.size).toBe(0);
+    expect(config.explicit).toBe(true);
+    expect(onWarning.mock.calls[0]?.[0]).toContain(
+      'unknown serve.sessionPrWatch.event',
+    );
   });
 
   it('warns and falls back to off when events is not a list', () => {
@@ -209,9 +242,11 @@ describe('resolveSessionPrWatchConfig', () => {
   });
 
   it('counts code points, not UTF-16 units', () => {
-    // 1000 astral characters are 2000 UTF-16 units but only 1000 code points.
+    // 1001 astral characters are 1001 code points (accepted) but 2002 UTF-16
+    // units (rejected by a `.length` implementation). 1000 would be exactly
+    // 2000 units and pass under both metrics, so it witnesses nothing.
     const config = resolveSessionPrWatchConfig(
-      { actions: { head_change: '𠮷'.repeat(1000) } },
+      { actions: { head_change: '𠮷'.repeat(1001) } },
       {},
     );
     expect(config.actions?.get('head_change')).toBeDefined();
@@ -262,19 +297,29 @@ describe('resolvePrWatchSubscription', () => {
     expect(sub.eventsForHost('github.com').size).toBe(0);
   });
 
-  it('normalises an empty explicit actions map to the single winner', () => {
-    // The drain treats any map as role-aware; an operator who wrote `{}`
-    // meant "no templates", not "no recipients".
+  it('keeps an explicit empty actions map role-aware', () => {
+    // The drain treats any map as role-aware: `{}` means "no role subscribed"
+    // and drops the entry, so it must not collapse to the legacy winner.
     const explicit = resolveSessionPrWatchConfig(
       { events: ['head_change'], actions: {} },
       {},
     );
-    expect(
-      resolvePrWatchSubscription(explicit, []).actionsForEvent(
-        'head_change',
-        'github.com',
-      ),
-    ).toBeUndefined();
+    const map = resolvePrWatchSubscription(explicit, []).actionsForEvent(
+      'head_change',
+      'github.com',
+    );
+    expect(map).toEqual(new Map());
+  });
+
+  it('returns the empty actions map for a type the host no longer subscribes', () => {
+    // undefined is the legacy single winner. A pending entry for a type that
+    // was just unsubscribed must drop, not wake a session with a generic
+    // prompt.
+    const sub = resolvePrWatchSubscription(OFF, [
+      channel({ prWatchEvents: ['head_change'] }),
+    ]);
+    expect(sub.actionsForEvent('ci_failure', 'github.com')).toEqual(new Map());
+    expect(sub.actionsForEvent('head_change', 'github.com')).toBeUndefined();
   });
 
   it('keys the alias by host and unions the events of one host', () => {
@@ -407,14 +452,15 @@ describe('resolvePrWatchSubscription', () => {
     expect(sub.eventsForHost('github.com').size).toBe(0);
   });
 
-  it('ignores an unrecognized event list with a warning', () => {
+  it('keeps the recognized members of an alias list', () => {
     const logs: string[] = [];
     const sub = resolvePrWatchSubscription(
       OFF,
       [channel({ prWatchEvents: ['head_change', 'not_a_type'] })],
       (message) => logs.push(message),
     );
-    expect(sub.anyEvents).toBe(false);
+    expect(sub.anyEvents).toBe(true);
+    expect([...sub.eventsForHost('github.com')]).toEqual(['head_change']);
     expect(logs.some((line) => line.includes('not_a_type'))).toBe(true);
   });
 

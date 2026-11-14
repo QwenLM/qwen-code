@@ -65,13 +65,6 @@ interface GithubConfig extends ChannelConfig, RepoFilterConfigFields {
    * per-host alias for one minor release.
    */
   prWatchEvents?: unknown;
-  /** @deprecated Removed with the adapter's state watch; ignored. */
-  prWatchLimit?: unknown;
-  /**
-   * @deprecated Removed with the adapter's state watch; the budget gate keeps
-   * its default reserve.
-   */
-  prWatchBudgetReserve?: unknown;
   /**
    * Instruction templates for bound delivery. `watch:*` keys are deprecated;
    * configure serve.sessionPrWatch.actions for state transitions.
@@ -690,6 +683,13 @@ interface BoundSessionConfigFields {
   deliverToBoundSessions?: unknown;
   /** @deprecated Configure serve.sessionPrWatch in the daemon. */
   prWatchEvents?: unknown;
+  /** @deprecated Removed with the adapter's state watch; ignored. */
+  prWatchLimit?: unknown;
+  /**
+   * @deprecated Removed with the adapter's state watch; the budget gate keeps
+   * its default reserve.
+   */
+  prWatchBudgetReserve?: unknown;
   boundSessionActions?: unknown;
   requireBoundWatch?: unknown;
   prCommentWatch?: unknown;
@@ -733,6 +733,8 @@ function usesDeprecatedPrWatchSurface(
   config: BoundSessionConfigFields,
 ): boolean {
   if (config.prWatchEvents !== undefined) return true;
+  if (config.prWatchLimit !== undefined) return true;
+  if (config.prWatchBudgetReserve !== undefined) return true;
   const actions = config.boundSessionActions;
   if (
     actions === null ||
@@ -1835,7 +1837,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.prCommentWatchEnabled = cfg.prCommentWatch !== false;
     if (usesDeprecatedPrWatchSurface(cfg)) {
       process.stderr.write(
-        `[Channel:${this.name}] warning: prWatchEvents and the watch:* keys of boundSessionActions are deprecated; this channel no longer detects PR state transitions. Configure serve.sessionPrWatch in the daemon's settings instead. The deprecated keys are read as a per-host alias for one minor release.\n`,
+        `[Channel:${this.name}] warning: prWatchEvents, the watch:* keys of boundSessionActions, prWatchLimit and prWatchBudgetReserve are deprecated; this channel no longer detects PR state transitions. Configure serve.sessionPrWatch in the daemon's settings instead. The watch keys are read as a per-host alias for one minor release; the two limit knobs are ignored and the pass uses its built-in budget.\n`,
       );
     }
     if (this.deliverToBoundSessions) {
@@ -4885,7 +4887,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private isCursorBlockingTask(task: InboundTaskRecord): boolean {
-    return this.isRecoverableInboundTask(task) && task.backpressure !== true;
+    // A retired `watch:` task that the dead-letter write keeps retrying is
+    // never replayed, so it must not freeze the shared notification cursor:
+    // with the dead-letter path unwritable, holding it would stop
+    // markNotificationsAsRead for the daemon's lifetime.
+    return (
+      this.isRecoverableInboundTask(task) &&
+      task.backpressure !== true &&
+      task.envelope?.messageId?.startsWith('watch:') !== true
+    );
   }
 
   /** Whether one of the thread's own tasks holds the cursor, as last seen. */
@@ -7257,27 +7267,34 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.loadPrWatchState();
     const candidates = new Map<
       string,
-      { chatId: string; number: number; updatedAt: string }
+      { chatId: string; number: number; updatedAt: string; terminal: boolean }
     >();
     for (const summary of this.lastBindings) {
       if (summary.sourceType === 'channel') continue;
       for (const pr of summary.prs) {
         const identity = this.parsePrBindingUrl(pr.url);
         if (!identity || identity.number !== pr.number) continue;
-        // A merged or closed binding has no new comments to fetch. The state
-        // watch used to keep it polled until it observed the closure; with
-        // that gone, the binding's own terminal state is authoritative. A
-        // reopen flips the binding back to open and resumes the watch.
-        if (pr.state === 'merged' || pr.state === 'closed') continue;
+        // A merged or closed binding has no new comments to fetch, but it
+        // still belongs to the snapshot: the entry is the only home of the
+        // comment cursor and the title, and the prune below deletes every key
+        // the snapshot does not claim. Skipping the fetch, not the candidate,
+        // keeps a reopen from re-baselining past the merged window.
+        const terminal = pr.state === 'merged' || pr.state === 'closed';
         const key = this.prBindingKey(identity.chatId, identity.number);
         const updatedAt = summary.updatedAt ?? '';
         const existing = candidates.get(key);
-        if (!existing || updatedAt > existing.updatedAt) {
+        if (!existing) {
           candidates.set(key, {
             chatId: identity.chatId,
             number: identity.number,
             updatedAt,
+            terminal,
           });
+        } else {
+          // Any open binding wins: its session still follows the PR, so the
+          // fetch stays on even when another summary already reads terminal.
+          if (!terminal) existing.terminal = false;
+          if (updatedAt > existing.updatedAt) existing.updatedAt = updatedAt;
         }
       }
     }
@@ -7320,6 +7337,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // and resume next pass.
     const commentBudget = { remaining: MAX_WATCH_COMMENTS_PER_PASS };
     for (const [key, candidate] of candidates) {
+      if (candidate.terminal) continue;
       // Yield at the spend site, not only at the poll boundary: one pass can
       // issue several requests per watched PR, so a pass entered just above
       // the reserve would otherwise spend the whole reserve before the

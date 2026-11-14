@@ -4932,6 +4932,10 @@ async function runQwenServeImpl(
       }
     | undefined;
   let sessionPrRefreshGeneration = 0;
+  // Deferred until the timer handle exists AND the hosted channels committed:
+  // the timer is created before listen and the alias needs the channel groups,
+  // so checking either earlier reports the wrong thing. One-shot.
+  let warnPrWatchWithoutTimer: (() => void) | undefined;
   // Kept separately from the timer handle: the event-loop-monitor cleanup
   // disposes and clears that handle before the lifecycle close runs its drains,
   // but the watch still has to stop in order (timer, in-flight work, owner
@@ -7871,15 +7875,27 @@ async function runQwenServeImpl(
                 }
                 return channels;
               };
-              // A configured watch with no timer would never observe
-              // anything. Resolving once at startup makes the effective
-              // subscription visible (and logs the alias) instead of leaving
-              // an operator to assume the channel still watches for them.
-              if (!sessionPrRefreshTimer && resolvePrWatchDeps()) {
+              // Resolve once here so the subscription is warm and the alias
+              // is logged. The "configured but unobservable" warning cannot
+              // run at this point: the timer handle is assigned after this
+              // block, and the hosted channels commit even later, so the check
+              // is deferred to the listen path below.
+              warnPrWatchWithoutTimer = () => {
+                if (sessionPrRefreshTimer) return;
+                try {
+                  if (!resolvePrWatchDeps()) return;
+                } catch (error) {
+                  daemonLog.warn(
+                    `PR watch deps unavailable: ${
+                      error instanceof Error ? error.message : String(error)
+                    }`,
+                  );
+                  return;
+                }
                 daemonLog.warn(
                   'PR watch: an effective subscription exists but the session PR refresh timer is not running (QWEN_SESSION_PR_REFRESH_MINUTES=0); no PR-state transition will be observed.',
                 );
-              }
+              };
             } catch (error) {
               daemonLog.warn(
                 `PR watch deps unavailable: ${
@@ -11186,6 +11202,11 @@ async function runQwenServeImpl(
       try {
         const resolved = resolveChannelWorkspaceGroupsAtListen();
         channelWorkspaceGroups = resolved?.groups;
+        // The alias is readable now, and the timer handle already exists (or
+        // is undefined on an interval of 0), so this is the first point where
+        // "a watched PR but nothing observes it" can be judged.
+        warnPrWatchWithoutTimer?.();
+        warnPrWatchWithoutTimer = undefined;
         if (resolved) {
           for (const skip of resolved.skipped) {
             const detail = sanitizeLogText(

@@ -838,6 +838,35 @@ describe('observeWorkspacePrBindings', () => {
     expect(warnings()).toHaveLength(2);
   });
 
+  it('clears a warned streak when a successful view is not persisted', async () => {
+    // The warning is about the view. A successful view that the slow-view
+    // guard refuses to persist must not leave `warned` set for the life of
+    // the timer.
+    const viewFailures = new Map<
+      string,
+      { count: number; warned: boolean; lastSeenAt?: number }
+    >();
+    const view = vi.fn(async (url: string) => okResult(url));
+    const id = prWatchIdentityFromUrl(prUrl(42))!;
+    const key = prWatchFileKey(id);
+    viewFailures.set(key, { count: 2, warned: true });
+    // A stored observation from the future makes the guard return early.
+    writePrWatchStateSync(dir, id, {
+      pr: id,
+      observedAt: T2,
+      state: 'open',
+      headSha: 'a'.repeat(40),
+      checks: 'passing',
+    });
+
+    const result = await observeWorkspacePrBindings(
+      [binding(42)],
+      makeDeps(view, { log: vi.fn(), viewFailures, now: () => Date.parse(T1) }),
+    );
+    expect(result.observed).toBe(0);
+    expect(viewFailures.has(key)).toBe(false);
+  });
+
   it('accepts a renamed repository and keeps the binding own watch file', async () => {
     const view = vi.fn(async () => okResult(prUrl(42, 'newowner/repo')));
     const log = vi.fn();
@@ -1179,6 +1208,46 @@ describe('runPrWatchObservationTick', () => {
     expect(offsets.get('/ws')).toBe(1);
     const id = prWatchIdentityFromUrl(prUrl(42))!;
     expect(readPrWatchStateSync(dir, id).kind).toBe('state');
+  });
+
+  it('prunes view-failure streaks whose PR left the watch set', async () => {
+    // The map lives for the timer's lifetime; a PR that merged, unbound or
+    // lost its workspace must age out, or a re-bound key resumes at `warned`.
+    const view = vi.fn(async (url: string) => okResult(url));
+    const nowMs = Date.parse(T1);
+    const viewFailures = new Map<
+      string,
+      { count: number; warned: boolean; lastSeenAt?: number }
+    >();
+    viewFailures.set('github.com/owner/repo#999', {
+      count: 2,
+      warned: true,
+      lastSeenAt: nowMs - 25 * 60 * 60 * 1000,
+    });
+    viewFailures.set('github.com/owner/repo#777', {
+      count: 1,
+      warned: false,
+      lastSeenAt: nowMs,
+    });
+
+    await runPrWatchObservationTick(
+      [runtime('/ws')],
+      {
+        watchDir: dir,
+        locks,
+        allowedHosts: new Set(['github.com']),
+        viewPullRequest: view,
+        now: () => nowMs,
+      },
+      {
+        intervalMs: 300_000,
+        sweepOffsets: new Map(),
+        viewFailures,
+      },
+    );
+
+    expect(viewFailures.has('github.com/owner/repo#999')).toBe(false);
+    expect(viewFailures.has('github.com/owner/repo#777')).toBe(true);
   });
 
   it('observes nothing when an unverifiable record blocks the claim', async () => {

@@ -55,6 +55,7 @@ import {
   prWatchIdentityFromUrl,
   detectPrTransitions,
   normalizeWatchHost,
+  type PrWatchViewFailureStreak,
 } from './pr-watch-observation.js';
 import {
   scanWorkspaceBindings,
@@ -773,10 +774,7 @@ export function startSessionPrRefreshTimer(deps: {
   // Consecutive failed-view streaks, kept across ticks so a PR the daemon's
   // gh cannot read warns once after two failures and again only after a
   // successful view resets the streak.
-  const prWatchViewFailures = new Map<
-    string,
-    { count: number; warned: boolean }
-  >();
+  const prWatchViewFailures = new Map<string, PrWatchViewFailureStreak>();
   let watchSeam: NonNullable<SessionPrRefreshOptions['prWatch']> | undefined;
   let watchTickCount = 0;
   // Retained binding rows, in-flight marks and restore slots for the delivery
@@ -832,7 +830,6 @@ export function startSessionPrRefreshTimer(deps: {
             watchDir: watchDeps.watchDir,
             locks: watchDeps.locks,
             allowedHosts: watchDeps.allowedHosts,
-            events: watchDeps.events,
             eventsForHost: watchDeps.eventsForHost,
             // Without this the seam's `log` is a declared-and-read field with
             // no setter, and every listing-write refusal stays silent — the

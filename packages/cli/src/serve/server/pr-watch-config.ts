@@ -35,9 +35,11 @@ const ACTION_VOCABULARY: BoundActionKeyVocabulary = {
 };
 
 /**
- * A template map the operator must fix before the daemon starts. The boot
- * discriminates by class, as it does for `InvalidPolicyConfigError`, so a
- * typo refuses startup instead of silently disabling delivery.
+ * A template map the operator must fix before the daemon starts. The resolver
+ * runs outside the settings try/catch, so the throw reaches the serve entry
+ * point, which prints the message and exits non-zero; no catch site
+ * discriminates on the class. A typo therefore refuses startup instead of
+ * silently disabling delivery.
  */
 export class InvalidSessionPrWatchConfigError extends Error {
   override readonly name = 'InvalidSessionPrWatchConfigError';
@@ -90,6 +92,7 @@ export interface PrWatchSubscription {
 }
 
 const NO_EVENTS: ReadonlySet<PrTransitionType> = new Set();
+const NO_ACTIONS: ReadonlyMap<string, string> = new Map();
 
 /** The shape `serve.sessionPrWatch` takes in settings, before validation. */
 export interface SessionPrWatchSetting {
@@ -121,15 +124,21 @@ function parseEvents(
       );
       return new Set();
     }
-    const name = entry.trim();
+    // Fold case the same way the channel alias does: the two spellings of
+    // one event must not behave differently when an operator migrates a
+    // value from prWatchEvents into this setting (or its env form).
+    const name = entry.trim().toLowerCase();
     // A blank member comes from a trailing comma in the env form; it names no
     // event, so it is ignored rather than invalidating the whole list.
     if (name === '') continue;
     if (!PR_TRANSITION_TYPES.has(name as PrTransitionType)) {
+      // A bad member narrows the watch, as the design states; emptying the
+      // whole list would instead silence it while `explicit` still suppresses
+      // the alias.
       onWarning(
-        `qwen serve: ignoring invalid ${source} (unrecognized transition type ${name})`,
+        `qwen serve: ignoring unrecognized transition type ${entry.trim()} in ${source}`,
       );
-      return new Set();
+      continue;
     }
     events.add(name as PrTransitionType);
   }
@@ -178,6 +187,15 @@ export function resolveSessionPrWatchConfig(
     onWarning(
       'qwen serve: ignoring invalid serve.sessionPrWatch (expected an object)',
     );
+  }
+  if (setting !== undefined) {
+    for (const key of Object.keys(setting)) {
+      if (key !== 'events' && key !== 'wakeDormant' && key !== 'actions') {
+        // A mistyped sub-key would otherwise make the config explicit with no
+        // events — silently suppressing the deprecated per-host alias.
+        onWarning(`qwen serve: ignoring unknown serve.sessionPrWatch.${key}`);
+      }
+    }
   }
   const envEvents = env[SESSION_PR_WATCH_EVENTS_ENV];
   const events =
@@ -259,10 +277,12 @@ function parseAliasEvents(
     const name = value.trim().toLowerCase();
     if (name === '') continue;
     if (!PR_TRANSITION_TYPES.has(name as PrTransitionType)) {
+      // Drop only the unrecognized member: one stale value must not discard
+      // the events the channel does subscribe to.
       log(
-        `PR watch: ignoring prWatchEvents for channel ${channelName} (unrecognized transition type ${name})`,
+        `PR watch: ignoring unrecognized transition type ${value.trim()} in prWatchEvents for channel ${channelName}`,
       );
-      return NO_EVENTS;
+      continue;
     }
     events.add(name as PrTransitionType);
   }
@@ -448,7 +468,14 @@ function resolveAlias(
 
   return {
     eventsForHost: (host) => eventsByHost.get(host) ?? NO_EVENTS,
-    actionsForEvent: (type, host) => actionsByHost.get(host)?.get(type),
+    // An unsubscribed type (or host) yields the empty map, not undefined: the
+    // drain reads undefined as the legacy single-winner and would deliver a
+    // pending entry for an event the operator just removed.
+    actionsForEvent: (type, host) => {
+      const byType = actionsByHost.get(host);
+      if (!byType || !byType.has(type)) return NO_ACTIONS;
+      return byType.get(type);
+    },
     anyEvents: activeHosts.length > 0,
   };
 }
@@ -462,10 +489,10 @@ export function resolvePrWatchSubscription(
   if (config.explicit) {
     return {
       eventsForHost: () => config.events,
+      // undefined keeps the legacy single winner; an explicitly configured
+      // empty map stays empty so no role matches and pending entries drop.
       actionsForEvent: () =>
-        config.actions !== undefined && config.actions.size > 0
-          ? config.actions
-          : undefined,
+        config.actions === undefined ? undefined : config.actions,
       anyEvents: config.events.size > 0,
     };
   }

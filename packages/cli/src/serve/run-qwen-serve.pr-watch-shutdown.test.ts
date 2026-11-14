@@ -144,6 +144,64 @@ describe('runQwenServe PR-watch shutdown wiring', () => {
     expect(stopWatch).toHaveBeenCalledTimes(1);
   });
 
+  it('builds no watch deps when nothing is subscribed', async () => {
+    // Enablement is deps presence. With no operator setting and no hosted
+    // channel alias, both getters must return nothing, or a daemon that was
+    // never configured would still claim the watch directory and spend gh.
+    vi.unstubAllEnvs();
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pr-watch-off-')),
+    );
+    const workspace = path.join(tmpDir, 'project');
+    fs.mkdirSync(workspace);
+    let timerOptions:
+      | Parameters<typeof refreshModule.startSessionPrRefreshTimer>[0]
+      | undefined;
+    vi.spyOn(refreshModule, 'startSessionPrRefreshTimer').mockImplementation(
+      (options) => {
+        timerOptions = options;
+        return {
+          dispose: vi.fn(),
+          stopWatch: vi.fn(async () => {}),
+          drainNow: vi.fn(async () => {}),
+        };
+      },
+    );
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(
+      () => bridge() as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        maxSessions: 1,
+        token: 'secret-token',
+        serveWebShell: false,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        runtimeStartupTimeoutMs: 0,
+      },
+    );
+    await fetch(`${handle.url}/health`, {
+      headers: { authorization: 'Bearer secret-token' },
+    });
+    await expect(handle.runtimeReady).resolves.toBeUndefined();
+    await vi.waitFor(() => expect(timerOptions).toBeDefined(), {
+      timeout: 15_000,
+    });
+    await vi.waitFor(
+      () => {
+        expect(timerOptions?.getPrWatchDeps?.()).toBeUndefined();
+        expect(timerOptions?.getPrDrainDeps?.()).toBeUndefined();
+      },
+      { timeout: 15_000 },
+    );
+  });
+
   it('loads hosted channel settings with env injection disabled', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pr-watch-env-')),

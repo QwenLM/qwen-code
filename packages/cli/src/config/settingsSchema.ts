@@ -414,7 +414,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: [] as string[],
             description:
-              'Transition types to deliver: ci_failure, merge_conflict, head_change, state_change. Empty (the default) runs no view and delivers nothing. QWEN_SESSION_PR_WATCH_EVENTS overrides this as a comma-separated list; an unrecognized value falls back to the default with a warning.',
+              'Transition types to deliver: ci_failure, merge_conflict, head_change, state_change. Empty (the default) runs no view and delivers nothing. QWEN_SESSION_PR_WATCH_EVENTS overrides this as a comma-separated list; an unrecognized entry is dropped with a warning and the recognized members still apply. Files under a served project may not set either this key or its environment override.',
             showInDialog: false,
             items: { type: 'string' },
           },
@@ -425,7 +425,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: true,
             description:
-              "Restore a dormant bound session to deliver a transition. When false, the transition stays queued until that session's next live turn. QWEN_SESSION_PR_WATCH_WAKE_DORMANT overrides this.",
+              "Restore a dormant bound session to deliver a transition. When false, the transition stays queued until that session's next live turn, bounded by the watch's retention (7 days) and per-PR pending cap (16 entries); older or overflow entries are dropped. QWEN_SESSION_PR_WATCH_WAKE_DORMANT overrides this.",
             showInDialog: false,
           },
           actions: {

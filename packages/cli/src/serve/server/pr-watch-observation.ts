@@ -42,6 +42,20 @@ export interface PrWatchObservation {
   failingChecks?: string[];
 }
 
+/**
+ * One PR's consecutive failed-view streak. `lastSeenAt` is the last tick that
+ * observed a failure and lets the tick prune streaks whose PR left the watch
+ * set; retention, not "absent this tick", because the rotation deliberately
+ * skips PRs and workspaces.
+ */
+export interface PrWatchViewFailureStreak {
+  count: number;
+  warned: boolean;
+  lastSeenAt?: number;
+}
+
+const PR_WATCH_VIEW_FAILURE_RETENTION_MS = 24 * 60 * 60 * 1000;
+
 export interface DetectedPrTransition {
   type: PrTransitionType;
   key: string;
@@ -295,7 +309,7 @@ export interface PrWatchObservationDeps {
    * class; the streak resets on a successful view, so a recovered PR that
    * fails again warns again. In-memory and per timer.
    */
-  viewFailures?: Map<string, { count: number; warned: boolean }>;
+  viewFailures?: Map<string, PrWatchViewFailureStreak>;
   /** The swept workspace's environment (its own GH_TOKEN/GH_CONFIG_DIR). */
   env?: Readonly<Record<string, string | undefined>>;
   /** Test seam; defaults to {@link fetchGitHubPullRequestView}. */
@@ -382,6 +396,7 @@ export async function observeWorkspacePrBindings(
         `PR watch: ${streak.count} consecutive view failures for ${target.identity.repo}#${target.identity.number} (${errorClass}); the PR gets no transitions until a view succeeds`,
       );
     }
+    streak.lastSeenAt = now();
     deps.viewFailures?.set(target.key, streak);
     log(detail);
   };
@@ -492,6 +507,10 @@ export async function observeWorkspacePrBindings(
         `PR watch: ${target.identity.repo}#${target.identity.number} resolved to renamed repository ${viewIdentity.repo}; keeping the binding's own watch file`,
       );
     }
+    // A successful view ends the streak here, not after the state write: the
+    // warning is about the view, and a read-only or slow-view tick that cannot
+    // persist must not leave a warned streak permanently dark.
+    deps.viewFailures?.delete(target.key);
     const filePath = prWatchFilePath(deps.watchDir, target.identity);
     try {
       await deps.locks.runExclusive(filePath, async () => {
@@ -535,7 +554,6 @@ export async function observeWorkspacePrBindings(
           );
         }
         writePrWatchStateSync(deps.watchDir, target.identity, detection.state);
-        deps.viewFailures?.delete(target.key);
         options.viewedThisTick?.add(target.key);
         observed += 1;
       });
@@ -553,8 +571,6 @@ export interface PrWatchObservationTickDeps {
   watchDir: string;
   locks: PathMutexRegistry;
   allowedHosts: ReadonlySet<string>;
-  /** Subscribed transition types; see {@link PrWatchObservationDeps.events}. */
-  events?: ReadonlySet<PrTransitionType>;
   /** Per-host subscription; see {@link PrWatchObservationDeps.eventsForHost}. */
   eventsForHost?: (host: string) => ReadonlySet<PrTransitionType>;
   viewPullRequest?: typeof fetchGitHubPullRequestView;
@@ -583,7 +599,7 @@ export interface PrWatchObservationTickOptions {
    */
   listedKeysByWorkspace?: ReadonlyMap<string, ReadonlySet<string>>;
   /** Cross-tick failed-view streaks; see {@link PrWatchObservationDeps.viewFailures}. */
-  viewFailures?: Map<string, { count: number; warned: boolean }>;
+  viewFailures?: Map<string, PrWatchViewFailureStreak>;
 }
 
 /**
@@ -634,7 +650,6 @@ export async function runPrWatchObservationTick(
         watchDir: deps.watchDir,
         locks: deps.locks,
         allowedHosts: deps.allowedHosts,
-        events: deps.events,
         eventsForHost: deps.eventsForHost,
         viewFailures: options.viewFailures,
         // Master §1: a workspace's own GH_TOKEN/GH_CONFIG_DIR applies to its
@@ -662,6 +677,17 @@ export async function runPrWatchObservationTick(
       sweepStart + result.consumed,
     );
     observed += result.observed;
+  }
+  // The daemon runs indefinitely, so a streak for a PR that left the watch
+  // set (merged, unbound, workspace removed) must age out; otherwise a re-bound
+  // key resumes at `warned` and never logs a new streak.
+  if (options.viewFailures !== undefined) {
+    const cutoff = now() - PR_WATCH_VIEW_FAILURE_RETENTION_MS;
+    for (const [key, streak] of options.viewFailures) {
+      if (streak.lastSeenAt !== undefined && streak.lastSeenAt < cutoff) {
+        options.viewFailures.delete(key);
+      }
+    }
   }
   return { claimed: true, observed };
 }
