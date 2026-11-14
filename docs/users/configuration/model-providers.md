@@ -484,6 +484,43 @@ Things to know about this endpoint:
 - **Nothing to set for `openai/gpt-5-4-nano`.** Its last segment, `gpt-5-4-nano`, is in the lookup, which gives it image input and a window no larger than the 400,000 tokens the catalog reports.
 - **Set `contextWindowSize` and `modalities` for `claude/sonnet-5`.** Its last segment, `sonnet-5`, is not a name the lookup knows (the lookup has `claude-sonnet-5`), so without them the entry gets the generic 200K window and is treated as text-only. The example sets the 1,000,000-token `context_length` and the image input the catalog reports. The default output request stays below the output limit of both models.
 
+### UberLLM
+
+[UberLLM](https://uberllm.dev) serves models from many vendors (DeepSeek, Qwen, GLM, Kimi, Gemini, Claude and others) through an OpenAI-compatible endpoint at `https://api.uberllm.dev/v1` and authenticates with an API key sent as a Bearer token, so it works with the `openai` protocol and no extra code. Create a key in the [UberLLM dashboard](https://uberllm.dev/dashboard/keys). Model ids are vendor-prefixed (`deepseek/deepseek-v4.1-flash`, `qwen/qwen3-coder`); the current ids, context windows, output limits and input modalities are listed in the public catalog at `https://api.uberllm.dev/v1/models`.
+
+```json
+{
+  "env": {
+    "UBERLLM_API_KEY": "<your UberLLM API key>"
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "deepseek/deepseek-v4.1-flash",
+        "name": "DeepSeek V4.1 Flash (UberLLM)",
+        "envKey": "UBERLLM_API_KEY",
+        "baseUrl": "https://api.uberllm.dev/v1",
+        "generationConfig": { "modalities": { "image": true } }
+      },
+      {
+        "id": "qwen/qwen3-coder",
+        "name": "Qwen3 Coder 480B (UberLLM)",
+        "envKey": "UBERLLM_API_KEY",
+        "baseUrl": "https://api.uberllm.dev/v1",
+        "generationConfig": { "contextWindowSize": 256000 }
+      }
+    ]
+  },
+  "security": { "auth": { "selectedType": "openai" } },
+  "model": { "name": "deepseek/deepseek-v4.1-flash" }
+}
+```
+
+Things to know about this endpoint:
+
+- **Set `modalities` from the catalog.** The catalog lists `deepseek/deepseek-v4.1-flash` with text and image input, but without `modalities.image` Qwen Code treats it as text-only and the model never receives the image from `read_file`. The example sets it explicitly; for any other id, use its `input_modalities` from the catalog.
+- **Pin `contextWindowSize` when the catalog says less.** A `vendor/model` id resolves to its base id, so it inherits that id's built-in entry when one exists and otherwise falls through to the generic family row. `deepseek/deepseek-v4.1-flash` inherits a 1,000,000-token window, below the 1,048,576 UberLLM serves, so it needs no pin. `qwen/qwen3-coder` has no entry of its own and lands on the generic Qwen row (262,144-token window, 32,768-token output), while UberLLM serves a 256,000-token window, so the example pins the window; the 32,768 output cap is below the 65,536 served, so it needs no change. For any other id, compare the catalog `context_length` with what the lookup resolves.
+
 ### OpenAI Responses API (`openai-responses`)
 
 Use `openai` with `wireApi: "responses"` to target OpenAI's `/v1/responses` endpoint. When the endpoint returns encrypted reasoning with visible thought text, it replays prior-turn reasoning across turns and `--resume` via `reasoning.encrypted_content`. Compatible endpoints that stream `response.reasoning_text.delta` also display their reasoning, but endpoints without `encrypted_content` cannot replay the opaque reasoning state. Use `reasoning.effort` (not `extra_body.enable_thinking`, which the Chat Completions wires use) to control reasoning intensity.
