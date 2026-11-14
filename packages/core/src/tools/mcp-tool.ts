@@ -466,6 +466,14 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     return false;
   }
 
+  /** This invocation's own connection status, falling back to the shared name. */
+  private connectionStatus(): MCPServerStatus | undefined {
+    return (
+      getMCPConnectionStatus(this.mcpClient) ??
+      getMCPServerStatus(this.serverName)
+    );
+  }
+
   private async attemptReconnect(): Promise<DiscoveredMCPTool | null> {
     if (!this.cliConfig) {
       return null;
@@ -498,13 +506,18 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * An abort tore this transport down. Do not wait for the disconnect: the
-   * cancelled invocation must reject immediately, and the transport reports
-   * the failure later. Watch the status registry and repair when the server
-   * actually leaves `CONNECTED`, leaving a session that survives the cancel
-   * with a live connection instead of a dead one (issue #12160).
+   * An abort tore this transport down. The cancelled invocation must reject
+   * immediately and the transport usually reports the failure one round trip
+   * later, so watch the status registry and repair when the server actually
+   * leaves `CONNECTED` (issue #12160). A transport error can also surface
+   * before the abort rejects the call, which leaves no later transition to
+   * watch — `statusAtCall` is what this invocation's connection reported
+   * before the call went out, so a drop from that live state is repaired
+   * directly.
    */
-  private repairConnectionOnDisconnectAfterAbort(): void {
+  private repairConnectionOnDisconnectAfterAbort(
+    statusAtCall: MCPServerStatus | undefined,
+  ): void {
     if (!this.cliConfig) {
       return;
     }
@@ -524,9 +537,21 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     // tracked; the name is only the fallback for legacy single-connection
     // paths.
     const connection: object | undefined = this.mcpClient;
-    const currentStatus = () =>
-      getMCPConnectionStatus(connection) ?? getMCPServerStatus(this.serverName);
-    let wasConnected = currentStatus() === MCPServerStatus.CONNECTED;
+    const status = this.connectionStatus();
+    // The transport reported the drop before this catch ran, so no later
+    // transition is coming to fire the latch below. Only a connection that
+    // was live when the call started is this abort's damage — one that was
+    // already down belongs to whoever dropped it, and repairing it here would
+    // resurrect a transport this invocation never had.
+    if (
+      statusAtCall === MCPServerStatus.CONNECTED &&
+      status === MCPServerStatus.DISCONNECTED &&
+      !isMCPServerTeardownIntent(this.serverName)
+    ) {
+      void this.attemptReconnect().catch(() => undefined);
+      return;
+    }
+    let wasConnected = status === MCPServerStatus.CONNECTED;
     const detach = () => {
       clearTimeout(expiry);
       removeMCPStatusChangeListener(listener);
@@ -589,6 +614,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   private async handleReconnectOnError(
     error: unknown,
     signal: AbortSignal,
+    statusAtCall: MCPServerStatus | undefined,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
     debugLogger.error(`MCP server error '${this.serverName}': ${error}`);
@@ -601,7 +627,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       // so a read at this point always sees the stale `connected` value.
       // Repair on the later transition instead, and never make this
       // invocation's rejection wait for a reconnect (issue #12160).
-      this.repairConnectionOnDisconnectAfterAbort();
+      this.repairConnectionOnDisconnectAfterAbort(statusAtCall);
       throw error;
     }
 
@@ -799,6 +825,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       }
     };
 
+    const statusAtCall = this.connectionStatus();
+
     try {
       // Start the idle timeout
       resetIdleTimeout();
@@ -917,7 +945,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           // The App branch classifies the abort before reaching
           // handleReconnectOnError, so arm the same repair here or an aborted
           // App call keeps the dead transport for the health monitor's budget.
-          this.repairConnectionOnDisconnectAfterAbort();
+          this.repairConnectionOnDisconnectAfterAbort(statusAtCall);
           throw createToolCallAbortError();
         }
         if (
@@ -947,7 +975,12 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           ToolErrorType.EXECUTION_TIMEOUT,
         );
       }
-      return this.handleReconnectOnError(error, signal, updateOutput);
+      return this.handleReconnectOnError(
+        error,
+        signal,
+        statusAtCall,
+        updateOutput,
+      );
     } finally {
       // Clear the idle timeout in all cases
       if (idleTimeoutId) {
@@ -1193,6 +1226,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       },
     ];
     const parentAbortRace = createParentAbortRace(signal);
+    const statusAtCall = this.connectionStatus();
 
     // Race MCP tool call with abort signal to respect cancellation
     try {
@@ -1231,7 +1265,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           ToolErrorType.EXECUTION_TIMEOUT,
         );
       }
-      return this.handleReconnectOnError(error, signal);
+      return this.handleReconnectOnError(error, signal, statusAtCall);
     } finally {
       parentAbortRace.dispose();
     }

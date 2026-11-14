@@ -3477,6 +3477,7 @@ describe('DiscoveredMCPTool', () => {
           ensureTool: vi.fn(),
         }),
       };
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
       const abortController = new AbortController();
       const executePromise = exec(
         mkTool({ trust: true, config: mockConfig, client }),
@@ -3484,19 +3485,56 @@ describe('DiscoveredMCPTool', () => {
         abortController.signal,
       );
 
+      // The transport reports the drop while the call is still pending, then
+      // the caller aborts. No later transition is coming, so the repair has
+      // to run on the already-reported state or the dead transport survives.
       updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
       abortController.abort();
 
       const rejection = await executePromise.catch((error) => error);
       expect(rejection).toMatchObject({ name: 'AbortError' });
-      // Repaired, not replayed: the cancelled request is not re-issued, and
-      // the repair runs detached from this rejection, so nothing reconnects
-      // before the transport has actually reported the teardown (#12160).
-      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(discoverToolsForServer).toHaveBeenCalledTimes(1);
       expect(client.callTool).toHaveBeenCalledTimes(1);
       expect(rejection).not.toMatchObject({
         errorType: ToolErrorType.EXECUTION_TIMEOUT,
       });
+    });
+
+    it('leaves a connection that was already down before the call alone', async () => {
+      const requestCancelled = coded('Request cancelled');
+      const discoverToolsForServer = vi.fn();
+      const client: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          (_params, options) =>
+            new Promise((_resolve, reject) => {
+              options?.signal?.addEventListener(
+                'abort',
+                () => reject(requestCancelled),
+                { once: true },
+              );
+            }),
+        ),
+      };
+      const mockConfig = {
+        getToolRegistry: () => ({
+          discoverToolsForServer,
+          ensureTool: vi.fn(),
+        }),
+      };
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      const abortController = new AbortController();
+      const executePromise = exec(
+        mkTool({ trust: true, config: mockConfig, client }),
+        'test',
+        abortController.signal,
+      );
+
+      abortController.abort();
+
+      const rejection = await executePromise.catch((error) => error);
+      expect(rejection).toMatchObject({ name: 'AbortError' });
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(client.callTool).toHaveBeenCalledTimes(1);
     });
 
     it('does not classify a direct -32001 that races with a parent abort as a timeout', async () => {
