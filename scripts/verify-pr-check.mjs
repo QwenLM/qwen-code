@@ -825,16 +825,21 @@ function main(argv) {
   let expectedHead = null;
   let snapshotWarning = null;
   let snapshotPath = null;
-  // The waiver's approval permalink is checked against the round's own
-  // coordinates when the snapshot carries them; without them only the
-  // URL shape is checkable.
+  // The waiver's approval permalink is checked against the round's
+  // coordinates ONLY when they come from the host-held --context snapshot:
+  // the artifact directory is writable by the PR code the round executed,
+  // so its own context.json must not supply the coordinates that judge its
+  // waiver. Without a trusted snapshot only the URL shape is checkable.
   const dirPrNumber = /^pr(\d+)-verify-/.exec(basename(resolve(dir)))?.[1];
   const coordinatesFrom = (snapshot) => {
     const repoMatch = /^([\w.-]+)\/([\w.-]+)$/.exec(snapshot?.repo ?? '');
+    const pr =
+      Number.isInteger(snapshot?.pr) && snapshot.pr > 0 ? snapshot.pr : null;
     const number =
-      Number.isInteger(snapshot?.pr) && snapshot.pr > 0
-        ? snapshot.pr
-        : Number(dirPrNumber) || null;
+      pr ??
+      (Number.isInteger(snapshot?.number) && snapshot.number > 0
+        ? snapshot.number
+        : Number(dirPrNumber) || null);
     return repoMatch && number
       ? { owner: repoMatch[1], repo: repoMatch[2], number }
       : null;
@@ -877,7 +882,8 @@ function main(argv) {
         } else {
           snapshotWarning = `snapshot ${snapshotPath} has no valid head OID; the head-OID check fell back to presence-only`;
         }
-        coordinates = coordinatesFrom(snapshot);
+        // No coordinates from the artifact's own context.json: it is
+        // PR-writable, so it cannot be the input that judges the waiver.
       } catch {
         snapshotWarning = `snapshot ${snapshotPath} is unreadable; the head-OID check fell back to presence-only`;
       }

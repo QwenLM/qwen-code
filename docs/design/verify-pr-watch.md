@@ -76,11 +76,14 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   start and every first deferral consumes the next sequence number (the
   high-water mark persists in the state, so a completed round's seq is
   never reused), the
-  list is kept in `seq` order (the tail is the newest push), and starting
-  a deferred head supersedes every entry with a lower `seq` — events
-  arrive in push order, so an older deferred head would spend a full round
-  on a commit the started one already contains. Legacy entries without a
-  `seq` sort first and are never superseded. A redelivery updates the
+  list is kept in `seq` order (the tail is the newest push), and a start
+  supersedes every entry with a lower `seq` — whether or not the started
+  head was itself deferred: events arrive in push order, so an older
+  deferred head would spend a full round on a commit the started one
+  already contains. Legacy entries without a `seq` sort first and are
+  never superseded, and a seq-less entry stays seq-less through
+  redelivery, start and re-defer — handing it the highest seq would
+  present an older head as the newest push. A redelivery updates the
   entry in place, keeping its original `seq`, so a redelivered older head
   cannot outrank a newer push. A redelivery of the in-flight head itself
   is simply skipped: the running round answers it. The local recipe's clone, base copy, proxy files and
@@ -111,9 +114,13 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   marker is refused, and a completion from a round older than the one that
   already answered for the head is refused as stale — neither strands the
   real marker nor overwrites the newer verdict and comment id. A
-  completion for a head that was never started, deferred or answered is
-  refused too: filing it would permanently dedup a commit no round
-  reviewed.
+  completion needs an in-flight marker or an earlier verdict: a deferred
+  entry is not a registration — a deferred head was refused because
+  another round was in flight, so it must be started (which clears its
+  entry) before it can be completed, or a commit no round reviewed would
+  be permanently deduped. A replayed inconclusive completion, whose
+  marker is already released, is refused here too instead of counting a
+  second retry.
   `inconclusive` releases the marker without filing the head as verified
   and **re-defers the head at its original `seq`**, so the completion
   output names it again — the start call already consumed its only event —
@@ -121,7 +128,9 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   re-defer counts retries: the watch prompt retries once, and a second
   inconclusive makes the head terminal — the output names it as not
   covered after repeated inconclusive rounds, not as awaiting a round, and
-  the prompt reports it under _Not covered_ instead of looping. A head
+  the prompt reports it under _Not covered_ instead of looping. A newer
+  push supersedes the terminal entry like any older deferral: the newer
+  round covers the commit. A head
   that already keeps an earlier verdict is not re-deferred: it keeps that
   verdict and its dedup. A late completion for a _different_ head changes
   the top-level view but erases no verification. A corrupt state body is

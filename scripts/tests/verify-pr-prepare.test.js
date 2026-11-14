@@ -778,6 +778,11 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     const context = JSON.parse(readFileSync(contextPath, 'utf8'));
     expect(context.baseRefOid).toBe(base);
     expect(context.headRefOid).toBe(head);
+    // The host-held snapshot carries the slug: the checker's waiver
+    // coordinate check reads it from --context, and gh's field selector
+    // has no repo member, so prepare adds it where the snapshot is written.
+    expect(context.repo).toBe(REPO);
+    expect(context.number).toBe(42);
     const artifacts = result.stdout.match(/artifacts {2}(\S+)/)?.[1];
     expect(artifacts).toMatch(/pr42-verify-\d{8}-\d{6}$/);
     expect(existsSync(join(artifacts, 'evidence'))).toBe(true);
@@ -1023,6 +1028,52 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     // Without --artifact-dir the gate still passes but writes nothing.
     const noDir = runPrepare(dir, ['--require-isolation'], env);
     expect(noDir.status).toBe(0);
+  });
+
+  // A failed re-run must not leave an earlier pass's record behind: the
+  // checker would still accept the container declaration against evidence
+  // that predates the refusal.
+  it('a failed gate re-run invalidates the earlier passing record', () => {
+    const { dir } = makeRepo();
+    const art = makeTmpDir();
+    const env = {
+      PATH: process.env.PATH ?? '',
+      HOME: makeTmpDir(),
+      SANDBOX: 'docker',
+      QWEN_VERIFY_CREDENTIAL_FREE: '1',
+    };
+    const passed = runPrepare(
+      dir,
+      ['--require-isolation', '--artifact-dir', art],
+      env,
+    );
+    expect(passed.status).toBe(0);
+    expect(existsSync(join(art, 'boundary-gate.json'))).toBe(true);
+    // Re-run with a credential signal: exit 4 AND the record is gone.
+    const failed = runPrepare(
+      dir,
+      ['--require-isolation', '--artifact-dir', art],
+      { ...env, OPENAI_API_KEY: 'sk-test' },
+    );
+    expect(failed.status).toBe(4);
+    expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
+    // The no-marker refusal invalidates too (skip on an ambiently
+    // isolated host, where removing SANDBOX still leaves a marker).
+    if (!detectIsolation({ ...env, SANDBOX: '' }).isolated) {
+      const passedAgain = runPrepare(
+        dir,
+        ['--require-isolation', '--artifact-dir', art],
+        env,
+      );
+      expect(passedAgain.status).toBe(0);
+      const noMarker = runPrepare(
+        dir,
+        ['--require-isolation', '--artifact-dir', art],
+        { ...env, SANDBOX: '' },
+      );
+      expect(noMarker.status).toBe(4);
+      expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
+    }
   });
 
   // A filesystem failure on the record write is the documented exit-3

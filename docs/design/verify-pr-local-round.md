@@ -116,9 +116,12 @@ silent:
   — the record a passing `verify-pr-prepare.mjs --require-isolation
   --artifact-dir <round-dir>` writes, corroborating the gate run behind the
   declaration; the waiver's `approval` must be a GitHub comment
-  permalink a reader can open, not free text, and when the round's
-  coordinates are available the permalink must cite that round's own PR.
-  The CI publish job writes the
+  permalink a reader can open, not free text, and the maintainer is its
+  sole author — the round never posts the comment it cites. When the
+  host-held `--context` snapshot carries the repo slug and the PR number
+  (prepare writes the slug into it), the permalink must cite that round's
+  own PR; the artifact directory's own `context.json` never supplies these
+  coordinates, because it is PR-writable. The CI publish job writes the
   CI lane's own declaration and `ci-lane` gate record before running the
   checker, so the round's own copy does not decide the check and older
   base-pinned skills still pass. The artifact tree is PR-writable and

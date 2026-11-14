@@ -681,7 +681,14 @@ function main(argv) {
   } catch (error) {
     return fail(3, `could not create the artifact directory: ${error.message}`);
   }
-  writeFileSync(contextPath, `${JSON.stringify(snapshot, null, 2)}\n`);
+  // The host-held snapshot carries the slug too: the checker compares a
+  // waiver's approval permalink against these coordinates, and gh's field
+  // selector has no repo member, so it is added where the snapshot is
+  // written, not to FIELDS.
+  writeFileSync(
+    contextPath,
+    `${JSON.stringify({ ...snapshot, repo: slug }, null, 2)}\n`,
+  );
   // Best-effort, like the lane: the round reads a missing file as "review
   // state unknown", so an earlier prepare's copy must not outlive a failed
   // fetch.
@@ -760,6 +767,20 @@ function main(argv) {
  * code that forges it; the CI publisher writes its own lane record.)
  */
 function requireBoundary(artifactDir = null) {
+  const recordPath = artifactDir
+    ? join(artifactDir, 'boundary-gate.json')
+    : null;
+  // A failed re-run must not leave an earlier pass's record behind: the
+  // checker would still accept the container declaration against evidence
+  // that predates the refusal. Every non-pass exit invalidates the record.
+  const invalidateRecord = () => {
+    if (!recordPath) return;
+    try {
+      rmSync(recordPath, { force: true });
+    } catch {
+      // Best-effort; the refusal exit is the contract.
+    }
+  };
   const isolation = detectIsolation();
   const credentials = detectCredentialSignals();
   const attested = process.env[CREDENTIAL_FREE_ATTESTATION] === '1';
@@ -771,6 +792,7 @@ function requireBoundary(artifactDir = null) {
     process.stderr.write(
       `verify-pr boundary: ${detail} — do not execute PR code in this process\n`,
     );
+    invalidateRecord();
     return 4;
   }
 
@@ -789,6 +811,7 @@ function requireBoundary(artifactDir = null) {
     process.stderr.write(
       `verify-pr boundary: ${isolation.signals.join(', ')} but ${refusals.join('; ')} — do not execute PR code here\n`,
     );
+    invalidateRecord();
     return 4;
   }
   if (artifactDir) {
@@ -799,15 +822,14 @@ function requireBoundary(artifactDir = null) {
       signals: isolation.signals,
       credentialFree: true,
     };
-    const path = join(artifactDir, 'boundary-gate.json');
-    const tmp = `${path}.${process.pid}.tmp`;
+    const tmp = `${recordPath}.${process.pid}.tmp`;
     // A filesystem failure here is the documented exit-3 path, not an
     // uncaught throw after the pass line: a driver keyed on exit 4 must
     // not proceed on a pass the record never landed.
     try {
       mkdirSync(artifactDir, { recursive: true });
       writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`);
-      renameSync(tmp, path);
+      renameSync(tmp, recordPath);
     } catch (error) {
       try {
         rmSync(tmp, { force: true });
@@ -815,6 +837,7 @@ function requireBoundary(artifactDir = null) {
         // Best-effort: force only covers ENOENT, and a cleanup failure
         // (ENOTDIR on a non-directory parent) must not mask the original.
       }
+      invalidateRecord();
       return fail(3, `could not write the gate record: ${error.message}`);
     }
   }

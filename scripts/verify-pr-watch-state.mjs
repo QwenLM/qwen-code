@@ -40,7 +40,8 @@
  * recorded in `deferredHeads`: the watch gate's cursor already advanced
  * past it, so no second event arrives, and `--complete` names the deferred
  * heads so the caller can start the latest one. Each start and first
- * deferral consumes a monotonic `seq` in push order; the list is kept in
+ * deferral consumes a monotonic `seq` in push order (legacy seq-less
+ * entries excepted — they stay seq-less); the list is kept in
  * seq order and the supersede filter keys on it, never on the write clock.
  * `--complete` removes only its own round's in-flight entry (matched by
  * head and round) and upserts its verified entry, except for
@@ -49,8 +50,10 @@
  * names it again (a head that already keeps an earlier verdict is not
  * re-deferred). The re-defer counts retries: a second inconclusive makes
  * the head terminal, named as not covered rather than awaiting a round.
- * A completion for a head that was never started, deferred or answered is
- * refused. The top-level `verifiedHead`/`previousHead` view reflects the
+ * A completion needs an in-flight marker or an earlier verdict: a deferred
+ * head must be started before it can be completed, and a replayed
+ * inconclusive completion is refused rather than counting a second retry.
+ * The top-level `verifiedHead`/`previousHead` view reflects the
  * most recent completion. `--release --head <oid>` is the recovery path
  * for a round that died after `--start`: it removes only the named head's
  * in-flight entry and refuses a head with no entry, including when no
@@ -374,8 +377,10 @@ export function startRound(
       if (duplicate === 'in-flight' && !sameCommit(blocker, head)) {
         // A redelivery updates the entry in place, keeping its original
         // seq (push order) and retry count; a first deferral consumes the
-        // next seq. The list is kept in seq order so the tail is the
-        // newest push, not the newest write.
+        // next seq. A seq-less legacy entry stays seq-less — handing it
+        // the highest seq would present an older head as the newest push.
+        // The list is kept in seq order so the tail is the newest push,
+        // not the newest write.
         const prior = deferredEntries(existing);
         const at = prior.findIndex((e) => sameCommit(e.head, head));
         const entry = {
@@ -386,8 +391,7 @@ export function startRound(
             at >= 0
               ? (prior[at].deferredAt ?? now.toISOString())
               : now.toISOString(),
-          seq:
-            at >= 0 ? (prior[at].seq ?? nextSeq(existing)) : nextSeq(existing),
+          seq: at >= 0 ? prior[at].seq : nextSeq(existing),
           retries: at >= 0 ? (prior[at].retries ?? 0) : 0,
         };
         const deferred = (
@@ -402,7 +406,7 @@ export function startRound(
           verifiedHeads: verifiedEntries(existing),
           inFlightHeads: inFlightEntries(existing),
           deferredHeads: deferred,
-          seqCounter: Math.max(existing?.seqCounter ?? 0, entry.seq),
+          seqCounter: Math.max(existing?.seqCounter ?? 0, entry.seq ?? 0),
         });
         writeState(stateRoot, pr, state);
       }
@@ -413,25 +417,24 @@ export function startRound(
       };
     }
     const startedAt = now.toISOString();
-    // Starting a deferred head supersedes every head deferred before it
-    // (lower seq): events arrive in push order, so an older deferred head
-    // would spend a full round on a commit the started one already
-    // contains. Legacy entries without a seq are never superseded. A head
-    // that was never deferred keeps the list intact. The marker carries
-    // the seq and retry count so an inconclusive completion can re-defer
-    // the head at its original push-order position.
+    // A start supersedes every deferred head with a lower seq — whether
+    // or not the started head was itself deferred: events arrive in push
+    // order, so an older deferred head would spend a full round on a
+    // commit the started one already contains. Legacy entries without a
+    // seq are never superseded, and a legacy head being started stays
+    // seq-less so it cannot present itself as the newest push. The marker
+    // carries the seq and retry count so an inconclusive completion can
+    // re-defer the head at its original push-order position.
     const priorDeferred = deferredEntries(existing);
     const own = priorDeferred.find((entry) => sameCommit(entry.head, head));
-    const seq = own?.seq ?? nextSeq(existing);
-    const deferredHeads = (
-      own && own.seq != null
-        ? priorDeferred.filter(
-            (entry) =>
-              !sameCommit(entry.head, head) &&
-              (entry.seq == null || entry.seq > own.seq),
-          )
-        : priorDeferred.filter((entry) => !sameCommit(entry.head, head))
-    ).sort(bySeq);
+    const seq = own ? (own.seq ?? null) : nextSeq(existing);
+    const deferredHeads = priorDeferred
+      .filter(
+        (entry) =>
+          !sameCommit(entry.head, head) &&
+          (entry.seq == null || entry.seq > (seq ?? 0)),
+      )
+      .sort(bySeq);
     const state = deriveView({
       pr,
       repo: repo ?? existing?.repo ?? null,
@@ -450,7 +453,7 @@ export function startRound(
       round,
       artifactDir,
       startedAt,
-      seqCounter: Math.max(existing?.seqCounter ?? 0, seq),
+      seqCounter: Math.max(existing?.seqCounter ?? 0, seq ?? 0),
     });
     return { path: writeState(stateRoot, pr, state), state };
   });
@@ -508,16 +511,15 @@ export function completeRound(
         };
       }
     }
-    // A verdict needs a registered head: an in-flight marker, an earlier
-    // verdict, or a deferred entry (the fallback that completes a deferred
-    // head without a prior start). A head none of these name was never
-    // started or refused — filing it would permanently dedup a commit no
-    // round reviewed (a stale OID after a force-push, the base sha).
-    if (
-      !ownFlight &&
-      !prior &&
-      !deferredEntries(existing).some((entry) => sameCommit(entry.head, head))
-    ) {
+    // A verdict needs a head some round actually ran: an in-flight marker
+    // or an earlier verdict. A deferred entry is NOT a registration — a
+    // deferred head was refused because another round was in flight, so
+    // completing it would permanently dedup a commit no round reviewed.
+    // A deferred head must be started (which clears its entry) before it
+    // can be completed; a replayed inconclusive completion, whose marker
+    // is already released, is refused here too instead of counting a
+    // second retry.
+    if (!ownFlight && !prior) {
       return { unregistered: true, path: statePath(stateRoot, pr) };
     }
     const dir = artifactDir ?? ownFlight?.artifactDir ?? null;
@@ -539,17 +541,17 @@ export function completeRound(
               completedAt,
             },
           ];
-    // A completed head no longer awaits a round — including the fallback
-    // path that completes a deferred head without a prior start, which
-    // would otherwise leave it named by every later --complete. An
-    // inconclusive completion files no verdict: its head is re-deferred so
-    // a later command names it again (the probe's cursor already advanced
-    // in the start call, so no second event arrives) — unless an earlier
-    // round already verified it, in which case the head keeps that verdict
-    // and its dedup, and is not re-deferred. The re-defer carries the
-    // marker's seq back onto the entry so the head keeps its push-order
-    // position instead of outranking heads pushed after it, and counts the
-    // retry: a second inconclusive makes the head terminal (not covered).
+    // A completed head no longer awaits a round. An inconclusive
+    // completion files no verdict: its head is re-deferred so a later
+    // command names it again (the probe's cursor already advanced in the
+    // start call, so no second event arrives) — unless an earlier round
+    // already verified it, in which case the head keeps that verdict and
+    // its dedup, and is not re-deferred. The re-defer carries the marker's
+    // seq back onto the entry so the head keeps its push-order position
+    // instead of outranking heads pushed after it; a seq-less legacy head
+    // stays seq-less so it sorts first and is never presented as newest.
+    // The re-defer counts the retry: a second inconclusive makes the head
+    // terminal (not covered).
     let deferred;
     let keptVerdict = false;
     let seqCounter = existing?.seqCounter ?? 0;
@@ -562,7 +564,7 @@ export function completeRound(
         const ownDeferred = priorDeferred.find((entry) =>
           sameCommit(entry.head, head),
         );
-        const seq = ownFlight?.seq ?? ownDeferred?.seq ?? nextSeq(existing);
+        const seq = ownFlight?.seq ?? ownDeferred?.seq ?? null;
         deferred = priorDeferred.filter(
           (entry) => !sameCommit(entry.head, head),
         );
@@ -575,7 +577,7 @@ export function completeRound(
           retries: (ownFlight?.retries ?? ownDeferred?.retries ?? 0) + 1,
         });
         deferred.sort(bySeq);
-        seqCounter = Math.max(existing?.seqCounter ?? 0, seq);
+        seqCounter = Math.max(existing?.seqCounter ?? 0, seq ?? 0);
       }
     } else {
       deferred = deferredEntries(existing).filter(
@@ -680,7 +682,8 @@ A head refused while another round runs is recorded as deferred; --complete
 and --release name the deferred heads so the caller can start the latest
 one. --complete must repeat the --start round: a mismatch, or a completion
 from a round older than the one already answered for the head, is refused
-(exit 3), as is a head that was never started, deferred or answered.
+(exit 3), as is a head with no in-flight marker and no earlier verdict — a
+deferred head must be started before it can be completed.
 --verdict inconclusive releases the marker without filing the head as
 verified and re-defers the head for the next round (a head that already
 keeps an earlier verdict is not re-deferred); a second inconclusive makes
@@ -739,7 +742,14 @@ function parseArgs(argv) {
       `--head is required and must be a 7-40 character hex OID\n\n${HELP}`,
     );
   }
-  if (!out.release && (!Number.isInteger(out.round) || out.round <= 0)) {
+  // --start and --complete require a round; --release may omit it
+  // (head-only release). A supplied value must be a positive integer on
+  // every verb, so a malformed release --round surfaces as a usage error,
+  // not a stale-round state conflict.
+  if (!out.release && out.round === null) {
+    throw new Error(`--round must be a positive integer\n\n${HELP}`);
+  }
+  if (out.round !== null && (!Number.isInteger(out.round) || out.round <= 0)) {
     throw new Error(`--round must be a positive integer\n\n${HELP}`);
   }
   if (out.start && !out.artifactDir) {
@@ -870,7 +880,7 @@ function main(argv) {
       }
       if (result.unregistered) {
         process.stderr.write(
-          `verify-pr watch-state: PR ${args.pr} head ${args.head} was never started, deferred or answered; refusing to file a verdict for an unregistered head (check --head and --state-root)\n`,
+          `verify-pr watch-state: PR ${args.pr} head ${args.head} has no in-flight marker and no earlier verdict; a deferred head must be started before it can be completed (check --head and --state-root)\n`,
         );
         return 3;
       }

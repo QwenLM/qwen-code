@@ -1320,11 +1320,20 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
       waiver('https://github.com/torvalds/linux/issues/1#issuecomment-1'),
       ['01-ab-cells.png'],
     );
+    // The coordinates must come from the HOST-HELD snapshot passed as
+    // --context — the invocation the skill's step 7 prescribes.
+    const hostSnapshot = join(tmpdir(), `verify-pr-coords-${Date.now()}.json`);
+    tmpDirs.push(hostSnapshot);
     writeFileSync(
-      join(dir, 'context.json'),
+      hostSnapshot,
       JSON.stringify({ repo: 'QwenLM/qwen-code', pr: 17185, headRefOid: HEAD }),
     );
-    const foreign = run(dir);
+    const withContext = (snapshot) =>
+      spawnSync(process.execPath, [SCRIPT, '--context', snapshot, dir], {
+        encoding: 'utf8',
+        env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+      });
+    const foreign = withContext(hostSnapshot);
     expect(foreign.status).toBe(1);
     expect(foreign.stdout).toMatch(
       /approval permalink cites torvalds\/linux#1, not this round's QwenLM\/qwen-code#17185/,
@@ -1339,9 +1348,71 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
         reason: 'Java battery needs the host JDK',
       }),
     );
-    const matching = run(dir);
+    const matching = withContext(hostSnapshot);
     expect(matching.status).toBe(0);
     expect(matching.stdout).toContain('ok: verdict=merge-ready');
+  });
+
+  // prepare's snapshot carries `number` (gh's field name), not `pr`, and
+  // the slug is added where prepare writes it: the documented invocation
+  // must fire the coordinate check with that shape too.
+  it('checks coordinates from a prepare-shaped snapshot (number, not pr)', () => {
+    const dir = makeArtifactDir(
+      validFiles({
+        boundary: JSON.stringify({
+          mode: 'waived',
+          by: 'maintainer',
+          approval: 'https://github.com/torvalds/linux/issues/1#issuecomment-1',
+          reason: 'why',
+        }),
+        report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\n**Boundary.** host, maintainer-approved waiver.\n`,
+      }),
+      ['01-ab-cells.png'],
+    );
+    const hostSnapshot = join(tmpdir(), `verify-pr-prep-${Date.now()}.json`);
+    tmpDirs.push(hostSnapshot);
+    writeFileSync(
+      hostSnapshot,
+      JSON.stringify({
+        number: 17185,
+        repo: 'QwenLM/qwen-code',
+        headRefOid: HEAD,
+      }),
+    );
+    const result = spawnSync(
+      process.execPath,
+      [SCRIPT, '--context', hostSnapshot, dir],
+      { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
+    );
+    expect(result.status).toBe(1);
+    expect(result.stdout).toMatch(
+      /approval permalink cites torvalds\/linux#1, not this round's QwenLM\/qwen-code#17185/,
+    );
+  });
+
+  // The artifact directory is PR-writable: its own context.json must NOT
+  // supply the coordinates that judge its waiver. Without --context the
+  // check stays shape-only, exactly as the failure path documents.
+  it('does not take coordinates from the artifact context.json', () => {
+    const dir = makeArtifactDir(
+      validFiles({
+        boundary: JSON.stringify({
+          mode: 'waived',
+          by: 'maintainer',
+          approval: 'https://github.com/torvalds/linux/issues/1#issuecomment-1',
+          reason: 'why',
+        }),
+        report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\n**Boundary.** host, maintainer-approved waiver.\n`,
+      }),
+      ['01-ab-cells.png'],
+    );
+    writeFileSync(
+      join(dir, 'context.json'),
+      JSON.stringify({ repo: 'QwenLM/qwen-code', pr: 17185, headRefOid: HEAD }),
+    );
+    const result = run(dir);
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toMatch(/approval permalink cites/);
   });
 });
 

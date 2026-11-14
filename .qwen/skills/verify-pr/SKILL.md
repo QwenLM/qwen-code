@@ -212,16 +212,18 @@ with exit 4. The two shapes:
   `{"mode":"container","detail":"<image, network policy, credential-free mount>"}`
   beside the gate's `boundary-gate.json`.
 - On the host: only after the maintainer **explicitly approves host execution
-  for this round** — ask once, in words; if the maintainer approves, they —
-  or the round, under the local publish path — record that approval as a PR
-  comment, and `approval` is that comment's permalink:
+  for this round** — ask once, in words; if the maintainer approves, **they**
+  record that approval as a PR comment (the round never authors the comment
+  it cites), and `approval` is that comment's permalink:
   `{"mode":"waived","by":"<maintainer>","approval":"<permalink to the maintainer's approval comment>","reason":"<why this round may run outside a boundary>"}`.
   The approval is a permalink a reader can open
   (`https://github.com/<owner>/<repo>/pull/<n>#issuecomment-<id>`), not free
   text — a verbal "yes" in the session is not the record; the comment is.
-  When the round's snapshot carries `repo` and `pr`, the checker also
-  compares the permalink's owner/repo/number against them: the approval
-  must be a comment on this round's PR, not any comment anywhere.
+  When the host-held snapshot passed as `--context` carries `repo` and the
+  PR number, the checker also compares the permalink's owner/repo/number
+  against them: the approval must be a comment on this round's PR, not any
+  comment anywhere. The round's own artifact-directory `context.json` never
+  supplies these coordinates — it is PR-writable.
   The invocation itself is not that approval, and a waiver never carries
   over to the next round unasked. If the maintainer declines, use the sandboxed
   lane. Measured case: two local rounds on PR #16866 ran the whole battery on
@@ -677,14 +679,16 @@ Exit 3 has several shapes, each with its own reaction:
   it once the state records a repo.
 
 Record the finished round with the same script's completion form:
-`node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--comment-id <id>]`
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--comment-id <id>] --repo <owner>/<repo>`
 — `--verdict` is one of `merge-ready | findings | blocked | inconclusive`,
 verbatim; a completion without it exits 2 and leaves the head in flight
 forever. A completion whose `--round` differs from the in-flight marker, or
 from a round that already answered for the head, is refused (exit 3) rather
 than stranding the marker or overwriting the newer verdict; so is a
-completion for a head that was never started, deferred or answered — check
-`--head` and `--state-root` rather than filing a verdict for a stranger.
+completion for a head with no in-flight marker and no earlier verdict — a
+deferred head must be **started** before it can be completed, and a replayed
+inconclusive completion is refused rather than counting a second retry.
+Check `--head` and `--state-root` rather than filing a verdict for a stranger.
 `inconclusive` releases the marker without filing the head as verified and
 **re-defers the head at its original push-order position**, so the
 completion output names it for the next round: retry it once. A second
@@ -697,7 +701,7 @@ output names **deferred heads awaiting a round**, start the latest one as
 the next round through the same `--start` flow — that is the only event
 those heads will ever get; starting it supersedes older deferred heads. If
 a round dies after `--start`, recover its marker with
-`node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>]`
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --repo <owner>/<repo>`
 before starting the next round for that head — never hand-edit the state
 file. A supplied `--round` must match the marker's round, so a retried
 recovery cannot delete a newer round's live marker for the same head. The
@@ -875,7 +879,7 @@ ambiguous rather than verify a guessed PR. Then, in order:
    `--complete` and `--release` too. When the in-flight
    round is dead (killed session, OOM, aborted turn), nothing will answer:
    recover the marker with
-   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head>`
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> --repo <owner>/<repo>`
    — the head the exit-3 message names as in flight, which under
    one-round-per-PR may be a different head than `H`; releasing `H` itself
    is refused when it holds no marker — and start again. The release keeps
@@ -884,7 +888,7 @@ ambiguous rather than verify a guessed PR. Then, in order:
    **before** the round starts — the same write-before-start rule the watch
    prompt follows, so a watch fire during the manual round skips `H`. Once
    the round completes, record it with
-   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--comment-id <id>]`.
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--comment-id <id>] --repo <owner>/<repo>`.
    A completion whose `--round` differs from the marker, or from a round
    that already answered for `H`, is refused (exit 3).
    Measured case: two consecutive rounds skipped the hand-written completion

@@ -6632,15 +6632,16 @@ describe('qwen-triage verify hardening round 2', () => {
     );
     // Under one-round-per-PR the blocking marker may belong to another
     // head: recovery releases the head the error names, not `H` itself.
+    // Both forms carry --repo: the guard refuses them without it (D9-1).
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --release --head <blocking head>',
+      'verify-pr-watch-state.mjs <n> --release --head <blocking head> --repo <owner>/<repo>',
     );
     expect(flat).toContain('the head the exit-3 message names as in flight');
     expect(flat).toContain(
       'the same write-before-start rule the watch prompt follows',
     );
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word>',
+      'verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--comment-id <id>] --repo <owner>/<repo>',
     );
     // Registration is a step of its own ahead of the round, not an
     // afterthought behind it.
@@ -6704,8 +6705,10 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --artifact-dir <dir> --repo <owner>/<repo>',
     );
+    // The completion and release forms carry --repo too: the guard
+    // refuses a registered round's completion without it (D9-1).
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word>',
+      'verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--comment-id <id>] --repo <owner>/<repo>',
     );
     // The duty, not just the command string: deleting the consequence
     // sentence while keeping the command must go red too.
@@ -6714,7 +6717,7 @@ describe('qwen-triage verify hardening round 2', () => {
       'a completion without it exits 2 and leaves the head in flight forever',
     );
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --release --head <headSha>',
+      'verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --repo <owner>/<repo>',
     );
     // The state root is the trusted clone's main worktree, and <dir> is
     // the directory prepare printed — not a value invented at registration.
@@ -6781,7 +6784,12 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(prompt).toContain(
       'deferred heads not covered after repeated inconclusive rounds',
     );
-    expect(prompt).toContain('never started, deferred or answered');
+    expect(prompt).toContain(
+      'a deferred head must be **started** before it can be completed',
+    );
+    expect(prompt).toContain(
+      'a replayed inconclusive completion is refused rather than counting a second retry',
+    );
     expect(prompt).toContain(
       "A supplied `--round` must match the marker's round",
     );
@@ -6858,10 +6866,19 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       '{"mode":"waived","by":"<maintainer>","approval":"<permalink to the maintainer\'s approval comment>","reason":"<why this round may run outside a boundary>"}',
     );
-    // The waiver's approval channel is named: the maintainer (or the round
-    // under the local publish path) posts the comment the permalink points at.
+    // The maintainer is the sole author of the approval comment: the
+    // round never posts the comment it cites (N9-1).
     expect(flat).toContain(
-      'or the round, under the local publish path — record that approval as a PR comment',
+      'if the maintainer approves, **they** record that approval as a PR comment (the round never authors the comment it cites)',
+    );
+    expect(flat).not.toContain('or the round, under the local publish path');
+    // The coordinate check reads the host-held --context snapshot, never
+    // the PR-writable artifact context.json (R9-1).
+    expect(flat).toContain(
+      'When the host-held snapshot passed as `--context` carries `repo` and the PR number',
+    );
+    expect(flat).toContain(
+      "The round's own artifact-directory `context.json` never supplies these coordinates — it is PR-writable",
     );
     // The completion duty is a top-level paragraph, not folded into the
     // last exit-3 bullet by a two-space indent.
