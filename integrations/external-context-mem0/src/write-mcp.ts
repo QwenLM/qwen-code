@@ -16,10 +16,13 @@ import type { RememberProvider } from './types.js';
 export function createMem0WriteMcpServer(
   remember: RememberProvider,
 ): McpServer {
-  const server = new McpServer({
-    name: 'external-context-mem0-write',
-    version: '0.1.0',
-  });
+  const server = new McpServer(
+    {
+      name: 'external-context-mem0-write',
+      version: '0.1.0',
+    },
+    { maxToolInputElements: 100_000 },
+  );
   server.registerTool(
     'context_remember',
     {
