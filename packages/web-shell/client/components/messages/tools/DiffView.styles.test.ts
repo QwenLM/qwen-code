@@ -52,9 +52,9 @@ describe('DiffView text wrapping styles', () => {
     expect(rules[0]!.selector).toBe('.content');
     expect(rules[0]!.parent).toBe(root);
     expect(declarations(rules[0]!)).toEqual([
-      'min-width: 0',
       'white-space: pre-wrap',
       'overflow-wrap: anywhere',
+      'min-width: 0',
     ]);
   });
 
