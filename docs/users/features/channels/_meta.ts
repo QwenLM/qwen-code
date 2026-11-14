@@ -6,6 +6,7 @@ export default {
   'dingtalk-webhook': 'DingTalk Webhook Sending',
   dws: 'DingTalk Workspace',
   wecom: 'WeCom',
+  'wecom-webhook': 'WeCom Webhook Sending',
   'wecom-callback': 'WeCom Callback',
   feishu: 'Feishu',
   'feishu-webhook': 'Feishu Webhook Sending',
