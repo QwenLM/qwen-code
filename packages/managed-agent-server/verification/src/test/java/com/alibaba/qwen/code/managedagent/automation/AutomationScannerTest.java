@@ -228,6 +228,34 @@ class AutomationScannerTest {
     }
 
     @Test
+    void listSessionPagesWithACursorUnderTheLiveStateBind() {
+        // A limit below the live capacity forces hasMore and a nextCursor, so
+        // the cursor arm of the query (which carries the live-state bind in a
+        // different positional order than the first-page arm) is exercised.
+        List<String> created = new java.util.ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            created.add(service.create(tenant, ACTOR,
+                    "iso-page-" + UUID.randomUUID(),
+                    new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                            "UTC", "Run it.", null, "skip", "none", null, true))
+                    .body().id());
+        }
+        PublicList<PublicAutomation> first = service.listSession(tenant,
+                sessionId, null, 2);
+        assertThat(first.data()).hasSize(2);
+        assertThat(first.hasMore()).isTrue();
+        assertThat(first.nextCursor()).isNotNull();
+        PublicList<PublicAutomation> second = service.listSession(tenant,
+                sessionId, first.nextCursor(), 2);
+        assertThat(second.data()).hasSize(1);
+        assertThat(second.hasMore()).isFalse();
+        List<String> paged = new java.util.ArrayList<>();
+        first.data().forEach(a -> paged.add(a.id()));
+        second.data().forEach(a -> paged.add(a.id()));
+        assertThat(paged).containsExactlyInAnyOrderElementsOf(created);
+    }
+
+    @Test
     void retireSessionRefusesAForeignDefinitionAndLeavesItLive() {
         PublicAutomation mine = service.create(tenant, ACTOR,
                 "iso-retire-" + UUID.randomUUID(),

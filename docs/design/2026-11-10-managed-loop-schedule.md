@@ -384,9 +384,12 @@ separate change:
    armed wakeup); a due or immediate loop input still answers `true`.
    The proof's progress stays cached — refusing the answer, not the
    pages read — so a wake input committed past the 32-revision proof
-   window is still reached; the cached deferred proof expires at the
-   earliest deferred fire time, and a settlement drops the input from
-   the deferred latch. The exemption needs a clock reference in the
+   window is still reached. A cached deferred proof that certifies
+   nothing expires at the earliest deferred fire time; one that also
+   carries a due pending input answers `true` from the complete
+   shortcut and stays memoized at that revision until the journal
+   advances. A settlement drops the input from the deferred latch.
+   The exemption needs a clock reference in the
    store and a `WakeRecoveryStoreTest` pair (future-only loop input →
    `isEmpty()`, no attach; due loop input → `contains(true)`, attach).
 2. **Fire-time sentinel Java fixture replay parity.** The journal-replay

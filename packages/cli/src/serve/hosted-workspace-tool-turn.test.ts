@@ -68,6 +68,9 @@ import {
   HOSTED_CRON_LIST_TOOL,
   HOSTED_CRON_DELETE_TOOL,
   cronExecutionId,
+  cronListDescription,
+  cronDeleteDescription,
+  cronDeleteIdDescription,
   HOSTED_MEMBER_PLAN_TOOL,
   HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
   HOSTED_SEND_MESSAGE_TO_PARENT_TOOL,
@@ -2859,7 +2862,49 @@ it('the cron union declarations name only the creators the profile declares', as
     expect(del!.description?.includes('loop wakeup')).toBe(hasLoopWakeup);
     expect(delId?.includes('loop_wakeup')).toBe(hasLoopWakeup);
     expect(delId?.includes('cron_create')).toBe(hasCronCreate);
+    // The handlers are not narrowed by profile: schedules can exist on any
+    // profile (the public actor-scoped route creates them without consulting
+    // the CLI tool profile), so the schedule half is always described — even
+    // on shell/3, which lacks cron_create but can still hold live schedules.
+    expect(list!.description).toMatch(/cron schedules/);
+    expect(delId).toMatch(/schedule id/);
   }
+});
+
+it('the cron description helpers name only the declared creators in every corner', () => {
+  // Directly pin the composed helpers across the full boolean space, including
+  // the (false, false) corner no current profile produces: a profile added to
+  // declaresCronTools() alone must not be handed text naming a tool it lacks.
+  for (const hasCronCreate of [false, true]) {
+    for (const hasLoopWakeup of [false, true]) {
+      const list = cronListDescription(hasCronCreate, hasLoopWakeup);
+      const del = cronDeleteDescription(hasCronCreate, hasLoopWakeup);
+      const delId = cronDeleteIdDescription(hasCronCreate, hasLoopWakeup);
+      expect(list.includes('cron_create')).toBe(hasCronCreate);
+      expect(list.includes('loop_wakeup')).toBe(hasLoopWakeup);
+      expect(del.includes('loop wakeup')).toBe(hasLoopWakeup);
+      expect(delId.includes('cron_create')).toBe(hasCronCreate);
+      expect(delId.includes('loop_wakeup')).toBe(hasLoopWakeup);
+      // Schedules are always listable/retirable regardless of profile.
+      expect(list).toMatch(/cron schedules/);
+      expect(delId).toMatch(/schedule id/);
+    }
+  }
+  // The both-creators wording is served only by the exported constants; the
+  // composed (true, true) corner must match them so the two cannot drift.
+  expect(cronListDescription(true, true)).toBe(
+    HOSTED_CRON_LIST_TOOL.description,
+  );
+  expect(cronDeleteDescription(true, true)).toBe(
+    HOSTED_CRON_DELETE_TOOL.description,
+  );
+  expect(cronDeleteIdDescription(true, true)).toBe(
+    (
+      HOSTED_CRON_DELETE_TOOL.parametersJsonSchema as {
+        properties?: { id?: { description?: string } };
+      }
+    ).properties?.id?.description,
+  );
 });
 
 it.each([429, 502, 503])(

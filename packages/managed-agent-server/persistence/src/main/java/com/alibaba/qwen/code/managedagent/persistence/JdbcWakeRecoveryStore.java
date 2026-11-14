@@ -72,8 +72,11 @@ public class JdbcWakeRecoveryStore
          * progress itself is cacheable — refusing the answer, not the pages
          * read, is what keeps a wake input past the page window reachable. */
         private boolean deferred;
-        /** The earliest deferred notBefore. At or past it the cached proof is
-         * discarded so the input is re-read as due (counted), not skipped. */
+        /** The earliest deferred notBefore. At or past it a cached proof that
+         * certifies nothing is discarded so the input is re-read as due
+         * (counted), not skipped. A proof that is also complete answers true
+         * from the complete shortcut before this expiry is consulted; it is
+         * invalidated by the journal revision advancing, not by the fire time. */
         private long deferredUntil = Long.MAX_VALUE;
     }
 
