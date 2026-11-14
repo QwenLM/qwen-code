@@ -61,6 +61,7 @@ import {
 import { getAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/request-context.js';
 import type { Content, Part } from '@google/genai';
 import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import { LoopEventBus } from '@qwen-code/qwen-code-core/event-bus/bus.js';
 import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { EventEmitter, getEventListeners } from 'node:events';
 import {
@@ -8247,6 +8248,78 @@ describe('runNonInteractive', () => {
       expect(close).toHaveBeenCalled();
     },
   );
+
+  describe('event-bus agent loop opt-in', () => {
+    const answerStream = () =>
+      createStreamFromEvents([
+        { type: LlmEventType.Content, value: 'Answer' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]);
+
+    it.each([false, true])(
+      'runs the shared loop on the bus only when the flag is on (bus=%s)',
+      async (bus) => {
+        setupMetricsMock();
+        Object.assign(mockConfig, {
+          isUnifiedAgentLoopEnabled: vi.fn(() => true),
+          isEventBusAgentLoopEnabled: vi.fn(() => bus),
+        });
+        // Execution marker: the bus path publishes loop events, the
+        // procedural shared loop never touches the bus.
+        const publishSpy = vi.spyOn(LoopEventBus.prototype, 'publish');
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(answerStream());
+
+        await expect(
+          runNonInteractive(mockConfig, mockSettings, 'Hello', 'prompt-bus'),
+        ).resolves.toBe(0);
+
+        expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
+        // Headless must resolve both switches for the 'headless' surface.
+        expect(
+          (
+            mockConfig as unknown as {
+              isUnifiedAgentLoopEnabled: ReturnType<typeof vi.fn>;
+            }
+          ).isUnifiedAgentLoopEnabled,
+        ).toHaveBeenCalledWith('headless');
+        expect(
+          (
+            mockConfig as unknown as {
+              isEventBusAgentLoopEnabled: ReturnType<typeof vi.fn>;
+            }
+          ).isEventBusAgentLoopEnabled,
+        ).toHaveBeenCalledWith('headless');
+        if (bus) {
+          expect(publishSpy).toHaveBeenCalled();
+        } else {
+          expect(publishSpy).not.toHaveBeenCalled();
+        }
+        const stdout = processStdoutSpy.mock.calls
+          .map(([chunk]) => String(chunk))
+          .join('');
+        expect(stdout).toContain('Answer');
+      },
+    );
+
+    it('leaves the legacy loop untouched when only the bus flag is on', async () => {
+      setupMetricsMock();
+      Object.assign(mockConfig, {
+        isUnifiedAgentLoopEnabled: () => false,
+        isEventBusAgentLoopEnabled: () => true,
+      });
+      const publishSpy = vi.spyOn(LoopEventBus.prototype, 'publish');
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(answerStream());
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'Hello', 'prompt-bus-only'),
+      ).resolves.toBe(0);
+
+      expect(publishSpy).not.toHaveBeenCalled();
+    });
+  });
 
   describe.each([false, true])('Mod turns (shared loop: %s)', (shared) => {
     beforeEach(() => {

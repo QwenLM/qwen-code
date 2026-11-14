@@ -23,10 +23,13 @@ import { APP_URI } from './app-contract.js';
 import type { ReportStore } from './report-store.js';
 
 export function createReportServer(store: ReportStore): McpServer {
-  const server = new McpServer({
-    name: 'test-failure-explorer',
-    version: '1.0.0',
-  });
+  const server = new McpServer(
+    {
+      name: 'test-failure-explorer',
+      version: '1.0.0',
+    },
+    { maxToolInputElements: 100_000 },
+  );
   server.registerTool(
     'test_report_import',
     {

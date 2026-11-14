@@ -80,6 +80,7 @@ import type { McpAppPromptSubmission } from './hooks/useMcpAppMessages';
 import type { ArtifactPanel } from './components/artifacts/ArtifactPanel';
 import type { WebShellSettingsOptions } from './settings';
 import type { WebShellModelManagementOptions } from './modelManagement';
+import type { WebShellModelPickerOptions } from './model-picker';
 import { DEFAULT_SESSION_ACTION_ITEMS } from './components/sidebar/WebShellSidebar';
 import type { Message } from './adapters/types';
 import type {
@@ -421,6 +422,12 @@ type ChatEditorTestProps = {
     trusted: boolean;
   }>;
   atWorkspaceCwd?: string;
+  modelPickerScope?: {
+    sessionId?: string;
+    workspaceId?: string;
+    workspaceCwd?: string;
+    daemonBaseUrl?: string;
+  };
   composerScopeKey?: string;
   workspaceFeaturesEnabled?: boolean;
   attachmentsEnabled?: boolean;
@@ -943,6 +950,7 @@ const {
       queuedPromptSessionHasActivePrompt: false,
       chatEditorRenderCount: 0,
       latestChatEditorProps: null as ChatEditorTestProps | null,
+      latestModelPicker: undefined as WebShellModelPickerOptions | undefined,
       onChatEditorLayout: null as ((props: ChatEditorTestProps) => void) | null,
       latestToastHostElevated: false,
       latestTaskChipsTasks: null as
@@ -1011,6 +1019,10 @@ const {
         }) => Promise<boolean | void> | boolean | void;
         manageLiveState?: boolean;
         onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
+      } | null,
+      latestChannelsManagerProps: null as {
+        clientId?: string;
+        sessionWorkspaceCwd?: string;
       } | null,
       latestToolApprovalDisabled: false,
       latestToolApprovalKeyboardActive: null as boolean | null,
@@ -1484,6 +1496,7 @@ vi.mock('./components/ChatEditor', async () => {
         testState.latestChatEditorProps = props;
         const { onAttachmentsChange } = props;
         const customization = useWebShellCustomization();
+        testState.latestModelPicker = customization.modelPicker;
         React.useEffect(() => {
           onAttachmentsChange?.(
             Boolean(
@@ -1913,9 +1926,12 @@ vi.mock('./components/dialogs/GitDiffDialog', async () => {
 // sub-dialog (model picker, approval-mode picker) via [data-testid="dialog-shell"].
 // It also carries the real component's [data-web-shell-dialog] marker, which
 // the drawer's touch-scroll blocker keys its dialog exemption off.
-vi.mock('./components/dialogs/DialogShell', async () => {
+vi.mock('./components/dialogs/DialogShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./components/dialogs/DialogShell')>();
   const React = await import('react');
   return {
+    ...actual,
     DialogShell: (props: {
       children?: React.ReactNode;
       title?: React.ReactNode;
@@ -2487,8 +2503,15 @@ vi.doMock('./components/SessionOverviewPanel', async () => {
 vi.doMock('./components/channels/ChannelsManagerPage', async () => {
   const React = await import('react');
   return {
-    ChannelsManagerPage: () =>
-      React.createElement('div', { 'data-testid': 'channels-manager-page' }),
+    ChannelsManagerPage: (props: {
+      clientId?: string;
+      sessionWorkspaceCwd?: string;
+    }) => {
+      testState.latestChannelsManagerProps = props;
+      return React.createElement('div', {
+        'data-testid': 'channels-manager-page',
+      });
+    },
   };
 });
 vi.doMock('./components/channels/ChannelEventsPage', async () => {
@@ -3100,6 +3123,9 @@ const { McpStatusMessage } = await import(
   './components/messages/McpStatusMessage'
 );
 const { I18nProvider } = await import('./i18n');
+const { SessionSearchDialog } = await import(
+  './components/sidebar/SessionSearchDialog'
+);
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -12865,6 +12891,7 @@ beforeEach(() => {
   testState.queuedPromptSessionHasActivePrompt = false;
   testState.chatEditorRenderCount = 0;
   testState.latestChatEditorProps = null;
+  testState.latestModelPicker = undefined;
   testState.onChatEditorLayout = null;
   testState.latestToastHostElevated = false;
   testState.latestTaskChipsTasks = null;
@@ -12877,6 +12904,7 @@ beforeEach(() => {
   testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestSessionOverviewProps = null;
+  testState.latestChannelsManagerProps = null;
   testState.latestToolApprovalKeyboardActive = null;
   testState.toolApprovalKeyboardActiveHistory = [];
   testState.latestToolApprovalPlanTodos = [];
@@ -19572,6 +19600,53 @@ describe('App session callbacks', () => {
       );
       expect(stored['draft\0/tmp/other']?.tabs).toContainEqual(
         expect.objectContaining({ kind: 'files', workspaceCwd: '/tmp/other' }),
+      );
+    });
+
+    it('opens a terminal tab when crypto.randomUUID is unavailable (non-secure context)', async () => {
+      setupDraft();
+      mockConnection.capabilities.features = ['web_terminal'];
+      testState.captureArtifactPanelOnly = true;
+      const { container } = renderApp({
+        rightPanel: { items: ['files', 'terminal'] },
+      });
+      await flush();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      // Plain-HTTP remote origins are not secure contexts: randomUUID is
+      // simply not exposed there, and opening a tab must still work.
+      const cryptoObject = globalThis.crypto;
+      const descriptor = Object.getOwnPropertyDescriptor(
+        cryptoObject,
+        'randomUUID',
+      );
+      Object.defineProperty(cryptoObject, 'randomUUID', {
+        value: undefined,
+        configurable: true,
+      });
+      try {
+        expect(typeof cryptoObject.randomUUID).toBe('undefined');
+        act(() => testState.latestArtifactPanelProps?.onOpenTerminal?.());
+        await flush();
+      } finally {
+        if (descriptor) {
+          Object.defineProperty(cryptoObject, 'randomUUID', descriptor);
+        } else {
+          delete (cryptoObject as { randomUUID?: unknown }).randomUUID;
+        }
+      }
+      expect(testState.latestArtifactPanelProps?.tabs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'terminal',
+            id: expect.stringMatching(/^terminal:/),
+          }),
+        ]),
       );
     });
 
@@ -38846,6 +38921,46 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
   });
 
+  it("attributes channel QR logins to the live session's tab", async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-channels"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestChannelsManagerProps).not.toBeNull();
+    expect(testState.latestChannelsManagerProps?.clientId).toBe('client-1');
+    expect(testState.latestChannelsManagerProps?.sessionWorkspaceCwd).toBe(
+      '/tmp/project',
+    );
+  });
+
+  it('withholds the tab id once the session is cleared', async () => {
+    // The terminal session paths keep clientId and workspaceCwd while dropping
+    // sessionId, so the page's workspace comparison still matches. Only the
+    // session gate keeps a dead id off the routes.
+    mockConnection.sessionId = undefined;
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-channels"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestChannelsManagerProps).not.toBeNull();
+    expect(testState.latestChannelsManagerProps?.sessionWorkspaceCwd).toBe(
+      '/tmp/project',
+    );
+    expect(testState.latestChannelsManagerProps?.clientId).toBeUndefined();
+  });
+
   it('shadow-isolates the unified plugin manager body when plugins is enabled', async () => {
     const { container } = renderApp({
       shadowDom: {
@@ -42965,6 +43080,109 @@ describe('App session callbacks', () => {
     expect(swipe(drawer)).toBe(false);
     // The page behind the drawer must stay locked.
     expect(swipe(document.body)).toBe(true);
+  });
+
+  it('keeps the real session search scrollable and dismissible over the drawer', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-sidebar-shell]')).not.toBeNull();
+
+    // The sidebar is mocked in this harness, so mount the real dialog beside
+    // it: the App drawer guards are document-level and apply to any focusable
+    // node outside the shell, exactly like the portaled dialog in production.
+    const searchContainer = document.createElement('div');
+    document.body.appendChild(searchContainer);
+    const searchRoot = createRoot(searchContainer);
+    mounted.push({ root: searchRoot, container: searchContainer });
+    const onClose = vi.fn();
+    await act(async () => {
+      searchRoot.render(
+        <I18nProvider language="en">
+          <SessionSearchDialog
+            client={undefined}
+            workspaces={[{ cwd: '/workspace', displayName: 'Workspace' }]}
+            initialSessions={[
+              {
+                sessionId: 'drawer-search',
+                displayName: 'Drawer search',
+                workspaceCwd: '/workspace',
+              } as DaemonSessionSummary,
+            ]}
+            primaryWorkspaceCwd="/workspace"
+            includeStandalone={false}
+            organizationEnabled={false}
+            qualified={false}
+            catalogKey=""
+            restoreFocus={null}
+            onClose={onClose}
+            onSelect={vi.fn()}
+            onQueryChange={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const dialog = document
+      .querySelector<HTMLElement>('[role="listbox"]')
+      ?.closest<HTMLElement>('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    const row = dialog!.querySelector<HTMLElement>('[role="option"]');
+    expect(row).not.toBeNull();
+
+    // jsdom has no layout: give the result list real scroll geometry so
+    // Radix's scroll lock sees a scrollable ancestor instead of cancelling
+    // every touch gesture targeting it.
+    const list =
+      dialog!.querySelector<HTMLElement>('[role="listbox"]')!.parentElement!;
+    list.style.overflowY = 'auto';
+    Object.defineProperty(list, 'scrollHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(list, 'clientHeight', {
+      configurable: true,
+      value: 200,
+    });
+    const touch = (type: string, clientY: number, target: EventTarget) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      const point = [{ clientX: 10, clientY }];
+      for (const property of ['touches', 'changedTouches']) {
+        Object.defineProperty(event, property, { value: point });
+      }
+      target.dispatchEvent(event);
+      return event;
+    };
+    act(() => {
+      touch('touchstart', 300, row!);
+    });
+    let swipeEvent!: Event;
+    act(() => {
+      swipeEvent = touch('touchmove', 200, row!);
+    });
+    expect(swipeEvent.defaultPrevented).toBe(false);
+
+    const close = dialog!.querySelector<HTMLButtonElement>(
+      'button[aria-label="close"]',
+    )!;
+    act(() => {
+      close.focus();
+      close.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    // Escape belongs to the dialog; the drawer behind it stays open.
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(container.querySelector('[data-sidebar-shell]')).not.toBeNull();
   });
 
   it('starts a new session from the external shell ref and returns to chat', async () => {
@@ -52591,6 +52809,40 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
   });
 });
 
+describe('modelPicker customization plumbing', () => {
+  it('shares and updates the host picker configuration through customization', async () => {
+    const first = { mountHeader: () => null };
+    const second = { displayContentByModelId: { qwen: () => null } };
+    const { rerender } = renderApp({ modelPicker: first });
+    await flush();
+    expect(testState.latestModelPicker).toBe(first);
+
+    rerender({ modelPicker: second });
+    await flush();
+    expect(testState.latestModelPicker).toBe(second);
+
+    rerender({});
+    await flush();
+    expect(testState.latestModelPicker).toBeUndefined();
+  });
+
+  it.each(['workspace', 'standalone'] as const)(
+    'uses the main %s composer scope and preserves the full daemon base URL',
+    async (kind) => {
+      mockConnection.sessionContext =
+        kind === 'workspace' ? { kind, cwd: '/tmp/project' } : { kind };
+      mockWorkspace.baseUrl = 'https://models.example/daemon/proxy';
+      renderApp();
+      await flush();
+      expect(testState.latestChatEditorProps?.modelPickerScope).toEqual({
+        sessionId: 'session-1',
+        workspaceCwd: kind === 'workspace' ? '/tmp/project' : undefined,
+        daemonBaseUrl: 'https://models.example/daemon/proxy',
+      });
+    },
+  );
+});
+
 describe('fileUploadEnabled customization plumbing', () => {
   it.each(['upload', 'attach'] as const)(
     'passes the %s drop preference to composers',
@@ -52999,6 +53251,19 @@ describe('brand resolution', () => {
 
     expect(handler).toHaveBeenLastCalledWith({ name: 'Second' });
     expect(handler).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('chat width styles', () => {
+  it('applies the host maximum to responsive content', async () => {
+    const { container } = renderApp({ chatMaxWidth: 720 });
+    await flush();
+
+    expect(
+      container
+        .querySelector<HTMLElement>('[data-web-shell-root]')
+        ?.style.getPropertyValue('--chat-responsive-content-width'),
+    ).toBe('min(720px, clamp(440px, 85cqw, calc(100cqw - 128px)))');
   });
 });
 

@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
@@ -21,6 +23,7 @@ import java.util.Base64;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * C1 regression: once {@code compactOnce()} publishes a pack and
@@ -39,6 +42,7 @@ class JournalPackDeletionRegressionTest {
     private static final String TENANT = "tenant";
     private static final String WORKSPACE = "workspace";
     private static final String SESSION = "session";
+    private static final long EXPIRES_AT = 4_102_444_800_000L;
 
     private JdbcTemplate jdbc;
     private JdbcJournalPacks packs;
@@ -210,5 +214,54 @@ class JournalPackDeletionRegressionTest {
         // lands the empty compaction-state resource instead of failing on null bytes.
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE resource_id LIKE"
                 + " 'compaction-state:%'", Long.class)).isEqualTo(1);
+    }
+
+    @Test
+    void activationLeaseRowResolvesDeletedBlobFromThePack() {
+        appendActivation();
+        compactAndDelete();
+        JournalStoreRows rows = new JournalStoreRows(StorageReadPolicy.inProcess(), jdbc, objects);
+        JournalStoreRows.ActivationLeaseRow lease = rows.activationLeaseRow(activationHead());
+        assertThat(lease.revision()).isEqualTo(1);
+        assertThat(lease.workerId()).isEqualTo("worker");
+        assertThat(lease.lease().activationId()).isEqualTo("current");
+        assertThat(lease.lease().epoch()).isEqualTo(2);
+        assertThat(lease.lease().renewalSeq()).isEqualTo(1);
+        assertThat(lease.lease().expiresAt()).isEqualTo(EXPIRES_AT);
+    }
+
+    @Test
+    void activationLeaseRowFailsClosedWithoutAnObjectStore() {
+        appendActivation();
+        compactAndDelete();
+        JournalStoreRows rows = new JournalStoreRows(StorageReadPolicy.inProcess(), jdbc, null);
+        assertThatThrownBy(() -> rows.activationLeaseRow(activationHead()))
+                .isInstanceOf(ManagedAgentException.class);
+    }
+
+    // A single renewActivation record whose first line is the activation.changed event the lease
+    // lookup parses; is_activation_record is a generated column keyed on the operation name.
+    private void appendActivation() {
+        String event = "{\"managedSession\":{\"kind\":\"activation.changed\",\"payload\":{\"phase\":\"active\","
+                + "\"activationId\":\"current\",\"epoch\":2,\"renewalSeq\":1,\"expiresAt\":" + EXPIRES_AT
+                + ",\"workerId\":\"worker\"}}}";
+        byte[] bytes = (event + "\n").getBytes(StandardCharsets.UTF_8);
+        revision = 1;
+        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
+                        + " command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence,"
+                        + " last_sequence, event_count, writer_generation, writer_id, writer_token_hash, activation_epoch,"
+                        + " record_encoding, record_bytes, byte_length, record_digest, gmt_create)"
+                        + " VALUES (?, ?, ?, 1, ?, 'tx-1', 'renewActivation', 'command-1', ?, 0, 0, 0, 1, 'worker', ?,"
+                        + " 2, 'identity', ?, ?, ?, 1)",
+                TENANT, WORKSPACE, SESSION, DigestUtils.sha256Hex("key-1"), "a".repeat(64), "b".repeat(64),
+                bytes, bytes.length, DigestUtils.sha256Hex(bytes));
+        jdbc.update("UPDATE ma_session_head SET journal_revision = 1, committed_sequence = 0,"
+                + " activation_epoch = 2, activation_id = 'current', activation_phase = 'active',"
+                + " activation_event_epoch = 2, activation_expires_at = ?, activation_head_revision = 1", EXPIRES_AT);
+    }
+
+    private JournalStoreRows.HeadRow activationHead() {
+        return new JournalStoreRows.HeadRow(TENANT, WORKSPACE, SESSION, "ACTIVE", 1, 1, "worker", null, null,
+                1, 0, "digest", 2, null, 0, 0, "READY", null, "current", "active", 2L, EXPIRES_AT, 1L);
     }
 }

@@ -132,7 +132,10 @@ import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
 
-import { isWorkspaceTrusted } from './trustedFolders.js';
+import {
+  getTrustFileDecisionBelowIdeRoot,
+  isWorkspaceTrusted,
+} from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
 import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import {
@@ -1935,8 +1938,11 @@ export async function loadCliConfig(
 
   const ideMode = !sandboxEnabled && (settings.ide?.enabled ?? false);
 
+  const isAcpMode = argv.acp || argv.experimentalAcp;
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
-  const trustedFolder = isWorkspaceTrusted(settings).isTrusted === true;
+  const trustedFolder =
+    isWorkspaceTrusted(settings, undefined, isAcpMode ? cwd : undefined)
+      .isTrusted === true;
 
   // Custom style files are prompts: a project's are read only from a trusted
   // workspace, and none at all in --bare / --safe-mode, which keep built-ins.
@@ -2220,7 +2226,6 @@ export async function loadCliConfig(
   // In non-interactive mode, tools that require a user prompt are denied unless
   // the caller has explicitly allowed them. Stream-JSON input is excluded from
   // this logic because approval can be sent programmatically via JSON messages.
-  const isAcpMode = argv.acp || argv.experimentalAcp;
   if (
     !bareMode &&
     !interactive &&
@@ -2657,7 +2662,9 @@ export async function loadCliConfig(
   // said no to this exact block, and trust does not override that decision.
   // Mirror Config.isExplicitlyTrustedFolder(): IDE-reported workspace trust
   // counts even with the feature off, as the docs promise.
-  const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+  const ideTrust = isAcpMode
+    ? ideContextStore.getWorkspaceTrust(cwd)
+    : ideContextStore.get()?.workspaceState?.isTrusted;
   const explicitlyTrusted =
     (folderTrust || ideTrust !== undefined) && trustedFolder;
   const projectHooksPendingApproval = gateHooks
@@ -2894,7 +2901,7 @@ export async function loadCliConfig(
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     // Undefined flows through to Config's default (5) and clamp logic.
     maxSubagentDepth: resolveMaxSubagentDepth(argv, settings),
-    experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
+    experimentalZedIntegration: isAcpMode ?? false,
     // ACP/serve-scoped: only the spawned ACP child can re-hang a restored
     // ask_user_question. In the plain TUI the flag would skip load-time
     // orphan repair (client.ts) with nothing able to re-hang the question,
@@ -2910,7 +2917,8 @@ export async function loadCliConfig(
     lsToolEnabled: settings.tools?.listDirectory?.enabled === true,
     todoWriteEnabled: settings.tools?.todoWrite?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
-    unifiedAgentLoopEnabled: settings.experimental?.unifiedAgentLoop ?? false,
+    unifiedAgentLoopEnabled: settings.experimental?.unifiedAgentLoop,
+    eventBusAgentLoopEnabled: settings.experimental?.eventBusAgentLoop,
     agentCollaborationEnabled:
       settings.experimental?.agentCollaboration ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,
@@ -2994,6 +3002,8 @@ export async function loadCliConfig(
     folderTrust,
     interactive,
     trustedFolder,
+    trustFileDecisionBelowIdeRoot: (dir, ideRoot) =>
+      getTrustFileDecisionBelowIdeRoot(settings, dir, ideRoot),
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,

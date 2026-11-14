@@ -98,18 +98,18 @@ public class JdbcManagedSessionStore
         ToolPublicationRetentionStore outputRetention = new ToolPublicationRetentionStore(jdbc, manager);
         var ownerReads = new org.springframework.transaction.support.TransactionTemplate(manager);
         ownerReads.setTimeout(10);
-        this.storeRows = new JournalStoreRows(readerVersion, jdbc);
-        this.jdbc = jdbc;
-        this.publicationObjects = publicationObjects;
-        this.fencing = new JournalFencing(storeRows, jdbc, journalEventTransport, credentials, csiBindings);
         this.journalPacks = sessionResourceSettings == null ? null
                 : new JdbcJournalPacks(jdbc, publicationObjects, sessionResourceSettings);
+        this.storeRows = new JournalStoreRows(readerVersion, jdbc, publicationObjects);
+        this.jdbc = jdbc;
+        this.publicationObjects = publicationObjects;
+        this.fencing = new JournalFencing(storeRows, jdbc, journalEventTransport, credentials, csiBindings, journalPacks);
         this.historyQueries = new JournalHistoryQueries(fencing, storeRows, jdbc, journalPacks);
         this.lifecycleAuthorization = new JournalLifecycleAuthorization(fencing, storeRows, harnessRules, jdbc, extensionRecords, lifecycleExecution, lifecycleSessions);
         this.resourceReads = new JournalResourceReads(fencing, storeRows, jdbc, publicationObjects, outputRetention, ownerReads);
         this.resourceWrites = new JournalResourceWrites(fencing, storeRows, jdbc, sessionResourceSettings);
-        this.writerLifecycle = new JournalWriterLifecycle(fencing, storeRows, readerVersion, jdbc, credentials, csiBindings, extensionRecords);
-        this.commits = new JournalCommit(fencing, lifecycleAuthorization, resourceWrites, storeRows, readerVersion, jdbc, toolResults, journalEventTransport, extensionRecords, actions);
+        this.writerLifecycle = new JournalWriterLifecycle(fencing, storeRows, readerVersion, jdbc, credentials, csiBindings, extensionRecords, journalPacks);
+        this.commits = new JournalCommit(fencing, lifecycleAuthorization, resourceWrites, storeRows, readerVersion, jdbc, toolResults, journalEventTransport, extensionRecords, actions, journalPacks);
     }
 
     static final int GUARD_ACQUIRE_TIMEOUT_SECONDS = JournalFencing.GUARD_ACQUIRE_TIMEOUT_SECONDS;
@@ -143,6 +143,15 @@ public class JdbcManagedSessionStore
     public void authorizeOrdinary(String tenantId, String sessionId, String writerToken,
             ManagedSessionStoreModels.AuthorizeLifecycleRequest request) {
         lifecycleAuthorization.authorizeOrdinary(tenantId, sessionId, writerToken, request);
+    }
+
+    /**
+     * The Session's creator actor, for the internal writer-binding routes that
+     * have no user principal: the automation mutations act as the creator.
+     * Empty when the Session has no creator key.
+     */
+    public String creatorActor(String tenantId, String sessionId) {
+        return storeRows.creatorActor(tenantId, sessionId);
     }
 
     @Transactional
