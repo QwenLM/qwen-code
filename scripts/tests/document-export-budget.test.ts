@@ -51,10 +51,11 @@ describe('document export budgets', () => {
     // gate itself only runs in web_shell_e2e_smoke shard 1 and the
     // schedule-only nightly leg, where a healthy render sits well under either
     // ceiling. These byte-shape pins give each revert a ~0ms witness through
-    // test:scripts, which runs on every PR.
-    expect(gateSource).toContain(
-      'const MAX_DOCUMENT_DURATION_MS = documentExportBudgetMs(process.env);',
+    // test:scripts, which runs on every PR. The patterns tolerate the reflow
+    // and trailing comma Prettier emits for a long call or argument.
+    expect(gateSource).toMatch(
+      /const MAX_DOCUMENT_DURATION_MS = documentExportBudgetMs\(\s*process\.env,?\s*\);/,
     );
-    expect(gateSource).toContain('}, MAX_DOCUMENT_DURATION_MS + 30_000);');
+    expect(gateSource).toMatch(/MAX_DOCUMENT_DURATION_MS \+ 30_000,?\s*\);/);
   });
 });
