@@ -2552,10 +2552,11 @@ describe('todo_write in the Worker', () => {
     await exec.close();
   });
 
-  it('scrubs the runtime root from a failed write reported as success', async () => {
-    // A file where the todos directory belongs makes the write fail. Core then
-    // reports the failure inside a success-shaped result whose text names the
-    // absolute runtime path, outside the tenant Workspace.
+  it('scrubs the runtime root from a failed write', async () => {
+    // A file where the todos directory belongs makes the write fail. The
+    // failure is now classified by the tool itself, so the Worker reports it
+    // as an error result — whose text must still not name the absolute
+    // runtime path, outside the tenant Workspace.
     await writeFile(path.join(runtimeDir, 'todos'), 'not a directory');
     const exec = ManagedToolExecutor.forWorkspace(workspace, 'session-15076');
     const todos = { todos: [{ id: 'a', content: 'a', status: 'pending' }] };
@@ -2567,7 +2568,7 @@ describe('todo_write in the Worker', () => {
     const text = (result.responseParts as Array<{ text?: string }>)
       .map((part) => part.text ?? '')
       .join('');
-    expect(result.executionStatus).toBe('success');
+    expect(result.executionStatus).toBe('error');
     expect(text).toContain('Failed to modify todos');
     expect(text).not.toContain(runtimeDir);
     await exec.close();

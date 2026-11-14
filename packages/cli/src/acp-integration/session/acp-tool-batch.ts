@@ -457,6 +457,9 @@ export async function runAcpToolBatch(
           success: status === 'success',
           artifacts: response.artifacts,
           persistedOutputFiles: response.persistedOutputFiles,
+          ...(executed && state.cancelMessage
+            ? { cancelMessage: state.cancelMessage }
+            : {}),
         }),
       'tool result update',
       // A todo result can publish a new plan revision, so it stays turn-scoped.

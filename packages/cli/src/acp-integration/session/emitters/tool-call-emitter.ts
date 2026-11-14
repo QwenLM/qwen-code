@@ -91,6 +91,16 @@ function stripBoundaryArtifactsFromRawOutput(resultDisplay: unknown): unknown {
   return changed ? { ...resultDisplay, toolCalls } : resultDisplay;
 }
 
+function todoWriteFailureText(
+  resultDisplay: unknown,
+  cancelMessage?: string,
+): string {
+  if (typeof resultDisplay === 'string' && resultDisplay.trim()) {
+    return resultDisplay;
+  }
+  return cancelMessage ?? 'todo_write failed';
+}
+
 /**
  * Unified tool call event emitter.
  *
@@ -194,7 +204,9 @@ export class ToolCallEmitter extends BaseEmitter {
 
   /**
    * Emits a terminal frame when a prepared tool call is discarded before
-   * execution. TodoWrite remains represented exclusively by plan updates.
+   * execution. TodoWrite preparations are still not announced (the tool is
+   * represented by plan updates while it runs); only its terminal failure
+   * frames are emitted.
    *
    * @param callId - ID of the prepared tool call
    * @param toolName - Name of the prepared tool
@@ -241,7 +253,23 @@ export class ToolCallEmitter extends BaseEmitter {
     // Handle TodoWriteTool specially - send plan update instead
     if (this.isTodoWriteTool(params.toolName)) {
       if (params.subagentMeta) return;
-      if (!params.success) return;
+      if (!params.success) {
+        // A failed todo_write changes no plan, so without a terminal frame the
+        // call is invisible on the wire: no plan, no tool_call update.
+        await this.emitError(
+          params.callId,
+          params.toolName,
+          params.error ??
+            new Error(
+              todoWriteFailureText(params.resultDisplay, params.cancelMessage),
+            ),
+          params.subagentMeta,
+          params.startedAt !== undefined && params.durationMs !== undefined
+            ? { startedAt: params.startedAt, durationMs: params.durationMs }
+            : undefined,
+        );
+        return;
+      }
       const plan = this.planEmitter.extractPlan(
         params.resultDisplay,
         params.args,
@@ -319,20 +347,27 @@ export class ToolCallEmitter extends BaseEmitter {
       toolName,
       subagentMeta,
     );
-    await this.sendUpdate(
-      createTranscriptToolCallResultUpdate({
-        toolName,
-        callId,
-        success: false,
-        errorMessage: error.message,
-        extra: {
-          ...timing,
-          ...subagentMeta,
-          provenance: provenance.provenance,
-          ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
-        },
-      }),
-    );
+    const update = createTranscriptToolCallResultUpdate({
+      toolName,
+      callId,
+      success: false,
+      errorMessage: error.message,
+      extra: {
+        ...timing,
+        ...subagentMeta,
+        provenance: provenance.provenance,
+        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+      },
+    });
+    if (!this.isTodoWriteTool(toolName)) {
+      await this.sendUpdate(update);
+      return;
+    }
+    // A todo_write never emits a tool_call start frame, so channel transports
+    // have no remembered kind to fall back on and drop a kindless update.
+    // `think` matches the kind ACP receives for TodoWriteTool's `Kind.Think`.
+    const { title } = this.resolveToolMetadata(toolName, undefined);
+    await this.sendUpdate({ ...update, title, kind: 'think' });
   }
 
   /**

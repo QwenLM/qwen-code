@@ -16,6 +16,7 @@ import * as path from 'path';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import { ToolErrorType } from './tool-error.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { detectTodoChanges, HookPhase, type TodoItem } from '../hooks/types.js';
@@ -305,6 +306,10 @@ function createBlockedTodoResult(
 ${systemMessage}
 </system-reminder>`,
     returnDisplay: message,
+    // A hook block must classify as a failure: Session.runTool derives the
+    // status from `error` alone, so without it a blocked todo_write is
+    // persisted as success and no failure frame reaches the wire.
+    error: { message, type: ToolErrorType.EXECUTION_FAILED },
   };
 }
 
@@ -632,6 +637,10 @@ Todo list modification failed with error: ${errorMessage}. You may need to retry
       return {
         llmContent: errorLlmContent,
         returnDisplay: `Error writing todos: ${errorMessage}`,
+        error: {
+          message: `Error writing todos: ${errorMessage}`,
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
       };
     }
   }

@@ -53480,6 +53480,37 @@ describe('Session', () => {
       );
     });
 
+    it('surfaces a todo_write that fails after running as a failed card', async () => {
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'Failed to modify todos.',
+        returnDisplay: 'Error writing todos: disk full',
+        error: { message: 'Error writing todos: disk full' },
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.TODO_WRITE, execute),
+      );
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-todo-failed',
+        [{ id: 'todo_failed_call', name: core.ToolNames.TODO_WRITE, args: {} }],
+      );
+
+      const updates = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([params]) => params.update);
+      expect(updates).toContainEqual(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'todo_failed_call',
+          status: 'failed',
+          kind: 'think',
+        }),
+      );
+    });
+
     it('records one successful terminal when ACP updates fail', async () => {
       const logToolCallSpy = vi
         .spyOn(core, 'logToolCall')

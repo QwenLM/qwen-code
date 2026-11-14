@@ -17266,36 +17266,44 @@ export class Session implements SessionContext {
         opts.errorType,
       );
       const modelErrorParts = withHookContext(errorParts, opts.status);
-      if (toolName !== ToolNames.TODO_WRITE) {
-        try {
-          if (opts.settledMetadata) {
-            await this.toolCallEmitter.emitResult({
-              callId,
-              toolName,
-              args,
-              startedAt: startTime,
-              durationMs: Date.now() - startTime,
-              message: errorParts,
-              error,
-              success: false,
-              artifacts: opts.settledMetadata.artifacts,
-              persistedOutputFiles: opts.settledMetadata.persistedOutputFiles,
-            });
-          } else {
-            await this.toolCallEmitter.emitError(
-              callId,
-              toolName,
-              error,
-              undefined,
-              { startedAt: startTime, durationMs: Date.now() - startTime },
-            );
-          }
-        } catch (emitError) {
-          debugLogger.debug(
-            '[Session.runTool] Failed to emit terminal tool update',
-            emitError,
+      try {
+        if (toolName === ToolNames.TODO_WRITE) {
+          // A todo_write that failed before execution has no plan to report,
+          // so a terminal frame is the only thing that makes it observable.
+          await this.toolCallEmitter.emitError(
+            callId,
+            toolName,
+            error,
+            undefined,
+            { startedAt: startTime, durationMs: Date.now() - startTime },
+          );
+        } else if (opts.settledMetadata) {
+          await this.toolCallEmitter.emitResult({
+            callId,
+            toolName,
+            args,
+            startedAt: startTime,
+            durationMs: Date.now() - startTime,
+            message: errorParts,
+            error,
+            success: false,
+            artifacts: opts.settledMetadata.artifacts,
+            persistedOutputFiles: opts.settledMetadata.persistedOutputFiles,
+          });
+        } else {
+          await this.toolCallEmitter.emitError(
+            callId,
+            toolName,
+            error,
+            undefined,
+            { startedAt: startTime, durationMs: Date.now() - startTime },
           );
         }
+      } catch (emitError) {
+        debugLogger.debug(
+          '[Session.runTool] Failed to emit terminal tool update',
+          emitError,
+        );
       }
       if (executeAttempted && !producerObserved) {
         observeToolResultBoundary({
@@ -19954,7 +19962,30 @@ export class Session implements SessionContext {
               }
             }
 
-            // Skip tool_call_update event for TodoWriteTool
+            // Skip tool_call_update event for TodoWriteTool on success; a
+            // failed call emits no plan either, so surface the failure instead
+            // of leaving the call invisible on the wire.
+            if (!succeeded) {
+              try {
+                await this.toolCallEmitter.emitResult({
+                  callId,
+                  toolName,
+                  startedAt: startTime,
+                  durationMs: Date.now() - startTime,
+                  message: responseParts,
+                  resultDisplay: toolResult.returnDisplay,
+                  error: responseError,
+                  success: false,
+                  artifacts: settledArtifacts,
+                  persistedOutputFiles: settledPersistedOutputFiles,
+                });
+              } catch (emitError) {
+                debugLogger.debug(
+                  '[Session.runTool] Failed to emit todo_write failure update',
+                  emitError,
+                );
+              }
+            }
             // Still log and return function response for LLM
           } else if (!isTodoWriteTool) {
             // Normal tool handling: emit result using ToolCallEmitter
