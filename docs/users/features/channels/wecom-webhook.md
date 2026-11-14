@@ -60,6 +60,11 @@ restart or reload applies saved configuration changes.
 
 ## Use Web Shell
 
+If your build contains the backend support but predates the Web integration,
+Channels does not list this method or existing `wecom-webhook` instances. Use
+the `settings.json` and `qwen serve --channel` steps above until you upgrade to
+a build containing the Web integration.
+
 In Channels, choose WeCom and then Webhook (send only). Select the workspace,
 save the webhook URL and start the Channel. No signing secret is needed.
 Receiving, pairing and agent-session settings do not apply to this method.
