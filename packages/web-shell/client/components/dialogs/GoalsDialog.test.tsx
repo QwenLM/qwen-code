@@ -1220,7 +1220,8 @@ describe('GoalsDialog multi-workspace', () => {
   });
 
   it('shows no picker or badges for a single workspace', async () => {
-    await mount([baseGoal()], { workspaces: [primaryWs] });
+    const onOpenSession = vi.fn();
+    await mount([baseGoal()], { workspaces: [primaryWs], onOpenSession });
 
     expect(actions.listGoals).toHaveBeenCalledWith();
     expect(actions.listGoals).toHaveBeenCalledTimes(1);
@@ -1228,15 +1229,29 @@ describe('GoalsDialog multi-workspace', () => {
 
     click(findButton('New goal'));
     expect(document.querySelector('select')).toBeNull();
+    click(findButton('Cancel'));
+
+    // Untagged badge, but the sole workspace's context still travels with the
+    // session open, matching the scheduled-tasks single-project branch.
+    click(findButton('fix-ci'));
+    expect(onOpenSession).toHaveBeenCalledWith('sess-1', '/w-primary');
   });
 
   it('lists only the locked workspace, without picker or badges', async () => {
+    const onOpenSession = vi.fn();
     await mount([], {
       workspaces: [primaryWs, secondaryWs],
       lockedWorkspace: secondaryWs,
+      onOpenSession,
       listGoalsByWorkspace: {
         'ws-2': {
-          goals: [baseGoal({ sessionId: 's1', condition: 'locked goal' })],
+          goals: [
+            baseGoal({
+              sessionId: 's1',
+              condition: 'locked goal',
+              displayName: null,
+            }),
+          ],
           droppedCount: 0,
         },
       },
@@ -1249,6 +1264,11 @@ describe('GoalsDialog multi-workspace', () => {
 
     click(findButton('New goal'));
     expect(document.querySelector('select')).toBeNull();
+    click(findButton('Cancel'));
+
+    // No badge, but the session still opens in the locked workspace's context.
+    click(findButton('s1'));
+    expect(onOpenSession).toHaveBeenCalledWith('s1', '/w-secondary');
   });
 
   it('opens a goal session in its own workspace', async () => {

@@ -154,7 +154,12 @@ export function GoalsDialog({
       let firstError: string | null = null;
       if (lockedWorkspace) {
         const result = await actions.listGoals(lockedWorkspaceId);
-        list = result.goals;
+        // Tag even without a badge so opening a goal's session restores it
+        // in the locked workspace's context, as the scheduled-tasks page does.
+        list = result.goals.map((goal) => ({
+          ...goal,
+          workspaceCwd: lockedWorkspace.cwd,
+        }));
         dropped = result.droppedCount;
       } else if (isMultiWorkspace) {
         // Fan out over every operable workspace and tag each goal with its
@@ -168,7 +173,6 @@ export function GoalsDialog({
               return {
                 goals: result.goals.map((goal) => ({
                   ...goal,
-                  workspaceId: actionId,
                   workspaceCwd: ws.cwd,
                 })),
                 droppedCount: result.droppedCount,
@@ -184,8 +188,15 @@ export function GoalsDialog({
         list = results.flatMap((result) => result.goals);
         dropped = results.reduce((sum, result) => sum + result.droppedCount, 0);
       } else {
+        // The one workspace of a single-project daemon: its goals' sessions
+        // are restored there, not in a standalone or Live context. Daemons
+        // that advertise no workspace list keep the untagged legacy shape.
+        const sole = workspaceList.find((ws) => ws.primary);
         const result = await actions.listGoals();
-        list = result.goals;
+        list =
+          sole && workspaceList.length === 1
+            ? result.goals.map((goal) => ({ ...goal, workspaceCwd: sole.cwd }))
+            : result.goals;
         dropped = result.droppedCount;
       }
       if (!mountedRef.current || seq !== reloadSeqRef.current) return;
@@ -211,6 +222,7 @@ export function GoalsDialog({
     lockedWorkspaceId,
     operableWorkspaces,
     workspaceActionId,
+    workspaceList,
   ]);
 
   // One self-chaining loop owns both the initial load and the polling: each

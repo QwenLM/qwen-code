@@ -100,9 +100,11 @@ qualified routes use.
   `daemon/workspace/types.ts` and `actions.ts`: with a `workspaceId` it
   requests `/workspaces/<encoded id>/goals`; without one it keeps
   `/goals`. Same response parsing and snapshot filtering as today.
-- `DaemonGoal` gains optional `workspaceId?: string` and
-  `workspaceCwd?: string`, populated by the page during fan-out (the daemon
-  payload does not carry them), mirroring `DaemonScheduledTask`.
+- `DaemonGoal` gains an optional `workspaceCwd?: string`, populated by the
+  page in every listing branch (the daemon payload does not carry it).
+  Unlike `DaemonScheduledTask`, no `workspaceId` field is added: goal
+  mutations go through the owner-resolving per-session routes, so nothing
+  reads a workspace id.
 
 ### GoalsDialog: aggregation, badges, picker
 
@@ -115,11 +117,16 @@ ordinaryWorkspaces`, and `lockedWorkspaceCapability`).
 - Derived state: `isMultiWorkspace = !lockedWorkspace && workspaces.length
   > 1`; `operableWorkspaces = workspaces.filter(ws => ws.primary ||
   > ws.trusted)`; `workspaceActionId(ws) = ws.primary ? undefined : ws.id`.
-- Reload: locked → single qualified (or primary) fetch; multi → fan out
-  over `operableWorkspaces` with `Promise.all`, tag each goal with its
-  workspace, sum `droppedCount`, keep the first error while retaining the
-  other workspaces' goals; single → today's unqualified fetch. The existing
-  monotonic reload sequence and self-chaining 10 s poll stay unchanged.
+- Reload: locked → single qualified (or primary) fetch, tagged with the
+  locked workspace's cwd; multi → fan out over `operableWorkspaces` with
+  `Promise.all`, tag each goal with its workspace, sum `droppedCount`, keep
+  the first error while retaining the other workspaces' goals; single →
+  today's unqualified fetch, tagged with the sole primary's cwd when the
+  daemon advertises exactly one workspace (daemons with no workspace list
+  keep the untagged legacy shape). Tagging in all three branches mirrors
+  `ScheduledTasksDialog` so opening a goal's session carries its workspace
+  context even without a badge. The existing monotonic reload sequence and
+  self-chaining 10 s poll stay unchanged.
 - Cards: in multi-workspace view, a workspace badge (label from the existing
   `workspaceLabel` utils) leads the card footer. Card keys stay
   `sessionId` (session ids are daemon-global, unlike scheduled-task ids).
@@ -139,8 +146,11 @@ ordinaryWorkspaces`, and `lockedWorkspaceCapability`).
   `GoalsDialog` (the same workspace arrays the scheduled-tasks page gets).
 - `onCreateGoal(condition, workspaceCwd?)`: when the picker supplied a cwd,
   create the session in that workspace; otherwise keep
-  `resolveWorkspaceMaintenanceTargetCwd()`. The stranded-session recovery,
-  owner-guard, and show-chat flow stay unchanged.
+  `resolveWorkspaceMaintenanceTargetCwd()`. The stranded-session recovery
+  reuses the stranded session only while the picker still targets its
+  workspace; a retry that switches the picker to a different workspace
+  allocates a fresh session there instead of silently creating the goal in
+  the previous one. The owner-guard and show-chat flow stay unchanged.
 - `onOpenSession` passes the goal's tagged `workspaceCwd` so
   `loadSidebarSession` switches to the goal's workspace context, mirroring
   the scheduled-tasks wiring.
@@ -165,8 +175,9 @@ Workspace display names come from the existing `workspaceLabel` /
    page's partial-load error while other workspaces still render. This is
    the existing primary behavior, not a regression.
 3. **No workspace fields in the daemon payload.** The client tags goals
-   during fan-out, mirroring `DaemonScheduledTask`; the primary contract
-   stays byte-compatible.
+   with `workspaceCwd` in every listing branch; the primary contract stays
+   byte-compatible. No `workspaceId` is carried because goal mutations use
+   the owner-resolving per-session routes, not workspace-scoped ones.
 4. **Controls unchanged.** Owner-resolving per-session routes already work
    cross-workspace (pinned by `multi-workspace-sessions.test.ts`); adding
    qualified control routes would duplicate that machinery.

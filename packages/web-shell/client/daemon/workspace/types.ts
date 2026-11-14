@@ -462,10 +462,9 @@ export interface DaemonGoal {
   hasActivePrompt: boolean;
   /** Canonical lifecycle state; UI controls must use its goalId/revision. */
   snapshot: GoalSnapshotV2;
-  /** The registered workspace this goal belongs to, when the aggregated
-   * multi-workspace view tagged it. Absent on the plain primary listing. */
-  workspaceId?: string;
-  /** The owning workspace's cwd, tagged alongside `workspaceId`. */
+  /** The owning workspace's cwd, tagged client-side by the Goals page (in
+   * every listing branch) so opening a goal's session restores it in that
+   * workspace's context. Absent when the daemon advertises no workspaces. */
   workspaceCwd?: string;
 }
 

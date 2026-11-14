@@ -88,8 +88,9 @@ primary `GET /goals` 保留信任门（`isWorkspaceTrusted`）。本设计保留
   `DaemonWorkspaceActions.listGoals(workspaceId?: string)`：带 `workspaceId`
   时请求 `/workspaces/<编码 id>/goals`；不带时保持 `/goals`。响应解析与快
   照过滤与今天一致。
-- `DaemonGoal` 增加可选 `workspaceId?: string` 与 `workspaceCwd?: string`，
-  由页面在 fan-out 时填充（daemon 载荷不携带），镜像 `DaemonScheduledTask`。
+- `DaemonGoal` 增加可选 `workspaceCwd?: string`，由页面在每个列举分支填充
+  （daemon 载荷不携带）。与 `DaemonScheduledTask` 不同，不加 `workspaceId`
+  字段：Goal 变更走按属主解析的会话级路由，没有任何消费方读 workspace id。
 
 ### GoalsDialog：聚合、徽章、选择器
 
@@ -102,11 +103,14 @@ ordinaryWorkspaces`，以及 `lockedWorkspaceCapability`）。
 - 派生状态：`isMultiWorkspace = !lockedWorkspace && workspaces.length > 1`；
   `operableWorkspaces = workspaces.filter(ws => ws.primary || ws.trusted)`；
   `workspaceActionId(ws) = ws.primary ? undefined : ws.id`。
-- 重载：锁定 → 单次限定（或 primary）请求；多 workspace → 对
-  `operableWorkspaces` 用 `Promise.all` fan-out，给每条 Goal 打 workspace
-  标签，`droppedCount` 求和，保留第一个错误同时留住其他 workspace 的
-  Goal；单 workspace → 今天的无后缀请求。现有单调重载序号与自链式 10 s
-  轮询保持不变。
+- 重载：锁定 → 单次限定（或 primary）请求，打上锁定 workspace 的 cwd；
+  多 workspace → 对 `operableWorkspaces` 用 `Promise.all` fan-out，给每条
+  Goal 打 workspace 标签，`droppedCount` 求和，保留第一个错误同时留住其他
+  workspace 的 Goal；单 workspace → 今天的无后缀请求，daemon 恰好广告一个
+  workspace 时打上该 primary 的 cwd（不广告 workspace 列表的 daemon 保持
+  无标签的旧形状）。三个分支都打标签，镜像 `ScheduledTasksDialog`，使打开
+  Goal 会话时即使无徽章也带上 workspace 上下文。现有单调重载序号与自链式
+  10 s 轮询保持不变。
 - 卡片：多 workspace 视图下，卡片 footer 起始处加 workspace 徽章（标签用
   现有 `workspaceLabel` 工具）。卡片键仍是 `sessionId`（会话 id 是 daemon
   全局的，不同于 scheduled-task id）。
@@ -124,7 +128,9 @@ ordinaryWorkspaces`，以及 `lockedWorkspaceCapability`）。
   `defaultWorkspaceCwd`（与 scheduled-tasks 页相同的 workspace 数组）。
 - `onCreateGoal(condition, workspaceCwd?)`：选择器提供了 cwd 时在该
   workspace 创建会话；否则保持 `resolveWorkspaceMaintenanceTargetCwd()`。
-  搁浅会话恢复、owner 守卫与跳转聊天流程不变。
+  搁浅会话恢复仅在选择器仍指向其所属 workspace 时复用搁浅会话；重试时若
+  选择器改指其他 workspace，则在那里新分配会话，而不是静默把 Goal 建在
+  上一个 workspace。owner 守卫与跳转聊天流程不变。
 - `onOpenSession` 带上 Goal 被打标签的 `workspaceCwd`，使
   `loadSidebarSession` 切换到 Goal 的 workspace 上下文，镜像
   scheduled-tasks 的接线。
@@ -146,8 +152,9 @@ en，与 `scheduledTasks.workspace` 的先例一致。workspace 显示名来自�
    primary scheduled-tasks 读面）带信任门，未受信 primary 的 fan-out 成员
    会返回 403，表现为页面的部分加载错误，其他 workspace 照常渲染。这是
    primary 的既有行为，不是回归。
-3. **daemon 载荷不加 workspace 字段。** 客户端在 fan-out 时打标签，镜像
-   `DaemonScheduledTask`；primary 契约保持字节级兼容。
+3. **daemon 载荷不加 workspace 字段。** 客户端在每个列举分支给 Goal 打
+   `workspaceCwd` 标签；primary 契约保持字节级兼容。不携带 `workspaceId`，
+   因为 Goal 变更走按属主解析的会话级路由，而非 workspace 限定路由。
 4. **控制路由不动。** 按属主解析的会话级路由已跨 workspace 可用（有
    `multi-workspace-sessions.test.ts` 钉子）；新增限定控制路由只会重复这
    套机制。
