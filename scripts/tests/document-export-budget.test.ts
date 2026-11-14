@@ -7,10 +7,12 @@
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
-  createScanner,
-  LanguageVariant,
+  createSourceFile,
+  forEachChild,
+  getLeadingCommentRanges,
+  getTrailingCommentRanges,
+  type Node,
   ScriptTarget,
-  SyntaxKind,
 } from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { documentExportBudgetMs } from '../../integration-tests/document-export-budget.js';
@@ -30,37 +32,42 @@ const integrationConfigSource = readFileSync(
   'utf8',
 );
 
-// Blank comments with the TypeScript scanner so a commented-out copy of a
-// pinned line cannot satisfy the pin. A /\*[\s\S]*?\*\// regex is not safe
-// here: the gate's page.route('**/*') glob contains "/*", which a blanket
-// regex reads as a comment opener, blanking the rest of the file and
+// Blank comments using the parser's own trivia ranges so a commented-out
+// copy of a pinned line cannot satisfy the pin. A raw createScanner walk is
+// not safe here: it does not rescan the `}` of a `${...}` substitution as a
+// template token (the parser calls reScanTemplateToken), so on the gate's
+// interpolated RENDERER_URL / RENDERER_CSS_URL templates it desyncs and
+// blanks none of the comments after them. A /\*[\s\S]*?\*\// regex is not
+// safe either: the gate's page.route('**/*') glob contains "/*", which a
+// blanket regex reads as a comment opener, blanking the rest of the file and
 // swallowing the real assertion. Newlines survive so line anchors keep their
 // line structure.
 function blankComments(source: string): string {
-  const scanner = createScanner(
-    ScriptTarget.Latest,
-    false,
-    LanguageVariant.Standard,
+  const sourceFile = createSourceFile(
+    'pinned-source.ts',
     source,
+    ScriptTarget.Latest,
+    true,
   );
+  const ranges: { pos: number; end: number }[] = [];
+  const collect = (node: Node) => {
+    ranges.push(...(getLeadingCommentRanges(source, node.pos) ?? []));
+    ranges.push(...(getTrailingCommentRanges(source, node.end) ?? []));
+    forEachChild(node, collect);
+  };
+  collect(sourceFile);
+  // Comments after the last statement are leading trivia of the EOF token,
+  // which no node visits.
+  const eof = sourceFile.getChildAt(sourceFile.getChildCount() - 1);
+  ranges.push(...(getLeadingCommentRanges(source, eof.pos) ?? []));
+  ranges.sort((a, b) => a.pos - b.pos);
   let out = '';
   let last = 0;
-  for (
-    let token = scanner.scan();
-    token !== SyntaxKind.EndOfFileToken;
-    token = scanner.scan()
-  ) {
-    if (
-      token === SyntaxKind.SingleLineCommentTrivia ||
-      token === SyntaxKind.MultiLineCommentTrivia
-    ) {
-      const start = scanner.getTokenPos();
-      const end = scanner.getTextPos();
-      out +=
-        source.slice(last, start) +
-        source.slice(start, end).replace(/[^\n]/g, ' ');
-      last = end;
-    }
+  for (const { pos, end } of ranges) {
+    if (pos < last) continue;
+    out +=
+      source.slice(last, pos) + source.slice(pos, end).replace(/[^\n]/g, ' ');
+    last = end;
   }
   return out + source.slice(last);
 }
@@ -175,6 +182,20 @@ describe('document export budgets', () => {
     expect(blankComments(blockCommented)).not.toMatch(WIRING_PIN);
     expect(blankComments(blockCommented)).not.toMatch(CASE_CEILING_PIN);
 
+    // Interpolated-template shape: a blanking mechanism that desyncs on the
+    // `}` of a `${...}` substitution (as a raw scanner walk does) passes the
+    // fixtures above but fails here. The gate's RENDERER_URL templates are
+    // the real-world instance of this shape.
+    const templateThenComment = [
+      'const t = `x${y}z`;',
+      '/*',
+      'const MAX_DOCUMENT_DURATION_MS = documentExportBudgetMs(process.env);',
+      '*/',
+      'const MAX_DOCUMENT_DURATION_MS = 60_000;',
+    ].join('\n');
+    expect(templateThenComment).toMatch(WIRING_PIN);
+    expect(blankComments(templateThenComment)).not.toMatch(WIRING_PIN);
+
     // it.skip( / describe.skip( shape: only the opening pins can see it.
     const skippedCase = [
       '  it.skip(',
@@ -228,5 +249,90 @@ describe('document export budgets', () => {
     const reflowedWiring =
       'const MAX_DOCUMENT_DURATION_MS = documentExportBudgetMs(\n  process.env,\n);';
     expect(reflowedWiring).toMatch(WIRING_PIN);
+  });
+
+  it('does not witness comment-shaped reverts of the real gate source', () => {
+    // Synthetic fixtures cannot see a blanking mechanism that desyncs on the
+    // gate's interpolated template literals: drive the real source through
+    // each comment-shaped rollback instead. For the single-line pins the raw
+    // mutant must still match — the blanked copy is what the pin sees, so
+    // blanking is the only defense.
+    const replaceOnce = (src: string, from: string, to: string): string => {
+      const i = src.indexOf(from);
+      expect(i, `anchor present: ${from.slice(0, 40)}`).toBeGreaterThanOrEqual(
+        0,
+      );
+      expect(src.indexOf(from, i + 1), 'anchor unique').toBe(-1);
+      return src.slice(0, i) + to + src.slice(i + from.length);
+    };
+    const blockComment = (s: string) => '/*\n' + s + '\n*/';
+
+    const wiring =
+      'const MAX_DOCUMENT_DURATION_MS = documentExportBudgetMs(process.env);';
+    const ceiling = '    MAX_DOCUMENT_DURATION_MS + 30_000,\n  );';
+    const assertion =
+      '      expect(durationMs).toBeLessThan(MAX_DOCUMENT_DURATION_MS);';
+    const title =
+      "    'opens, searches, copies, and prints the maximum document with its pinned npm runtime',";
+    const caseOpening = '  it(\n' + title;
+    const describeOpening =
+      "describe('ExportTranscriptDocument browser gate', () => {";
+
+    // Wiring commented out, literal restored.
+    const wiringRevert = replaceOnce(
+      gateSource,
+      wiring,
+      blockComment(wiring) + '\nconst MAX_DOCUMENT_DURATION_MS = 60_000;',
+    );
+    expect(wiringRevert).toMatch(WIRING_PIN);
+    expect(blankComments(wiringRevert)).not.toMatch(WIRING_PIN);
+
+    // Derived ceiling commented out.
+    const ceilingRevert = replaceOnce(
+      gateSource,
+      ceiling,
+      blockComment(ceiling),
+    );
+    expect(ceilingRevert).toMatch(CASE_CEILING_PIN);
+    expect(blankComments(ceilingRevert)).not.toMatch(CASE_CEILING_PIN);
+
+    // Budget assertion commented out.
+    const assertionRevert = replaceOnce(
+      gateSource,
+      assertion,
+      blockComment(assertion),
+    );
+    expect(blankComments(assertionRevert)).not.toMatch(BUDGET_ASSERTION_PIN);
+
+    // Partial rollback: assertion and ceiling commented out, wiring intact.
+    const partialRevert = replaceOnce(
+      assertionRevert,
+      ceiling,
+      blockComment(ceiling),
+    );
+    expect(blankComments(partialRevert)).not.toMatch(BUDGET_ASSERTION_PIN);
+    expect(blankComments(partialRevert)).not.toMatch(CASE_CEILING_PIN);
+
+    // Case really skipped, with a commented-out copy of the enabled opening
+    // left behind to tempt the opening pin.
+    const skippedCaseRevert = replaceOnce(
+      gateSource,
+      caseOpening,
+      blockComment(caseOpening) + '\n  it.skip(\n' + title,
+    );
+    expect(skippedCaseRevert).toMatch(CASE_OPENING_PIN);
+    expect(blankComments(skippedCaseRevert)).not.toMatch(CASE_OPENING_PIN);
+
+    // Same shape for the describe opening.
+    const skippedDescribeRevert = replaceOnce(
+      gateSource,
+      describeOpening,
+      blockComment(describeOpening) +
+        "\ndescribe.skip('ExportTranscriptDocument browser gate', () => {",
+    );
+    expect(skippedDescribeRevert).toMatch(DESCRIBE_OPENING_PIN);
+    expect(blankComments(skippedDescribeRevert)).not.toMatch(
+      DESCRIBE_OPENING_PIN,
+    );
   });
 });
