@@ -41,7 +41,12 @@ function mayHaveReachedDaemon(error: unknown): boolean {
  * but it is not one a join gives (not JSON, or without `connected`).
  */
 function mayStillComplete(baseUrl: string, answered = false): string {
-  return `The daemon at ${baseUrl} ${answered ? 'answered without confirming the join' : 'did not finish answering'}; the join may still complete. Check its log before trying again, with a new token if it did not.`;
+  // No usable answer arrived, so whether the daemon recorded this join's
+  // token is unknowable here — name the two branches instead of promising
+  // the rerun goes on. On a released daemon it does not: a token-bearing
+  // rerun aborts the live connection and is then refused, while a new
+  // token re-enrolls.
+  return `The daemon at ${baseUrl} ${answered ? 'answered without confirming the join' : 'did not finish answering'}; the join may still complete. Check its log before trying again: if the daemon recorded this join's token, the same command again goes on with it; one it refuses needs a new token.`;
 }
 
 export interface JoinArgs {
@@ -227,6 +232,7 @@ export async function runAgentsJoin(
     error?: string;
     connected?: boolean;
     saved?: boolean;
+    recorded?: boolean;
     saveError?: string;
     providers?: string[];
   };
@@ -258,8 +264,12 @@ export async function runAgentsJoin(
     }
     return 1;
   }
-  // An older daemon does not send `saved`; it always claimed the save.
+  // An older daemon sends neither `saved` (it always claimed the save) nor
+  // `recorded`. Absent means unknown, not recorded: a released daemon aborts
+  // the live connection on a token-bearing rerun and then refuses the spent
+  // token, so only an explicit `recorded: true` earns the advice.
   const saved = result.saved !== false;
+  const recorded = result.recorded === true;
   deps.out(
     `Joined ${target.serverUrl} as a runtime for workspace ${target.workspaceId}${
       result.providers?.length
@@ -267,10 +277,15 @@ export async function runAgentsJoin(
         : ''
     }.${saved ? ' The daemon reconnects after restarts.' : ''}`,
   );
-  // Still a successful join: the token is spent, so rerunning with it fails.
+  // Still a successful join: it is connected, and only the reconnect after a
+  // restart is lost. The same command again keeps the connection and retries
+  // the save, so the warning points at that — but only on `recorded: true`.
+  // A re-join whose record write failed, or a daemon that cannot say (an
+  // older one), can see the rerun refused, and the advice must not send the
+  // operator into it.
   if (!saved) {
     deps.err(
-      `Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: ${result.saveError || 'no detail'}`,
+      `Warning: the daemon could not save this connection, so it will not reconnect after a restart or a workspace reload: ${result.saveError || 'no detail'}${recorded ? '. Run the same command again to save it.' : ''}`,
     );
   }
   return 0;

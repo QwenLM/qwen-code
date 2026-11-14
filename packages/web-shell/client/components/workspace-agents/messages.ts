@@ -252,11 +252,11 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
   'collab.runtime.joinConnected': (v) =>
     `This computer joined ${v?.server} as a runtime.`,
   'collab.runtime.notSavedHere': (v) =>
-    `This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload${v?.error ? `: ${v.error}` : '.'}`,
+    `This computer joined, but could not save the connection, so it will not reconnect after a restart or a workspace reload${v?.error ? `: ${v.error}` : ''}.${v?.recorded === 'true' ? ' Run the same join command again to save it.' : ''}`,
   'collab.runtime.notSavedThere': (v) =>
     `That computer connected, but could not save the connection, so it will not reconnect after a restart or a workspace reload${v?.error ? `: ${v.error}` : '.'}`,
   'collab.runtime.joinTimedOut': (v) =>
-    `No answer from this computer’s daemon${v?.error ? ` (${v.error})` : ''}. It may still be joining: check on the coordinator before trying again, with a new join token if it did not join.`,
+    `No answer from this computer’s daemon${v?.error ? ` (${v.error})` : ''}. It may still be joining: check on the coordinator. If it did not join, try the same join again: if the daemon recorded this join’s token, it goes on with it; a token it refuses needs a new one.`,
   'collab.runtime.joinFailed': (v) => `This computer’s join: ${v?.error ?? ''}`,
   'collab.runtime.connectingHint':
     'Connecting a runtime… Actions that leave this page wait until it finishes.',
@@ -486,11 +486,11 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
   'collab.runtime.joinConnected': (v) =>
     `这台电脑已作为 Runtime 加入 ${v?.server}。`,
   'collab.runtime.notSavedHere': (v) =>
-    `这台电脑已加入，但没能保存这次连接，重启或重新加载工作区后不会自动重连${v?.error ? `：${v.error}` : '。'}`,
+    `这台电脑已加入，但没能保存这次连接，重启或重新加载工作区后不会自动重连${v?.error ? `：${v.error}` : ''}。${v?.recorded === 'true' ? '再运行一次同样的加入命令即可保存。' : ''}`,
   'collab.runtime.notSavedThere': (v) =>
     `那台电脑已连接，但没能保存这次连接，重启或重新加载工作区后不会自动重连${v?.error ? `：${v.error}` : '。'}`,
   'collab.runtime.joinTimedOut': (v) =>
-    `这台电脑的守护进程没有应答${v?.error ? `（${v.error}）` : ''}，它可能仍在加入：请先在协调方确认；如果没有加入，再用新的加入令牌重试。`,
+    `这台电脑的守护进程没有应答${v?.error ? `（${v.error}）` : ''}，它可能仍在加入：请先在协调方确认。如果没有加入，再试一次同样的加入：若守护进程记录了本次加入的令牌，重跑会沿用这次尝试已完成的部分继续；若令牌被拒绝，则需要新的令牌。`,
   'collab.runtime.joinFailed': (v) => `这台电脑的加入请求：${v?.error ?? ''}`,
   'collab.runtime.connectingHint':
     '正在连接 Runtime…会离开本页的操作要等它完成。',
