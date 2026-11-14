@@ -896,21 +896,6 @@ export function isWrappedSystemReminderPart(part: Part): boolean {
 export const RELEVANT_MEMORY_HEADING = '## Relevant memory';
 
 /**
- * True for the wrapped legacy recalled-memory part built by
- * `buildLegacyRelevantAutoMemoryPrompt`. It is wrapped like a reminder, but
- * it is not one of the per-turn mode reminders, so continuation guards that
- * ask "were the reminders already delivered?" must not count it.
- */
-export function isRecalledMemoryReminderPart(part: Part): boolean {
-  return (
-    isWrappedSystemReminderPart(part) &&
-    part.text!.startsWith(
-      `${SYSTEM_REMINDER_OPEN}\n${RELEVANT_MEMORY_HEADING}\n`,
-    )
-  );
-}
-
-/**
  * True for a wrapped per-turn reminder that a replayed continuation may
  * already carry: one of the reminders the continuation guards would insert
  * (plan mode, arena, output style). The match is on each producer's exported
