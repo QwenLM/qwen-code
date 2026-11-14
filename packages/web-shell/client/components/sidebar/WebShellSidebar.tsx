@@ -3050,6 +3050,11 @@ export function WebShellSidebar({
     primaryWorkspaceExpansionId,
   ]);
 
+  // Auto-restore for a cold draft: expand the sidebar, but never write the
+  // connected workspace into the selection — a selection write re-enters
+  // this effect's trigger condition when the composer picker picks the
+  // primary workspace (spelled `undefined`), silently reverting the user's
+  // first pick (#16992).
   useEffect(() => {
     if (currentSessionId || selectedWorkspaceCwd !== undefined) {
       return;
@@ -3071,7 +3076,6 @@ export function WebShellSidebar({
           key: contextKey,
         });
       }
-      onSelectWorkspace?.(connectedWorkspace.cwd);
       return;
     }
     if (!hasWorkspaceExpansionPreference(primaryWorkspaceExpansionId)) {
@@ -3080,7 +3084,6 @@ export function WebShellSidebar({
   }, [
     connection.workspaceCwd,
     currentSessionId,
-    onSelectWorkspace,
     primaryWorkspaceExpansionId,
     selectedWorkspaceCwd,
     workspace.capabilities,
