@@ -261,6 +261,15 @@ export function BackgroundTaskViewProvider({
       ? identityIndex
       : Math.max(0, Math.min(selection.index, entries.length - 1));
 
+  // Remember the displayed position so removal falls back near the row the
+  // user last saw, even after a reorder moved the selected task.
+  useEffect(() => {
+    if (identityIndex < 0 || selection.index === identityIndex) return;
+    setSelection((current) =>
+      current === selection ? { ...current, index: identityIndex } : current,
+    );
+  }, [identityIndex, selection]);
+
   const moveSelectionUp = useCallback((): boolean => {
     if (selectedIndex <= 0) return false;
     setSelectedIndex(selectedIndex - 1);
@@ -275,10 +284,11 @@ export function BackgroundTaskViewProvider({
   }, [entries.length, selectedIndex, setSelectedIndex]);
 
   const openDialog = useCallback(() => {
+    setSelectedIndex(selectedIndex);
     setAutoOpened(false);
     setDialogMode('list');
     setPillFocused(false);
-  }, []);
+  }, [selectedIndex, setSelectedIndex]);
 
   const closeDialog = useCallback(() => {
     // A dismissal before the acknowledgment would consume the latch with the

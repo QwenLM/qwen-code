@@ -304,6 +304,78 @@ describe('BackgroundTaskViewProvider approval surfacing', () => {
     },
   );
 
+  it('keeps the task selected when opening from the footer before a reorder', () => {
+    let workflows: WorkflowTask[] = [];
+    const { config, fireApprovalChange } = makeConfig(() => workflows);
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <BackgroundTaskViewProvider config={config}>
+        {children}
+      </BackgroundTaskViewProvider>
+    );
+    const { result } = renderHook(
+      () => ({
+        state: useBackgroundTaskViewState(),
+        actions: useBackgroundTaskViewActions(),
+      }),
+      { wrapper },
+    );
+
+    act(() => result.current.actions.openDialog());
+    expect(result.current.state.selectedIndex).toBe(0);
+    expect(result.current.state.entries[0]).toMatchObject({ agentId: 'a1' });
+
+    act(() => {
+      workflows = [{ ...workflowEntry(), startTime: 300 }];
+      fireApprovalChange();
+    });
+
+    expect(result.current.state.selectedIndex).toBe(1);
+    expect(
+      result.current.state.entries[result.current.state.selectedIndex],
+    ).toMatchObject({ agentId: 'a1' });
+  });
+
+  it('falls back near the last displayed row after a reordered task is removed', () => {
+    let workflows = [workflowEntry(['approval-target'])];
+    const { config, fireApprovalChange } = makeConfig(() => workflows);
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <BackgroundTaskViewProvider config={config}>
+        {children}
+      </BackgroundTaskViewProvider>
+    );
+    const { result } = renderHook(
+      () => ({
+        state: useBackgroundTaskViewState(),
+        actions: useBackgroundTaskViewActions(),
+      }),
+      { wrapper },
+    );
+    expect(result.current.state.selectedIndex).toBe(1);
+
+    act(() => {
+      workflows = [
+        ...workflows,
+        ...[300, 400, 500].map((startTime) => ({
+          ...workflowEntry(),
+          id: `wf-${startTime}`,
+          runId: `wf-${startTime}`,
+          startTime,
+        })),
+      ];
+      fireApprovalChange();
+    });
+    expect(result.current.state.selectedIndex).toBe(4);
+    expect(result.current.state.entries[4]).toMatchObject({ runId: 'wf-1' });
+
+    act(() => {
+      workflows = workflows.filter((entry) => entry.runId !== 'wf-1');
+      fireApprovalChange();
+    });
+
+    expect(result.current.state.selectedIndex).toBe(3);
+    expect(result.current.state.entries[3]).toMatchObject({ agentId: 'a1' });
+  });
+
   it('updates the selected identity through keyboard and explicit navigation', () => {
     let workflows = [workflowEntry(['approval-target'])];
     const { config, fireApprovalChange } = makeConfig(() => workflows);

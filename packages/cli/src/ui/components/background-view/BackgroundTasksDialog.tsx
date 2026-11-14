@@ -1661,11 +1661,9 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     }
     const seen = initialDetailStatusRef.current;
     if (seen && seen.entryId !== selectedEntryId) {
-      // Selection is index-based while the roster re-sorts on every
-      // status change, so a *different* entry can move into the pinned
-      // index while the viewed entry is still alive in the list.
-      // Re-anchor the selection to its new position; only exit when the
-      // entry is genuinely gone.
+      // The provider preserves selection by identity across roster updates.
+      // Defensively restore the viewed entry if another action changed the
+      // selection while detail was open; only exit when the entry is gone.
       const driftedIndex = entries.findIndex(
         (candidate) => entryId(candidate) === seen.entryId,
       );
