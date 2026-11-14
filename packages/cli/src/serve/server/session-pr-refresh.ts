@@ -738,7 +738,13 @@ export function startSessionPrRefreshTimer(deps: {
    * stays governed by the internal constant (off).
    */
   observationEnabled?: boolean;
-}): { dispose(): void; stopWatch(): Promise<void> } | undefined {
+}):
+  | {
+      dispose(): void;
+      stopWatch(): Promise<void>;
+      drainNow(workspaceCwd: string, sessionId?: string): Promise<void>;
+    }
+  | undefined {
   const intervalMs = resolveSessionPrRefreshIntervalMs(deps.env ?? process.env);
   if (intervalMs === undefined) return undefined;
   // Rotating Aone view-window offset per workspace: each sweep advances the
@@ -762,10 +768,14 @@ export function startSessionPrRefreshTimer(deps: {
   // Retained binding rows, in-flight marks and restore slots for the delivery
   // drain, kept across ticks (master §4/§5).
   const prDrainState = createPrWatchDrainState();
-  // Set only once the gated block actually ran, so shutdown never reads a
-  // watch seam while the switch is off (switch-off parity).
+  // Set only once a gated path actually claimed the watch — the tick's
+  // observation block or an on-demand drain — so shutdown never reads a watch
+  // seam while the switch is off (switch-off parity).
   let activeWatchDir: string | undefined;
   let running = false;
+  // Latched by stopWatch so an on-demand drain cannot claim the watch
+  // directory after the owner record has been handed back.
+  let stopped = false;
   // The observation holds the owner record for the whole tick, and the drain
   // state cannot see that phase, so shutdown waits on the tick itself too.
   const tickWaiters = new Set<() => void>();
@@ -940,6 +950,7 @@ export function startSessionPrRefreshTimer(deps: {
      * stop and reads no seam, so the off state stays inert through shutdown too.
      */
     async stopWatch(): Promise<void> {
+      stopped = true;
       if (activeWatchDir === undefined) {
         dispose();
         return;
@@ -951,6 +962,59 @@ export function startSessionPrRefreshTimer(deps: {
         waitForTick: tickIdle,
         log: (message) => process.stderr.write(`[serve] ${message}\n`),
       });
+    },
+    /**
+     * Deliver a just-restored session's pending transitions without waiting for
+     * the next tick (design §2). Runs on this timer's own drain state: a second
+     * state would not see the in-flight marks and could deliver twice.
+     *
+     * Coverage is declared partial on purpose. Only one workspace is scanned,
+     * so every other workspace's bindings are absent from the rows — a complete
+     * scan would let the drain delete their watch files as unbound. Partial
+     * suppresses that unbound-delete branch only: the stale age-out still runs,
+     * but its window is seven days while the full tick refreshes `lastBoundAt`
+     * every interval, so it cannot fire for a workspace the tick still sees.
+     */
+    async drainNow(workspaceCwd: string, sessionId?: string): Promise<void> {
+      // Same gate as the tick: with the switch off the watch is inert, and a
+      // resume must not deliver from watch files a previous owner left behind.
+      if (!(deps.observationEnabled ?? SESSION_PR_WATCH_OBSERVATION_ENABLED)) {
+        return;
+      }
+      const drainDeps = deps.getPrDrainDeps?.();
+      if (!drainDeps) return;
+      const runtime = deps.workspaceRegistry
+        .listAll()
+        .find((candidate) => candidate.workspaceCwd === workspaceCwd);
+      // Same trust filter as the tick's watch workspaces: an untrusted
+      // non-primary is never observed, so it must not be drained on demand
+      // either — the ledger would run git in its checkout.
+      if (!runtime || !(runtime.trusted || runtime.primary)) return;
+      // This drain claims the owner record too, and the first tick is a minute
+      // away, so shutdown has to learn about the claim here as well. Otherwise
+      // stopWatch takes its "nothing to stop" return, never waits for the
+      // restores dispatched below, and leaves a record a successor reads as
+      // held by a live pid — its whole watch stays inert until this process
+      // dies. No await separates the latch check from the assignment.
+      if (stopped) return;
+      activeWatchDir = drainDeps.watchDir;
+      // This session was just restored, so a Gone mark an earlier archive or
+      // worktree loss left for it is stale. Without clearing it the drain keeps
+      // filtering the recipient out until the rejoin horizon expires, and the
+      // resume this hook exists for delivers nothing.
+      if (sessionId !== undefined) prDrainState.gone.delete(sessionId);
+      // Recipient selection and the persisted `delivered` ring are global across
+      // workspaces, and coveragePartial gates only the delete/drop branches —
+      // never the delivery decision. Driving this with the resumed workspace
+      // alone would hide a more recent binder in another workspace, deliver to
+      // a lower-priority one, and record the key as delivered, permanently
+      // consuming the transition the leader is owed. So the rows must be as
+      // complete as the periodic tick's, while the trust gate above still
+      // decides whether this resume may drain at all.
+      const watched = deps.workspaceRegistry
+        .listAll()
+        .filter((candidate) => candidate.trusted || candidate.primary);
+      await runPrWatchDrainTick(watched, drainDeps, prDrainState, true);
     },
   };
 }
