@@ -260,6 +260,9 @@ function boundDeliveredRingPath(
   cwd = '/tmp/test',
   channelName = 'test-github',
 ): string {
+  // Mirror the production name encoding (channelFilePath) so a drift cannot
+  // silently point this helper at a file the adapter never reads.
+  const encodedName = channelName.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 200);
   const nameHash = createHash('sha256')
     .update(channelName)
     .digest('hex')
@@ -268,7 +271,7 @@ function boundDeliveredRingPath(
     process.env.QWEN_HOME!,
     'channels',
     getWorkspaceScopeDirName(cwd),
-    `${channelName}-${nameHash}-github-bound-delivered.json`,
+    `${encodedName}-${nameHash}-github-bound-delivered.json`,
   );
 }
 
@@ -23811,7 +23814,7 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
 
           expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
           expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
-            '离线积压：channel 停摆期间 PR 新增 2 条评论：',
+            '离线积压：自上次成功轮询以来 PR 新增 2 条评论：',
           );
         });
 
@@ -24042,7 +24045,7 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           ).toBe('2026-07-02T09:59:59.000Z');
         });
 
-        it('the omitted digest tail follows as individual deliveries', async () => {
+        it('the omitted digest tail follows as further digests', async () => {
           await initChannel(commentOnlyConfig, { boundSessions });
           boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
           setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
@@ -24472,6 +24475,13 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
             },
             { boundSessions },
           );
+          // Premise: the corrupt file IS the ring the adapter loaded. Without
+          // this, a naming drift would leave the ring readable (ENOENT) and the
+          // assertions below would pass for the ordinary not-delivered reason.
+          expect(
+            (channel as unknown as { boundDeliveredUnreadable: boolean })
+              .boundDeliveredUnreadable,
+          ).toBe(true);
           boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
           setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
           seedCommentEntry();
@@ -24496,6 +24506,61 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           expect(
             readWatchState().entries['owner/repo#42']!['digestPending'],
           ).toBe(true);
+        });
+
+        it('a repaired delivery ring stops re-delivering an accepted digest', async () => {
+          // A startup-unreadable ring must not keep the digest's delivered
+          // check false forever: the first accepted delivery repairs the ring
+          // and clears the unreadable flag, so the backlog drains once instead
+          // of re-delivering the same digest every poll.
+          mkdirSync(dirname(boundDeliveredRingPath()), { recursive: true });
+          writeFileSync(boundDeliveredRingPath(), '{invalid json', 'utf-8');
+          await initChannel(commentOnlyConfig, { boundSessions });
+          // Premise: the corrupt file IS the ring the adapter loaded.
+          expect(
+            (channel as unknown as { boundDeliveredUnreadable: boolean })
+              .boundDeliveredUnreadable,
+          ).toBe(true);
+          boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+          setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+          seedCommentEntry();
+          mockPull({});
+          routeCommentPaginate();
+          mockOctokit.rest.issues.listComments.mockResolvedValue(
+            gapComments(3),
+          );
+          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+          const resetFetch = () => {
+            (
+              channel as unknown as {
+                prWatchState: {
+                  entries: Record<string, { commentLastFetchAt?: number }>;
+                };
+              }
+            ).prWatchState.entries['owner/repo#42']!.commentLastFetchAt = 0;
+          };
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockImplementation(() => true);
+          try {
+            await pollOnce();
+            resetFetch();
+            await pollOnce();
+            resetFetch();
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+          expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+          expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+            'Offline backlog: 3',
+          );
+          expect(
+            readWatchState().entries['owner/repo#42']!['digestPending'],
+          ).toBe(false);
+          expect(
+            readWatchState().entries['owner/repo#42']!['commentSince'],
+          ).not.toBe('2026-07-01T00:00:00.000Z');
         });
 
         it('a gap while comment watch is disabled does not arm the digest', async () => {
@@ -24699,13 +24764,13 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
           await pollOnce();
           expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
-          // The size arm fires on a healthy heartbeat: it must not claim the
-          // channel was not running (the gap arm keeps the outage wording).
+          // The size arm fires on a healthy heartbeat: it must use the neutral
+          // lead, not the gap arm's "since the last successful poll" wording.
           expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
             'Comment backlog: 25',
           );
           expect(boundSessions.deliverPrompt.mock.calls[0]![1]).not.toContain(
-            'while this channel was not running',
+            'since the last successful poll',
           );
           // The omitted tail arms the entry even though the SIZE arm (not the
           // gap-arming loop) entered the digest, so the remainder follows as a
@@ -24722,8 +24787,338 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           ).prWatchState.entries['owner/repo#42']!.commentLastFetchAt = 0;
           await pollOnce();
           expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+          // The follow-up of a SIZE-triggered digest keeps the neutral lead:
+          // no gap was detected, so it must not use the gap arm's wording.
+          expect(boundSessions.deliverPrompt.mock.calls[1]![1]).toContain(
+            'Comment backlog:',
+          );
+          expect(boundSessions.deliverPrompt.mock.calls[1]![1]).not.toContain(
+            'since the last successful poll',
+          );
+        });
+
+        it('a downtime gap after a size-armed digest reports the offline lead', async () => {
+          await initChannel(commentOnlyConfig, { boundSessions });
+          boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+          // Healthy heartbeat: the backlog SIZE arms the first digest and its
+          // omitted tail persists the size origin.
+          setLastPollAt(new Date(Date.now() - 5000).toISOString());
+          seedCommentEntry();
+          mockPull({});
+          routeCommentPaginate();
+          mockOctokit.rest.issues.listComments.mockResolvedValue(
+            Array.from({ length: 25 }, (_, i) => ({
+              id: 950 + i,
+              node_id: `IC_${950 + i}`,
+              body: `size-gap-${i}`,
+              created_at: `2026-07-02T10:${String(i).padStart(2, '0')}:00.000Z`,
+              user: { login: 'test-bot' },
+            })),
+          );
+          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+          await pollOnce();
+          expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+          expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+            'Comment backlog: 25',
+          );
+          expect(
+            readWatchState().entries['owner/repo#42']!['digestSizeArmed'],
+          ).toBe(true);
+          // A genuine outage interrupts the drain: the gap arm must reset the
+          // stale size origin so the remainder reports the offline lead, not
+          // the neutral one inherited from the size arm.
+          setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+          (
+            channel as unknown as {
+              prWatchState: {
+                entries: Record<string, { commentLastFetchAt?: number }>;
+              };
+            }
+          ).prWatchState.entries['owner/repo#42']!.commentLastFetchAt = 0;
+          await pollOnce();
+          expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
           expect(boundSessions.deliverPrompt.mock.calls[1]![1]).toContain(
             'Offline backlog:',
+          );
+          expect(
+            readWatchState().entries['owner/repo#42']!['digestSizeArmed'],
+          ).toBe(false);
+        });
+
+        it('disabling comment watch clears a persisted arm before re-enable', async () => {
+          // A gap persisted the arm; the operator then disables comment watch
+          // and restarts. The arm must be cleared where the disabled state is
+          // observable (runPrStateWatch's guard), not survive to digest the
+          // comments accumulated while watching was off.
+          await initChannel(commentOnlyConfig, { boundSessions });
+          seedCommentEntry({ digestPending: true });
+          await initChannel(
+            { ...commentOnlyConfig, prCommentWatch: false },
+            { boundSessions },
+          );
+          mockPull({});
+          routeCommentPaginate();
+          await pollOnce();
+          expect(
+            readWatchState().entries['owner/repo#42']!['digestPending'],
+          ).toBe(false);
+          expect(
+            readWatchState().entries['owner/repo#42']!['commentSince'],
+          ).toBe('2026-07-01T00:00:00.000Z');
+          // Re-enable with a fresh heartbeat: the accumulated comment delivers
+          // per comment, not as a digest of comments that were never gap backlog.
+          await initChannel(commentOnlyConfig, { boundSessions });
+          boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+          setLastPollAt(new Date(Date.now() - 5000).toISOString());
+          mockPull({});
+          routeCommentPaginate();
+          mockOctokit.rest.issues.listComments.mockResolvedValue(
+            gapComments(1),
+          );
+          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+          await pollOnce();
+          expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+          expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+            'New comment by',
+          );
+          expect(boundSessions.deliverPrompt.mock.calls[0]![1]).not.toContain(
+            'Offline backlog',
+          );
+        });
+
+        it('a drained PR is not re-armed when a later pass aborts', async () => {
+          // Two bound PRs: PR 42's backlog digests to completion and clears its
+          // arm, then PR 43's fetch 429s and aborts the pass. The global one-shot
+          // must not survive the abort and re-arm the drained PR 42, or a later
+          // single fresh comment would digest under an outage lead that never
+          // happened.
+          await initChannel(commentOnlyConfig, { boundSessions });
+          boundSessions.listPrBindings.mockResolvedValue({
+            bindings: [
+              makeBinding({
+                prs: [
+                  {
+                    number: 42,
+                    url: 'https://github.com/owner/repo/pull/42',
+                    state: 'open',
+                  },
+                  {
+                    number: 43,
+                    url: 'https://github.com/owner/repo/pull/43',
+                    state: 'open',
+                  },
+                ],
+              }),
+            ],
+            partial: false,
+          });
+          boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+          const seeded = {
+            commentBaseline: '2026-07-01T00:00:00.000Z',
+            commentSince: '2026-07-01T00:00:00.000Z',
+            commentLastFetchAt: 0,
+          };
+          seedWatchState({
+            'owner/repo#42': { ...seeded },
+            'owner/repo#43': { ...seeded },
+          });
+          setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+          mockPull({});
+          let pr42: unknown[] = gapComments(3);
+          mockOctokit.rest.activity.listNotificationsForAuthenticatedUser.mockResolvedValue(
+            [],
+          );
+          mockOctokit.paginate.mockImplementation(
+            async (_fn: unknown, params: Record<string, unknown> = {}) => {
+              if ('pull_number' in params) return [];
+              if ('issue_number' in params) {
+                if (params['issue_number'] === 43) {
+                  throw Object.assign(new Error('API rate limit exceeded'), {
+                    status: 429,
+                  });
+                }
+                return pr42;
+              }
+              return [];
+            },
+          );
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockImplementation(() => true);
+          try {
+            await pollOnce();
+            // PR 42 drained and cleared before PR 43 aborted the pass.
+            expect(
+              readWatchState().entries['owner/repo#42']!['digestPending'],
+            ).toBe(false);
+            expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+            expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+              'Offline backlog: 3',
+            );
+            // A fresh heartbeat and one ordinary new comment on PR 42: it must
+            // deliver per comment, not re-digest under a stale outage arm.
+            setLastPollAt(new Date(Date.now() - 5000).toISOString());
+            (
+              channel as unknown as {
+                prWatchState: {
+                  entries: Record<string, { commentLastFetchAt?: number }>;
+                };
+              }
+            ).prWatchState.entries['owner/repo#42']!.commentLastFetchAt = 0;
+            pr42 = [
+              {
+                id: 999,
+                node_id: 'IC_999',
+                body: 'fresh comment',
+                created_at: '2026-07-02T11:00:00.000Z',
+                user: { login: 'test-bot' },
+              },
+            ];
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+          expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+          expect(boundSessions.deliverPrompt.mock.calls[1]![1]).toContain(
+            'New comment by',
+          );
+          expect(boundSessions.deliverPrompt.mock.calls[1]![1]).not.toContain(
+            'Offline backlog',
+          );
+        });
+
+        it('a held digest dedupes rendered members the ring evicts', async () => {
+          // The shared dispatchedComments ring is at its cap with keys older
+          // than the notification cursor, which sits PAST the backlog. Recording
+          // the digest's rendered keys crosses the cap and evicts the first one
+          // (its created_at predates the cursor). The per-entry rendered frontier
+          // must still dedupe it, so the follow-up neither re-delivers it nor
+          // over-counts its "new comment(s)".
+          await initChannel(commentOnlyConfig, { boundSessions });
+          boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+          setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+          seedCommentEntry();
+          const cursor = (
+            channel as unknown as {
+              cursor: {
+                dispatchedComments?: string[];
+                dispatchedCommentTimes?: Record<string, string>;
+                lastProcessedAt: string;
+              };
+            }
+          ).cursor;
+          cursor.lastProcessedAt = '2026-07-03T00:00:00.000Z';
+          cursor.dispatchedComments = Array.from(
+            { length: 500 },
+            (_, i) => `old-${i}`,
+          );
+          cursor.dispatchedCommentTimes = Object.fromEntries(
+            Array.from({ length: 500 }, (_, i) => [
+              `old-${i}`,
+              '2026-07-01T00:00:00.000Z',
+            ]),
+          );
+          mockPull({});
+          routeCommentPaginate();
+          mockOctokit.rest.issues.listComments.mockResolvedValue(
+            Array.from({ length: 25 }, (_, i) => ({
+              id: 600 + i,
+              node_id: `IC_${600 + i}`,
+              body: `member-${i}`,
+              created_at: `2026-07-02T10:${String(i).padStart(2, '0')}:00.000Z`,
+              user: { login: 'test-bot' },
+            })),
+          );
+          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+          await pollOnce();
+          expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+          expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+            'Offline backlog: 25',
+          );
+          (
+            channel as unknown as {
+              prWatchState: {
+                entries: Record<string, { commentLastFetchAt?: number }>;
+              };
+            }
+          ).prWatchState.entries['owner/repo#42']!.commentLastFetchAt = 0;
+          await pollOnce();
+          expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(2);
+          // Only the 5 omitted members re-list; the 20 rendered members stay
+          // deduped by the frontier (without it the evicted key makes this 6).
+          expect(boundSessions.deliverPrompt.mock.calls[1]![1]).toContain(
+            'Offline backlog: 5',
+          );
+          expect(boundSessions.deliverPrompt.mock.calls[1]![1]).not.toContain(
+            '#issuecomment-605',
+          );
+          expect(boundSessions.deliverPrompt.mock.calls[1]![1]).not.toContain(
+            '#issuecomment-624',
+          );
+        });
+
+        it('the Gone fallback cannot hand a digest back to its full-context author', async () => {
+          // Legacy config (no boundSessionActions): resolveBoundTargets picks the
+          // single most-recent follower (target-session), while the exclusion
+          // scans EVERY follower. author-session wrote every rendered member but
+          // is older, so it is not the resolved target; when the target goes Gone
+          // the fallback must still exclude the author rather than hand it a
+          // digest of its own comments. Deriving the exclusion from the resolved
+          // targets instead of the follower set would deliver to the author.
+          await initChannel(commentOnlyConfig, { boundSessions });
+          boundSessions.listPrBindings.mockResolvedValue({
+            bindings: [
+              makeBinding({
+                sessionId: 'author-session',
+                updatedAt: '2026-07-01T00:00:00.000Z',
+              }),
+              makeBinding({
+                sessionId: 'target-session',
+                updatedAt: '2026-07-02T00:00:00.000Z',
+              }),
+            ],
+            partial: false,
+          });
+          const members = Array.from({ length: 25 }, (_, i) => ({
+            id: 800 + i,
+            node_id: `IC_${800 + i}`,
+            body: `member-${i}`,
+            created_at: `2026-07-02T10:${String(i).padStart(2, '0')}:00.000Z`,
+            user: { login: 'test-bot' },
+          }));
+          const authorKeys = new Set(members.map((m) => `ic:${m.id}`));
+          boundSessions.postedCommentIds = vi
+            .fn()
+            .mockImplementation(async (sessionId: string) =>
+              sessionId === 'author-session' ? authorKeys : new Set(),
+            );
+          boundSessions.deliverPrompt.mockImplementation(
+            async (sessionId: string) => {
+              if (sessionId === 'target-session') {
+                throw new BoundSessionGoneError('bound-session');
+              }
+              return undefined;
+            },
+          );
+          setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+          seedCommentEntry();
+          mockPull({});
+          routeCommentPaginate();
+          mockOctokit.rest.issues.listComments.mockResolvedValue(members);
+          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockImplementation(() => true);
+          try {
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+          // The target was tried (Gone); the full-context author must never be
+          // handed the digest by the fallback.
+          expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+          expect(boundSessions.deliverPrompt.mock.calls[0]![0]).toBe(
+            'target-session',
           );
         });
 

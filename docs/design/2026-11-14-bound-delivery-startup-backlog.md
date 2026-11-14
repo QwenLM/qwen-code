@@ -64,7 +64,13 @@ delivered, but it should arrive as a compact summary, not a flood.
   configured poll interval so a long-interval channel does not digest every
   poll. Gap detection is gated on bound delivery AND comment watching being
   enabled: a gap while comment watching is disabled does not arm the digest, so
-  comments accumulated while disabled deliver per comment once re-enabled.
+  comments accumulated while disabled deliver per comment once re-enabled. A
+  arm persisted BEFORE watching was disabled is cleared at the poll loop's
+  watch gate (the observable disabled site — the watch pass itself is never
+  called while disabled), so a disabled restart cannot carry the arm into a
+  later re-enable and digest comments that were never gap backlog. A transient
+  skip (failed binding refresh, budget reserve) keeps the arm: the backlog is
+  real.
 
 ### 2. Comment backlog digest (per-PR, armed by the gap or the window size)
 
@@ -74,15 +80,18 @@ degraded (empty/partial) first poll still arms the entries on disk and a
 restart before a complete snapshot finds the arm. The arm is also persisted
 immediately at gap detection, so a poll whose watch pass is skipped (failed
 binding refresh) does not lose it. Entries outside the watch-cap slice keep
-their arm until watched. The global flag clears once a trusted, non-aborted
-pass has watched something; the per-entry flag carries the digest for
-individual PRs across per-PR errors, cap exclusion, untrusted snapshots, and
-restarts. An entry's arm clears when its backlog is consumed (the digest
-settled with nothing omitted, or nothing to deliver) or on a silent first
-observation. A held cursor (omitted tail, refused dispatch, gate grace) KEEPS
-the arm. A complete-but-empty binding snapshot is authoritative absence: the
-entry prunes under the existing contract, and a binding that appears later is a
-silent first observation.
+their arm until watched. The global flag is a TRUE one-shot: it clears as soon
+as it has armed the persisted entries, not after a trusted pass — keeping it
+alive across aborted passes would re-arm entries an earlier pass already
+drained, so a later single fresh comment would digest under an outage lead that
+never happened. The per-entry flag (persisted by the pass's save) carries the
+digest for individual PRs across per-PR errors, cap exclusion, untrusted
+snapshots, aborted passes, and restarts. An entry's arm clears when its backlog
+is consumed (the digest settled with nothing omitted, or nothing to deliver) or
+on a silent first observation. A held cursor (omitted tail, refused dispatch,
+gate grace) KEEPS the arm. A complete-but-empty binding snapshot is authoritative
+absence: the entry prunes under the existing contract, and a binding that appears
+later is a silent first observation.
 
 Digest mode is also armed by BACKLOG SIZE: a deliverable window larger than
 `MAX_WATCH_COMMENTS_PER_PASS` digests regardless of the heartbeat, because a
@@ -90,7 +99,12 @@ healed endpoint after sustained per-PR fetch failures keeps the heartbeat fresh
 while the cursor stays hours back — the gap alone would never arm it. The
 size-armed digest uses a neutral lead (it must not claim an outage that did not
 happen) and persists its own arm when it omits members, so the remainder
-follows as further digests.
+follows as further digests. The size-triggered origin is remembered per entry
+(`digestSizeArmed`), so the follow-ups — which re-enter through the persisted
+arm — keep the neutral lead too; only a genuine downtime gap uses the
+offline-backlog wording. A detected gap RESETS the size origin, so an outage
+that interrupts a size-armed drain reports the offline lead again rather than
+inheriting the stale neutral one.
 
 In `watchPrComments`, digest mode replaces the per-comment dispatch loop:
 
@@ -117,7 +131,13 @@ In `watchPrComments`, digest mode replaces the per-comment dispatch loop:
   retained, so the next pass re-lists and DIGESTS the remainder (the rendered
   suffix dedupes). Clearing the arm here would drain the remainder one prompt
   per comment — the flood this feature removes. Nothing is consumed without
-  being delivered.
+  being delivered. The rendered suffix dedupes against a per-entry persisted
+  frontier (`digestRendered`) as well as the shared `dispatchedComments` ring:
+  the ring evicts keys older than the NOTIFICATION cursor, which a healthy poll
+  advances past a held digest's backlog, so a rendered key can be evicted
+  mid-drain; the frontier keeps it deduped so the follow-up neither re-delivers
+  it nor over-counts its "new comment(s)". The frontier accumulates while the
+  cursor is held and clears when the backlog is consumed.
 - Envelope: `messageId` is `comment-digest:<n>:<sha256-40 of sorted RENDERED
 member keys>` (content-hash identity over what was actually delivered,
   mirroring the aggregate lane's superset semantics); metadata keeps
@@ -136,7 +156,10 @@ member keys>` (content-hash identity over what was actually delivered,
   holds `since`, and keeps the arm, so the cursor never advances past members
   that were never delivered and the next pass re-lists them. Without the undo,
   the claim-time keys would hide every member from the retry and the next pass's
-  empty candidate set would consume the backlog with zero prompts.
+  empty candidate set would consume the backlog with zero prompts. A successful
+  delivery rewrites the ring and clears the unreadable flag, so a
+  startup-unreadable ring is repaired by the first accepted digest and the
+  backlog drains once instead of re-delivering every poll.
 - Cursor: commits `nowIso` (clearing the arm) when the dispatch delivered and
   nothing was omitted; holds before the backlog head (keeping the arm) when
   members were omitted; holds `since` (keeping the arm) when nothing was
@@ -155,9 +178,13 @@ member keys>` (content-hash identity over what was actually delivered,
 
 New copy entries in `BOUND_DELIVERY_COPY` (en + zh): an offline-backlog lead
 (gap arm), a neutral comment-backlog lead (size arm), and an offline omission
-notice. The omission notice rides at the FRONT because the shared body cap
-truncates the tail. Structural markers and platform values follow the existing
-language contract (English byte-identical entries for `en`).
+notice. The offline lead is worded to be true of BOTH gap triggers — a restart
+and an in-process API outage both leave a stale heartbeat while the process may
+still be running — so it says "since the last successful poll" rather than
+claiming the channel was not running. The omission notice rides at the FRONT
+because the shared body cap truncates the tail. Structural markers and platform
+values follow the existing language contract (English byte-identical entries
+for `en`).
 
 ## Design decisions and rationale
 
@@ -222,9 +249,14 @@ backlog)` suite): gap digest vs per-comment no-gap, legacy cursor, interval
   re-list dedupe, partial/empty snapshot arm retention, per-PR fetch error,
   in-process outage recovery, budget exhaustion, group sender allowlist,
   retired verdict (with a second poll after the gate clears), unreadable
-  delivery ring, size arm (neutral lead + omitted-tail arm), disabled-watch
-  no-arm, over-budget fall-through, degraded-first-poll restart, persistent
-  fetch failure.
+  delivery ring, a repaired ring draining an accepted digest once over three
+  polls, size arm (neutral lead + omitted-tail arm + neutral follow-up lead),
+  a gap resetting a size-armed drain to the offline lead, disabled-watch
+  no-arm, a disabled restart clearing a persisted arm before re-enable, a
+  drained PR not re-armed when a later pass aborts, a held digest deduping
+  rendered members the ring evicts, the legacy Gone fallback excluding the
+  full-context author, over-budget fall-through, degraded-first-poll restart,
+  persistent fetch failure.
 - E2E (hermetic mock GitHub + isolated daemon + PR sidecar): gap → one digest
   with rendered member keys recorded; no-gap → per-comment; full-size backlog →
   newest members survive the body budget; first-observation-under-gap → silent.

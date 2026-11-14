@@ -672,6 +672,23 @@ interface PrWatchEntry {
    * prompt per comment.
    */
   digestPending?: boolean;
+  /**
+   * True when the digest arm was set by the SIZE arm (an over-cap window on a
+   * healthy heartbeat) rather than a downtime gap, so the digest and its
+   * follow-ups use the neutral backlog lead instead of claiming an outage.
+   * Cleared together with digestPending, and reset to false whenever a
+   * detected gap re-arms the entry (the gap becomes the current origin).
+   */
+  digestSizeArmed?: boolean;
+  /**
+   * Dedupe frontier of the rendered members of a HELD digest (omitted tail).
+   * The shared dispatchedComments ring evicts keys older than the notification
+   * cursor, which a healthy poll advances past a held digest's backlog; this
+   * per-entry frontier keeps the rendered keys deduped across the drain so an
+   * evicted key is not re-listed and delivered twice. Accumulated while the
+   * cursor is held; cleared when the backlog is consumed.
+   */
+  digestRendered?: string[];
 }
 
 interface PrWatchStateFile {
@@ -701,7 +718,12 @@ function isPrWatchEntryShape(value: unknown): value is PrWatchEntry {
     stringOrUndef(entry.commentSince) &&
     numberOrUndef(entry.commentLastFetchAt) &&
     (entry.digestPending === undefined ||
-      typeof entry.digestPending === 'boolean')
+      typeof entry.digestPending === 'boolean') &&
+    (entry.digestSizeArmed === undefined ||
+      typeof entry.digestSizeArmed === 'boolean') &&
+    (entry.digestRendered === undefined ||
+      (Array.isArray(entry.digestRendered) &&
+        entry.digestRendered.every((k) => typeof k === 'string')))
   );
 }
 
@@ -1199,7 +1221,7 @@ const BOUND_DELIVERY_COPY: Readonly<
     newInlineReviewCommentLead: (author) =>
       `New inline review comment by @${author}:`,
     offlineCommentsLead: (count) =>
-      `Offline backlog: ${count} new comment(s) on the PR while this channel was not running:`,
+      `Offline backlog: ${count} new comment(s) on the PR since the last successful poll:`,
     commentBacklogLead: (count) =>
       `Comment backlog: ${count} new comment(s) on this PR:`,
     offlineOmittedNotice: (count) =>
@@ -1219,7 +1241,7 @@ const BOUND_DELIVERY_COPY: Readonly<
     newCommentLead: (author) => `@${author} 的新评论：`,
     newInlineReviewCommentLead: (author) => `@${author} 的新行内评审评论：`,
     offlineCommentsLead: (count) =>
-      `离线积压：channel 停摆期间 PR 新增 ${count} 条评论：`,
+      `离线积压：自上次成功轮询以来 PR 新增 ${count} 条评论：`,
     commentBacklogLead: (count) => `评论积压：本 PR 新增 ${count} 条评论：`,
     offlineOmittedNotice: (count) =>
       `本摘要因篇幅省略了 ${count} 条评论，将分批摘要补投`,
@@ -2806,6 +2828,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           this.loadPrWatchState();
           for (const entry of Object.values(this.prWatchState.entries)) {
             entry.digestPending = true;
+            // A genuine gap is the current origin: reset any stale size-arm
+            // origin so an outage that interrupts a size-armed drain still
+            // reports the offline lead rather than the neutral one.
+            entry.digestSizeArmed = false;
           }
           this.savePrWatchState();
         } catch {
@@ -2860,6 +2886,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // recovers during this window still owes its recovery row.
       this.watchBudgetLow = false;
       this.closeWatchBudgetEpisode();
+      if (!commentWatchActive) {
+        // Comment watching is OFF (not merely skipped this poll): a persisted
+        // digest arm must not survive a disabled restart and later digest the
+        // comments accumulated while it was off. This is the observable site —
+        // runPrStateWatch is never called while disabled. The design promises
+        // per-comment delivery for comments accumulated while watching is off.
+        // A transient boundRefreshFailed skip keeps the arm (the backlog is real).
+        try {
+          this.loadPrWatchState();
+          let cleared = false;
+          for (const entry of Object.values(this.prWatchState.entries)) {
+            if (entry.digestPending === true) {
+              entry.digestPending = false;
+              entry.digestSizeArmed = false;
+              entry.digestRendered = [];
+              cleared = true;
+            }
+          }
+          if (cleared) this.savePrWatchState();
+        } catch {
+          // Watch state unreadable: nothing to clear, and the arm cannot be
+          // consumed while watching is off anyway.
+        }
+      }
     }
 
     if (this.inboundRecoveryPending) {
@@ -6529,6 +6579,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         `${JSON.stringify({ keys: this.boundDeliveredOrder })}\n`,
         { encoding: 'utf-8', mode: 0o600 },
       );
+      // A successful write repairs the ring: clear the unreadable flag so the
+      // digest's known-positive delivery check (and the suppression callers)
+      // see the ring as readable again. Otherwise a startup-unreadable ring
+      // would keep the digest's delivered check false forever, re-delivering
+      // the same backlog every poll even though each delivery repairs the file.
+      this.boundDeliveredUnreadable = false;
     } catch (err) {
       process.stderr.write(
         `[Channel:${this.name}] failed to persist bound-delivered ring (in-memory suppression still active): ${sanitizeLogText(
@@ -7441,19 +7497,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // active keys: a degraded (empty/partial) first poll must still arm the
     // entries on disk, so a restart before a complete snapshot finds the arm
     // and digests the backlog instead of flooding per comment. Entries
-    // outside the watch-cap slice keep their arm until watched. The per-entry
-    // flag is persisted and cleared only when that PR's backlog is consumed.
+    // outside the watch-cap slice keep their arm until watched. The one-shot
+    // clears HERE, once it has armed: the per-entry flags (persisted below)
+    // carry the digest across per-PR errors, cap exclusion, untrusted
+    // snapshots, and restarts. Keeping the global flag alive across aborted
+    // passes would re-arm entries an earlier pass already drained, so a later
+    // single fresh comment would digest under an outage lead that never
+    // happened.
     if (this.startupDigestPending) {
       for (const entry of Object.values(this.prWatchState.entries)) {
         entry.digestPending = true;
+        entry.digestSizeArmed = false;
       }
+      this.startupDigestPending = false;
     }
     const commentBudget = { remaining: MAX_WATCH_COMMENTS_PER_PASS };
-    let passAborted = false;
-    let watchedAny = false;
     for (const [key, candidate] of candidates) {
       if (candidate.terminal) continue;
-      watchedAny = true;
       // Yield at the spend site, not only at the poll boundary: one pass can
       // issue several requests per watched PR, so a pass entered just above
       // the reserve would otherwise spend the whole reserve before the
@@ -7461,7 +7521,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // so far still reach savePrWatchState below.
       if (this.watchBudgetExhausted()) {
         this.noteWatchBudgetLow();
-        passAborted = true;
         break;
       }
       try {
@@ -7478,14 +7537,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         if (isWatchPassAbortError(err)) {
           // Shared credential/rate-limit failure: abort the rest of the
           // pass instead of issuing one doomed request per watched PR.
-          // Later polls retry the full set once the condition clears.
+          // Later polls retry the full set once the condition clears. The
+          // per-entry arms persisted below carry the digest across the abort.
           process.stderr.write(
             `[Channel:${this.name}] PR watch pass aborted at ${key} (credential/rate limit); the remaining watched PRs skip this poll: ${sanitizeLogText(
               err instanceof Error ? err.message : String(err),
               200,
             )}\n`,
           );
-          passAborted = true;
           break;
         }
         process.stderr.write(
@@ -7497,20 +7556,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
     }
     this.savePrWatchState();
-    // The global one-shot only arms entries; it clears once a trusted,
-    // non-aborted pass has actually watched something. An empty watched set
-    // (bindings not yet present) or an untrusted snapshot keeps it armed for
-    // the next pass; per-entry flags carry the digest for individual PRs
-    // across errors, cap exclusion, and restarts.
-    if (
-      !passAborted &&
-      watchedAny &&
-      this.boundSnapshotTrusted &&
-      !this.lastBindingsPartial &&
-      !this.boundRefreshFailed
-    ) {
-      this.startupDigestPending = false;
-    }
   }
 
   /**
@@ -7541,22 +7586,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     budget: { remaining: number },
     digestMode: boolean,
   ): Promise<void> {
-    if (
-      !this.deliverToBoundSessions ||
-      !this.prCommentWatchEnabled ||
-      !this.boundSessions
-    ) {
-      // Comment watching is off: a stale arm must not digest later-enabled
-      // comments that were never gap backlog.
-      if (this.prWatchState.entries[key]?.digestPending === true) {
-        this.prWatchState.entries[key] = {
-          ...this.prWatchState.entries[key],
-          digestPending: false,
-        };
-        this.savePrWatchState();
-      }
-      return;
-    }
+    // The poll loop only reaches this pass with bound delivery and comment
+    // watching enabled, and clears any stale digest arm when they are off. The
+    // handle guard narrows the nullable handle for the delivery lookups below.
+    if (!this.boundSessions) return;
     const entry = this.prWatchState.entries[key] ?? {};
     const now = Date.now();
     const nowIso = new Date(now).toISOString();
@@ -7569,6 +7602,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         commentSince: nowIso,
         commentLastFetchAt: now,
         digestPending: false,
+        digestSizeArmed: false,
+        digestRendered: [],
       };
       this.savePrWatchState();
       return;
@@ -7677,8 +7712,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       return;
     }
     const baseline = entry.commentBaseline;
+    // The held digest's rendered frontier backs up the shared dispatchedComments
+    // ring: the ring evicts keys older than the notification cursor, which a
+    // healthy poll advances past a held digest's backlog, so a rendered key can
+    // be evicted mid-drain. The per-entry frontier keeps it deduped regardless.
+    const renderedFrontier = new Set(entry.digestRendered ?? []);
     const alreadyDispatched = (commentKey: string): boolean =>
-      this.cursor.dispatchedComments?.includes(commentKey) === true;
+      this.cursor.dispatchedComments?.includes(commentKey) === true ||
+      renderedFrontier.has(commentKey);
     const candidates: Array<{
       key: string;
       attrKey: string;
@@ -7826,7 +7867,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         commentLastFetchAt: now,
         // The digest arm clears only when this PR's backlog is consumed;
         // a held cursor (omitted tail, refused dispatch) keeps it armed.
-        ...(clearDigest ? { digestPending: false } : {}),
+        ...(clearDigest
+          ? { digestPending: false, digestSizeArmed: false, digestRendered: [] }
+          : {}),
       };
       this.savePrWatchState();
     };
@@ -7931,6 +7974,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const digesting =
       digestMode || deliverable.length > MAX_WATCH_COMMENTS_PER_PASS;
     if (digesting) {
+      // The gap arm reports the outage; the size arm (and its follow-ups,
+      // which re-enter via the persisted arm) fires on a healthy heartbeat and
+      // must not claim the channel was not running.
+      const gapLead =
+        digestMode && this.prWatchState.entries[key]?.digestSizeArmed !== true;
       // Allocate the shared body ceiling NEWEST-FIRST: the cap keeps the
       // prefix, so rendering oldest-first would let it eat exactly the
       // newest, most actionable members. Members that do not fit are named
@@ -7961,9 +8009,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ): string => {
         const digestCopy = BOUND_DELIVERY_COPY[language];
         const omitted = deliverable.length - members.length;
-        // The gap arm reports the outage; the size arm fires on a healthy
-        // heartbeat, so it must not claim the channel was not running.
-        const leadText = digestMode
+        const leadText = gapLead
           ? digestCopy.offlineCommentsLead(deliverable.length)
           : digestCopy.commentBacklogLead(deliverable.length);
         // The omission notice rides at the FRONT: a tail notice would be
@@ -7977,7 +8023,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
       };
       const leadCp = cp(
-        digestMode
+        gapLead
           ? BOUND_DELIVERY_COPY[this.locale].offlineCommentsLead(
               deliverable.length,
             )
@@ -8098,9 +8144,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           // further digests); the rendered suffix is deduped. Arm regardless
           // of how the digest was entered — the size arm has no gap-arming
           // loop, so the omitted tail must persist its own arm or it would
-          // drain one prompt per comment.
+          // drain one prompt per comment. Remember a size-triggered origin so
+          // the follow-up keeps the neutral lead (no outage was detected).
           const armedEntry = this.prWatchState.entries[key];
-          if (armedEntry) armedEntry.digestPending = true;
+          if (armedEntry) {
+            armedEntry.digestPending = true;
+            if (!digestMode) armedEntry.digestSizeArmed = true;
+            // Persist the rendered frontier so the shared ring's eviction
+            // (keyed to the notification cursor, which a healthy poll advances
+            // past this held backlog) cannot re-list and re-deliver a rendered
+            // member, nor over-count the follow-up digest's "new comment(s)".
+            armedEntry.digestRendered = [
+              ...new Set([
+                ...(armedEntry.digestRendered ?? []),
+                ...rendered.map((candidate) => candidate.key),
+              ]),
+            ];
+          }
           commitCursor(
             new Date(
               Date.parse(deliverable[0]!.createdAt) - 1000,
