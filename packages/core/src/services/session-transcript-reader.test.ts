@@ -1259,6 +1259,14 @@ describe('SessionTranscriptReader', () => {
       await fs.writeFile(file, lines.slice(0, -1).join('\n') + '\n');
       const reader = new SessionTranscriptReader(workspaceDir);
       expect(await reader.getLastUserPromptAt(sessionId)).toBe(first.timestamp);
+      expect(
+        await reader.readTurnHooksPage(sessionId, 'legacy-record:u1'),
+      ).toMatchObject({
+        coverage: 'unsupported',
+        summary: null,
+        totalExecutions: 0,
+        executions: [],
+      });
       const archive = path.join(path.dirname(file), 'archive');
       await fs.mkdir(archive);
       await fs.copyFile(file, path.join(archive, `${sessionId}.jsonl`));

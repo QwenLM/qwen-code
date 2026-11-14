@@ -181,11 +181,15 @@ describe('FileChangedWatcher with real files', () => {
       const nested = path.join(root, 'directory.a1b2c3d4e5f6.tmp', 'topic.md');
       const notify = vi.fn().mockResolvedValue(undefined);
       watcher = new FileChangedWatcher(notify);
+      // Create the directory before the watcher starts so the ready scan
+      // attaches its watch. Writing into a directory created after setPaths
+      // races chokidar's readdir-then-watch window, which can drop the add
+      // permanently (#16626, #16668).
+      await fs.mkdir(path.dirname(nested));
       await watcher.setPaths(
         [root, explicit],
         registration === 'static' ? [explicit] : [],
       );
-      await fs.mkdir(path.dirname(nested));
       for (const file of [explicit, nested])
         await fs.writeFile(file, 'created');
       await vi.waitFor(() => {

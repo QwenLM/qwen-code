@@ -493,6 +493,18 @@ export class SessionApiHistoryAccumulator {
     }
     const lengthBeforeAppend = this.history.length;
     appendApiHistoryRecord(this.history, record, this.completedToolCallIds);
+    if (record.type === 'tool_result' && record.subtype === 'tool_loop_end') {
+      const callId = record.toolCallResult?.callId;
+      if (
+        callId &&
+        record.message.parts?.some(
+          (part) => part.functionResponse?.id === callId,
+        ) &&
+        hasUniqueToolResult(this.history, callId)
+      ) {
+        this.completedToolCallIds.add(callId);
+      }
+    }
     // A `mid_turn_user_message` merges into the previous entry instead of
     // pushing; only a real append gets a flag, so the two arrays stay aligned.
     if (this.history.length > lengthBeforeAppend) {

@@ -90,6 +90,8 @@ export type ContentGeneratorConfig = {
   baseUrl?: string;
   vertexai?: boolean;
   authType?: AuthType | undefined;
+  /** Separate model route that must use its own provider configuration. */
+  isolatedRoute?: boolean;
   enableOpenAILogging?: boolean;
   openAILoggingDir?: string;
   timeout?: number; // Timeout configuration in milliseconds

@@ -4,7 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.event.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.contracts.event.ManagedEventEnvelopes;
 import com.alibaba.qwen.code.managedagent.event.EventTransportConsumer.MaterializeOutcome;
 import com.alibaba.qwen.code.managedagent.event.TransportWakeActivator.Outcome;
-import com.alibaba.qwen.code.managedagent.persistence.TransportConsumerStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcTransportConsumerStore;
 import org.apache.rocketmq.client.apis.consumer.ConsumeResult;
 import org.apache.rocketmq.client.apis.message.MessageId;
 import org.apache.rocketmq.client.apis.message.MessageView;
@@ -32,7 +32,7 @@ class EventTransportConsumerTest {
     private static final String DIGEST = "b".repeat(64);
 
     private TransportWakeActivator wakes;
-    private TransportConsumerStore store;
+    private JdbcTransportConsumerStore store;
     private MessageMaterializer materializer;
     private List<Runnable> queued;
     private EventTransportConsumer consumer;
@@ -62,7 +62,7 @@ class EventTransportConsumerTest {
     @BeforeEach
     void setUp() {
         wakes = mock(TransportWakeActivator.class);
-        store = mock(TransportConsumerStore.class);
+        store = mock(JdbcTransportConsumerStore.class);
         materializer = mock(MessageMaterializer.class);
         queued = new ArrayList<>();
         consumer = new EventTransportConsumer(wakes, store, materializer,
