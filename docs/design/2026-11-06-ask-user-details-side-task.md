@@ -26,7 +26,10 @@ first committing to an answer or discarding the question.
   transcript context. The tab's `initialPrompt` is sent as the child session's
   first prompt.
 - Files written by a session surface as turn outputs; `.html` files are
-  renderable artifacts and open in the right panel's HTML preview.
+  renderable artifacts and open in the right panel's HTML preview. The
+  auto-record skips dot directories such as `.qwen/`, so a file there
+  surfaces as a turn output only if the session records it explicitly with
+  the `record_artifact` tool.
 - The pending AskUser panel (`AskUserQuestion`) offers Submit / Ignore /
   Previous / Next and an "Other" free-text input, but no details action.
 
@@ -68,11 +71,17 @@ first committing to an answer or discarding the question.
    resources) under `.qwen/tmp/` using ASD-STE100 sentence rules (one idea per
    sentence, active voice, short sentences, one term per concept, conditions
    before actions, lists for three or more items, no metaphors or
-   exclamations); keep code, commands, paths, and config keys verbatim; reply
-   with the file path and a one-sentence summary.
-4. The HTML file appears as a turn output in the side-task chat and opens in
-   the existing right-panel HTML preview. The pending question stays pending;
-   the user returns to the main view to answer or Ignore.
+   exclamations); keep code, commands, paths, and config keys verbatim;
+   record the saved file with the `record_artifact` tool (kind `html`,
+   `workspacePath` set to the saved file) — files under `.qwen/tmp/` are not
+   registered as session artifacts automatically, and only the explicit call
+   makes the page surface as a turn-output card; then reply with the file
+   path and a one-sentence summary.
+4. The HTML file appears as a turn output in the side-task chat — via the
+   prompt's explicit `record_artifact` step, because `write_file`'s
+   auto-record skips `.qwen/` — and opens in the existing right-panel HTML
+   preview. The pending question stays pending; the user returns to the main
+   view to answer or Ignore.
 
 ## Design decisions
 

@@ -788,6 +788,37 @@ it.each([
   },
 );
 
+it.each([
+  [
+    'en',
+    'Files under .qwen/tmp/ are not registered as session artifacts automatically',
+    'call the record_artifact tool with kind html and workspacePath set to the saved file',
+    'Finally reply with the file path',
+  ],
+  [
+    'zh-CN',
+    '.qwen/tmp/ 下的文件不会自动登记为会话产物',
+    '调用 record_artifact 工具（kind 为 html，workspacePath 为已保存的文件）',
+    '最后回复文件路径',
+  ],
+])(
+  'details prompt tells the child to record the saved file as an artifact (%s)',
+  (language, autoRecordNote, recordStep, replyStep) => {
+    // #16962: the mandated output location .qwen/tmp/ is skipped by the
+    // write_file auto artifact recording (dot directory), so the page never
+    // surfaces as a turn-output card with a Preview action unless the child
+    // records it explicitly. Pin the note plus the record step before the
+    // final reply in both locales.
+    const prompt = getTranslator(language as 'en' | 'zh-CN')(
+      'askUser.detailsPrompt',
+      { questions: '1. Which cache backend?' },
+    );
+    expect(prompt).toContain(autoRecordNote);
+    expect(prompt).toContain(recordStep);
+    expect(prompt.indexOf(recordStep)).toBeLessThan(prompt.indexOf(replyStep));
+  },
+);
+
 it('sends a retained initial prompt once transcript loading completes', async () => {
   connection.sessionId = 'side-session-1';
   connection.displayName = 'Side task';
