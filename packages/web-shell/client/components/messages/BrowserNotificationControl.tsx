@@ -17,9 +17,25 @@ import {
   PopoverTrigger,
 } from '../ui/popover';
 
+export type ClientOperatingSystem = 'macos' | 'windows' | 'other';
+
+export function detectClientOperatingSystem(
+  userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent,
+  platform = typeof navigator === 'undefined' ? '' : navigator.platform,
+): ClientOperatingSystem {
+  const identity = `${platform} ${userAgent}`;
+  // iOS user agents contain "Mac OS X", but iOS uses mobile notification
+  // settings and must not receive the desktop macOS instructions.
+  if (/iphone|ipad|ipod/i.test(identity)) return 'other';
+  if (/macintosh|mac os x|macintel/i.test(identity)) return 'macos';
+  if (/windows/i.test(identity)) return 'windows';
+  return 'other';
+}
+
 export function BrowserNotificationControl() {
   const settings = useBrowserNotificationSettings();
   const { t } = useI18n();
+  const clientOperatingSystem = detectClientOperatingSystem();
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   const content = useRef<HTMLDivElement>(null);
@@ -205,32 +221,45 @@ export function BrowserNotificationControl() {
           )}
           <p>{t('browserNotifications.helpWhen')}</p>
           <p className="text-muted-foreground">
-            {t('browserNotifications.helpSystem')}
+            {t(
+              clientOperatingSystem === 'other'
+                ? 'browserNotifications.helpSystemOther'
+                : 'browserNotifications.helpSystem',
+            )}
           </p>
-          <details className="group shrink-0">
-            <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
-              macOS
-              <ChevronDownIcon
-                aria-hidden="true"
-                className="size-3.5 transition-transform group-open:rotate-180"
-              />
-            </summary>
-            <p className="mt-1 text-muted-foreground">
-              {t('browserNotifications.helpMac')}
+          {clientOperatingSystem === 'macos' && (
+            <details className="group shrink-0">
+              <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
+                macOS
+                <ChevronDownIcon
+                  aria-hidden="true"
+                  className="size-3.5 transition-transform group-open:rotate-180"
+                />
+              </summary>
+              <p className="mt-1 text-muted-foreground">
+                {t('browserNotifications.helpMac')}
+              </p>
+            </details>
+          )}
+          {clientOperatingSystem === 'windows' && (
+            <details className="group shrink-0">
+              <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
+                Windows
+                <ChevronDownIcon
+                  aria-hidden="true"
+                  className="size-3.5 transition-transform group-open:rotate-180"
+                />
+              </summary>
+              <p className="mt-1 text-muted-foreground">
+                {t('browserNotifications.helpWindows')}
+              </p>
+            </details>
+          )}
+          {clientOperatingSystem === 'other' && (
+            <p className="text-muted-foreground">
+              {t('browserNotifications.helpOther')}
             </p>
-          </details>
-          <details className="group shrink-0">
-            <summary className="flex cursor-pointer list-none items-center gap-1 font-medium [&::-webkit-details-marker]:hidden">
-              Windows
-              <ChevronDownIcon
-                aria-hidden="true"
-                className="size-3.5 transition-transform group-open:rotate-180"
-              />
-            </summary>
-            <p className="mt-1 text-muted-foreground">
-              {t('browserNotifications.helpWindows')}
-            </p>
-          </details>
+          )}
         </PopoverContent>
       </Popover>
     </span>
