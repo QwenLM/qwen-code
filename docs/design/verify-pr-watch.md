@@ -53,33 +53,51 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   by `scripts/verify-pr-watch-state.mjs` (`--start` / `--complete` /
   `--release`) since PR #17185 — rounds no longer hand-write the JSON, whose
   completion write two consecutive rounds on PR #16866 skipped, leaving the
-  file two heads stale. The file holds two lists, `verifiedHeads` and
-  `inFlightHeads`, each entry carrying its own head, round, artifact
-  directory and timestamp; the top-level `verifiedHead`/`previousHead`
-  fields are a compatibility view over the most recent completions.
+  file two heads stale. The file holds three lists, `verifiedHeads`,
+  `inFlightHeads` and `deferredHeads`, each entry carrying its own head,
+  round, artifact directory and timestamp; the top-level
+  `verifiedHead`/`previousHead` fields are a compatibility view over the
+  most recent completions.
   Verified heads dedupe **as a list**: a fire for any sha already verified
   is ignored without a model turn, not just the most recent one, and the
   bound-delivery design dedupes redelivered head-change events against it.
   **One round runs per PR at a time**: while any round is in flight, a fire
-  for any head — including a new one — is skipped until the running round
-  completes or is released. The local recipe's clone, base copy, proxy
-  files and container name are per PR, so overlapping rounds would clobber
-  each other; the CI lane serialises the same way with its per-PR
-  concurrency group. Every read-modify-write holds an exclusive lock file
-  beside the state file, so two concurrent invocations cannot each build
-  state from the same pre-existing file and erase each other's entry; a
-  killed invocation's `.lock` is removed manually, never reclaimed by
-  timestamp. The state root resolves from the script's own clone (its main
-  worktree), not the caller's cwd, so a round whose session directory is
-  its PR clone still writes the trusted clone's state. `--complete` removes
-  only its own head's in-flight entry and upserts its verified entry; a late
+  for a different head is refused — and **recorded as deferred**, not
+  dropped. The probe's cursor advances to the new head in the very call
+  that emits the transition, so no second event will arrive; the deferred
+  list is that head's only delivery. `--complete` prints the deferred
+  heads, and the watch prompt starts the latest one as the next round. A
+  redelivery of the in-flight head itself is simply skipped: the running
+  round answers it. The local recipe's clone, base copy, proxy files and
+  container name are per PR, so overlapping rounds would clobber each
+  other; the CI lane serialises the same way with its per-PR concurrency
+  group. Every read-modify-write holds an exclusive lock file beside the
+  state file, so two concurrent invocations cannot each build state from
+  the same pre-existing file and erase each other's entry. The lock carries
+  an ownership token and is released only by its creator, so a holder whose
+  lock was manually removed and re-created cannot delete the new owner's
+  lock; a killed invocation's `.lock` is removed manually, never reclaimed
+  by timestamp. The state root resolves from the script's own clone (its
+  main worktree), not the caller's cwd, so a round whose session directory
+  is its PR clone still writes the trusted clone's state; `--state-root`
+  overrides it and must be an absolute path. A copy of the helper outside
+  the trusted clone — the container recipe's `/trusted-scripts` mount
+  resolves the default to `/` — needs that explicit `--state-root`.
+  `--complete` removes only its own round's in-flight entry (matched by
+  head **and** round, so a stale round completing after its replacement
+  started cannot erase the replacement's marker) and upserts its verified
+  entry — except `inconclusive`, which releases the marker without filing
+  the head as verified, so a later round can still verify it. A late
   completion by an older round changes the top-level view but erases no
   verification. `--start` writes the sha **before** the round begins, so a
   round that dies still does not replay the same head. A round that dies
   after `--start` is recovered with `--release --head <oid>` (the head is
   mandatory), which removes only the named head's in-flight entry without
-  recording a verdict and refuses a head with no entry — the same recovery
-  the gate provides for a dead claim.
+  recording a verdict and refuses a head with no entry — including when no
+  markers exist at all, so a release aimed at the wrong state root cannot
+  read as success. Under one-round-per-PR the blocking marker may belong to
+  a different head than the one being started: recovery releases the head
+  the refusal names. This mirrors the gate's recovery for a dead claim.
 
 ## Design decisions
 
@@ -126,8 +144,9 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
 - `scripts/verify-pr-watch-gate.mjs` — the gate wrapper: forwards only `resync`
   and `stop`, and refuses to install over another consumer's probe state.
 - `scripts/verify-pr-watch-state.mjs` — the state file's owner since PR #17185:
-  per-head `verifiedHeads`/`inFlightHeads` lists, atomic writes, UTC stamps,
-  and the `--start` / `--complete` / `--release` contract.
+  per-head `verifiedHeads`/`inFlightHeads`/`deferredHeads` lists, atomic
+  writes, UTC stamps, and the `--start` / `--complete` / `--release`
+  contract.
 - `scripts/tests/verify-pr-watch-state.test.js` — the dedup, completion,
   release and migration cases, including the concurrent-head witnesses.
 - `scripts/tests/verify-pr-watch-gate.test.js` — the filter's five outcomes and
@@ -163,5 +182,10 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
 - `/verify-pr <n> --watch` produces a task whose gate prints nothing while the
   PR is quiet, and one JSON line when the head moves.
 - A second fire for the same sha produces no second round.
+- A head pushed while a round is in flight is refused, recorded as deferred,
+  and named by the running round's `--complete` output; starting the latest
+  named head verifies it without a manual probe or a second event.
+- An `inconclusive` completion leaves the head startable; a release for a
+  head with no marker is refused, not a silent success.
 - The task is removed on `merged`/`closed`, or via `cron_delete`.
 - Nothing is scheduled when the probe or `gh` is unavailable.

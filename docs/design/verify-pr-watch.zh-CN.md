@@ -22,7 +22,7 @@ Status: implementing with this change.
 - 任务形态：cron 每 2 分钟；gate = `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --repo <owner>/<repo> --cli <绝对路径 qwen>`；`recurring: true`、`durable: true`、`sessionMode: "current"`。包装脚本只转发 `resync`（head 移动）与 `stop`；评论或 CI 失败是 `action: "fix"`，会被丢弃——调度器只要看到非空输出就开一轮，prompt 无法"取消"已经开始的那一轮。
 - prompt 消费包装转发的输出：`head_moved_externally` → 对该 sha 开一轮；`stop`（merged/closed）→ 删除任务并停止。
 - 包装脚本的 `--check` 在 `.qwen/tmp` 已存在 `autofix-pr-<n>-gate.json` 或 `autofix-pr-<n>-state.json` 时拒绝安装：一个游标只服务一个消费者，第二个 watch 会抢走第一个需要的 head 移动与 `stop`。
-- 去重写在状态文件（`.qwen/tmp/verify-pr-watch-<n>.json`），自 PR #17185 起由 `scripts/verify-pr-watch-state.mjs`（`--start` / `--complete` / `--release`）接管——轮次不再手写 JSON：PR #16866 的连续两个轮次跳过了手写完成写入，让文件落后了两个 head。文件保存两个列表 `verifiedHeads` 与 `inFlightHeads`，每项自带 head、轮次、产物目录与时间戳；顶层 `verifiedHead`/`previousHead` 是最近完成记录的兼容视图。已验 head **按列表去重**：任何已验过的 sha 的重复 fire 都不产生模型 turn，不只是最近一个——绑定投递设计正是用它对重投递的 head-change 事件去重。**同一 PR 同时只跑一轮**：任何轮次在飞时，任何 head（包括新 head）的 fire 都被跳过，直到在跑轮次完成或被释放。本地配方的克隆、base 副本、代理文件与容器名都按 PR 划分，重叠轮次会互相踩踏；CI 车道用按 PR 的 concurrency group 同样串行化。每次读-改-写都持有状态文件旁的排他锁文件，两个并发调用不会各自基于同一旧文件构造状态而互抹条目；被杀调用留下的 `.lock` 手动删除，绝不按时间戳回收。状态根从脚本自身所在克隆（其主 worktree）解析，而非调用方 cwd——会话目录是 PR clone 的轮次也写可信克隆的状态。`--complete` 只移除自己 head 的 in-flight 项并更新自己的已验项；旧轮次的晚到完成只改变顶层视图，不抹掉任何验证。`--start` **先写 sha 再开轮次**，这样中途死掉的轮次不会重放同一个 head。`--start` 之后死掉的轮次用 `--release --head <oid>` 恢复（head 必填）：只移除具名 head 的 in-flight 项、不记录判定，无此项的 head 会被拒绝——与 gate 对死锁声明的恢复同形。
+- 去重写在状态文件（`.qwen/tmp/verify-pr-watch-<n>.json`），自 PR #17185 起由 `scripts/verify-pr-watch-state.mjs`（`--start` / `--complete` / `--release`）接管——轮次不再手写 JSON：PR #16866 的连续两个轮次跳过了手写完成写入，让文件落后了两个 head。文件保存三个列表 `verifiedHeads`、`inFlightHeads` 与 `deferredHeads`，每项自带 head、轮次、产物目录与时间戳；顶层 `verifiedHead`/`previousHead` 是最近完成记录的兼容视图。已验 head **按列表去重**：任何已验过的 sha 的重复 fire 都不产生模型 turn，不只是最近一个——绑定投递设计正是用它对重投递的 head-change 事件去重。**同一 PR 同时只跑一轮**：任何轮次在飞时，另一个 head 的 fire 被拒绝——并**记为 deferred**，而不是丢弃。探针游标在发出转变的同一次调用里就前进到新 head，所以不会有第二次事件；deferred 列表就是这个 head 唯一的投递。`--complete` 打印 deferred heads，watch prompt 把其中最新的一个作为下一轮启动。在飞 head 自身的重投递则直接跳过：在跑的轮次会回答它。本地配方的克隆、base 副本、代理文件与容器名都按 PR 划分，重叠轮次会互相踩踏；CI 车道用按 PR 的 concurrency group 同样串行化。每次读-改-写都持有状态文件旁的排他锁文件，两个并发调用不会各自基于同一旧文件构造状态而互抹条目。锁带归属令牌，只由创建者释放——锁被手动删除又被他人重建时，原持有者的清理不会删掉新持有者的锁；被杀调用留下的 `.lock` 手动删除，绝不按时间戳回收。状态根从脚本自身所在克隆（其主 worktree）解析，而非调用方 cwd——会话目录是 PR clone 的轮次也写可信克隆的状态；`--state-root` 可覆盖，且必须是绝对路径。助手在可信克隆之外的副本——容器配方的 `/trusted-scripts` 挂载会把默认根解析成 `/`——必须显式传 `--state-root`。`--complete` 只移除自己**那一轮**的 in-flight 项（按 head **加轮次**匹配，被释放后仍活着的旧轮次晚到完成时，不会抹掉接替它的轮次的标记）并更新自己的已验项——`inconclusive` 例外：它释放标记但不把 head 记为已验，后续轮次仍可验证它。旧轮次的晚到完成只改变顶层视图，不抹掉任何验证。`--start` **先写 sha 再开轮次**，这样中途死掉的轮次不会重放同一个 head。`--start` 之后死掉的轮次用 `--release --head <oid>` 恢复（head 必填）：只移除具名 head 的 in-flight 项、不记录判定，无此项的 head 会被拒绝——完全没有标记时同样拒绝，指向错误状态根的 release 不能读作成功。同一 PR 只跑一轮时，阻塞标记可能属于另一个 head：恢复要释放拒绝消息点名的那个 head。这与 gate 对死锁声明的恢复同形。
 
 ## 设计决策
 
@@ -44,7 +44,7 @@ Status: implementing with this change.
 
 - `.qwen/skills/verify-pr/SKILL.md` —— `--watch` 的契约与护栏。
 - `scripts/verify-pr-watch-gate.mjs` —— gate 包装：只转发 `resync` 与 `stop`，并在别的消费者已占用探针状态时拒绝安装。
-- `scripts/verify-pr-watch-state.mjs` —— 自 PR #17185 起状态文件的持有者：按 head 的 `verifiedHeads`/`inFlightHeads` 列表、原子写、UTC 时间戳，以及 `--start` / `--complete` / `--release` 契约。
+- `scripts/verify-pr-watch-state.mjs` —— 自 PR #17185 起状态文件的持有者：按 head 的 `verifiedHeads`/`inFlightHeads`/`deferredHeads` 列表、原子写、UTC 时间戳，以及 `--start` / `--complete` / `--release` 契约。
 - `scripts/tests/verify-pr-watch-state.test.js` —— 去重、完成、释放与迁移用例，含并发 head 见证。
 - `scripts/tests/verify-pr-watch-gate.test.js` —— 过滤的几种结果与共存检查。
 - `scripts/tests/qwen-triage-workflow.test.js` —— 钉住包装命令、过滤、归属检查与二进制能力拒绝。
@@ -68,5 +68,7 @@ Status: implementing with this change.
 
 - `/verify-pr <n> --watch` 产生的任务在 PR 安静时 gate 无输出，head 变化时输出一行 JSON。
 - 同一 sha 的第二次 fire 不产生第二轮。
+- 轮次在飞时推送的 head 被拒绝、记为 deferred，并由在跑轮次的 `--complete` 输出点名；启动被点名的最新 head 即可验证它，无需手动探针或第二次事件。
+- `inconclusive` 完成后 head 仍可启动；对无标记 head 的 release 被拒绝，而非静默成功。
 - `merged`/`closed` 后任务被移除，或可用 `cron_delete` 手动停止。
 - 探针或 `gh` 不可用时什么都不排。

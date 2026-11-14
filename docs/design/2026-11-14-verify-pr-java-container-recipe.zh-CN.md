@@ -33,13 +33,13 @@
 在 skill 中增加第二份配方，当增量触及 `packages/managed-agent-server/` 时选用：
 
 1. **镜像。** 自带车道 Maven 与 JDK 的 Maven 镜像，如 `maven:3.9.11-eclipse-temurin-21`。实现时核实确切 tag 存在并按 digest 钉住（JS 配方按 tag 引用 `node:22-bookworm`；Java 配方应更严）。
-2. **离线 Maven 仓库，在边界内预置。** 宿主侧不对 PR 的 pom 跑任何 Maven goal：`mvn install` 会走完整默认生命周期，PR 绑定到 `compile`/`test` 的插件执行会在维护者机器上运行——下面的剥离清单覆盖的是项目模型期扩展，覆盖不到绑定生命周期的 `<build><plugins>` 执行。正确做法：宿主准备净化副本（剥离清单见下），**预置在凭证隔离、仅允许配置镜像出网的容器内运行**，使用无凭据的镜像配置，产出的仓库拷贝出来。预置跑 `mvn dependency:go-offline` 并安装 PR 的 `packages/sdk-java` reactor 产物（对 SDK 模块跑 `mvn install -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true`，与 CI 车道在自己作业边界内所做一致）：managed-agent 构建从本地仓库解析它们，新预置缺了就无法解析，复用预置里陈旧的则会对着错误的 jar 编译——SDK pom 或源码变化时按同一条「为此 head 构建」复用规则重新预置。随后剥掉 `_remote.repositories` 跟踪文件（或以 `-Dmaven.legacyLocalRepo=true` 预置）：它们记录每个 artifact 由哪个镜像服务，离线解析遇到不同 repo id 否则会重新解析并失败。电池容器只挂载该仓库目录——绝不挂 `settings.xml`（可能带镜像源凭据）——并以 `-Dmaven.repo.local=/m2 --network none` 运行——比 JS 配方更严（JS 配方为模型代理保留网络），因为 Java 电池不需要模型访问。离线解析保住无凭据边界：无网络即无外泄路径，容器内也没有镜像源鉴权。
+2. **离线 Maven 仓库，在边界内预置。** 宿主侧不对 PR 的 pom 跑任何 Maven goal：`mvn install` 会走完整默认生命周期，PR 绑定到 `compile`/`test` 的插件执行会在维护者机器上运行——下面的剥离清单覆盖的是项目模型期扩展，覆盖不到绑定生命周期的 `<build><plugins>` 执行。正确做法：宿主准备净化副本（剥离清单见下），**预置在凭证隔离、仅允许配置镜像出网的容器内运行**，使用无凭据的镜像配置，产出的仓库拷贝出来。预置跑 `mvn dependency:go-offline` 并安装 PR 的 `packages/sdk-java` reactor 产物（对 SDK 模块跑 `mvn install -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true`，与 CI 车道在自己作业边界内所做一致）：managed-agent 构建从本地仓库解析它们，新预置缺了就无法解析，复用预置里陈旧的则会对着错误的 jar 编译。复用键在本配方各处是同一条规则：**仅当 pom 集合与 SDK 源码均未变化时才复用预置仓库**；任一变化即重新预置，与 skill 对安装和构建适用的「为此 head 构建」复用规则相同。随后剥掉 `_remote.repositories` 跟踪文件（或以 `-Dmaven.legacyLocalRepo=true` 预置）：它们记录每个 artifact 由哪个镜像服务，离线解析遇到不同 repo id 否则会重新解析并失败。电池容器只挂载该仓库目录——绝不挂 `settings.xml`（可能带镜像源凭据）——并以 `-Dmaven.repo.local=/m2 --network none` 运行——比 JS 配方更严（JS 配方为模型代理保留网络），因为 Java 电池不需要模型访问。离线解析保住无凭据边界：无网络即无外泄路径，容器内也没有镜像源鉴权。
 3. **可信脚本、PR 克隆、模型代理。** 与 JS 配方同一布局：脚本来自可信克隆，轮次跑在独立 PR 克隆里，任何模型驱动步骤走宿主侧 `verify-pr-model-proxy.mjs` 中继。离线电池容器够不到该代理，因此轮次自己的模型 turn 跑在另一个接代理的容器里（JS 配方的形状），或者不跑；电池本身不需要模型访问。
-4. **声明。** 门禁通过后由**运营方**写入 `{"mode":"container","detail":"maven:3.9.11-eclipse-temurin-21, --network none, offline m2, credential-free"}`——与 JS 配方同一条运营方持有规则，不是轮次自己写。
+4. **声明。** 门禁通过后由**运营方**写入声明——与 JS 配方同一条运营方持有规则，不是轮次自己写。轮次用了两个容器时，声明要**同时点名两个**：离线电池容器与跑模型 turn 的接代理容器，各带镜像与网络策略，例如 `{"mode":"container","detail":"battery: maven:3.9.11-eclipse-temurin-21, --network none, offline m2; model turns: node:22-bookworm via host proxy; credential-free"}`。没有模型 turn 的轮次只点名电池容器。
 
 ## 设计决策与理由
 
-- **预置在边界内，电池离线。** 预置需要镜像，因此跑在仅允许镜像出网的无凭据容器里——出网白名单是第二信任面（DNS、重定向、镜像源被攻陷），所以只限于预置阶段；电池本身对拷出的仓库以 `--network none` 运行。宿主绝不对 PR pom 跑 goal：绑定生命周期的插件执行也是 PR 代码，任何剥离清单都无法穷举。代价：每轮一个预置步骤（分钟级；同一 PR 的轮次间在 pom 集合不变时复用仓库目录即可跨轮缓存——与 skill 对安装和构建已有的复用规则相同）。
+- **预置在边界内，电池离线。** 预置需要镜像，因此跑在仅允许镜像出网的无凭据容器里——出网白名单是第二信任面（DNS、重定向、镜像源被攻陷），所以只限于预置阶段；电池本身对拷出的仓库以 `--network none` 运行。宿主绝不对 PR pom 跑 goal：绑定生命周期的插件执行也是 PR 代码，任何剥离清单都无法穷举。代价：每轮一个预置步骤（分钟级；同一 PR 的轮次间在 pom 集合与 SDK 源码均未变化时复用仓库目录即可跨轮缓存——与 skill 对安装和构建已有的复用规则相同）。
 - **自带镜像优先于 node 上加 JDK。** 在 `node:22-bookworm` 上叠 JDK 能让混合 PR 共用一个容器，但会偏离 CI 车道运行时，并增大轮次必须信任的镜像。混合轮次可以在 Java 镜像里跑 JS 套件（经钉住的安装带上 Node），或跑两个容器；该选择留给实现。
 
 ## 约束
@@ -51,7 +51,7 @@
 ## 风险
 
 - **预置不全。** `dependency:go-offline` 会漏掉懒解析的插件，离线构建随后在轮次中途失败。缓解：大声失败、从失败模块重新预置，未解决前把缺口记入 _Not covered_——绝不静默回退宿主执行。
-- **仓库复用陈旧。** 为别的 head 构建的复用仓库可能掩盖依赖变化。缓解：适用 skill 既有的「为此 head 构建」复用规则；以 pom diff 判定。
+- **仓库复用陈旧。** 为别的 head 构建的复用仓库可能掩盖依赖变化，陈旧的 SDK jar 会对着错误的代码编译。缓解：适用 skill 既有的「为此 head 构建」复用规则，并以上面唯一的复用键判定——pom 集合与 SDK 源码必须均未变化；任一变化即重新预置。
 - **镜像漂移。** digest 钉住加文档化的刷新步骤。
 
 ## 验证计划
@@ -64,7 +64,7 @@
 ## 验收标准
 
 - skill 携带 Java 配方，与 JS 配方同样的可信克隆 / PR 克隆 / 代理布局。
-- Java 轮次能在不于宿主执行任何 PR 代码的情况下完成，报告的 `**Boundary.**` 行写明镜像与网络策略。
+- Java 轮次能在不于宿主执行任何 PR 代码的情况下完成，报告的 `**Boundary.**` 行点名轮次用过的每个容器，各带镜像与网络策略。
 - 豁免路径对无法使用配方的轮次（如依赖数据库的复现）仍然可用且记录在案。
 
 ## 开放问题

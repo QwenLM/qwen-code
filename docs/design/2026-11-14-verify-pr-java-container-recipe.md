@@ -79,9 +79,12 @@ A second recipe in the skill, selected when the delta touches
 -Dgpg.skip=true -Dmaven.javadoc.skip=true` on the SDK modules, as the CI
    lane does inside its own job boundary): the managed-agent build resolves
    them from the local repo, so a fresh seed without them cannot resolve,
-   and a reused seed with stale ones compiles against the wrong jar —
-   re-seed whenever the SDK poms or sources change, under the same
-   built-for-this-head reuse rule. Strip the `_remote.repositories`
+   and a reused seed with stale ones compiles against the wrong jar. The
+   reuse key is one rule everywhere in this recipe: **reuse the seeded
+   repository only when the pom set and the SDK sources are both
+   unchanged**; a change to either re-seeds, under the same
+   built-for-this-head reuse rule the skill applies to installs and
+   builds. Strip the `_remote.repositories`
    tracking files afterwards (or seed with `-Dmaven.legacyLocalRepo=true`):
    they record which mirror served each artifact, and offline resolution
    against a different repo id otherwise re-resolves and fails. The battery
@@ -98,10 +101,13 @@ A second recipe in the skill, selected when the delta touches
    reach that proxy, so the round's own model turns run in a separate
    proxy-connected container (the JS recipe's shape) or not at all; the
    battery itself needs no model access.
-4. **Declaration.** The operator writes
-   `{"mode":"container","detail":"maven:3.9.11-eclipse-temurin-21, --network none, offline m2, credential-free"}`
-   after the gate passes — the same operator-owned rule as the JS recipe,
-   not the round itself.
+4. **Declaration.** The operator writes the declaration after the gate
+   passes — the same operator-owned rule as the JS recipe, not the round
+   itself. It names **both** containers when the round uses two: the
+   offline battery container and the proxy-connected container that runs
+   the model turns, each with its image and network policy, e.g.
+   `{"mode":"container","detail":"battery: maven:3.9.11-eclipse-temurin-21, --network none, offline m2; model turns: node:22-bookworm via host proxy; credential-free"}`.
+   A round with no model turns names the battery container alone.
 
 ## Design decisions and rationale
 
@@ -113,8 +119,9 @@ A second recipe in the skill, selected when the delta touches
   host never runs a goal against PR poms: lifecycle-bound plugin executions
   are PR code too, and no strip list can enumerate them. Cost: a seed step
   per round (minutes, cached across rounds of the same PR by reusing the
-  repository directory when the pom set is unchanged — the same reuse rule
-  the skill already applies to installs and builds).
+  repository directory when the pom set and the SDK sources are both
+  unchanged — the same reuse rule the skill already applies to installs
+  and builds).
 - **Bundled image over JDK-on-node.** Layering a JDK onto `node:22-bookworm`
   would serve mixed PRs in one container, but drifts from the CI lane's
   runtime and grows the image the round must trust. Mixed rounds can run the
@@ -149,8 +156,10 @@ A second recipe in the skill, selected when the delta touches
   re-seed from the failing module, and record the gap under _Not covered_
   until resolved — never fall back to host execution silently.
 - **Repository reuse staleness.** A reused repository built for another head
-  can mask a dependency change. Mitigation: the skill's existing
-  built-for-this-head reuse rule applies; pom diff decides.
+  can mask a dependency change, and stale SDK jars compile against the wrong
+  code. Mitigation: the skill's existing built-for-this-head reuse rule
+  applies with the single reuse key above — the pom set and the SDK sources
+  must both be unchanged; a change to either re-seeds.
 - **Image drift.** Digest pinning plus a documented refresh step.
 
 ## Validation plan
@@ -171,7 +180,8 @@ A second recipe in the skill, selected when the delta touches
 - The skill carries the Java recipe with the same trusted-clone / PR-clone /
   proxy layout as the JS recipe.
 - A Java round can complete without any host execution of PR code, and its
-  report's `**Boundary.**` line names the image and network policy.
+  report's `**Boundary.**` line names every container the round used, each
+  with its image and network policy.
 - The waiver path remains available and recorded for rounds that cannot use
   the recipe (e.g. a database-dependent repro).
 

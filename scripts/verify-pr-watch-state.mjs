@@ -32,29 +32,40 @@
  * only one round runs per PR at a time: the local recipe's clone, base
  * copy, proxy files and container name are per PR, so overlapping rounds
  * would clobber each other — the CI lane serialises the same way with its
- * per-PR concurrency group. A new head waits until the running round
- * completes or is released. `--complete` removes only its own head's
- * in-flight entry and upserts its verified entry; the top-level
- * `verifiedHead`/`previousHead` view reflects the most recent completion.
- * `--release --head <oid>` is the recovery path for a round that died after
- * `--start`: it removes only the named head's in-flight entry and refuses a
- * head with no entry.
+ * per-PR concurrency group. A head refused while another round runs is
+ * recorded in `deferredHeads`: the watch gate's cursor already advanced
+ * past it, so no second event arrives, and `--complete` names the deferred
+ * heads so the caller can start the latest one. `--complete` removes only
+ * its own round's in-flight entry (matched by head and round) and upserts
+ * its verified entry, except for `inconclusive`, which releases the marker
+ * without filing the head as verified — an inconclusive head stays
+ * startable. The top-level `verifiedHead`/`previousHead` view reflects the
+ * most recent completion. `--release --head <oid>` is the recovery path for
+ * a round that died after `--start`: it removes only the named head's
+ * in-flight entry and refuses a head with no entry, including when no
+ * markers exist at all — a release aimed at the wrong state root must not
+ * read as success.
  *
  * Every read-modify-write holds an exclusive lock file beside the state
  * file, so two concurrent invocations cannot each build state from the same
- * pre-existing file and erase each other's entry. A killed invocation can
- * leave the lock behind; removing the `.lock` file (never the state file)
- * is the recovery, mirroring the gate's explicit release of a dead claim.
+ * pre-existing file and erase each other's entry. The lock carries an
+ * ownership token and is released only by the invocation that created it,
+ * so a slow holder's cleanup cannot delete a newer holder's lock. A killed
+ * invocation can leave the lock behind; removing the `.lock` file (never
+ * the state file) is the recovery, mirroring the gate's explicit release of
+ * a dead claim.
  *
  * The state root defaults to the main worktree of the clone the script
  * lives in — resolved from the script's own location, not the caller's
  * cwd, so a round whose session directory is its PR clone still writes the
- * trusted clone's state. `--state-root` overrides it for tests.
+ * trusted clone's state. `--state-root` overrides it for tests and must be
+ * an absolute path.
  *
  * Exit codes: 0 written, 1 I/O error, 2 usage, 3 duplicate head / round in
  * flight / foreign marker / lock held.
  */
 
+import { randomUUID } from 'node:crypto';
 import {
   mkdirSync,
   readFileSync,
@@ -62,7 +73,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isEntryPoint } from './lib/entry-point.js';
 import { mainWorktree } from './verify-pr-watch-gate.mjs';
@@ -121,7 +132,10 @@ function inFlightEntries(existing) {
     return [
       {
         head: existing.inFlightHead,
-        round: existing.round ?? null,
+        // The pre-list top-level round is ambiguous — it names whichever
+        // operation wrote last, verified or in-flight — so the migrated
+        // marker matches completion by head alone (round null).
+        round: null,
         artifactDir: existing.artifactDir ?? null,
         startedAt: existing.startedAt ?? null,
       },
@@ -209,14 +223,18 @@ function writeState(stateRoot, prNumber, state) {
  * reports the lock instead of guessing staleness from a timestamp — the
  * same idiom as the watch gate's ownership claim.
  */
-function withStateLock(stateRoot, prNumber, fn) {
+export function withStateLock(stateRoot, prNumber, fn) {
   const lock = `${statePath(stateRoot, prNumber)}.lock`;
   mkdirSync(join(stateRoot, '.qwen', 'tmp'), { recursive: true });
   const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  // The token identifies this holder: if the lock was removed (manual
+  // recovery of a dead holder) and re-created by someone else, releasing
+  // must not delete the new owner's lock.
+  const token = `${process.pid}:${randomUUID()}\n`;
   let held = false;
   for (let attempt = 0; attempt < 20 && !held; attempt++) {
     try {
-      writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' });
+      writeFileSync(lock, token, { flag: 'wx' });
       held = true;
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
@@ -228,7 +246,7 @@ function withStateLock(stateRoot, prNumber, fn) {
     return fn();
   } finally {
     try {
-      unlinkSync(lock);
+      if (readFileSync(lock, 'utf8') === token) unlinkSync(lock);
     } catch {
       // Already gone; nothing to release.
     }
@@ -250,6 +268,15 @@ export function duplicateHead(existing, head) {
   return null;
 }
 
+/** Deferred heads: refused by one-round-per-PR, awaiting the next round. */
+function deferredEntries(existing) {
+  return Array.isArray(existing?.deferredHeads)
+    ? existing.deferredHeads.filter(
+        (entry) => entry && typeof entry.head === 'string',
+      )
+    : [];
+}
+
 export function startRound(
   stateRoot,
   { pr, head, round, artifactDir, repo },
@@ -259,6 +286,33 @@ export function startRound(
     const existing = readState(stateRoot, pr);
     const duplicate = duplicateHead(existing, head);
     if (duplicate) {
+      // A head refused because another head's round is in flight is
+      // recorded as deferred, not dropped: the probe's cursor already
+      // advanced past it, so no second event will arrive. --complete prints
+      // the deferred heads and the watch prompt starts the latest one. A
+      // redelivery of the in-flight head itself needs no deferred entry —
+      // the running round answers it.
+      const blocker = inFlightEntries(existing)[0]?.head ?? null;
+      if (duplicate === 'in-flight' && !sameCommit(blocker, head)) {
+        const deferred = deferredEntries(existing).filter(
+          (entry) => !sameCommit(entry.head, head),
+        );
+        deferred.push({
+          head,
+          round,
+          artifactDir,
+          deferredAt: now.toISOString(),
+        });
+        const state = deriveView({
+          ...(existing ?? {}),
+          pr,
+          repo: repo ?? existing?.repo ?? null,
+          verifiedHeads: verifiedEntries(existing),
+          inFlightHeads: inFlightEntries(existing),
+          deferredHeads: deferred,
+        });
+        writeState(stateRoot, pr, state);
+      }
       return {
         duplicate,
         blockedBy: inFlightEntries(existing)[0]?.head ?? null,
@@ -271,6 +325,9 @@ export function startRound(
       repo: repo ?? existing?.repo ?? null,
       verifiedHeads: verifiedEntries(existing),
       inFlightHeads: [{ head, round, artifactDir, startedAt }],
+      deferredHeads: deferredEntries(existing).filter(
+        (entry) => !sameCommit(entry.head, head),
+      ),
       round,
       artifactDir,
       startedAt,
@@ -287,34 +344,59 @@ export function completeRound(
   return withStateLock(stateRoot, pr, () => {
     const existing = readState(stateRoot, pr);
     const completedAt = now.toISOString();
-    const kept = verifiedEntries(existing).filter(
+    const flights = inFlightEntries(existing);
+    // Match the round too: a stale round completing after its marker was
+    // released and a newer round for the same head started must not erase
+    // the replacement's marker. Migrated entries carry round null and
+    // match by head alone.
+    const ownFlight = flights.find(
+      (entry) =>
+        sameCommit(entry.head, head) &&
+        (entry.round == null || entry.round === round),
+    );
+    const dir = artifactDir ?? ownFlight?.artifactDir ?? null;
+    // An inconclusive round reached no verdict: it releases its marker but
+    // is not filed as verified, so the head stays startable.
+    const verified =
+      verdict === 'inconclusive'
+        ? verifiedEntries(existing)
+        : [
+            ...verifiedEntries(existing).filter(
+              (entry) => !sameCommit(entry.head, head),
+            ),
+            {
+              head,
+              round,
+              verdict,
+              commentId: commentId ?? null,
+              artifactDir: dir,
+              completedAt,
+            },
+          ];
+    // A completed head no longer awaits a round — including the fallback
+    // path that completes a deferred head without a prior start, which
+    // would otherwise leave it named by every later --complete.
+    const deferred = deferredEntries(existing).filter(
       (entry) => !sameCommit(entry.head, head),
     );
-    const flights = inFlightEntries(existing);
-    const ownFlight = flights.find((entry) => sameCommit(entry.head, head));
-    const dir = artifactDir ?? ownFlight?.artifactDir ?? null;
     const state = deriveView({
       ...(existing ?? {}),
       pr,
-      verifiedHeads: [
-        ...kept,
-        {
-          head,
-          round,
-          verdict,
-          commentId: commentId ?? null,
-          artifactDir: dir,
-          completedAt,
-        },
-      ],
-      // A completion removes only its own head's in-flight entry.
-      inFlightHeads: flights.filter((entry) => !sameCommit(entry.head, head)),
+      verifiedHeads: verified,
+      inFlightHeads: ownFlight
+        ? flights.filter((entry) => entry !== ownFlight)
+        : flights,
+      deferredHeads: deferred,
       round,
       artifactDir: dir,
       startedAt: existing?.startedAt ?? null,
       completedAt,
     });
-    return { path: writeState(stateRoot, pr, state), state };
+    return {
+      path: writeState(stateRoot, pr, state),
+      state,
+      deferred,
+    };
   });
 }
 
@@ -332,9 +414,11 @@ export function releaseRound(stateRoot, { pr, head }) {
     const flights = inFlightEntries(existing);
     const entry = flights.find((candidate) => sameCommit(candidate.head, head));
     if (!entry) {
+      // No marker at all is a refusal, not a silent success: a release
+      // aimed at the wrong state root must not read as recovery.
       return flights.length > 0
         ? { mismatch: true, recorded: flights.map((f) => f.head).join(', ') }
-        : { released: false };
+        : { released: false, noMarker: true };
     }
     const state = deriveView({
       ...(existing ?? {}),
@@ -343,6 +427,7 @@ export function releaseRound(stateRoot, { pr, head }) {
       inFlightHeads: flights.filter(
         (candidate) => !sameCommit(candidate.head, head),
       ),
+      deferredHeads: deferredEntries(existing),
     });
     writeState(stateRoot, pr, state);
     return {
@@ -360,10 +445,13 @@ const HELP = `Usage:
 
 Owns .qwen/tmp/verify-pr-watch-<pr>.json so rounds never hand-write it.
 --start exits 3 when the head is already verified or any round is in flight
-for the PR (one round per PR; a new head waits for completion or release).
---release removes only the named head's in-flight entry; a head with no
-entry is refused (exit 3) or, with no markers at all, a no-op. The state
-root defaults to the main worktree of the clone the script lives in.
+for the PR (one round per PR). A head refused while another round runs is
+recorded as deferred; --complete names the deferred heads so the caller can
+start the latest one. --complete with --verdict inconclusive releases the
+marker without filing the head as verified. --release removes only the named
+head's in-flight entry; a head with no entry is refused (exit 3), including
+when no markers exist at all. --state-root must be an absolute path; the
+default is the main worktree of the clone the script lives in.
 
 Exit codes: 0 written, 1 I/O error, 2 usage, 3 duplicate / in flight / lock.
 `;
@@ -422,13 +510,17 @@ function parseArgs(argv) {
     );
   }
   // A trailing --state-root with no value is undefined, not null: reject it
-  // here so it surfaces as a usage error, not a native TypeError or a
-  // resolve() of the caller's cwd.
+  // here so it surfaces as a usage error, not a native TypeError. A
+  // relative value would resolve against the caller's cwd — the hazard the
+  // script-clone default exists to prevent — so require an absolute path.
   if (
     out.stateRoot !== null &&
     (typeof out.stateRoot !== 'string' || out.stateRoot.trim() === '')
   ) {
     throw new Error(`--state-root must not be empty\n\n${HELP}`);
+  }
+  if (out.stateRoot !== null && !isAbsolute(out.stateRoot)) {
+    throw new Error(`--state-root must be an absolute path\n\n${HELP}`);
   }
   return out;
 }
@@ -449,21 +541,22 @@ function main(argv) {
     args.stateRoot !== null
       ? resolve(args.stateRoot)
       : mainWorktree(SCRIPT_CLONE);
+  const lockHeld = (pr) => {
+    process.stderr.write(
+      `verify-pr watch-state: PR ${pr} state lock is held by another invocation; retry shortly (a killed invocation's .lock file beside the state file may need manual removal — never the state file itself)\n`,
+    );
+    return 3;
+  };
   try {
     if (args.start) {
       const result = startRound(root, args);
-      if (result.locked) {
-        process.stderr.write(
-          `verify-pr watch-state: PR ${args.pr} state lock is held by another invocation; retry shortly (a killed invocation's .lock file may need manual removal)\n`,
-        );
-        return 3;
-      }
+      if (result.locked) return lockHeld(args.pr);
       if (result.duplicate) {
         process.stderr.write(
           result.duplicate === 'in-flight' &&
             result.blockedBy &&
             !sameCommit(result.blockedBy, args.head)
-            ? `verify-pr watch-state: PR ${args.pr} has a round in flight for ${result.blockedBy}; one round per PR — let it finish or release it before starting ${args.head}\n`
+            ? `verify-pr watch-state: PR ${args.pr} has a round in flight for ${result.blockedBy}; one round per PR — ${args.head} is recorded as deferred and will be named by --complete\n`
             : `verify-pr watch-state: PR ${args.pr} head ${args.head} is already ${result.duplicate}; let that round answer\n`,
         );
         return 3;
@@ -473,33 +566,34 @@ function main(argv) {
       );
     } else if (args.complete) {
       const result = completeRound(root, args);
-      if (result.locked) {
-        process.stderr.write(
-          `verify-pr watch-state: PR ${args.pr} state lock is held by another invocation; retry shortly\n`,
-        );
-        return 3;
-      }
+      if (result.locked) return lockHeld(args.pr);
       process.stdout.write(
-        `verify-pr watch-state: PR ${args.pr} round ${args.round} verified ${args.head} (${args.verdict}) at ${result.path}\n`,
+        args.verdict === 'inconclusive'
+          ? `verify-pr watch-state: PR ${args.pr} round ${args.round} recorded inconclusive for ${args.head} (not verified; the head stays startable) at ${result.path}\n`
+          : `verify-pr watch-state: PR ${args.pr} round ${args.round} verified ${args.head} (${args.verdict}) at ${result.path}\n`,
       );
+      if (result.deferred.length > 0) {
+        process.stdout.write(
+          `verify-pr watch-state: PR ${args.pr} deferred heads awaiting a round: ${result.deferred.map((entry) => entry.head).join(', ')} — start the latest one\n`,
+        );
+      }
     } else {
       const result = releaseRound(root, args);
-      if (result.locked) {
-        process.stderr.write(
-          `verify-pr watch-state: PR ${args.pr} state lock is held by another invocation; retry shortly\n`,
-        );
-        return 3;
-      }
+      if (result.locked) return lockHeld(args.pr);
       if (result.mismatch) {
         process.stderr.write(
           `verify-pr watch-state: PR ${args.pr} head ${args.head} has no in-flight marker (recorded: ${result.recorded}); refusing to release another round's marker\n`,
         );
         return 3;
       }
+      if (result.noMarker) {
+        process.stderr.write(
+          `verify-pr watch-state: PR ${args.pr} has no in-flight marker for ${args.head} at ${root}; nothing to release (check --state-root)\n`,
+        );
+        return 3;
+      }
       process.stdout.write(
-        result.released
-          ? `verify-pr watch-state: PR ${args.pr} released in-flight marker for ${result.head} (started ${result.startedAt})\n`
-          : `verify-pr watch-state: PR ${args.pr} has no in-flight marker to release\n`,
+        `verify-pr watch-state: PR ${args.pr} released in-flight marker for ${result.head} (started ${result.startedAt})\n`,
       );
     }
     return 0;

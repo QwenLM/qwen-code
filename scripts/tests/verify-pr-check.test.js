@@ -5,7 +5,13 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -847,6 +853,30 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     });
     expect(local.status).toBe(1);
     expect(local.stdout).toMatch(/boundary\.json is missing/);
+  });
+
+  // The artifact directory is writable by the PR code the round executed:
+  // a directory in place of an artifact must degrade to the missing-artifact
+  // refusal, not crash with EISDIR before any check runs.
+  it('refuses a directory in place of boundary.json instead of crashing', () => {
+    const dir = makeArtifactDir(validFiles({ boundary: undefined }), [
+      '01-ab-cells.png',
+    ]);
+    mkdirSync(join(dir, 'boundary.json'));
+    const result = run(dir);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toMatch(/boundary\.json is missing/);
+    expect(result.stderr).not.toMatch(/EISDIR/);
+  });
+
+  it('refuses a directory in place of report.md instead of crashing', () => {
+    const dir = makeArtifactDir(validFiles(), ['01-ab-cells.png']);
+    unlinkSync(join(dir, 'report.md'));
+    mkdirSync(join(dir, 'report.md'));
+    const result = run(dir);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toMatch(/report\.md is missing/);
+    expect(result.stderr).not.toMatch(/EISDIR/);
   });
 
   it('exits 0 on a consistent round and 1 on a contradiction', () => {

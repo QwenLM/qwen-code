@@ -101,8 +101,16 @@ directory is writable by the PR code the round executed.
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
 
+// The artifact directory is writable by the PR code the round executed, so
+// a path may be a directory or otherwise unreadable. Degrade to "missing"
+// (the checks below refuse incomplete artifacts) instead of crashing with
+// EISDIR before any check runs.
 function readIfExists(path) {
-  return existsSync(path) ? readFileSync(path, 'utf8') : null;
+  try {
+    return existsSync(path) ? readFileSync(path, 'utf8') : null;
+  } catch {
+    return null;
+  }
 }
 
 /** OIDs are quoted at every length from 7 to 40; compare by prefix. */

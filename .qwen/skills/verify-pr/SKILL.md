@@ -183,7 +183,10 @@ check step for a container, the CI publish job for the lane, and the VM's
 operator for a VM boundary. The gate detects container markers only, so a
 VM's operator sets `container=<vm name>` and `QWEN_VERIFY_CREDENTIAL_FREE=1`
 after confirming nothing is mounted, then writes the declaration the same
-way. The two shapes:
+way. The VM round also runs under a **scratch `HOME`** — the credential
+scan reads `~/.ssh`, `~/.config/gh`, `~/.aws` and the rest under the
+process home, so the operator's real home fails `--require-isolation` with
+exit 4 even on a clean VM. The two shapes:
 
 - Inside a boundary that passed `--require-isolation`:
   `{"mode":"container","detail":"<image, network policy, credential-free mount>"}`.
@@ -521,18 +524,26 @@ authority to certify the round.
    file **or at the directory itself** (a plain redirect would follow it and
    truncate the target on the host), plant a directory under the reserved
    name, and a live container could rewrite the declaration between the
-   write and the checker's read:
+   write and the checker's read. Every exit path — including the symlink
+   refusal — still tears the proxy down: it holds the real model key, so a
+   refusal that skipped the teardown would leave the credential live and
+   its token exported. Record the refusal in `rc` instead of exiting early:
 
    ```bash
    docker rm -f qwen-verify-<n>
-   [ -L <round-dir> ] && { echo "round dir is a symlink" >&2; exit 1; }
-   rm -rf -- <round-dir>/boundary.json
-   printf '%s\n' '{"mode":"container","detail":"<image, network policy, credential-free mount>"}' > <round-dir>/boundary.json
-   node <trusted-clone>/scripts/verify-pr-check.mjs \
-     --context ~/.cache/qwen-verify/pr<n>/pr.json <round-dir>
+   rc=0
+   [ -L <round-dir> ] && { echo "round dir is a symlink" >&2; rc=1; }
+   if [ "$rc" -eq 0 ]; then
+     rm -rf -- <round-dir>/boundary.json
+     printf '%s\n' '{"mode":"container","detail":"<image, network policy, credential-free mount>"}' > <round-dir>/boundary.json
+     node <trusted-clone>/scripts/verify-pr-check.mjs \
+       --context ~/.cache/qwen-verify/pr<n>/pr.json <round-dir>
+     rc=$?
+   fi
    kill "$(cat ~/.cache/qwen-verify/pr<n>/proxy.pid)"
    rm -f ~/.cache/qwen-verify/pr<n>/proxy.json ~/.cache/qwen-verify/pr<n>/proxy.err ~/.cache/qwen-verify/pr<n>/proxy.pid
    unset QWEN_VERIFY_PROXY_TOKEN
+   exit "$rc"
    ```
 
    `<round-dir>` is the artifact directory prepare printed —
@@ -589,17 +600,30 @@ Run prepare first (trusted host metadata), then register the round with
 **before** the verification work starts, so a round that dies does not
 replay the same head; `<dir>` is the artifact directory prepare printed,
 and the helper runs from the trusted clone — the state root defaults to
-its main worktree, never the round's PR clone.
-Exit 3 means the file already records that head or marks a round in flight,
-and the fire is skipped. Record the finished round with the same script's
-completion form:
+its main worktree, never the round's PR clone. The default resolves from
+the script's own location, so a copy outside the trusted clone — the
+container recipe's read-only `/trusted-scripts` mount resolves it to `/` —
+needs an explicit absolute `--state-root <trusted main worktree>`; run the
+registration from the host's trusted clone instead.
+Exit 3 has two shapes. The head itself is already verified or in flight:
+the fire is skipped, that round answers. Another head's round is in flight
+(one round per PR): the refused head is **recorded as deferred** and the
+fire is skipped — the probe's cursor advanced past it in the same call, so
+no second event will arrive. Record the finished round with the same
+script's completion form:
 `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--comment-id <id>]`
 — `--verdict` is one of `merge-ready | findings | blocked | inconclusive`,
 verbatim; a completion without it exits 2 and leaves the head in flight
-forever. If a round dies after `--start`, recover its marker with
+forever. `inconclusive` releases the marker without filing the head as
+verified, so a later round can still verify it. When the completion output
+names **deferred heads awaiting a round**, start the latest one as the next
+round through the same `--start` flow — that is the only event those heads
+will ever get. If a round dies after `--start`, recover its marker with
 `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha>`
 before starting the next round for that head — never hand-edit the state
-file. On `action: "stop"` (merged or closed),
+file. A release for a head with no in-flight marker is refused (exit 3),
+including when no markers exist at all: check `--state-root` before
+assuming the marker is gone. On `action: "stop"` (merged or closed),
 delete the task with `cron_delete`, drop the claim with
 `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release`, and stop
 watching; drop it too when task creation fails. Any other event — a comment, a
@@ -752,15 +776,20 @@ ambiguous rather than verify a guessed PR. Then, in order:
    main worktree, never the round's PR clone), after prepare has printed the
    artifact directory — `<dir>` is that printed path:
    `node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --artifact-dir <dir> --repo <owner>/<repo>`.
-   Exit 3 means the file already records `H` as verified or in flight: let
-   that round answer instead of starting a duplicate. When the in-flight
+   Exit 3 means the file already records `H` as verified or in flight, or
+   another head's round is in flight (one round per PR): let that round
+   answer instead of starting a duplicate. A cross-head refusal records `H`
+   as deferred, and the running round's `--complete` output names it — start
+   the latest deferred head it names as the next round. When the in-flight
    round is dead (killed session, OOM, aborted turn), nothing will answer:
    recover the marker with
-   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H>`
-   and start again — the release keeps `verifiedHead` and refuses a marker
-   belonging to another head. If the killed invocation left a `.lock` file
-   beside the state file, remove that lock file first — never the state
-   file itself. The write happens
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head>`
+   — the head the exit-3 message names as in flight, which under
+   one-round-per-PR may be a different head than `H`; releasing `H` itself
+   is refused when it holds no marker — and start again. The release keeps
+   `verifiedHead` and refuses a marker belonging to another head. If the
+   killed invocation left a `.lock` file beside the state file, remove that
+   lock file first — never the state file itself. The write happens
    **before** the round starts — the same write-before-start rule the watch
    prompt follows, so a watch fire during the manual round skips `H`. Once
    the round completes, record it with

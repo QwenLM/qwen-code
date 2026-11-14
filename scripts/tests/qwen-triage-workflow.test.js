@@ -6625,6 +6625,12 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'Exit 3 means the file already records `H` as verified or in flight',
     );
+    // Under one-round-per-PR the blocking marker may belong to another
+    // head: recovery releases the head the error names, not `H` itself.
+    expect(flat).toContain(
+      'verify-pr-watch-state.mjs <n> --release --head <blocking head>',
+    );
+    expect(flat).toContain('the head the exit-3 message names as in flight');
     expect(flat).toContain(
       'the same write-before-start rule the watch prompt follows',
     );
@@ -6711,6 +6717,26 @@ describe('qwen-triage verify hardening round 2', () => {
       "the helper runs from the trusted clone — the state root defaults to its main worktree, never the round's PR clone",
     );
     expect(flat).toContain('`<dir>` is the artifact directory prepare printed');
+    // A copy outside the trusted clone resolves the default root to the
+    // mount's parent — the container's /trusted-scripts mount resolves it
+    // to / — so the prompt must demand an explicit absolute --state-root.
+    expect(flat).toContain(
+      "the container recipe's read-only `/trusted-scripts` mount resolves it to `/`",
+    );
+    expect(flat).toContain('--state-root <trusted main worktree>');
+    // One round per PR: a cross-head refusal is deferred, not dropped —
+    // the probe's cursor already advanced, so no second event arrives —
+    // and the completion output is the deferred head's only delivery.
+    expect(flat).toContain('recorded as deferred');
+    expect(flat).toContain('no second event will arrive');
+    expect(flat).toContain('deferred heads awaiting a round');
+    expect(flat).toContain('start the latest one as the next round');
+    // inconclusive releases the marker without deduping the head away.
+    expect(flat).toContain(
+      '`inconclusive` releases the marker without filing the head as verified',
+    );
+    // A release with no marker is a refusal, not a silent success.
+    expect(flat).toContain('including when no markers exist at all');
   });
 
   // Two local rounds on PR #16866 ran the whole battery on the host with no
@@ -6726,6 +6752,9 @@ describe('qwen-triage verify hardening round 2', () => {
     // container, CI lane, and VM alike.
     expect(flat).toContain("the boundary's operator writes it");
     expect(flat).toContain("the VM's operator for a VM boundary");
+    // The credential scan reads the process home: a VM round under the
+    // operator's real home fails --require-isolation even on a clean VM.
+    expect(flat).toContain('The VM round also runs under a **scratch `HOME`**');
     expect(flat).toContain(
       '{"mode":"container","detail":"<image, network policy, credential-free mount>"}',
     );
@@ -6750,12 +6779,40 @@ describe('qwen-triage verify hardening round 2', () => {
     // Presence guards first: indexOf returns -1 for a deleted line, and -1
     // is less than any positive index, so the ordering alone is vacuous.
     expect(flat).toContain('docker rm -f qwen-verify-<n>');
-    expect(flat.indexOf('docker rm -f qwen-verify-<n>')).toBeLessThan(
-      flat.indexOf('rm -rf -- <round-dir>/boundary.json'),
+    const stop = flat.indexOf('docker rm -f qwen-verify-<n>');
+    const symlinkGuard = flat.indexOf('[ -L <round-dir> ]');
+    const clear = flat.indexOf('rm -rf -- <round-dir>/boundary.json');
+    const write = flat.indexOf('> <round-dir>/boundary.json');
+    // The step-7 checker call, not the earlier generic mentions of the
+    // script: this exact context path appears only in the cleanup block.
+    // Whitespace flattening keeps the line-continuation backslash.
+    const checker = flat.indexOf(
+      'verify-pr-check.mjs \\ --context ~/.cache/qwen-verify/pr<n>/pr.json <round-dir>',
     );
-    expect(flat.indexOf('rm -rf -- <round-dir>/boundary.json')).toBeLessThan(
-      flat.indexOf('> <round-dir>/boundary.json'),
+    expect(stop).toBeGreaterThan(-1);
+    expect(symlinkGuard).toBeGreaterThan(-1);
+    expect(clear).toBeGreaterThan(-1);
+    expect(write).toBeGreaterThan(-1);
+    expect(checker).toBeGreaterThan(-1);
+    // Stop the container, refuse a symlinked round dir, clear the planted
+    // name, write the declaration, then run the checker — in that order.
+    expect(stop).toBeLessThan(symlinkGuard);
+    expect(symlinkGuard).toBeLessThan(clear);
+    expect(clear).toBeLessThan(write);
+    expect(write).toBeLessThan(checker);
+    // The symlink refusal records rc instead of exiting early, so the
+    // proxy teardown — which holds the real model key — runs on every
+    // path, and the block exits with the recorded status.
+    expect(flat).toContain(
+      '[ -L <round-dir> ] && { echo "round dir is a symlink" >&2; rc=1; }',
     );
+    const teardown = flat.indexOf(
+      'kill "$(cat ~/.cache/qwen-verify/pr<n>/proxy.pid)"',
+    );
+    expect(teardown).toBeGreaterThan(-1);
+    expect(flat.indexOf('rc=1')).toBeLessThan(teardown);
+    expect(checker).toBeLessThan(teardown);
+    expect(flat).toContain('exit "$rc"');
     // The report carries the boundary for human readers too.
     expect(flat).toContain('Open it with a `**Boundary.**` line');
   });
@@ -7120,7 +7177,11 @@ describe('qwen-triage verify publish fidelity', () => {
         mode: 'container',
         detail: 'CI verify lane (credential-free container)',
       });
-      expect(body).toContain('merge-ready');
+      // The trusted headline, not just the word: a demotion note quotes
+      // `merge-ready` too, so the bare word cannot tell trust from demotion.
+      expect(body).toContain('merge-ready (agent verdict)');
+      expect(body).not.toContain('was not trusted');
+      expect(body).not.toContain('reported as not passed');
       const script = publishScript();
       expect(script.indexOf('CI verify lane')).toBeGreaterThan(-1);
       // The clear must precede the write, and the write the checker: a
@@ -7164,7 +7225,9 @@ describe('qwen-triage verify publish fidelity', () => {
         mode: 'container',
         detail: 'CI verify lane (credential-free container)',
       });
-      expect(body).toContain('merge-ready');
+      expect(body).toContain('merge-ready (agent verdict)');
+      expect(body).not.toContain('was not trusted');
+      expect(body).not.toContain('reported as not passed');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -7190,7 +7253,9 @@ describe('qwen-triage verify publish fidelity', () => {
         mode: 'container',
         detail: 'CI verify lane (credential-free container)',
       });
-      expect(body).toContain('merge-ready');
+      expect(body).toContain('merge-ready (agent verdict)');
+      expect(body).not.toContain('was not trusted');
+      expect(body).not.toContain('reported as not passed');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
