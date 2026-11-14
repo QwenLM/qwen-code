@@ -394,9 +394,10 @@ takes its actions from the first channel by name that can deliver it, with a
 logged conflict. An explicit `serve.sessionPrWatch` wins. The alias ends one
 minor release after this change, when the keys are rejected at `connect()`.
 
-One visible consequence: `%title%` in a comment template renders the last
-title the old state watch recorded and is no longer refreshed. A channel that
-never had a state subscription renders it empty, as before.
+One visible consequence: treat `%title%` in a comment template as
+deprecated. It renders the last title the old state watch recorded and is
+never refreshed again; a channel that never had a state subscription renders
+it empty, as before.
 
 To protect the interactive notification lane, the channel records the
 remaining REST budget from every successful response and skips the pass when
@@ -405,13 +406,21 @@ delays delivery — a comment that appears and is deleted before the next pass i
 not seen — but the cursors are durable, so a new comment is fetched once the
 budget recovers or its window resets.
 
-The two polling reads — the comment watch's list calls and the notifications
-list — are **conditional requests**. The channel remembers each response's
-`ETag` and sends `If-None-Match` on the next read of the same URL. When
-nothing changed GitHub answers `304 Not Modified`, which does not count
-against the primary rate limit, and the channel reuses the retained body. The
-requests still go out at the same rate; what drops is the budget they consume.
-The cache is in memory and per connection: a restart or reconnect re-reads
+The notifications list is a **conditional request**. The channel remembers
+each response's `ETag` and sends `If-None-Match` on the next read of the same
+URL; when nothing changed GitHub answers `304 Not Modified`, which does not
+count against the primary rate limit, and the channel reuses the retained
+body. The PR view the daemon issues is conditional for the same reason.
+
+The comment watch's `issues.listComments` and `pulls.listReviewComments`
+reads are **not** conditional: their `since` window moves on every pass, so
+the cache key changes with it, and each pass spends a full request per bound
+PR (~60/hour at the 60-second default). The removed fan-out cap is why this
+is now the dominant cost: with 50 bound PRs the comment watch alone is most
+of a 5,000/hour budget, and a 403/429 aborts the pass and stalls comment
+delivery until the window resets. The requests still go out at the same rate
+for the notification lane; what drops there is the budget they consume. The
+cache is in memory and per connection: a restart or reconnect re-reads
 once at full cost. Bodies over 256 KiB are not cached, total retention is
 capped at 64 MiB, and a response with no `ETag` is passed through without
 taking a slot. The notifications endpoint also returns `X-Poll-Interval`, and
@@ -525,8 +534,9 @@ event.
 `%%` renders a literal `%`, and an unknown `%foo%` stays literal so typos are
 visible. Substituted GitHub values are sanitized, and `%title%` and
 `%sender%` are also capped at 200 code points with a visible marker. `%title%`
-comes from the last PR title the old state watch observed; it is not refreshed
-any more, so it can be stale. A channel that never had a state subscription
+comes from the last PR title the old state watch observed; it has no writer
+any more, so it is stale, and this variable is deprecated with the `watch:*`
+keys — prefer omitting it. A channel that never had a state subscription
 renders it empty, as before.
 The rendered instruction appears under an `[Operator instruction — trusted]`
 label and a `Source: this channel's configuration` line; the untrusted-data
@@ -609,7 +619,7 @@ boundary; tool permissions remain the boundary.
 - **A late notification can miss its comment.** The cursor follows the newest notification, so a notification GitHub delivers after a newer one was marked read can name a comment from before the cursor. Comments created in the cursor's own second are still read when the cursor lists that second's comments (see [How It Works](#how-it-works)); earlier ones are not, and the user has to post again.
 - The notification lanes process only issue/PR conversation comments. The PR comment watch additionally enumerates same-account inline review comments, but review summary bodies are not enumerated by either, and other-account inline review comments reach no bound session.
 - The selected credential must support the Notifications API. Fine-grained PATs do not support it; use local `gh` authentication or a classic PAT with `notifications` scope.
-- **State transitions are the daemon's.** This channel no longer delivers `head_change`, `ci_failure`, `merge_conflict` or `state_change`; `serve.sessionPrWatch` does, from the daemon's PR refresh. The daemon's latency, its CI predicate (cancelled and stale checks count as failing), its self-push suppression per recipient and its per-workspace trust rules are documented in the [master design](../../../developers/daemon/17-configuration.md) and the settings reference. The channel's own watch is now the comment watch only.
+- **State transitions are the daemon's.** This channel no longer delivers `head_change`, `ci_failure`, `merge_conflict` or `state_change`; `serve.sessionPrWatch` does, from the daemon's PR refresh. The daemon's latency, its CI predicate (cancelled and stale checks count as failing), its self-push suppression per recipient and its per-workspace trust rules are documented in the [master design](../../../design/2026-11-04-daemon-pr-state-transitions.md) and the [settings reference](../../configuration/settings.md). The channel's own watch is now the comment watch only.
 
 ## Starting the Channel
 

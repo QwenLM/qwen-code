@@ -150,10 +150,13 @@ daemon 读完整 boot 设置，它在 timer 创建前已完成合并。
 `packages/cli/src/serve/process-env-guard.test.ts` 的每文件访问多重集保持不变；若
 确实需要直接访问，则在同一改动里更新其 allowance 条目并写明理由。
 
-非法 `events` 值告警并回退默认，与 `maxSessionsFromSettings`
-（`run-qwen-serve.ts:1901-1918`）一致。非法 `actions` 映射拒绝启动，与
-`validatePolicyConfig`（`:692`，在 `:722` 与 `:734` 抛 `InvalidPolicyConfigError`）
-一致：一个静默关掉投递的模板笔误比一次响亮失败更糟，而渠道对同样三条规则本来就抛错。
+无法识别的 `events` 成员只丢弃该项并告警，其余成员继续生效：坏列表只收窄监视，
+清空整表会在 `explicit` 仍压掉别名的同时让监视彻底沉默。未知子键同样告警，而不是
+让配置变成「explicit 但零事件」。两个环境覆盖都进入项目 `.env` 的排除表，与其它
+daemon 全局键一致：被服务的仓库不得打开它的设置文件被禁止设置的监视。非法 `actions`
+映射拒绝启动，与 `validatePolicyConfig`（`:692`，在 `:722` 与 `:734` 抛
+`InvalidPolicyConfigError`）一致：一个静默关掉投递的模板笔误比一次响亮失败更糟，
+而渠道对同样三条规则本来就抛错。
 
 ### 2. 启用即 deps 存在性
 
@@ -267,23 +270,24 @@ listing 在同一 tick 稍后才跑）。drain 的扫描继续独立，沿用其
 与锁语义。即使在 1 分钟下限，实测成本也远低于 tick 预算；未来若单 session 扫描
 成本上升，应先重跑该探针再接受三次扫描。
 
-## 涉及文件
-
-| 层           | 文件                                                                                                                                         | 改动                                                         |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| config       | `packages/cli/src/config/settingsSchema.ts`                                                                                                  | `serve.sessionPrWatch`（`events`、`wakeDormant`、`actions`） |
-| config       | `packages/cli/src/serve/fast-path-settings.ts`                                                                                               | 摘要类型、picker 与合并器加上该键；`ignoredKeys` 点名它      |
-| config       | `packages/cli/src/config/settingsUtils.ts`                                                                                                   | `WORKSPACE_RESTRICTED_SETTINGS` 加上该 operator-only 键      |
-| daemon       | `packages/cli/src/serve/run-qwen-serve.ts`                                                                                                   | boot 读取、env 覆盖、别名解析、扩展签名                      |
-| daemon       | `packages/cli/src/serve/server/session-pr-refresh.ts`                                                                                        | 启用由有效事件集推导；listing 扫描决策                       |
-| daemon       | `packages/cli/src/serve/server/pr-watch-observation.ts`                                                                                      | 事件集进入探测器与 tick                                      |
-| daemon       | `packages/cli/src/serve/server/pr-watch-deps.ts`                                                                                             | 透传 `actions` / `wakeDormant`；别名 host                    |
-| channel      | `packages/channels/github/src/GithubAdapter.ts`                                                                                              | 拆分 pass、退休状态与任务、弃用键                            |
-| channel      | `packages/channels/github/src/index.ts`                                                                                                      | descriptor 描述与选项                                        |
-| channel-base | `packages/channels/base/src/types.ts`                                                                                                        | 两个配置字段加 `@deprecated`                                 |
-| web-shell    | `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx`                                                                      | 弃用提示                                                     |
-| docs         | `docs/users/features/channels/github.md`、`docs/users/configuration/settings.md`、`docs/developers/daemon/17-configuration.md`、两版设计文档 | 迁移、设置、标题变化                                         |
-| tests        | 每个改动文件旁的 `.test.ts`                                                                                                                  | 见验证                                                       |
+| 层        | 文件                                                                                                                                         | 改动                                                            |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| config    | `packages/cli/src/config/settingsSchema.ts`                                                                                                  | `serve.sessionPrWatch`（`events`、`wakeDormant`、`actions`）    |
+| config    | `packages/cli/src/config/settingsUtils.ts`                                                                                                   | `WORKSPACE_RESTRICTED_SETTINGS` 加上该 operator-only 键         |
+| config    | `packages/cli/src/config/shared-env-keys.ts`                                                                                                 | 两个 env 覆盖加入项目 `.env` 排除表                             |
+| config    | `packages/cli/src/serve/fast-path-settings.ts`、`packages/cli/src/serve/fast-path.test.ts`                                                   | 摘要类型、picker 与合并器加上该键；`ignoredKeys` 点名它         |
+| daemon    | `packages/cli/src/serve/run-qwen-serve.ts`                                                                                                   | boot 读取、env 覆盖、别名解析、扩展签名、延后的一次性定时器告警 |
+| daemon    | `packages/cli/src/serve/server/pr-watch-config.ts`（新增）                                                                                   | 设置解析、按 host 别名、订阅对象                                |
+| daemon    | `packages/cli/src/serve/server/pr-watch-store.ts`、`pr-watch-drain.ts`                                                                       | 前序增量新增的 store/drain 模块；本次改动其订阅接缝             |
+| daemon    | `packages/cli/src/serve/server/pr-watch-deps.ts`                                                                                             | 透传 `actions` / `wakeDormant`；别名 host                       |
+| daemon    | `packages/cli/src/serve/server/pr-watch-observation.ts`                                                                                      | 事件集进入探测器与 tick；失败 streak 生命周期                   |
+| daemon    | `packages/cli/src/serve/server/session-pr-refresh.ts`                                                                                        | 启用由有效事件集推导；listing 扫描决策；streak map              |
+| channel   | `packages/channels/github/src/GithubAdapter.ts`                                                                                              | 拆分 pass、退休状态与任务、弃用键、保留合并绑定游标             |
+| channel   | `packages/channels/github/src/index.ts`                                                                                                      | descriptor 描述与选项                                           |
+| web-shell | `packages/web-shell/client/components/channels/channel-editor-state.ts`、`ChannelEditorDialog.tsx`、`client/i18n.tsx`                        | 弃用键按 daemon 的接受方式保存；弃用说明真正到达界面            |
+| generated | `packages/vscode-ide-companion/schemas/settings.schema.json`                                                                                 | 由 schema 重新生成                                              |
+| docs      | `docs/users/features/channels/github.md`、`docs/users/configuration/settings.md`、`docs/developers/daemon/17-configuration.md`、两版设计文档 | 迁移、设置、标题变化                                            |
+| tests     | 每个改动文件旁的 `.test.ts`                                                                                                                  | 见验证                                                          |
 
 ## 关键设计决策
 

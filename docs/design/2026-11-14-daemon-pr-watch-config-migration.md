@@ -187,12 +187,16 @@ They are read through the injected environment record, not a new
 access proves necessary, its allowance entry is updated with a reason in the
 same change.
 
-An invalid `events` value falls back to the default with a warning, matching
-`maxSessionsFromSettings` (`run-qwen-serve.ts:1901-1918`). An invalid `actions`
-map refuses the boot, matching `validatePolicyConfig` (`:692`, which throws
-`InvalidPolicyConfigError` at `:722` and `:734`): a template typo that silently
-disables delivery is worse than a loud failure, and the channel already throws
-for the same three rules.
+An unrecognized `events` entry is dropped with a warning while the recognized
+members still apply: a bad list narrows the watch, and emptying it would
+silence the watch while `explicit` still suppresses the alias. An unknown
+sub-key warns instead of making the config explicit with no events. Both env
+overrides are on the project-`.env` exclusion list, like the other daemon-wide
+keys: a served repository must not switch on the watch its settings file is
+forbidden to set. An invalid `actions` map refuses the boot, matching
+`validatePolicyConfig` (`:692`, which throws `InvalidPolicyConfigError` at
+`:722` and `:734`): a template typo that silently disables delivery is worse
+than a loud failure, and the channel already throws for the same three rules.
 
 ### 2. Enablement is deps presence
 
@@ -343,23 +347,24 @@ far below the tick budget even at the one-minute floor; a future change that
 raises the per-session scan cost should re-run this probe before the three
 scans are accepted as-is.
 
-## Files affected
-
-| Layer        | File                                                                                                                                             | Change                                                                   |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| config       | `packages/cli/src/config/settingsSchema.ts`                                                                                                      | `serve.sessionPrWatch` (`events`, `wakeDormant`, `actions`)              |
-| config       | `packages/cli/src/serve/fast-path-settings.ts`                                                                                                   | the summary type, picker and merger gain the key; `ignoredKeys` names it |
-| config       | `packages/cli/src/config/settingsUtils.ts`                                                                                                       | `WORKSPACE_RESTRICTED_SETTINGS` gains the operator-only key              |
-| daemon       | `packages/cli/src/serve/run-qwen-serve.ts`                                                                                                       | boot read, env overrides, alias resolution, extended signature           |
-| daemon       | `packages/cli/src/serve/server/session-pr-refresh.ts`                                                                                            | enablement from the effective event set; listing scan decision           |
-| daemon       | `packages/cli/src/serve/server/pr-watch-observation.ts`                                                                                          | event set into the detector and the tick                                 |
-| daemon       | `packages/cli/src/serve/server/pr-watch-deps.ts`                                                                                                 | `actions` / `wakeDormant` threaded; alias hosts                          |
-| channel      | `packages/channels/github/src/GithubAdapter.ts`                                                                                                  | split the pass, retire state and tasks, deprecate keys                   |
-| channel      | `packages/channels/github/src/index.ts`                                                                                                          | descriptor descriptions and options                                      |
-| channel-base | `packages/channels/base/src/types.ts`                                                                                                            | `@deprecated` on the two config fields                                   |
-| web-shell    | `packages/web-shell/client/components/channels/ChannelEditorDialog.tsx`                                                                          | deprecation hints                                                        |
-| docs         | `docs/users/features/channels/github.md`, `docs/users/configuration/settings.md`, `docs/developers/daemon/17-configuration.md`, both design docs | the move, the setting, the title change                                  |
-| tests        | collocated `.test.ts` for each changed file                                                                                                      | see validation                                                           |
+| Layer     | File                                                                                                                                             | Change                                                                                   |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| config    | `packages/cli/src/config/settingsSchema.ts`                                                                                                      | `serve.sessionPrWatch` (`events`, `wakeDormant`, `actions`)                              |
+| config    | `packages/cli/src/config/settingsUtils.ts`                                                                                                       | `WORKSPACE_RESTRICTED_SETTINGS` gains the operator-only key                              |
+| config    | `packages/cli/src/config/shared-env-keys.ts`                                                                                                     | both env overrides become project-`.env` exclusions                                      |
+| config    | `packages/cli/src/serve/fast-path-settings.ts`, `packages/cli/src/serve/fast-path.test.ts`                                                       | the summary type, picker and merger gain the key; `ignoredKeys` names it                 |
+| daemon    | `packages/cli/src/serve/run-qwen-serve.ts`                                                                                                       | boot read, env overrides, alias resolution, extended signature, deferred timer warning   |
+| daemon    | `packages/cli/src/serve/server/pr-watch-config.ts` (new)                                                                                         | the setting's parser, the per-host alias, the subscription object                        |
+| daemon    | `packages/cli/src/serve/server/pr-watch-store.ts`, `pr-watch-drain.ts`                                                                           | store/drain modules the earlier increments added; touched here for the subscription seam |
+| daemon    | `packages/cli/src/serve/server/pr-watch-deps.ts`                                                                                                 | `actions` / `wakeDormant` threaded; alias hosts                                          |
+| daemon    | `packages/cli/src/serve/server/pr-watch-observation.ts`                                                                                          | event set into the detector and the tick; failure-streak lifecycle                       |
+| daemon    | `packages/cli/src/serve/server/session-pr-refresh.ts`                                                                                            | enablement from the effective event set; listing scan decision; streak map               |
+| channel   | `packages/channels/github/src/GithubAdapter.ts`                                                                                                  | split the pass, retire state and tasks, deprecate keys, keep merged cursors              |
+| channel   | `packages/channels/github/src/index.ts`                                                                                                          | descriptor descriptions and options                                                      |
+| web-shell | `packages/web-shell/client/components/channels/channel-editor-state.ts`, `ChannelEditorDialog.tsx`, `client/i18n.tsx`                            | the deprecated key saves as the daemon takes it; the deprecation copy reaches the screen |
+| generated | `packages/vscode-ide-companion/schemas/settings.schema.json`                                                                                     | regenerated from the schema                                                              |
+| docs      | `docs/users/features/channels/github.md`, `docs/users/configuration/settings.md`, `docs/developers/daemon/17-configuration.md`, both design docs | the move, the setting, the title change                                                  |
+| tests     | collocated `.test.ts` for each changed file                                                                                                      | see validation                                                                           |
 
 ## Key design decisions
 
