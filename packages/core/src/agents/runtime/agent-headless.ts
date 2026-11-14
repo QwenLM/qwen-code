@@ -42,6 +42,7 @@ import type {
 import { AgentTerminateMode } from './agent-types.js';
 import { logSubagentExecution } from '../../telemetry/loggers.js';
 import { SubagentExecutionEvent } from '../../telemetry/types.js';
+import type { LoopType } from '../../telemetry/types.js';
 import { AgentCore, EXTERNAL_MESSAGE_PREFIX } from './agent-core.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 
@@ -237,7 +238,7 @@ export class AgentHeadless implements SubagentExecutor {
   // mode. Consumers must treat `undefined` as a normal outcome.
   private lastError: string | undefined;
   // Which loop detector fired when terminateMode is LOOP_DETECTED (#9450).
-  private loopType: string | null = null;
+  private loopType: LoopType | null = null;
   private chat?: LlmChat;
   private toolsList?: FunctionDeclaration[];
   private executing = false;
@@ -655,6 +656,11 @@ export class AgentHeadless implements SubagentExecutor {
 
   getTerminateMode(): AgentTerminateMode {
     return this.terminateMode;
+  }
+
+  /** Which loop detector fired, when terminateMode is LOOP_DETECTED (#9450). */
+  getLoopType(): LoopType | null {
+    return this.loopType;
   }
 
   getLastError(): string | undefined {

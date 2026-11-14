@@ -480,6 +480,7 @@ export async function runSkillReviewByAgent(params: {
       terminateReasonMessage(
         result.terminateReason,
         'Skill review agent did not complete successfully',
+        result.loopType,
       ),
     );
   }

@@ -83,6 +83,7 @@ import {
   logLoopProtection,
   logSubagentExecution,
 } from '../../telemetry/loggers.js';
+import { LoopType } from '../../telemetry/types.js';
 import type { SubagentExecutionEvent } from '../../telemetry/types.js';
 import {
   fnCall,
@@ -1784,6 +1785,11 @@ describe('subagent.ts', () => {
           expect(scope.getTerminateMode()).toBe(
             AgentTerminateMode.LOOP_DETECTED,
           );
+          // A forked caller reads the detector off this accessor; the finish
+          // event alone never reaches it (#13519).
+          expect(scope.getLoopType()).toBe(
+            LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+          );
           // The 3rd identical call's results carry the loop-protection
           // reminder, after the tool response (#14828).
           expect(sentParts(3).at(-1)?.text).toContain(
@@ -2151,6 +2157,7 @@ describe('subagent.ts', () => {
             'consecutive_identical_tool_calls',
           );
           expect(finishEvents[1].loopType).toBeUndefined();
+          expect(scope.getLoopType()).toBeNull();
         });
 
         it('should ignore duplicate provider tool-call ids already present in chat history', async () => {
