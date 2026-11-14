@@ -7,6 +7,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import { Text } from 'ink';
+import { act } from 'react';
 import { Composer } from './Composer.js';
 import { InputPrompt } from './InputPrompt.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
@@ -86,6 +87,10 @@ vi.mock('./InputPrompt.js', () => ({
 
 vi.mock('./Footer.js', () => ({
   Footer: () => <Text>Footer</Text>,
+}));
+
+vi.mock('./KeyboardShortcuts.js', () => ({
+  KeyboardShortcuts: () => <Text>KeyboardShortcuts</Text>,
 }));
 
 vi.mock('./QueuedMessageDisplay.js', () => ({
@@ -266,6 +271,92 @@ describe('Composer', () => {
 
       const { lastFrame } = renderComposer(uiState);
 
+      expect(lastFrame()).not.toContain('Footer');
+    });
+
+    it('keeps the footer mounted while messages are queued during a busy turn', () => {
+      // #8666: isInputActive is false across the whole window a queued message
+      // can exist in (approval-mode resets, slash-command processing,
+      // WaitingForConfirmation). The footer holds the only always-on "N
+      // queued" badge, so hiding it there leaves the queue invisible.
+      const uiState = createMockUIState({
+        isInputActive: false,
+        isConfigInitialized: true,
+        messageQueue: ['queued while busy'],
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).toContain('Footer');
+      expect(lastFrame()).toContain('queued while busy');
+    });
+
+    it('keeps the footer hidden when input is inactive and the queue is empty', () => {
+      const uiState = createMockUIState({
+        isInputActive: false,
+        isConfigInitialized: true,
+        messageQueue: [],
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).not.toContain('Footer');
+    });
+
+    it('renders the footer rather than the shortcuts panel when a queued message mounts the slot with the input inactive', () => {
+      // showShortcuts has one writer and nothing resets it when isInputActive
+      // flips, so a panel left open would otherwise take the slot the queue
+      // just mounted and hide the count this change exists for.
+      const uiState = createMockUIState({
+        isInputActive: true,
+        isConfigInitialized: true,
+      });
+
+      const { lastFrame, rerender } = renderComposer(uiState);
+
+      const inputPrompt = vi.mocked(InputPrompt);
+      const firstProps = inputPrompt.mock.calls.at(-1)?.[0] as {
+        onToggleShortcuts?: () => void;
+      };
+      // The premise is asserted: a later refactor that stops passing the prop
+      // would otherwise make the case green without opening the panel at all.
+      expect(firstProps.onToggleShortcuts).toBeDefined();
+      act(() => firstProps.onToggleShortcuts!());
+      expect(lastFrame()).toContain('KeyboardShortcuts');
+
+      rerender(
+        composerElement(
+          createMockUIState({
+            isInputActive: false,
+            isConfigInitialized: true,
+            messageQueue: ['queued'],
+          }),
+        ),
+      );
+
+      expect(lastFrame()).toContain('Footer');
+      expect(lastFrame()).not.toContain('KeyboardShortcuts');
+    });
+
+    it('keeps the shortcuts panel reachable while the input is active', () => {
+      // The mirror of the suppression case: an inverted or collapsed ternary
+      // would make the panel unreachable in every state and leave the rest of
+      // the suite green.
+      const uiState = createMockUIState({
+        isInputActive: true,
+        isConfigInitialized: true,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      const inputPrompt = vi.mocked(InputPrompt);
+      const props = inputPrompt.mock.calls.at(-1)?.[0] as {
+        onToggleShortcuts?: () => void;
+      };
+      expect(props.onToggleShortcuts).toBeDefined();
+      act(() => props.onToggleShortcuts!());
+
+      expect(lastFrame()).toContain('KeyboardShortcuts');
       expect(lastFrame()).not.toContain('Footer');
     });
   });

@@ -180,9 +180,16 @@ export const Composer = ({ footerRef }: ComposerProps) => {
           which returns a message exactly while initialization is pending — so
           it has to mount on that window too, or startup shows no progress at
           all. InputPrompt stays gated on isInputActive alone. */}
-      {(uiState.isInputActive || !uiState.isConfigInitialized) &&
+      {/* The footer is where the "N queued" count is drawn. The queue previews
+          above (QueuedMessageDisplay) stay mounted, but the count disappears
+          once the input goes inactive — slash-command processing and an inline
+          tool confirmation — so the footer mounts while the queue is
+          non-empty too (#8666). */}
+      {(uiState.isInputActive ||
+        !uiState.isConfigInitialized ||
+        uiState.messageQueue.length > 0) &&
         !showSuggestions &&
-        (showShortcuts ? (
+        (showShortcuts && uiState.isInputActive ? (
           <KeyboardShortcuts />
         ) : (
           !isScreenReaderEnabled && <Footer containerRef={footerRef} />
