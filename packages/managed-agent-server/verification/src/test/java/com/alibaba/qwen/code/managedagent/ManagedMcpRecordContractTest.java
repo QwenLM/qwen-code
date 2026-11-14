@@ -51,10 +51,30 @@ class ManagedMcpRecordContractTest {
         }
     }
 
+    @Test
+    void boundsEveryPublicMcpSequenceAtTheSharedCeiling() throws IOException {
+        JsonNode fixtures = fixtures();
+        String domain = "mcp_operation";
+        JsonNode template = fixtures.get("templates").get(domain);
+        var body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
+        JsonNode atCeiling = merge(template, JSON.readTree(
+                "{\"serverRevision\": 9007199254740990,"
+                        + " \"run\": {\"definition\": {\"definitionRevision\": 9007199254740990}}}"));
+        body.require().accept(atCeiling);
+        JsonNode pastCeiling = merge(template, JSON.readTree(
+                "{\"serverRevision\": 9007199254740991,"
+                        + " \"run\": {\"definition\": {\"definitionRevision\": 9007199254740991}}}"));
+        InvalidRecordException refused = assertThrows(InvalidRecordException.class,
+                () -> body.require().accept(pastCeiling));
+        assertEquals("serverRevision must be an integer from 1 to"
+                + " 9007199254740990.", refused.getMessage());
+    }
+
     static JsonNode fixtures() throws IOException {
         Path directory = Path.of("").toAbsolutePath();
         while (directory != null) {
-            Path path = directory.resolve("packages/core/src/managed-runtime/contracts/managed-mcp-record-v1.fixtures.json");
+            Path path = directory.resolve(
+                    "packages/core/src/managed-runtime/contracts/managed-mcp-record-v1.fixtures.json");
             if (Files.exists(path)) {
                 return JSON.readTree(Files.readString(path));
             }

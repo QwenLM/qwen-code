@@ -147,15 +147,15 @@ class AgentDefinitionExtensionsTest {
         assertRefused("mcp_servers", () -> AgentDefinitionExtensions.mcpServers(List.of(MCP), WorkspaceToolProfiles.READ));
         assertRefused("mcp_servers", () -> AgentDefinitionExtensions.mcpServers(List.of(MCP), "hosted-workspace-shell/2"));
         assertRefused("mcp_servers", () -> AgentDefinitionExtensions.mcpServers(List.of(MCP, MCP), WorkspaceToolProfiles.MCP));
-        for (Object revision : List.of(0, -1, 1.5, "1", 9007199254740992L)) {
+        for (Object revision : List.of(0, -1, 1.5, "1", 9007199254740991L, 9007199254740992L)) {
             Map<String, Object> pin = new LinkedHashMap<>(MCP);
             pin.put("server_revision", revision);
             assertRefused("mcp_servers", () -> AgentDefinitionExtensions.mcpServers(List.of(pin), WorkspaceToolProfiles.MCP));
         }
         Map<String, Object> pin = new LinkedHashMap<>(MCP);
-        pin.put("server_revision", 9007199254740991L);
+        pin.put("server_revision", 9007199254740990L);
         assertThat(AgentDefinitionExtensions.mcpServers(List.of(pin), WorkspaceToolProfiles.MCP)
-                .getFirst().get("serverRevision")).isEqualTo(9007199254740991L);
+                .getFirst().get("serverRevision")).isEqualTo(9007199254740990L);
         pin.put("command", "forbidden");
         assertRefused("mcp_servers", () -> AgentDefinitionExtensions.mcpServers(List.of(pin), WorkspaceToolProfiles.MCP));
     }

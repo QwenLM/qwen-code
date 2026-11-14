@@ -29,6 +29,7 @@ export function parseHostedMcpServers(
       !/^[A-Za-z0-9._:-]{1,128}$/u.test(pin['serverId']) ||
       !Number.isSafeInteger(pin['serverRevision']) ||
       Number(pin['serverRevision']) < 1 ||
+      Number(pin['serverRevision']) > Number.MAX_SAFE_INTEGER - 1 ||
       typeof pin['definitionDigest'] !== 'string' ||
       !/^[0-9a-f]{64}$/u.test(pin['definitionDigest']) ||
       ids.has(pin['serverId'])

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.catalog;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionPolicyStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
@@ -173,6 +174,7 @@ public class ManagedMcpManagementService {
 
     private static boolean counter(JsonNode value, long minimum) {
         return value.isIntegralNumber() && value.canConvertToLong()
-                && value.longValue() >= minimum && value.longValue() <= 9_007_199_254_740_991L;
+                && value.longValue() >= minimum
+                && value.longValue() <= ManagedSessionStoreModels.MAX_SAFE_COUNTER;
     }
 }

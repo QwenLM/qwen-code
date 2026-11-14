@@ -363,6 +363,7 @@ export function parseHostedHookPin(value: unknown): ManagedHookCatalogPin {
     !/^[A-Za-z0-9._:-]{1,128}$/u.test(pin['catalogId']) ||
     !Number.isSafeInteger(pin['catalogRevision']) ||
     (pin['catalogRevision'] as number) < 1 ||
+    (pin['catalogRevision'] as number) > Number.MAX_SAFE_INTEGER - 1 ||
     typeof pin['definitionDigest'] !== 'string' ||
     !/^[a-f0-9]{64}$/u.test(pin['definitionDigest'])
   )

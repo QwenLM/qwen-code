@@ -416,6 +416,34 @@
       "start": false
     },
     {
+      "id": "unsafe-server-revision",
+      "domain": "mcp_operation",
+      "patch": {
+        "serverRevision": 9007199254740991,
+        "run": {
+          "definition": {
+            "definitionRevision": 9007199254740991
+          }
+        }
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "max-server-revision",
+      "domain": "mcp_operation",
+      "patch": {
+        "serverRevision": 9007199254740990,
+        "run": {
+          "definition": {
+            "definitionRevision": 9007199254740990
+          }
+        }
+      },
+      "valid": true,
+      "start": true
+    },
+    {
       "id": "bad-ref",
       "domain": "mcp_operation",
       "patch": {

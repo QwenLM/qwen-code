@@ -1733,18 +1733,19 @@ public final class ManagedExtensionRecords {
     /**
      * A JSON number equal to an integer in range. As in JSON Schema and in
      * JavaScript, 1.0 counts as 1; a number past the double range, which
-     * Jackson reads as an infinity, counts as none.
+     * Jackson reads as an infinity, counts as none. The count ceiling clamps a
+     * wider {@code max}, and the refusal names the ceiling actually enforced.
      */
     public static long count(JsonNode node, long min, long max,
             String label) {
+        long ceiling = Math.min(max, MAX_COUNT);
         BigDecimal value = node != null && node.isNumber()
                 && Double.isFinite(node.doubleValue())
                 ? node.decimalValue() : null;
         require(value != null && value.stripTrailingZeros().scale() <= 0
                 && value.compareTo(BigDecimal.valueOf(min)) >= 0
-                && value.compareTo(BigDecimal.valueOf(Math.min(max,
-                        MAX_COUNT))) <= 0,
-                label + " must be an integer from " + min + " to " + max);
+                && value.compareTo(BigDecimal.valueOf(ceiling)) <= 0,
+                label + " must be an integer from " + min + " to " + ceiling);
         return value.longValueExact();
     }
 
