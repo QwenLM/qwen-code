@@ -2,7 +2,7 @@
 
 [English](2026-11-08-daemon-pr-watch-drain.md) | [简体中文](2026-11-08-daemon-pr-watch-drain.zh-CN.md)
 
-Status: proposed (2026-11-08). This is the increment after [observation and transition detection](2026-11-08-daemon-pr-watch-observation.md) (merged as #16611) of [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md) (the "master design" below). It implements §4 Delivery and §5 Durability, together with the §2 watch-file deletion and `lastBoundAt` rules that the observation increment deferred to the drain because they need the drain's scan-completeness information. Configuration (§6) and the channel migration (§7) stay out (PR B). Like the observation, the whole path stays behind the internal off switch and is production-inert until the enablement increment populates its deps.
+Status: landed as #16656 (proposed 2026-11-08). This is the increment after [observation and transition detection](2026-11-08-daemon-pr-watch-observation.md) (merged as #16611) of [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md) (the "master design" below). It implements §4 Delivery and §5 Durability, together with the §2 watch-file deletion and `lastBoundAt` rules that the observation increment deferred to the drain because they need the drain's scan-completeness information. Configuration (§6) and the channel migration (§7) stay out (PR B). Like the observation, the whole path stayed behind the internal off switch and was production-inert until the enablement increment populated its deps; PR B has since removed that switch.
 
 ## Problem
 
@@ -37,7 +37,7 @@ The observation writes detected transitions into each PR watch file's `pending`,
 - Daemon-level provision of the watch/drain deps in `run-qwen-serve.ts` (allowed-hosts discovery, the lock registry and watch dir, the admission/restore deps, and the listing→watch write + `listedKeys`): the enablement increment. The drain exposes a deps seam and is inert until it is populated and the switch is on.
 - The shared restore extraction from `restoreSessionHandler`, the resume-drain hook, and the serve-lifecycle close reorder: these only run once the drain is enabled, so they land with the enablement increment where they can be exercised end-to-end. This increment injects `wakeSession` as a dependency and tests the drain's restore handling against it; the route is untouched.
 - Fencing interactive writers (master §4 "Dormant sessions"): the session-writer-lease exposure is the channel's today and stays out of scope.
-- Manual-push ledger (master open question 5): only pushes through the autofix-pr helper are recorded.
+- Manual-push ledger (still open in the master design): only pushes through the autofix-pr helper are recorded.
 
 ## Proposed changes
 
@@ -97,7 +97,7 @@ The drain runs in the same gated timer block as the observation, after `runPrWat
 2. **The file is the only baseline; delivery is PR-scoped.** Observation stays per workspace while detection and delivery are PR-scoped, so an unreachable/untrusted/retired binder holds no stale copy and simply becomes a candidate again when reachable.
 3. **Admission counts as delivery.** As for the channel's bound relay, an admitted prompt queued behind a running turn is lost with the in-memory queue on restart; the watch file already records the key and does not re-inject it. `delivered` (not the per-session admission ring) stops a key being admitted to a different session.
 4. **Restore is an injected dependency.** The drain consumes `wakeSession`; the shared restore extraction from the route lands with enablement so it can be tested end-to-end. The drain's restore-error classification is its own and treats `session_writer_conflict` as temporary.
-5. **Off by default.** The drain is production-inert until the enablement increment populates the deps and PR B turns the switch on; no build runs both pollers.
+5. **Off by default.** The drain was production-inert until the enablement increment populated the deps and PR B removed the switch; no build runs both pollers.
 
 ## Constraints and risks
 
@@ -131,4 +131,4 @@ The drain runs in the same gated timer block as the observation, after `runPrWat
 
 ## Open questions
 
-- Inherited from the master design (on-by-default timing, `cancelled`/`stale` CI predicate, manual-push ledger); none are decided here.
+- Inherited from the master design (manual-push ledger); none are decided here. On-by-default timing and the `cancelled`/`stale` CI predicate were settled on 2026-11-14: off by default, and core's predicate kept.

@@ -2,15 +2,16 @@
 
 [English](2026-11-14-daemon-pr-watch-config-migration.md) | [简体中文](2026-11-14-daemon-pr-watch-config-migration.zh-CN.md)
 
-状态：提案。本增量即母设计（[PR 状态跃迁](2026-11-04-daemon-pr-state-transitions.md)
+状态：已实现 —— 于 2026-11-14 以 #17214 落地。本增量即母设计（[PR 状态跃迁](2026-11-04-daemon-pr-state-transitions.zh-CN.md)
 §6 与 §7）所称的 **PR B**。下文每条代码引用都读自 `bbdca16b52`（`origin/main`），
-也就是本分支的起点提交。
+也就是本分支的起点提交，因此行号描述的是那棵树而非今天的树。
 
-PR A 已完成：九个 PR 已合入（#16577、#16590、#16611、#16656、#16732、#16810、
-#16834、#16847、#17032）。daemon 已拥有 watch store、观测、drain、共享 admission
-与 restore，以及 deps 装配。内部开关 `SESSION_PR_WATCH_OBSERVATION_ENABLED` 仍为
-`false`（`packages/cli/src/serve/server/session-pr-refresh.ts:82`），因此生产行为
-未变，PR 监视仍全部由 GitHub 渠道适配器承担。
+本增量开工时 PR A 已完成：九个 PR 已合入（#16577、#16590、#16611、#16656、#16732、
+#16810、#16834、#16847、#17032），使 daemon 拥有 watch store、观测、drain、共享
+admission 与 restore，以及 deps 装配。那时内部开关
+`SESSION_PR_WATCH_OBSERVATION_ENABLED` 仍为 `false`，因此生产行为未变，PR 监视仍全部
+由 GitHub 渠道适配器承担。本增量移除了该开关——启用现在即 deps 存在性——适配器也不再
+检测 PR 状态跃迁。
 
 ## 问题
 
@@ -115,7 +116,7 @@ listen」。该签名目前只覆盖 base-URL 列表。
 
 - 默认打开 watch。母设计决策 7 把这留作后续产品决策；本增量保持默认关闭。
 - 改动 CI 谓词、跃迁规则、drain 的加锁、restore 并发或投递信封。这些由 PR A 定案。
-- `review_decision` 跃迁、Aone 对等、手工推送账本（母设计 open questions 3、4、5）。
+- `review_decision` 跃迁、Aone 对等、手工推送账本（母设计仍开放的三个问题）。
 - 重写 comment 车道、其预算钩子或其 ETag 缓存。
 
 ## 提议的改动

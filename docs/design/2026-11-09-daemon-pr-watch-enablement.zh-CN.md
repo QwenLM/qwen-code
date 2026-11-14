@@ -2,11 +2,11 @@
 
 [English](2026-11-09-daemon-pr-watch-enablement.md) | [简体中文](2026-11-09-daemon-pr-watch-enablement.zh-CN.md)
 
-状态：proposed（2026-11-09），部分已落地（#16732 与本增量）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md)（下称「主设计」）中继 [投递 drain](2026-11-08-daemon-pr-watch-drain.md)（已合入 #16656）之后的增量，覆盖 drain 增量延后到启用的四项：共享 restore（§1）、resume 后 drain 钩子（§2）、lifecycle close 重排（§3）、daemon 级 deps 填充（§4）。**已落地：完整的 §3 与 §4 中的 host 枚举器（#16732）；§1 共享 restore（#16810）；§5 listing 写入与 `listedKeys`（#16847）；以及本增量的 §2 与 §4 其余部分。**§2 与 §4 一起落地——因为 §4 提供 §2 所需的消费者；下文各节均按此标注。**off 开关仍为 `false`，`sessionPrWatch` 设置仍不读取**——配置（§6）、channel 别名与打开开关（§7）仍属 PR B。任何构建都绝不能同时跑两个 poller。
+状态：已落地（2026-11-09 提案；#16732、#16810、#16847 与 #17032）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md)（下称「主设计」）中继 [投递 drain](2026-11-08-daemon-pr-watch-drain.md)（已合入 #16656）之后的增量，覆盖 drain 增量延后到启用的四项：共享 restore（§1）、resume 后 drain 钩子（§2）、lifecycle close 重排（§3）、daemon 级 deps 填充（§4）。**已落地：完整的 §3 与 §4 中的 host 枚举器（#16732）；§1 共享 restore（#16810）；§5 listing 写入与 `listedKeys`（#16847）；以及本增量的 §2 与 §4 其余部分。**§2 与 §4 一起落地——因为 §4 提供 §2 所需的消费者；下文各节均按此标注。**撰写时 off 开关仍为 `false`，`sessionPrWatch` 设置仍不读取**——配置（§6）、channel 别名与移除该开关（§7）当时属 PR B，此后已以 #17214 落地。任何构建都绝不能同时跑两个 poller。
 
 ## 问题
 
-drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、registry 与自推访问都作为注入依赖，而生产中没有任何东西填充它们：`getPrWatchDeps` 与 `getPrDrainDeps` 没有生产调用方，`defaultPrWatchDir()` 与 `releasePrWatchOwnershipSync()` 只被测试引用。PR B 打开开关后有三个后果——两个是正确性问题，一个是延迟问题：
+drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、registry 与自推访问都作为注入依赖，而生产中没有任何东西填充它们：`getPrWatchDeps` 与 `getPrDrainDeps` 没有生产调用方，`defaultPrWatchDir()` 与 `releasePrWatchOwnershipSync()` 只被测试引用。PR B 移除该开关后有三个后果——两个是正确性问题，一个是延迟问题：
 
 - 休眠接收者永远无法被唤醒。真实 restore 原先位于 `restoreSessionHandler`——`registerSessionRoutes` 内的一个路由闭包，只能经 HTTP 到达；§1 已把它的可复用核心移入 `server/session-restore.ts`。channel 经 SDK 调用它（`commands/channel/daemon-worker.ts:1057-1063`），而 daemon 不能用这条跨进程路径做自己的进程内投递。
 - `wakeDormant: false` 会把投递推迟最多一个 refresh interval，对**接收者未被标记 `Gone`** 的条目**不会**永久搁浅：drain 在每个 tick 的观测之后运行、重新读取每个 watch 文件的 `pending` 列表，且只有 `isSessionLive` 为假时才进休眠分支——所以会话一旦 live，下一个 tick 就投递。被早先失败投递标记 `Gone` 的接收者是例外：候选过滤与存活无关地把它丢掉，直到 rejoin 窗口到期，这正是 §2 那处重置要解决的。其余情况下缺的是即时性：没有任何东西在 resume 那一刻触发 drain，因此一条转换可能要为一个用户正在看的会话等满一个 interval（默认 5 分钟）。
@@ -37,10 +37,10 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 
 ## 非目标
 
-- `sessionPrWatch` 配置、其环境覆盖、channel 别名与打开开关：**PR B**（主 §6/§7）。
+- `sessionPrWatch` 配置、其环境覆盖、channel 别名与移除该开关：**PR B**（主 §6/§7）。
 - 移除 adapter watch：PR B。在此之前 channel 保留自己的 poller，daemon 侧保持惰性。
 - 对交互式写入者的隔离（主 §4）：session-writer-lease 暴露面是 channel 今天的现状，仍排除在外。
-- 手动 push 账本（主开放问题 5）：只记录经 autofix-pr helper 的 push。
+- 手动 push 账本（母设计中仍开放）：只记录经 autofix-pr helper 的 push。
 
 ## 拟议改动
 
@@ -179,5 +179,5 @@ refresh 的 slim listing 已知每个被列出 PR 的 state。在同一门控下
 
 ## 开放问题
 
-- 继承自主设计（默认开启时机、`cancelled`/`stale` CI 谓词、手动 push 账本）；此处均不决定。
+- 继承自主设计（手动 push 账本）；此处均不决定。默认开启时机与 `cancelled`/`stale` CI 谓词已于 2026-11-14 定案：默认关闭，保留 core 的谓词。
 - `gh` hosts 枚举是否应跨 tick 缓存。拟议：每次构建 deps 时读一次，因为 daemon 运行期间新增主机是运维动作，重启已覆盖；若 PR B 的别名需要实时 channel 托管变化再议。

@@ -2,11 +2,11 @@
 
 [English](2026-11-09-daemon-pr-watch-enablement.md) | [简体中文](2026-11-09-daemon-pr-watch-enablement.zh-CN.md)
 
-Status: proposed (2026-11-09), partially landed (#16732 and this increment). This is the increment after [delivery drain](2026-11-08-daemon-pr-watch-drain.md) (merged as #16656) of [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md) (the "master design"). It covers the four items the drain increment deferred to enablement: the shared restore (§1), the resume-drain hook (§2), the lifecycle close reorder (§3), and the daemon-level deps provisioning (§4). **Landed so far: §3 in full and the host enumerator from §4 (#16732); §1, the shared restore (#16810); §5, the listing write and `listedKeys` (#16847); and §2 plus the rest of §4 in this increment.** §2 and §4 land together because §4 supplies the consumers §2 needs; each section below is marked accordingly. **The off switch stays `false` and the `sessionPrWatch` setting is still not read** — configuration (§6), the channel alias and turning the switch on (§7) remain PR B. No build may ever run both pollers.
+Status: landed (proposed 2026-11-09; #16732, #16810, #16847 and #17032). This is the increment after [delivery drain](2026-11-08-daemon-pr-watch-drain.md) (merged as #16656) of [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md) (the "master design"). It covers the four items the drain increment deferred to enablement: the shared restore (§1), the resume-drain hook (§2), the lifecycle close reorder (§3), and the daemon-level deps provisioning (§4). **Landed so far: §3 in full and the host enumerator from §4 (#16732); §1, the shared restore (#16810); §5, the listing write and `listedKeys` (#16847); and §2 plus the rest of §4 in this increment.** §2 and §4 land together because §4 supplies the consumers §2 needs; each section below is marked accordingly. **At the time of writing the off switch stayed `false` and the `sessionPrWatch` setting was not read** — configuration (§6), the channel alias and removing that switch (§7) were PR B, which has since landed as #17214. No build may ever run both pollers.
 
 ## Problem
 
-The drain is complete but unreachable. `runPrWatchDrainTick` takes its restore, admission, registry and self-push access as injected dependencies, and nothing in production populates them: `getPrWatchDeps` and `getPrDrainDeps` have no production caller, `defaultPrWatchDir()` and `releasePrWatchOwnershipSync()` are referenced only by tests. Three consequences follow once PR B flips the switch — two of correctness, one of latency:
+The drain is complete but unreachable. `runPrWatchDrainTick` takes its restore, admission, registry and self-push access as injected dependencies, and nothing in production populates them: `getPrWatchDeps` and `getPrDrainDeps` have no production caller, `defaultPrWatchDir()` and `releasePrWatchOwnershipSync()` are referenced only by tests. Three consequences follow once PR B removes the switch — two of correctness, one of latency:
 
 - A dormant recipient can never be woken. The real restore lived in `restoreSessionHandler`, a route closure inside `registerSessionRoutes`, reachable only over HTTP; §1 moved its reusable core into `server/session-restore.ts`. The channel reaches it through the SDK (`commands/channel/daemon-worker.ts:1057-1063`), which the daemon cannot use for its own in-process delivery.
 - `wakeDormant: false` delays delivery by up to one refresh interval. It does **not** strand entries whose recipient is not marked `Gone`: the drain runs after the observation on every tick, re-reads each watch file's `pending` list, and only takes the dormant branch when `isSessionLive` is false — so once the session is live, the next tick delivers. A recipient an earlier failed delivery marked `Gone` is the exception: the candidate filter drops it regardless of liveness until the rejoin horizon, which §2's reset addresses. What is otherwise missing is immediacy: nothing drains at the moment of resume, so a transition can wait a full interval (5 minutes by default) for a session the user is already looking at.
@@ -37,10 +37,10 @@ Two further gaps were load-bearing for correctness rather than reachability, and
 
 ## Non-goals
 
-- `sessionPrWatch` configuration, its environment overrides, the channel alias and turning the switch on: **PR B** (master §6/§7).
+- `sessionPrWatch` configuration, its environment overrides, the channel alias and removing that switch: **PR B** (master §6/§7).
 - Removing the adapter watch: PR B. Until then the channel keeps its own poller and the daemon's stays inert.
 - Fencing interactive writers (master §4): the session-writer-lease exposure is the channel's today and stays out.
-- Manual-push ledger (master open question 5): only pushes through the autofix-pr helper are recorded.
+- Manual-push ledger (still open in the master design): only pushes through the autofix-pr helper are recorded.
 
 ## Proposed changes
 
@@ -179,5 +179,5 @@ The rows for `session-restore.ts`, `worktree-ownership-op.ts` and the four §1 t
 
 ## Open questions
 
-- Inherited from the master design (default-on timing, `cancelled`/`stale` CI predicates, manual-push ledger); none decided here.
+- Inherited from the master design (manual-push ledger); none decided here. Default-on timing and the `cancelled`/`stale` CI predicates were settled on 2026-11-14: off by default, and core's predicate kept.
 - Whether the `gh` hosts enumeration should cache across ticks. Proposed: read once per deps build, since a host added while the daemon runs is an operator action that a restart already covers; revisit if PR B's alias needs live channel hosting changes.

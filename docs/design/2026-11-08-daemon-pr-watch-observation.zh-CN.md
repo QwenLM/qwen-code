@@ -2,7 +2,7 @@
 
 [English](2026-11-08-daemon-pr-watch-observation.md) | [简体中文](2026-11-08-daemon-pr-watch-observation.zh-CN.md)
 
-状态：proposed（2026-11-08）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md)（下称「主设计」）的下一步，仅实现 §1 观测与 §3 转换检测；投递（§4–§5）、配置（§6）与 channel 迁移（§7）不在本增量内。
+状态：已落地（#16611；2026-11-08 提案）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md)（下称「主设计」）的下一步，仅实现 §1 观测与 §3 转换检测；投递（§4–§5）、配置（§6）与 channel 迁移（§7）不在本增量内。下文按该增量当时的设计描述；PR B（#17214）此后移除了内部开关，启用现在即 deps 存在性。
 
 ## 问题
 
@@ -73,7 +73,7 @@
 ## 关键设计决策
 
 1. **检测纯函数化、与 I/O 分离。** 转换规则是最易回归的部分；隔离后可直接运行主 §3 验证清单，无需 daemon 或 `gh`。
-2. **默认 off，置于内部常量而非设置之后。** 符合主 §7 PR A：在后继增量开启前任何 build 都不跑观测器；尚不读取设置。
+2. **默认 off，置于内部常量而非设置之后。** 符合主 §7 PR A：在后继增量启用前任何 build 都不跑观测器；当时尚不读取设置。PR B（#17214）直接移除了该常量，而不是翻开它。
 3. **不投递、不删除。** `pending` 累积（受 store 上限约束）但永不 drain；删除与 `lastBoundAt` 等待 drain 增量，使 scan-completeness 规则在一处决定。
 4. **复用而非重实现。** view 抓取、rollup、store、lock registry 与 prompt 契约均已合入；本增量只新增观测编排与检测。
 
@@ -98,7 +98,7 @@
 
 ## 开放问题
 
-- 继承自主设计（默认开启、`cancelled`/`stale` CI 谓词、`review_decision`、Aone parity、手动推送账本）；此处均不决定。
+- 继承自主设计（`review_decision`、Aone parity、手动推送账本）；此处均不决定。默认开启与 `cancelled`/`stale` CI 谓词已于 2026-11-14 定案：默认关闭，保留 core 的谓词。
 
 ## 已决实现选择
 
