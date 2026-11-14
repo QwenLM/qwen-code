@@ -2,7 +2,7 @@
 
 [English](2026-11-08-daemon-pr-watch-observation.md) | [简体中文](2026-11-08-daemon-pr-watch-observation.zh-CN.md)
 
-Status: landed as #16611 (proposed 2026-11-08). This is the next increment of [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md) (the "master design" below). It implements §1 observation and §3 transition detection only; delivery (§4–§5), configuration (§6) and the channel migration (§7) stay out of this increment. The body below describes the increment as designed; PR B (#17214) later removed the internal switch, so enablement is now deps presence.
+Status: implemented as #16611 (proposed 2026-11-08). This is the next increment of [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md) (the "master design" below). It implements §1 observation and §3 transition detection only; delivery (§4–§5), configuration (§6) and the channel migration (§7) stay out of this increment. The body below describes the increment as designed; PR B (#17214) later removed the internal switch, so enablement is now deps presence.
 
 ## Problem
 
@@ -102,4 +102,4 @@ Two layers, both unit-testable without a daemon:
 
 ## Resolved implementation choices
 
-- The internal switch is a module constant `SESSION_PR_WATCH_OBSERVATION_ENABLED` (off) gating the timer hook, with an `observationEnabled` timer-deps test seam defaulting to that constant so a fixture can exercise the on path; production omits the seam, so the constant governs. The sweep functions are exported and tested directly. Flipping the constant alone still no-ops until `getPrWatchDeps` is populated (fail closed).
+- Enablement is deps presence: an empty subscription builds no watch deps, and both the periodic tick and the on-demand drain gate on them. The internal constant `SESSION_PR_WATCH_OBSERVATION_ENABLED` that gated the timer hook when this increment was designed was removed in PR B (#17214), not flipped. The `observationEnabled` timer-deps test seam remains, with `false` forcing the watch off; absent or `true` leaves enablement to deps presence. The sweep functions are exported and tested directly.

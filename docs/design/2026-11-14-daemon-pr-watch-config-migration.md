@@ -6,7 +6,9 @@ Status: implemented — landed as #17214 on 2026-11-14. This is the increment th
 master design ([PR state transitions](2026-11-04-daemon-pr-state-transitions.md),
 §6 and §7) calls **PR B**. Every code citation below was read at `bbdca16b52`
 (`origin/main`), the commit this branch started from, so the line numbers
-describe that tree rather than today's.
+describe that tree rather than today's. The body below describes the increment as
+designed at that commit; it landed as #17214, removing the internal switch and the
+adapter's state detection.
 
 PR A was already complete when this increment began: nine PRs merged (#16577,
 #16590, #16611, #16656, #16732, #16810, #16834, #16847, #17032), giving the daemon

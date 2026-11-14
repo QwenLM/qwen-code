@@ -2,7 +2,7 @@
 
 [English](2026-11-08-daemon-pr-watch-observation.md) | [简体中文](2026-11-08-daemon-pr-watch-observation.zh-CN.md)
 
-状态：已落地（#16611；2026-11-08 提案）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.zh-CN.md)（下称「主设计」）的下一步，仅实现 §1 观测与 §3 转换检测；投递（§4–§5）、配置（§6）与 channel 迁移（§7）不在本增量内。下文按该增量当时的设计描述；PR B（#17214）此后移除了内部开关，启用现在即 deps 存在性。
+状态：已实现（#16611；2026-11-08 提案）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.zh-CN.md)（下称「主设计」）的下一步，仅实现 §1 观测与 §3 转换检测；投递（§4–§5）、配置（§6）与 channel 迁移（§7）不在本增量内。下文按该增量当时的设计描述；PR B（#17214）此后移除了内部开关，启用现在即 deps 存在性。
 
 ## 问题
 
@@ -102,4 +102,4 @@
 
 ## 已决实现选择
 
-- 内部开关是模块常量 `SESSION_PR_WATCH_OBSERVATION_ENABLED`（off），门控 timer 钩子；timer deps 带一个默认取该常量的 `observationEnabled` 测试接缝，使夹具能覆盖 on 路径。生产不传该接缝，故由常量决定。扫描函数被导出并直接测试。仅翻转常量仍会 no-op，直到 `getPrWatchDeps` 被填充（fail closed）。
+- 启用即 deps 存在性：空订阅不构建 watch deps，周期 tick 与按需 drain 都以它们为闸门。本增量设计时门控 timer 钩子的内部常量 `SESSION_PR_WATCH_OBSERVATION_ENABLED` 已在 PR B（#17214）中被移除，而不是翻开。`observationEnabled` 这个 timer deps 测试接缝仍在，`false` 强制关闭监视；缺席或 `true` 则把启用交给 deps 存在性。扫描函数被导出并直接测试。

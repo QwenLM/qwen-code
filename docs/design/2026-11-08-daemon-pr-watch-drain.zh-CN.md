@@ -2,7 +2,7 @@
 
 [English](2026-11-08-daemon-pr-watch-drain.md) | [简体中文](2026-11-08-daemon-pr-watch-drain.zh-CN.md)
 
-状态：已落地（#16656；2026-11-08 提案）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.zh-CN.md)（下称「主设计」）中继 [观测与转换检测](2026-11-08-daemon-pr-watch-observation.zh-CN.md)（已合入 #16611）之后的增量。它实现 §4 投递与 §5 持久性，并一并落地观测增量延后到 drain 的 §2 watch 文件删除与 `lastBoundAt` 规则（因为它们需要 drain 的扫描完整性信息）。配置（§6）与 channel 迁移（§7）仍排除在外（PR B）。与观测一样，整条路径当时保持在内部关闭开关之后，直到 PR B 移除该开关才对生产生效；启用增量此前已填充其 deps，但开关仍为 `false`。下文按该增量当时的设计描述；PR B（#17214）此后移除了该开关，启用现在即 deps 存在性。
+状态：已实现（#16656；2026-11-08 提案）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.zh-CN.md)（下称「主设计」）中继 [观测与转换检测](2026-11-08-daemon-pr-watch-observation.zh-CN.md)（已合入 #16611）之后的增量。它实现 §4 投递与 §5 持久性，并一并落地观测增量延后到 drain 的 §2 watch 文件删除与 `lastBoundAt` 规则（因为它们需要 drain 的扫描完整性信息）。配置（§6）与 channel 迁移（§7）仍排除在外（PR B）。与观测一样，整条路径当时保持在内部关闭开关之后，直到 PR B 移除该开关才对生产生效；启用增量此前已填充其 deps，但开关仍为 `false`。下文按该增量当时的设计描述；PR B（#17214）此后移除了该开关，启用现在即 deps 存在性。
 
 ## 问题
 
