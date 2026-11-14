@@ -10,6 +10,7 @@ import type {
   AgentLoopOptions,
   AgentLoopResult,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
+import * as agentLoopRollout from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { Mock, MockInstance } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -25333,12 +25334,14 @@ describe('useLlmStream', () => {
         },
       });
 
+      let entrySpy: ReturnType<typeof vi.spyOn>;
       beforeEach(() => {
         Object.assign(mockConfig, {
           isUnifiedAgentLoopEnabled: vi.fn(() => true),
           isEventBusAgentLoopEnabled: vi.fn(() => kernel),
         });
         mockRunAgentLoop.mockClear();
+        entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
       });
       // Each round ran as one loop call, on the kernel when it is on, and
       // every loop read that happened names the 'ink' surface.
@@ -25346,6 +25349,9 @@ describe('useLlmStream', () => {
         for (const [options] of mockRunAgentLoop.mock.calls) {
           expect(options).toMatchObject({ maxRounds: 1, useEventBus: kernel });
         }
+        // The ink loop entry marker must be logged for this surface.
+        expect(entrySpy).toHaveBeenCalledWith(expect.anything(), 'ink');
+        entrySpy.mockRestore();
         const runtime = mockConfig as unknown as {
           isUnifiedAgentLoopEnabled: ReturnType<typeof vi.fn>;
           isEventBusAgentLoopEnabled: ReturnType<typeof vi.fn>;

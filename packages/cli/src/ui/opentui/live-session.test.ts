@@ -23,6 +23,7 @@ import { createRestoreToolResponseBinding } from '../utils/restore-tool-response
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { runAgentLoop } from '@qwen-code/qwen-code-core/core/agent-loop.js';
+import * as agentLoopRollout from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import {
   mkdtemp,
   readdir,
@@ -4377,6 +4378,7 @@ describe.each([false, true])(
         );
 
     it('sends the same requests and yields the same events as the current path', async () => {
+      const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
       const runs = [];
       let sharedConfig: Config | undefined;
       for (const onShared of [false, true]) {
@@ -4419,6 +4421,9 @@ describe.each([false, true])(
       expect(kernelCalls.every(([surface]) => surface === 'opentui')).toBe(
         true,
       );
+      // Both arms must log the opentui loop entry marker (legacy included).
+      expect(entrySpy).toHaveBeenCalledWith(expect.anything(), 'opentui');
+      entrySpy.mockRestore();
     });
 
     it.each(['retry', 'model_fallback'])(

@@ -32,6 +32,7 @@ import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
 import type { UserTurnInput } from '@qwen-code/qwen-code-core/core/client.js';
 import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
 import { runAgentLoop } from '@qwen-code/qwen-code-core/core/agent-loop.js';
+import * as agentLoopRollout from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import {
   getApiHistoryPromptId,
@@ -1325,6 +1326,19 @@ describe('Session', () => {
         .mocked(mockConfig.setAgentLoopKernelEligibilityProvider)
         .mock.calls.at(-1)?.[0];
       expect(provider?.('acp')).toBe(true);
+    });
+
+    it('logs the acp loop entry marker on a prompt', async () => {
+      const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
+      vi.mocked(mockChat.sendMessageStream).mockImplementation(async () =>
+        createEmptyStream(),
+      );
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text' as const, text: 'hello' }],
+      });
+      expect(entrySpy).toHaveBeenCalledWith(mockConfig, 'acp');
+      entrySpy.mockRestore();
     });
   });
 
