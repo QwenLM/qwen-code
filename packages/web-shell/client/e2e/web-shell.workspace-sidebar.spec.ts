@@ -30,6 +30,16 @@ async function order(page: Page) {
     );
 }
 
+async function openWorkspaceFilter(page: Page) {
+  await page
+    .getByRole('button', { name: 'Display options', exact: true })
+    .click();
+  await page.getByRole('menuitem', { name: /^Workspace/ }).hover();
+  await expect(
+    page.getByRole('menuitemradio', { name: 'All', exact: true }),
+  ).toBeVisible();
+}
+
 async function startDrag(page: Page, index: number) {
   const box = await header(page, index).boundingBox();
   if (!box) throw new Error('Missing workspace header');
@@ -76,6 +86,39 @@ test.beforeEach(async ({ page }, testInfo) => {
   );
   await expect(header(page, 2)).toBeVisible();
   await expect(header(page, 0)).toHaveAttribute('draggable', 'true');
+});
+
+test('workspace filtering survives reload and restores defaults', async ({
+  page,
+}, testInfo) => {
+  const secondLabel = workspaces[1]!.cwd.split('/').at(-1)!;
+  await openWorkspaceFilter(page);
+  await expect(
+    page.getByRole('menuitemradio', { name: 'All', exact: true }),
+  ).toHaveAttribute('aria-checked', 'true');
+  await page.screenshot({ path: testInfo.outputPath('workspace-filter.png') });
+  await page
+    .getByRole('menuitemradio', { name: secondLabel, exact: true })
+    .click();
+  await expect.poll(() => order(page)).toEqual([workspaces[1]!.cwd]);
+  await page.reload();
+  await expect(header(page, 1)).toBeVisible();
+  expect(await order(page)).toEqual([workspaces[1]!.cwd]);
+  await openWorkspaceFilter(page);
+  await expect(
+    page.getByRole('menuitemradio', { name: secondLabel, exact: true }),
+  ).toHaveAttribute('aria-checked', 'true');
+  await page
+    .getByRole('menuitemradio', { name: 'No workspace', exact: true })
+    .click();
+  await expect.poll(() => order(page)).toEqual([]);
+  await openWorkspaceFilter(page);
+  await page
+    .getByRole('menuitem', { name: 'Restore defaults', exact: true })
+    .click();
+  await expect
+    .poll(() => order(page))
+    .toEqual(workspaces.map((workspace) => workspace.cwd));
 });
 
 test('bulk collapse/expand retains headers and five-session previews', async ({

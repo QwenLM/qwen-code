@@ -1,8 +1,11 @@
 import {
   SessionSortMenu,
   readSessionSort,
+  readWorkspaceFilter,
   writeSessionSort,
+  writeWorkspaceFilter,
   type SessionSort,
+  type WorkspaceFilter,
 } from './SessionSortMenu';
 import { useDaemonAvailability } from '../../daemon/availability-context.js';
 import {
@@ -1513,6 +1516,20 @@ export function WebShellSidebar({
     () => providedWorkspaces ?? workspace.capabilities?.workspaces ?? [],
     [providedWorkspaces, workspace.capabilities?.workspaces],
   );
+  const [workspaceFilterPreference, setWorkspaceFilterPreference] = useState(
+    () => ({
+      host: sortHost,
+      value: readWorkspaceFilter(sortHost),
+    }),
+  );
+  const workspaceFilter =
+    workspaceFilterPreference.host === sortHost
+      ? workspaceFilterPreference.value
+      : readWorkspaceFilter(sortHost);
+  const changeWorkspaceFilter = (value: WorkspaceFilter) => {
+    writeWorkspaceFilter(sortHost, value);
+    setWorkspaceFilterPreference({ host: sortHost, value });
+  };
   // Display-only ordering preference, scoped per daemon host so two hosts
   // never share one list. Workspaces the stored order does not mention (new
   // registrations) keep the daemon's order after the listed ones.
@@ -1576,12 +1593,9 @@ export function WebShellSidebar({
   const lockedWorkspace = lockedWorkspaceCwd
     ? workspaces.find((entry) => entry.cwd === lockedWorkspaceCwd)
     : undefined;
-  const includePrimaryWorkspaceSessions =
-    sessionContent === undefined &&
-    (!lockedWorkspaceCwd || lockedWorkspace?.primary === true);
   const projectName =
     getWorkspaceName(connection.workspaceCwd) || t('sidebar.projectFallback');
-  const displayedWorkspaces = useMemo<DaemonWorkspaceCapability[]>(() => {
+  const sidebarWorkspaces = useMemo<DaemonWorkspaceCapability[]>(() => {
     const availableWorkspaces =
       workspaces.length > 0
         ? workspaces
@@ -1609,6 +1623,18 @@ export function WebShellSidebar({
     showLive,
     workspaces,
   ]);
+  const displayedWorkspaces = useMemo(() => {
+    if (workspaceFilter === 'all') return sidebarWorkspaces;
+    if (workspaceFilter === 'standalone') return [];
+    return sidebarWorkspaces.filter(
+      (workspace) => `workspace:${workspace.cwd}` === workspaceFilter,
+    );
+  }, [sidebarWorkspaces, workspaceFilter]);
+  const includePrimaryWorkspaceSessions =
+    sessionContent === undefined &&
+    (!lockedWorkspaceCwd || lockedWorkspace?.primary === true) &&
+    (workspaceFilter === 'all' ||
+      displayedWorkspaces.some((workspace) => workspace.primary));
   const liveStateWorkspaceCwds = useMemo(
     () =>
       displayedWorkspaces
@@ -1870,6 +1896,7 @@ export function WebShellSidebar({
     focusedHostOrigin,
     lockedWorkspaceCwd,
     sessionContent,
+    workspaceFilter,
     exitSelection,
   ]);
   useEffect(() => {
@@ -2693,6 +2720,12 @@ export function WebShellSidebar({
       options: { requirePinned: boolean },
     ): void => {
       if (!matchesSessionSource(session, selectedSessionSource)) return;
+      if (workspaceFilter === 'standalone') return;
+      if (
+        workspaceFilter.startsWith('workspace:') &&
+        `workspace:${getSessionWorkspaceCwd(session)}` !== workspaceFilter
+      )
+        return;
       // Rows fetched through the pinned filter stay unless an optimistic
       // unpin flips them; rows merged from other pages must be pinned.
       if (session.isPinned === false) return;
@@ -2720,12 +2753,14 @@ export function WebShellSidebar({
   }, [
     applyOptimisticPin,
     getIdentityForSession,
+    getSessionWorkspaceCwd,
     includePrimaryWorkspaceSessions,
     optimisticPins,
     primaryPinnedSessions,
     selectedSessionSource,
     secondaryPinnedSessions,
     sessions,
+    workspaceFilter,
   ]);
   // Track actual Pinned membership so duplicate rows share one rename form.
   const pinnedSectionIdentities = useMemo(
@@ -6525,6 +6560,7 @@ export function WebShellSidebar({
 
   const standaloneSessionsVisible = Boolean(
     !sectionView &&
+      (workspaceFilter === 'all' || workspaceFilter === 'standalone') &&
       workspace.capabilities?.features?.includes(
         STANDALONE_SESSIONS_CAPABILITY,
       ) === true &&
@@ -6785,6 +6821,11 @@ export function WebShellSidebar({
     standaloneSessionsVisible,
     t,
   ]);
+  const displayMenuEnabled =
+    questionSortSupported ||
+    standaloneSessionsVisible ||
+    sidebarWorkspaces.length > 1 ||
+    workspaceFilter !== 'all';
   const sessionActionControlsVisible =
     !sectionView && sessionContent === undefined && (!collapsed || mobileOpen);
   const sessionActionButtonClassName =
@@ -7948,7 +7989,7 @@ export function WebShellSidebar({
           {!sectionView &&
             (selectionMode ||
               primaryNavItems.has('newTask') ||
-              (questionSortSupported && sessionActionControlsVisible)) && (
+              (displayMenuEnabled && sessionActionControlsVisible)) && (
               <div
                 className={cx(
                   styles.newTaskNav,
@@ -7991,10 +8032,14 @@ export function WebShellSidebar({
                 ) : null}
                 {sessionActionControlsVisible && (
                   <div className="ml-auto flex shrink-0 items-center gap-1">
-                    {questionSortSupported && (
+                    {displayMenuEnabled && (
                       <SessionSortMenu
                         value={sessionSort}
                         onChange={changeSessionSort}
+                        workspaceValue={workspaceFilter}
+                        onWorkspaceChange={changeWorkspaceFilter}
+                        workspaces={sidebarWorkspaces}
+                        sortEnabled={questionSortSupported}
                         triggerClassName={sessionActionButtonClassName}
                       />
                     )}
@@ -8135,6 +8180,7 @@ export function WebShellSidebar({
               {!channelView &&
                 (!liveNavigationEnabled || liveView) &&
                 showLive &&
+                workspaceFilter === 'all' &&
                 livePresence &&
                 liveWorkspaces.length === 0 && (
                   <div
@@ -8282,11 +8328,15 @@ export function WebShellSidebar({
                     {searchInProjectHeader &&
                       !sessionActionControlsVisible &&
                       !sectionView &&
-                      questionSortSupported &&
+                      displayMenuEnabled &&
                       sessionContent === undefined && (
                         <SessionSortMenu
                           value={sessionSort}
                           onChange={changeSessionSort}
+                          workspaceValue={workspaceFilter}
+                          onWorkspaceChange={changeWorkspaceFilter}
+                          workspaces={sidebarWorkspaces}
+                          sortEnabled={questionSortSupported}
                           triggerClassName={styles.projectsHeaderAction}
                         />
                       )}
@@ -8899,7 +8949,7 @@ export function WebShellSidebar({
                     </div>
                   </div>
                 </div>
-                {!hideProjectHeader && (
+                {!hideProjectHeader && workspaceFilter === 'all' && (
                   <OtherHostProjects
                     onOpenHostSession={onOpenHostSession}
                     rankOf={rankOfHost}
