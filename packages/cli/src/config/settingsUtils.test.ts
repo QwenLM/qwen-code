@@ -491,6 +491,14 @@ describe('SettingsUtils', () => {
                 default: 5,
                 showInDialog: true,
               },
+              visionModel: {
+                type: 'string',
+                label: 'Vision Model',
+                category: 'General',
+                requiresRestart: false,
+                default: '',
+                showInDialog: true,
+              },
             } as unknown as ReturnType<typeof getSettingsSchema>);
 
             expect(getDialogSettingKeys()).toContain(key);
@@ -500,6 +508,9 @@ describe('SettingsUtils', () => {
             expect(
               getDialogSettingKeys({ excludeWorkspaceRestricted: true }),
             ).not.toContain(key);
+            expect(
+              getDialogSettingKeys({ excludeWorkspaceRestricted: true }),
+            ).toContain('visionModel');
           },
         );
       });
