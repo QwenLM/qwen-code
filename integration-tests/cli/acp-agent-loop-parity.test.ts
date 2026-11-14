@@ -5,11 +5,13 @@
  */
 
 /**
- * An ACP session runs each scripted scenario twice, with
- * `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` unset and set, and the two runs must
- * send the model the same requests, send the client the same
- * `session/update` notifications and end each prompt the same way.
- * Differences the shared loop makes on purpose are asserted separately below.
+ * An ACP session runs each scripted scenario three times: with
+ * `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` unset, set, and set together with
+ * `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP`. The runs must send the model the
+ * same requests, send the client the same `session/update` notifications and
+ * end each prompt the same way, and the third must run each of the session's
+ * rounds on the event-bus kernel. Differences the shared loop makes on
+ * purpose are asserted separately below.
  */
 
 import { spawn } from 'node:child_process';
@@ -21,7 +23,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -105,9 +107,50 @@ interface Run {
   goalTurnEnds: unknown[];
   /** The stop reason of each background-notification turn, in order. */
   backgroundTurnEnds: unknown[];
+  /** The session's rounds that ran in a `runAgentLoop` call of their own. */
+  sharedRounds: number;
+  /** Those of them the event-bus kernel ran. */
+  kernelRounds: number;
 }
 
 const PROMPT_TIMEOUT_MS = 60_000;
+
+/** What the session logs for each round it runs in a `runAgentLoop` call. */
+const SHARED_ROUND_LOG = 'model round on the shared agent loop';
+
+/**
+ * The session's rounds the event-bus adapter ran, matched to the session's
+ * own by prompt ID. A subagent's rounds, which run on the kernel too, have
+ * prompt IDs of their own.
+ */
+function countKernelRounds(debugLog: string): number {
+  const promptIds = new Set(
+    Array.from(
+      debugLog.matchAll(
+        /model round on the shared agent loop \(prompt ([^)]+)\)/g,
+      ),
+      ([, promptId]) => promptId,
+    ),
+  );
+  return Array.from(
+    debugLog.matchAll(
+      /\[EVENT_BUS\][^\n]* runAgentLoopOnBus started \S+ \(prompt ([^)]+)\)/g,
+    ),
+  ).filter(([, promptId]) => promptIds.has(promptId)).length;
+}
+
+/** The debug logs a run wrote under its runtime directory. */
+function readDebugLog(runtimeDir: string): string {
+  const debugDir = join(runtimeDir, 'debug');
+  if (!existsSync(debugDir)) return '';
+  return (
+    readdirSync(debugDir, { recursive: true, withFileTypes: true })
+      // `latest` points at the session's own log.
+      .filter((entry) => entry.isFile() && basename(entry.name) !== 'latest')
+      .map((entry) => readFileSync(join(entry.parentPath, entry.name), 'utf8'))
+      .join('')
+  );
+}
 
 // A Goal's id and the record ids it cites are random in each run.
 const RANDOM_ID =
@@ -226,9 +269,15 @@ function modelRequests(server: FakeOpenAIServer, dir: string): unknown[] {
   );
 }
 
-/** Leaves out `available_commands_update`, sent on its own schedule. */
-const isPromptUpdate = (update: unknown) =>
-  (update as JsonObject)?.['sessionUpdate'] !== 'available_commands_update';
+/** Leaves out scheduled command updates and loop-specific Hook diagnostics. */
+const isPromptUpdate = (update: unknown) => {
+  const frame = update as JsonObject | undefined;
+  const meta = frame?.['_meta'] as JsonObject | undefined;
+  return (
+    frame?.['sessionUpdate'] !== 'available_commands_update' &&
+    meta?.['hookLifecycle'] === undefined
+  );
+};
 
 /** The usage and the request end a finished response reports. */
 const isResponseEnd = (update: unknown) => {
@@ -269,7 +318,11 @@ const allowOnce = () => ({
       rig = undefined;
     });
 
-    async function run(scenario: Scenario, shared: boolean): Promise<Run> {
+    async function run(
+      scenario: Scenario,
+      shared: boolean,
+      kernel = false,
+    ): Promise<Run> {
       await server?.close();
       await rig?.cleanup();
       rig = new TestRig();
@@ -327,9 +380,13 @@ const allowOnce = () => ({
         // each run's request snapshot encodes, so give each run its own
         // scratch runtime outside the workspace.
         QWEN_RUNTIME_DIR: qwenHome,
+        // The debug log records the rounds each loop ran.
+        QWEN_DEBUG_LOG_FILE: '1',
       };
       delete env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'];
       if (shared) env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = '1';
+      delete env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'];
+      if (kernel) env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] = '1';
       delete env[PRIVATE_ACP_CAPABILITY_ENV];
       if (scenario.trustedParent) {
         env[PRIVATE_ACP_CAPABILITY_ENV] = PARENT_CAPABILITY;
@@ -463,6 +520,7 @@ const allowOnce = () => ({
 
       const stopReasons: unknown[] = [];
       let sessionId = '';
+      let debugLog = '';
       try {
         await request('initialize', {
           protocolVersion: 1,
@@ -521,6 +579,7 @@ const allowOnce = () => ({
           if (agent.exitCode !== null || agent.signalCode) resolve(undefined);
           else agent.once('exit', resolve);
         });
+        debugLog = readDebugLog(qwenHome);
         // Keep the runtime state for post-mortem whenever TestRig.cleanup()
         // keeps the test directory, which it decides by truthiness.
         if (!process.env['KEEP_OUTPUT']) {
@@ -551,25 +610,38 @@ const allowOnce = () => ({
         permissionsAt,
         goalTurnEnds,
         backgroundTurnEnds,
+        sharedRounds: debugLog.split(SHARED_ROUND_LOG).length - 1,
+        kernelRounds: countKernelRounds(debugLog),
       };
     }
 
-    async function both(scenario: Scenario) {
+    /** The current loop, the shared loop, and the shared loop on the kernel. */
+    async function arms(scenario: Scenario) {
       const current = await run(scenario, false);
       const shared = await run(scenario, true);
+      const kernel = await run(scenario, true, true);
       const dump = process.env['ACP_PARITY_DUMP'];
       if (dump) {
         const slug = scenario.name.replace(/[^a-z0-9]+/gi, '-');
-        writeFileSync(
-          join(dump, `${slug}.current.json`),
-          JSON.stringify(current, null, 1),
-        );
-        writeFileSync(
-          join(dump, `${slug}.shared.json`),
-          JSON.stringify(shared, null, 1),
-        );
+        for (const [arm, result] of Object.entries({
+          current,
+          shared,
+          kernel,
+        })) {
+          writeFileSync(
+            join(dump, `${slug}.${arm}.json`),
+            JSON.stringify(result, null, 1),
+          );
+        }
       }
-      return { current, shared };
+      expect(current.sharedRounds + current.kernelRounds).toBe(0);
+      expect(shared.kernelRounds).toBe(0);
+      // Each of the session's rounds runs in its own `runAgentLoop` call,
+      // which the kernel runs when it is on.
+      expect(shared.sharedRounds).toBeGreaterThan(0);
+      expect(kernel.sharedRounds).toBe(shared.sharedRounds);
+      expect(kernel.kernelRounds).toBe(kernel.sharedRounds);
+      return { current, shared, kernel };
     }
 
     const read = (file: string, id: string) =>
@@ -875,12 +947,8 @@ const allowOnce = () => ({
     it.each(scenarios.map((scenario) => [scenario.name, scenario] as const))(
       '%s: same requests, updates and stop reasons',
       async (_name, scenario) => {
-        const { current, shared } = await both(scenario);
+        const { current, shared, kernel } = await arms(scenario);
 
-        expect(shared.stopReasons).toEqual(current.stopReasons);
-        expect(shared.requests).toEqual(current.requests);
-        expect(shared.goalTurnEnds).toEqual(current.goalTurnEnds);
-        expect(shared.backgroundTurnEnds).toEqual(current.backgroundTurnEnds);
         expect(current.backgroundTurnEnds).toHaveLength(
           scenario.backgroundTurns ?? 0,
         );
@@ -891,30 +959,36 @@ const allowOnce = () => ({
           scenario.cutByLoopGuard
             ? run.updates.filter((update) => !isResponseEnd(update))
             : run.updates;
-        if (scenario.concurrent) {
-          expect(byToolCall(updates(shared))).toEqual(
-            byToolCall(updates(current)),
-          );
-        } else {
-          expect(updates(shared)).toEqual(updates(current));
+        for (const arm of [shared, kernel]) {
+          expect(arm.stopReasons).toEqual(current.stopReasons);
+          expect(arm.requests).toEqual(current.requests);
+          expect(arm.goalTurnEnds).toEqual(current.goalTurnEnds);
+          expect(arm.backgroundTurnEnds).toEqual(current.backgroundTurnEnds);
+          if (scenario.concurrent) {
+            expect(byToolCall(updates(arm))).toEqual(
+              byToolCall(updates(current)),
+            );
+          } else {
+            expect(updates(arm)).toEqual(updates(current));
+          }
+          if (scenario.cutByLoopGuard) {
+            const lastEnd = arm.updates.findLast(isResponseEnd) as JsonObject;
+            expect(
+              (
+                (lastEnd['_meta'] as JsonObject)[
+                  'executionLifecycle'
+                ] as JsonObject
+              )['outcome'],
+            ).toBe('interrupted');
+          }
+          expect(arm.permissions).toEqual(current.permissions);
         }
-        if (scenario.cutByLoopGuard) {
-          const lastEnd = shared.updates.findLast(isResponseEnd) as JsonObject;
-          expect(
-            (
-              (lastEnd['_meta'] as JsonObject)[
-                'executionLifecycle'
-              ] as JsonObject
-            )['outcome'],
-          ).toBe('interrupted');
-        }
-        expect(shared.permissions).toEqual(current.permissions);
       },
       120_000,
     );
 
     it('asks for every approval of a batch before running any of its calls, as other surfaces do', async () => {
-      const { current, shared } = await both(
+      const { current, shared, kernel } = await arms(
         scenarios.find(
           ({ name }) => name === 'an approved write between reads',
         )!,
@@ -930,9 +1004,11 @@ const allowOnce = () => ({
       expect(current.permissionsAt[0]).toBeGreaterThan(
         started(current, 'call_in'),
       );
-      expect(shared.permissionsAt[0]).toBeLessThanOrEqual(
-        started(shared, 'call_in'),
-      );
+      for (const arm of [shared, kernel]) {
+        expect(arm.permissionsAt[0]).toBeLessThanOrEqual(
+          started(arm, 'call_in'),
+        );
+      }
     }, 120_000);
 
     it('runs UserPromptSubmit on tool-result requests too, as other surfaces do', async () => {
@@ -965,11 +1041,12 @@ const allowOnce = () => ({
         },
       };
 
-      const { current, shared } = await both(scenario);
+      const { current, shared, kernel } = await arms(scenario);
 
       expect(shared.updates).toEqual(current.updates);
+      expect(kernel.updates).toEqual(current.updates);
       // Hook calls by each run's second model request, the tool result's.
-      expect(hookCalls).toEqual([1, 2]);
+      expect(hookCalls).toEqual([1, 2, 2]);
     }, 120_000);
 
     it('cancels a tool-result request whose UserPromptSubmit hook is still running', async () => {
@@ -1001,18 +1078,20 @@ const allowOnce = () => ({
             : { content: 'It says readme body.' },
       };
 
-      const started = Date.now();
-      const shared = await run(scenario, true);
+      for (const kernel of [false, true]) {
+        const started = Date.now();
+        const arm = await run(scenario, true, kernel);
 
-      expect(shared.stopReasons).toEqual(['cancelled']);
-      // The tool result never reached the model.
-      expect(shared.requests).toHaveLength(1);
-      expect(Date.now() - started).toBeLessThan(30_000);
+        expect(arm.stopReasons).toEqual(['cancelled']);
+        // The tool result never reached the model.
+        expect(arm.requests).toHaveLength(1);
+        expect(Date.now() - started).toBeLessThan(30_000);
+      }
     }, 120_000);
 
     it("blocks a write in plan mode with the scheduler's notice, as other surfaces do", async () => {
       const written: boolean[] = [];
-      const { current, shared } = await both({
+      const { current, shared, kernel } = await arms({
         name: 'a write in plan mode',
         prompts: ['Write the file.'],
         settings: { tools: { approvalMode: 'plan' } },
@@ -1071,14 +1150,19 @@ const allowOnce = () => ({
       expect(JSON.stringify(shared.requests[1])).toContain(
         JSON.stringify(sharedNotice),
       );
-      // One reading per run, current first, and neither wrote the file.
-      expect(written).toEqual([false, false]);
+      // The kernel runs as the shared loop does.
+      expect(kernel.stopReasons).toEqual(shared.stopReasons);
+      expect(kernel.permissions).toEqual([]);
+      expect(kernel.requests).toEqual(shared.requests);
+      expect(kernel.updates).toEqual(shared.updates);
+      // One reading per run, current first, and none wrote the file.
+      expect(written).toEqual([false, false, false]);
     }, 120_000);
 
     it('adds no date reminder to a first prompt, as other surfaces do', async () => {
       // The startup context already carries today's date; the client adds a
       // reminder only once the date changes.
-      const { current, shared } = await both({
+      const { current, shared, kernel } = await arms({
         name: 'date reminder',
         prompts: ['Say hello.'],
         reply: () => ({ content: 'Hello there.' }),
@@ -1086,6 +1170,7 @@ const allowOnce = () => ({
 
       expect(current.dateReminders).toBe(0);
       expect(shared.dateReminders).toBe(0);
+      expect(kernel.dateReminders).toBe(0);
     }, 120_000);
   },
 );

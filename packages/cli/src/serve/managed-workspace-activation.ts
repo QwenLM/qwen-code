@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import type { Application, Request, Response } from 'express';
 import {
   authorizeManagedRuntime,
@@ -29,13 +30,25 @@ export const WORKSPACE_CAPABILITY_DIGEST =
   'sha256:7df3981fa14b397fe09f6ba84ed0c096c71902394da667bf47f3b315866e7f91';
 export const MEASURED_WORKSPACE_CAPABILITY_DIGEST =
   'sha256:b2ab403f278282eb8f2ca06c926be96bd3d85877714f64dc926eab535f544580';
+// The measured Workspace profile plus the user-terminal surface. Derived from
+// the canonical capability string exactly as the extension profiles are; the
+// Java control plane pins the same hex in WorkspaceExecutionProfile.
+export const MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST = `sha256:${createHash('sha256').update('managed-workspace-execution/2;web-terminal/1').digest('hex')}`;
 export const MEASURED_WORKSPACE_EXECUTION_PROFILE =
   'managed-workspace-execution/2';
 
 export function isWorkspaceToolCapability(digest: string): boolean {
   return (
     digest === WORKSPACE_CAPABILITY_DIGEST ||
-    digest === MEASURED_WORKSPACE_CAPABILITY_DIGEST
+    isMeasuredWorkspaceCapability(digest)
+  );
+}
+
+/** The measured result-protocol profiles, with or without the terminal. */
+export function isMeasuredWorkspaceCapability(digest: string): boolean {
+  return (
+    digest === MEASURED_WORKSPACE_CAPABILITY_DIGEST ||
+    digest === MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST
   );
 }
 export const RESIDENT_WORKSPACE_PROFILE = 'resident-workspace-files/1';
@@ -147,6 +160,7 @@ export class WorkspaceActivations {
             : ![
                 WORKSPACE_CAPABILITY_DIGEST,
                 MEASURED_WORKSPACE_CAPABILITY_DIGEST,
+                MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST,
                 ...(boot.managedExtensions
                   ? [
                       MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
@@ -155,7 +169,7 @@ export class WorkspaceActivations {
                   : []),
               ].includes(boot.capabilityDigest) ||
               request['profile'] !==
-                (boot.capabilityDigest === MEASURED_WORKSPACE_CAPABILITY_DIGEST
+                (isMeasuredWorkspaceCapability(boot.capabilityDigest)
                   ? MEASURED_WORKSPACE_EXECUTION_PROFILE
                   : WORKSPACE_EXECUTION_PROFILE)) ||
           binding === undefined ||
