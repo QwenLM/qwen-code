@@ -503,11 +503,10 @@ export interface CollectWorkspaceMemoryStatusOptions {
    * Read each discovered file's text, capped at the write route's
    * byte limit. A file that fails to read keeps its entry without
    * `content` and adds a cell to `errors[]`. `content` is also
-   * omitted (without an error cell) when the on-disk bytes are not
-   * valid BOM-free UTF-8 — a lossy decode is never served as
-   * replaceable text — and a read whose byte count differs from the
-   * earlier `stat` is flagged `truncated` with no `content` (torn
-   * read racing a concurrent write).
+   * omitted, without an error cell and with `truncated: true`, when the
+   * on-disk bytes are not valid BOM-free UTF-8 or a concurrent write
+   * invalidates the read snapshot. Retrying unchanged bytes cannot repair
+   * an encoding issue; a lossy decode is never served as replaceable text.
    */
   includeContent?: boolean;
 }
@@ -671,8 +670,8 @@ async function walkWorkspaceForMemory(
  *   makes the snapshot unsafe to replace: flag `truncated` and omit text.
  * - Bytes that are not valid BOM-free UTF-8 (GBK, Shift_JIS, UTF-16 from
  *   PowerShell `>` redirection, BOM'd UTF-8) cannot round-trip through
- *   a replace write: omit `content` so the client's fallback path takes
- *   over instead of saving a lossy decode back over the original bytes.
+ *   a replace write: omit `content` and flag `truncated` so the panel
+ *   stays read-only, even when the file is below the content-size cap.
  */
 async function readMemoryFileContent(
   filePath: string,
@@ -726,7 +725,7 @@ async function readMemoryFileContent(
     }
     const truncated = opened.size > MAX_MEMORY_CONTENT_BYTES;
     const slice = buffer.subarray(0, MAX_MEMORY_CONTENT_BYTES);
-    if (detectBOM(slice)) return { truncated };
+    if (detectBOM(slice)) return { truncated: true };
     try {
       return {
         content: new TextDecoder('utf-8', { fatal: true }).decode(slice, {
@@ -735,7 +734,7 @@ async function readMemoryFileContent(
         truncated,
       };
     } catch {
-      return { truncated };
+      return { truncated: true };
     }
   } finally {
     await handle.close();

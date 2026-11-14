@@ -233,7 +233,9 @@ Two things to know before enabling it:
 
 ### `/memory`
 
-Opens the Memory panel. From here you can:
+Opens the Memory panel. In Web Shell, files stay read-only when their complete text is unavailable, including files that exceed the content limit, files that change during a read, and files with a byte-order mark or invalid UTF-8. If a file changed during a read, select its memory tab again to retry.
+
+From here you can:
 
 - Turn auto-memory saving on or off
 - Turn periodic cleanup (dream) on or off
