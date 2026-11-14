@@ -171,6 +171,19 @@ class TrackedChild implements TrackedChildProcess {
   readonly exited: Promise<AcpChannelExitInfo | undefined>;
   private readonly knownGroups = new Set<number>();
   private cleanupProofError: Error | undefined;
+  /**
+   * Every signal the kernel refused with EPERM, keyed by pgid. Not proof of a
+   * failed shutdown, so a refusal never throws on its own, but it is the only
+   * thing that tells "we lost permission or the pgid was reused" apart from
+   * "our own process tree is wedged", so the refusals for groups still alive
+   * at the deadline ride along on the deadline error. Keying by pgid drops a
+   * refusal recorded for a group that has since emptied, and keeping one
+   * refusal per signal per group keeps a refused SIGKILL visible next to the
+   * SIGTERM while a re-signal of an already-refused group does not append a
+   * byte-identical sentence — the two shutdown paths that share a group would
+   * otherwise make one refusal read as several.
+   */
+  private readonly cleanupRefusals = new Map<number, string[]>();
   private exitInfo: AcpChannelExitInfo | undefined;
   private exitedSettled = false;
   private forceKillRequested = false;
@@ -441,9 +454,16 @@ class TrackedChild implements TrackedChildProcess {
         const proof = this.cleanupProofError
           ? `; ${this.cleanupProofError.message}`
           : '';
+        const refusal = survivingGroups.length
+          ? [...this.cleanupRefusals]
+              .filter(([group]) => survivingGroups.includes(group))
+              .flatMap(([, notes]) => notes)
+              .map((note) => `; ${note}`)
+              .join('')
+          : '';
         throw new Error(
           `ACP child pid=${rootPid} did not exit with its owned process groups ` +
-            `within ${EXIT_DEADLINE_MS}ms (surviving pgids=${groups})${proof}`,
+            `within ${EXIT_DEADLINE_MS}ms (surviving pgids=${groups})${proof}${refusal}`,
         );
       }
       await delay(
@@ -560,6 +580,21 @@ class TrackedChild implements TrackedChildProcess {
       } catch (error) {
         if (isErrno(error, 'ESRCH')) {
           this.knownGroups.delete(group);
+          continue;
+        }
+        // EPERM does not prove the group is still ours to signal: the group may
+        // already have emptied while a reused pgid belongs to a process this
+        // child did not start. Keep the group committed and let the process
+        // table settle it — a group still alive at the deadline fails loudly in
+        // the `surviving pgids=` error below. `survivingGroups` already treats
+        // EPERM as provisional for the same reason.
+        if (isErrno(error, 'EPERM')) {
+          const note =
+            `ACP child pid=${rootPid ?? 'unknown'} was refused ${signal} ` +
+            `to pgid=${group}: ${toError(error).message}`;
+          const notes = this.cleanupRefusals.get(group) ?? [];
+          if (!notes.includes(note)) notes.push(note);
+          this.cleanupRefusals.set(group, notes);
           continue;
         }
         this.recordCleanupProofError(
