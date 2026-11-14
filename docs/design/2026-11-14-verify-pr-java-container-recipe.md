@@ -123,9 +123,11 @@ paths the CI lane's Java gate matches:
    inspects environment and credential signals, not sockets).
 4. **Declaration.** The operator writes the declaration after the gate
    passes — the same operator-owned rule as the JS recipe, not the round
-   itself. It names **both** containers when the round uses two: the
-   offline battery container and the proxy-connected container that runs
-   the model turns, each with its image and network policy, e.g.
+   itself. The gate run (`--require-isolation --artifact-dir <round-dir>`)
+   writes the `boundary-gate.json` record the checker requires alongside a
+   container declaration. It names **both** containers when the round uses
+   two: the offline battery container and the proxy-connected container
+   that runs the model turns, each with its image and network policy, e.g.
    `{"mode":"container","detail":"battery: maven:3.9.11-eclipse-temurin-21, --network none, offline m2; model turns: node:22-bookworm via host proxy; credential-free"}`.
    A round with no model turns names the battery container alone.
 
