@@ -460,16 +460,16 @@ describe('normalize', () => {
     // A foreground shell's result ends with its process group too, so the
     // queued-input scenario's sizes move with the pid's width in the same
     // way. These texts cross a multiple of four, which steps both ceilings.
-    const shellText = (pid: number) =>
-      'Command: echo queue-now && node -e "setTimeout(() => {}, 5000)"\n' +
+    const shellText = (pid: number, output = 'queue-now') =>
+      `Command: echo ${output} && node -e "setTimeout(() => {}, 5000)"\n` +
       'Directory: (root)\n' +
-      'Output: queue-now\n' +
+      `Output: ${output}\n` +
       'Error: (none)\n' +
       'Exit Code: 0\n' +
       'Signal: (none)\n' +
       `Process Group PGID: ${pid}`;
-    const shellRecord = (pid: number) => {
-      const text = shellText(pid);
+    const shellRecord = (pid: number, output?: string) => {
+      const text = shellText(pid, output);
       return [
         {
           type: 'system',
@@ -502,8 +502,12 @@ describe('normalize', () => {
         },
       ];
     };
-    const normalizedShell = (pid: number, volatile?: Volatile) =>
-      normalize(shellRecord(pid), '/workspace', '/scratch', volatile);
+    const normalizedShell = (
+      pid: number,
+      volatile?: Volatile,
+      output?: string,
+    ) =>
+      normalize(shellRecord(pid, output), '/workspace', '/scratch', volatile);
     expect(shellText(99).length % 4).toBe(0);
     // Without the scenario's keys the counts follow the pid's width; with
     // them the records compare, while the PGID text is scrubbed either way.
@@ -513,6 +517,12 @@ describe('normalize', () => {
     );
     expect(normalizedShell(99, FOREGROUND_SHELL_VOLATILE)).toEqual(
       normalizedShell(100, FOREGROUND_SHELL_VOLATILE),
+    );
+    // A real output difference still compares unequal, so widening the keys
+    // to 'output' cannot quietly retire what the scenario detects. The
+    // replacement keeps the length, leaving the text as the only difference.
+    expect(normalizedShell(99, FOREGROUND_SHELL_VOLATILE)).not.toEqual(
+      normalizedShell(99, FOREGROUND_SHELL_VOLATILE, 'queue-noX'),
     );
   });
 });
