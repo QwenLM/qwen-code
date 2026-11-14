@@ -269,6 +269,26 @@ it.each([
   expect(writeText).toHaveBeenCalledWith(text);
 });
 
+it('copies a diff preview as the pane draws it, not as it is stored', async () => {
+  // A preview whose whole body is an internal marker (`\diff-…`) is localized
+  // by `DiffView` at its render boundary. Copy hands over the same preview, so
+  // it has to localize it too: otherwise the user gets an internal token the
+  // card never displayed.
+  const writeText = stubClipboard();
+  const container = await render(
+    tool({ oldText: 'a\n', newText: 'a' }, undefined, 'edit'),
+  );
+  const pane = section(container, 'output')?.querySelector(
+    '[aria-label="File diff"]',
+  );
+  const shown = pane?.textContent ?? '';
+  expect(shown).not.toBe('');
+  expect(shown).not.toContain('\\diff');
+  await click(container, 'Copy Output');
+  expect(writeText).toHaveBeenCalledTimes(1);
+  expect(writeText.mock.lastCall?.[0]).toBe(shown);
+});
+
 it('bounds a long value before putting it in the DOM', async () => {
   const writeText = stubClipboard();
   const container = await render(tool('x'.repeat(100_000), undefined));

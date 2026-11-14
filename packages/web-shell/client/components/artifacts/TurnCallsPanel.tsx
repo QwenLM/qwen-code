@@ -749,14 +749,7 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
                 {t('turnCalls.result')}
               </div>
               {diff ? (
-                <>
-                  <DiffView diff={diff.slice(0, MAX_DETAIL_LENGTH)} />
-                  {diff.length > MAX_DETAIL_LENGTH && (
-                    <p className="text-xs text-muted-foreground">
-                      {t('gitDiff.truncated')}
-                    </p>
-                  )}
-                </>
+                <DiffView diff={diff} maxLength={MAX_DETAIL_LENGTH} />
               ) : (
                 <ToolCallDetail
                   text={
