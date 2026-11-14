@@ -699,6 +699,12 @@ export async function runNonInteractive(
 
     let turnCount = 0;
     let limitedTurnCount = 0;
+    // A refusal the client reported for the main turn. Captured inside that
+    // turn's event loop because the terminal result is emitted only after the
+    // drain items run, and a drain item's refusal ends the run by itself.
+    let mainTurnRefusal: ReturnType<
+      NonNullable<JsonOutputAdapterInterface['getRefusedTurn']>
+    > = null;
     let totalApiDurationMs = 0;
     const startTime = Date.now();
     let activeInteractionPromptId = prompt_id;
@@ -3359,6 +3365,10 @@ export async function runNonInteractive(
 
           // Finalize assistant message
           adapter.finalizeAssistantMessage();
+          // Sample the refusal once this turn's stream has ended: later
+          // events belong to drain items, which end the run themselves.
+          mainTurnRefusal ??= adapter.getRefusedTurn?.() ?? null;
+          adapter.clearRefusedTurn?.();
           totalApiDurationMs += Date.now() - apiStartTime;
 
           if (loopDetected) {
@@ -3606,6 +3616,11 @@ export async function runNonInteractive(
             const modPrompt = batch[0]?.modPrompt;
 
             turnCount++;
+            // A drain turn keeps its own end-of-run path, so a refusal it
+            // records must not be mistaken for the main turn's — but a
+            // refusal already recorded for the main turn still ends the run.
+            if (mainTurnRefusal) return;
+            mainTurnRefusal = null;
             await enforceSessionTurnLimit(false);
 
             const itemParts = deferredReminder
@@ -3865,6 +3880,10 @@ export async function runNonInteractive(
             const p = (async () => {
               while ((pullModPrompts(), localQueue.length > 0)) {
                 if (loopDetected) return;
+                // A refused main turn ends the run with the refusal; drain
+                // items only carry the rest of a run that continues, and
+                // running one would clear the refusal before it is reported.
+                if (mainTurnRefusal) return;
                 // Stop draining once a queued item's structured_output
                 // call captured the terminal contract — no point running
                 // more queued prompts that can't influence the result.
@@ -4091,6 +4110,31 @@ export async function runNonInteractive(
               stats,
             });
             return 1;
+          }
+
+          // A turn the client refused before any model request (turn cap,
+          // session token cap) reaches here with no tool calls and no text,
+          // so the success envelope below would hand the consumer the
+          // previous answer under `subtype: "success"`. Report the refusal
+          // instead. Drain items run their own loop and end the run through
+          // routeAbort / the holdback below, so only the main turn counts.
+          const refusedTurn = mainTurnRefusal;
+          if (refusedTurn) {
+            endActiveInteraction('error', {
+              errorMessage: refusedTurn.message,
+              errorType: refusedTurn.subtype,
+            });
+            await emitResult({
+              isError: true,
+              durationMs: Date.now() - startTime,
+              apiDurationMs: totalApiDurationMs,
+              numTurns: turnCount,
+              errorMessage: refusedTurn.message,
+              subtype: refusedTurn.subtype,
+              usage,
+              stats,
+            });
+            return refusedTurn.subtype === 'error_max_turns' ? 53 : 1;
           }
 
           await emitResult({

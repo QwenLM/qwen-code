@@ -242,6 +242,7 @@ function streamFrames(stdout: string, dir: string): unknown[] {
               subtype: frame['subtype'],
               is_error: frame['is_error'],
               result: frame['result'],
+              error: frame['error'],
               num_turns: frame['num_turns'],
             },
             dir,
@@ -759,13 +760,20 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     const results = (frames: unknown[]) =>
       frames.filter((frame) => (frame as JsonObject)['type'] === 'result');
 
-    // The current loop reports the second message as a success that repeats
-    // the first answer, without asking the model.
+    // The current loop reports the second message as an error result that
+    // names the turn limit, instead of replaying the first answer; the
+    // stream-json transport still exits 0 because it keeps reading messages.
     expect(current.exitCode).toBe(0);
     expect(current.requests).toHaveLength(1);
     expect(results(current.frames)).toMatchObject([
       { is_error: false, result: 'answer 1' },
-      { is_error: false, result: 'answer 1' },
+      {
+        subtype: 'error_max_turns',
+        is_error: true,
+        error: {
+          message: expect.stringContaining('Reached max session turns'),
+        },
+      },
     ]);
     // The shared loop ends the run at the limit the way headless reports its
     // own limit: the error on stderr and exit code 53.
