@@ -69,7 +69,7 @@ skill 发布有两个生产者、一个消费者；Harness 只是消费者。
 
 两个部署门都不改变 body。变体在 profile 声明 `loop_wakeup` 处描述 wakeup 路径、在声明 `cron_create` 处描述固定间隔路径，与门无关；门在运行时以类型化错误拒绝 create/arming 调用，正如不变的工具声明已然允许。这使 skill 与工具面一致，而非试图从控制面预测运行时操作门（其中之一 loop env 门甚至对 Java 不可见）。
 
-**D3 — body 来源与单一来源。** 共享 skill 内容住在 bundled `SKILL.md`。managed 变体表达为一组小的、有文档的措辞替换（durable/expiry 句）加 profile 条件章节块。managed body 资产提交在 `packages/core/src/managed-runtime/contracts/` 下（contracts 模块已把该目录拷贝到 Java classpath，`contracts/pom.xml:53-54`），故 Java 以 classpath 资源读取，无需新构建机制。一个 TypeScript 一致性测试读取 bundled `SKILL.md`，应用有文档的替换与章节选择，对每个 profile 形状断言与提交的 managed 资产逐字节相等——任一方向漂移都使测试变红（"从生产者钉消费者"模式）。资产是 Java 发布的单一提交产物；测试把它绑回 bundled 源。
+**D3 — body 来源与单一来源。** 共享 skill 内容住在 bundled `SKILL.md`。TypeScript 生成器 `buildManagedLoopBody(profile)` 从它派生 managed body：一组小的、有文档的措辞替换（durable/expiry 句）加 profile 条件章节选择。由于两条路径在 body 中深度交织（Parsing、loop.md 模式、Autonomous 模式都引用两个 creator），组合住在 TypeScript，而非 Java 字符串外科手术。三个 body 生成并提交在 `packages/core/src/managed-runtime/contracts/` 下——union（shell/4）、cron-only（files/4、team-lead/2）、wakeup-only（shell/3）——contracts 模块已把该目录拷贝到 Java classpath（`contracts/pom.xml:53-54`）。TypeScript 一致性测试断言每个提交资产与 `buildManagedLoopBody(profile)` 逐字节相等，并把生成器绑回 bundled 源；任一方向漂移都使测试变红（"从生产者钉消费者"模式）。Java 是纯选择器：按 Session 的 profile 读资产并注入，不做字符串组合。
 
 **D4 — 冻结、重放安全、容量受限。** 注入的变体搭乘现有不可变 receipt 与 digest；无新资源 kind、无 schema 版本 bump。loop body 约 7 KiB，远低于 512 KiB 单 body / 2 MiB 目录上限（`AgentDefinitionExtensions.java:42-81`）。注入对 profile 确定，保持幂等键下的重放。
 
@@ -77,10 +77,10 @@ skill 发布有两个生产者、一个消费者；Harness 只是消费者。
 
 ### 涉及文件
 
-- `packages/core/src/managed-runtime/contracts/` — managed loop body 资产（共享内容 + profile 条件块），拷贝到 Java。
-- `packages/core/src/skills/bundled/loop/` — 把 managed 资产绑回 `SKILL.md` 的一致性测试（不改 `SKILL.md` 本身）。
+- `packages/core/src/managed-runtime/contracts/` — 三个生成的 managed loop body（union / cron-only / wakeup-only），拷贝到 Java。
+- `packages/core/src/skills/bundled/loop/managed-loop-skill.ts` — `buildManagedLoopBody(profile)` 生成器（措辞替换 + 章节选择）；同址一致性测试把生成资产绑回 `SKILL.md`（不改 `SKILL.md` 本身）。
 - `packages/managed-agent-server/persistence/.../AgentSessionAdmissions.java` — 按 profile 注入变体；放宽 save 守卫。
-- `packages/managed-agent-server/persistence/.../JdbcManagedSessionSkills.java` — 读 classpath 资产；组合按 profile 的 body（或一个小 helper）。
+- `packages/managed-agent-server/persistence/.../JdbcManagedSessionSkills.java` — 按 profile 选择并读 classpath 资产（不做字符串组合）。
 - `packages/managed-agent-server/contracts/.../WorkspaceToolProfiles.java` — loop-creator 谓词 helper（若尚不存在）。
 - 验证：每个 profile 形状的准入测试、空 caller-skills 情形、门无关性、重放确定性、重名冲突、READ/无 creator 的空贡献。
 
@@ -93,7 +93,7 @@ skill 发布有两个生产者、一个消费者；Harness 只是消费者。
 
 ## 风险
 
-- **body 组合复杂度。** 在 Java 中按 profile 组合 markdown 章节比子句级工具描述更脆弱。缓解：一致性测试把每个 profile 的组合 body 逐字节钉回 bundled 源；删掉某 creator 章节的变异使其变红。
+- **body 组合复杂度。** 两条路径在 body 中深度交织（Parsing、loop.md 模式、Autonomous 模式），故按 profile 组合很精细。缓解：组合住在 TypeScript 生成器（D3），Java 只选择；一致性测试把每个生成 body 逐字节钉回 bundled 源，删掉某 creator 章节的变异使其变红。
 - **单一来源漂移。** 两个提交 body（本地 + managed）可能分叉。缓解：D3 的一致性测试从 bundled 源派生 managed 资产。
 - **幂等交互。** 在请求 digest 之后注入不得改变重放结果。缓解：重放测试断言相同快照。
 - **与 caller 导入的本地 `loop` 重名冲突**。缓解：D5 文档化服务端变体为权威；测试钉住冲突。
@@ -120,7 +120,7 @@ skill 发布有两个生产者、一个消费者；Harness 只是消费者。
 
 设计期间已解决（留档）：
 
-- **组合位置。** 在 Java 准入时组合按 profile 的 body（D2/D3），保持单一提交资产并由一致性测试绑定，而非构建时为每个 profile 形状预生成一个 body。已定：Java 组合。
+- **组合位置。** TypeScript 生成器为每个 profile 形状派生一个提交 body（union / cron-only / wakeup-only），Java 按 profile 选择；一致性测试把资产绑回 bundled 源。在发现两条路径于 body 中深度交织、使 Java 字符串外科手术脆弱后，从纯 Java 组合 refine 而来。已定：TypeScript 生成 + Java 选择。
 - **门关闭粒度。** 部署门是保留工具声明的操作门（`hosted-workspace-tool-turn.ts:2488-2513` 不咨询门），故 body 按 profile 驱动、与门无关；门在运行时拒绝调用。已定：门不影响 body。
 - **与 caller 导入的本地 `loop` 共存。** 拒绝重名（当前准入行为）并文档化 managed-bound 创建不应同时导入本地 `loop` body，而非静默覆盖 caller 意图。已定：拒绝 + 文档化。
 

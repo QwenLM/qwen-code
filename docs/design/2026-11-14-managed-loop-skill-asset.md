@@ -172,17 +172,20 @@ surface rather than trying to predict a runtime operation gate (one of which,
 the loop env gate, is not even visible to Java) from the control plane.
 
 **D3 — Body source and single source of truth.** The shared skill content lives
-in the bundled `SKILL.md`. The managed variant is expressed as a small,
-documented set of wording substitutions (the durable/expiry sentences) plus the
-profile-conditional section blocks. The managed body asset is committed under
-`packages/core/src/managed-runtime/contracts/` (the directory the contracts
-module already copies onto the Java classpath, `contracts/pom.xml:53-54`), so
-Java reads it as a classpath resource with no new build machinery. A TypeScript
-parity test reads the bundled `SKILL.md`, applies the documented substitutions
-and section selection, and asserts byte-equality with the committed managed
-asset for each profile shape — drift in either direction reddens the test
-(the "pin the consumer from the producer" pattern). The asset is the single
-committed artifact Java publishes; the test binds it to the bundled source.
+in the bundled `SKILL.md`. A TypeScript generator `buildManagedLoopBody(profile)`
+derives the managed body from it: a small documented set of wording substitutions
+(the durable/expiry sentences) plus profile-conditional section selection.
+Because the two paths interleave throughout the body (Parsing, loop.md mode, and
+Autonomous mode all reference both creators), the composition lives in
+TypeScript, not Java string surgery. Three bodies are generated and committed
+under `packages/core/src/managed-runtime/contracts/` — union (shell/4), cron-only
+(files/4, team-lead/2), and wakeup-only (shell/3) — the directory the contracts
+module already copies onto the Java classpath (`contracts/pom.xml:53-54`). A
+TypeScript parity test asserts each committed asset equals
+`buildManagedLoopBody(profile)` byte-for-byte and binds the generator to the
+bundled source; drift in either direction reddens the test (the "pin the consumer
+from the producer" pattern). Java is a pure selector: it reads the asset for the
+Session's profile and injects it, doing no string composition.
 
 **D4 — Frozen, replay-safe, capacity-bounded.** The injected variant rides the
 existing immutable receipt and digest; no new resource kind, no schema version
@@ -200,14 +203,16 @@ managed-bound creation should not also import the local `loop` body.
 
 ### Files affected
 
-- `packages/core/src/managed-runtime/contracts/` — the managed loop body
-  asset(s) (shared content + profile-conditional blocks), copied to Java.
-- `packages/core/src/skills/bundled/loop/` — a parity test binding the managed
-  asset to `SKILL.md` (no change to `SKILL.md` itself).
+- `packages/core/src/managed-runtime/contracts/` — the three generated managed
+  loop bodies (union / cron-only / wakeup-only), copied to Java.
+- `packages/core/src/skills/bundled/loop/managed-loop-skill.ts` — the
+  `buildManagedLoopBody(profile)` generator (wording substitutions + section
+  selection); a collocated parity test binds the generated assets to `SKILL.md`
+  (no change to `SKILL.md` itself).
 - `packages/managed-agent-server/persistence/.../AgentSessionAdmissions.java` —
   inject the variant by profile; widen the save guard.
 - `packages/managed-agent-server/persistence/.../JdbcManagedSessionSkills.java`
-  — read the classpath asset; compose the per-profile body (or a small helper).
+  — select and read the classpath asset for the profile (no string composition).
 - `packages/managed-agent-server/contracts/.../WorkspaceToolProfiles.java` —
   loop-creator predicate helpers if not already present.
 - Verification: admission tests for each profile shape, the empty-caller-skills
@@ -225,10 +230,12 @@ managed-bound creation should not also import the local `loop` body.
 
 ## Risks
 
-- **Body composition complexity.** Composing markdown sections per profile in
-  Java is more fragile than the clause-level tool descriptions. Mitigation: the
-  parity test pins each profile's composed body byte-for-byte against the
-  bundled source; a mutation that drops a creator section reddens it.
+- **Body composition complexity.** The two paths interleave throughout the body
+  (Parsing, loop.md mode, Autonomous mode), so per-profile composition is
+  intricate. Mitigation: the composition lives in the TypeScript generator (D3)
+  and Java only selects; the parity test pins each generated body byte-for-byte
+  against the bundled source, and a mutation that drops a creator section
+  reddens it.
 - **Single-source drift.** Two committed bodies (local + managed) can diverge.
   Mitigation: D3's parity test derives the managed asset from the bundled source.
 - **Idempotency interaction.** Injecting after the request digest must not change
@@ -271,10 +278,12 @@ clear` retires it.
 
 Resolved during design (kept here for the record):
 
-- **Composition locus.** Compose the per-profile body in Java at admission
-  (D2/D3), keeping one committed asset bound by the parity test, rather than
-  pre-generating one body per profile shape at build time. Decided: Java
-  composition.
+- **Composition locus.** A TypeScript generator derives one committed body per
+  profile shape (union / cron-only / wakeup-only) and Java selects by profile;
+  the parity test binds the assets to the bundled source. Refined from pure Java
+  composition after finding the two paths interleave throughout the body, which
+  makes Java string surgery fragile. Decided: TypeScript generation + Java
+  selection.
 - **Gate-off granularity.** The deployment gates are operation gates that leave
   the tool declaration in place (`hosted-workspace-tool-turn.ts:2488-2513`
   consult no gate), so the body is profile-driven and gate-independent; a gate
