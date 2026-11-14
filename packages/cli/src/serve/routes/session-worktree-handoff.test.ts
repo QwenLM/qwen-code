@@ -294,6 +294,25 @@ describe('POST /session/:id/worktree-handoff', () => {
     expect(res.body.code).toBe('invalid_handoff_target');
   });
 
+  it('refuses an occupied auto branch name with the typed 409', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    // A commit makes the worktree eligible for auto branch promotion.
+    writeFileSync(path.join(fixture.worktreeDir, 'work.txt'), 'work\n');
+    git(fixture.worktreeDir, 'add', 'work.txt');
+    git(fixture.worktreeDir, 'commit', '-qm', 'agent work', '--no-verify');
+    // Occupy the auto name worktree-<slug>.
+    git(fixture.workspaceDir, 'branch', `worktree-${fixture.slug}`);
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('branch_already_exists');
+  });
+
   it('refuses handoff to local for a superseded sidecar', async () => {
     const fixture = makeFixture();
     fixture.writeTranscript();

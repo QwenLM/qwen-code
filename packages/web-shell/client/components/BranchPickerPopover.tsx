@@ -1825,23 +1825,33 @@ export function BranchPickerPopover({
                           </>
                         )}
                       {onHandoff && (
-                        <button
-                          type="button"
-                          className={styles.actionItem}
-                          disabled={!!busyAction}
-                          onClick={() => void handleHandoff()}
-                          data-testid="branch-picker-handoff"
-                        >
-                          <ArrowLeftIcon
-                            size={14}
-                            className={styles.actionIcon}
-                          />
-                          <span className={styles.actionLabel}>
-                            {gitCwd
-                              ? t('branchPicker.action.handoffToLocal')
-                              : t('branchPicker.action.moveToWorktree')}
-                          </span>
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            className={styles.actionItem}
+                            disabled={!!busyAction}
+                            onClick={() => void handleHandoff()}
+                            data-testid="branch-picker-handoff"
+                          >
+                            <ArrowLeftIcon
+                              size={14}
+                              className={styles.actionIcon}
+                            />
+                            <span className={styles.actionLabel}>
+                              {gitCwd
+                                ? t('branchPicker.action.handoffToLocal')
+                                : t('branchPicker.action.moveToWorktree')}
+                            </span>
+                          </button>
+                          {!gitCwd && (
+                            <ActionHintLabel
+                              hint={{
+                                text: t('branchPicker.moveToWorktreeHint'),
+                                tone: 'info',
+                              }}
+                            />
+                          )}
+                        </>
                       )}
                       {onOpenWorktrees && (
                         <button

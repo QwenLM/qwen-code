@@ -1392,19 +1392,31 @@ export class GitWorktreeService {
     }
     // The service may be rooted at a subdirectory of the repository;
     // --full-name keeps untracked paths repository-relative so the overlay
-    // lands them at the same offset inside the worktree.
-    const repoTop =
-      (await this.getRepoTopLevel().catch(() => null)) ?? this.sourceRepoPath;
+    // lands them at the same offset inside the worktree. When the repo top
+    // cannot be resolved, skip the untracked overlay rather than pair
+    // repo-relative paths with a subdirectory base (every copy would miss
+    // and be swallowed); the tracked stash carry still applies.
+    const repoTop = await this.getRepoTopLevel().catch(() => null);
     let untrackedFiles: string[] = [];
-    try {
-      const raw = await (
-        await this.getGit()
-      ).raw(['ls-files', '--others', '--exclude-standard', '--full-name']);
-      untrackedFiles = raw.trim().split('\n').filter(Boolean);
-    } catch {
-      // Non-fatal: proceed without untracked files
+    if (repoTop === null) {
+      debugLogger.warn(
+        'captureDirtyState: repository top unavailable; skipping untracked carry',
+      );
+    } else {
+      try {
+        const raw = await (
+          await this.getGit()
+        ).raw(['ls-files', '--others', '--exclude-standard', '--full-name']);
+        untrackedFiles = raw.trim().split('\n').filter(Boolean);
+      } catch {
+        // Non-fatal: proceed without untracked files
+      }
     }
-    return { stashCommit, untrackedFiles, repoTop };
+    return {
+      stashCommit,
+      untrackedFiles,
+      repoTop: repoTop ?? this.sourceRepoPath,
+    };
   }
 
   /**
@@ -3127,6 +3139,25 @@ export class GitWorktreeService {
     const worktreePath = this.getUserWorktreePath(slug);
     const branchName = worktreeBranchForSlug(slug);
 
+    // A detached worktree has no branch whose safe-delete refusal would
+    // protect committed work: the `git branch -d` below can never fire for
+    // it, and removing the checkout would leave the agent's commits
+    // unreachable. Refuse the removal itself when HEAD carries commits no
+    // other ref reaches — the detached counterpart of the named-branch
+    // protection. An explicit force delete opts out, as it does for branches.
+    if (
+      options.deleteBranch &&
+      !options.forceDeleteBranch &&
+      (await this.isDetachedWorktree(worktreePath)) &&
+      (await this.hasUnmergedWorktreeCommits(slug))
+    ) {
+      return {
+        success: false,
+        error: 'Worktree has unmerged commits',
+        branchPreserved: true,
+      };
+    }
+
     const removed = await this.removeWorktree(worktreePath);
     if (!removed.success) {
       return removed;
@@ -3436,6 +3467,25 @@ export class GitWorktreeService {
         success: false,
         error: error instanceof Error ? error.message : String(error),
       };
+    }
+  }
+
+  /**
+   * Whether the checkout at `worktreePath` is in detached HEAD. A missing
+   * or unreadable checkout reads as not detached: the removal path then
+   * fails or proceeds on its own filesystem merits.
+   */
+  private async isDetachedWorktree(worktreePath: string): Promise<boolean> {
+    try {
+      const { simpleGit } = await loadSimpleGit();
+      const abbrev = (
+        await simpleGit(worktreePath)
+          .env(gitEnv())
+          .revparse(['--abbrev-ref', 'HEAD'])
+      ).trim();
+      return abbrev === 'HEAD';
+    } catch {
+      return false;
     }
   }
 

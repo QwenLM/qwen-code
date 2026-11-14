@@ -212,4 +212,62 @@ describe('GitWorktreeService — detached managed worktrees', () => {
       service.createWorktreeBranch(detached.path, 'feat/taken'),
     ).rejects.toThrow(/already exists/);
   });
+
+  it('removeUserWorktree refuses a detached worktree carrying unmerged commits', async () => {
+    const worktree = await createDetached('sess-loss');
+    await fs.writeFile(path.join(worktree.path, 'work.txt'), 'precious\n');
+    git(worktree.path, 'add', 'work.txt');
+    git(worktree.path, 'commit', '-qm', 'agent work', '--no-verify');
+    const tip = git(worktree.path, 'rev-parse', 'HEAD');
+
+    const result = await service.removeUserWorktree('sess-loss', {
+      deleteBranch: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.branchPreserved).toBe(true);
+    await expect(fs.lstat(worktree.path)).resolves.toBeTruthy();
+    // The commit survives and stays reachable from the worktree HEAD.
+    expect(git(worktree.path, 'rev-parse', 'HEAD')).toBe(tip);
+  });
+
+  it('removeUserWorktree deletes a detached worktree at base without commits', async () => {
+    const worktree = await createDetached('sess-clean');
+    const result = await service.removeUserWorktree('sess-clean', {
+      deleteBranch: true,
+    });
+    expect(result.success).toBe(true);
+    await expect(fs.lstat(worktree.path)).rejects.toThrow();
+  });
+
+  it('removeUserWorktree force delete opts out of the detached protection', async () => {
+    const worktree = await createDetached('sess-force');
+    await fs.writeFile(path.join(worktree.path, 'work.txt'), 'work\n');
+    git(worktree.path, 'add', 'work.txt');
+    git(worktree.path, 'commit', '-qm', 'agent work', '--no-verify');
+
+    const result = await service.removeUserWorktree('sess-force', {
+      deleteBranch: true,
+      forceDeleteBranch: true,
+    });
+
+    expect(result.success).toBe(true);
+    await expect(fs.lstat(worktree.path)).rejects.toThrow();
+  });
+
+  it('removeUserWorktree deletes a detached worktree once its commits are merged', async () => {
+    const worktree = await createDetached('sess-merged');
+    await fs.writeFile(path.join(worktree.path, 'work.txt'), 'work\n');
+    git(worktree.path, 'add', 'work.txt');
+    git(worktree.path, 'commit', '-qm', 'agent work', '--no-verify');
+    const tip = git(worktree.path, 'rev-parse', 'HEAD');
+    git(repoRoot, 'merge', '-q', '--no-edit', tip);
+
+    const result = await service.removeUserWorktree('sess-merged', {
+      deleteBranch: true,
+    });
+
+    expect(result.success).toBe(true);
+    await expect(fs.lstat(worktree.path)).rejects.toThrow();
+  });
 });

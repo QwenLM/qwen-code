@@ -129,7 +129,7 @@ option on `createUserWorktree` (`carryDirtyState`), so `enter_worktree` and
 agent-isolation callers keep their current behavior. The capture lists
 untracked files with `--full-name` and copies from the repository top, so a
 service rooted at a subdirectory still lands files at the correct worktree
-offset (the pre-extraction pattern misplaced them).
+offset (the pre-extraction pattern misplaced them). When the repository top cannot be resolved, the untracked overlay is skipped with a warning rather than silently missing every copy.
 
 Unlike `setupWorktrees`, the session path does **not** create a baseline
 commit: Codex applies the changes as uncommitted state, and the Changes view
@@ -217,13 +217,20 @@ lock, with the same superseded-sidecar and marker-ownership guards as D5
 create` snapshot applied in the local checkout after the checkout. Then
   relocate the session cwd to the local checkout, clear the sidecar and the
   bridge worktree association, and leave the worktree directory (with its
-  marker) for retention cleanup (P6) or manual removal.
+  marker) for retention cleanup (P6) or manual removal. Every worktree
+  creation path (session create and Local → Worktree handoff) records the
+  base branch and HEAD commit in the sidecar (`originalBranch` /
+  `originalHeadCommit`); the beyond-base test reads that recorded base, so
+  an empty base would silently skip the promotion.
 - **Local → Worktree** (`to: 'worktree'`): refuse if the session already has
   a worktree sidecar. Create a detached managed worktree from the local
   HEAD with the dirty overlay (D3), write the sidecar + marker, relocate the
   session into it, and set the bridge worktree metadata. On relocation
   failure the fresh worktree, sidecar, and marker are rolled back. The local
-  checkout is left as it was.
+  checkout is left as it was. The auto-created branch name receives the
+  same typed `branch_already_exists` refusal as an explicit name, and the
+  "Move to worktree" action carries a hint that the local checkout keeps
+  its dirty state and handing back requires a clean local checkout.
 
 v1 limitations (documented, not silent): the local-clean requirement stands
 in for "no other active session owns the local checkout" (the bridge has no
@@ -261,6 +268,11 @@ deletes oldest-first beyond `worktree.maxRetained`, snapshotting each.
   switch reset, non-Git/untrusted ineligible). The explicit-choice marker
   clears at draft boundaries (session id / active workspace change), not
   on transient eligibility drops.
+- Drift guards: the repo-wide consistency checks migrate with the surface —
+  the zh-CN settings coverage (`workspace-settings-i18n.test.ts`), the
+  legacy telemetry route count and catalog (`telemetry.test.ts`,
+  `telemetry-catalog.test.ts`), and the integration capabilities baseline
+  (`integration-tests/cli/qwen-serve-routes.test.ts`).
 - Acceptance: with no setting, a new session in a trusted Git workspace sends
   `worktree: {}` on first prompt; with `worktree.defaultForNewSessions: false`
   it sends no worktree param; explicit selections behave as today.
@@ -298,6 +310,14 @@ deletes oldest-first beyond `worktree.maxRetained`, snapshotting each.
   commits (HEAD reachability, per the `workspace-git-worktrees.ts` exemplar)
   or work preserve it (snapshot path in P6). `branchPreserved` reports
   `false` for detached removals (there is no branch to keep).
+  `removeUserWorktree` additionally refuses the removal itself when a
+  detached worktree carries unmerged commits: the named-branch path gets
+  that protection from `git branch -d`'s refusal, which can never fire
+  without a branch, so the detached path needs an explicit guard (an
+  explicit force delete opts out). The `--worktree` startup re-attach gate
+  keeps refusing foreign occupants including detached checkouts — startup
+  worktrees are always named, and session re-attach goes through
+  session-restore, not the flag.
 - Tests: per-consumer migration tests; journal recovery on detached shape;
   reset/restore on detached shape; named-branch worktrees still work
   (both shapes tolerated everywhere).

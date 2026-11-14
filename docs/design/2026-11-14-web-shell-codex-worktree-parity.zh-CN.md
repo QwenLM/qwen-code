@@ -117,7 +117,7 @@ P2 将其抽为共享的 `captureDirtyState` / `applyDirtyState` helper，并通
 `createUserWorktree` 的可选参数（`carryDirtyState`）在会话 worktree 创建
 路径调用，`enter_worktree` 与 agent 隔离调用方保持现有行为。捕获用
 `--full-name` 列出 untracked 文件并从仓库顶层复制，因此根在子目录的服务
-仍能把文件放到 worktree 的正确偏移（抽取前的模式会放错位置）。
+仍能把文件放到 worktree 的正确偏移（抽取前的模式会放错位置）。仓库顶层无法解析时，跳过 untracked overlay 并发告警，而非静默丢失每一次复制。
 
 与 `setupWorktrees` 不同，会话路径**不**创建 baseline commit：Codex 以
 未提交状态应用改动，Changes 视图原样呈现用户已有的改动。这也让 detached
@@ -186,11 +186,16 @@ worktree 会话（`gitSessionId` + 拉取到的 `detached` 状态）且 daemon �
   worktree 释放分支——git 禁止同一分支同时在两个 worktree 检出。worktree
   的未提交改动以 `git stash create` 快照在 checkout 后应用于本地检出。然后
   把会话 cwd 迁回本地检出，清除 sidecar 与 bridge worktree 关联，worktree
-  目录（连同 marker）留给保留清理（P6）或手动删除。
+  目录（连同 marker）留给保留清理（P6）或手动删除。每条 worktree 创建路径
+  （会话创建与 Local → Worktree 移交）都把 base 分支与 HEAD commit 记入
+  sidecar（`originalBranch` / `originalHeadCommit`）；超出 base 的判定读取
+  该记录 base，base 为空会静默跳过建分支。
 - **Local → Worktree**（`to: 'worktree'`）：会话已有 worktree sidecar 时
   拒绝。从本地 HEAD 创建 detached 托管 worktree 并施加 dirty overlay（D3），
   写 sidecar + marker，把会话迁入，设置 bridge worktree 元数据。迁移失败时
-  回滚新建的 worktree、sidecar、marker。本地检出保持原样。
+  回滚新建的 worktree、sidecar、marker。本地检出保持原样。自动创建的分支名
+  与显式名字一样获得类型化 `branch_already_exists` 拒绝；「移入 worktree」
+  动作带提示：本地检出保留其 dirty 状态，移交回本地需要本地检出干净。
 
 v1 限制（成文而非静默）：以「本地干净」要求代替「无其他活跃会话占用本地
 检出」（bridge 无会话列表探针可查占用）；handoff 不实现 `worktree-reset`
@@ -222,6 +227,10 @@ HEAD，或在记录的分支上），把快照解压覆盖，翻回 sidecar。�
   显式选择优先——含挺过 transient git-status 失败、重置后不再施加、切换
   workspace 重置、非 Git/不受信任不合格）。显式选择标记在 draft 边界
   （session id / 活跃 workspace 变化）清除，不在 transient 资格掉落时清除。
+- 漂移守卫：仓库级一致性检查随表面一起迁移——zh-CN 设置覆盖
+  （`workspace-settings-i18n.test.ts`）、legacy telemetry 路由计数与目录
+  （`telemetry.test.ts`、`telemetry-catalog.test.ts`）、集成 capabilities
+  基线（`integration-tests/cli/qwen-serve-routes.test.ts`）。
 - 验收：无设置时，受信任 Git workspace 的新会话首条消息发送 `worktree: {}`；
   `worktree.defaultForNewSessions: false` 时不带 worktree 参数；显式选择
   行为与今天一致。
@@ -252,6 +261,11 @@ HEAD，或在记录的分支上），把快照解压覆盖，翻回 sidecar。�
   commit 且无工作则可删除；有独有 commit（按 HEAD 可达性判定，范本
   `workspace-git-worktrees.ts`）或工作则保留（P6 的快照路径）。detached
   删除时 `branchPreserved` 报告 `false`（没有分支可保留）。
+  `removeUserWorktree` 另在 detached worktree 携带未合并 commit 时拒绝删除
+  本身：命名分支路径的保护来自 `git branch -d` 的拒绝，无分支时它永远不会
+  触发，故 detached 路径需要显式守卫（显式 force 删除可退出）。`--worktree`
+  启动重附着门继续拒绝外部占用者（含 detached 检出）——启动 worktree 总是
+  命名分支，会话重附着走 session-restore 而非该参数。
 - 测试：逐消费方迁移测试；detached 形态的 journal 恢复；detached 形态的
   reset/restore；命名分支 worktree 仍可用（两种形态处处容忍）。
 - 验收：新会话 worktree 无分支（`git branch --list 'worktree-*'` 不变）；

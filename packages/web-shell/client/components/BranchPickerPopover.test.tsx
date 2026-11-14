@@ -298,6 +298,16 @@ function clickButton(label: string): void {
   });
 }
 
+function moveToWorktreeHintPresent(): boolean {
+  return Array.from(
+    document.body.querySelectorAll('[data-testid="branch-picker-action-hint"]'),
+  ).some((el) =>
+    el.textContent?.includes(
+      'handing back later requires a clean local checkout',
+    ),
+  );
+}
+
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
@@ -656,6 +666,7 @@ describe('BranchPickerPopover actions', () => {
     );
     await flush();
 
+    expect(moveToWorktreeHintPresent()).toBe(false);
     clickButton('Hand off to local');
     await flush();
 
@@ -668,6 +679,7 @@ describe('BranchPickerPopover actions', () => {
     mountWithBranches(BRANCHES, { onHandoff });
     await flush();
 
+    expect(moveToWorktreeHintPresent()).toBe(true);
     clickButton('Move to worktree');
     await flush();
 

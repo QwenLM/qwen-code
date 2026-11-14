@@ -15773,6 +15773,8 @@ describe('createServeApp', () => {
       mockWt.realpath = (p) => p;
       mockWt.createMarker = createMarker;
       mockWt.writeSidecar = writeSidecar;
+      const baseCommit = 'b'.repeat(40);
+      mockBranchOps.getHeadCommit = () => Promise.resolve(baseCommit);
 
       try {
         const res = await request(app)
@@ -15798,6 +15800,10 @@ describe('createServeApp', () => {
           detached: true,
         });
         expect(createMarker).toHaveBeenCalledWith(worktreePath, 'fake-0');
+        // The sidecar must record the base the worktree starts from:
+        // handoff back to local promotes a branch only when HEAD moved
+        // past originalHeadCommit, so an empty base would silently skip
+        // the promotion and leave the agent's commits in the worktree.
         expect(writeSidecar).toHaveBeenCalledWith(
           expect.stringMatching(/fake-0\.worktree\.json$/),
           {
@@ -15806,11 +15812,12 @@ describe('createServeApp', () => {
             worktreeBranch: 'worktree-my-task',
             originalCwd: WS_BOUND,
             workspaceCwd: WS_BOUND,
-            originalBranch: '',
-            originalHeadCommit: '',
+            originalBranch: 'main',
+            originalHeadCommit: baseCommit,
           },
         );
       } finally {
+        mockBranchOps.getHeadCommit = undefined;
         mockWt.createMarker = undefined;
         mockWt.writeSidecar = undefined;
         mockWt.realpath = undefined;

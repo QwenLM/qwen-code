@@ -3127,6 +3127,8 @@ export function registerSessionRoutes(
     let worktreeMeta:
       | { slug: string; path: string; branch: string }
       | undefined;
+    let worktreeBaseBranch: string | undefined;
+    let worktreeBaseCommit: string | undefined;
     let worktreeDurablyAttached = false;
     let spawnCompleted = false;
 
@@ -3384,6 +3386,10 @@ export function registerSessionRoutes(
         const baseBranch = await wtService
           .getCurrentBranch()
           .catch(() => undefined);
+        // Record the base the worktree starts from: the handoff back to
+        // local promotes a branch only when HEAD moved past this commit.
+        worktreeBaseBranch = baseBranch;
+        worktreeBaseCommit = await getHeadCommit(workspaceCwd);
         assertRuntimeGenerationOpen?.();
         const wtResult = await wtService.createUserWorktree(slug, baseBranch, {
           carryDirtyState: true,
@@ -3730,8 +3736,8 @@ export function registerSessionRoutes(
               worktreeBranch: worktreeMeta.branch,
               originalCwd: workspaceCwd,
               workspaceCwd,
-              originalBranch: '',
-              originalHeadCommit: '',
+              originalBranch: worktreeBaseBranch ?? '',
+              originalHeadCommit: worktreeBaseCommit ?? '',
             },
           );
           assertRuntimeGenerationOpen?.();
@@ -5097,6 +5103,16 @@ export function registerSessionRoutes(
               const base = sidecar.originalHeadCommit;
               if (!branch && head && base && head !== base) {
                 branch = name ?? worktreeBranchForSlug(sidecar.slug);
+                // Same typed refusal as the explicit-name path: an occupied
+                // auto name must not degrade into a generic bridge error.
+                if (await wtService.localBranchExists(branch)) {
+                  res.status(409).json({
+                    error: `Branch ${branch} already exists`,
+                    code: 'branch_already_exists',
+                    sessionId: storageSessionId,
+                  });
+                  return;
+                }
                 await wtService.createWorktreeBranch(realTarget, branch);
               }
               if (branch) {
