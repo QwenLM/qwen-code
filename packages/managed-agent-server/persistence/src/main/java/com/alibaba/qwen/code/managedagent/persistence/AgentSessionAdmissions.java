@@ -237,7 +237,7 @@ final class AgentSessionAdmissions {
             merged.addAll(AgentDefinitionExtensions.skills(storeRows.readMap(definitions.find(tenantId, agentId,
                     Long.parseLong(pin.revision())).orElseThrow().definitionJson()).get("skills"), true));
         }
-        merged.addAll(skills);
+        ManagedLoopSkill.mergeInto(merged, skills, pin.toolProfile());
         var effectiveSkills = AgentDefinitionExtensions.sessionSkills(merged);
         if (worktree != null && sessionWorktrees == null) {
             throw new ManagedAgentException(409, "worktree_unavailable", "Session worktrees are unavailable.");
@@ -259,7 +259,7 @@ final class AgentSessionAdmissions {
             jdbc.update("UPDATE ma_session SET public_child_agents_version=1 WHERE tenant_id=? AND session_id=?",
                     tenantId, admission.sessionId());
         }
-        if (!skills.isEmpty()) {
+        if (!effectiveSkills.isEmpty()) {
             creationSkills.save(tenantId, admission.sessionId(), effectiveSkills);
         }
         if (extensionPins != null) {

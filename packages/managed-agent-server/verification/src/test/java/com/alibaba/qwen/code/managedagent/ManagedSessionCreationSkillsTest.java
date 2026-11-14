@@ -387,6 +387,49 @@ class ManagedSessionCreationSkillsTest {
     }
 
     @Test
+    void injectsTheManagedLoopSkillByProfileEvenWithNoCallerSkills() throws Exception {
+        Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
+        Object previousProfiles = com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "definitionToolProfiles");
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles",
+                List.of("hosted-workspace-files/1", "hosted-workspace-files/4"));
+        try {
+            // A cron-only profile (files/4) with an empty caller catalog still
+            // receives the server loop skill: the widened save guard writes the
+            // receipt even though the caller supplied no skills.
+            String cronAgent = defineProfile("hosted-workspace-files/4", "cron-loop-agent");
+            String cronSession = create(request(cronAgent, List.of()), "cron-loop", false).get("id").asText();
+            var cronCatalog = snapshots.effective(store.requireSession(tenant, cronSession));
+            assertThat(cronCatalog).hasSize(1);
+            assertThat(cronCatalog.getFirst().get("name")).isEqualTo("loop");
+            assertThat((String) cronCatalog.getFirst().get("body"))
+                    .contains("CronCreate").doesNotContain("LoopWakeup");
+            // A profile with no loop creator receives no loop skill.
+            String filesAgent = defineProfile("hosted-workspace-files/1", "files-no-loop");
+            String filesSession = create(request(filesAgent, List.of()), "files-no-loop", false).get("id").asText();
+            assertThat(snapshots.effective(store.requireSession(tenant, filesSession))).isEmpty();
+            // A caller-imported local "loop" skill conflicts with the server variant.
+            var localLoop = Map.<String, Object>of("name", "loop", "description", "Local", "body", "LOCAL");
+            submit(request(cronAgent, List.of(localLoop)), "duplicate-loop", false)
+                    .andExpect(status().isConflict());
+        } finally {
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", previousProfiles);
+        }
+    }
+
+    private String defineProfile(String profile, String key) throws Exception {
+        var definition = json.createObjectNode();
+        definition.putObject("model");
+        definition.put("instructions", "");
+        definition.putArray("tools").addObject().put("type", "hosted_profile").put("profile", profile);
+        definition.putObject("permission_policy");
+        var created = mvc.perform(post("/v1/agents").principal(actor("actor"))
+                        .header(TenantContextFilter.HEADER, tenant).header("Idempotency-Key", key)
+                        .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsBytes(definition)))
+                .andExpect(status().isAccepted()).andReturn();
+        return json.readTree(created.getResponse().getContentAsString()).get("id").asText();
+    }
+
+    @Test
     void refusesUnsupportedUnauthorizedAndInvalidRequestsBeforeCreatingAnything() throws Exception {
         var body = request("qwen-code", List.of(skill));
         sessionSkillsSupported = false;
