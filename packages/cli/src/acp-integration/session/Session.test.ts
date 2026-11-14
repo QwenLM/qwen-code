@@ -7053,9 +7053,11 @@ describe('Session', () => {
         .mockResolvedValue(createEmptyStream());
       // The review is what this round owes the caller, so an unsettled review
       // must hold the turn open — and it must do so through the promise
-      // `runManagedAutoSkillReview` returned, not through the drained queue.
+      // `runManagedAutoMemoryBackgroundTasks` returned (the gate runs inside
+      // that call, so the host never evaluates it twice), not through the
+      // drained queue.
       const reviewNeverSettles = new Promise<number>(() => {});
-      mockLlmClient.runManagedAutoSkillReview.mockReturnValue(
+      mockLlmClient.runManagedAutoMemoryBackgroundTasks.mockReturnValue(
         reviewNeverSettles,
       );
       mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValue([]);

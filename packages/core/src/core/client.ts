@@ -3520,37 +3520,43 @@ export class LlmClient {
   runManagedAutoMemoryBackgroundTasks(
     messageType: SendMessageType,
     { skipMemoryExtraction = false }: { skipMemoryExtraction?: boolean } = {},
-  ): void {
+  ): Promise<number> | undefined {
     // During shutdown, skip all background memory tasks so the process
     // can exit cleanly without spawning new work.
     if (this.shutdownRequested) {
       debugLogger.debug(
         'Skipping background memory tasks: shutdown requested.',
       );
-      return;
+      return undefined;
     }
 
     // autoSkill counts tool calls and can trigger on both UserQuery and
-    // ToolResult turns so the threshold can fire mid-session.
+    // ToolResult turns so the threshold can fire mid-session. The review
+    // promise is returned so a host can await exactly it without calling the
+    // gate a second time: scheduleSkillReview clears the flags it reads
+    // (skillsModifiedInSession always), so a second evaluation would judge
+    // the turn on state the first one reset and dispatch what the gates
+    // already declined.
+    let skillReview: Promise<number> | undefined;
     if (
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.ToolResult
     ) {
-      this.runManagedAutoSkillReview();
+      skillReview = this.runManagedAutoSkillReview();
     }
 
     if (
       messageType !== SendMessageType.UserQuery &&
       messageType !== SendMessageType.ToolResult
     ) {
-      return;
+      return skillReview;
     }
 
     const projectRoot = this.config.getProjectRoot();
     const mgr = this.config.getMemoryManager();
 
     if (!this.config.getManagedAutoMemoryEnabled()) {
-      return;
+      return skillReview;
     }
 
     for (const scope of ['project', 'user'] as const) {
@@ -3571,19 +3577,19 @@ export class LlmClient {
     // Extract and Dream stay once per user query; migration also needs the
     // completed ToolResult path so tool-using turns can activate recall.
     if (messageType !== SendMessageType.UserQuery) {
-      return;
+      return skillReview;
     }
     // A session agent's hidden session is agent-to-agent work, not the
     // person's conversation: extracting from it would add a model call to
     // every agent turn and feed agent chatter into the person's memory.
     if (this.config.isSessionAgentSession?.() === true) {
-      return;
+      return skillReview;
     }
     // A relayed message is often not the person's own: extracting at its stop
     // would add model calls to every relayed event, learning from turns the
     // person did not take.
     if (skipMemoryExtraction) {
-      return;
+      return skillReview;
     }
 
     const sessionId = this.config.getSessionId();
@@ -3638,6 +3644,7 @@ export class LlmClient {
         return 0;
       });
     this.pendingMemoryTaskPromises.push(dreamPromise);
+    return skillReview;
   }
 
   /**

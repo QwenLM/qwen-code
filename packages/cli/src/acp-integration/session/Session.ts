@@ -11724,16 +11724,22 @@ export class Session implements SessionContext {
     // Capture the review promise before the queue is consumed: the review is
     // pushed onto that same queue, and a waiting host must await the review
     // without inheriting Extract and Dream.
-    const sharedRoundReview = llmClient.runManagedAutoSkillReview();
-    llmClient.runManagedAutoMemoryBackgroundTasks(SendMessageType.UserQuery, {
-      skipMemoryExtraction: channelTurn,
-    });
+    // Capture the review promise from the same call that schedules the rest
+    // of the background work. Calling the gate separately first would make
+    // runManagedAutoMemoryBackgroundTasks evaluate it a second time on flags
+    // the first call just reset (skillsModifiedInSession is always cleared),
+    // dispatching a review the `skills_modified_in_session` gate declined.
+    const sharedRoundReview = llmClient.runManagedAutoMemoryBackgroundTasks(
+      SendMessageType.UserQuery,
+      { skipMemoryExtraction: channelTurn },
+    );
     // ACP reports no memory updates, so take the tasks the client queued for
     // that report instead of leaving them to pile up over the session. Extract
     // and Dream are fire-and-forget (design doc §6); the turn must not wait on
     // them, or `session/prompt` would stay open until those agents finish. The
     // only part this round owes the caller is the skill review, which
-    // `runManagedAutoSkillReview` already returned and scheduled above.
+    // `runManagedAutoMemoryBackgroundTasks` already returned and scheduled
+    // above.
     void llmClient.consumePendingMemoryTaskPromises();
     if (sharedRoundReview) {
       await sharedRoundReview;
