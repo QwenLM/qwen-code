@@ -12,8 +12,9 @@ export const END_SYNCHRONIZED_UPDATE = '\u001B[?2026l';
  * unlike the allow-listed terminals below, sets no `TERM_PROGRAM` at all. A
  * process started from a Windows Terminal tab inherits that tab's
  * `WT_SESSION`, so a `TERM_PROGRAM` that names a different terminal wins —
- * that is the host painting the frames. This is the same signal the rest of
- * the tree uses (`osc8.ts`, `useTerminalProgress.ts`).
+ * that is the host painting the frames. The `TERM_PROGRAM` tie-break is local
+ * to this predicate; `osc8.ts` and `useTerminalProgress.ts` key on
+ * `WT_SESSION` alone.
  */
 function isWindowsTerminal(env: NodeJS.ProcessEnv): boolean {
   return Boolean(env['WT_SESSION']) && !env['TERM_PROGRAM'];

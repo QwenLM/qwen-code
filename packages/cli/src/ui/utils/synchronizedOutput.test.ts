@@ -62,11 +62,12 @@ describe('terminalSupportsSynchronizedOutput', () => {
   });
 
   it('does not consult the Windows build for a native Windows Terminal', () => {
-    // #11929 was filed from build 22631 with Windows Terminal 1.24, which
-    // implements DECSET 2026. Gating on the build withheld the wrappers from
-    // exactly that host, and the same host upgraded to a newer terminal is
-    // indistinguishable by build. A terminal without the mode ignores the
-    // sequences, so there is nothing to withhold.
+    // #11929 was filed from build 22631 on Windows Terminal 1.12, which does
+    // not implement DECSET 2026; the reporter upgraded to 1.24 in a follow-up
+    // comment but the retest result was not recorded. The same OS build
+    // cannot distinguish the two, so a build gate withheld the wrappers from
+    // the upgraded host. A terminal without the mode ignores the sequences,
+    // so there is nothing to withhold.
     expect(terminalSupportsSynchronizedOutput({ WT_SESSION: 'abc' })).toBe(
       true,
     );
@@ -124,15 +125,41 @@ describe('terminalSupportsSynchronizedOutput', () => {
     );
   });
 
-  it('does not take an inherited WT_SESSION inside WSL for Windows Terminal', () => {
-    // A WSL shell on a Windows Terminal tab inherits WT_SESSION, and the tab's
-    // terminal is the one painting the frames, so it takes the same branch.
+  it('takes a WSLENV-forwarded WT_SESSION inside WSL as Windows Terminal', () => {
+    // A WSL shell on a Windows Terminal tab carries WT_SESSION only when
+    // WSLENV forwards it — a stock WSL shell does not (see
+    // terminalRedrawOptimizer.ts). The tab's terminal is the one painting the
+    // frames, so it takes the same branch.
     expect(
       terminalSupportsSynchronizedOutput({
         WT_SESSION: 'abc',
         WSL_DISTRO_NAME: 'Ubuntu',
       }),
     ).toBe(true);
+  });
+
+  it('vetoes a non-allow-listed TERM_PROGRAM on an inherited WT_SESSION', () => {
+    // The !TERM_PROGRAM conjunct decides the inherited-WT_SESSION case: a
+    // terminal that names itself must keep the allow-list in charge, whether
+    // or not the host also sets WT_SESSION.
+    expect(
+      terminalSupportsSynchronizedOutput({
+        TERM_PROGRAM: 'vscode',
+        WT_SESSION: 'abc',
+      }),
+    ).toBe(false);
+    expect(
+      terminalSupportsSynchronizedOutput({
+        TERM_PROGRAM: 'Apple_Terminal',
+        WT_SESSION: 'abc',
+      }),
+    ).toBe(false);
+    expect(
+      terminalSupportsSynchronizedOutput({
+        TERM_PROGRAM: 'JetBrains-JediTerm',
+        WT_SESSION: 'abc',
+      }),
+    ).toBe(false);
   });
 });
 
