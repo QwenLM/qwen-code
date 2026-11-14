@@ -8,7 +8,6 @@ import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
   createSourceFile,
-  forEachChild,
   getLeadingCommentRanges,
   getTrailingCommentRanges,
   type Node,
@@ -53,11 +52,14 @@ function blankComments(source: string): string {
   const collect = (node: Node) => {
     ranges.push(...(getLeadingCommentRanges(source, node.pos) ?? []));
     ranges.push(...(getTrailingCommentRanges(source, node.end) ?? []));
-    forEachChild(node, collect);
+    // getChildren, not forEachChild: punctuation tokens own trivia too (a
+    // block comment before a call's closing paren is leading trivia of the
+    // CloseParenToken), and forEachChild never visits them.
+    for (const child of node.getChildren()) collect(child);
   };
   collect(sourceFile);
-  // Comments after the last statement are leading trivia of the EOF token,
-  // which no node visits.
+  // Comments after the last statement are leading trivia of the EOF token;
+  // collect it explicitly in case the child walk ever skips it.
   const eof = sourceFile.getChildAt(sourceFile.getChildCount() - 1);
   ranges.push(...(getLeadingCommentRanges(source, eof.pos) ?? []));
   ranges.sort((a, b) => a.pos - b.pos);
@@ -97,6 +99,17 @@ const DESCRIBE_OPENING_PIN =
 // re-indenting the whole block under a dead condition all break the pin.
 const BUDGET_ASSERTION_PIN =
   /^ {6}await expectConnectSrcCspEnforced\(page\);\n {6}expect\(durationMs\)\.toBeLessThan\(MAX_DOCUMENT_DURATION_MS\);\n {6}const heapDeltaBytes = Math\.max\(0, heapAfter - heapBefore\);/m;
+// The measured window the assertion reads: both ends are anchored to their
+// immediate neighbours at the case body's exact indentation, so zeroing the
+// measurement, moving either end, or commenting them out all break the pins.
+const WINDOW_START_PIN =
+  /^ {6}const probe = await installNetworkAndCspProbe\(page\);\n {6}const startedAt = nodePerformance\.now\(\);\n {6}const heapBefore = await page\.evaluate\(/m;
+const WINDOW_END_PIN =
+  /^ {6}\);\n {6}const durationMs = nodePerformance\.now\(\) - startedAt;$/m;
+// No focus/skip/todo modifier anywhere in the gate: it.only( on a sibling
+// case silently drops the maximum-document case on local runs (CI unset),
+// and the opening pins only see the case's own opening.
+const FOCUS_PIN = /^\s*(?:it|describe|test)\s*\.\s*(?:only|skip|todo)\s*\(/m;
 
 describe('document export budgets', () => {
   it('keeps the tight 60s ceiling off the shared self-hosted pool', () => {
@@ -115,18 +128,27 @@ describe('document export budgets', () => {
       RUNNER_ENVIRONMENT: 'self-hosted',
     });
     expect(budget).toBe(180_000);
-    // The gate derives its per-case ceiling from this budget, and a per-case
-    // timeout outranks the suite's, so the budget has to stay under the suite
-    // ceiling for the budget assertion to be the one that reports a wedged run.
-    // Literal, not the imported config: the config derives testTimeout from
-    // the ambient TB_TIMEOUT_MINUTES, which would make this config-free lane
-    // depend on the caller's shell (same shape as ready-prompt-budget.test.ts).
+    // The pool's real CI environment carries both markers.
+    expect(
+      documentExportBudgetMs({ CI: 'true', RUNNER_ENVIRONMENT: 'self-hosted' }),
+    ).toBe(180_000);
+    // The per-case timeout (budget + 30s slack) outranks the suite default,
+    // so the budget assertion is the one that reports a wedged run. The
+    // literal comparison documents that the widened budget still fits under
+    // the suite's five-minute default. Literal, not the imported config: the
+    // config derives testTimeout from the ambient TB_TIMEOUT_MINUTES, which
+    // would make this config-free lane depend on the caller's shell (same
+    // shape as ready-prompt-budget.test.ts).
     expect(budget).toBeLessThan(300_000);
     // The literal is only correct while the integration default stays five
-    // minutes; pin the derivation so lowering the '5' fallback reddens here
-    // and both ceilings move together.
+    // minutes; pin both halves of the derivation so lowering the '5'
+    // fallback or changing the arithmetic reddens here and both ceilings
+    // move together.
     expect(integrationConfigCode).toMatch(
       /Number\(process\.env\['TB_TIMEOUT_MINUTES'\] \|\| '5'\)/,
+    );
+    expect(integrationConfigCode).toMatch(
+      /const testTimeoutMs = timeoutMinutes \* 60 \* 1000;/,
     );
   });
 
@@ -147,6 +169,13 @@ describe('document export budgets', () => {
     // leave the gate enforcing only the case timeout, reporting a bare
     // "Test timed out" instead of the budget.
     expect(gateCode).toMatch(BUDGET_ASSERTION_PIN);
+    // The measured window must stay intact: zeroing durationMs or moving
+    // startedAt turns the budget assertion into a tautology without touching
+    // any line above.
+    expect(gateCode).toMatch(WINDOW_START_PIN);
+    expect(gateCode).toMatch(WINDOW_END_PIN);
+    // No focus/skip/todo modifier anywhere in the gate.
+    expect(gateCode).not.toMatch(FOCUS_PIN);
   });
 
   it('does not witness a commented-out revert of the wiring', () => {
@@ -209,6 +238,26 @@ describe('document export budgets', () => {
     const skippedDescribe =
       "describe.skip('ExportTranscriptDocument browser gate', () => {});";
     expect(skippedDescribe).not.toMatch(DESCRIBE_OPENING_PIN);
+
+    // Focus-marker shape: the negative gate assertion must see it.only( /
+    // it.todo( on any case, not just the maximum-document case's opening.
+    const focusedCase = "  it.only('a sibling case', async () => {});";
+    expect(focusedCase).toMatch(FOCUS_PIN);
+    const todoCase = "  it.todo('a sibling case');";
+    expect(todoCase).toMatch(FOCUS_PIN);
+
+    // Commented-out measured window: both ends must stop matching once
+    // blanked (the neighbourhood anchors also break on the marker lines).
+    const windowCommented = [
+      '/*',
+      '      const startedAt = nodePerformance.now();',
+      '*/',
+      '/*',
+      '      const durationMs = nodePerformance.now() - startedAt;',
+      '*/',
+    ].join('\n');
+    expect(blankComments(windowCommented)).not.toMatch(WINDOW_START_PIN);
+    expect(blankComments(windowCommented)).not.toMatch(WINDOW_END_PIN);
 
     // Brace-wrapped / relocated assertion shapes: the neighbourhood anchor
     // must see the assertion only between its two neighbours at the case
@@ -317,6 +366,20 @@ describe('document export budgets', () => {
     expect(ceilingRevert).toMatch(CASE_CEILING_PIN);
     expect(blankComments(ceilingRevert)).not.toMatch(CASE_CEILING_PIN);
 
+    // Parseable ceiling revert: the argument and the original closer are
+    // commented out in place and a fresh closer keeps the call valid, so the
+    // block comment is leading trivia of the closing paren token — which a
+    // forEachChild walk never visits.
+    const ceilingRevertWithCloser = replaceOnce(
+      gateSource,
+      ceiling,
+      blockComment(ceiling) + '\n  );',
+    );
+    expect(ceilingRevertWithCloser).toMatch(CASE_CEILING_PIN);
+    expect(blankComments(ceilingRevertWithCloser)).not.toMatch(
+      CASE_CEILING_PIN,
+    );
+
     // Budget assertion commented out.
     const assertionRevert = replaceOnce(
       gateSource,
@@ -355,5 +418,18 @@ describe('document export budgets', () => {
     expect(blankComments(skippedDescribeRevert)).not.toMatch(
       DESCRIBE_OPENING_PIN,
     );
+
+    // Measured window commented out in place: the budget assertion would
+    // read an undefined durationMs, and neither window end may keep matching.
+    const windowStart = '      const startedAt = nodePerformance.now();';
+    const windowEnd =
+      '      const durationMs = nodePerformance.now() - startedAt;';
+    const windowRevert = replaceOnce(
+      replaceOnce(gateSource, windowStart, blockComment(windowStart)),
+      windowEnd,
+      blockComment(windowEnd),
+    );
+    expect(blankComments(windowRevert)).not.toMatch(WINDOW_START_PIN);
+    expect(blankComments(windowRevert)).not.toMatch(WINDOW_END_PIN);
   });
 });
