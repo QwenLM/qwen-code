@@ -3,6 +3,7 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+import { commandMetadata } from './command-metadata.js';
 import type { Argv, CommandModule } from 'yargs';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -26,8 +27,7 @@ const writeStdoutLineFlushed = (message: string): Promise<void> =>
   );
 
 export const memoryCommand: CommandModule = {
-  command: 'memory',
-  describe: 'Preview and import external memories',
+  ...commandMetadata.memory,
   builder: (argv: Argv) =>
     argv
       .command({
