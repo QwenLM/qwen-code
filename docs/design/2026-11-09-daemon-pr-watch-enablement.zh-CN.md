@@ -2,7 +2,7 @@
 
 [English](2026-11-09-daemon-pr-watch-enablement.md) | [简体中文](2026-11-09-daemon-pr-watch-enablement.zh-CN.md)
 
-状态：已落地（2026-11-09 提案；#16732、#16810、#16847 与 #17032）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.zh-CN.md)（下称「主设计」）中继 [投递 drain](2026-11-08-daemon-pr-watch-drain.zh-CN.md)（已合入 #16656）之后的增量，覆盖 drain 增量延后到启用的四项：共享 restore（§1）、resume 后 drain 钩子（§2）、lifecycle close 重排（§3）、daemon 级 deps 填充（§4）。**已落地：完整的 §3 与 §4 中的 host 枚举器（#16732）；§1 共享 restore（#16810）；§5 listing 写入与 `listedKeys`（#16847）；以及本增量的 §2 与 §4 其余部分。**§2 与 §4 一起落地——因为 §4 提供 §2 所需的消费者；下文各节均按此标注。**撰写时 off 开关仍为 `false`，`sessionPrWatch` 设置仍不读取**——配置（§6）、channel 别名与移除该开关（§7）当时属 PR B，此后已以 #17214 落地。任何构建都绝不能同时跑两个 poller。
+状态：已落地（2026-11-09 提案；#16732、#16810、#16847 与 #17032）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.zh-CN.md)（下称「主设计」）中继 [投递 drain](2026-11-08-daemon-pr-watch-drain.zh-CN.md)（已合入 #16656）之后的增量，覆盖 drain 增量延后到启用的四项：共享 restore（§1）、resume 后 drain 钩子（§2）、lifecycle close 重排（§3）、daemon 级 deps 填充（§4）。**已落地：完整的 §3 与 §4 中的 host 枚举器（#16732）；§1 共享 restore（#16810）；§5 listing 写入与 `listedKeys`（#16847）；以及本增量的 §2 与 §4 其余部分。**§2 与 §4 一起落地——因为 §4 提供 §2 所需的消费者；下文各节均按此标注。**撰写时 off 开关仍为 `false`，`sessionPrWatch` 设置仍不读取**——配置（§6）、channel 别名与移除该开关（§7）当时属 PR B，此后已以 #17214 落地。任何构建都绝不能同时跑两个 poller。下文按该增量当时的设计描述：本增量填充了 drain 的 deps，PR B（#17214）此后移除了内部开关，启用现在即 deps 存在性。
 
 ## 问题
 
