@@ -165,6 +165,12 @@ import type {
   LspStatusSnapshot,
 } from '../lsp/types.js';
 import type { InstructionLoadReason } from '../hooks/types.js';
+import {
+  resolveAgentLoopSwitch,
+  UNIFIED_SURFACE_DEFAULTS,
+  EVENT_BUS_SURFACE_DEFAULTS,
+  type AgentLoopSurface,
+} from './agent-loop-rollout.js';
 import { ApprovalMode } from './approval-mode.js';
 
 // Other modules
@@ -3267,8 +3273,8 @@ export class Config {
   private readonly lsToolEnabled: boolean = false;
   private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
-  private readonly unifiedAgentLoopEnabled: boolean = false;
-  private readonly eventBusAgentLoopEnabled: boolean = false;
+  private readonly unifiedAgentLoopEnabled: boolean | undefined;
+  private readonly eventBusAgentLoopEnabled: boolean | undefined;
   private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private readonly artifactRecordingSupported: boolean = true;
@@ -3736,8 +3742,12 @@ export class Config {
     this.lsToolEnabled = params.lsToolEnabled ?? false;
     this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
-    this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled ?? false;
-    this.eventBusAgentLoopEnabled = params.eventBusAgentLoopEnabled ?? false;
+    // Deliberately not `?? false`: these are tri-state. Unset must stay
+    // undefined so the resolver falls through to the per-surface built-in
+    // default; collapsing to false here would make "not set" indistinguishable
+    // from "explicitly off" and block a later per-surface default flip.
+    this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled;
+    this.eventBusAgentLoopEnabled = params.eventBusAgentLoopEnabled;
     this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactRecordingSupported = params.artifactRecordingSupported ?? true;
@@ -4231,6 +4241,8 @@ export class Config {
   private async initializeOnce(
     options?: ConfigInitializeOptions,
   ): Promise<void> {
+    const ripgrepAbort = new AbortController();
+    let ripgrepAvailability: Promise<boolean> | undefined;
     try {
       if (this.shellExecutionSandbox)
         this.shellExecutionSandbox = await probeShellSandbox(
@@ -4253,9 +4265,28 @@ export class Config {
           : undefined,
       );
       await this.bindSessionExecutionEngine();
+      // Overlap ACP's binary health check with resource I/O in this request.
+      if (
+        this.getExperimentalZedIntegration() &&
+        this.getUseRipgrep() &&
+        this.sessionExecutionEngine !== 'managed' &&
+        !this.getExecutionEnvironment() &&
+        !this.shellExecutionSandbox &&
+        !this.getBareMode()
+      ) {
+        ripgrepAvailability = canUseRipgrep(
+          this.getUseBuiltinRipgrep(),
+          AbortSignal.any([
+            ripgrepAbort.signal,
+            this.executionShutdown.signal,
+            ...(options?.signal ? [options.signal] : []),
+          ]),
+        );
+        void ripgrepAvailability.catch(() => undefined);
+      }
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
-      await this.initializeInternal(options);
+      await this.initializeInternal(options, ripgrepAvailability);
       this.workflowModeReady = true;
       if (this.initialWorkflowMode !== undefined) {
         const enabled = this.initialWorkflowMode;
@@ -4293,6 +4324,9 @@ export class Config {
         });
       }
       throw error;
+    } finally {
+      ripgrepAbort.abort();
+      await ripgrepAvailability?.catch(() => undefined);
     }
   }
 
@@ -4319,6 +4353,7 @@ export class Config {
 
   private async initializeInternal(
     options?: ConfigInitializeOptions,
+    ripgrepAvailability?: Promise<boolean>,
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
     await this.proxyDispatcherReady;
@@ -4888,6 +4923,7 @@ export class Config {
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
       skipInlineMcpDiscovery ? { skipDiscovery: true } : undefined,
+      ripgrepAvailability,
     );
     options?.signal?.throwIfAborted();
     recordStartupEvent('config_initialize_tool_registry_end');
@@ -10830,16 +10866,24 @@ export class Config {
     return this.agentTeamEnabled;
   }
 
-  isUnifiedAgentLoopEnabled(): boolean {
-    if (process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] === '1') return true;
-    return this.unifiedAgentLoopEnabled;
+  isUnifiedAgentLoopEnabled(surface: AgentLoopSurface): boolean {
+    return resolveAgentLoopSwitch({
+      env: process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'],
+      setting: this.unifiedAgentLoopEnabled,
+      surface,
+      surfaceDefault: UNIFIED_SURFACE_DEFAULTS[surface],
+      variable: 'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+    });
   }
 
-  isEventBusAgentLoopEnabled(): boolean {
-    if (process.env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] === '1') {
-      return true;
-    }
-    return this.eventBusAgentLoopEnabled;
+  isEventBusAgentLoopEnabled(surface: AgentLoopSurface): boolean {
+    return resolveAgentLoopSwitch({
+      env: process.env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'],
+      setting: this.eventBusAgentLoopEnabled,
+      surface,
+      surfaceDefault: EVENT_BUS_SURFACE_DEFAULTS[surface],
+      variable: 'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
+    });
   }
 
   /**
@@ -13601,6 +13645,7 @@ export class Config {
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
     options?: { skipDiscovery?: boolean; forSubAgent?: boolean },
+    ripgrepAvailability?: Promise<boolean>,
   ): Promise<ToolRegistry> {
     const registry = new ToolRegistry(
       this,
@@ -13892,7 +13937,8 @@ export class Config {
       let errorString: undefined | string = undefined;
       recordStartupEvent('config_initialize_ripgrep_probe_start');
       try {
-        useRipgrep = await canUseRipgrep(this.getUseBuiltinRipgrep());
+        useRipgrep = await (ripgrepAvailability ??
+          canUseRipgrep(this.getUseBuiltinRipgrep()));
       } catch (error: unknown) {
         errorString = getErrorMessage(error);
       }

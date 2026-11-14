@@ -128,6 +128,75 @@ describe('detectPrTransitions', () => {
     expect(next.transitions).toEqual([]);
   });
 
+  it('records every type when no subscription is given', () => {
+    const first = detectPrTransitions(identity, undefined, obs(), T0);
+    const next = detectPrTransitions(
+      identity,
+      first.state,
+      obs({ headSha: 'b'.repeat(40), checks: 'failing' }),
+      T1,
+    );
+    expect(types(next.transitions)).toEqual(['head_change', 'ci_failure']);
+  });
+
+  it('drops an unsubscribed type from both the transitions and pending', () => {
+    const first = detectPrTransitions(identity, undefined, obs(), T0);
+    const next = detectPrTransitions(
+      identity,
+      first.state,
+      obs({ headSha: 'b'.repeat(40), checks: 'failing' }),
+      T1,
+      new Set(['ci_failure']),
+    );
+    expect(types(next.transitions)).toEqual(['ci_failure']);
+    expect((next.state.pending ?? []).map((entry) => entry.type)).toEqual([
+      'ci_failure',
+    ]);
+  });
+
+  it('keeps only the subscribed type when several fire at once', () => {
+    const first = detectPrTransitions(identity, undefined, obs(), T0);
+    const next = detectPrTransitions(
+      identity,
+      first.state,
+      obs({
+        headSha: 'b'.repeat(40),
+        checks: 'failing',
+        mergeable: 'conflicting',
+        state: 'closed',
+      }),
+      T1,
+      new Set(['state_change']),
+    );
+    expect(types(next.transitions)).toEqual(['state_change']);
+  });
+
+  it('still records ciFired for an unsubscribed ci_failure', () => {
+    // Subscribing later must not fire retroactively for a head that was
+    // already failing: the bookkeeping is deliberately not filtered, the
+    // same rule that makes a first observation initialise silently.
+    const headA = 'a'.repeat(40);
+    const s0 = detectPrTransitions(identity, undefined, obs(), T0);
+    const s1 = detectPrTransitions(
+      identity,
+      s0.state,
+      obs({ headSha: headA, checks: 'failing' }),
+      T1,
+      new Set(['head_change']),
+    );
+    expect(s1.transitions).toEqual([]);
+    expect(s1.state.ciFired).toEqual([headA]);
+
+    const s2 = detectPrTransitions(
+      identity,
+      s1.state,
+      obs({ headSha: headA, checks: 'failing' }),
+      T2,
+      new Set(['head_change', 'ci_failure']),
+    );
+    expect(s2.transitions).toEqual([]);
+  });
+
   it('fires ci_failure once per head across a force-push revisit', () => {
     const headA = 'a'.repeat(40);
     const headB = 'b'.repeat(40);
@@ -605,6 +674,78 @@ describe('observeWorkspacePrBindings', () => {
     }
   });
 
+  it('writes no transition the subscription excludes', async () => {
+    // The sweep-level witness for the view call site. The detector's filter
+    // has its own direct cases, but only this one proves the sweep passes its
+    // subscription down: dropping `deps.events` at the call site leaves every
+    // other case in this file green.
+    const view = vi.fn(async (url: string) => okResult(url));
+    await observeWorkspacePrBindings([binding(42)], makeDeps(view));
+    view.mockImplementation(async (url: string) =>
+      okResult(url, { headSha: 'b'.repeat(40), checks: 'failing' }),
+    );
+    const result = await observeWorkspacePrBindings(
+      [binding(42)],
+      makeDeps(view, {
+        now: () => Date.parse(T2),
+        events: new Set(['ci_failure']),
+      }),
+    );
+    expect(result.observed).toBe(1);
+    const id = prWatchIdentityFromUrl(prUrl(42))!;
+    const after = readPrWatchStateSync(dir, id);
+    expect(after.kind).toBe('state');
+    if (after.kind === 'state') {
+      expect(after.state.pending?.map((p) => p.type)).toEqual(['ci_failure']);
+    }
+  });
+
+  it('skips a host the per-host subscription does not cover, without a view', async () => {
+    // Under the alias, an allowed host no channel covers subscribes nothing.
+    // Spending a view there would be a request nobody can receive.
+    const view = vi.fn(async (url: string) => okResult(url));
+    const result = await observeWorkspacePrBindings(
+      [binding(42, undefined, 'owner/repo', 'ghe.example.com')],
+      makeDeps(view, {
+        allowedHosts: new Set(['github.com', 'ghe.example.com']),
+        eventsForHost: (host) =>
+          host === 'github.com' ? new Set(['head_change']) : new Set(),
+      }),
+    );
+    expect(result).toEqual({ consumed: 0, observed: 0, failed: 0 });
+    expect(view).not.toHaveBeenCalled();
+  });
+
+  it('prefers the per-host subscription over the global set', async () => {
+    // The alias path passes no global set; the per-host one must be the one
+    // the detector sees, or every type would fire on an aliased host.
+    const view = vi.fn(async (url: string) => okResult(url));
+    await observeWorkspacePrBindings([binding(42)], makeDeps(view));
+    view.mockImplementation(async (url: string) =>
+      okResult(url, { headSha: 'b'.repeat(40), checks: 'failing' }),
+    );
+    const result = await observeWorkspacePrBindings(
+      [binding(42)],
+      makeDeps(view, {
+        now: () => Date.parse(T2),
+        events: new Set([
+          'head_change',
+          'ci_failure',
+          'merge_conflict',
+          'state_change',
+        ]),
+        eventsForHost: () => new Set(['ci_failure']),
+      }),
+    );
+    expect(result.observed).toBe(1);
+    const id = prWatchIdentityFromUrl(prUrl(42))!;
+    const after = readPrWatchStateSync(dir, id);
+    expect(after.kind).toBe('state');
+    if (after.kind === 'state') {
+      expect(after.state.pending?.map((p) => p.type)).toEqual(['ci_failure']);
+    }
+  });
+
   it('plumbs the view mergeable into the watch file and conflict detection', async () => {
     const id = prWatchIdentityFromUrl(prUrl(42))!;
     const view = vi.fn(async (url: string) =>
@@ -664,6 +805,66 @@ describe('observeWorkspacePrBindings', () => {
     expect(result).toEqual({ consumed: 1, observed: 0, failed: 1 });
     const id = prWatchIdentityFromUrl(prUrl(42))!;
     expect(readPrWatchStateSync(dir, id).kind).toBe('absent');
+  });
+
+  it('warns once after two consecutive failed views and resets on success', async () => {
+    // The alias's views run with the daemon's gh, not the channel's token: a
+    // PR it cannot read gets nothing, and the operator must be told once per
+    // failure streak rather than once per tick.
+    const viewFailures = new Map<string, { count: number; warned: boolean }>();
+    const log = vi.fn();
+    const view = vi.fn(
+      async (_url: string): Promise<FetchGitHubPullRequestViewResult> => {
+        throw new Error('gh: not found');
+      },
+    );
+    const deps = makeDeps(view, { log, viewFailures });
+    const run = () => observeWorkspacePrBindings([binding(42)], deps);
+    await run();
+    await run();
+    const warnings = () =>
+      log.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes('consecutive view failures'));
+    expect(warnings()).toHaveLength(1);
+    // A successful view resets the streak; the next streak warns again.
+    view.mockImplementation(async (url: string) => okResult(url));
+    await run();
+    view.mockImplementation(async () => {
+      throw new Error('gh: not found');
+    });
+    await run();
+    await run();
+    expect(warnings()).toHaveLength(2);
+  });
+
+  it('clears a warned streak when a successful view is not persisted', async () => {
+    // The warning is about the view. A successful view that the slow-view
+    // guard refuses to persist must not leave `warned` set for the life of
+    // the timer.
+    const viewFailures = new Map<
+      string,
+      { count: number; warned: boolean; lastSeenAt?: number }
+    >();
+    const view = vi.fn(async (url: string) => okResult(url));
+    const id = prWatchIdentityFromUrl(prUrl(42))!;
+    const key = prWatchFileKey(id);
+    viewFailures.set(key, { count: 2, warned: true });
+    // A stored observation from the future makes the guard return early.
+    writePrWatchStateSync(dir, id, {
+      pr: id,
+      observedAt: T2,
+      state: 'open',
+      headSha: 'a'.repeat(40),
+      checks: 'passing',
+    });
+
+    const result = await observeWorkspacePrBindings(
+      [binding(42)],
+      makeDeps(view, { log: vi.fn(), viewFailures, now: () => Date.parse(T1) }),
+    );
+    expect(result.observed).toBe(0);
+    expect(viewFailures.has(key)).toBe(false);
   });
 
   it('accepts a renamed repository and keeps the binding own watch file', async () => {
@@ -1007,6 +1208,46 @@ describe('runPrWatchObservationTick', () => {
     expect(offsets.get('/ws')).toBe(1);
     const id = prWatchIdentityFromUrl(prUrl(42))!;
     expect(readPrWatchStateSync(dir, id).kind).toBe('state');
+  });
+
+  it('prunes view-failure streaks whose PR left the watch set', async () => {
+    // The map lives for the timer's lifetime; a PR that merged, unbound or
+    // lost its workspace must age out, or a re-bound key resumes at `warned`.
+    const view = vi.fn(async (url: string) => okResult(url));
+    const nowMs = Date.parse(T1);
+    const viewFailures = new Map<
+      string,
+      { count: number; warned: boolean; lastSeenAt?: number }
+    >();
+    viewFailures.set('github.com/owner/repo#999', {
+      count: 2,
+      warned: true,
+      lastSeenAt: nowMs - 25 * 60 * 60 * 1000,
+    });
+    viewFailures.set('github.com/owner/repo#777', {
+      count: 1,
+      warned: false,
+      lastSeenAt: nowMs,
+    });
+
+    await runPrWatchObservationTick(
+      [runtime('/ws')],
+      {
+        watchDir: dir,
+        locks,
+        allowedHosts: new Set(['github.com']),
+        viewPullRequest: view,
+        now: () => nowMs,
+      },
+      {
+        intervalMs: 300_000,
+        sweepOffsets: new Map(),
+        viewFailures,
+      },
+    );
+
+    expect(viewFailures.has('github.com/owner/repo#999')).toBe(false);
+    expect(viewFailures.has('github.com/owner/repo#777')).toBe(true);
   });
 
   it('observes nothing when an unverifiable record blocks the claim', async () => {

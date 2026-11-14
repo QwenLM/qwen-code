@@ -267,7 +267,7 @@ async function runSpeculationModelRound(
   signal: AbortSignal | undefined,
 ): Promise<Part[]> {
   const modelParts: Part[] = [];
-  if (config.isUnifiedAgentLoopEnabled?.() !== true) {
+  if (config.isUnifiedAgentLoopEnabled?.('speculation') !== true) {
     const stream = await chat.sendMessageStream(
       model,
       { message: parts },

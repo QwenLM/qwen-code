@@ -15,6 +15,7 @@ import {
   type FakeOpenAIRequest,
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
+import { sharedLoopRoundCount } from '../test-helper.js';
 import {
   DEFAULT_CLI_BIN,
   spawnDaemon,
@@ -177,6 +178,7 @@ describe.skipIf(process.platform === 'win32').each([false, true])(
           USERPROFILE: home,
           QWEN_HOME: home,
           QWEN_RUNTIME_DIR: path.join(root, 'runtime'),
+          QWEN_DEBUG_LOG_FILE: '1',
           QWEN_CLI_ENTRY: DEFAULT_CLI_BIN,
           // The docker E2E leg exports QWEN_SANDBOX=docker; inherited by the
           // daemon's `qwen --acp` children, it puts them in a container with
@@ -294,6 +296,9 @@ describe.skipIf(process.platform === 'win32').each([false, true])(
       // Give a duplicate delivery the chance to show up before counting.
       await new Promise((resolve) => setTimeout(resolve, 2_000));
       expect(server.requests.filter(isNotificationRequest)).toHaveLength(1);
+      // The arm label must be real: the shared arm runs the shared loop,
+      // the legacy arm never calls runModelRound.
+      expect(sharedLoopRoundCount(path.join(root, 'runtime')) > 0).toBe(shared);
     }, 180_000);
   },
 );

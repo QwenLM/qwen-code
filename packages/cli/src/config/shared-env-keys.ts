@@ -92,6 +92,12 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // must not be able to turn them on, nor to unset an operator's kill switch.
   'QWEN_CODE_ENABLE_LSP',
   'QWEN_CODE_DISABLE_LSP',
+  // The agent-loop rollout switches are the same class of opt-in experiment:
+  // a project `.env` must not force the shared loop or the event-bus kernel on
+  // (or off) ahead of the operator's explicit setting. The operator's launch
+  // environment and the parity suites' spawned child env are unaffected.
+  'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+  'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
   // The name-only lock is a deployment policy. A project that wants it sets
   // tools.workflowNameOnly, which a workspace may only turn on; a project
   // .env must not be able to unset the operator's exported value.
@@ -304,6 +310,17 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // location is an operator decision (documented as a per-daemon opt-in), so
   // only the daemon's launch environment or a home `.env` may set it.
   'QWEN_SERVE_SESSION_ATTACHMENTS_ROOT',
+  // The two PR-watch overrides are the environment form of
+  // serve.sessionPrWatch, which WORKSPACE_RESTRICTED_SETTINGS strips from
+  // workspace settings: the watch spends the daemon's own gh budget and
+  // injects prompts into sessions across every workspace it serves. A
+  // project `.env` setting either key would hand a repository that
+  // daemon-wide switch — and, because a non-blank event list counts as the
+  // operator's explicit choice, silently suppress the trust-gated per-host
+  // channel alias. The operator channels (home-scoped `.env` and the launch
+  // environment) still apply.
+  'QWEN_SESSION_PR_WATCH_EVENTS',
+  'QWEN_SESSION_PR_WATCH_WAKE_DORMANT',
   // DEV gates the daemon's inherited-loader-env scrub (run-qwen-serve.ts);
   // only the dev harness (scripts/dev.js) stamps it into the launch env. A
   // project file setting it would silently keep loader vars in the base env

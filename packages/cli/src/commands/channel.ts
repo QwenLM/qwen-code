@@ -1,3 +1,4 @@
+import { commandMetadata } from './command-metadata.js';
 import type { CommandModule, Argv } from 'yargs';
 import { startCommand } from './channel/start.js';
 import { stopCommand } from './channel/stop.js';
@@ -25,8 +26,7 @@ const pairingCommand: CommandModule = {
 };
 
 export const channelCommand: CommandModule = {
-  command: 'channel',
-  describe: 'Manage messaging channels (Telegram, Discord, etc.)',
+  ...commandMetadata.channel,
   builder: (yargs: Argv) =>
     yargs
       .command(startCommand)

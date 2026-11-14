@@ -53,14 +53,19 @@ export type ServeFastPathSettings = Pick<
 > & {
   general?: Pick<NonNullable<Settings['general']>, 'chatRecording'>;
   policy?: ServeFastPathPolicyInput;
-  serve?: { channels?: unknown; tokenQr?: unknown; maxSessions?: unknown };
+  serve?: {
+    channels?: unknown;
+    tokenQr?: unknown;
+    maxSessions?: unknown;
+    sessionPrWatch?: unknown;
+  };
   /**
    * Report-only: keys a workspace settings file set that only
-   * operator-owned scopes may set (`serve.tokenQr` and `serve.maxSessions`
-   * are the restricted keys this reader would otherwise honor). The values
-   * never enter the summary; the serve boot names the drop on stderr,
-   * matching the warning the interactive CLI raises through
-   * getSettingsWarnings.
+   * operator-owned scopes may set (`serve.tokenQr`, `serve.maxSessions` and
+   * `serve.sessionPrWatch` are the restricted keys this reader would
+   * otherwise honor). The values never enter the summary; the serve boot
+   * names the drop on stderr, matching the warning the interactive CLI
+   * raises through getSettingsWarnings.
    */
   ignoredWorkspaceKeys?: string[];
 };
@@ -467,9 +472,9 @@ function readSettingsSummary(
       `Serve fast path settings file ${filePath} must be a JSON object.`,
     );
   }
-  // serve.tokenQr and serve.maxSessions are honored from operator-owned
-  // scopes only (see pickFastPathSettings); a workspace file that sets
-  // either gets the drop reported, never the value.
+  // serve.tokenQr, serve.maxSessions and serve.sessionPrWatch are honored
+  // from operator-owned scopes only (see pickFastPathSettings); a workspace
+  // file that sets any of them gets the drop reported, never the value.
   const serveSection = parsed['serve'];
   if (
     ignoredKeys !== undefined &&
@@ -481,6 +486,9 @@ function readSettingsSummary(
     }
     if (serveSection['maxSessions'] !== undefined) {
       ignoredKeys.push('serve.maxSessions');
+    }
+    if (serveSection['sessionPrWatch'] !== undefined) {
+      ignoredKeys.push('serve.sessionPrWatch');
     }
   }
   return pickFastPathSettings(parsed, includeServe, includeOperatorServe);
@@ -707,15 +715,24 @@ function pickFastPathSettings(
     // value. The consumers validate and warn.
     const tokenQr = includeOperatorServe ? serve['tokenQr'] : undefined;
     const maxSessions = includeOperatorServe ? serve['maxSessions'] : undefined;
+    // serve.sessionPrWatch spends daemon-wide gh budget and injects prompts
+    // into sessions across workspaces, so a repository must not switch it on
+    // for the whole daemon. The trust-gated channel alias is the per-workspace
+    // path.
+    const sessionPrWatch = includeOperatorServe
+      ? serve['sessionPrWatch']
+      : undefined;
     if (
       channels !== undefined ||
       tokenQr !== undefined ||
-      maxSessions !== undefined
+      maxSessions !== undefined ||
+      sessionPrWatch !== undefined
     ) {
       out.serve = {
         ...(channels !== undefined ? { channels } : {}),
         ...(tokenQr !== undefined ? { tokenQr } : {}),
         ...(maxSessions !== undefined ? { maxSessions } : {}),
+        ...(sessionPrWatch !== undefined ? { sessionPrWatch } : {}),
       };
     }
   }
@@ -779,12 +796,17 @@ function mergeFastPathSettings(
       merged.policy = { ...(merged.policy ?? {}), ...source.policy };
     }
     if (source.serve) {
-      const { tokenQr, maxSessions } = source.serve;
-      if (tokenQr !== undefined || maxSessions !== undefined) {
+      const { tokenQr, maxSessions, sessionPrWatch } = source.serve;
+      if (
+        tokenQr !== undefined ||
+        maxSessions !== undefined ||
+        sessionPrWatch !== undefined
+      ) {
         merged.serve = {
           ...(merged.serve ?? {}),
           ...(tokenQr !== undefined ? { tokenQr } : {}),
           ...(maxSessions !== undefined ? { maxSessions } : {}),
+          ...(sessionPrWatch !== undefined ? { sessionPrWatch } : {}),
         };
       }
     }

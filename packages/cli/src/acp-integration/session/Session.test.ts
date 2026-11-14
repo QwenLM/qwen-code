@@ -5149,6 +5149,21 @@ describe('Session', () => {
       expect(result.stopReason).toBe('end_turn');
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
       expect(send).toHaveBeenCalledOnce();
+      // Every ACP surface read must pass 'acp' — not just one of them — so a
+      // wrong label at any automatic-turn site is caught, not only the site
+      // this test drives.
+      const loopCalls = (
+        mockConfig.isUnifiedAgentLoopEnabled as ReturnType<typeof vi.fn>
+      ).mock.calls;
+      expect(loopCalls.length).toBeGreaterThan(0);
+      expect(loopCalls.every(([surface]) => surface === 'acp')).toBe(true);
+      // The kernel getter's ACP reads must pass 'acp' too, so a wrong
+      // label at any of the three ACP kernel sites is also caught.
+      const kernelCalls = (
+        mockConfig.isEventBusAgentLoopEnabled as ReturnType<typeof vi.fn>
+      ).mock.calls;
+      expect(kernelCalls.length).toBeGreaterThan(0);
+      expect(kernelCalls.every(([surface]) => surface === 'acp')).toBe(true);
       expect(send.mock.calls[0][3]).toMatchObject({
         type: core.SendMessageType.UserQuery,
         userTurn: {
@@ -6530,6 +6545,20 @@ describe('Session', () => {
         );
         await vi.waitFor(() => expect(agentText()).toContain('cron result'));
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        // The cron automatic-turn gate must read the 'acp' surface, not just
+        // the primary prompt's gate — changing this site's label reds this.
+        const loopCalls = (
+          mockConfig.isUnifiedAgentLoopEnabled as ReturnType<typeof vi.fn>
+        ).mock.calls;
+        expect(loopCalls.length).toBeGreaterThan(0);
+        expect(loopCalls.every(([surface]) => surface === 'acp')).toBe(true);
+        // The kernel getter's ACP reads must pass 'acp' too, so a wrong
+        // label at any of the three ACP kernel sites is also caught.
+        const kernelCalls = (
+          mockConfig.isEventBusAgentLoopEnabled as ReturnType<typeof vi.fn>
+        ).mock.calls;
+        expect(kernelCalls.length).toBeGreaterThan(0);
+        expect(kernelCalls.every(([surface]) => surface === 'acp')).toBe(true);
       });
 
       it('records a cron prompt before the response its round records', async () => {
@@ -6778,6 +6807,20 @@ describe('Session', () => {
         ).toEqual(['agent done', '']);
         // Not streamed piece by piece as a prompt's response is.
         expect(agentText()).not.toContain('agent ');
+        // The background-notification gate must read the 'acp' surface —
+        // changing this site's label reds this.
+        const loopCalls = (
+          mockConfig.isUnifiedAgentLoopEnabled as ReturnType<typeof vi.fn>
+        ).mock.calls;
+        expect(loopCalls.length).toBeGreaterThan(0);
+        expect(loopCalls.every(([surface]) => surface === 'acp')).toBe(true);
+        // The kernel getter's ACP reads must pass 'acp' too, so a wrong
+        // label at any of the three ACP kernel sites is also caught.
+        const kernelCalls = (
+          mockConfig.isEventBusAgentLoopEnabled as ReturnType<typeof vi.fn>
+        ).mock.calls;
+        expect(kernelCalls.length).toBeGreaterThan(0);
+        expect(kernelCalls.every(([surface]) => surface === 'acp')).toBe(true);
       });
 
       it('ends a notification turn that loop protection stopped as partial', async () => {

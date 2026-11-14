@@ -84,6 +84,7 @@ describe('built-in channel registry', () => {
       'email',
       'wecom',
       'wecom-callback',
+      'wecom-webhook',
       'feishu',
       'feishu-webhook',
       'qq',
