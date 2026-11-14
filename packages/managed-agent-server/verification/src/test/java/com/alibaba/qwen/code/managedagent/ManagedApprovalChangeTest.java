@@ -202,7 +202,7 @@ class ManagedApprovalChangeTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1",
-            "hosted-workspace-shell/3"})
+            "hosted-workspace-shell/3", "hosted-workspace-shell/4"})
     void persistsPlanIndependentlyAndFreezesItWithTheTurnPolicy(String profile) throws Exception {
         when(harness.supportsPlanMode()).thenReturn(true);
         session = customSession(profile, "default");
@@ -390,7 +390,8 @@ class ManagedApprovalChangeTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = "hosted-workspace-files/3")
+    @ValueSource(strings = {"hosted-workspace-files/3", "hosted-workspace-files/4",
+            "hosted-workspace-shell/4"})
     void snapshotsTheApprovalSelectionOnTurnsOfTheNewProfileVersions(String profile) throws Exception {
         session = customSession(profile, "default");
         var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "hello"));
@@ -766,8 +767,8 @@ class ManagedApprovalChangeTest {
     private ManagedAgentStore store() {
         var properties = new ManagedAgentProperties();
         properties.setDefinitionToolProfiles(List.of("hosted-workspace-files/1", "hosted-workspace-shell/1",
-                "hosted-workspace-shell/3", "hosted-workspace-files/2", "hosted-workspace-files/3",
-                "hosted-workspace-read/1"));
+                "hosted-workspace-shell/3", "hosted-workspace-shell/4", "hosted-workspace-files/2",
+                "hosted-workspace-files/3", "hosted-workspace-files/4", "hosted-workspace-read/1"));
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setWorkspaceShellEnabled(true);
         properties.getHarness().setApprovalMode("default");
