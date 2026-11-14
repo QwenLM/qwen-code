@@ -24893,7 +24893,7 @@ export function App({
                     </div>
                   </div>
                   <div className={styles.fullPageBody}>
-                    <TodosDialog />
+                    <TodosDialog lockedWorkspaceCwd={lockedWorkspaceCwd} />
                   </div>
                 </div>
               )}

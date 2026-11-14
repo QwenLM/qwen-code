@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CalendarIcon,
   CheckCircle2Icon,
@@ -73,10 +73,76 @@ function bucketOf(due: string | null, today: string): AgendaBucket {
   return 'later';
 }
 
-export function TodosDialog() {
+export interface TodosDialogProps {
+  /**
+   * The cwd of a workspace the host locked the shell to. The daemon-wide
+   * aggregate spans every workspace, so a locked shell must scope what
+   * this page shows — other workspaces' todo lists are not this host's
+   * business.
+   */
+  lockedWorkspaceCwd?: string;
+}
+
+/** Narrows a snapshot to one workspace's groups, with recomputed totals and
+ *  only the tag definitions the surviving todos actually use. */
+function scopeSnapshotToWorkspace(
+  snapshot: DaemonTodosSnapshot,
+  cwd: string,
+): DaemonTodosSnapshot {
+  const groups = snapshot.groups.filter((g) => g.project === cwd);
+  const totals = {
+    projects: groups.length,
+    sessions: 0,
+    open: 0,
+    pending: 0,
+    in_progress: 0,
+    completed: 0,
+  };
+  const usedTags = new Set<string>();
+  for (const group of groups) {
+    for (const session of group.sessions) {
+      totals.sessions += 1;
+      for (const todo of session.todos) {
+        if (todo.status === 'completed') {
+          totals.completed += 1;
+        } else {
+          totals.open += 1;
+          if (todo.status === 'pending') totals.pending += 1;
+          else totals.in_progress += 1;
+        }
+        for (const tag of todo.tags ?? []) usedTags.add(tag);
+      }
+    }
+  }
+  const tagDefinitions = snapshot.tagDefinitions
+    ? Object.fromEntries(
+        Object.entries(snapshot.tagDefinitions).filter(([name]) =>
+          usedTags.has(name),
+        ),
+      )
+    : undefined;
+  return {
+    ...snapshot,
+    groups,
+    totals,
+    ...(tagDefinitions ? { tagDefinitions } : {}),
+  };
+}
+
+export function TodosDialog({ lockedWorkspaceCwd }: TodosDialogProps) {
   const actions = useWorkspaceActions();
   const { t } = useI18n();
   const [snapshot, setSnapshot] = useState<DaemonTodosSnapshot | null>(null);
+  // Scoped view of the snapshot: everything downstream renders from this,
+  // so a locked shell never surfaces other workspaces' todos, totals or
+  // tag names.
+  const scopedSnapshot = useMemo(
+    () =>
+      lockedWorkspaceCwd && snapshot
+        ? scopeSnapshotToWorkspace(snapshot, lockedWorkspaceCwd)
+        : snapshot,
+    [snapshot, lockedWorkspaceCwd],
+  );
   const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState<TodosView>('kanban');
   const [project, setProject] = useState('');
@@ -117,7 +183,7 @@ export function TodosDialog() {
   const items: FlatTodo[] = useMemo(() => {
     const q = query.trim().toLowerCase();
     const flat: FlatTodo[] = [];
-    for (const group of snapshot?.groups ?? []) {
+    for (const group of scopedSnapshot?.groups ?? []) {
       for (const session of group.sessions) {
         for (const todo of session.todos) {
           if (
@@ -145,7 +211,7 @@ export function TodosDialog() {
       }
     }
     return flat;
-  }, [snapshot, query, tagFilter]);
+  }, [scopedSnapshot, query, tagFilter]);
 
   // Bulk actions may only touch todos currently on screen. `items` applies
   // the search and tag filters, but the render narrows further per view
@@ -164,17 +230,28 @@ export function TodosDialog() {
 
   // Kanban needs the completed column, so the page always loads the full
   // snapshot — relevance is handled by the views, not by the aggregate.
+  // Monotonic sequence: overlapping loads (mount, refresh, post-update
+  // reload, bulk) are all reachable, and whichever GET resolved LAST used
+  // to win — silently reverting a flip the server already accepted. A
+  // response whose sequence is no longer newest is dropped.
+  const loadSeqRef = useRef(0);
   const load = useCallback(async () => {
+    const seq = ++loadSeqRef.current;
     try {
       setError(null);
-      setSnapshot(await actions.listTodos(true));
+      const next = await actions.listTodos(true);
+      if (loadSeqRef.current !== seq) return;
+      setSnapshot(next);
     } catch (err) {
+      if (loadSeqRef.current !== seq) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      // The empty state must be able to tell "nothing loaded yet" apart
-      // from "loaded and there is nothing" — don't flash it while the
-      // first fetch is in flight.
-      setLoaded(true);
+      if (loadSeqRef.current === seq) {
+        // The empty state must be able to tell "nothing loaded yet" apart
+        // from "loaded and there is nothing" — don't flash it while the
+        // first fetch is in flight.
+        setLoaded(true);
+      }
     }
   }, [actions]);
 
@@ -262,8 +339,8 @@ export function TodosDialog() {
   const today = todayIso();
 
   const projects = useMemo(
-    () => (snapshot?.groups ?? []).map((g) => g.project),
-    [snapshot],
+    () => (scopedSnapshot?.groups ?? []).map((g) => g.project),
+    [scopedSnapshot],
   );
 
   const allTags = useMemo(() => {
@@ -271,11 +348,11 @@ export function TodosDialog() {
     for (const item of items) {
       for (const tag of item.tags) tags.add(tag);
     }
-    for (const name of Object.keys(snapshot?.tagDefinitions ?? {})) {
+    for (const name of Object.keys(scopedSnapshot?.tagDefinitions ?? {})) {
       tags.add(name);
     }
     return [...tags].sort();
-  }, [items, snapshot?.tagDefinitions]);
+  }, [items, scopedSnapshot?.tagDefinitions]);
 
   const selectToggle = (on: boolean, onClick: () => void, label: string) => (
     <button
@@ -343,7 +420,7 @@ export function TodosDialog() {
             </span>
           )}
           {todo.tags.map((tag) => {
-            const def = snapshot?.tagDefinitions?.[tag];
+            const def = scopedSnapshot?.tagDefinitions?.[tag];
             return (
               <span
                 key={tag}
@@ -436,15 +513,23 @@ export function TodosDialog() {
             <input
               type="date"
               defaultValue={todo.dueDate ?? ''}
-              onChange={(e) => {
+              // Native date inputs fire change for EVERY intermediate
+              // segment value — typing a year emits 0002-11-15,
+              // 0020-11-15, … before the real one, and each is a
+              // syntactically valid date the daemon will accept. Never
+              // commit from change: hold the draft and commit on blur,
+              // when typing is done. Empty on blur just closes; the ✕
+              // button remains the explicit clear.
+              onBlur={(e) => {
                 const value = e.target.value;
-                // A native date input fires change with '' for every
-                // partial value (segment edits, backspace) — committing
-                // that as null would delete the stored date. Empty is
-                // ignored; the ✕ button is the explicit clear.
-                if (!value) return;
-                void update(todo.key, { dueDate: value });
+                if (value && value !== todo.dueDate) {
+                  void update(todo.key, { dueDate: value });
+                }
                 setDateKey(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur();
+                if (e.key === 'Escape') setDateKey(null);
               }}
             />
             {todo.dueDate && (
@@ -466,7 +551,7 @@ export function TodosDialog() {
           <div className={styles.tagEditor}>
             <div className={styles.tagEditorRow}>
               {todo.tags.map((tag) => {
-                const def = snapshot?.tagDefinitions?.[tag];
+                const def = scopedSnapshot?.tagDefinitions?.[tag];
                 return (
                   <button
                     key={tag}
@@ -489,7 +574,7 @@ export function TodosDialog() {
               })}
             </div>
             <div className={styles.tagEditorRow}>
-              {Object.entries(snapshot?.tagDefinitions ?? {})
+              {Object.entries(scopedSnapshot?.tagDefinitions ?? {})
                 .filter(([name]) => !todo.tags.includes(name))
                 .map(([name, def]) => (
                   <button
@@ -527,9 +612,16 @@ export function TodosDialog() {
                 onClick={() => {
                   const name = newTagName.trim();
                   if (!name) return;
+                  // A definition write repaints every card carrying the
+                  // tag, so only mint one for names that don't exist
+                  // yet — retyping an existing name must not overwrite
+                  // its colour with the editor's current swatch.
+                  const exists = snapshot?.tagDefinitions?.[name] !== undefined;
                   void update(todo.key, {
                     tags: [...new Set([...todo.tags, name])],
-                    tagDefinition: { name, color: newTagColor },
+                    ...(exists
+                      ? {}
+                      : { tagDefinition: { name, color: newTagColor } }),
                   });
                   setNewTagName('');
                 }}
@@ -691,9 +783,17 @@ export function TodosDialog() {
           <input
             type="date"
             className={styles.bulkDate}
-            onChange={(e) => {
+            // Same intermediate-value hazard as the inline editor: commit
+            // on blur, never per-change.
+            onBlur={(e) => {
               const value = e.target.value;
-              if (value) void bulk({ dueDate: value });
+              if (value) {
+                void bulk({ dueDate: value });
+                e.target.value = '';
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur();
             }}
             title={t('todos.setDueDate')}
           />
@@ -710,7 +810,7 @@ export function TodosDialog() {
       {allTags.length > 0 && (
         <div className={styles.tagFilterRow}>
           {allTags.map((tag) => {
-            const def = snapshot?.tagDefinitions?.[tag];
+            const def = scopedSnapshot?.tagDefinitions?.[tag];
             const active = tagFilter === tag;
             return (
               <button
@@ -746,20 +846,22 @@ export function TodosDialog() {
         </div>
       )}
 
-      {snapshot && (
+      {scopedSnapshot && (
         <div className={styles.totals}>
           <span>
-            <ListTodoIcon size={12} /> {snapshot.totals.projects}{' '}
+            <ListTodoIcon size={12} /> {scopedSnapshot.totals.projects}{' '}
             {t('todos.projectsLabel')}
           </span>
           <span>
-            {snapshot.totals.sessions}{' '}
-            {snapshot.totals.sessions === 1
+            {scopedSnapshot.totals.sessions}{' '}
+            {scopedSnapshot.totals.sessions === 1
               ? t('todos.session')
               : t('todos.sessions')}
           </span>
-          <span className={styles.totalOpen}>{snapshot.totals.open}</span>
-          <span className={styles.totalDone}>{snapshot.totals.completed}</span>
+          <span className={styles.totalOpen}>{scopedSnapshot.totals.open}</span>
+          <span className={styles.totalDone}>
+            {scopedSnapshot.totals.completed}
+          </span>
         </div>
       )}
 

@@ -752,9 +752,16 @@ export function registerTodosRoutes(
             typeof tagDefinition.name === 'string' &&
             typeof tagDefinition.color === 'string'
           ) {
-            tagOverlay.definitions[tagDefinition.name] = {
-              color: tagDefinition.color,
-            };
+            // Definitions are mint-once: a definition write repaints every
+            // card carrying the tag, so re-adding an existing name from a
+            // client's colour swatch must not silently overwrite the
+            // colour twelve other cards already show. An explicit
+            // definition-edit API can opt in later.
+            if (tagOverlay.definitions[tagDefinition.name] === undefined) {
+              tagOverlay.definitions[tagDefinition.name] = {
+                color: tagDefinition.color,
+              };
+            }
           }
           if (validatedTags !== undefined) {
             const tagKey = `${sessionId}:${planId}:${todoId}`;

@@ -459,6 +459,45 @@ describe('registerTodosRoutes', () => {
       expect(body.groups[0].sessions[0].todos[0].tags).toContain('urgent');
     });
 
+    it('does not overwrite an existing tag definition on re-add', async () => {
+      const todoDir = path.join(tmpDir, 'todos');
+      fs.mkdirSync(todoDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(todoDir, 'session-abc.json'),
+        JSON.stringify({
+          planId: 'plan-1',
+          todos: [{ id: '1', content: 'Task', status: 'pending' }],
+          sessionId: 'session-abc',
+        }),
+      );
+      fs.writeFileSync(
+        path.join(todoDir, 'todo-tags.json'),
+        JSON.stringify({
+          definitions: { urgent: { color: '#ff0000' } },
+          assignments: {},
+        }),
+      );
+      const route = app.routes['POST /todos/update'];
+      await route.handler(
+        {
+          body: {
+            sessionId: 'session-abc',
+            todoId: '1',
+            tags: ['urgent'],
+            tagDefinition: { name: 'urgent', color: '#00ff00' },
+          },
+        },
+        res,
+      );
+      expect(res.statusCode).toBe(200);
+      // Definitions are mint-once: re-adding an existing name with a
+      // different colour must not repaint every card carrying the tag.
+      const overlay = JSON.parse(
+        fs.readFileSync(path.join(todoDir, 'todo-tags.json'), 'utf-8'),
+      );
+      expect(overlay.definitions.urgent.color).toBe('#ff0000');
+    });
+
     it('serializes concurrent status flips through the write lock', async () => {
       const todoDir = path.join(tmpDir, 'todos');
       fs.mkdirSync(todoDir, { recursive: true });
