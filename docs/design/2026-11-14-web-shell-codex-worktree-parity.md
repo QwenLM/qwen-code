@@ -4,9 +4,10 @@
 
 ## Status and scope
 
-Proposed. Full parity with Codex managed worktrees for Web Shell sessions,
-delivered in ordered phases (P1–P7). Each phase is independently shippable;
-the end state matches the Codex reference behavior below. Maintainer-authored
+P1–P5 implemented (this PR); P6–P7 planned as follow-up. Full parity with
+Codex managed worktrees for Web Shell sessions, delivered in ordered phases
+(P1–P7). Each phase is independently shippable; the end state matches the
+Codex reference behavior below. Maintainer-authored
 core changes (the detached-HEAD refactor in P3) are exempt from the external
 two-tier gate but still follow the common design and self-audit workflow.
 
@@ -245,7 +246,7 @@ deletes oldest-first beyond `worktree.maxRetained`, snapshotting each.
 
 ## Phased implementation
 
-### P1 — Default worktree + settings switch
+### P1 — Default worktree + settings switch — implemented
 
 - Schema: add `worktree.defaultForNewSessions` (D2); serve it to Web Shell.
 - Client: initialize/apply the default intent per D1; chip shows worktree
@@ -261,7 +262,7 @@ deletes oldest-first beyond `worktree.maxRetained`, snapshotting each.
   `worktree: {}` on first prompt; with `worktree.defaultForNewSessions: false`
   it sends no worktree param; explicit selections behave as today.
 
-### P2 — Dirty carry-over for session worktrees
+### P2 — Dirty carry-over for session worktrees — implemented
 
 - Core: extract `captureDirtyState` / `applyDirtyState` helpers from
   `setupWorktrees` (capture-once semantics preserved there); add

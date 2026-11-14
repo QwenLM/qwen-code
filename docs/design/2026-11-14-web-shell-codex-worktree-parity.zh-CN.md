@@ -4,8 +4,9 @@
 
 ## 状态与范围
 
-提案中。Web Shell 会话完整对齐 Codex 托管 worktree，按有序阶段（P1–P7）交付。
-每个阶段可独立发布；终态与下文 Codex 参考行为一致。P3 的 detached-HEAD
+P1–P5 已实现（本 PR）；P6–P7 计划后续。Web Shell 会话完整对齐 Codex 托管
+worktree，按有序阶段（P1–P7）交付。每个阶段可独立发布；终态与下文 Codex
+参考行为一致。P3 的 detached-HEAD
 重构属于 maintainer 发起的核心改动，豁免外部 PR 两级门禁，但仍遵循通用设计
 与自审流程。
 
@@ -209,7 +210,7 @@ HEAD，或在记录的分支上），把快照解压覆盖，翻回 sidecar。�
 
 ## 分阶段实现
 
-### P1 — 缺省 worktree + settings 开关
+### P1 — 缺省 worktree + settings 开关 — 已实现
 
 - Schema：新增 `worktree.defaultForNewSessions`（D2）；向 Web Shell 暴露。
 - 客户端：按 D1 初始化/施加缺省意图；发送前 chip 显示 worktree 模式；现有
@@ -223,7 +224,7 @@ HEAD，或在记录的分支上），把快照解压覆盖，翻回 sidecar。�
   `worktree.defaultForNewSessions: false` 时不带 worktree 参数；显式选择
   行为与今天一致。
 
-### P2 — 会话 worktree 的 dirty 携带
+### P2 — 会话 worktree 的 dirty 携带 — 已实现
 
 - Core：从 `setupWorktrees` 抽出 `captureDirtyState` / `applyDirtyState`
   helper（那里保留 capture-once 语义）；`createUserWorktree` 增加
