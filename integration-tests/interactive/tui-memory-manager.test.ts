@@ -31,8 +31,13 @@ if (override) assert(path.isAbsolute(command.bin));
 const profile = override
   ? `explicit-${renderer}`
   : `${command.bin}-${renderer}`;
-const outputRoot = process.env['QWEN_TUI_ACCEPTANCE_OUT'] ?? '';
-assert(outputRoot && path.isAbsolute(outputRoot));
+// Every lane that collects `interactive/` reaches this module, and only the
+// tui-parity legs export QWEN_TUI_ACCEPTANCE_OUT. Fall back to a repo-relative
+// directory like the sibling suites do, so an unset variable is not a
+// collection-time failure that reddens the whole lane.
+const outputRoot =
+  process.env['QWEN_TUI_ACCEPTANCE_OUT'] ??
+  path.join(root, '.qwen/e2e-tests/tui-memory-manager');
 const names = ['OWNED-CONTEXT-A.md', 'OWNED-CONTEXT-B.md'];
 const editMarker = '\nOWNED_MEMORY_EDITOR_PROOF\n';
 const toggleKeys = [
