@@ -53,6 +53,12 @@ import {
 } from '../customization';
 import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
+import {
+  isShellCompletionAckRow,
+  isTurnStartMessage,
+  shellAckRowFromMessage,
+  type ShellAckRow,
+} from '../utils/shellCompletionAck';
 import { formatTurnDuration } from '../utils/turnDuration';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
@@ -780,20 +786,88 @@ function isFinalContentCandidate(
   );
 }
 
+function isBackgroundTurnMarker(item: DisplayItem): boolean {
+  return (
+    item.type === 'message' &&
+    item.message.role === 'system' &&
+    item.message.source === 'background_notification_turn_started'
+  );
+}
+
+/**
+ * The ack rule itself lives in utils/shellCompletionAck.ts so the /copy
+ * path applies the same classification. This wrapper projects the turn's
+ * display rows into the rule's row view: message rows keep their fields,
+ * parallel-agent groups count as execution work, and turn chrome
+ * (turn_outputs cards and turn_collapse rows) is transparent to the rule.
+ *
+ * A reply is folded away from the turn's final answer only on positive
+ * signals: it is the daemon-tagged reply to a background shell completion
+ * (or the raw result notification itself), the turn already produced a
+ * main answer before that specific marker, only thoughts, markers, daemon
+ * bookkeeping rows, and turn chrome sit between the marker and the reply,
+ * and nothing but thoughts, markers, task-completed bookkeeping, turn
+ * chrome, and a reply the rule itself folds follows it. A reply to a
+ * failed or cancelled task, an untagged reply, or one followed by work or
+ * user steering stays the turn's final answer.
+ */
+// Shared projections for non-message display rows: the rule reads only
+// isWorkStep (parallel-agent groups) and isTurnChrome (turn chrome) from
+// them, so three constants cover every non-message item type.
+const inertAckRow: ShellAckRow = {
+  role: 'inert',
+  hasContent: false,
+  isWorkStep: false,
+  isAgentReply: false,
+  isCompletionRow: false,
+};
+const workAckRow: ShellAckRow = { ...inertAckRow, isWorkStep: true };
+const chromeAckRow: ShellAckRow = { ...inertAckRow, isTurnChrome: true };
+
+function isShellCompletionAckItem(
+  items: readonly DisplayItem[],
+  start: number,
+  end: number,
+  index: number,
+): boolean {
+  const rows: ShellAckRow[] = [];
+  for (let i = start + 1; i <= end; i++) {
+    const item = items[i]!;
+    rows.push(
+      item.type === 'message'
+        ? shellAckRowFromMessage(item.message)
+        : item.type === 'parallel_agents'
+          ? workAckRow
+          : item.type === 'turn_outputs' || item.type === 'turn_collapse'
+            ? chromeAckRow
+            : inertAckRow,
+    );
+  }
+  return isShellCompletionAckRow(
+    rows,
+    index - (start + 1),
+    -1,
+    rows.length - 1,
+  );
+}
+
+/**
+ * The last final-content row of the turn, or -1. `skipShellAcks` skips
+ * rows the ack rule folds so the main answer stands; the
+ * turnAwaitsBackgroundSummary gate passes false because the tagged reply
+ * itself is the signal that the summary has already landed.
+ */
 function findFinalAnswerIndex(
   items: readonly DisplayItem[],
   start: number,
   end: number,
   includeBackgroundNotifications = true,
+  skipShellAcks = true,
 ): number {
   let hasLaterWork = false;
   for (let i = end; i > start; i--) {
     const item = items[i]!;
-    if (
-      item.type === 'message' &&
-      item.message.role === 'system' &&
-      item.message.source === 'background_notification_turn_started'
-    ) {
+    if (isBackgroundTurnMarker(item)) {
       hasLaterWork = false;
     } else if (isExecutionWorkStep(item)) {
       hasLaterWork = true;
@@ -801,10 +875,51 @@ function findFinalAnswerIndex(
       !hasLaterWork &&
       isFinalContentCandidate(item, includeBackgroundNotifications)
     ) {
+      if (skipShellAcks && isShellCompletionAckItem(items, start, end, i)) {
+        continue;
+      }
       return i;
     }
   }
   return -1;
+}
+
+/**
+ * A collapsed turn must show its report, not a short closer: a turn that
+ * produced a substantial answer and then a one-line completion note
+ * (a guard or todo-stop line) would otherwise fold the report and show
+ * the note. The final candidate stands only if it is itself a
+ * deliverable; otherwise the nearest preceding deliverable in the same
+ * turn stands instead. Fail-toward-showing-more: with no preceding
+ * deliverable the original candidate stands, so nothing is hidden.
+ * The shell-ack fold already ran inside findFinalAnswerIndex; the two
+ * rules compose, because a well-formed ack never carries report text.
+ */
+const DELIVERABLE_MIN_LENGTH = 1000;
+
+function isDeliverableAnswer(item: DisplayItem): boolean {
+  if (item.type !== 'message' || item.message.role !== 'assistant') {
+    return false;
+  }
+  if (isAgentReply(item)) return false;
+  const content = item.message.content;
+  return (
+    typeof content === 'string' && content.length >= DELIVERABLE_MIN_LENGTH
+  );
+}
+
+function resolveDeliverableAnswerIdx(
+  items: readonly DisplayItem[],
+  start: number,
+  candidateIdx: number,
+): number {
+  if (candidateIdx < 0 || isDeliverableAnswer(items[candidateIdx]!)) {
+    return candidateIdx;
+  }
+  for (let i = candidateIdx - 1; i > start; i--) {
+    if (isDeliverableAnswer(items[i]!)) return i;
+  }
+  return candidateIdx;
 }
 
 function collectFinalAssistantTurnIds(
@@ -1080,11 +1195,10 @@ function isScheduledTaskMessage(message: {
   );
 }
 
-// Collapse and timeline turns start at chat prompts and shell prompts; new-chat
-// auto-follow still uses getLastUserMessageId so shell prompts do not jump.
-function isTurnStartMessage(message: Message): boolean {
-  return message.role === 'user' || message.role === 'user_shell';
-}
+// Collapse and timeline turns start at chat prompts and shell prompts;
+// new-chat auto-follow still uses getLastUserMessageId so shell prompts do
+// not jump. The predicate itself lives in utils/shellCompletionAck.ts,
+// shared with the /copy span bound.
 
 // Find the turn head (user message id) owning the message referenced by a
 // `msg:` row key, when the message is still present.
@@ -2009,9 +2123,12 @@ function turnAwaitsBackgroundSummary(
       return false;
     }
   }
+  // The gate counts the tagged ack as the landed summary, so the ack fold
+  // must not hide it here or a completed shell turn would never collapse.
   return (
     waitForOrderedNarration &&
-    findFinalAnswerIndex(items, start, end, false) < state.lastNotificationIndex
+    findFinalAnswerIndex(items, start, end, false, false) <
+      state.lastNotificationIndex
   );
 }
 
@@ -2093,7 +2210,8 @@ export function applyTurnCollapse(
       pendingApprovalCallId,
     );
 
-    const answerIdx = findFinalAnswerIndex(items, start, end);
+    const rawAnswerIdx = findFinalAnswerIndex(items, start, end);
+    const answerIdx = resolveDeliverableAnswerIdx(items, start, rawAnswerIdx);
     let answerStartIdx = answerIdx;
     // A passive completion can split one streamed answer into several rows.
     // Keep those segments, but stop at work or an automatic execution marker.

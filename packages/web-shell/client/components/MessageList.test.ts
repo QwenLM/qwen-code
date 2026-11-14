@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Message, TurnCollapseHead } from '../adapters/types';
+import { transcriptBlocksToDaemonMessages } from '../adapters/transcriptToMessages';
 import {
   attachTurnOutputs,
   applyTurnCollapse,
@@ -200,6 +201,57 @@ function makeAssistantMessage(
   id: string,
 ): Extract<Message, { role: 'assistant' }> {
   return { id, role: 'assistant', content: 'response' };
+}
+
+function makeBackgroundTurnMarker(
+  id: string,
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer' = 'shell',
+  taskStatus?: string,
+): Extract<Message, { role: 'system' }> {
+  return {
+    id,
+    role: 'system',
+    variant: 'info',
+    source: 'background_notification_turn_started',
+    content: kind,
+    backgroundTurn: {
+      turnId: 'auto-task',
+      taskId: 'task',
+      kind,
+      startedAt: 100,
+    },
+    ...(taskStatus !== undefined
+      ? {
+          data: {
+            backgroundTask: {
+              kind: 'shell',
+              taskId: 'task',
+              status: taskStatus,
+            },
+          },
+        }
+      : {}),
+  };
+}
+
+function makeBackgroundNotificationRow(
+  id: string,
+  content: string,
+): Extract<Message, { role: 'system' }> {
+  return {
+    id,
+    role: 'system',
+    variant: 'info',
+    source: 'background_notification',
+    content,
+  };
+}
+
+function makeAckMessage(id: string): Extract<Message, { role: 'assistant' }> {
+  return {
+    ...makeAssistantMessage(id),
+    source: 'background_notification_response',
+  };
 }
 
 function makeThoughtMessage(id: string): Message {
@@ -3041,6 +3093,733 @@ it('retains a complete main reply when a later background tool-only execution en
   ).toBe(false);
 });
 
+it('retains the main reply when a background task ack follows the notification marker', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    {
+      id: 'marker',
+      role: 'system',
+      variant: 'info',
+      source: 'background_notification_turn_started',
+      content: 'shell',
+      backgroundTurn: {
+        turnId: 'auto-task',
+        taskId: 'task',
+        kind: 'shell',
+        startedAt: 100,
+      },
+    },
+    makeAckMessage('ack'),
+  ];
+  const rows = collapseItems(groupParallelAgents(messages));
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'report',
+    ),
+  ).toBe(true);
+  expect(
+    rows.some((item) => item.type === 'message' && item.message.id === 'ack'),
+  ).toBe(false);
+});
+
+it('folds a restored shell ack whose tag the adapter re-derives from the turn envelope', () => {
+  // Restored transcript shape: the persisted record keeps the turn's
+  // `backgroundTurn` envelope but no `_meta.source` on the ack, so the
+  // adapter must re-derive the tag or the fold would lose the report.
+  const turn = {
+    turnId: 'auto-task',
+    taskId: 'task',
+    kind: 'shell' as const,
+    sourceTurnId: 'u1',
+    startedAt: 100,
+  };
+  const messages = transcriptBlocksToDaemonMessages([
+    {
+      id: 'u1',
+      kind: 'user',
+      text: 'run the check',
+      streaming: false,
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    },
+    {
+      id: 'report',
+      kind: 'assistant',
+      text: 'All checks passed.',
+      streaming: false,
+      clientReceivedAt: 2,
+      createdAt: 2,
+      updatedAt: 2,
+    },
+    {
+      id: 'notification',
+      kind: 'user',
+      text: '<task-notification>done</task-notification>',
+      streaming: false,
+      clientReceivedAt: 3,
+      createdAt: 3,
+      updatedAt: 3,
+      meta: {
+        source: 'background_notification',
+        backgroundTask: { kind: 'shell', taskId: 'task', status: 'completed' },
+      },
+      backgroundTurn: turn,
+    },
+    {
+      id: 'ack',
+      kind: 'assistant',
+      text: 'Background task finished.',
+      streaming: false,
+      clientReceivedAt: 4,
+      createdAt: 4,
+      updatedAt: 4,
+      backgroundTurn: turn,
+    },
+  ]);
+  const rows = collapseItems(groupParallelAgents(messages));
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'report',
+    ),
+  ).toBe(true);
+  expect(
+    rows.some((item) => item.type === 'message' && item.message.id === 'ack'),
+  ).toBe(false);
+});
+
+it('keeps the last ordinary reply final when no background marker is present', () => {
+  const rows = collapseItems(
+    groupParallelAgents([
+      makeUserMessage('u1'),
+      makeAssistantMessage('mid'),
+      makeAssistantMessage('last'),
+    ]),
+  );
+  expect(
+    rows.some((item) => item.type === 'message' && item.message.id === 'last'),
+  ).toBe(true);
+  expect(
+    rows.some((item) => item.type === 'message' && item.message.id === 'mid'),
+  ).toBe(false);
+});
+
+it('keeps the post-marker summary final for an agent completion', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeAssistantMessage('launch-ack'),
+    {
+      id: 'marker',
+      role: 'system',
+      variant: 'info',
+      source: 'background_notification_turn_started',
+      content: 'agent',
+      backgroundTurn: {
+        turnId: 'auto-task',
+        taskId: 'task',
+        kind: 'agent',
+        sourceTurnId: 'u1',
+        startedAt: 100,
+      },
+    },
+    makeThinkingMessage('bg-thinking'),
+    makeAssistantMessage('summary'),
+  ];
+  const rows = collapseItems(groupParallelAgents(messages));
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'summary',
+    ),
+  ).toBe(true);
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'launch-ack',
+    ),
+  ).toBe(false);
+});
+
+it('keeps the reply final when further work follows the shell marker', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    {
+      id: 'marker',
+      role: 'system',
+      variant: 'info',
+      source: 'background_notification_turn_started',
+      content: 'shell',
+      backgroundTurn: {
+        turnId: 'auto-task',
+        taskId: 'task',
+        kind: 'shell',
+        startedAt: 100,
+      },
+    },
+    makeAgentToolGroup('more-work'),
+    makeAssistantMessage('reply'),
+  ];
+  const rows = collapseItems(groupParallelAgents(messages));
+  expect(
+    rows.some((item) => item.type === 'message' && item.message.id === 'reply'),
+  ).toBe(true);
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'report',
+    ),
+  ).toBe(false);
+});
+
+it('keeps the reply final when the user steers after the shell marker', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    {
+      id: 'marker',
+      role: 'system',
+      variant: 'info',
+      source: 'background_notification_turn_started',
+      content: 'shell',
+      backgroundTurn: {
+        turnId: 'auto-task',
+        taskId: 'task',
+        kind: 'shell',
+        startedAt: 100,
+      },
+    },
+    {
+      id: 'steering',
+      role: 'system',
+      source: 'mid_turn_message_injected',
+      variant: 'info',
+      content: 'Verify',
+    },
+    makeAssistantMessage('reply'),
+  ];
+  const rows = collapseItems(groupParallelAgents(messages));
+  expect(
+    rows.some((item) => item.type === 'message' && item.message.id === 'reply'),
+  ).toBe(true);
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'report',
+    ),
+  ).toBe(false);
+});
+
+it('keeps the reply final when the shell task it answers failed', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeAssistantMessage('started'),
+    makeBackgroundTurnMarker('marker', 'shell', 'failed'),
+    makeThinkingMessage('bg-thinking'),
+    {
+      ...makeAckMessage('analysis'),
+      content:
+        'The build failed. 14 tests errored in packages/core; ' +
+        'the first failure is a missing fixture.',
+    },
+  ];
+  const rows = collapseItems(groupParallelAgents(messages));
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'analysis',
+    ),
+  ).toBe(true);
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'started',
+    ),
+  ).toBe(false);
+});
+
+it('keeps the main reply final when only the raw notification follows the marker', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    makeBackgroundTurnMarker('marker'),
+    makeBackgroundNotificationRow(
+      'notification',
+      '<task-notification>Background shell finished.</task-notification>',
+    ),
+  ];
+  // After the summary grace window the turn may collapse; the raw
+  // notification row must be demoted so the main reply stays final.
+  const rows = collapseItems(groupParallelAgents(messages), {
+    backgroundSummaryGraceActive: false,
+  });
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'report',
+    ),
+  ).toBe(true);
+});
+
+it('folds the tagged ack past a task-completed status row after the marker', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    makeBackgroundTurnMarker('marker'),
+    {
+      id: 'task-completed',
+      role: 'system',
+      variant: 'info',
+      source: 'background_task_completed',
+      content: 'Background shell bg_1234abcd finished',
+      data: {
+        kind: 'shell',
+        taskId: 'bg_1234abcd',
+        status: 'completed',
+      },
+    },
+    makeAckMessage('ack'),
+  ];
+  const rows = collapseItems(groupParallelAgents(messages));
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'report',
+    ),
+  ).toBe(true);
+  expect(
+    rows.some((item) => item.type === 'message' && item.message.id === 'ack'),
+  ).toBe(false);
+});
+
+it('keeps the tagged ack final when the user steers after it', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    makeBackgroundTurnMarker('marker'),
+    makeAckMessage('ack'),
+    {
+      id: 'steering',
+      role: 'system',
+      source: 'mid_turn_message_injected',
+      variant: 'info',
+      content: 'Verify',
+    },
+  ];
+  const rows = collapseItems(groupParallelAgents(messages));
+  expect(
+    rows.some((item) => item.type === 'message' && item.message.id === 'ack'),
+  ).toBe(true);
+});
+
+it.each(['agent', 'monitor', 'shell', 'workflow', 'peer'] as const)(
+  'folds only the shell ack after a %s completion marker',
+  (kind) => {
+    const messages: Message[] = [
+      makeUserMessage('u1'),
+      makeAssistantMessage('report'),
+      makeBackgroundTurnMarker('marker', kind),
+      makeAckMessage('ack'),
+    ];
+    const rows = collapseItems(groupParallelAgents(messages));
+    const has = (id: string) =>
+      rows.some((item) => item.type === 'message' && item.message.id === id);
+    if (kind === 'shell') {
+      expect(has('report')).toBe(true);
+      expect(has('ack')).toBe(false);
+    } else {
+      expect(has('ack')).toBe(true);
+      expect(has('report')).toBe(false);
+    }
+  },
+);
+
+it('folds the ack after the second marker when the turn answered before it', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeBackgroundTurnMarker('marker-1'),
+    makeAssistantMessage('report'),
+    makeBackgroundTurnMarker('marker-2'),
+    makeAckMessage('ack'),
+  ];
+  const rows = collapseItems(groupParallelAgents(messages));
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'report',
+    ),
+  ).toBe(true);
+  expect(
+    rows.some((item) => item.type === 'message' && item.message.id === 'ack'),
+  ).toBe(false);
+});
+
+it('folds a tagged ack the model writes after a thinking block', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    makeBackgroundTurnMarker('marker'),
+    makeThinkingMessage('bg-thinking'),
+    makeAckMessage('ack'),
+  ];
+  const rows = collapseItems(groupParallelAgents(messages));
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'report',
+    ),
+  ).toBe(true);
+  expect(
+    rows.some((item) => item.type === 'message' && item.message.id === 'ack'),
+  ).toBe(false);
+});
+
+it('folds the tagged ack after the later shell marker, not the earlier agent one', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    makeBackgroundTurnMarker('marker-agent', 'agent'),
+    makeBackgroundTurnMarker('marker-shell', 'shell'),
+    makeAckMessage('ack'),
+  ];
+  const rows = collapseItems(groupParallelAgents(messages));
+  expect(
+    rows.some(
+      (item) => item.type === 'message' && item.message.id === 'report',
+    ),
+  ).toBe(true);
+  expect(
+    rows.some((item) => item.type === 'message' && item.message.id === 'ack'),
+  ).toBe(false);
+});
+
+it('shows the main reply, not the tagged ack, in the session timeline detail', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    {
+      ...makeAssistantMessage('report'),
+      content: 'The deliverable report.',
+    },
+    makeBackgroundTurnMarker('marker'),
+    {
+      ...makeAckMessage('ack'),
+      content: 'Done.',
+    },
+  ];
+  const entries = getSessionTimelineEntries(messages);
+  expect(entries).toHaveLength(1);
+  expect(entries[0].detail).toContain('The deliverable report.');
+  expect(entries[0].detail).not.toContain('Done.');
+});
+
+it('keeps the main reply final when a turn outputs card follows the ack', () => {
+  const changes: TurnOutputFileChange[] = [
+    {
+      path: 'src/app.ts',
+      status: 'modified',
+      toolCallId: 'call-a1',
+      isArtifact: false,
+      diffs: [{ oldText: 'one\n', newText: 'two\n' }],
+    },
+  ];
+  const items = attachTurnOutputs(
+    groupParallelAgents([
+      makeUserMessage('u1'),
+      makeAssistantMessage('report'),
+      makeBackgroundTurnMarker('marker'),
+      makeAckMessage('ack'),
+    ]),
+    false,
+    new Map([['u1', changes]]),
+  );
+  const rows = collapseItems(items);
+  expect(rowIds(rows)).toContain('report');
+  expect(rowIds(rows)).not.toContain('ack');
+});
+
+it('collapses a completed shell turn when the tagged ack follows the raw notification', () => {
+  const items = groupParallelAgents([
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    makeBackgroundTurnMarker('marker'),
+    makeBackgroundNotificationRow(
+      'notification',
+      '<task-notification>Background shell finished.</task-notification>',
+    ),
+    makeAckMessage('ack'),
+  ]);
+  const rows = collapseItems(items);
+  // The tagged ack counts as the landed summary, so the head collapses
+  // with a frozen span, not a live one.
+  expect(collapseOf(rows, 'u1')).toMatchObject({ collapsed: true });
+  expect(collapseOf(rows, 'u1')?.liveStartedAt).toBeUndefined();
+  expect(rowIds(rows)).toContain('report');
+  expect(rowIds(rows)).not.toContain('ack');
+});
+
+it('keeps the main reply, not the raw notification, final when the ack follows it', () => {
+  const items = groupParallelAgents([
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    makeBackgroundTurnMarker('marker'),
+    makeBackgroundNotificationRow(
+      'notification',
+      '<task-notification>Background shell finished.</task-notification>',
+    ),
+    makeAckMessage('ack'),
+  ]);
+  const rows = collapseItems(items, { backgroundSummaryGraceActive: false });
+  expect(rowIds(rows)).toContain('report');
+  expect(rowIds(rows)).not.toContain('notification');
+  expect(rowIds(rows)).not.toContain('ack');
+});
+
+it('does not let the raw notification license the ack fold', () => {
+  const items = groupParallelAgents([
+    makeUserMessage('u1'),
+    makeBackgroundNotificationRow(
+      'notification',
+      '<task-notification>Background shell finished.</task-notification>',
+    ),
+    makeBackgroundTurnMarker('marker'),
+    makeAckMessage('ack'),
+  ]);
+  const rows = collapseItems(items, { backgroundSummaryGraceActive: false });
+  expect(rowIds(rows)).toContain('ack');
+  expect(rowIds(rows)).not.toContain('notification');
+});
+
+it('folds both acks of consecutive background completions', () => {
+  const taskCompleted = (id: string): Message => ({
+    id,
+    role: 'system',
+    variant: 'info',
+    source: 'background_task_completed',
+    content: 'Background shell finished',
+    data: { kind: 'shell', taskId: id, status: 'completed' },
+  });
+  const items = groupParallelAgents([
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    makeBackgroundTurnMarker('marker-1'),
+    taskCompleted('task-1'),
+    makeAckMessage('ack-1'),
+    makeBackgroundTurnMarker('marker-2'),
+    taskCompleted('task-2'),
+    makeAckMessage('ack-2'),
+  ]);
+  const rows = collapseItems(items);
+  expect(rowIds(rows)).toContain('report');
+  expect(rowIds(rows)).not.toContain('ack-1');
+  expect(rowIds(rows)).not.toContain('ack-2');
+});
+
+it('keeps the tagged ack final when the turn answered nothing before the marker', () => {
+  const items = groupParallelAgents([
+    makeUserMessage('u1'),
+    makeBackgroundTurnMarker('marker'),
+    makeAckMessage('ack'),
+  ]);
+  const rows = collapseItems(items, { backgroundSummaryGraceActive: false });
+  expect(rowIds(rows)).toContain('ack');
+});
+
+it('folds the tagged ack when the marker carries a completed task status', () => {
+  const items = groupParallelAgents([
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    makeBackgroundTurnMarker('marker', 'shell', 'completed'),
+    makeAckMessage('ack'),
+  ]);
+  const rows = collapseItems(items, { backgroundSummaryGraceActive: false });
+  expect(rowIds(rows)).toContain('report');
+  expect(rowIds(rows)).not.toContain('ack');
+});
+
+it('keeps the tagged ack final when work follows the main answer', () => {
+  // Work between the main answer and the marker disqualifies the answer as
+  // the prior one, so the ack is not bookkeeping and stands as the final
+  // answer; the turn collapses onto it. Exact shape: if the work projection
+  // dies, the ack folds, no final answer remains and the turn stays open
+  // (report reappears).
+  const items = groupParallelAgents([
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    makeMultiToolGroup('work'),
+    makeBackgroundTurnMarker('marker'),
+    makeAckMessage('ack'),
+  ]);
+  const rows = collapseItems(items, { backgroundSummaryGraceActive: false });
+  expect(rowIds(rows)).toEqual(['u1', 'tc-u1', 'ack']);
+});
+
+it('keeps the tagged ack final when a parallel-agent group follows the main answer', () => {
+  // Same disqualification through the parallel_agents projection (the
+  // grouped item counts as execution work). If that projection dies, the
+  // ack folds, no final answer remains and the turn stays open, which
+  // re-exposes the report.
+  const items = groupParallelAgents([
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    makeAgentToolGroup('a1'),
+    makeAgentToolGroup('a2'),
+    makeBackgroundTurnMarker('marker'),
+    makeAckMessage('ack'),
+  ]);
+  const rows = collapseItems(items, { backgroundSummaryGraceActive: false });
+  expect(rowIds(rows)).toContain('ack');
+  expect(rowIds(rows)).not.toContain('report');
+});
+
+it('shows the tagged ack, not the raw notification, in the timeline when no answer precedes the marker', () => {
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeBackgroundNotificationRow(
+      'notification',
+      '<task-notification>Background shell finished.</task-notification>',
+    ),
+    makeBackgroundTurnMarker('marker'),
+    { ...makeAckMessage('ack'), content: 'Done.' },
+  ];
+  const entries = getSessionTimelineEntries(messages);
+  expect(entries).toHaveLength(1);
+  expect(entries[0].detail).toContain('Done.');
+  expect(entries[0].detail).not.toContain('<task-notification>');
+});
+
+describe('turn-collapse deliverable final answer', () => {
+  // A collapsed turn must show its report, not a short closer that
+  // follows a substantial answer (a guard or todo-stop line). The final
+  // candidate stands only if it is a deliverable: an ordinary assistant
+  // reply (never an agent reply) with at least 1000 characters. A
+  // Markdown heading is not required: reports often open with a plain
+  // summary line or a pipe table. Otherwise the nearest preceding
+  // deliverable in the turn stands; with none, the original candidate
+  // stands (fail-toward-showing-more, so nothing extra is hidden).
+
+  const report = '## RLS-26042 — shard-router v29\n' + 'x'.repeat(1200);
+
+  it('shows the report, not the short closer that follows it', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('report'), content: report },
+      makeAssistantMessage('closer'),
+    ]);
+    const rows = collapseItems(items);
+    expect(collapseOf(rows, 'u1')).toMatchObject({ collapsed: true });
+    expect(rowIds(rows)).toContain('report');
+    expect(rowIds(rows)).not.toContain('closer');
+  });
+
+  it('shows the long log, not the short closer, when the log carries no heading', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('log'), content: 'y'.repeat(1500) },
+      makeAssistantMessage('done'),
+    ]);
+    const rows = collapseItems(items);
+    expect(collapseOf(rows, 'u1')).toMatchObject({ collapsed: true });
+    expect(rowIds(rows)).toContain('log');
+    expect(rowIds(rows)).not.toContain('done');
+  });
+
+  it('keeps a heading-less long final even when a headed plan precedes it', () => {
+    // Regression: a report that opens with a plain line (no Markdown
+    // heading) used to be folded in favor of an earlier headed plan,
+    // hiding the actual result.
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      {
+        ...makeAssistantMessage('plan'),
+        content: '## Plan\n' + 'p'.repeat(3200),
+      },
+      {
+        ...makeAssistantMessage('final'),
+        content: 'Done. Summary:\n' + 'f'.repeat(1300),
+      },
+    ]);
+    const rows = collapseItems(items);
+    expect(collapseOf(rows, 'u1')).toMatchObject({ collapsed: true });
+    expect(rowIds(rows)).toContain('final');
+    expect(rowIds(rows)).not.toContain('plan');
+  });
+
+  it('keeps the deliverable final when a plain interim note precedes it', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeAssistantMessage('mid'),
+      { ...makeAssistantMessage('report'), content: report },
+    ]);
+    const rows = collapseItems(items);
+    expect(rowIds(rows)).toContain('report');
+    expect(rowIds(rows)).not.toContain('mid');
+  });
+
+  it('keeps the last deliverable when several stand in the turn', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      {
+        ...makeAssistantMessage('first'),
+        content: '## one\n' + 'a'.repeat(1100),
+      },
+      makeAssistantMessage('mid'),
+      {
+        ...makeAssistantMessage('second'),
+        content: '## two\n' + 'b'.repeat(1100),
+      },
+    ]);
+    const rows = collapseItems(items);
+    expect(rowIds(rows)).toContain('second');
+    expect(rowIds(rows)).not.toContain('first');
+  });
+
+  it('keeps the short final line when the only headed reply is below the length floor', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('mini'), content: '## mini\nshort' },
+      makeAssistantMessage('closer'),
+    ]);
+    const rows = collapseItems(items);
+    expect(rowIds(rows)).toContain('closer');
+    expect(rowIds(rows)).not.toContain('mini');
+  });
+
+  it('folds the tagged shell ack, not the report, when both stand in the turn', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('report'), content: report },
+      makeBackgroundTurnMarker('marker'),
+      makeAckMessage('ack'),
+    ]);
+    const rows = collapseItems(items, { backgroundSummaryGraceActive: false });
+    expect(rowIds(rows)).toContain('report');
+    expect(rowIds(rows)).not.toContain('ack');
+  });
+
+  it('never treats an agent reply as the deliverable', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeThinkingMessage('thought'),
+      {
+        ...makeAssistantMessage('agent'),
+        content: report,
+        agentMessage: { kind: 'agent_message' },
+      },
+      makeAssistantMessage('closer'),
+    ]);
+    const rows = collapseItems(items);
+    expect(collapseOf(rows, 'u1')).toMatchObject({ collapsed: true });
+    expect(rowIds(rows)).toContain('agent');
+    expect(rowIds(rows)).toContain('closer');
+  });
+
+  it('accepts a deliverable at exactly the length floor', () => {
+    // '## exact\n' is 9 characters, so 991 fillers make exactly 1000.
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      {
+        ...makeAssistantMessage('exact'),
+        content: '## exact\n' + 'z'.repeat(991),
+      },
+      makeAssistantMessage('closer'),
+    ]);
+    const rows = collapseItems(items);
+    expect(rowIds(rows)).toContain('exact');
+    expect(rowIds(rows)).not.toContain('closer');
+  });
+});
+
 describe('background completion markers', () => {
   it.each(['agent', 'shell', 'peer'] as const)(
     'folds a %s result marker even when it is the only step',
@@ -3143,6 +3922,10 @@ describe('background completion markers', () => {
       );
       expect(collapseOf(collapsed, 'u1')?.collapsed).toBe(true);
       expect(rowIds(collapsed)).not.toContain(markers[0]!.id);
+      // The untagged post-marker reply is the turn's deliverable; the
+      // pre-marker answer must stay hidden behind the fold.
+      expect(rowIds(collapsed)).toContain('summary');
+      expect(rowIds(collapsed)).not.toContain('other-answer');
     },
   );
 
