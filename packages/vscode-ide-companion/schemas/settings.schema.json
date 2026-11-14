@@ -509,6 +509,11 @@
           "type": "number",
           "default": 0
         },
+        "startExpanded": {
+          "description": "Start in expanded detail mode: thinking blocks and tool output are shown inline from the first turn. Takes effect on the next launch; Ctrl+O / Alt+T still toggles it afterwards. This also shows tool output inlined when ui.showToolCallDetails is false, because it seeds the same app-wide flag Ctrl+O uses. TUI only — the web shell is unaffected.",
+          "type": "boolean",
+          "default": false
+        },
         "compactMode": {
           "description": "Retired: compact view is always on in both the TUI and the web shell. The key is kept so existing settings files do not warn.",
           "type": "boolean",

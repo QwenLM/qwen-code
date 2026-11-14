@@ -356,7 +356,10 @@ function OpenTuiEntryApp({
   // every committed thought open. It lives here rather than in the transcript
   // so the keystroke still lands while a dialog or a confirmation owns the
   // screen, the way ink's app-level handler does.
-  const [thoughtsExpanded, setThoughtsExpanded] = useState(false);
+  // `ui.startExpanded` only seeds the initial value; the toggle owns it afterwards.
+  const [thoughtsExpanded, setThoughtsExpanded] = useState(
+    () => settings.merged.ui?.startExpanded === true,
+  );
   useKeyboard((key: KeyEvent) => {
     if (!matchesCommand(Command.TOGGLE_THINKING_EXPANDED, key)) return;
     key.preventDefault();

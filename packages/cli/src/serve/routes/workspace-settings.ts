@@ -55,6 +55,7 @@ const TUI_ONLY_SETTINGS = new Set([
   'ide.enabled',
   'ui.showLineNumbers',
   'ui.showToolCallArgs',
+  'ui.startExpanded',
   'ui.renderMode',
   'ui.useTerminalBuffer',
   'ui.mouseTracking',
