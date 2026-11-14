@@ -177,5 +177,13 @@ class SurfaceRegistryGateTest {
                     mock(ToolPublicationDataStore.class),
                     mock(ToolPublicationAdmissionStore.class), properties);
         }
+
+        @Bean
+        TerminalTicketController surfaceGateTerminalTicket() {
+            return new TerminalTicketController(
+                    mock(com.alibaba.qwen.code.managedagent.workspace.runtime
+                            .WorkspaceTerminalRelayService.class),
+                    new TerminalTicketStore(java.time.Clock.systemUTC()));
+        }
     }
 }
