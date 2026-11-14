@@ -85,7 +85,7 @@ test('aggregates goals from every workspace and badges each card @smoke', async 
   expect(paths).toContain('GET /workspaces/ws-secondary/goals');
 });
 
-test('the create form targets the picked workspace', async ({
+test('the create form targets the picked workspace @smoke', async ({
   page,
   baseURL,
 }) => {
