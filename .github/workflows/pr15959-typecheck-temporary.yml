@@ -1,4 +1,4 @@
-name: 'PR 15959 isolated typecheck'
+name: 'PR 15959 typecheck controls and trial merge'
 on:
   push:
     branches: ['codex/verify-pr-15959-typecheck-20261115']
@@ -7,25 +7,38 @@ permissions:
   actions: read
 jobs:
   typecheck:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - mode: negative
+            source: '0ba1d481cd98f8ea78698ef282767babc555c954'
+            build_run: '43606770112'
+          - mode: merged
+            source: '3056beba72fec1646733e3ade9080a35c8bb1e0a'
+            build_run: '43617647081'
     runs-on: [self-hosted, linux, x64, ecs-qwen]
     container: node:22-bookworm
     timeout-minutes: 45
     env:
       NODE_OPTIONS: '--max-old-space-size=6144'
       QWEN_SKIP_PREPARE: '1'
+      EXPECTED_SOURCE: '${{ matrix.source }}'
+      VERIFY_MODE: '${{ matrix.mode }}'
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: '0ba1d481cd98f8ea78698ef282767babc555c954'
+          ref: '${{ matrix.source }}'
           persist-credentials: false
       - name: Attest source and resource limits
         run: |
           mkdir -p .verify-evidence
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          test "$(git rev-parse HEAD)" = '0ba1d481cd98f8ea78698ef282767babc555c954'
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
           git rev-parse HEAD | tee .verify-evidence/source-sha.txt
           node -e 'console.log(JSON.stringify({node:process.version,heapBytes:require("node:v8").getHeapStatistics().heap_size_limit}))' | tee .verify-evidence/runtime.json
           cat /sys/fs/cgroup/memory.max 2>/dev/null || true
@@ -38,7 +51,7 @@ jobs:
         with:
           name: unit-test-tree
           repository: QwenLM/qwen-code
-          run-id: '43606770112'
+          run-id: '${{ matrix.build_run }}'
           github-token: ${{ github.token }}
           path: '.verify-input'
       - name: Restore built prerequisites
@@ -46,18 +59,41 @@ jobs:
           tar -xzf .verify-input/unit-test-tree.tgz
           node scripts/ci-build-cache.mjs host-assets
           git diff --exit-code
-      - name: Run standalone typecheck sequentially
+      - name: Check semantic rejection or merged typecheck
         timeout-minutes: 20
         run: |
-          set +e
-          npm run typecheck 2>&1 | tee .verify-evidence/typecheck.log
-          result=${PIPESTATUS[0]}
-          printf '%s\n' "$result" > .verify-evidence/typecheck.rc
-          exit "$result"
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          out=Path('.verify-evidence')
+          mode=os.environ['VERIFY_MODE']
+          probe=Path('packages/cli/src/serve/pr15959-typecheck-sentinel.ts')
+          assert not probe.exists()
+          try:
+              if mode=='negative':
+                  probe.write_text("export const PR15959_TYPECHECK_SENTINEL: never = 'unacceptable';\n")
+              cmd=['npm','run','typecheck'] if mode=='merged' else ['npm','run','typecheck','--workspace=packages/cli','--','--pretty','false']
+              with (out/'typecheck.log').open('w') as log:
+                  result=subprocess.run(cmd,stdout=log,stderr=subprocess.STDOUT,timeout=1000)
+              output=(out/'typecheck.log').read_text()
+              (out/'typecheck.rc').write_text(str(result.returncode)+'\n')
+              print(output,flush=True)
+              witness='pr15959-typecheck-sentinel.ts' in output and 'TS2322' in output
+              audit={'mode':mode,'exit':result.returncode,'sentinelReported':witness}
+              (out/'control.json').write_text(json.dumps(audit)+'\n')
+              print(json.dumps(audit),flush=True)
+              if mode=='negative':
+                  assert result.returncode==1 and witness, 'Typecheck did not reject the included semantic error'
+              else:
+                  assert result.returncode==0, 'Trial-merge typecheck failed'
+          finally:
+              if mode=='negative' and probe.exists(): probe.unlink()
+          PY
+          git diff --exit-code
       - name: Preserve evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: pr15959-standalone-typecheck
+          name: 'pr15959-typecheck-${{ matrix.mode }}'
           path: .verify-evidence/
           include-hidden-files: true
