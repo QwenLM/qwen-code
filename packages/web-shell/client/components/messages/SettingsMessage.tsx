@@ -151,6 +151,9 @@ const HIDDEN_SETTING_KEYS = new Set([
   'ui.compactMode',
   'mcpServers',
   'model.reasoningEffort',
+  // Read by the composer to default new sessions to worktree mode; the
+  // configuration surface is settings.json, not a panel row.
+  'worktree.defaultForNewSessions',
 ]);
 const LIVE_SETTING_KEYS = new Set([
   'experimental.liveVoice.enabled',

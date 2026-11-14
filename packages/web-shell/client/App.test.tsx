@@ -25391,6 +25391,258 @@ describe('App session callbacks', () => {
     );
   });
 
+  const worktreeDefaultSetting = (
+    effective: boolean,
+  ): DaemonSettingDescriptor => ({
+    key: 'worktree.defaultForNewSessions',
+    type: 'boolean',
+    label: 'Default Worktree For New Web Shell Sessions',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: true,
+    values: { effective },
+  });
+
+  it('defaults the composer to worktree mode when the setting is on', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('default worktree session');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    const request = mockSessionActions.createSession.mock.calls[0][0];
+    expect(request.worktree).toEqual({});
+    expect(request.branch).toBeUndefined();
+  });
+
+  it('keeps the current-branch default when the setting is off', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(false)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('plain session');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    const request = mockSessionActions.createSession.mock.calls[0][0];
+    expect(request.worktree).toBeUndefined();
+    expect(request.branch).toBeUndefined();
+  });
+
+  it('applies the worktree default when settings arrive after the composer renders', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    // The status setter bails on content-equal statuses (isSameGitStatus),
+    // so the focus refetch must report a changed branch to force the
+    // re-render that reads the late settings (the real hook re-renders on
+    // its own fetch resolution; the mock reads testState directly).
+    let branch = 'main';
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockImplementation(async () => ({ branch })),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+
+    testState.settings = [worktreeDefaultSetting(true)];
+    branch = 'feat/late-settings';
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+  });
+
+  it('does not override an explicit current-branch choice when settings arrive late', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    let branch = 'main';
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockImplementation(async () => ({ branch })),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    const intentChange = testState.latestChatEditorProps?.onGitModeIntentChange;
+    expect(intentChange).toBeDefined();
+    act(() => {
+      intentChange?.({ mode: 'current' });
+    });
+    await flush();
+
+    testState.settings = [worktreeDefaultSetting(true)];
+    branch = 'feat/late-settings';
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+  });
+
+  it('does not re-apply the worktree default after the user resets to current', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    let branch = 'main';
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockImplementation(async () => ({ branch })),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+
+    const intentChange = testState.latestChatEditorProps?.onGitModeIntentChange;
+    act(() => {
+      intentChange?.({ mode: 'current' });
+    });
+    await flush();
+
+    branch = 'feat/after-reset';
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+  });
+
+  it('keeps an explicit current-branch choice across a transient git-status failure', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    const workspaceGit = vi.fn().mockResolvedValue({ branch: 'main' });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+    const intentChange = testState.latestChatEditorProps?.onGitModeIntentChange;
+    act(() => {
+      intentChange?.({ mode: 'current' });
+    });
+    await flush();
+
+    // Both fetch paths of one round fail: eligibility drops transiently.
+    // The touched flag must survive the drop (no draft boundary occurred),
+    // so the recovery round does not re-apply the worktree default.
+    workspaceGit.mockRejectedValueOnce(new Error('daemon busy'));
+    workspaceGit.mockRejectedValueOnce(new Error('daemon busy'));
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+  });
+
   it('keeps an armed worktree intent across a transient git-status failure', async () => {
     mockConnection.sessionId = undefined;
     mockWorkspace.capabilities = {
