@@ -284,7 +284,7 @@ import {
   summarizeProjectHooks,
 } from '../config/hook-approvals.js';
 import { assembleMcpServers } from '../config/mcpServers.js';
-import { recomputeMcpGating } from '../config/hot-reload.js';
+import { bareSafeMcpGating, recomputeMcpGating } from '../config/hot-reload.js';
 import {
   REDACTED_MCP_SECRET,
   redactMcpServerSecrets,
@@ -4609,13 +4609,15 @@ class QwenAgent implements Agent {
                 config.getTopTierMcpServers(),
               );
           const bootAllowed = config.getCliAllowedMcpServerNames();
+          const bootExcluded = config.getCliExcludedMcpServerNames();
           const gating = isBareOrSafe
-            ? { allowed: bootAllowed ? [...bootAllowed] : undefined }
+            ? bareSafeMcpGating(bootAllowed, bootExcluded)
             : recomputeMcpGating(
                 settings,
                 mcpServers,
                 cwd,
                 bootAllowed,
+                bootExcluded,
                 config.getApprovalMode() === ApprovalMode.YOLO,
               );
           config.setExcludedMcpServers(gating.excluded ?? []);
