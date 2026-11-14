@@ -201,6 +201,11 @@ host 按 watch identity 的口径归并（裸 hostname、不带端口），因�
 不可能不一致。同一 hostname 不同端口的两个渠道因此共享一个条目；这是 identity 的
 推论，不是新规则。
 
+别名生效时记录一次日志。若存在有效订阅而刷新 timer 未运行
+（`QWEN_SESSION_PR_REFRESH_MINUTES=0`），启动时也告警一次；某个 PR 连续两次视图失败
+后，每个失败连续段告警一次，点名该 PR 与错误类别：别名用的是 daemon 的 `gh`，不是
+渠道 token，因此渠道能读的 PR 也可能拿不到事件。
+
 ### 6. 拆分适配器的 pass，而不是删除它
 
 `runPrStateWatch` 保留其候选选择、每 PR 状态文件、预算闸与 comment 游标。去掉的是

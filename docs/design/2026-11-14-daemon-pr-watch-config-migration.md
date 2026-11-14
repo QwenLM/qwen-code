@@ -256,6 +256,13 @@ alias and `allowedHosts` cannot disagree. Two channels on different ports of one
 hostname therefore share one entry; that is a consequence of the identity, not a
 new rule.
 
+The alias logs once when it takes effect. It also warns once at startup when an
+effective subscription exists while the refresh timer is not running
+(`QWEN_SESSION_PR_REFRESH_MINUTES=0`), and it warns once per PR failure streak
+after two consecutive failed views, naming the PR and the error class: the alias
+reads with the daemon's `gh`, not the channel's token, so a PR the channel could
+read may get nothing.
+
 ### 6. Splitting the adapter's pass, not deleting it
 
 `runPrStateWatch` keeps its candidate selection, its per-PR state file, its

@@ -770,6 +770,13 @@ export function startSessionPrRefreshTimer(deps: {
   // produced are consumed by the next tick's observation. Kept per workspace
   // for the same reason the view offsets are.
   const listedKeysByWorkspace = new Map<string, ReadonlySet<string>>();
+  // Consecutive failed-view streaks, kept across ticks so a PR the daemon's
+  // gh cannot read warns once after two failures and again only after a
+  // successful view resets the streak.
+  const prWatchViewFailures = new Map<
+    string,
+    { count: number; warned: boolean }
+  >();
   let watchSeam: NonNullable<SessionPrRefreshOptions['prWatch']> | undefined;
   let watchTickCount = 0;
   // Retained binding rows, in-flight marks and restore slots for the delivery
@@ -844,6 +851,7 @@ export function startSessionPrRefreshTimer(deps: {
               intervalMs,
               sweepOffsets: githubSweepOffsets,
               listedKeysByWorkspace,
+              viewFailures: prWatchViewFailures,
               deadline: tickStart + intervalMs / 2,
             });
           } catch (error) {

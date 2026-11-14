@@ -7668,7 +7668,9 @@ async function runQwenServeImpl(
             | typeof import('./server/pr-watch-deps.js').createPrWatchDeps
             | undefined;
           let readHostedGithubChannels:
-            | (() => ReadonlyArray<import('./server/pr-watch-config.js').HostedGithubChannel>)
+            | (() => ReadonlyArray<
+                import('./server/pr-watch-config.js').HostedGithubChannel
+              >)
             | undefined;
           let resolvePrWatchSubscription:
             | typeof import('./server/pr-watch-config.js').resolvePrWatchSubscription
@@ -7802,8 +7804,9 @@ async function runQwenServeImpl(
               // trusted workspace, so an untrusted workspace's settings never
               // widen the allowed set or contribute to the alias.
               readHostedGithubChannels = () => {
-                const channels: Array<import('./server/pr-watch-config.js').HostedGithubChannel> =
-                  [];
+                const channels: Array<
+                  import('./server/pr-watch-config.js').HostedGithubChannel
+                > = [];
                 const runtimes = workspaceRegistry.listAll();
                 for (const group of channelWorkspaceGroups ?? []) {
                   const runtime = runtimes.find(
@@ -7868,6 +7871,15 @@ async function runQwenServeImpl(
                 }
                 return channels;
               };
+              // A configured watch with no timer would never observe
+              // anything. Resolving once at startup makes the effective
+              // subscription visible (and logs the alias) instead of leaving
+              // an operator to assume the channel still watches for them.
+              if (!sessionPrRefreshTimer && resolvePrWatchDeps()) {
+                daemonLog.warn(
+                  'PR watch: an effective subscription exists but the session PR refresh timer is not running (QWEN_SESSION_PR_REFRESH_MINUTES=0); no PR-state transition will be observed.',
+                );
+              }
             } catch (error) {
               daemonLog.warn(
                 `PR watch deps unavailable: ${

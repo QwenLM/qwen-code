@@ -289,6 +289,13 @@ export interface PrWatchObservationDeps {
    * not cover subscribes nothing, so its PRs cost no view at all.
    */
   eventsForHost?: (host: string) => ReadonlySet<PrTransitionType>;
+  /**
+   * Cross-tick consecutive-failure streaks, keyed by PR. A PR that two
+   * consecutive sweeps fail to view gets one warning naming it and the error
+   * class; the streak resets on a successful view, so a recovered PR that
+   * fails again warns again. In-memory and per timer.
+   */
+  viewFailures?: Map<string, { count: number; warned: boolean }>;
   /** The swept workspace's environment (its own GH_TOKEN/GH_CONFIG_DIR). */
   env?: Readonly<Record<string, string | undefined>>;
   /** Test seam; defaults to {@link fetchGitHubPullRequestView}. */
@@ -359,6 +366,25 @@ export async function observeWorkspacePrBindings(
   const log = deps.log ?? (() => {});
   const now = deps.now ?? Date.now;
   const view = deps.viewPullRequest ?? fetchGitHubPullRequestView;
+  const recordViewFailure = (
+    target: ViewTarget,
+    detail: string,
+    errorClass: string,
+  ): void => {
+    const streak = deps.viewFailures?.get(target.key) ?? {
+      count: 0,
+      warned: false,
+    };
+    streak.count += 1;
+    if (streak.count >= 2 && !streak.warned) {
+      streak.warned = true;
+      log(
+        `PR watch: ${streak.count} consecutive view failures for ${target.identity.repo}#${target.identity.number} (${errorClass}); the PR gets no transitions until a view succeeds`,
+      );
+    }
+    deps.viewFailures?.set(target.key, streak);
+    log(detail);
+  };
 
   // Build the unique view set: open bound PRs plus closed PRs the listing
   // did not return; merged is terminal by the newest observation.
@@ -430,15 +456,19 @@ export async function observeWorkspacePrBindings(
       result = await view(target.url, deps.watchDir, deps.env);
     } catch (error) {
       failed += 1;
-      log(
+      recordViewFailure(
+        target,
         `PR watch: view failed for ${target.identity.repo}#${target.identity.number}: ${String(error)}`,
+        error instanceof Error ? error.name : typeof error,
       );
       continue;
     }
     if (result.kind !== 'ok') {
       failed += 1;
-      log(
+      recordViewFailure(
+        target,
         `PR watch: view unavailable for ${target.identity.repo}#${target.identity.number}: ${result.kind}`,
+        result.kind,
       );
       continue;
     }
@@ -505,6 +535,7 @@ export async function observeWorkspacePrBindings(
           );
         }
         writePrWatchStateSync(deps.watchDir, target.identity, detection.state);
+        deps.viewFailures?.delete(target.key);
         options.viewedThisTick?.add(target.key);
         observed += 1;
       });
@@ -551,6 +582,8 @@ export interface PrWatchObservationTickOptions {
    * closed PR the listing covered leave the view rotation.
    */
   listedKeysByWorkspace?: ReadonlyMap<string, ReadonlySet<string>>;
+  /** Cross-tick failed-view streaks; see {@link PrWatchObservationDeps.viewFailures}. */
+  viewFailures?: Map<string, { count: number; warned: boolean }>;
 }
 
 /**
@@ -603,6 +636,7 @@ export async function runPrWatchObservationTick(
         allowedHosts: deps.allowedHosts,
         events: deps.events,
         eventsForHost: deps.eventsForHost,
+        viewFailures: options.viewFailures,
         // Master §1: a workspace's own GH_TOKEN/GH_CONFIG_DIR applies to its
         // PRs, but the untrusted primary's views run with the daemon's own
         // environment (undefined → ghEnv falls back to process.env), so a

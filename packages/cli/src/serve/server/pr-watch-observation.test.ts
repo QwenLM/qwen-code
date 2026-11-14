@@ -807,6 +807,37 @@ describe('observeWorkspacePrBindings', () => {
     expect(readPrWatchStateSync(dir, id).kind).toBe('absent');
   });
 
+  it('warns once after two consecutive failed views and resets on success', async () => {
+    // The alias's views run with the daemon's gh, not the channel's token: a
+    // PR it cannot read gets nothing, and the operator must be told once per
+    // failure streak rather than once per tick.
+    const viewFailures = new Map<string, { count: number; warned: boolean }>();
+    const log = vi.fn();
+    const view = vi.fn(
+      async (_url: string): Promise<FetchGitHubPullRequestViewResult> => {
+        throw new Error('gh: not found');
+      },
+    );
+    const deps = makeDeps(view, { log, viewFailures });
+    const run = () => observeWorkspacePrBindings([binding(42)], deps);
+    await run();
+    await run();
+    const warnings = () =>
+      log.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes('consecutive view failures'));
+    expect(warnings()).toHaveLength(1);
+    // A successful view resets the streak; the next streak warns again.
+    view.mockImplementation(async (url: string) => okResult(url));
+    await run();
+    view.mockImplementation(async () => {
+      throw new Error('gh: not found');
+    });
+    await run();
+    await run();
+    expect(warnings()).toHaveLength(2);
+  });
+
   it('accepts a renamed repository and keeps the binding own watch file', async () => {
     const view = vi.fn(async () => okResult(prUrl(42, 'newowner/repo')));
     const log = vi.fn();
