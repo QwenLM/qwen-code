@@ -7989,7 +7989,9 @@ export function WebShellSidebar({
           {!sectionView &&
             (selectionMode ||
               primaryNavItems.has('newTask') ||
-              (displayMenuEnabled && sessionActionControlsVisible)) && (
+              (displayMenuEnabled &&
+                hideProjectHeader &&
+                sessionActionControlsVisible)) && (
               <div
                 className={cx(
                   styles.newTaskNav,
@@ -8032,7 +8034,7 @@ export function WebShellSidebar({
                 ) : null}
                 {sessionActionControlsVisible && (
                   <div className="ml-auto flex shrink-0 items-center gap-1">
-                    {displayMenuEnabled && (
+                    {displayMenuEnabled && hideProjectHeader && (
                       <SessionSortMenu
                         value={sessionSort}
                         onChange={changeSessionSort}
@@ -8325,9 +8327,7 @@ export function WebShellSidebar({
                     <IconChevron expanded={projectsExpanded} />
                   </button>
                   <div className={styles.projectsHeaderActions}>
-                    {searchInProjectHeader &&
-                      !sessionActionControlsVisible &&
-                      !sectionView &&
+                    {!sectionView &&
                       displayMenuEnabled &&
                       sessionContent === undefined && (
                         <SessionSortMenu

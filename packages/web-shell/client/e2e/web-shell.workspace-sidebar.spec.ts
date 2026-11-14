@@ -31,9 +31,13 @@ async function order(page: Page) {
 }
 
 async function openWorkspaceFilter(page: Page) {
-  await page
-    .getByRole('button', { name: 'Display options', exact: true })
-    .click();
+  const displayOptions = page.getByRole('button', {
+    name: 'Display options',
+    exact: true,
+  });
+  await expect(displayOptions.locator('../..')).toContainText('Workspaces');
+  await displayOptions.locator('../..').hover();
+  await displayOptions.click();
   await page.getByRole('menuitem', { name: /^Workspace/ }).hover();
   await expect(
     page.getByRole('menuitemradio', { name: 'All', exact: true }),

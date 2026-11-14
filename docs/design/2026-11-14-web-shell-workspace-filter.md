@@ -8,7 +8,7 @@
 
 [#17142](https://github.com/QwenLM/qwen-code/issues/17142) asks for a way to find workspaces in a long Web Shell sidebar. This change deliberately uses an explicit workspace selector rather than changing session-search semantics. A query that happens to match both a workspace and a session therefore cannot silently switch the search mode.
 
-The sidebar already had a persisted session-sort menu. The new control extends that entry into a display-options menu with nested `Sort by` and `Workspace` selectors and a `Restore defaults` action.
+The sidebar already had a persisted session-sort menu. The new control extends that entry into a display-options menu with nested `Sort by` and `Workspace` selectors and a `Restore defaults` action. Its ListFilter trigger sits in the Workspaces title row alongside the existing workspace actions; layouts that hide that title retain the original-row fallback, and the collapsed session popover keeps the control reachable.
 
 ## Goals and scope
 
@@ -42,7 +42,7 @@ The implementation uses the existing Radix dropdown primitives and portal integr
 
 ## Validation
 
-- Seven affected Vitest files: 319 tests passed.
+- Seven affected Vitest files: 320 tests passed.
 - `npm run typecheck`: passed.
 - `npm run build`: passed.
 - ESLint and Prettier checks for every changed implementation, test, and localization file: passed.

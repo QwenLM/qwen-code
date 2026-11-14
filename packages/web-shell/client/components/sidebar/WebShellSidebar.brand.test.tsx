@@ -178,7 +178,7 @@ describe('sidebar brand', () => {
   });
 
   it.each([undefined, false] as const)(
-    'groups sorting immediately before multi-select with branding=%s',
+    'places display options in the workspace header with branding=%s',
     async (branding) => {
       mocks.connection.capabilities = {
         qwenCodeVersion: '1.2.3',
@@ -197,8 +197,13 @@ describe('sidebar brand', () => {
         'button[aria-label="Select sessions"]',
       );
       expect(select).not.toBeNull();
-      expect(sort!.nextElementSibling).toBe(select);
-      expect(sort!.parentElement!.parentElement).toBe(
+      expect(
+        sort!.parentElement!.querySelector(
+          'button[aria-label="Collapse all workspaces"]',
+        ),
+      ).not.toBeNull();
+      expect(sort!.closest('[class*="newTaskNav"]')).toBeNull();
+      expect(select!.parentElement!.parentElement).toBe(
         container.querySelector('button[aria-label="New session"]')!
           .parentElement,
       );
@@ -261,11 +266,19 @@ describe('sidebar brand', () => {
           'button[aria-label="New session"]',
         ),
       ).toBeNull();
-      expect(
-        sorts[0].parentElement!.querySelector(
-          'button[aria-label="Collapse all workspaces"]',
-        ),
-      ).toBeNull();
+      if (hideProjectHeader) {
+        expect(
+          sorts[0].parentElement!.querySelector(
+            'button[aria-label="Collapse all workspaces"]',
+          ),
+        ).toBeNull();
+      } else {
+        expect(
+          sorts[0].parentElement!.querySelector(
+            'button[aria-label="Collapse all workspaces"]',
+          ),
+        ).not.toBeNull();
+      }
     },
   );
 

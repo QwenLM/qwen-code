@@ -8,7 +8,7 @@
 
 [#17142](https://github.com/QwenLM/qwen-code/issues/17142) 要求在较长的 Web Shell 侧边栏中能够查找工作区。本次明确采用独立的工作区选择器，不改变会话搜索语义，因此同一个查询同时匹配工作区和会话时，不会悄悄切换搜索模式。
 
-侧边栏原本已有持久化的会话排序菜单。新控件将这一入口扩展为显示选项菜单，包含 `Sort by` 和 `Workspace` 两个子菜单，以及 `Restore defaults` 操作。
+侧边栏原本已有持久化的会话排序菜单。新控件将这一入口扩展为显示选项菜单，包含 `Sort by` 和 `Workspace` 两个子菜单，以及 `Restore defaults` 操作。ListFilter 触发图标位于 Workspaces 标题行，与现有工作区操作并列；隐藏该标题的布局保留原操作行回退入口，折叠会话弹层中也仍可访问。
 
 ## 目标与范围
 
@@ -42,7 +42,7 @@
 
 ## 验证
 
-- 7 个受影响的 Vitest 文件：319 个测试通过。
+- 7 个受影响的 Vitest 文件：320 个测试通过。
 - `npm run typecheck`：通过。
 - `npm run build`：通过。
 - 所有改动的实现、测试和本地化文件的 ESLint 与 Prettier 检查：通过。
