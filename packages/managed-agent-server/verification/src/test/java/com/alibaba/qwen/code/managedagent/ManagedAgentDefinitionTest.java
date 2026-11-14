@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
-import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -62,7 +62,7 @@ class ManagedAgentDefinitionTest {
     private JdbcTemplate jdbc;
 
     @Autowired
-    private com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore definitions;
+    private JdbcManagedAgentDefinitionStore definitions;
 
     @Autowired
     @Qualifier("managedAgentTransactionManager")
@@ -303,10 +303,6 @@ class ManagedAgentDefinitionTest {
         String tenant = tenant();
         String agentId = json(create(tenant, "for-update", DEFINITION)
                 .andExpect(status().isAccepted())).path("id").asText();
-        com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore store =
-                new com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore(
-                        new org.springframework.jdbc.core.JdbcTemplate(
-                                jdbc.getDataSource()), new RequestDigests());
         org.springframework.transaction.support.TransactionTemplate template =
                 new org.springframework.transaction.support.TransactionTemplate(
                         transactionManager);
@@ -325,7 +321,7 @@ class ManagedAgentDefinitionTest {
                 contenderEntered.countDown();
                 template.executeWithoutResult(ignored -> {
                     long started = System.nanoTime();
-                    store.latestForUpdate(tenant, agentId);
+                    assertThat(definitions.latestForUpdate(tenant, agentId)).isPresent();
                     contenderReadMillis.set(
                             (System.nanoTime() - started) / 1_000_000);
                 });
@@ -335,7 +331,7 @@ class ManagedAgentDefinitionTest {
         });
         contender.start();
         template.executeWithoutResult(ignored -> {
-            store.latestForUpdate(tenant, agentId);
+            assertThat(definitions.latestForUpdate(tenant, agentId)).isPresent();
             holderLocked.countDown();
             try {
                 // The contender enters its transaction right after the
@@ -348,8 +344,9 @@ class ManagedAgentDefinitionTest {
             }
         });
         contender.join(5000);
-        assertThat(contenderFailure.get()).as(
-                "the contender's locking read failed for another reason")
+        assertThat(contenderFailure.get()).withFailMessage(() ->
+                "the contender's locking read failed: " + contenderFailure.get()
+                        + "; cause: " + contenderFailure.get().getCause())
                 .isNull();
         assertThat(contender.isAlive()).isFalse();
         // The contender's locking read must block on the holder's row lock

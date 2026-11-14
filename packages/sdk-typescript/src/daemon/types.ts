@@ -331,6 +331,11 @@ export type DaemonGitOperation =
   | 'revert'
   | 'bisect';
 
+export interface DaemonWorkspaceGitIgnoredPaths {
+  v: 1;
+  ignoredPaths: string[];
+}
+
 /**
  * Current Git metadata returned from a workspace Git status route.
  *
@@ -1616,7 +1621,14 @@ export interface DaemonRestoredSession extends DaemonSession {
    */
   eventEpoch?: string;
   /**
-   * True when the compaction engine failed at least once for this session
+   * Publish-time summary/unverified-seed boundary captured with a full load
+   * snapshot in eventEpoch. A suffix starting after it excludes those sources,
+   * not other partial/truncated/degraded content. Zero precedes the first event;
+   * absence is not zero. Omitted for summary reads and persisted-page refreshes.
+   */
+  replayProjectionWatermark?: number;
+  /**
+   * True when publication retention or compaction failed for this session
    * (load only): `compactedReplay`/`liveJournal` may lag behind live
    * events. Clients should prefer the full transcript (see
    * `fullTranscriptAvailable`) over the degraded snapshot.
@@ -1736,6 +1748,9 @@ export interface DaemonSessionSummary {
   workspaceCwd: string;
   createdAt?: string;
   updatedAt?: string;
+  /** Recorded ISO time of the latest real user input on the active main branch.
+   * Absent when unavailable; never substitute createdAt or updatedAt. */
+  lastUserPromptAt?: string;
   displayName?: string;
   titleSource?: 'manual' | 'auto';
   /** Id of the session that spawned this one (via `create_sub_session`), or
@@ -1825,6 +1840,11 @@ export interface DaemonSessionToolCalls {
   events: DaemonEvent[];
 }
 
+export type DaemonSessionTurnHooksPage =
+  import('./ui/hook-lifecycle.js').HookTurnPage;
+export type DaemonSessionTurnHooksPageOptions =
+  DaemonSessionTurnIndexPageOptions;
+
 export interface DaemonSessionTurnIndexPageOptions {
   snapshot?: string;
   start?: number;
@@ -1837,6 +1857,8 @@ export interface DaemonSessionTurnIndexEntry {
   turnId: string;
   kind: 'prompt' | 'realtime' | 'scheduled';
   promptId?: string;
+  /** Canonical persisted identity for per-turn history queries. */
+  historyPromptId?: string;
   timestamp?: string;
   label: string;
   detail?: string;
@@ -1931,6 +1953,8 @@ export type DaemonSessionGroupFilter =
   | (string & {});
 
 export interface DaemonSessionListPageOptions {
+  /** Descending order; question sort requires session_last_user_prompt_sort. Unknown times sort last. */
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   pageSize?: number;
   cursor?: string;
   archiveState?: DaemonSessionArchiveState;
@@ -1948,6 +1972,14 @@ export interface DaemonSessionListPageOptions {
   sourceType?: string;
   /** Restrict the page to this source identifier. Requires `sourceType`. */
   sourceId?: string;
+  /**
+   * List the sessions currently live in the workspace bridge instead of
+   * persisted history, so closed rows cannot crowd live sessions out of the
+   * first page. Served over native REST; the ACP transport does not carry it.
+   * Cannot be combined with `view`, archived `archiveState`,
+   * `parentSessionId`, `sourceType`, or `sourceId`.
+   */
+  liveOnly?: boolean;
 }
 
 export interface DaemonSessionListPage {
@@ -1967,8 +1999,8 @@ export interface DaemonSessionCatalogWorkspace {
 export interface DaemonSessionCatalogRequest {
   /** 1–20 entries; `all` excludes internal workspaces. */
   workspaces: 'all' | DaemonSessionCatalogWorkspace[];
-  /** Shared filters; pageSize is 1–100, default 20. */
-  options?: Omit<DaemonSessionListPageOptions, 'cursor'>;
+  /** Shared filters; pageSize is 1–100, default 20. `liveOnly` is not shared. */
+  options?: Omit<DaemonSessionListPageOptions, 'cursor' | 'liveOnly'>;
   includeGroups?: boolean;
 }
 
@@ -2891,6 +2923,107 @@ export interface DaemonWorkspaceMemoryDreamOptions {
   clientId?: string;
 }
 
+export type DaemonMemoryImportScope = 'project' | 'user';
+
+export interface DaemonMemoryImportSourceFile {
+  path: string;
+  content: string;
+}
+
+export interface DaemonMemoryImportSource {
+  version: 1;
+  source: 'codex';
+  files: DaemonMemoryImportSourceFile[];
+}
+
+export interface DaemonMemoryImportSection {
+  id: string;
+  groupId: string;
+  title: string;
+  path: string;
+  line: number;
+  content: string;
+  references: string[];
+  suggestedScope: DaemonMemoryImportScope | 'unassigned';
+  sourceProject?: string;
+  reason: string;
+  selectable: boolean;
+}
+
+export interface DaemonMemoryImportEstimate {
+  basis: 'source-only-with-context-reserve';
+  modelCalls: number;
+  sourceTokens: number;
+  maxOutputTokens: number;
+  reservedTokens: number;
+  exceedsBudget: boolean;
+  limits: {
+    maxCalls: number;
+    maxReservedTokens: number;
+    batchSections: number;
+    sourceBytes: number;
+    contextBytes: number;
+    outputTokens: number;
+    promptBytes: number;
+  };
+}
+
+export interface DaemonMemoryImportPreview {
+  version: 1;
+  kind: 'preview';
+  digest: string;
+  groups: Array<{
+    id: string;
+    scope: DaemonMemoryImportSection['suggestedScope'];
+    sourceProject?: string;
+    sectionIds: string[];
+    estimate: DaemonMemoryImportEstimate;
+  }>;
+  sections: DaemonMemoryImportSection[];
+  warnings: string[];
+  estimate: DaemonMemoryImportEstimate;
+}
+
+export interface DaemonMemoryImportSelection {
+  id: string;
+  scope: DaemonMemoryImportScope;
+}
+
+export interface DaemonMemoryImportRequest {
+  source: DaemonMemoryImportSource;
+  selection: DaemonMemoryImportSelection[];
+  idempotencyKey: string;
+}
+
+export interface DaemonMemoryImportItemResult {
+  id: string;
+  scope: DaemonMemoryImportScope;
+  status: 'pending' | 'added' | 'duplicate' | 'conflict' | 'skipped' | 'failed';
+  reason?: string;
+  refs?: string[];
+}
+
+export interface DaemonMemoryImportResult {
+  sourceSections: number;
+  newDocuments: number;
+  duplicateSections: number;
+  conflictSections: number;
+  failedSections: number;
+}
+
+export interface DaemonMemoryImportTask {
+  version: 1;
+  kind: 'task';
+  id: string;
+  status: 'queued' | 'running' | 'completed' | 'partial' | 'cancelled';
+  createdAt: string;
+  updatedAt: string;
+  items: DaemonMemoryImportItemResult[];
+  usage: { modelCalls: number; reservedTokens: number };
+  budget: { maxCalls: number; maxReservedTokens: number };
+  result?: DaemonMemoryImportResult;
+}
+
 export type DaemonContentHash = `sha256:${string}`;
 
 const DAEMON_CONTENT_HASH_RE = /^sha256:[0-9a-f]{64}$/;
@@ -3802,11 +3935,28 @@ export interface DaemonSessionStatsModelMetrics {
     totalTtftMs: number;
     /**
      * Time from the first to the last visible output, summed over requests
-     * whose window is at least 100 ms; shorter bursts cannot measure a rate.
+     * whose window is at least 100 ms. With `totalThroughputOutputTokens` it
+     * gives the generation-window rate that clients before
+     * `totalOutputSpeedDurationMs` show.
      */
     totalGenerationDurationMs: number;
     /** Output tokens of the requests in `totalGenerationDurationMs`. */
     totalThroughputOutputTokens: number;
+    /**
+     * Time from the first to the last visible output, summed over every timed
+     * request like `totalTtftMs`. Absent from older daemons.
+     */
+    totalTimedGenerationDurationMs?: number;
+    /**
+     * Output tokens, reasoning counted once, of the timed requests that
+     * reported any. Absent from older daemons.
+     */
+    totalOutputSpeedTokens?: number;
+    /**
+     * TTFT plus generation time of the requests in `totalOutputSpeedTokens`:
+     * output speed divides the tokens by it. Absent from older daemons.
+     */
+    totalOutputSpeedDurationMs?: number;
   };
   /**
    * Most recent timed, non-internal responses (oldest first, at most 200).
@@ -3817,8 +3967,14 @@ export interface DaemonSessionStatsModelMetrics {
     /** Event time, epoch ms. */
     at: number;
     ttftMs: number;
-    /** Generation window; below 100 ms it measures no output rate. */
+    /**
+     * From the first to the last visible output. Output speed divides
+     * `outputTokens` by `ttftMs + generationMs`; for a daemon without
+     * `generation.totalOutputSpeedDurationMs`, by `generationMs` when it is at
+     * least 100 ms.
+     */
     generationMs: number;
+    /** Reasoning counted once; older daemons sent the provider's count. */
     outputTokens: number;
     /** Subagent that issued the request; absent for the main conversation. */
     source?: string;
@@ -5030,7 +5186,15 @@ export interface DaemonChannelConfigNumberFieldDescriptor
   required?: boolean;
   envResolvable?: never;
   multiline?: never;
+  /** Exclusive lower bound: the value must be strictly greater than this. */
   exclusiveMinimum?: number;
+  /**
+   * Inclusive lower bound: the value may equal this. Needed because a field
+   * whose real floor is 0 cannot express it with `exclusiveMinimum` — writing
+   * -1 to admit 0 also admits (-1, 0), which the editor then accepts and the
+   * adapter rejects at save. When both are declared the stricter one wins.
+   */
+  minimum?: number;
   /** Inclusive upper bound. A poll interval above Node's 32-bit timer range is
    * clamped to 1ms, so an unbounded interval field can persist a hot loop. */
   maximum?: number;
@@ -5082,10 +5246,51 @@ export interface DaemonChannelTypeDescriptor {
   type: string;
   displayName: string;
   manageable: boolean;
+  /**
+   * Whether the adapter offers browser-rendered QR login. Absent on daemons
+   * that predate the capability.
+   */
+  supportsQrLogin?: boolean;
   fields: readonly DaemonChannelConfigFieldDescriptor[];
+  /** True for sending-only integrations; absent on older daemons. */
+  outboundOnly?: boolean;
+  /** Adapter-owned logical destination, without endpoint credentials. */
+  defaultDeliveryTarget?: {
+    type: 'user' | 'chat';
+    id: string;
+    label?: string;
+  };
 }
 
 export type DaemonChannelTypeCatalog = DaemonChannelTypeDescriptor[];
+
+export type DaemonChannelQrLoginStatus =
+  | 'pending'
+  | 'succeeded'
+  | 'failed'
+  | 'expired'
+  | 'cancelled';
+
+/**
+ * A browser-rendered QR login session. Carries no credential values: the daemon
+ * persists them itself and the client only learns that binding succeeded.
+ */
+export interface DaemonChannelQrLoginView {
+  loginId: string;
+  channelType: string;
+  channelName: string;
+  status: DaemonChannelQrLoginStatus;
+  expiresAt: number;
+  /** Rendered QR image; only the initiating client receives it. */
+  qrCodeDataUrl?: string;
+  error?: string;
+}
+
+export interface DaemonChannelQrLoginStartResult
+  extends DaemonChannelQrLoginView {
+  /** True when an existing pending login for the same channel was reattached. */
+  attached: boolean;
+}
 
 export interface DaemonChannelRuntimeState {
   state: 'stopped' | 'starting' | 'connected' | 'partial' | 'error';
@@ -6188,4 +6393,35 @@ export interface DaemonSubscriptionActivation {
   authType: 'qwen-subscription';
   modelId: string;
   runtimeSync: DaemonModelProviderRuntimeSyncResult;
+}
+
+/**
+ * WeChat login state. The credential is process-global (one account.json in
+ * the daemon's home), so these views are served outside any workspace scope.
+ * Neither carries the bot token: it is consumed by the daemon when it saves
+ * the account and is never returned to a client.
+ */
+export interface DaemonWeixinAccountStatus {
+  /** False once the daemon has disposed these routes; login is unavailable. */
+  enabled: boolean;
+  configured: boolean;
+  userId?: string;
+  savedAt?: string;
+}
+
+export interface DaemonWeixinLoginFlow {
+  id: string;
+  /** Not monotonic: `scanned` can return to `waiting` with a replacement QR. */
+  status: 'waiting' | 'scanned' | 'ready' | 'expired' | 'error';
+  /** Block-glyph QR rendering, absent when the encoder could not render it. */
+  qrText?: string;
+  /**
+   * The URL the operator scans. A live status does not guarantee one: while
+   * the daemon mints a replacement after an expiry the view has neither this
+   * nor qrText, and terminal views have neither. Derive the scan prompt from
+   * these two fields, never from `status`.
+   */
+  qrcodeUrl?: string;
+  /** Set on the failure terminals only; `ready` carries none. */
+  errorCode?: string;
 }

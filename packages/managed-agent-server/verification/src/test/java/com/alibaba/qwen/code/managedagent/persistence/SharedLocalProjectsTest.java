@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
@@ -54,7 +55,7 @@ class SharedLocalProjectsTest {
         var guard = new WorkspaceStorageGuard(jdbc, manager, properties,
                 path -> new StorageIdentityReader.Identity(path.toString(), "test-host", "device",
                         Files.readAttributes(path, BasicFileAttributes.class).fileKey().toString(), "birth"));
-        var store = new WorkspaceCreationStore(jdbc, manager, guard, new ManagedWorkspaceRegistry(jdbc),
+        var store = new WorkspaceCreationStore(jdbc, manager, guard, new JdbcManagedWorkspaceRegistry(jdbc),
                 properties, new ObjectMapper(), Clock.systemUTC());
         return new Catalog(name, jdbc, manager, properties, guard, store);
     }
@@ -68,21 +69,21 @@ class SharedLocalProjectsTest {
 
     private record Catalog(String tenant, JdbcTemplate jdbc, DataSourceTransactionManager manager,
             ManagedAgentProperties properties, WorkspaceStorageGuard guard, WorkspaceCreationStore store) {
-        ManagedWorkspaceRegistry.WorkspaceSummary add(Path project) {
+        JdbcManagedWorkspaceRegistry.WorkspaceSummary add(Path project) {
             return store.create(tenant, "actor", "Project", "import", null, null, project.toString());
         }
 
-        String storage(ManagedWorkspaceRegistry.WorkspaceSummary workspace) {
+        String storage(JdbcManagedWorkspaceRegistry.WorkspaceSummary workspace) {
             return jdbc.queryForObject("SELECT storage_id FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?",
                     String.class, tenant, workspace.workspaceId());
         }
 
-        ContextBinding binding(ManagedWorkspaceRegistry.WorkspaceSummary workspace) {
+        ContextBinding binding(JdbcManagedWorkspaceRegistry.WorkspaceSummary workspace) {
             return new ContextBinding(tenant, workspace.workspaceId(), 1, storage(workspace),
                     workspace.defaultCwdRelative(), "config", 1);
         }
 
-        Path marker(ManagedWorkspaceRegistry.WorkspaceSummary workspace) {
+        Path marker(JdbcManagedWorkspaceRegistry.WorkspaceSummary workspace) {
             return Path.of(properties.getRuntimeBroker().getStateDirectory()).resolve("imported-projects")
                     .resolve(storage(workspace)).resolve(".qwen-managed-storage.json");
         }
@@ -157,7 +158,7 @@ class SharedLocalProjectsTest {
                 () -> catalog.guard().migrationSource(catalog.tenant(), storage, 1, operation),
                 () -> catalog.guard().publishMigrationMarker(project.getParent(), new byte[0], registration, operation),
                 () -> catalog.guard().promoteMigration(registration, catalog.guard().identity(project.getParent()), operation, operation),
-                () -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(catalog.jdbc(), catalog.manager(), catalog.guard(), catalog.properties()))
+                () -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(catalog.jdbc(), catalog.manager(), catalog.guard(), catalog.properties()))
                         .beginRewind(catalog.binding(imported), mock(RuntimeSessionRecord.class)));
         for (Runnable action : exclusive) {
             assertThatThrownBy(action::run).isInstanceOfSatisfying(RuntimeBrokerException.class,
@@ -172,7 +173,7 @@ class SharedLocalProjectsTest {
     void legacyImportedReceiptKeepsItsOriginalMarkerContract() throws Exception {
         Path project = project();
         Catalog legacy = catalog("legacy");
-        byte[] actor = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(legacy.tenant(), "actor");
+        byte[] actor = ManagedWorkspaceRegistry.actorKey(legacy.tenant(), "actor");
         String scope = ManagedReceipts.actorScope(actor);
         String key = ManagedSchemaKeys.receiptKey(ReceiptNamespace.WORKSPACE_CREATE,
                 legacy.tenant(), ReceiptScope.ACTOR, scope, "import");

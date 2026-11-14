@@ -4,7 +4,7 @@ import com.alibaba.qwen.code.managedagent.api.ToolPublicationController;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
@@ -49,7 +49,7 @@ public final class PublicationProbeWiring {
     public ToolPublicationStore publicationStore(
             JdbcTemplate jdbc,
             PlatformTransactionManager manager,
-            ManagedSessionStore sessions,
+            JdbcManagedSessionStore sessions,
             ToolExecutionRepository executions,
             RuntimeBindingRepository bindings) {
         return new ToolPublicationStore(jdbc, manager, sessions, executions,
@@ -62,7 +62,7 @@ public final class PublicationProbeWiring {
             JdbcTemplate jdbc,
             PlatformTransactionManager manager,
             ToolPublicationStore grants,
-            ManagedSessionStore sessions,
+            JdbcManagedSessionStore sessions,
             ToolPublicationObjectStore objects) {
         var operationTimeout = Duration.ofSeconds(60);
         var budget = new ToolPublicationDataStore.VerificationBudget(
@@ -77,7 +77,7 @@ public final class PublicationProbeWiring {
     public ToolPublicationAdmissionStore publicationAdmissionStore(
             JdbcTemplate jdbc,
             PlatformTransactionManager manager,
-            ManagedSessionStore sessions,
+            JdbcManagedSessionStore sessions,
             ToolPublicationDataStore data) {
         return new ToolPublicationAdmissionStore(jdbc, manager, sessions, data);
     }
@@ -121,6 +121,19 @@ public final class PublicationProbeWiring {
         public InputStream open(String key, Runnable guard) {
             guard.run();
             return open(key);
+        }
+
+        @Override
+        public InputStream openRange(String key, long offset, long length, Runnable guard) {
+            guard.run();
+            byte[] bytes = objects.get(key);
+            if (bytes == null) {
+                throw new IllegalStateException("Unknown object " + key);
+            }
+            if (offset < 0 || length < 0 || offset + length > bytes.length) {
+                throw new IllegalArgumentException("Invalid object range");
+            }
+            return new ByteArrayInputStream(bytes, (int) offset, (int) length);
         }
     }
 }

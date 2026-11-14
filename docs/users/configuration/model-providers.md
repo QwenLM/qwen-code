@@ -407,6 +407,83 @@ Things to know about this endpoint:
 - **Error bodies arrive compressed.** A rejected request can show as `400 status code (no body)`; the message is readable with `Accept-Encoding: identity` in a direct call.
 - **Imported models on a dedicated AI cluster** (for example Qwen models imported from Hugging Face) are addressed by the endpoint OCID as the model id on the Responses wire. Treat that as an advanced, per-tenancy setup.
 
+### Wally (RunAnywhere)
+
+[Wally](https://www.runwally.com) by RunAnywhere serves open-weight models through an OpenAI-compatible endpoint at `https://inference.runanywhere.ai/v1` and authenticates with an API key sent as a Bearer token, so it works with the `openai` protocol and no extra code. Create a key in the [RunAnywhere console](https://console.runanywhere.ai). The current model ids, context windows and input modalities are listed in the public catalog at `https://inference.runanywhere.ai/v1/models`.
+
+```json
+{
+  "env": {
+    "WALLY_API_KEY": "<your Wally API key>"
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "deepseek-v4.1-flash",
+        "name": "DeepSeek V4.1 Flash (Wally)",
+        "envKey": "WALLY_API_KEY",
+        "baseUrl": "https://inference.runanywhere.ai/v1",
+        "generationConfig": { "modalities": { "image": true } }
+      },
+      {
+        "id": "glm-5.3-flash",
+        "name": "GLM-5.3 Flash (Wally)",
+        "envKey": "WALLY_API_KEY",
+        "baseUrl": "https://inference.runanywhere.ai/v1",
+        "generationConfig": { "modalities": {} }
+      }
+    ]
+  },
+  "security": { "auth": { "selectedType": "openai" } },
+  "model": { "name": "deepseek-v4.1-flash" }
+}
+```
+
+Things to know about this endpoint:
+
+- **Set `modalities` from the catalog, not the model family.** On Wally, `deepseek-v4.1-flash` reads images while the built-in model lookup records it as text-only, and `glm-5.3-flash` is text-only (a request with an image part fails with `400 glm-5.3-flash does not take image, audio, video or file input`) while the lookup marks it as image-capable. The example sets both explicitly; for any other id, use its `input_modalities` from the catalog.
+- **No `contextWindowSize` needed for these two.** Both ids resolve in the built-in model lookup to a window no larger than the 1,048,576 tokens Wally serves, and the default output request stays below their output limits. If you add an id whose catalog `context_length` is smaller than what the lookup assumes, pin `contextWindowSize` to the catalog value.
+
+### Wiro AI
+
+[Wiro AI](https://wiro.ai/llm) serves models from several vendors through an OpenAI-compatible endpoint at `https://llm.wiro.ai/v1` and authenticates with an API key sent as a Bearer token, so it works with the `openai` protocol and no extra code. Create a [Wiro AI project](https://wiro.ai/panel/project/new) to get a key. Model ids are lowercase `owner/model`. The catalog at `GET https://llm.wiro.ai/v1/models`, called with the same key, returns the current ids with each model's `context_length` and input modalities, and the [models page](https://wiro.ai/models?categories=llm-tool-call) shows the models that support tool calls. The [gateway docs](https://wiro.ai/docs/completions-api) describe the endpoint in full.
+
+```json
+{
+  "env": {
+    "WIRO_API_KEY": "<your Wiro AI API key>"
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "openai/gpt-5-4-nano",
+        "name": "GPT-5.4 Nano (Wiro AI)",
+        "envKey": "WIRO_API_KEY",
+        "baseUrl": "https://llm.wiro.ai/v1"
+      },
+      {
+        "id": "claude/sonnet-5",
+        "name": "Claude Sonnet 5 (Wiro AI)",
+        "envKey": "WIRO_API_KEY",
+        "baseUrl": "https://llm.wiro.ai/v1",
+        "generationConfig": {
+          "contextWindowSize": 1000000,
+          "modalities": { "image": true }
+        }
+      }
+    ]
+  },
+  "security": { "auth": { "selectedType": "openai" } },
+  "model": { "name": "openai/gpt-5-4-nano" }
+}
+```
+
+Things to know about this endpoint:
+
+- **The built-in model lookup sees only the segment after the last `/`.** An id whose last segment is a name the lookup knows resolves on its own. Any other id inherits nothing and needs its fields set from the catalog.
+- **Nothing to set for `openai/gpt-5-4-nano`.** Its last segment, `gpt-5-4-nano`, is in the lookup, which gives it image input and a window no larger than the 400,000 tokens the catalog reports.
+- **Set `contextWindowSize` and `modalities` for `claude/sonnet-5`.** Its last segment, `sonnet-5`, is not a name the lookup knows (the lookup has `claude-sonnet-5`), so without them the entry gets the generic 200K window and is treated as text-only. The example sets the 1,000,000-token `context_length` and the image input the catalog reports. The default output request stays below the output limit of both models.
+
 ### OpenAI Responses API (`openai-responses`)
 
 Use `openai` with `wireApi: "responses"` to target OpenAI's `/v1/responses` endpoint. When the endpoint returns encrypted reasoning with visible thought text, it replays prior-turn reasoning across turns and `--resume` via `reasoning.encrypted_content`. Compatible endpoints that stream `response.reasoning_text.delta` also display their reasoning, but endpoints without `encrypted_content` cannot replay the opaque reasoning state. Use `reasoning.effort` (not `extra_body.enable_thinking`, which the Chat Completions wires use) to control reasoning intensity.

@@ -2970,6 +2970,39 @@ export class SessionService {
     };
   }
 
+  async getLastUserPromptAt(
+    sessionId: string,
+    archiveState: SessionArchiveState = 'active',
+    options: { preferCache?: boolean } = {},
+  ): Promise<string | undefined> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) return undefined;
+    try {
+      return await this.transcriptReader.getLastUserPromptAt(
+        sessionId,
+        archiveState,
+        {
+          ...options,
+          validateFirstRecord: (record) =>
+            typeof record.sessionId === 'string' &&
+            typeof record.cwd === 'string' &&
+            record.sessionId.toLowerCase() === sessionId.toLowerCase() &&
+            this.sessionBelongsToCurrentProject(record.sessionId, record.cwd),
+        },
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    }
+  }
+
+  async setLastUserPromptAt(
+    sessionId: string,
+    timestamp: string | undefined,
+  ): Promise<void> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) return;
+    await this.transcriptReader.setLastUserPromptAt(sessionId, timestamp);
+  }
+
   async getSessionListItem(
     sessionId: string,
     archiveState: SessionArchiveState = 'active',
@@ -3895,6 +3928,7 @@ export class SessionService {
       }
       for (const identity of physicalSnapshot.identities) {
         this.removeFileIfExists(identity.filePath);
+        this.transcriptReader.invalidateLastUserPromptAt(sessionId);
         transcriptRemoved = true;
         this.commitUsageSalvageBestEffort(
           preparedUsage.get(identity.filePath) ?? null,
@@ -4028,6 +4062,7 @@ export class SessionService {
           options.assertCanMutate?.();
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
           this.removeFileIfExists(active.filePath);
+          this.transcriptReader.invalidateLastUserPromptAt(sessionId);
           try {
             options.assertCleanupOwned?.();
             await moveSessionPrSidecar(
@@ -4078,6 +4113,7 @@ export class SessionService {
         this.assertMaintainableSessionUnchanged(sessionId, snapshot);
         try {
           fs.renameSync(sourcePath, targetPath);
+          this.transcriptReader.invalidateLastUserPromptAt(sessionId);
         } catch (error) {
           throw this.sessionFileMoveError('archive', error);
         }
@@ -4188,6 +4224,7 @@ export class SessionService {
           options.assertCanMutate?.();
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
           this.removeFileIfExists(archived.filePath);
+          this.transcriptReader.invalidateLastUserPromptAt(sessionId);
           try {
             options.assertCleanupOwned?.();
             await moveSessionPrSidecar(
@@ -4239,6 +4276,7 @@ export class SessionService {
         await this.retitleIfCollidesWithActive(sessionId, sourcePath);
         try {
           fs.renameSync(sourcePath, targetPath);
+          this.transcriptReader.invalidateLastUserPromptAt(sessionId);
         } catch (error) {
           throw this.sessionFileMoveError('unarchive', error);
         }
@@ -5321,7 +5359,8 @@ function remapSystemPayloadForFork(
       | undefined;
     if (
       payload?.uiEvent?.['event.name'] === 'request_lifecycle' ||
-      payload?.uiEvent?.['event.name'] === 'tool_lifecycle'
+      payload?.uiEvent?.['event.name'] === 'tool_lifecycle' ||
+      payload?.uiEvent?.['event.name'] === 'hook_lifecycle'
     ) {
       const event = payload.uiEvent;
       return {
@@ -5329,7 +5368,8 @@ function remapSystemPayloadForFork(
         uiEvent: {
           ...event,
           sessionId: newSessionId,
-          ...(event['event.name'] === 'request_lifecycle'
+          ...(event['event.name'] === 'request_lifecycle' ||
+          event['event.name'] === 'hook_lifecycle'
             ? {
                 promptId:
                   typeof event['promptId'] === 'string' &&
@@ -5475,7 +5515,8 @@ export function replayUiTelemetryFromConversation(
     if (
       uiEvent &&
       uiEvent['event.name'] !== 'request_lifecycle' &&
-      uiEvent['event.name'] !== 'tool_lifecycle'
+      uiEvent['event.name'] !== 'tool_lifecycle' &&
+      uiEvent['event.name'] !== 'hook_lifecycle'
     ) {
       uiTelemetryService.addEvent(uiEvent as UiEvent, sessionId);
     }

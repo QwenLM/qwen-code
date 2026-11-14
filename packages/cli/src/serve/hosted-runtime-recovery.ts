@@ -5,11 +5,18 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { recordManagedToolMeasurements } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-measurements.js';
 import { parseManagedConfigInstallRecord } from '@qwen-code/qwen-code-core/managed-runtime/managed-config-install.js';
 import { expandHostedExtensionCommand } from './hosted-extension-command.js';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import {
+  getManagedExecutionDiagnostics,
+  observeManagedToolResponse,
+  type ManagedInvocationObservation,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
+import { hostedSkillDiagnostic } from './hosted-skill-diagnostics.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { ManagedShellResultSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
@@ -37,8 +44,12 @@ import { enforceFunctionResponseBudget } from '@qwen-code/qwen-code-core/tools/t
 import { hostedToolOutputBudget } from './hosted-harness-model.js';
 import { RESIDENT_WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
+  HOSTED_MEMORY_READS,
+  isHostedMemoryTool,
+} from './hosted-memory-session.js';
+import {
   convertToFunctionErrorResponse,
-  convertToFunctionResponse,
+  convertToFunctionResponse as baseFunctionResponse,
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
@@ -78,7 +89,7 @@ import {
 } from './hosted-team-session.js';
 import {
   CHILD_LEDGER_TOOL_NAMES,
-  fitChildResultInline,
+  fitChildResultInline as baseFitChildResultInline,
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
   HOSTED_AGENT_WAIT_ABANDONED_TEXT,
   HOSTED_CHILD_LEDGER_UNKNOWN_TEXT,
@@ -570,10 +581,17 @@ export async function settleParkedTurnCancelled(input: {
         'managed-tool-outcome',
         outcomeBytes(item, parts),
       ));
+    await recordManagedToolMeasurements(
+      input.session,
+      item.executionCallId,
+      outcomeRef,
+      input.broker?.toolMeasurements(item.executionCallId),
+    );
+    input.broker?.releaseToolMeasurements(item.executionCallId);
     // The assistant's functionCall must meet its functionResponse in the next
     // turn's history, or providers reject the request as malformed.
     if (!journaled.has(item.functionCallId)) {
-      await input.session.sink.write({
+      await writeRecoveryRecord(input.session, {
         uuid: randomUUID(),
         parentUuid: item.modelMessageId,
         sessionId: input.sessionId,
@@ -818,7 +836,14 @@ async function answerAbandonedTurnCalls(input: {
             callId: functionCallId,
           });
     let parts: Part[];
-    if (uncommitted === 'hosted' && call.name === 'skill' && input.skills) {
+    if (isHostedMemoryTool(call.name)) {
+      if (uncommitted === 'none') continue;
+      parts = unconfirmedMemoryResponse(call.name, functionCallId);
+    } else if (
+      uncommitted === 'hosted' &&
+      call.name === 'skill' &&
+      input.skills
+    ) {
       parts = skillResponses.get(functionCallId)!;
     } else if (planDecision !== undefined) {
       parts = convertToFunctionResponse(call.name, functionCallId, [
@@ -903,17 +928,26 @@ async function answerAbandonedTurnCalls(input: {
         executionStatus: ledgerUnknown || !observed ? 'unknown' : 'cancelled',
       };
     }
-    await input.session.sink.write({
-      uuid: randomUUID(),
-      parentUuid: call.messageId,
-      sessionId: input.sessionId,
-      timestamp: new Date().toISOString(),
-      type: 'tool_result',
-      cwd: input.cwd,
-      version: 'hosted-harness/1',
-      daemonPromptId: input.promptId,
-      message: { role: 'user', parts },
-    });
+    await writeRecoveryRecord(
+      input.session,
+      {
+        uuid: randomUUID(),
+        parentUuid: call.messageId,
+        sessionId: input.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'tool_result',
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        daemonPromptId: input.promptId,
+        message: { role: 'user', parts },
+      },
+      launched
+        ? managedChildTaskId(
+            input.sessionId,
+            launched.run.executionCallId ?? callKey,
+          )
+        : undefined,
+    );
     answeredNow += 1;
   }
   return answeredNow;
@@ -1048,6 +1082,106 @@ function sentMessageText(
 /** The interruption every settle or resume route below names. */
 const INTERRUPTED_HARNESS = 'the Harness that asked was interrupted';
 
+function unconfirmedMemoryResponse(name: string, callId: string): Part[] {
+  const parts = convertToFunctionErrorResponse(
+    name,
+    callId,
+    [],
+    'The personal memory result was not durably recorded before interruption. Its outcome is unknown; do not automatically retry this operation.',
+  );
+  const response = parts[0]!.functionResponse!;
+  response.response = {
+    ...response.response,
+    status: HOSTED_MEMORY_READS.has(name) ? 'unavailable' : 'unknown',
+    executionStatus: 'unknown',
+  };
+  return parts;
+}
+
+const recoveredSuccessfulParts = new WeakSet<object>();
+const recoveredFacts = new WeakMap<object, ManagedInvocationObservation>();
+
+function convertToFunctionResponse(
+  ...args: Parameters<typeof baseFunctionResponse>
+): Part[] {
+  const parts = baseFunctionResponse(...args);
+  for (const part of parts) recoveredSuccessfulParts.add(part);
+  return parts;
+}
+
+function fitChildResultInline(
+  ...args: Parameters<typeof baseFitChildResultInline>
+): Part[] {
+  const parts = baseFitChildResultInline(...args);
+  for (const part of parts) recoveredSuccessfulParts.add(part);
+  return parts;
+}
+
+async function writeRecoveryRecord(
+  managed: ManagedSession,
+  record: ChatRecord,
+  taskId?: string,
+): Promise<void> {
+  const collector = getManagedExecutionDiagnostics(managed.authority);
+  const facts =
+    record.type === 'tool_result' && collector
+      ? (record.message?.parts ?? []).flatMap((part) => {
+          const response = part.functionResponse;
+          const fact =
+            recoveredFacts.get(part) ??
+            (response?.id ? collector.observation(response.id) : undefined);
+          if (!fact) return [];
+          const observation = structuredClone(fact);
+          if (taskId) observation.taskId = taskId;
+          if (recoveredSuccessfulParts.has(part))
+            observation.execution = 'success';
+          observeManagedToolResponse(observation, response?.response);
+          return [observation];
+        })
+      : undefined;
+  await managed.sink.write(record, facts);
+}
+
+function rememberSkillResult(
+  session: ManagedSession,
+  catalog: HostedSkillCatalog,
+  callId: string,
+  args: Record<string, unknown>,
+  origin: 'user' | 'model',
+  revision: number | undefined,
+  parts: Part[],
+): Part[] {
+  const fact = getManagedExecutionDiagnostics(session.authority)?.observation(
+    callId,
+  );
+  if (fact) {
+    fact.toolKind = 'hosted';
+    fact.admission = 'allowed';
+    fact.execution = 'success';
+    fact.skill = hostedSkillDiagnostic(catalog, args, origin, revision);
+    for (const part of parts) recoveredFacts.set(part, fact);
+  }
+  return parts;
+}
+
+function rememberSkillRefusal(
+  session: ManagedSession,
+  callId: string,
+  parts: Part[],
+  admission: 'denied' | 'invalid',
+): Part[] {
+  const fact = getManagedExecutionDiagnostics(session.authority)?.observation(
+    callId,
+  );
+  if (fact) {
+    fact.toolKind = 'hosted';
+    fact.admission = admission;
+    fact.execution = 'not_started';
+    for (const part of parts) recoveredFacts.set(part, fact);
+  }
+  return parts;
+}
+
 async function hostedSkillBatchResponses(
   session: ManagedSession,
   catalog: HostedSkillCatalog,
@@ -1067,7 +1201,11 @@ async function hostedSkillBatchResponses(
       ? HOSTED_SKILL_BATCH_REFUSAL
       : catalog.validationError(call.args, origin),
   );
-  const entries = [];
+  const entries: Array<{
+    callId: string;
+    toolName: string;
+    responseParts: Part[];
+  }> = [];
   for (const [index, call] of calls.entries()) {
     if (call.name !== 'skill') continue;
     const saved = records
@@ -1080,12 +1218,17 @@ async function hostedSkillBatchResponses(
     const responseParts = saved.length
       ? saved
       : problems.some((problem) => problem !== undefined)
-        ? convertToFunctionErrorResponse(
-            'skill',
+        ? rememberSkillRefusal(
+            session,
             call.id!,
-            [],
-            problems[index] ??
-              'This tool was not executed because another call in the batch has invalid arguments. Retry the batch with corrected arguments.',
+            convertToFunctionErrorResponse(
+              'skill',
+              call.id!,
+              [],
+              problems[index] ??
+                'This tool was not executed because another call in the batch has invalid arguments. Retry the batch with corrected arguments.',
+            ),
+            problems[index] !== undefined ? 'invalid' : 'denied',
           )
         : await hostedSkillResponse(
             session,
@@ -1100,7 +1243,26 @@ async function hostedSkillBatchResponses(
   }
   return new Map(
     enforceFunctionResponseBudget(entries, hostedToolOutputBudget(cwd)).map(
-      (entry) => [entry.callId, entry.responseParts],
+      (entry, index) => {
+        const original = entries[index].responseParts;
+        const fact = original
+          .map((part) => recoveredFacts.get(part))
+          .find((value) => value !== undefined);
+        if (fact) {
+          const observation = structuredClone(fact);
+          observation.delivery = isDeepStrictEqual(
+            original,
+            entry.responseParts,
+          )
+            ? 'complete'
+            : 'partial';
+          if (observation.skill)
+            observation.skill.delivery = observation.delivery;
+          for (const part of entry.responseParts)
+            recoveredFacts.set(part, observation);
+        }
+        return [entry.callId, entry.responseParts];
+      },
     ),
   );
 }
@@ -1114,10 +1276,18 @@ async function hostedSkillResponse(
   origin: 'user' | 'model',
   hooks?: HostedHookSession,
 ): Promise<Part[]> {
-  const refused = (reason: string) =>
-    convertToFunctionErrorResponse('skill', callId, [], reason);
+  const refused = (
+    reason: string,
+    admission: 'denied' | 'invalid' = 'denied',
+  ) =>
+    rememberSkillRefusal(
+      session,
+      callId,
+      convertToFunctionErrorResponse('skill', callId, [], reason),
+      admission,
+    );
   const initialProblem = catalog.validationError(args, origin);
-  if (initialProblem) return refused(initialProblem);
+  if (initialProblem) return refused(initialProblem, 'invalid');
   if (hooks) {
     const marker = session.authority.extensionRecord(
       'hook_execution',
@@ -1257,16 +1427,43 @@ async function hostedSkillResponse(
             throw new HostedHookRecoveryRequiredError();
         },
       });
-      return convertToFunctionResponse('skill', callId, [{ text }]);
+      return rememberSkillResult(
+        session,
+        catalog,
+        callId,
+        args as Record<string, unknown>,
+        origin,
+        record.configRevision,
+        convertToFunctionResponse('skill', callId, [{ text }]),
+      );
     } catch {
       throw new HostedHookRecoveryRequiredError();
     }
   }
-  return problem
-    ? convertToFunctionErrorResponse('skill', callId, [], problem)
-    : convertToFunctionResponse('skill', callId, [
-        { text: catalog.response(args) },
-      ]);
+  if (problem) return refused(problem, 'invalid');
+  const config = getManagedExecutionDiagnostics(session.authority)?.observation(
+    callId,
+  )
+    ? session.authority.domainRecord('config_install')
+    : undefined;
+  const revision = config
+    ? parseManagedConfigInstallRecord(
+        JSON.parse(
+          (await session.resources.read(config.recordRef)).toString('utf8'),
+        ),
+      ).configRevision
+    : undefined;
+  return rememberSkillResult(
+    session,
+    catalog,
+    callId,
+    args as Record<string, unknown>,
+    origin,
+    revision,
+    convertToFunctionResponse('skill', callId, [
+      { text: catalog.response(args) },
+    ]),
+  );
 }
 
 /**
@@ -1348,7 +1545,7 @@ export async function settleCancelledAgentWaitRuns(input: {
       HOSTED_AGENT_WAIT_ABANDONED_TEXT,
     );
     if (!journaled.has(run.functionCallId))
-      await input.managed.sink.write({
+      await writeRecoveryRecord(input.managed, {
         uuid: randomUUID(),
         parentUuid: run.modelMessageId,
         sessionId: input.sessionId,
@@ -1435,19 +1632,30 @@ export async function fillParkedRoundAgentGaps(input: {
     input.promptId,
     projected,
   );
+  const recoveredTasks = new Map<string, string>();
   const writeFold = async (parts: Part[]): Promise<void> => {
-    await input.managed.sink.write({
-      uuid: randomUUID(),
-      parentUuid: assistant.uuid,
-      sessionId: input.sessionId,
-      timestamp: new Date().toISOString(),
-      type: 'tool_result',
-      cwd: input.cwd,
-      version: 'hosted-harness/1',
-      model: 'recovered',
-      daemonPromptId: input.promptId,
-      message: { role: 'user', parts },
-    });
+    await writeRecoveryRecord(
+      input.managed,
+      {
+        uuid: randomUUID(),
+        parentUuid: assistant.uuid,
+        sessionId: input.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'tool_result',
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        model: 'recovered',
+        daemonPromptId: input.promptId,
+        message: { role: 'user', parts },
+      },
+      parts
+        .map((part) =>
+          part.functionResponse?.id
+            ? recoveredTasks.get(part.functionResponse.id)
+            : undefined,
+        )
+        .find((id) => id !== undefined),
+    );
   };
   // The fit predicate measures exactly this record shape (a uuid is always
   // 36 chars; the assistant parent is always 36; the timestamp is one ISO
@@ -1492,6 +1700,13 @@ export async function fillParkedRoundAgentGaps(input: {
     // The journaled set gates only the fold, never the replay-safe marks —
     // both sibling arms in this diff document and follow the same rule.
     const foldOwed = !journaled.has(callId);
+    if (isHostedMemoryTool(name)) {
+      if (foldOwed) {
+        await writeFold(unconfirmedMemoryResponse(name, callId));
+        filled += 1;
+      }
+      continue;
+    }
     if (name === 'skill' && input.skills) {
       if (foldOwed) {
         await writeFold(skillResponses.get(callId)!);
@@ -1557,6 +1772,15 @@ export async function fillParkedRoundAgentGaps(input: {
       children === undefined
         ? undefined
         : children.record(hostedChildRunIdFor(input.promptId, callId));
+    if (admitted)
+      recoveredTasks.set(
+        callId,
+        managedChildTaskId(
+          input.sessionId,
+          admitted.run.executionCallId ??
+            hostedChildRunIdFor(input.promptId, callId),
+        ),
+      );
     if (children === undefined || admitted === undefined) {
       if (foldOwed) {
         await writeFold(
@@ -1746,7 +1970,7 @@ export async function settleCancelledCommandWaitRuns(input: {
   for (const run of input.runs) {
     const parts = await sessionCommandJournalAnswer(input.commands, run);
     if (!journaled.has(run.functionCallId))
-      await input.managed.sink.write({
+      await writeRecoveryRecord(input.managed, {
         uuid: randomUUID(),
         parentUuid: run.modelMessageId,
         sessionId: input.sessionId,
@@ -1832,7 +2056,7 @@ export async function fillParkedRoundCommandGaps(input: {
         throw new HostedChildLedgerRecoveryRequiredError(
           'Child run ledger is unavailable; the gap cannot be proven never-started.',
         );
-      await input.managed.sink.write({
+      await writeRecoveryRecord(input.managed, {
         uuid: randomUUID(),
         parentUuid: assistant.uuid,
         sessionId: input.sessionId,
@@ -1869,7 +2093,9 @@ export async function fillParkedRoundCommandGaps(input: {
           )
         : undefined;
     let parts: Part[] | undefined;
-    if (sent !== undefined) {
+    if (isHostedMemoryTool(name)) {
+      parts = unconfirmedMemoryResponse(name, callId);
+    } else if (sent !== undefined) {
       parts = convertToFunctionResponse(name, callId, [{ text: sent }]);
     } else {
       parts = convertToFunctionErrorResponse(
@@ -1884,7 +2110,7 @@ export async function fillParkedRoundCommandGaps(input: {
       );
     }
     if (foldOwed) {
-      await input.managed.sink.write({
+      await writeRecoveryRecord(input.managed, {
         uuid: randomUUID(),
         parentUuid: assistant.uuid,
         sessionId: input.sessionId,
@@ -2047,7 +2273,7 @@ async function settleJournalOnlyInterruptedTurn(input: {
   // channel wake settle stamps (F5), so the input settles and — with
   // the park at a model-start phase — the checkpoint hands the Session
   // over to its next Turn in the same commit.
-  await input.session.sink.write({
+  await writeRecoveryRecord(input.session, {
     uuid: randomUUID(),
     parentUuid: null,
     sessionId: input.sessionId,
@@ -2825,8 +3051,15 @@ export async function recoverHostedRuntimeTurn(input: {
             'managed-tool-outcome',
             outcome,
           );
+          await recordManagedToolMeasurements(
+            session,
+            item.executionCallId,
+            outcomeRef,
+            broker.toolMeasurements(item.executionCallId),
+          );
+          broker.releaseToolMeasurements(item.executionCallId);
           if (!journaled.has(item.functionCallId)) {
-            await session.sink.write(record);
+            await writeRecoveryRecord(session, record);
           }
           await harness.resolveAwaitRuntime(item.executionCallId, outcomeRef);
           states.set(item.executionCallId, { state: 'settled' });

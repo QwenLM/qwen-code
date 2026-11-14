@@ -2,13 +2,14 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **Status**: accepted in #15343. PR 1 (headless) merged in #15369. PR 2a (the model round of ACP prompt turns) is in review in #15509.
+- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip waits on the nightly unified-loop E2E gate (#16192). PR 5 (AgentCore) is in progress: 5a (#16880) and 5b (#17035) are merged. The remaining steps are tracked in #17045. PR 6a (speculation's model round, #17029) is in review.
 - **Date**: 2026-10-23, against upstream `779a4d5d0d`.
 - **Related**:
   - tracking issue #15327;
   - the earlier proposal #8775, which starts with AgentCore and headless; this design extends its goal to all seven loops, and its AgentCore step is PR 5;
   - defects found while comparing the loops: #15324, #15325, #15326;
-  - [loop protection setting](2026-10-21-loop-protection-setting.md).
+  - [loop protection setting](2026-10-21-loop-protection-setting.md);
+  - [Event-bus agent loop](2026-11-11-event-bus-agent-loop.md) — the shared loop's event-driven implementation, available to headless, AgentCore and OpenTUI when both experimental loop settings are enabled.
 
 ## Problem
 
@@ -115,7 +116,7 @@ The loop is an async function. Every model event reaches the surface unchanged t
 3. The client's terminal events become stop reasons, so a surface can no longer drop them: `MaxSessionTurns`, `SessionTokenLimitExceeded`, `UserPromptSubmitBlocked`, `LoopDetected` and `Error`.
 4. When the round ends with no tool calls, the loop stops with `completed`. The Stop hook, steering and next-speaker continuations have already run inside `LlmClient`.
 
-The main-session round is `LlmClient.sendMessageStream`. AgentCore and speculation need a round over their own `LlmChat`. PR 5 adds that round on `Turn`, so chunk parsing exists only in `turn.ts`. The interface between the loop and its round appears in that PR, when it gets its second implementation.
+The main-session round is `LlmClient.sendMessageStream`. AgentCore and speculation need a round over their own `LlmChat`. PR 5a adds that round on `Turn`, so chunk parsing exists only in `turn.ts`, and with it the interface between the loop and its round, `ModelRoundSource`, now that the round has a second implementation.
 
 ### Tool batch
 
@@ -176,13 +177,13 @@ A policy affects only the surface that passes it.
 
 Some surfaces did part of the interaction step themselves before they moved, and keep doing it on the shared path for a while. A send option then tells the client not to do that part, so it does not run twice. Each such option is a transition step, not a lasting API: it is listed here with the step that removes it or turns it into an input.
 
-| Option                   | Why the host keeps the part                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Removed by                                                                                                                                                                                                                                                                                     |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `toolLoopGuardsByHost`   | ACP's tool step runs the daemon tool-loop guards: the per-turn tool-call cap, repeated calls, the exploration reminder and the repeated-tool-failure guard                                                                                                                                                                                                                                                                                                                                                                                                     | PR 2b for a fresh prompt's tool batches: the client's guards apply, and ACP keeps the ones only it has, its parameter-error, partial-edit and repeated-tool-failure stops, as its policy. A session with live tools and an Agent Host session keep ACP's tool step and this option until PR 2d |
-| `interactionSpanByHost`  | ACP's span is parented to the daemon's trace                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | an input instead: the client joins the span the host started for the prompt; before the default changes for ACP                                                                                                                                                                                |
-| `userTurnRecordedByHost` | ACP records the prompt as typed, with its display text, attachments, resource links and daemon prompt id, before slash commands run, and takes the turn's file-history snapshot before its first send, so a prompt cancelled before it is sent still has one; on a retry, a continue or a restore it has started the todo work chain; on a Goal round it recorded the runtime continuation's message; on a cron round it records the prompt once its request reached history, and on a background-notification round the notification with the task it reports | an input instead: the host passes that record and the client writes it; before the default changes for ACP                                                                                                                                                                                     |
+| Option                 | Why the host keeps the part                                                                                                                                | Removed by                                                                                                                                                                                                                                                                                     |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `toolLoopGuardsByHost` | ACP's tool step runs the daemon tool-loop guards: the per-turn tool-call cap, repeated calls, the exploration reminder and the repeated-tool-failure guard | PR 2b for a fresh prompt's tool batches: the client's guards apply, and ACP keeps the ones only it has, its parameter-error, partial-edit and repeated-tool-failure stops, as its policy. A session with live tools and an Agent Host session keep ACP's tool step and this option until PR 2d |
 
-`toolCallPreparations`, `memoryRecallQuery`, `stopPolicies` and `historyPromptId` are not in the table: the first asks for an extra event, the second gives recall the prompt's text, which the host expanded before the send, the third adds the host's reasons to continue at a stop point ([Stop-point continuations](#stop-point-continuations)), and the fourth gives a `Retry` the history identity of the attempt it replaces; none turns anything off. PR 2c-1 removed `stopHookRunByHost`, with which ACP fired the Stop hook in its own Stop loop.
+The ACP host-input slice of #17045 replaces `interactionSpanByHost` with the caller-owned `interactionSpan`, and `userTurnRecordedByHost` with `userTurn`. Removing it means the host writes its record through core's `recordUserTurn` at the timing it already had, and tells core with `userTurn.promptId` not to record the turn itself; `userTurn` also carries the todo-chain and snapshot inputs. See [ACP host turn inputs](2026-11-13-acp-host-turn-inputs.md).
+
+`toolCallPreparations`, `memoryRecallQuery`, `stopPolicies` and `historyPromptId` are not in the table: the first asks for an extra event, the second gives recall the prompt's text, which the host expanded before the send, the third adds the host's reasons to continue at a stop point ([Stop-point continuations](#stop-point-continuations)), and the fourth gives a `Retry` the history identity of the attempt it replaces; none turns anything off. `skipMemoryExtraction` is not in the table either: it does turn off the client's memory extraction and Dream, but because the turn relays a channel's message, not because the host does that part itself, so it is a lasting input rather than a transition step. PR 2c-1 removed `stopHookRunByHost`, with which ACP fired the Stop hook in its own Stop loop.
 
 A new option that turns off part of the client's work for one host needs a row here, and a surface's default does not change while it has an open row.
 
@@ -248,13 +249,13 @@ PR 2 moves ACP in steps. PR 2a moves the model round of a fresh user prompt: one
 | `chat.sendMessageStream` behind `#sendMessageStreamWithAutoCompression`                           | `LlmClient.sendMessageStream` through `runModelRound`: the first round is `UserQuery`, a round after tools is `ToolResult`, and input taken while a response streamed is `Steer`                                      |
 | raw chunks: text, thought, usage, function calls, tool-call preparations                          | the client's events: `Content`, `Thought` with its raw `text`, the usage on `Finished`, `ToolCallRequest` with the `functionCall` it came from, `ToolCallPreparation`                                                 |
 | UserPromptSubmit through the message bus                                                          | `admitUserPrompt`, with the same input at the same point; the first round applies the verdict, and a blocked prompt is reported by that round without a request                                                       |
-| the user message record, the todo work chain and the file-history snapshot                        | ACP's, as today; the first round says so with `userTurnRecordedByHost`                                                                                                                                                |
+| the user message record, the todo work chain and the file-history snapshot                        | ACP writes its record at the existing boundary through core's `recordUserTurn`, and the first round carries `promptId` so core records nothing, plus the todo-chain and snapshot inputs in `userTurn`                 |
 | memory recall, plan, arena and output-style reminders, workflow intent, MessageDisplay            | the client                                                                                                                                                                                                            |
 | compaction before the send and its notice; the session token gate                                 | the client's compaction inside the send, with the same notice on `ChatCompressed`; the client's gate, reported as today (`max_tokens`)                                                                                |
 | the external Stop hook, its cap and its continuation                                              | ACP's Stop loop, as today, which also runs the Todo Stop Guard and the current turn's background results; the round told the client with `stopHookRunByHost` until PR 2c-1 moved the stop point to the client's chain |
 | the StopFailure hook and the 429 mapping when a request fails                                     | ACP, as today, also for a stream `Error` event, with the error the provider threw                                                                                                                                     |
 | the managed memory tasks after the turn                                                           | ACP, when the turn ends as today, through the client's `runManagedAutoMemoryBackgroundTasks`; until PR 2c-1 the client skipped them under `stopHookRunByHost`, since ACP's Stop loop could still continue the turn    |
-| the interaction span                                                                              | ACP's, as today; the round tells the client with `interactionSpanByHost`                                                                                                                                              |
+| the interaction span                                                                              | ACP starts and ends the span; the round passes `interactionSpan` for the client to join                                                                                                                               |
 | the daemon tool-loop guards: the per-turn tool-call cap, repeated calls, the exploration reminder | ACP's, as today; the round tells the client with `toolLoopGuardsByHost`, so the client checks no tool-call patterns and adds neither the exploration reminder nor the todo reminder ACP's message carries             |
 | no content or thought loop heuristics, no session turn cap                                        | the client's content and thought heuristics when `model.skipLoopDetection` is false, whose `LoopDetected` rejects the prompt as a loop (`LOOP_DETECTED`); `MaxSessionTurns` ends it with `max_turn_requests`          |
 
@@ -308,7 +309,7 @@ PR 2c-1 moves the stop point of the turns PR 2a moved onto the client's chain. A
 | each continuation streams through ACP's legacy send path and runs ACP's tool step                                | the client's round and the shared tool batch, as for the rest of the turn                                                                                                                     |
 | ACP runs the managed memory tasks after its Stop loop                                                            | the client runs them when the turn's last response stops on its own; ACP runs them when the turn ends otherwise, such as at the Stop-hook cap, on a Steer round or a tool that ended the turn |
 
-The client keeps a host's span, tool-guard and stop-policy options on a Stop-hook continuation, so it neither starts a span of its own nor turns its guards on for the continuation's tools. ACP resets its own tool-guard state for each Stop-hook or Todo Stop Guard continuation, including when Live tools retain ACP's tool executor. Tool-result requests within a continuation keep that budget.
+The client keeps a host's span, tool-guard, stop-policy and memory-extraction-skip options on a Stop-hook continuation, so it neither starts a span of its own nor turns its guards on for the continuation's tools. ACP resets its own tool-guard state for each Stop-hook or Todo Stop Guard continuation, including when Live tools retain ACP's tool executor. Tool-result requests within a continuation keep that budget.
 
 Hook diagnostics do not reopen a finished response's interruption window. Each new model request starts a new final-answer capture; a diagnostic with no following request keeps the preceding answer.
 
@@ -318,13 +319,13 @@ The core change of this step adds `SendMessageOptions.stopPolicies` with the `St
 
 PR 2c-2 puts five more kinds of ACP turn on the shared round, the shared tool batch and the client's stop point. Two are fresh prompts PR 2a left out: channel prompts and Goal-proposal approval turns. Three re-enter a turn the session already has: a retry, a continue of an interrupted turn and the restore of an unanswered `ask_user_question`. Goal turns, cron and background notifications move in PRs 2c-3 and 2c-4.
 
-| Turn                           | With the setting on                                                                                                                                                                                                                 |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| channel prompt                 | a `UserQuery` like any fresh prompt, without the submitted prompt or workflow input, as today; its responses are not cut short by queued input, its tool results never end the turn, and its repeated-tool-failure guard stays off  |
-| Goal-proposal approval         | a `UserQuery`; the session settles the proposal as today, and a Todo Stop Guard that gives way, or the Stop hook's cap, keeps the proposal from starting a Goal                                                                     |
-| retry                          | ACP strips the failed attempt and puts it back if the retry never sends, as today; the first round is a `Retry` with `historyPromptId`, the attempt's identity, and UserPromptSubmit's verdict from `admitUserPrompt`               |
-| continue                       | ACP strips the interrupted run, or closes the interrupted calls, as today; the first round is a `Retry` with `historyPromptId` and no UserPromptSubmit; a first request that never goes out puts the interrupted run back as it was |
-| restore of `ask_user_question` | ACP asks the question again with its own tool step; the answer is the first round, a `Retry`; later batches run on the shared batch                                                                                                 |
+| Turn                           | With the setting on                                                                                                                                                                                                                                                                                                           |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| channel prompt                 | a `UserQuery` like any fresh prompt, without the submitted prompt or workflow input, as today; its responses are not cut short by queued input, its tool results never end the turn, its repeated-tool-failure guard stays off, and every round carries `skipMemoryExtraction`, so it schedules no memory extraction or Dream |
+| Goal-proposal approval         | a `UserQuery`; the session settles the proposal as today, and a Todo Stop Guard that gives way, or the Stop hook's cap, keeps the proposal from starting a Goal                                                                                                                                                               |
+| retry                          | ACP strips the failed attempt and puts it back if the retry never sends, as today; the first round is a `Retry` with `historyPromptId`, the attempt's identity, and UserPromptSubmit's verdict from `admitUserPrompt`                                                                                                         |
+| continue                       | ACP strips the interrupted run, or closes the interrupted calls, as today; the first round is a `Retry` with `historyPromptId` and no UserPromptSubmit; a first request that never goes out puts the interrupted run back as it was                                                                                           |
+| restore of `ask_user_question` | ACP asks the question again with its own tool step; the answer is the first round, a `Retry`; later batches run on the shared batch                                                                                                                                                                                           |
 
 A re-entered turn's first round is a `Retry`, not a `ToolResult`, even when it carries tool results: a `ToolResult` does not start the client's interaction, so the previous prompt's loop-detector counts would carry over and UserPromptSubmit would run on the results. Headless continues an interrupted turn with a `ToolResult` because each of its runs is a new process. A `Retry` gets no system reminders from the client, so ACP adds its plan, arena and output-style reminders to it as today, and the todo reminder ACP takes is the one the client would take.
 
@@ -365,6 +366,10 @@ The prompt loop's shared round becomes a method that the three loops share. The 
 Both kinds of turn run the Todo Stop Guard as their stop policy, after the Stop hook. Queued input does not cut their responses short, as today, and is taken at a tool boundary; it no longer continues a notification turn at its stop point, but starts the next turn, as on a prompt since PR 2c-1. A cron turn keeps ACP's interaction span; a notification turn, which has none on ACP's side, gets the client's.
 
 The core change of this step: `userTurnRecordedByHost` also covers a `Cron` and a `Notification` send, whose prompt or notification the host records.
+
+Step 3 of #17045 runs each model request of an ACP turn and its tool batch in one `runAgentLoop` call, for prompt, Goal, cron and background-notification turns, as the TUIs do. With `experimental.eventBusAgentLoop` also enabled, the call uses the event-bus kernel. The round still reports each event through the session's callback, and the turn still decides what follows it. The batch waits in `onRoundEnd` until the turn hands it the session's scheduler, the history's answered calls, the batch's own tool signal, its launch check and its result callback; as before, the batch records its results itself. A turn that leaves before the hand-off, because the round ended it or the turn was cancelled, closes the round's call in its `finally`, which skips the batch. The batch's tools run in the async context of the hand-off, which carries the turn's prompt ID, its todo work chain and a full-turn model override. The round still runs under the signal queued input aborts, by cutting a response short or by keeping the turn at its stop point. The kernel takes either as a cancellation, and the round ends as on the procedural loop, inside the cap. That signal aborts only around a response without calls, so during a batch it aborts only with the turn, and only a cancelled turn's batch can reach the cap. The first round of a prompt that UserPromptSubmit blocked, which sends nothing, runs in a call of its own. Sessions with live tools and read-only Agent Host sessions keep ACP's own tool step and call the model round alone. The ACP parity suite runs every scenario a third time with both settings on and matches the event-bus adapter's log to the session's rounds by prompt ID.
+
+When cancellation reaches the kernel's deadline, ACP applies the tool output budget to the responses that have already settled and records them once. This path uses the output already available, including any existing recovery files. An unfinished call is left to the existing history repair. Queued tool card updates for settled calls can finish when the client resumes reading. ACP releases the turn while those updates or a confirmation handler are still pending.
 
 ### The Ink TUI on the shared loop (PR 3)
 
@@ -431,6 +436,119 @@ Until the turn sends the round, the batch keeps the scheduler and keeps the TUI 
 
 A retry with Ctrl+Y already runs on the shared round and, from PR 3b-2b, awaits its batch. PR 3c-1 adds the retry scenarios to the Ink parity suite, with a retried tool-result round whose response calls a tool, and a scenario for input queued while a tool runs.
 
+PR 3c-2 covers the turns the TUI starts on its own: a Goal's continuations, a background task's notification, a cron fire and a teammate's report. Each is a `submitQuery` call that the TUI's idle scheduling makes with its own send type, so each already runs on the shared round and the shared batch, and from PR 3c-1 the turn sends the round its batch continues with. The scheduling around these turns stays the TUI's, as on the other surfaces. PR 3c-2 adds a scenario for each kind of turn to the Ink parity suite, with a tool batch inside the turn. They pass unchanged, so the TUI's code does not change.
+
+Step 3 of #17045 runs each Ink TUI model request and tool batch in one `runAgentLoop` call, as OpenTUI does. With `experimental.eventBusAgentLoop` also enabled, the call uses the event-bus kernel. The round still reports each event through the processor's callback, and the processor still decides what the round's calls become: a repeated replay stops the turn, a response of replays alone is answered by the TUI, and any other response runs as the shared batch. The batch waits in `onRoundEnd` until the processor hands it the scheduler, the history's answered calls and its result callback; a processor that hands nothing over, because it ended the turn or answered the replays itself, leaves the round to its caller, which closes it and skips the batch, replays included. The round runs under the signal Esc aborts, and the batch's tools under the turn's signal, which a Goal turn's preemption also aborts, as before. The TUI parity suite runs every Ink scenario a third time with both settings on, including the turns the TUI starts on its own, and matches the event-bus adapter's log to the TUI's rounds by prompt ID.
+
+### OpenTUI on the shared loop (PR 4)
+
+OpenTUI's live turn, `livePromptEvents` in `live-session.ts`, already has the loop's shape: it sends a round, runs the round's calls on a new `InteractiveModToolScheduler`, and sends their results as the next round, until a round calls no tools. OpenTUI does not start turns of its own yet: it has no Goal continuation, background-notification, cron or teammate turns. It moves in these steps:
+
+| Step | Content                                                                                                               |
+| ---- | --------------------------------------------------------------------------------------------------------------------- |
+| 4a   | every model round on the loop's `runModelRound`; the turn keeps its tool step; the parity suite runs on OpenTUI too   |
+| 4b   | a round's tool calls as one shared batch over `InteractiveModToolScheduler`, with the loop's finalizing and recording |
+| 4c   | verify the turn behavior already present after 4b: steering input at a tool boundary and a retry                      |
+| 4d   | default on, then remove the current loop                                                                              |
+
+PR 4a sends each model round of the live turn through `runModelRound`. The turn reads the round's events one at a time, as it reads the client's stream, and maps each as before. A turn that stops reading, because a newer turn replaced it or it was cancelled, ends the round, which closes the client's stream. What moves:
+
+| OpenTUI today                                                                               | With the setting on                                             |
+| ------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| the turn collects `tool_call_request` events and drops them on `retry` and `model_fallback` | `runModelRound` collects and drops them                         |
+| the calls a response made before a detected loop still run                                  | any stop reason keeps the round's calls from running, as in Ink |
+
+The parity suite runs on the renderer that `QWEN_E2E_RENDERER` selects. On OpenTUI it leaves out the scenarios of turns OpenTUI does not start, and checks that only the run with the setting on sends its rounds on the shared loop.
+
+PR 4b runs a shared round's calls as one batch of the shared loop, `runToolBatch`, on an executor over the turn's `InteractiveModToolScheduler`. The scheduler takes the batch as before, so the tool cards, approvals, checkpoints and the Mod tool middleware do not change. The batch then finishes the step, as it does on Ink:
+
+| OpenTUI today                                             | With the setting on                                                                                                                         |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| a call the model replays from history runs again          | the batch answers it in place, and answers alone go out as the next round; a model that replays an answered call again is stopped as a loop |
+| only a batch the Mod tool middleware touched is finalized | every batch is finalized, so results that together exceed the tool output budget are trimmed to it                                          |
+| the turn records each result while it is current          | the batch's recording, under the same check                                                                                                 |
+| no call counts toward the session's completed tool calls  | each completed call counts, except a cancelled one and those the Mod tool middleware counted                                                |
+| a tool that ends the turn does not end it                 | it ends the turn, with the results in history                                                                                               |
+
+A tool a slash command runs keeps the current path, as on Ink.
+
+PR 4c covers the rest of the turn. The live turn already sends the round its batch continues with, built as the loop's `nextRound` builds a round, as an Ink turn does from PR 3c-1:
+
+| OpenTUI with the setting on, from PR 4b                                                                                                         | What PR 4c checks                                                                                                               |
+| ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| after the batch, the turn takes the steering input queued for the tool boundary and sends it after the batch's results, as a `ToolResult` round | the same after a batch of replays alone; a round that stops or is cancelled before it takes the input puts it back in the queue |
+| a batch that ends the turn sends no round                                                                                                       | the input stays queued when a tool ends the turn, when Esc cancels the batch and when the model replays an answered call again  |
+| a retry with Ctrl+Y sends its round with the `Retry` type on the shared round and runs its calls on the shared batch                            | the retry's turn takes the steering input after its batch as a fresh turn does                                                  |
+
+The turn's code therefore does not change. PR 4c adds unit tests for these cases on the shared path; the fresh-turn and retry cases compare both paths, while the remaining cases check the shared path only. The parity suite already runs its retry scenarios and the scenario for input queued while a tool runs on OpenTUI.
+
+Step 3 of #17045 runs each OpenTUI model request and tool batch in one `runAgentLoop` call. With `experimental.eventBusAgentLoop` also enabled, the call uses the event-bus kernel. The turn reads events one at a time and drives the next round. Both loop implementations pass the round's calls and stop reason to `onRoundEnd` and await it. OpenTUI reports the end of the stream, then waits for the turn to hand off its scheduler. The batch starts after the handoff, including replay handling and result finalization. Closing the round before the handoff skips the batch. A retried continuation adds the results it paired to replay bookkeeping before the batch starts. The TUI parity suite compares both loop implementations and verifies OpenTUI rounds using the event-bus adapter's log and their prompt IDs.
+
+### AgentCore on the shared loop (PR 5)
+
+AgentCore's reasoning loop, `runReasoningLoop` in `agent-core.ts`, runs every subagent, background and forked agent, workflow agent and in-process teammate, under every surface. It sends each round on the agent's own `LlmChat` and parses the stream's chunks itself, runs the round's calls on a new `CoreToolScheduler`, adds the parent's messages after the results, waits for messages or asks for a final answer when a round calls no tools, and maps its stops to `terminateMode`. It moves in these steps:
+
+| Step | Content                                                                                                                                                        |
+| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 5a   | every model round on the loop's `runModelRound`, on a `Turn` over the agent's `LlmChat`; the agent keeps its tool step; subagent scenarios in the parity suite |
+| 5b   | a round's calls as one shared batch over the agent's scheduler, with its deferred approvals                                                                    |
+| 5c   | each round and its batch in one `runAgentLoop` call, on the event-bus kernel when it is on; the agent keeps its driver between rounds                          |
+| 5d   | default on, then remove the current loop                                                                                                                       |
+
+PR 5a gives `runModelRound` a second kind of round. It takes the main session's `LlmClient` or a `ModelRoundSource`, and `turnModelRound(chat, model, options)` sends a round on a `Turn` over an agent's chat. The `Turn` accepts optional request fields for tools and the output limit, reports when the stream is ready, and provides each chunk's text, response ID and usage before yielding its events. A `Retry` event can carry a raised output limit. The agent can ask the `Turn` to propagate request errors unchanged. A surface's model-event callback may return a stop reason, which ends the round there and closes its stream.
+
+AgentCore maps the round's events as it maps its chunks today and keeps the raw function calls for its tool step. What moves:
+
+| AgentCore today                                                                         | With the setting on                                                                               |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| it sends each round on `LlmChat.sendMessageStream` and parses its chunks                | `runModelRound` sends it on a `Turn`, and AgentCore maps the round's events                       |
+| a loop it detects in the stream breaks out of the stream                                | the event's callback returns `loop_detected`, which ends the round and closes the stream          |
+| a model fallback keeps what the failed model streamed: its calls, text and thought text | they are dropped, so the round carries only the fallback model's output, as on the other surfaces |
+| a streamed text event per text part                                                     | per chunk: its thought text, then its text                                                        |
+
+Both paths emit `ROUND_START` after stream preparation so the workflow watchdog gives the model response a fresh stall window. The agent emits text from the entire received chunk before its loop checks and tracks response IDs per attempt. A failed request, a cancel and a retry wait cut off by the time limit end the run as today. The suite with the setting on counts each subagent round sent on the shared loop in the debug log. The TUI suite counts main-session rounds using a separate log entry.
+
+PR 5b runs a round's calls as one batch of the loop's `runToolBatch` on the agent's own scheduler, as the Ink TUI and OpenTUI run theirs on their own schedulers. The batch's `client` becomes optional: it counts the executed calls toward the main session's tool calls, which an agent's calls do not count toward today. What moves:
+
+| AgentCore today                                                       | With the setting on                                                                         |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| it answers a provider replay and stops at a repeated one              | the batch does, and the agent emits the replay's events from its result                     |
+| it refuses a call it did not declare or may not run before scheduling | its executor refuses the call with the same error, after the batch remembered it as refused |
+| it orders and finalizes the results                                   | the batch does, and the agent emits `TOOL_RESPONSES_FINALIZED` from them                    |
+
+The scheduler, with its events, approvals and hooks, stays the agent's own, so a deferred approval restores the agent's four async-local frames as it does today. The batch leaves the results unrecorded, since they go to the agent's chat and not to the session's transcript. It keeps the results of an aborted batch, so the run ends at the next round's abort check as it does today. A call id the stream repeats still runs and is answered once. The headless suite counts each subagent batch on the shared loop in the debug log, and the TUI suite answers a subagent's approval in the TUI.
+
+PR 5c runs each round, its model request and its tool batch, in one `runAgentLoop` call that returns after the batch, as headless runs each round of its main turn. With `experimental.eventBusAgentLoop` enabled, AgentCore uses the event-bus kernel. OpenTUI is the third entry point to use it, after headless and AgentCore. The agent keeps its driver between rounds: the parent's messages after the results, the loop reminder and the result-aware loop guard, the wait and the request for a final answer, and the mapping of the stops to `terminateMode`. Handing the whole run to the loop, with no driver of its own, is left to the follow-up issue of #17045. The loop's options change as follows, on the procedural and the event-bus path:
+
+- `runAgentLoop` takes the batch options `keepCancelledResults`, `deferRecording` and `duplicateStateForCall`, and returns the batch's results by call;
+- it takes a `ModelRoundSource` in place of the client; the calls of a loop on a round source do not count toward the session's tool calls;
+- `onRoundEnd` may return a stop reason, which ends the loop between the model round and its batch.
+
+What moves:
+
+| AgentCore with 5b                                                                                  | With 5c                                                                                                                 |
+| -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| it hands the round's function calls to its tool step                                               | its round source gives the batch the agent's request for each call: one per call id, with the round's final response ID |
+| after the stream it emits the round's text, counts it, checks the time limit and records the usage | it does the same in `onRoundEnd`, which stops the loop when the time limit has passed, so the batch does not run        |
+| its tool step runs the round's calls as one `runToolBatch` batch                                   | the same batch runs inside the call, and the call returns its results                                                   |
+
+The headless suite runs each subagent scenario a third time with both settings on and compares it with the run on the shared loop; the debug log marks each subagent round on the kernel. The unit tests of the agent's tool step and run cover the current loop, the shared loop and the kernel.
+
+### Speculation on the shared loop (PR 6)
+
+Speculation's `runSpeculativeLoop` in `speculation.ts` runs the accepted suggestion ahead of the user on a forked `LlmChat` with copy-on-write file isolation. It sends each round on the chat and parses the stream's chunks itself, then runs the round's calls through its own tool gate (boundary/redirect) and executes them directly, without the scheduler. PR 6a moves only the model round: with the setting on, `runSpeculationModelRound` sends it on `runModelRound` over `turnModelRound(chat, model, { throwErrors: true })` and rebuilds the visible-text and function-call parts from the round's events; the tool gate, the direct execution, the overlay writes and the boundary handling are unchanged. `throwErrors` keeps a failed request rejecting so `startSpeculation` sets `aborted` and cleans the overlay, as the raw-chunk path does.
+
+| Speculation today                                                     | With the setting on                                                                                    |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| it parses each chunk's parts, keeping visible text and function calls | the round's `Content` and `ToolCallRequest` events become those parts                                  |
+| a retry or fallback keeps the abandoned attempt's text and calls      | a fresh retry or fallback drops them; a continuation retry keeps the text it appends to                |
+| a text part per streamed text part                                    | one text part per chunk, as the `Turn` reports it                                                      |
+| an id-less function call keeps no id                                  | the call gains the `Turn`'s generated id (not reachable on the OpenAI wire, which already assigns ids) |
+| a name-less function call is dropped                                  | dropped too: the guard reads the raw name, not the `Turn`'s `undefined_tool_name` placeholder          |
+| the request carries no abort signal; cancelling returns the iterator  | the request carries the abort signal, so a cancel also aborts the in-flight request                    |
+
+The unit suite in `speculation.test.ts` runs a text-only round, a single call, a two-call batch and a thought part with the setting off and on and compares the resulting history, tool execution and status; a branch marker pins that the shared round runs only with the setting on. Event-seam tests cover a fresh retry, an un-flagged retry, a continuation retry, a model fallback, a failed request (aborted and the overlay cleaned on both paths), a name-less call, an id-less call, a two-text-part chunk, and the request bodies (the suggestion, then the tool results), the prompt id and the abort signal. Speculation has no entry in the integration parity suite yet; that run is added when its default flip is prepared.
+
 ## Migration
 
 | PR    | Content                                                                                                                                             |
@@ -453,12 +571,19 @@ A retry with Ctrl+Y already runs on the shared round and, from PR 3b-2b, awaits 
 | 3c-1  | Ink TUI: input at a tool boundary through the loop's next round; a retry                                                                            |
 | 3c-2  | Ink TUI: cron, background-notification, teammate and Goal turns                                                                                     |
 | 3d    | Ink TUI: default on, then remove its current loop                                                                                                   |
-| 4     | OpenTUI                                                                                                                                             |
-| 5     | AgentCore on a `Turn` round (subagents, background and forked agents, workflows)                                                                    |
-| 6     | speculation                                                                                                                                         |
+| 4a    | OpenTUI: every model round on the loop's round; the turn keeps its tool step; the parity suite on OpenTUI                                           |
+| 4b    | OpenTUI: a round's tool calls as one shared batch                                                                                                   |
+| 4c    | OpenTUI: verify the turn behavior already present after 4b, including steering input at a tool boundary and a retry                                 |
+| 4d    | OpenTUI: default on, then remove its current loop                                                                                                   |
+| 5a    | AgentCore: every model round on the loop's round, on a `Turn` over the agent's chat; the agent keeps its tool step                                  |
+| 5b    | AgentCore: a round's calls as one shared batch, with its deferred approvals                                                                         |
+| 5c    | AgentCore: each round and its batch in one `runAgentLoop` call, on the event-bus kernel when it is on                                               |
+| 5d    | AgentCore: default on, then remove its current loop                                                                                                 |
+| 6a    | speculation: every model round on the loop's round, on a `Turn` over the forked chat; speculation keeps its tool gate and direct execution          |
+| 6b    | speculation: default on, then remove its current round                                                                                              |
 | —     | Hosted Harness: separate evaluation                                                                                                                 |
 
-Each of PRs 4–6 is followed by its own default-on and removal steps.
+PR 6b is speculation's default-on and removal step.
 
 A surface counts as moved when it passes its parity suite with the setting on and its known differences are listed. Each surface then changes its default on its own, without waiting for the others. Its default changes when:
 
@@ -498,6 +623,16 @@ A difference fails the scenario unless it is listed with a linked issue.
 - structured output with a sibling call;
 - a teammate message merged into a tool-result turn.
 
+**Subagent scenarios** (in the headless suite, from PR 5a), each through the `agent` tool, with the subagent's requests compared with the main session's in the order they were sent:
+
+- a subagent that reads a file;
+- a subagent that recovers after one disconnect. The test checks for two requests and the recovered answer in the parent tool result.
+- a subagent stopped at its turn limit;
+- a subagent's call of a tool it may not use beside a read, in one response (PR 5b);
+- a subagent whose model fails.
+
+From PR 5c each subagent scenario also runs with `experimental.eventBusAgentLoop` on and must match the run on the shared loop. Every headless scenario now does: the run with both settings on must match the run on the shared loop, and the event-bus adapter's debug marker must count one `runAgentLoop` call per main-session round; the two runs without the kernel must log none.
+
 **ACP scenarios** (`integration-tests/cli/acp-agent-loop-parity.test.ts`):
 
 - plain text, and streamed text with a thought;
@@ -519,13 +654,14 @@ A difference fails the scenario unless it is listed with a linked issue.
 
 A continuation's request runs under a prompt id of its own on the current loop and under the turn's prompt id on the shared loop; the suite compares them as one.
 
-**Ink scenarios** (`integration-tests/interactive/ink-agent-loop-parity.test.ts`). The TUI runs in a pseudo-terminal against the fake server. The suite compares the two runs' request bodies as sent, with the system prompt, the tools offered and each message's `reasoning_content`, and their session's chat records, with usage. It also checks each run's number of requests, and, through the debug log, that only the run with the setting on sends its rounds and runs its tool batches on the shared loop, as many as the scenario has. A scenario that sends and records nothing, such as a blocked prompt, checks the notice on each run's last screen instead; the screen is not compared otherwise, since it repaints on timers:
+**TUI scenarios** (`integration-tests/interactive/tui-agent-loop-parity.test.ts`). The TUI that `QWEN_E2E_RENDERER` selects, Ink or OpenTUI, runs in a pseudo-terminal against the fake server. The suite compares the two runs' request bodies as sent, with the system prompt, the tools offered and each message's `reasoning_content`, and their session's chat records, with usage. It also checks each run's number of requests, and, through the debug log, that only the run with the setting on sends its rounds and runs its tool batches on the shared loop, as many as the scenario has. A scenario that sends and records nothing, such as a blocked prompt, checks the notice on each run's last screen instead; the screen is not compared otherwise, since it repaints on timers:
 
 - plain text, and streamed text with a thought;
 - a thought before a tool, whose second request replays the reasoning;
 - one tool, and two reads in one response;
 - a replayed call next to a fresh one, which the batch answers;
 - an approved write, then a declined one, in the default approval mode;
+- a subagent's write approved in the TUI, in the default approval mode (PR 5b);
 - a shell command cancelled with Esc while it runs;
 - an edit cut off by the output limit;
 - a stream that drops and is retried;
@@ -534,14 +670,20 @@ A continuation's request runs under a prompt id of its own on the current loop a
 - a retry after a model error, and a retry that fails again;
 - a retried tool-result round whose response calls a tool;
 - input queued while a tool runs, which goes out with the tool's result;
+- a Goal whose second continuation reads a file and then proposes that the Goal is complete, which the check accepts; the check's request, which does not stream, is compared too;
+- a background shell whose result starts a notification turn, which reads a file;
+- a cron job that fires once, whose turn reads a file;
+- a teammate's report that starts a teammate turn, which reads a file; the leader's requests and the teammate's are each compared in the order that agent sent them;
 - a UserPromptSubmit hook that blocks;
 - a Stop hook that blocks once.
 
-The suite runs in the integration job. The nightly E2E run, and one started by hand, also runs the whole integration suite with the setting on, in a Linux leg without a sandbox; it is the scheduled job a surface's default change waits on.
+On OpenTUI the suite leaves out the Goal, background-notification, cron and teammate scenarios, since OpenTUI does not start those turns, and checks the tool batches on the shared loop from PR 4b on. Its retry scenarios and the scenario for input queued while a tool runs cover PR 4c. There, the replayed call is an intended difference: the scenario checks that only the run with the setting on answers it in place.
+
+The suites run in the integration job, the TUI suite on Ink; the OpenTUI interactive E2E job, on main and nightly, runs the TUI suite on OpenTUI. The nightly E2E run, and one started by hand, also runs the whole integration suite with the setting on, in a Linux leg without a sandbox; it is the scheduled job a surface's default change waits on.
 
 ## Compatibility
 
-- With the setting off, no surface changes. The shared code that changes is additive: the scheduler's optional `beforeToolLaunch`, from PR 2a the `Turn` event fields and send options above, from PR 2b the exported `runToolBatch` and the scheduler's `refuseToolCall` and `onPermissionPromptTerminalSequence`, from PR 2c-1 `stopPolicies`, and from PR 3b-1 a settled call's `recorded`, a batch's `responses` and the batch option `deferRecording`, which change nothing for a caller that does not use them.
+- With the setting off, no surface changes. The shared code that changes is additive: the scheduler's optional `beforeToolLaunch`, from PR 2a the `Turn` event fields and send options above, from PR 2b the exported `runToolBatch` and the scheduler's `refuseToolCall` and `onPermissionPromptTerminalSequence`, from PR 2c-1 `stopPolicies`, from PR 3b-1 a settled call's `recorded`, a batch's `responses` and the batch option `deferRecording`, from PR 5b the batch's optional `client`, and from PR 5c the loop's batch options, its results by call, a round source in place of the client and a stop from `onRoundEnd`, which change nothing for a caller that does not use them.
 - With the setting on, headless differs from today in these intended ways. Most follow from scheduling a batch as one unit, as the TUI already does:
   - a stream-json message past `--max-session-turns` ends the run at the session turn limit, as `-p` does (the error on stderr, exit code 53), instead of a success that repeats the previous answer (#15325);
   - a notification turn (cron, monitor and other queued items) counts each of its model rounds toward `--max-session-turns`, as the main turn does, instead of one turn for the whole item, so a run whose notification turns call tools can reach the limit sooner;
@@ -589,6 +731,24 @@ The suite runs in the integration job. The nightly E2E run, and one started by h
   - from PR 3b-1, the skipped siblings of a plan-mode entry no longer count toward the session's completed tool calls;
   - from PR 3b-2a, a tool that ends the turn ends it outside a Goal turn too.
 
+- With the setting on, OpenTUI differs from today in these intended ways, as Ink does:
+  - from PR 4a, the calls a response made before a detected loop no longer run, as in Ink and headless.
+  - from PR 4b, a call the model replays from history is answered in place instead of run again;
+  - from PR 4b, every tool batch is finalized, so results that together exceed the tool output budget are trimmed to it;
+  - from PR 4b, completed tool calls count toward the session's tool calls, which the automatic skill review and memory recall read;
+  - from PR 4b, a tool that ends the turn ends it, with the results in history.
+
+- With the setting on, AgentCore differs from today in these intended ways:
+  - from PR 5a, a model fallback drops what the failed model streamed, its calls, text and thought text, so the round's answer carries only the fallback model's output, as on the other surfaces ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
+  - from PR 5a, a streamed text event carries a chunk's thought text or its visible text ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
+  - from PR 5b, within a reasoning run the batch tracks calls the agent may not run separately from executable calls, including when they share a provider ID. The first exact replay gets a duplicate response and a further replay stops the batch. Replay events come before refusals in the batch ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
+
+- With the setting on, speculation differs from today in these intended ways:
+  - from PR 6a, a fresh retry or a model fallback drops the abandoned attempt's text and calls, so the round carries only the new attempt's output; a continuation retry keeps the text it appends to, as today ([#15327](https://github.com/QwenLM/qwen-code/issues/15327));
+  - from PR 6a, a round's visible text arrives as one part per chunk instead of one part per streamed text part ([#15327](https://github.com/QwenLM/qwen-code/issues/15327));
+  - from PR 6a, an id-less function call gains the `Turn`'s generated id on the call and its response (not reachable on the OpenAI wire, which already assigns ids) ([#15327](https://github.com/QwenLM/qwen-code/issues/15327));
+  - from PR 6a, the model request carries the abort signal, so a cancel aborts the in-flight request as well as returning the iterator ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
+
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 
 - No setting, protocol field or file format is removed.
@@ -599,7 +759,7 @@ The suite runs in the integration job. The nightly E2E run, and one started by h
 | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Whole-batch scheduling changes headless frame order or the exact `--max-tool-calls` count                   | ordered result streaming; `beforeToolLaunch`; parity scenarios at the budget edge                                                                                                                |
 | Moving ACP onto `LlmClient` adds behavior (caps, heuristics, reminders) and could run hooks twice           | ACP's own copies stay off the shared path; parity lists every added behavior; separate PR                                                                                                        |
-| AgentCore's deferred approvals must restore four async-local frames                                         | move the existing contract tests with the code; a real deferred-approval run in the TUI agent view (PR 5)                                                                                        |
+| AgentCore's deferred approvals must restore four async-local frames                                         | move the existing contract tests with the code; a subagent's write approved in the TUI, on Ink and OpenTUI (PR 5b)                                                                               |
 | Two implementations coexist while the setting exists, and new loop-level behavior has to be wired into both | each surface switches its default and drops its current loop as soon as it is ready, instead of after every surface has moved; the current loops are not refactored meanwhile; parity runs in CI |
 | Large PRs touch core                                                                                        | each PR moves one surface; PR 1 is a feature PR behind an off-by-default setting                                                                                                                 |
 
