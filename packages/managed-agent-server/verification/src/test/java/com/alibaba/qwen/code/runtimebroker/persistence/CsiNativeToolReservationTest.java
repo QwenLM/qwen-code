@@ -7,7 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
-import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -542,7 +542,7 @@ class CsiNativeToolReservationTest {
         source.setURL("jdbc:h2:mem:csi-members-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=0;DATABASE_TO_LOWER=TRUE");
         Connection connection = source.getConnection();
-        JdbcRuntimeBrokerSchema.initialize(source);
+        ManagedSchema.initialize(source);
         connection.setAutoCommit(false);
         return connection;
     }
