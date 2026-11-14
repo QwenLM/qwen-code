@@ -380,13 +380,25 @@ describe('managed DingTalk adapter inbound', () => {
     // so the third message is never attempted.
     expect(plane.submitAttempts()).toBe(2);
     expect(plane.submit).toHaveLength(0);
-    fake.push('m4', messageData({ msgId: 'm4', text: { content: 'fourth' } }));
+    // During the stall the gate refuses new frames, leaving them unacked for
+    // provider redelivery instead of acked-and-parked in memory.
+    expect(
+      fake.push(
+        'm4',
+        messageData({ msgId: 'm4', text: { content: 'fourth' } }),
+      ),
+    ).toBe(false);
     await adapter.tick();
     // One held-claim probe per tick; the mail behind the stall stays unattempted.
     expect(plane.submitAttempts()).toBe(3);
     expect(plane.submit).toHaveLength(0);
-    // The binding answers again: the held claim and the backlog flow.
+    // The binding answers again: the held claim and the backlog flow. m3 was
+    // persisted as a claim when the stall armed, so this tick lifts the stall
+    // and re-drives it from pending; m4 is then redelivered by the provider (it
+    // was left unacked during the stall) and admitted on the next tick.
     plane.setRefuseSubmit(undefined);
+    await adapter.tick();
+    fake.push('m4', messageData({ msgId: 'm4', text: { content: 'fourth' } }));
     await adapter.tick();
     expect(plane.submit.map((event) => event.text)).toEqual([
       'second',
@@ -417,15 +429,25 @@ describe('managed DingTalk adapter inbound', () => {
     // the stall — that mail must not be admitted to the still-broken binding.
     const second = await connectedAdapter(cwd);
     second.plane.setRefuseSubmit({ status: 503 });
+    // The re-armed stall refuses new frames at the gate (left unacked).
+    expect(
+      second.fake.push(
+        'm3',
+        messageData({ msgId: 'm3', text: { content: 'behind' } }),
+      ),
+    ).toBe(false);
+    await second.adapter.tick();
+    expect(second.plane.submitAttempts()).toBe(1);
+    expect(second.plane.submit).toHaveLength(0);
+    // The binding answers again: this tick lifts the stall and admits the held
+    // claim; the mail behind it is then redelivered by the provider (it was left
+    // unacked during the stall) and admitted on the next tick.
+    second.plane.setRefuseSubmit(undefined);
+    await second.adapter.tick();
     second.fake.push(
       'm3',
       messageData({ msgId: 'm3', text: { content: 'behind' } }),
     );
-    await second.adapter.tick();
-    expect(second.plane.submitAttempts()).toBe(1);
-    expect(second.plane.submit).toHaveLength(0);
-    // The binding answers again: the held claim and the mail behind it flow.
-    second.plane.setRefuseSubmit(undefined);
     await second.adapter.tick();
     expect(second.plane.submit.map((event) => event.text)).toEqual([
       'held',
@@ -840,6 +862,65 @@ describe('managed DingTalk adapter review fixes', () => {
     expect(
       second.plane.submit.map((event) => event.platformEventId),
     ).not.toContain('dingtalk:m33');
+    await second.adapter.disconnect();
+  });
+
+  it('a refused rejection receipt does not abort the claimed batch (R5-3)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    // d-targetless has no usable target (takes the rejection arm); d-behind is
+    // sendable and sits behind it in the same claimed batch.
+    const targetless = delivery('d-targetless', 1);
+    targetless.replyContext = {
+      conversationId: '',
+      sessionWebhook: '',
+      senderId: 'staff-1',
+      robotCode: 'robot-app',
+    };
+    plane.enqueue([targetless, delivery('d-behind', 1)]);
+    plane.setReceiptError((id) =>
+      id === 'd-targetless'
+        ? Object.assign(new Error('refused'), { status: 500 })
+        : undefined,
+    );
+    await adapter.tick();
+    // The rejection receipt is refused, but the delivery behind it must still
+    // send — the tick must not escape and settle the whole batch unknown.
+    expect(fake.sent.map((entry) => entry.text)).toEqual(['segment 0']);
+    await adapter.disconnect();
+  });
+
+  it('persists the acked inbox backlog when the stall arms, so a hard restart re-drives it (R5-1)', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    first.plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    // Three frames are acked into the inbox before the stall arms.
+    first.fake.push(
+      'm1',
+      messageData({ msgId: 'm1', text: { content: 'first' } }),
+    );
+    first.fake.push(
+      'm2',
+      messageData({ msgId: 'm2', text: { content: 'second' } }),
+    );
+    first.fake.push(
+      'm3',
+      messageData({ msgId: 'm3', text: { content: 'third' } }),
+    );
+    await first.adapter.tick();
+    // m1 drops as the sacrifice, m2 holds and arms the stall. m3 was already
+    // acked; it must be persisted as a claim even though admission is stalled.
+    expect(first.plane.submitAttempts()).toBe(2);
+    // Hard restart: no graceful disconnect, so drainInboxOnShutdown never runs
+    // and the first adapter is abandoned mid-stall. A fresh process reads only
+    // what was persisted to the state file — an in-memory inbox frame is lost.
+    const second = await connectedAdapter(cwd);
+    second.plane.setRefuseSubmit(undefined);
+    await second.adapter.tick();
+    // The held claim and the acked backlog both re-drive from durable state.
+    expect(second.plane.submit.map((event) => event.text)).toEqual([
+      'second',
+      'third',
+    ]);
     await second.adapter.disconnect();
   });
 });

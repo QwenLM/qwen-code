@@ -49,7 +49,17 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => {
         await mockState.connectGate.promise;
       }
       if (mockState.behavior === 'fail') {
-        throw new Error('getEndpoint failed');
+        // Mirror an AxiosError: config is an own enumerable property and
+        // toJSON() includes config.url, which carries the gettoken appsecret.
+        const error = new Error('getEndpoint failed') as Error & {
+          config: { url: string };
+          toJSON: () => unknown;
+        };
+        error.config = {
+          url: 'https://oapi.dingtalk.com/gettoken?appkey=AK&appsecret=SUPERSECRET',
+        };
+        error.toJSON = () => ({ message: error.message, config: error.config });
+        throw error;
       }
     }
     disconnect(): void {
@@ -98,7 +108,15 @@ describe('managed DingTalk stream connect (R1-9)', () => {
     mockState.behavior = 'fail';
     const { createStreamClient } = createManagedDingtalkDeps();
     const stream = createStreamClient(SETTINGS, () => true);
-    await expect(stream.connect()).rejects.toThrow('getEndpoint failed');
+    // The failure must surface, but the SDK error object (which serializes the
+    // gettoken appsecret) must not escape — redact the payload, not the failure.
+    const rejection = await stream.connect().then(
+      () => undefined,
+      (error) => error,
+    );
+    expect(rejection).toBeInstanceOf(Error);
+    expect(String(rejection.message)).toContain('connect failed');
+    expect(JSON.stringify(rejection)).not.toContain('SUPERSECRET');
   });
 
   it('a reconnect failure after a successful connect is swallowed', async () => {

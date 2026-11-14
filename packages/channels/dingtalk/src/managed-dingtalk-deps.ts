@@ -97,7 +97,16 @@ function createStreamClient(
         return result;
       },
       (error) => {
-        if (!everConnected) throw error;
+        // The first failure must surface (it tells the operator the credential
+        // or network is wrong), but never rethrow the SDK's error object: an
+        // AxiosError serializes its config.url, which carries the gettoken
+        // appsecret. Redact the payload, not the failure.
+        if (!everConnected) {
+          void error;
+          throw new Error(
+            'DingTalk stream connect failed; check the clientId/clientSecret and network.',
+          );
+        }
         // Do not echo the error: it can carry the endpoint/ticket. Log only on
         // the transition — a permanently rejected app would otherwise re-emit
         // this line every retry interval and drown the log.

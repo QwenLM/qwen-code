@@ -295,12 +295,16 @@ export class ManagedDingtalkAdapter {
   // Returns whether the frame was queued. Acceptance is the commit point: the
   // caller acks SUCCESS only on true, so an overflow leaves the frame unacked
   // and the provider's own redelivery is the backstop instead of a silent drop.
-  // Acceptance must mean "there is a durable claim slot", not merely inbox room:
-  // a frame acked while the 32-claim table is full could never be persisted and
-  // would be discarded on shutdown, so couple the gate to the claim budget.
+  // Acceptance must mean "a durable claim will be persisted", not merely inbox
+  // room. While the claim table is full there is no slot, so a frame acked here
+  // would live only in memory and be lost on a hard restart. While admission is
+  // stalled a new frame is left unacked for provider redelivery rather than
+  // parked as a claim waiting on the operator; drainInbox makes the pre-stall
+  // backlog durable. Couple the gate to both conditions.
   private onMessage(messageId: string, data: string): boolean {
     if (!this.running) return false;
     if (
+      this.instanceStalled ||
       this.inbox.length >= INBOX_LIMIT ||
       (this.state?.pending.length ?? 0) + this.inbox.length >=
         MANAGED_DINGTALK_PENDING_LIMIT
@@ -336,17 +340,19 @@ export class ManagedDingtalkAdapter {
     const state = this.state;
     if (!state) return;
     while (this.running && this.inbox.length > 0) {
-      if (
-        state.pending.length >= MANAGED_DINGTALK_PENDING_LIMIT ||
-        this.instanceStalled
-      )
-        return;
+      if (state.pending.length >= MANAGED_DINGTALK_PENDING_LIMIT) return;
       // Peek, then shift only after the claim is durable: a failed store.save()
       // must leave the frame in the inbox for the next tick, not drop it.
       const item = this.inbox[0]!;
-      await this.admit(item);
+      // A frame acked before the stall armed must still become durable: persist
+      // its claim without submitting while admission is stalled, so a hard
+      // restart re-drives it instead of losing it. The gate refuses new frames
+      // during the stall, so this only ever drains the pre-stall backlog; the
+      // stall-lift re-drives pending and the backlog flows once the binding
+      // answers again.
+      await this.admit(item, !this.instanceStalled);
       this.inbox.shift();
-      if (this.registeredGeneration === 0 || this.instanceStalled) return;
+      if (this.registeredGeneration === 0) return;
     }
   }
 
@@ -629,9 +635,25 @@ export class ManagedDingtalkAdapter {
       !webhook ||
       !this.senderAllowed(context?.senderId ?? '')
     ) {
-      await this.controlPlane.receipt(delivery.deliveryId, {
-        outcome: 'rejected',
-      });
+      // One delivery's unreportable rejection receipt must never abort the
+      // claimed batch: the deliveries behind it were already moved to sending
+      // server-side and would settle unknown (lost) if the tick escaped here.
+      // The rejection itself stays unreported — the control plane's lease
+      // reconciliation settles that one delivery — while the rest of the batch
+      // still sends.
+      try {
+        await this.controlPlane.receipt(delivery.deliveryId, {
+          outcome: 'rejected',
+        });
+      } catch (error) {
+        if (this.isRegistrationRefusal(error)) {
+          this.registeredGeneration = 0;
+          return;
+        }
+        this.log(
+          `Managed DingTalk rejection receipt for ${delivery.deliveryId} could not be reported (${String(error)}); the rest of the batch still sends.`,
+        );
+      }
       return;
     }
     for (const segment of delivery.segments) {
