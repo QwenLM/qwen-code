@@ -13678,7 +13678,10 @@ export function App({
       // with detached:true; it is exactly the shared-checkout shape the
       // worktree default exists to isolate.
       (selectedWorkspaceGitStatus?.branch ||
-        selectedWorkspaceGitStatus?.detached),
+        selectedWorkspaceGitStatus?.detached) &&
+      // An unborn HEAD (no commits yet) has no worktree base; the create
+      // path would refuse. Keep the composer on the current branch.
+      selectedWorkspaceGitStatus?.hasHead !== false,
   );
   const branchWorktreeEligible = Boolean(
     connection.sessionId &&

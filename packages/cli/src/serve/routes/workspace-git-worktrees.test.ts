@@ -130,6 +130,7 @@ const OUTSIDE = {
 const CLEAN = {
   branch: 'qwen/swift-fox',
   detached: false,
+  hasHead: true,
   hasUpstream: false,
   ahead: 0,
   behind: 0,
@@ -378,6 +379,7 @@ describe('workspace git worktree routes', () => {
       available: true,
       branch: 'qwen/swift-fox',
       detached: false,
+      hasHead: true,
       staged: 1,
       unstaged: 2,
       untracked: 3,

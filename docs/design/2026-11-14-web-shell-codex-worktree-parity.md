@@ -340,8 +340,11 @@ deletes oldest-first beyond `worktree.maxRetained`, snapshotting each.
 - Cleanup: branch finalization becomes commit-finalization — a detached
   worktree with no commits beyond base and no work is removable; unique
   commits (HEAD reachability, per the `workspace-git-worktrees.ts` exemplar)
-  or work preserve it (snapshot path in P6). `branchPreserved` reports
-  `false` for detached removals (there is no branch to keep).
+  or work preserve it (snapshot path in P6). Contract: a successful
+  detached removal returns `{ success: true }` with `branchPreserved`
+  unset (there is no branch to keep); a refused removal returns
+  `{ success: false, branchPreserved: true }` — the flag then means the
+  checkout itself was preserved, not a branch.
   `removeUserWorktree` additionally refuses the removal itself when a
   detached worktree carries unmerged commits: the named-branch path gets
   that protection from `git branch -d`'s refusal, which can never fire

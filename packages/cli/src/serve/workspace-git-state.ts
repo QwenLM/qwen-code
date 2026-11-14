@@ -20,6 +20,8 @@ export interface WorkspaceGitStatus {
   branch: string | null;
   /** v2 enriched fields — absent when not a repo or git is unavailable. */
   detached?: boolean;
+  /** false for an unborn HEAD (no commits yet): no worktree base exists. */
+  hasHead?: boolean;
   staged?: number;
   unstaged?: number;
   untracked?: number;
@@ -65,6 +67,7 @@ function sameWorkingTreeStatus(
   const _exhaustive: Record<keyof GitWorkingTreeStatus, true> = {
     branch: true,
     detached: true,
+    hasHead: true,
     hasUpstream: true,
     ahead: true,
     behind: true,
@@ -160,6 +163,7 @@ export class WorkspaceGitState {
       workspaceCwd,
       branch: entry.branch ?? status.branch ?? null,
       detached: status.detached,
+      hasHead: status.hasHead,
       staged: status.staged,
       unstaged: status.unstaged,
       untracked: status.untracked,

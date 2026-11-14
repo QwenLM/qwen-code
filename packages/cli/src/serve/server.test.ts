@@ -421,7 +421,7 @@ vi.mock('./server/git-branch-ops.js', () => ({
   getHeadCommit: () =>
     mockBranchOps.getHeadCommit
       ? mockBranchOps.getHeadCommit()
-      : Promise.resolve(undefined),
+      : Promise.resolve('a'.repeat(40)),
   createBranch: () =>
     mockBranchOps.createBranch
       ? mockBranchOps.createBranch()
@@ -15823,6 +15823,34 @@ describe('createServeApp', () => {
         mockWt.createMarker = undefined;
         mockWt.writeSidecar = undefined;
         mockWt.realpath = undefined;
+        mockWt.impl = undefined;
+      }
+    });
+
+    it('409 when the workspace has no commits to base a worktree on', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve(undefined);
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug: 'my-task' } });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('worktree_base_unavailable');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockBranchOps.getHeadCommit = undefined;
         mockWt.impl = undefined;
       }
     });

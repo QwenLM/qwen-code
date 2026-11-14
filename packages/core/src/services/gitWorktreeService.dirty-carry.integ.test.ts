@@ -23,6 +23,15 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 }
 
+function gitOk(cwd: string, ...args: string[]): boolean {
+  try {
+    execFileSync('git', args, { cwd, encoding: 'utf8' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function initRepo(dir: string): Promise<void> {
   git(dir, 'init', '-q', '-b', 'main');
   git(dir, 'config', 'user.email', 't@e.com');
@@ -156,6 +165,25 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     await expect(
       read(path.join(childPath, 'main-untracked.txt')),
     ).rejects.toThrow();
+  });
+
+  it('escapes gitignore metacharacters in the exclude rule', async () => {
+    // A route-style directory with a glob metacharacter: the raw path
+    // would become a character class matching nothing.
+    const sub = path.join(repoRoot, 'app', '[id]');
+    await fs.mkdir(sub, { recursive: true });
+    await fs.writeFile(path.join(sub, 'README.md'), 'sub\n');
+    git(repoRoot, 'add', '.');
+    git(repoRoot, 'commit', '-qm', 'route dir', '--no-verify');
+    const service = new GitWorktreeService(sub);
+    const created = await service.createUserWorktree('meta', 'main', {
+      detached: true,
+    });
+    expect(created.success).toBe(true);
+    // The worktrees directory must actually be ignored from the sub root.
+    const probe = path.join(sub, '.qwen', 'worktrees', 'probe');
+    const rc = gitOk(sub, 'check-ignore', '-q', '--', probe);
+    expect(rc).toBe(true);
   });
 
   it('keeps a tracked legacy .qwen/.gitignore instead of migrating it', async () => {

@@ -3391,6 +3391,15 @@ export function registerSessionRoutes(
         // local promotes a branch only when HEAD moved past this commit.
         worktreeBaseBranch = baseBranch;
         worktreeBaseCommit = await getHeadCommit(workspaceCwd);
+        if (!worktreeBaseCommit) {
+          // An unborn HEAD (no commits yet) has no base to detach from;
+          // git worktree add would fail with a generic error.
+          res.status(409).json({
+            error: 'The workspace has no commits to base a worktree on',
+            code: 'worktree_base_unavailable',
+          });
+          return;
+        }
         assertRuntimeGenerationOpen?.();
         const wtResult = await wtService.createUserWorktree(slug, baseBranch, {
           carryDirtyState: true,
@@ -5110,6 +5119,10 @@ export function registerSessionRoutes(
                 throw new WorktreeResetInvalidStateError(storageSessionId);
               }
               const localService = new GitWorktreeService(localCwd);
+              // An upgraded checkout may still hold the old daemon-written
+              // .qwen/.gitignore; migrate it before the clean gate so the
+              // daemon's own residue does not refuse the handoff.
+              await localService.migrateLegacyWorktreeGitignore();
               if (await localService.hasWorktreeChanges(localCwd)) {
                 res.status(409).json({
                   error: 'Local checkout has uncommitted changes',
@@ -5151,11 +5164,24 @@ export function registerSessionRoutes(
               // Carry the work before moving the session: branch checkout
               // first, then the tracked dirty snapshot, then the untracked
               // overlay (stash create excludes untracked files).
-              const snapshot = await wtService.createStashSnapshot(realTarget);
-              let branch = sidecar.worktreeBranch;
               const info =
                 await wtService.getRegisteredWorktreeBranch(realTarget);
               const head = info?.headCommit ?? '';
+              // Trust the checkout's actual branch, not the sidecar's
+              // record: the agent runs git freely in its worktree and may
+              // have switched branches since the sidecar was written.
+              // Checking out the recorded branch would leave the real
+              // work behind behind a 200.
+              if (!info || info.branch !== sidecar.worktreeBranch) {
+                res.status(409).json({
+                  error:
+                    'The worktree branch no longer matches the session record',
+                  code: 'worktree_branch_mismatch',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
+              let branch = info.branch;
               // Fail closed when the worktree HEAD or its recorded base
               // cannot be verified: skipping the promotion would report
               // success while the agent's commits stay in the worktree.
@@ -5168,6 +5194,7 @@ export function registerSessionRoutes(
                 });
                 return;
               }
+              const snapshot = await wtService.createStashSnapshot(realTarget);
               // Everything below mutates the local checkout, the worktree,
               // or the sidecar; a late failure (checkout hook, stash
               // conflict, busy-turn refusal at the queue tail) must restore
@@ -5336,6 +5363,7 @@ export function registerSessionRoutes(
             }
             runtime.bridge.setSessionResetPending(storageSessionId);
             const sourceService = new GitWorktreeService(sourceCwd);
+            await sourceService.migrateLegacyWorktreeGitignore();
             const currentBranch = await sourceService
               .getCurrentBranch()
               .catch(() => undefined);

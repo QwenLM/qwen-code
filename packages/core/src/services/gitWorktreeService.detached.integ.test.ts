@@ -288,6 +288,42 @@ describe('GitWorktreeService — detached managed worktrees', () => {
     );
   });
 
+  it('hasUnmergedWorktreeCommits judges an in-place-branched worktree by its HEAD', async () => {
+    const worktree = await createDetached('sess-branched');
+    await service.createWorktreeBranch(worktree.path, 'feat/from-detached');
+    await fs.writeFile(path.join(worktree.path, 'work.txt'), 'work\n');
+    git(worktree.path, 'add', 'work.txt');
+    git(worktree.path, 'commit', '-qm', 'agent work', '--no-verify');
+    // Unique commit: unmerged.
+    expect(await service.hasUnmergedWorktreeCommits('sess-branched')).toBe(
+      true,
+    );
+    // Merge it into main: the slug ref never existed, but the probe must
+    // now see the commit as covered (previously fail-closed forever).
+    const tip = git(worktree.path, 'rev-parse', 'HEAD');
+    git(repoRoot, 'merge', '-q', '--no-edit', tip);
+    expect(await service.hasUnmergedWorktreeCommits('sess-branched')).toBe(
+      false,
+    );
+  });
+
+  it('removeUserWorktree keeps a merged slug branch after in-place branching', async () => {
+    // A user branch at base, merged into HEAD; the session worktree is
+    // branched in place, so it is no longer detached but never owned the
+    // slug name. Removal must not delete the user's branch.
+    git(repoRoot, 'branch', 'worktree-sess-renamed');
+    const worktree = await createDetached('sess-renamed');
+    await service.createWorktreeBranch(worktree.path, 'feat/x');
+    const result = await service.removeUserWorktree('sess-renamed', {
+      deleteBranch: true,
+    });
+    expect(result.success).toBe(true);
+    expect(git(repoRoot, 'branch', '--list', 'worktree-sess-renamed')).toBe(
+      'worktree-sess-renamed',
+    );
+    expect(git(repoRoot, 'branch', '--list', 'feat/x')).toBe('feat/x');
+  });
+
   it('prepared finalize with branchOwned=false keeps a same-slug branch at base', async () => {
     git(repoRoot, 'branch', 'worktree-sess-fin');
     const base = git(repoRoot, 'rev-parse', 'HEAD');

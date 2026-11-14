@@ -282,8 +282,10 @@ HEAD，或在记录的分支上），把快照解压覆盖，翻回 sidecar。�
   SDK wire 类型不变（`branch: string`，`''` = detached）。
 - 清理：分支终结变为 commit 终结——detached worktree 若无超出 base 的
   commit 且无工作则可删除；有独有 commit（按 HEAD 可达性判定，范本
-  `workspace-git-worktrees.ts`）或工作则保留（P6 的快照路径）。detached
-  删除时 `branchPreserved` 报告 `false`（没有分支可保留）。
+  `workspace-git-worktrees.ts`）或工作则保留（P6 的快照路径）。契约：
+  detached 删除成功返回 `{ success: true }`，`branchPreserved` 不设置
+  （没有分支可保留）；拒绝删除返回 `{ success: false, branchPreserved: true }`
+  ——此时该标志表示检出本身被保留，而非分支。
   `removeUserWorktree` 另在 detached worktree 携带未合并 commit 时拒绝删除
   本身：命名分支路径的保护来自 `git branch -d` 的拒绝，无分支时它永远不会
   触发，故 detached 路径需要显式守卫（显式 force 删除可退出）。detached

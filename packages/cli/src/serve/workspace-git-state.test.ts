@@ -46,6 +46,7 @@ function summary(
     conflicted: 0,
     stashCount: 0,
     ...overrides,
+    hasHead: overrides.hasHead ?? true,
   };
 }
 
@@ -180,6 +181,7 @@ describe('WorkspaceGitState', () => {
     getGitWorkingTreeStatusMock.mockResolvedValue({
       branch: 'main',
       detached: false,
+      hasHead: true,
       hasUpstream: true,
       ahead: 2,
       behind: 1,
@@ -201,6 +203,7 @@ describe('WorkspaceGitState', () => {
       workspaceCwd: '/workspace',
       branch: 'main',
       detached: false,
+      hasHead: true,
       hasUpstream: true,
       ahead: 2,
       behind: 1,
@@ -220,6 +223,7 @@ describe('WorkspaceGitState', () => {
     getGitWorkingTreeStatusMock.mockResolvedValue({
       branch: 'main',
       detached: false,
+      hasHead: true,
       hasUpstream: false,
       ahead: 0,
       behind: 0,
@@ -246,6 +250,7 @@ describe('WorkspaceGitState', () => {
     getGitWorkingTreeStatusMock.mockResolvedValue({
       branch: null,
       detached: true,
+      hasHead: true,
       hasUpstream: false,
       ahead: 0,
       behind: 0,
@@ -265,6 +270,7 @@ describe('WorkspaceGitState', () => {
     ).resolves.toMatchObject({
       branch: 'a1b2c3d',
       detached: true,
+      hasHead: true,
     });
   });
 
