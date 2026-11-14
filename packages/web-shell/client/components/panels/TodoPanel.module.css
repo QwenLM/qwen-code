@@ -1,5 +1,4 @@
 .panel {
-  position: relative;
   width: fit-content;
   max-width: min(100%, 560px);
   margin: 0 auto;
@@ -133,7 +132,7 @@
   left: 50%;
   z-index: 30;
   display: flex;
-  width: min(560px, calc(100vw - 48px));
+  width: min(560px, 100%);
   max-height: min(42vh, 360px);
   flex-direction: column;
   gap: 8px;
