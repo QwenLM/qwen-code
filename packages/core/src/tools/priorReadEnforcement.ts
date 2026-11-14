@@ -27,14 +27,54 @@ export { StructuredToolError } from './tool-error.js';
  * `calculateEdit`, a thrown error from `getConfirmationDetails`, or a
  * `ToolResult` from `execute`.
  */
+export interface StaleFileSnapshot {
+  readonly dev: number;
+  readonly ino: number;
+  readonly mtimeMs: number;
+  readonly sizeBytes: number;
+}
+
+export interface PriorReadFailure {
+  type: ToolErrorType;
+  rawMessage: string;
+  displayMessage: string;
+}
+
+function makeStaleRejection(
+  filePath: string,
+  verb: PriorReadVerb,
+): PriorReadFailure {
+  return {
+    type: ToolErrorType.FILE_CHANGED_SINCE_READ,
+    rawMessage:
+      `File ${filePath} has been modified since you last read it ` +
+      `(mtime or size changed). Re-read it with the ${ToolNames.READ_FILE} ` +
+      `tool before ${verb} it to ensure your changes are based on current ` +
+      `content.`,
+    displayMessage: `file changed since last read; re-run ${ToolNames.READ_FILE} first.`,
+  };
+}
+
+function matchesStaleSnapshot(
+  stats: fs.Stats,
+  snapshot: StaleFileSnapshot,
+): boolean {
+  return (
+    stats.dev === snapshot.dev &&
+    stats.ino === snapshot.ino &&
+    stats.mtimeMs === snapshot.mtimeMs &&
+    stats.size === snapshot.sizeBytes
+  );
+}
+
 export type PriorReadDecision =
-  | { ok: true }
   | {
-      ok: false;
-      type: ToolErrorType;
-      rawMessage: string;
-      displayMessage: string;
-    };
+      ok: true;
+      recoveredFromStale?: true;
+      staleSnapshot?: StaleFileSnapshot;
+      staleRejection?: PriorReadFailure;
+    }
+  | ({ ok: false } & PriorReadFailure);
 
 /**
  * Verb used in the user-facing prose ("editing" / "overwriting").
@@ -79,6 +119,20 @@ export type PriorReadVerb = 'editing' | 'overwriting';
  */
 export interface CheckPriorReadOptions {
   expectExisting?: boolean;
+  /**
+   * When true, allow a previously read cacheable file whose on-disk
+   * fingerprint has drifted (`stale`) to return `ok: true` with
+   * `recoveredFromStale: true` and the captured `staleSnapshot`. Callers
+   * (such as `EditTool`) must still verify read authorization and exact
+   * unique literal matching, and recheck `expectedStaleSnapshot` on later
+   * TOCTOU guards.
+   */
+  allowStaleRecovery?: boolean;
+  /**
+   * Pin post-read / pre-write TOCTOU checks on a stale-recovered edit to
+   * the exact disk snapshot seen at calculate/confirm time.
+   */
+  expectedStaleSnapshot?: StaleFileSnapshot;
 }
 
 /**
@@ -137,7 +191,10 @@ export async function checkPriorRead(
   } catch (err) {
     const code = (err as NodeJS.ErrnoException | undefined)?.code;
     if (code === 'ENOENT') {
-      if (options.expectExisting) {
+      if (
+        options.expectExisting ||
+        options.expectedStaleSnapshot !== undefined
+      ) {
         // Post-read or pre-write: the file existed at planning time
         // but disappeared before this recheck. That is not a benign
         // disappearance race — it is the original target going away
@@ -224,20 +281,55 @@ export async function checkPriorRead(
     status.entry.lastReadAt !== undefined &&
     status.entry.lastReadCacheable
   ) {
+    if (options.expectedStaleSnapshot !== undefined) {
+      const rejection = makeStaleRejection(filePath, verb);
+      if (!matchesStaleSnapshot(stats, options.expectedStaleSnapshot)) {
+        return { ok: false, ...rejection };
+      }
+      return {
+        ok: true,
+        recoveredFromStale: true,
+        staleSnapshot: options.expectedStaleSnapshot,
+        staleRejection: rejection,
+      };
+    }
     return { ok: true };
   }
   if (status.state === 'stale') {
-    const raw =
-      `File ${filePath} has been modified since you last read it ` +
-      `(mtime or size changed). Re-read it with the ${ToolNames.READ_FILE} ` +
-      `tool before ${verb} it to ensure your changes are based on current ` +
-      `content.`;
-    return {
-      ok: false,
-      type: ToolErrorType.FILE_CHANGED_SINCE_READ,
-      rawMessage: raw,
-      displayMessage: `file changed since last read; re-run ${ToolNames.READ_FILE} first.`,
-    };
+    const rejection = makeStaleRejection(filePath, verb);
+    if (options.expectedStaleSnapshot !== undefined) {
+      if (
+        status.entry.lastReadAt !== undefined &&
+        status.entry.lastReadCacheable &&
+        matchesStaleSnapshot(stats, options.expectedStaleSnapshot)
+      ) {
+        return {
+          ok: true,
+          recoveredFromStale: true,
+          staleSnapshot: options.expectedStaleSnapshot,
+          staleRejection: rejection,
+        };
+      }
+      return { ok: false, ...rejection };
+    }
+    if (
+      options.allowStaleRecovery &&
+      status.entry.lastReadAt !== undefined &&
+      status.entry.lastReadCacheable
+    ) {
+      return {
+        ok: true,
+        recoveredFromStale: true,
+        staleSnapshot: {
+          dev: stats.dev,
+          ino: stats.ino,
+          mtimeMs: stats.mtimeMs,
+          sizeBytes: stats.size,
+        },
+        staleRejection: rejection,
+      };
+    }
+    return { ok: false, ...rejection };
   }
   if (status.state === 'unverifiable') {
     const verbBare = verb === 'editing' ? 'edit' : 'overwrite';

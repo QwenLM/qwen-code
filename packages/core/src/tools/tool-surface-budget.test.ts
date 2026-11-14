@@ -268,7 +268,7 @@ describe('trimmed descriptions keep their load-bearing clauses (#12054)', () => 
       [
         'tool to examine the file',
         'MUST be the exact literal text to replace',
-        'Include at least 3 lines of context BEFORE and AFTER',
+        'Include enough context to uniquely identify the target',
         'NEVER escape `old_string` or `new_string`',
         'The user has the ability to modify the `new_string` content',
       ],

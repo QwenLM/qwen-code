@@ -17,7 +17,12 @@ import type {
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, Kind, ToolConfirmationOutcome } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
-import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
+import {
+  makeRelative,
+  realpathNearestExisting,
+  shortenPath,
+  unescapePath,
+} from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
@@ -44,7 +49,17 @@ import type {
 } from '../services/fileSystemService.js';
 import type { Stats } from 'node:fs';
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
-import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
+import {
+  checkPriorRead,
+  StructuredToolError,
+  type PriorReadFailure,
+  type StaleFileSnapshot,
+} from './priorReadEnforcement.js';
+import { getFileReadDefaultPermission } from './file-read-permission.js';
+import {
+  buildPermissionCheckContext,
+  evaluatePermissionRules,
+} from '../core/permission-helpers.js';
 import { ReadFileTool } from './read-file.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
@@ -166,13 +181,58 @@ interface CalculatedEdit {
   bom: boolean;
   /** Original line ending style of the existing file */
   lineEnding: LineEnding;
+  recoveredFromStale?: boolean;
+  staleSnapshot?: StaleFileSnapshot;
 }
 
 class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
+  private confirmationCompleted = false;
+  private confirmedStaleSnapshot?: StaleFileSnapshot;
+
   constructor(
     private readonly config: Config,
     public params: EditToolParams,
   ) {}
+
+  private async canAutoReadFileForStaleRecovery(
+    filePath: string,
+  ): Promise<boolean> {
+    if (this.config.getFileSystemService().textFileIo) {
+      return false;
+    }
+    if (this.config.getFileService?.()?.shouldQwenIgnoreFile?.(filePath)) {
+      return false;
+    }
+    let defaultPermission: PermissionDecision;
+    if (this.config.storage) {
+      defaultPermission = getFileReadDefaultPermission(this.config, filePath);
+    } else {
+      const resolved = realpathNearestExisting(path.resolve(filePath));
+      defaultPermission =
+        this.config.getWorkspaceContext().isPathWithinWorkspace(resolved) ||
+        isAnyAutoMemPath(resolved, this.config.getTargetDir())
+          ? 'allow'
+          : 'ask';
+    }
+    if (defaultPermission !== 'allow') {
+      return false;
+    }
+    const pm = this.config.getPermissionManager?.();
+    if (!pm) {
+      return true;
+    }
+    const pmCtx = buildPermissionCheckContext(
+      ToolNames.READ_FILE,
+      { file_path: filePath },
+      this.config.getTargetDir(),
+    );
+    const { finalPermission, pmForcedAsk } = await evaluatePermissionRules(
+      pm,
+      defaultPermission,
+      pmCtx,
+    );
+    return finalPermission === 'allow' && !pmForcedAsk;
+  }
 
   toolLocations(): ToolLocation[] {
     return [{ path: this.params.file_path }];
@@ -213,6 +273,9 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     let useBOM = false;
     let detectedEncoding = 'utf-8';
     let detectedLineEnding: LineEnding = 'lf';
+    let recoveredFromStale = false;
+    let staleSnapshot: StaleFileSnapshot | undefined;
+    let staleRejection: PriorReadFailure | undefined;
     // Prior-read enforcement runs before any content is read so that
     // the read pipeline below (and the content-derived error codes
     // it can produce — NO_OCCURRENCE_FOUND, EXPECTED_OCCURRENCE_MISMATCH,
@@ -226,10 +289,22 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     // and falls through to the new-file path; an existing file that
     // appeared in the race window is rejected as unread.
     if (!this.config.getFileReadCacheDisabled()) {
+      const canAttemptStaleRecovery =
+        !replaceAll &&
+        params.old_string !== '' &&
+        params.old_string !== params.new_string &&
+        !(this.confirmationCompleted && !this.confirmedStaleSnapshot) &&
+        (await this.canAutoReadFileForStaleRecovery(params.file_path));
       const decision = await checkPriorRead(
         this.config.getFileReadCache(),
         params.file_path,
         'editing',
+        {
+          allowStaleRecovery: canAttemptStaleRecovery,
+          ...(this.confirmationCompleted && this.confirmedStaleSnapshot
+            ? { expectedStaleSnapshot: this.confirmedStaleSnapshot }
+            : {}),
+        },
       );
       if (!decision.ok) {
         return {
@@ -246,6 +321,11 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           bom: false,
           lineEnding: 'lf',
         };
+      }
+      if (decision.recoveredFromStale) {
+        recoveredFromStale = true;
+        staleSnapshot = decision.staleSnapshot;
+        staleRejection = decision.staleRejection;
       }
     }
     if (fileExists) {
@@ -292,7 +372,12 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         this.config.getFileReadCache(),
         params.file_path,
         'editing',
-        { expectExisting: true },
+        {
+          expectExisting: true,
+          ...(recoveredFromStale && staleSnapshot
+            ? { expectedStaleSnapshot: staleSnapshot }
+            : {}),
+        },
       );
       if (!postDecision.ok) {
         // Forensic trail for post-read TOCTOU rejections. These are
@@ -321,43 +406,85 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       }
     }
 
-    const normalizedStrings = normalizeEditStrings(
-      currentContent,
-      finalOldString,
-      finalNewString,
-    );
-    finalOldString = normalizedStrings.oldString;
-    finalNewString = normalizedStrings.newString;
     let matchOffsets: number[] | undefined;
+    let lineBasedMatch = false;
+    if (recoveredFromStale) {
+      // Stale recovery permits exact literal unique matching only — do not
+      // apply fuzzy whitespace, curly-quote, or Unicode escape normalization.
+      finalOldString = finalOldString.replace(/\r\n/g, '\n');
+      finalNewString = finalNewString.replace(/\r\n/g, '\n');
+    } else {
+      const normalizedStrings = normalizeEditStrings(
+        currentContent,
+        finalOldString,
+        finalNewString,
+      );
+      finalOldString = normalizedStrings.oldString;
+      finalNewString = normalizedStrings.newString;
+      lineBasedMatch = Boolean(normalizedStrings.lineBasedMatch);
+    }
 
     if (finalOldString === '' && !fileExists) {
       // Creating a new file
       isNewFile = true;
     } else if (!fileExists) {
-      // Trying to edit a nonexistent file (and old_string is not empty)
-      error = {
-        display: `File not found. Cannot apply edit. Use an empty old_string to create a new file.`,
-        raw: `File not found: ${params.file_path}`,
-        type: ToolErrorType.FILE_NOT_FOUND,
-      };
+      if (recoveredFromStale && staleRejection) {
+        error = {
+          display: staleRejection.displayMessage,
+          raw: staleRejection.rawMessage,
+          type: staleRejection.type,
+        };
+      } else {
+        // Trying to edit a nonexistent file (and old_string is not empty)
+        error = {
+          display: `File not found. Cannot apply edit. Use an empty old_string to create a new file.`,
+          raw: `File not found: ${params.file_path}`,
+          type: ToolErrorType.FILE_NOT_FOUND,
+        };
+      }
     } else if (currentContent !== null) {
-      finalOldString = maybeAugmentOldStringForDeletion(
-        currentContent,
-        finalOldString,
-        finalNewString,
-        normalizedStrings.lineBasedMatch,
-      );
-
-      if (normalizedStrings.lineBasedMatch) {
-        matchOffsets = findLineBasedMatchOffsets(
+      if (recoveredFromStale) {
+        const rawOccurrences = countOccurrences(currentContent, finalOldString);
+        if (rawOccurrences === 1) {
+          finalOldString = maybeAugmentOldStringForDeletion(
+            currentContent,
+            finalOldString,
+            finalNewString,
+            false,
+          );
+          occurrences = countOccurrences(currentContent, finalOldString);
+        } else {
+          occurrences = 0;
+        }
+      } else {
+        finalOldString = maybeAugmentOldStringForDeletion(
           currentContent,
           finalOldString,
+          finalNewString,
+          lineBasedMatch,
         );
+
+        if (lineBasedMatch) {
+          matchOffsets = findLineBasedMatchOffsets(
+            currentContent,
+            finalOldString,
+          );
+        }
+        occurrences =
+          matchOffsets?.length ??
+          countOccurrences(currentContent, finalOldString);
       }
-      occurrences =
-        matchOffsets?.length ??
-        countOccurrences(currentContent, finalOldString);
-      if (params.old_string === '') {
+      if (
+        recoveredFromStale &&
+        staleRejection &&
+        (occurrences !== 1 || finalOldString === finalNewString)
+      ) {
+        error = {
+          display: staleRejection.displayMessage,
+          raw: staleRejection.rawMessage,
+          type: staleRejection.type,
+        };
+      } else if (params.old_string === '') {
         // Error: Trying to create a file that already exists
         error = {
           display: `Failed to edit. Attempted to create a file that already exists.`,
@@ -452,6 +579,8 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       bom: useBOM,
       encoding: detectedEncoding,
       lineEnding: detectedLineEnding,
+      recoveredFromStale,
+      staleSnapshot,
     };
   }
 
@@ -518,6 +647,9 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       // surfaces — confirmation-required flows should not lose it.
       throw new StructuredToolError(editData.error.raw, editData.error.type);
     }
+
+    this.confirmationCompleted = true;
+    this.confirmedStaleSnapshot = editData.staleSnapshot;
 
     const fileName = path.basename(this.params.file_path);
     const fileDiff = createPatchSmart(
@@ -667,6 +799,8 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       // without enforcement. ENOENT inside checkPriorRead returns
       // ok:true so genuine new-file creation is unaffected.
       if (!this.config.getFileReadCacheDisabled()) {
+        const expectedStaleSnapshot =
+          this.confirmedStaleSnapshot ?? editData.staleSnapshot;
         const writeDecision = await checkPriorRead(
           this.config.getFileReadCache(),
           this.params.file_path,
@@ -678,7 +812,12 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           // that would silently re-create a file from stale bytes.
           // For genuine new-file creation, ENOENT is the expected
           // pre-write state (ok:true → writeTextFile creates).
-          { expectExisting: !editData.isNewFile },
+          {
+            expectExisting: !editData.isNewFile,
+            ...(editData.recoveredFromStale && expectedStaleSnapshot
+              ? { expectedStaleSnapshot }
+              : {}),
+          },
         );
         if (!writeDecision.ok) {
           debugLogger.warn('pre-write TOCTOU rejection', {
@@ -774,6 +913,11 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         this.config
           .getFileReadCache()
           .recordWrite(this.params.file_path, postWriteStats);
+        if (editData.recoveredFromStale) {
+          this.config
+            .getFileReadCache()
+            .markReadEvictedFromHistory(postWriteStats);
+        }
       } catch (error) {
         if (mutation) throw error;
         // Non-fatal: leaving a stale entry is preferable to failing
@@ -837,6 +981,12 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           : `The file: ${this.params.file_path} has been updated.`,
       ];
 
+      if (editData.recoveredFromStale) {
+        llmSuccessMessageParts.push(
+          `Note: The file had been modified since it was last read in this session, but \`old_string\` still matched uniquely and the edit was applied.`,
+        );
+      }
+
       const artifact = buildWorkspaceArtifactCandidate(
         this.config,
         this.params.file_path,
@@ -851,13 +1001,18 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         );
       }
 
-      const snippetResult = extractEditSnippet(
-        editData.currentContent,
-        editData.newContent,
-      );
-      if (snippetResult) {
-        const snippetText = `Showing lines ${snippetResult.startLine}-${snippetResult.endLine} of ${snippetResult.totalLines} from the edited file:\n\n---\n\n${snippetResult.content}`;
-        llmSuccessMessageParts.push(snippetText);
+      if (this.params.modified_by_user) {
+        llmSuccessMessageParts.push(
+          `User modified the \`new_string\` content to be: ${this.params.new_string}.`,
+        );
+        const snippetResult = extractEditSnippet(
+          editData.currentContent,
+          editData.newContent,
+        );
+        if (snippetResult) {
+          const snippetText = `Showing lines ${snippetResult.startLine}-${snippetResult.endLine} of ${snippetResult.totalLines} from the edited file:\n\n---\n\n${snippetResult.content}`;
+          llmSuccessMessageParts.push(snippetText);
+        }
       }
 
       return {
@@ -921,7 +1076,7 @@ Expectation for required parameters:
 2. \`old_string\` MUST be the exact literal text to replace (including all whitespace, indentation, newlines, and surrounding code etc.).
 3. \`new_string\` MUST be the exact literal text to replace \`old_string\` with (also including all whitespace, indentation, newlines, and surrounding code etc.). Ensure the resulting code is correct and idiomatic.
 4. NEVER escape \`old_string\` or \`new_string\`, that would break the exact literal text requirement.
-**Important:** If ANY of the above are not satisfied, the tool will fail. CRITICAL for \`old_string\`: Must uniquely identify the single instance to change. Include at least 3 lines of context BEFORE and AFTER the target text, matching whitespace and indentation precisely. If this string matches multiple locations, or does not match exactly, the tool will fail.`,
+**Important:** If ANY of the above are not satisfied, the tool will fail. CRITICAL for \`old_string\`: Must uniquely identify the single instance to change. Include enough context to uniquely identify the target, matching whitespace and indentation precisely. If this string matches multiple locations, or does not match exactly, the tool will fail.`,
       Kind.Edit,
       {
         properties: {
@@ -932,7 +1087,7 @@ Expectation for required parameters:
           },
           old_string: {
             description:
-              'The exact literal text to replace, preferably unescaped. For single replacements (default), include at least 3 lines of context BEFORE and AFTER the target text, matching whitespace and indentation precisely. If this string is not the exact literal text (i.e. you escaped it) or does not match exactly, the tool will fail.',
+              'The exact literal text to replace, preferably unescaped. For single replacements (default), include enough context to uniquely identify the target, matching whitespace and indentation precisely. If this string is not the exact literal text (i.e. you escaped it) or does not match exactly, the tool will fail.',
             type: 'string',
           },
           new_string: {
