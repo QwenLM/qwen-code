@@ -42,6 +42,7 @@ import {
   isTrimmedPermissionBlockId,
   isTrimmedToolBlockId,
   isUnrecognizedDiagnosticReason,
+  isDaemonTurnError,
   matchTurnEvent,
   normalizeDaemonEvent,
   type CreateSessionRequest,
@@ -953,6 +954,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     autoConnect = true,
     autoReconnect = true,
     restartEventStreamOnPrompt = false,
+    autoContinueInterruptedTurn = false,
     reconnectDelayMs = 1_000,
     maxReconnectDelayMs = 10_000,
     heartbeatIntervalMs = 30_000,
@@ -1768,6 +1770,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const settleCurrentSessionRestoredPromptRef = useRef<() => boolean>(
     () => false,
   );
+  // Only a recovery snapshot that a session load itself published is eligible
+  // for an automatic continuation: a live `turn_error` republishes the
+  // snapshot with `canContinue: true` and must not re-run a turn the user just
+  // watched fail. React re-renders and a StrictMode double-invoke must not
+  // enqueue two turns either, so each snapshot is claimed at most once.
+  const autoContinueLoadRecoveryRef =
+    useRef<DaemonSessionContextStatus['recovery']>(undefined);
+  const autoContinuedRecoveriesRef = useRef(new WeakSet<object>());
   // Apply the buffered transcript batch from outside the connect closure. The
   // action layer must settle against a committed store, not one that is still
   // 16ms behind (#9487).
@@ -2061,6 +2071,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         const availabilityGeneration = availabilityRef.current?.getGeneration();
         const skipMetadataRefreshThisIteration = skipMetadataRefresh;
         skipMetadataRefresh = false;
+        // An incremental reconnect keeps the session client, so only a fresh
+        // load may re-arm the auto-continue fence below.
+        const loadedSessionThisIteration = session === undefined;
         let loadingRequestedSession = false;
         let generatedUiRestoreTarget:
           | { scopeId: string; sessionId: string }
@@ -3710,6 +3723,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                         state: {},
                       }
                     : undefined));
+            const publishedRecovery = recoverySnapshotCurrent
+              ? context?.recovery
+              : ((current.context?.sessionId === activeSession.sessionId
+                  ? current.context.recovery
+                  : undefined) ??
+                (context?.recovery
+                  ? { ...context.recovery, canContinue: false }
+                  : undefined));
+            if (loadedSessionThisIteration) {
+              autoContinueLoadRecoveryRef.current = publishedRecovery;
+            }
             return {
               ...current,
               status: 'connected',
@@ -3779,14 +3803,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               context: nextContext
                 ? {
                     ...nextContext,
-                    recovery: recoverySnapshotCurrent
-                      ? context?.recovery
-                      : ((current.context?.sessionId === activeSession.sessionId
-                          ? current.context.recovery
-                          : undefined) ??
-                        (context?.recovery
-                          ? { ...context.recovery, canContinue: false }
-                          : undefined)),
+                    recovery: publishedRecovery,
                   }
                 : undefined,
               // Reconcile rather than reference-compare: the load response and
@@ -5709,6 +5726,42 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     if (promptStatus !== 'idle') return;
     queueMicrotask(() => tryLiveJournalRepairRef.current?.());
   }, [promptStatus]);
+  // Resume a turn a daemon or environment restart interrupted, once per
+  // session load, without asking the user to press Continue. Only
+  // `interrupted_prompt` qualifies: `interrupted_turn` persists as a dangling
+  // tool call whose repair is a decision the design reserves for the user, so
+  // it stays with the banner. A turn the user stopped is never resumed either:
+  // the daemon reports it as clean, or — when the cancellation reason was not
+  // persisted — attaches a `cancellationConfirmationId`. `catchingUp` is part
+  // of the guard for the same reason it is in `continueSession`: a load that
+  // does not inject a replay arms it alongside the recovery snapshot, and the
+  // action would refuse the call we just marked as claimed.
+  useEffect(() => {
+    if (!autoContinueInterruptedTurn || promptStatus !== 'idle') return;
+    const sessionId = connection.sessionId;
+    if (sessionId === undefined) return;
+    if (connection.status !== 'connected') return;
+    const recovery = connection.context?.recovery;
+    if (
+      connection.context?.sessionId !== sessionId ||
+      !recovery ||
+      recovery !== autoContinueLoadRecoveryRef.current ||
+      recovery.kind !== 'interrupted_prompt' ||
+      !recovery.canContinue ||
+      recovery.cancellationConfirmationId !== undefined ||
+      connection.loadingTranscript ||
+      connection.catchingUp
+    ) {
+      return;
+    }
+    if (autoContinuedRecoveriesRef.current.has(recovery)) return;
+    autoContinuedRecoveriesRef.current.add(recovery);
+    void actions.continueSession().catch((error: unknown) => {
+      if (!isDaemonTurnError(error)) {
+        console.warn('Automatic continuation failed', error);
+      }
+    });
+  }, [autoContinueInterruptedTurn, connection, promptStatus, actions]);
   const loadMoreTranscript = useCallback(
     async (options?: { force?: boolean }) => {
       const history = transcriptHistoryRef.current;

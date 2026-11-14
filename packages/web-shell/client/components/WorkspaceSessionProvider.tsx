@@ -466,6 +466,7 @@ function WorkspaceSessionProviderWorkspace({
       maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
       suppressOwnUserEcho
       restartEventStreamOnPrompt={restartSseOnPrompt}
+      autoContinueInterruptedTurn
     >
       {!viewHidden && (
         <App

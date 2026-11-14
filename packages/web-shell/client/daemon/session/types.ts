@@ -272,6 +272,15 @@ export interface DaemonSessionProviderProps {
    * regardless of this flag.
    */
   restartEventStreamOnPrompt?: boolean;
+  /**
+   * Resume a session load's interrupted user prompt instead of waiting for the
+   * Continue button. Only `interrupted_prompt` qualifies: a turn cut off
+   * mid-tool-call (`interrupted_turn`) needs the user's decision because the
+   * repair can repeat a side-effecting call, and a turn the user explicitly
+   * cancelled is reported as clean or with a `cancellationConfirmationId`.
+   * Both stay with the banner.
+   */
+  autoContinueInterruptedTurn?: boolean;
   /** Initial reconnect delay in milliseconds. */
   reconnectDelayMs?: number;
   /** Maximum reconnect delay in milliseconds after backoff. */
