@@ -118,18 +118,24 @@ vi.mock('./commands/mcp.js', () => ({
           handler: mocks.mcpListHandler,
         })
         .command({
-          // Mirror the real add command's variadic tail and
-          // `unknown-options-as-args` so version-looking server args are
-          // captured into `args` exactly like production.
-          command: 'add <name> <commandOrUrl> [args...]',
+          // Mirror the real add command's raw tail handling.
+          command: 'add <name> <commandOrUrl>',
           describe: 'Add a server',
           builder: (subYargs: Argv) =>
             subYargs
               .parserConfiguration({
                 'unknown-options-as-args': true,
                 'populate--': true,
+                'parse-positional-numbers': false,
               })
-              .positional('args', { type: 'string', array: true }),
+              .strict(false)
+              .strictCommands(false)
+              .middleware((argv) => {
+                const args = argv._.slice(argv._.indexOf('add') + 1);
+                argv['args'] = argv['--']
+                  ? [...args, ...(argv['--'] as string[])]
+                  : args;
+              }),
           handler: mocks.mcpAddHandler,
         })
         .command({
@@ -1077,6 +1083,8 @@ describe('runCliEntry', () => {
         'server.log',
         'alpine',
         '0x10',
+        '--args',
+        'value',
       ];
 
       await runCliEntry([

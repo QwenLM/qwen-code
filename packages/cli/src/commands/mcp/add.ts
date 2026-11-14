@@ -210,7 +210,7 @@ async function addMcpServer(
 }
 
 export const addCommand: CommandModule = {
-  command: 'add <name> <commandOrUrl> [args...]',
+  command: 'add <name> <commandOrUrl>',
   describe: 'Add a server',
   builder: (yargs) =>
     yargs
@@ -218,7 +218,10 @@ export const addCommand: CommandModule = {
       .parserConfiguration({
         'unknown-options-as-args': true, // Pass unknown options as server args
         'populate--': true, // Populate server args after -- separator
+        'parse-positional-numbers': false,
       })
+      .strict(false)
+      .strictCommands(false)
       .positional('name', {
         describe: 'Name of the server',
         type: 'string',
@@ -229,7 +232,6 @@ export const addCommand: CommandModule = {
         type: 'string',
         demandOption: true,
       })
-      .positional('args', { type: 'string', array: true })
       .option('scope', {
         alias: 's',
         describe: 'Configuration scope (user or project)',
@@ -309,11 +311,11 @@ export const addCommand: CommandModule = {
         string: true,
       })
       .middleware((argv) => {
-        // Handle -- separator args as server args if present
-        if (argv['--']) {
-          const existingArgs = argv['args'] || [];
-          argv['args'] = [...existingArgs, ...(argv['--'] as string[])];
-        }
+        // A named variadic positional reparses server flags as CLI options.
+        const existingArgs = argv._.slice(argv._.indexOf('add') + 1);
+        argv['args'] = argv['--']
+          ? [...existingArgs, ...(argv['--'] as string[])]
+          : existingArgs;
 
         // Auto-detect transport from URL if not explicitly specified
         if (!argv['transport']) {

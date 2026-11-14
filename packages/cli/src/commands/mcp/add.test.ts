@@ -166,29 +166,65 @@ describe('mcp add command', () => {
 
   it('should handle MCP server args with -- separator', async () => {
     await parser.parseAsync(
-      'add my-server npx -- -y http://example.com/some-package',
+      'add my-server npx -- -y http://example.com/some-package 0x10 --args value',
     );
 
     expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
       'my-server': {
         command: 'npx',
-        args: ['-y', 'http://example.com/some-package'],
+        args: [
+          '-y',
+          'http://example.com/some-package',
+          '0x10',
+          '--args',
+          'value',
+        ],
       },
     });
   });
 
-  it('should handle unknown options as MCP server args', async () => {
-    await parser.parseAsync(
-      'add test-server npx -y http://example.com/some-package',
-    );
+  it.each([
+    ['-y', 'http://example.com/some-package'],
+    ['run', 'image', '--args', 'value'],
+    ['run', 'image', '--args=value', 'img'],
+    ['run', 'image', '--serverArgs', 'value'],
+    ['run', 'image', '--server-args', 'value'],
+  ])(
+    'should handle unknown options as MCP server args (%j)',
+    async (...args) => {
+      await parser.parseAsync(['add', 'test-server', 'npx', ...args]);
 
-    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
-      'test-server': {
-        command: 'npx',
-        args: ['-y', 'http://example.com/some-package'],
-      },
-    });
-  });
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        {
+          'test-server': {
+            command: 'npx',
+            args,
+          },
+        },
+      );
+    },
+  );
+
+  it.each([
+    { args: ['add', 'test-server'], error: 'Not enough non-option arguments' },
+    {
+      args: ['add', 'test-server', 'npx', '--transport', 'invalid'],
+      error: 'Invalid values',
+    },
+  ])(
+    'should still reject invalid MCP options ($args)',
+    async ({ args, error }) => {
+      parser.exitProcess(false).showHelpOnFail(false).strict().strictCommands();
+
+      await expect(
+        Promise.resolve().then(() => parser.parseAsync(args)),
+      ).rejects.toThrow(error);
+
+      expect(mockSetValue).not.toHaveBeenCalled();
+    },
+  );
 
   it('should keep dash-prefixed server args in the add tail', async () => {
     // `unknown-options-as-args` means the server command's own flags belong in
