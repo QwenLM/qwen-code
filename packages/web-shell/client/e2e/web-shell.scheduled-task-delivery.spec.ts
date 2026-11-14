@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import type { DaemonScheduledTask } from '../daemon/workspace/types';
 import {
   createWebShellDaemonScenario,
@@ -51,6 +51,7 @@ async function install(
     channelsFail?: boolean;
     contactsFail?: boolean;
     deferPrimaryContacts?: boolean;
+    configuredWebhook?: 'dingtalk-webhook' | 'feishu-webhook';
   } = {},
 ) {
   const scenario = createWebShellDaemonScenario({
@@ -92,6 +93,25 @@ async function install(
         manageable: true,
         fields: [],
       },
+      ...(options.configuredWebhook
+        ? [
+            {
+              type: options.configuredWebhook,
+              displayName:
+                options.configuredWebhook === 'feishu-webhook'
+                  ? 'Feishu Webhook'
+                  : 'DingTalk Webhook',
+              manageable: true,
+              fields: [],
+              outboundOnly: true,
+              defaultDeliveryTarget: {
+                type: 'chat' as const,
+                id: 'default',
+                label: 'Configured group',
+              },
+            },
+          ]
+        : []),
     ],
   });
   if (options.omitWorkspaces) delete scenario.capabilities.workspaces;
@@ -133,7 +153,12 @@ async function install(
                 name,
                 {
                   name,
-                  config: { type: 'dingtalk' },
+                  config: {
+                    type:
+                      options.configuredWebhook && name === 'ops-bot'
+                        ? options.configuredWebhook
+                        : 'dingtalk',
+                  },
                   secrets: {},
                   startsWithServe: false,
                   runtime: { state: 'connected' },
@@ -165,7 +190,7 @@ async function install(
                     users: [],
                     topics: [],
                   })),
-                  ...(!secondary
+                  ...(!secondary && !options.configuredWebhook
                     ? [
                         {
                           channelName: 'ops-bot',
@@ -206,6 +231,9 @@ async function install(
     );
     return route.fulfill({ json: next });
   });
+  await page.route('**/workspace/models', (route) =>
+    route.fulfill({ json: { models: [] } }),
+  );
   await page.goto('/scheduled-tasks?language=en-US');
   await expect(
     page.getByRole('button', { name: 'New scheduled task', exact: true }),
@@ -241,6 +269,154 @@ async function selectDelivery(page: Page) {
     .getByRole('combobox', { name: 'Suggested destination', exact: true })
     .selectOption(JSON.stringify(target));
 }
+
+async function useConfiguredDestination(
+  page: Page,
+  baseURL: string,
+  info: TestInfo,
+  type: 'dingtalk-webhook' | 'feishu-webhook',
+) {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text());
+  });
+  const state = await install(page, baseURL, { configuredWebhook: type });
+  await createForm(page);
+  const channels = page.getByRole('combobox', {
+    name: 'Delivery Channel',
+    exact: true,
+  });
+  const id = page.getByRole('textbox', { name: 'Destination ID', exact: true });
+  const suggestions = page.getByRole('combobox', {
+    name: 'Suggested destination',
+    exact: true,
+  });
+  await channels.selectOption('ops-bot');
+  await expect(
+    page.getByText(
+      'Messages are sent to the group configured for this Channel.',
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(id).toHaveCount(0);
+  await expect(suggestions).toHaveCount(0);
+  expect(
+    state.reads.filter((path) => path.endsWith('/channel/observed-contacts')),
+  ).toEqual([]);
+  await page
+    .getByText('Messages are sent to the group configured for this Channel.', {
+      exact: true,
+    })
+    .scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: info.outputPath('configured-delivery-desktop.png'),
+  });
+
+  await channels.selectOption('release-bot');
+  await expect(id).toHaveValue('');
+  await expect(suggestions).toContainText('chat-1');
+  await id.fill('manual-target');
+  await channels.selectOption('ops-bot');
+  await expect(id).toHaveCount(0);
+  await expect(suggestions).toHaveCount(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page
+    .getByText('Messages are sent to the group configured for this Channel.', {
+      exact: true,
+    })
+    .scrollIntoViewIfNeeded();
+  const width = await page.getByRole('dialog').evaluate((element) => ({
+    client: element.clientWidth,
+    scroll: element.scrollWidth,
+  }));
+  expect(width.scroll).toBeLessThanOrEqual(width.client);
+  await page.screenshot({
+    path: info.outputPath('configured-delivery-mobile.png'),
+  });
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await expect.poll(() => state.writes.length).toBe(1);
+  expect(state.writes[0]!.body).toMatchObject({
+    sessionMode: 'persistent',
+    delivery: {
+      kind: 'channel',
+      target: { channelName: 'ops-bot', type: 'chat', id: 'default' },
+    },
+  });
+  await expect(page.getByTestId('scheduled-task-delivery')).toContainText(
+    'ops-bot · Chat · default',
+  );
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(id).toHaveCount(0);
+  await channels.selectOption('');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect.poll(() => state.writes.length).toBe(2);
+  expect(state.writes[1]!.body.delivery).toBeNull();
+  expect(errors).toEqual([]);
+}
+
+for (const type of ['dingtalk-webhook', 'feishu-webhook'] as const) {
+  test(`uses a ${type} configured destination without contacts and switches back to manual delivery @smoke`, async ({
+    page,
+    baseURL,
+  }, info) => {
+    await useConfiguredDestination(page, baseURL!, info, type);
+  });
+}
+
+test('preserves an unsupported saved configured target until explicit repair @smoke', async ({
+  page,
+  baseURL,
+}, info) => {
+  const saved = {
+    kind: 'channel' as const,
+    target: { channelName: 'ops-bot', type: 'user' as const, id: ' old-id ' },
+  };
+  const state = await install(page, baseURL!, {
+    configuredWebhook: 'dingtalk-webhook',
+    tasks: [task({ delivery: saved })],
+  });
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  const id = page.getByRole('textbox', { name: 'Destination ID', exact: true });
+  await expect(id).toHaveValue(' old-id ');
+  await expect(
+    page.getByRole('combobox', { name: 'Destination type', exact: true }),
+  ).toHaveValue('user');
+  await expect(
+    page.getByRole('button', {
+      name: 'Use configured destination',
+      exact: true,
+    }),
+  ).toBeVisible();
+  expect(
+    state.reads.filter((path) => path.endsWith('/channel/observed-contacts')),
+  ).toEqual([]);
+  await page
+    .getByRole('textbox', { name: 'Name', exact: true })
+    .fill('Renamed task');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect.poll(() => state.writes.length).toBe(1);
+  expect(state.writes[0]!.body).not.toHaveProperty('delivery');
+
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(id).toHaveValue(' old-id ');
+  const repair = page.getByRole('button', {
+    name: 'Use configured destination',
+    exact: true,
+  });
+  await repair.scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: info.outputPath('configured-delivery-preserved-id.png'),
+  });
+  await repair.click();
+  await expect(id).toHaveCount(0);
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect.poll(() => state.writes.length).toBe(2);
+  expect(state.writes[1]!.body.delivery).toEqual({
+    kind: 'channel',
+    target: { channelName: 'ops-bot', type: 'chat', id: 'default' },
+  });
+});
 
 test('creates, preserves, changes and explicitly clears scheduled delivery @smoke', async ({
   page,

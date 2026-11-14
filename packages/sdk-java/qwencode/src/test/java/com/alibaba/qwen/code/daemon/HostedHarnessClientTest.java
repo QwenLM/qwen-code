@@ -203,6 +203,30 @@ class HostedHarnessClientTest {
     }
 
     @Test
+    void clientFilesOperationPostsTheRegistrationAndParsesTheAnswer() throws Exception {
+        createSessionRoute();
+        AtomicReference<String> received = new AtomicReference<>();
+        AtomicInteger status = new AtomicInteger(200);
+        server.createContext("/session/" + SESSION_ID + "/client-files", exchange -> {
+            received.set(readBody(exchange));
+            sendSessionJson(exchange, status.get(), status.get() == 200
+                    ? "{\"registered\":true,\"generation\":1,\"toolCount\":1}"
+                    : "{\"code\":\"client_files_relay_unavailable\"}");
+        });
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            Map<String, Object> request = Map.of("action", "register", "serverId", "local-files",
+                    "generation", 1, "url", "http://127.0.0.1:4170/internal/managed-client-files/v1/sessions/"
+                            + SESSION_ID + "/mcp", "token", "relay-token");
+            Map<String, Object> answer = client.clientFilesOperation(session, request);
+            assertEquals(Boolean.TRUE, answer.get("registered"));
+            assertEquals(request, JsonSupport.parseObject(received.get(), "client files registration"));
+            status.set(503);
+            assertThrows(MutationOutcomeUnknownException.class, () -> client.clientFilesOperation(session, request));
+        }
+    }
+
+    @Test
     void mcpManagementAttachmentPreservesTheRequestAndNeverEnablesOrdinaryRecovery() {
         AtomicReference<Map<String, Object>> received = new AtomicReference<>();
         AtomicInteger requests = new AtomicInteger();
@@ -600,7 +624,7 @@ class HostedHarnessClientTest {
     @org.junit.jupiter.params.provider.ValueSource(strings = {"effects", "prepare_resources", "settle_resources"})
     void lifecycleV2RequiresExactCapabilityAndReceiptIdentity(String phase) {
         capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
-                "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,\"lifecycleV2Profiles\":[\"hosted-workspace-shell/1\"],"));
+                "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,\"lifecycleV2Profiles\":[\"hosted-workspace-shell/1\",\"hosted-workspace-shell/3\",\"hosted-workspace-shell/4\"],"));
         createSessionRoute();
         AtomicInteger calls = new AtomicInteger();
         AtomicBoolean wrongPhase = new AtomicBoolean();
@@ -620,6 +644,15 @@ class HostedHarnessClientTest {
                     "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", SESSION_ID),
                     "authority", Map.of("operationId", "close-2", "claimGeneration", 3));
             assertEquals("close-2", client.settleLifecycle(session, request).get("operationId"));
+            // The loop revision shell/3 is a public Shell on lifecycle v2 too.
+            var shell3 = new java.util.LinkedHashMap<>(request);
+            shell3.put("toolProfile", "hosted-workspace-shell/3");
+            assertEquals("close-2", client.settleLifecycle(session, shell3).get("operationId"));
+            // The fixed-interval revision shell/4 settles on the same arm; a
+            // dropped allowlist entry would refuse it before the mutation sends.
+            var shell4 = new java.util.LinkedHashMap<>(request);
+            shell4.put("toolProfile", "hosted-workspace-shell/4");
+            assertEquals("close-2", client.settleLifecycle(session, shell4).get("operationId"));
             wrongPhase.set(true);
             // The Harness answered 200 with a mismatched receipt: a
             // post-answer failure, not a pre-send protocol refusal.
@@ -629,7 +662,7 @@ class HostedHarnessClientTest {
             assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
             unsupported.put("protocolVersion", 3);
             assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
-            assertEquals(2, calls.get());
+            assertEquals(4, calls.get());
         }
     }
 

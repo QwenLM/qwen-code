@@ -34,6 +34,7 @@ import type {
   DaemonRewindSnapshotInfo,
   DaemonSession,
   DaemonSessionClient,
+  DaemonSessionPrInfo,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTaskRuntimeStatus,
@@ -359,6 +360,7 @@ export type DaemonNoticeOperation =
   | 'create_session'
   | 'close_session'
   | 'rename_session'
+  | 'bind_session_pr'
   | 'release_session'
   | 'list_sessions'
   | 'load_context'
@@ -710,6 +712,10 @@ export interface DaemonSessionActions {
     silent?: boolean;
   }): Promise<DaemonSessionContextUsageStatus>;
   renameSession(displayName: string): Promise<SessionMetadataResult>;
+  /** Manually bind a GitHub PR to the current session (supplementary registration). */
+  bindSessionPr(
+    pr: Omit<DaemonSessionPrInfo, 'issues'>,
+  ): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
   generateSessionContent(
     prompt: string,
@@ -921,4 +927,5 @@ export interface PendingSessionLoad {
   reject: (error: unknown) => void;
   signal?: AbortSignal;
   replaySource?: 'configured' | 'memory';
+  reconcilePromptActivity?: boolean;
 }

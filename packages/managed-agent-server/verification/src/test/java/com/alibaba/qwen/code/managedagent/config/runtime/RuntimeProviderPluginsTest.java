@@ -2,9 +2,11 @@ package com.alibaba.qwen.code.managedagent.config.runtime;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -25,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
 
@@ -178,9 +181,13 @@ class RuntimeProviderPluginsTest {
     }
 
     private static EmbeddedRuntimeBroker broker(ManagedAgentProperties settings) {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:plugins-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         return new EmbeddedRuntimeBroker(mock(AgentStateStore.class), settings,
-                new InMemoryRuntimeBindingRepository(), new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository());
+                new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])),
+                new JdbcRuntimeSessionRepository(source), new JdbcToolExecutionRepository(source));
     }
 
     private static URLClassLoader isolated(String selected) throws Exception {

@@ -107,6 +107,14 @@ describe('Hosted tool approval settings', () => {
     ).toBe(false);
   });
 
+  it('never asks before the loop cron list/cancel arm (D5)', () => {
+    for (const mode of ['default', 'auto-edit', 'auto', 'yolo'] as const)
+      for (const tool of ['cron_list', 'cron_delete'])
+        expect(hostedApprovalAsks({ mode, timeoutMs: 1_000 }, tool)).toBe(
+          false,
+        );
+  });
+
   it('retains a persisted human floor through Action parsing and live polling', async () => {
     const options = parseHostedActionOptions(
       Buffer.from(

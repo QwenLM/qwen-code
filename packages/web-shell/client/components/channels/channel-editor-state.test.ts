@@ -66,6 +66,83 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
   ],
 };
 
+describe.each(['dingtalk-webhook', 'feishu-webhook'])(
+  '%s outbound-only channel editing',
+  (type) => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type,
+      displayName: type,
+      manageable: true,
+      outboundOnly: true,
+      fields: [
+        {
+          key: 'webhookUrl',
+          label: 'Webhook URL',
+          kind: 'secret',
+          required: true,
+        },
+        { key: 'signingSecret', label: 'Signing secret', kind: 'secret' },
+      ],
+    };
+
+    it('validates and saves without inventing a receive policy', () => {
+      const draft = createChannelEditorDraft(descriptor);
+      draft.name = 'notices';
+      draft.secrets.webhookUrl = {
+        operation: 'replace',
+        value: '$GROUP_WEBHOOK_URL',
+      };
+      expect(draft.privatePolicy).toBe('');
+      expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({});
+      expect(buildChannelUpsertRequest(descriptor, draft, '1')).toEqual({
+        expectedRevision: '1',
+        config: { type },
+        secrets: {
+          webhookUrl: { operation: 'replace', value: '$GROUP_WEBHOOK_URL' },
+          signingSecret: { operation: 'clear' },
+        },
+      });
+    });
+
+    it('preserves required saved secrets but rejects clearing the endpoint', () => {
+      const instance: DaemonChannelInstanceSnapshot = {
+        name: 'notices',
+        config: { type },
+        secrets: {
+          webhookUrl: { present: true, source: 'environment' },
+          signingSecret: { present: true, source: 'literal' },
+        },
+        startsWithServe: false,
+        runtime: { state: 'stopped' },
+      };
+      const draft = createChannelEditorDraft(descriptor, instance);
+      expect(
+        validateChannelEditorDraft(descriptor, draft, [], instance),
+      ).toEqual({});
+      expect(
+        buildChannelUpsertRequest(descriptor, draft, '1', instance).secrets
+          ?.webhookUrl,
+      ).toEqual({ operation: 'preserve' });
+      expect(
+        buildChannelUpsertRequest(descriptor, draft, '1', instance).secrets
+          ?.signingSecret,
+      ).toEqual({ operation: 'preserve' });
+      draft.secrets.signingSecret = { operation: 'clear' };
+      expect(
+        validateChannelEditorDraft(descriptor, draft, [], instance),
+      ).toEqual({});
+      expect(
+        buildChannelUpsertRequest(descriptor, draft, '1', instance).secrets
+          ?.signingSecret,
+      ).toEqual({ operation: 'clear' });
+      draft.secrets.webhookUrl = { operation: 'clear' };
+      expect(
+        validateChannelEditorDraft(descriptor, draft, [], instance),
+      ).toEqual({ webhookUrl: 'required' });
+    });
+  },
+);
+
 const DINGTALK_WITH_ACCESS: DaemonChannelTypeDescriptor = {
   ...DINGTALK,
   fields: [
