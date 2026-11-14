@@ -41,18 +41,33 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain('/pkgdiet is the only entry point');
     expect(normalizedBody).toContain('does not gate subagents');
     expect(normalizedBody).toContain('qwen mcp remove --scope user pkgdiet');
+    expect(normalizedBody).toContain(
+      'installs the 2.x dependency tree at run time',
+    );
 
     // Bootstrap checks and options
     expect(normalizedBody).toContain('mcpServers.pkgdiet');
     expect(normalizedBody).toContain('reinstalling may overwrite');
     expect(normalizedBody).toContain('OVERRIDDEN by project/workspace');
     expect(normalizedBody).toContain('If shell execution is sandboxed');
+    expect(normalizedBody).toContain('qwen mcp approve pkgdiet');
+    expect(normalizedBody).toContain("serverName === 'pkgdiet'");
+    expect(normalizedBody).toContain('mcp__pkgdiet__check_dependency');
+    expect(normalizedBody).toContain(
+      'stop and name that server instead of proceeding',
+    );
 
     const sandboxCheck = normalizedBody.indexOf(
       'If shell execution is sandboxed',
     );
     const fastPath = normalizedBody.indexOf('skip to Instructions');
+    const stopProject = normalizedBody.indexOf(
+      'stop and name the winning file',
+    );
+
+    expect(sandboxCheck).toBeGreaterThanOrEqual(0);
     expect(fastPath).toBeGreaterThan(sandboxCheck);
+    expect(stopProject).toBeGreaterThan(fastPath);
 
     const confirmation = normalizedBody.indexOf(
       'Use `ask_user_question` to ask whether to continue',
@@ -83,6 +98,12 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain(
       'If the user cancels, gives any other answer, or the question cannot be shown, stop',
     );
+    expect(normalizedBody).toContain(
+      'downloaded and started by every session in every project until',
+    );
+    expect(normalizedBody).toContain(
+      'subagent, hook, workflow-script and terminal installs are not gated',
+    );
     expect(normalizedBody).toContain('NOT active');
 
     // Exact string pinning requested by review
@@ -106,6 +127,11 @@ describe('bundled pkgdiet skill', () => {
       'Never install a substitute the user has not explicitly approved',
     );
     expect(normalizedBody).toContain('not the transitive dependencies');
+    expect(normalizedBody).toContain('not a specific version');
+    expect(normalizedBody).toContain('could not evaluate this package');
+    expect(normalizedBody).toContain(
+      'read `reasons`. If they say the package was not evaluated',
+    );
 
     expect(normalizedBody).toContain('If verdict is WARN');
     expect(normalizedBody).toContain('ask the user');
