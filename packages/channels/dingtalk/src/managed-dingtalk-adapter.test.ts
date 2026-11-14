@@ -1139,4 +1139,44 @@ describe('managed DingTalk adapter review fixes', () => {
     expect(second.plane.submit.map((event) => event.text)).toEqual(['hello']);
     await second.adapter.disconnect();
   });
+
+  it('rejects connect when the lock is compromised during registration (R9-1)', async () => {
+    const cwd = tempCwd();
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    let compromise!: () => void;
+    let releaseRegister!: () => void;
+    const registerGate = new Promise<void>((resolve) => {
+      releaseRegister = resolve;
+    });
+    const originalRegister = plane.controlPlane.register.bind(
+      plane.controlPlane,
+    );
+    plane.controlPlane.register = async (request) => {
+      await registerGate;
+      return originalRegister(request);
+    };
+    const deps: ManagedDingtalkAdapterDeps = {
+      ...fake.deps,
+      lock: async (_directory, onCompromised) => {
+        compromise = onCompromised;
+        return async () => {};
+      },
+    };
+    const adapter = new ManagedDingtalkAdapter({
+      name: 'ding-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps,
+      pollLoop: false,
+    });
+    const connecting = adapter.connect();
+    await new Promise((resolve) => setImmediate(resolve));
+    compromise(); // lock lost while connect() awaits register
+    releaseRegister();
+    // The CLI treats a resolved connect() as a healthy start; a compromised
+    // adapter must reject so a supervisor can restart it, not park deaf.
+    await expect(connecting).rejects.toThrow('stopped during connection');
+  });
 });

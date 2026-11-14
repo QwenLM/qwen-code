@@ -238,6 +238,12 @@ export class ManagedDingtalkAdapter {
         throw new Error('Managed DingTalk adapter stopped during connection.');
       await this.ensureRegistered(this.state);
       await this.reportOrphanedOutbound();
+      // A lock compromise can land during the awaits above (the update timer
+      // fires while register() is in flight). Re-check so connect() rejects
+      // rather than resolving a healthy-looking start for a stopped, deaf
+      // adapter the CLI would then park on.
+      if (!this.running || this.ownershipLost)
+        throw new Error('Managed DingTalk adapter stopped during connection.');
       if (this.pollLoop) this.loop = this.runLoop();
     } catch (error) {
       this.stop();
