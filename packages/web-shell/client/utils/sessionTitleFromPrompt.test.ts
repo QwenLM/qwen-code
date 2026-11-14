@@ -54,4 +54,47 @@ describe('titleFromPrompt', () => {
     expect(titleFromPrompt('   ')).toBeUndefined();
     expect(titleFromPrompt('\n')).toBeUndefined();
   });
+
+  it('folds multi-line prompts when allowMultiLine is set', () => {
+    expect(
+      titleFromPrompt('Fix login\non mobile', { allowMultiLine: true }),
+    ).toBe('Fix login on mobile');
+    expect(
+      titleFromPrompt('Fix login\r\non mobile', { allowMultiLine: true }),
+    ).toBe('Fix login on mobile');
+    expect(titleFromPrompt('a\n\nb\rc', { allowMultiLine: true })).toBe(
+      'a b c',
+    );
+  });
+
+  it('still rejects multi-line prompts by default', () => {
+    expect(titleFromPrompt('Fix login\non mobile')).toBeUndefined();
+  });
+
+  it('truncates instead of rejecting when truncate is set', () => {
+    expect(titleFromPrompt('a'.repeat(41), { truncate: true })).toBe(
+      'a'.repeat(40),
+    );
+    expect(
+      titleFromPrompt('a'.repeat(200) + ' b', {
+        maxTitleLength: 200,
+        allowMultiLine: true,
+        truncate: true,
+      }),
+    ).toBe('a'.repeat(200));
+  });
+
+  it('still rejects prompts beyond the cap without truncate', () => {
+    expect(
+      titleFromPrompt('Fix login\non mobile', {
+        allowMultiLine: true,
+        maxTitleLength: 5,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('accepts one-character titles when minTitleLength is lowered', () => {
+    expect(titleFromPrompt('a', { minTitleLength: 1 })).toBe('a');
+    expect(titleFromPrompt('abc')).toBeUndefined();
+  });
 });
