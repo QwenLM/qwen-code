@@ -185,15 +185,18 @@ export function openSyncNoFollow(
  * {@link UNVERIFIABLE_IDENTITY_CODE}. The caller owns closing the returned
  * handle.
  *
- * Deliberately read-only with no `flags`/`mode` parameters: no caller needs
- * them, and an `fs.open`-shaped signature would invite write/create flags
- * through a helper whose semantics and tests cover only the read-only case.
- * Re-add them (with a caller and tests) in the PR that first needs them.
+ * `nonBlocking` adds `O_NONBLOCK` where available so callers can check the
+ * opened handle's type before reading. The helper always opens read-only.
  */
-export async function openNoFollow(filePath: string): Promise<FileHandle> {
+export async function openNoFollow(
+  filePath: string,
+  { nonBlocking = false }: { nonBlocking?: boolean } = {},
+): Promise<FileHandle> {
   // Optional chain so strict vitest mocks of node:fs that omit `constants`
   // degrade to plain O_RDONLY (= 0) instead of throwing at call time.
-  const baseFlags = fs.constants?.O_RDONLY ?? 0;
+  const baseFlags =
+    (fs.constants?.O_RDONLY ?? 0) |
+    (nonBlocking ? (fs.constants?.O_NONBLOCK ?? 0) : 0);
   const noFollowFlag = getNoFollowFlag();
   if (typeof noFollowFlag === 'number') {
     return fs.promises.open(filePath, baseFlags | noFollowFlag);

@@ -8,7 +8,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.automation.AutomationScanner;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcAutomationLedgerStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
@@ -186,7 +186,7 @@ public final class HostedAutomationCrashFixtureMain {
     // and the covered marker has not moved yet. Locking the schedule row
     // cannot express it (the settle's HELD proof reads the same row), so
     // the fixture parks the store's own advanceWatermark call instead.
-    static class HoldStore extends AutomationLedgerStore {
+    static class HoldStore extends JdbcAutomationLedgerStore {
         HoldStore(JdbcTemplate jdbc) {
             super(jdbc);
         }
@@ -211,7 +211,7 @@ public final class HostedAutomationCrashFixtureMain {
     static class FireHold {
         @Bean
         @Primary
-        AutomationLedgerStore holdStore(JdbcTemplate jdbc) {
+        JdbcAutomationLedgerStore holdStore(JdbcTemplate jdbc) {
             return new HoldStore(jdbc);
         }
 

@@ -63,6 +63,8 @@ import {
 import {
   ApprovalMode,
   ToolConfirmationOutcome,
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
 } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -73,6 +75,7 @@ import { createOpenTuiCommandContext } from './commands-context.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
 import type { StatusLineState } from '../hooks/useStatusLine.js';
 import { StreamingState } from '../types.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
 import type { HistoryItem } from '../types.js';
 import type { LiveHistoryItem } from './live-session-model.js';
 import {
@@ -118,6 +121,8 @@ const mocks = vi.hoisted(() => {
     inputProps: null as Record<string, unknown> | null,
     dialogProps: null as Record<string, unknown> | null,
     toolConfirmProps: null as Record<string, unknown> | null,
+    extensionSettingProps: null as Record<string, unknown> | null,
+    extensionChoiceProps: null as Record<string, unknown> | null,
     shellConfirmProps: null as Record<string, unknown> | null,
     actionConfirmProps: null as Record<string, unknown> | null,
     mcpApprovalProps: null as Record<string, unknown> | null,
@@ -382,6 +387,18 @@ vi.mock('./dialogs-confirm.js', () => ({
     return 'hooks-approval';
   },
 }));
+vi.mock('./ExtensionAcquisition.js', () => ({
+  ExtensionPluginChoice: (props: Record<string, unknown>) => {
+    mocks.state.extensionChoiceProps = props;
+    const permission = props['permission'] as { marketplace: { name: string } };
+    return <span>{`extension-choice:${permission.marketplace.name}`}</span>;
+  },
+  ExtensionSettingInput: (props: Record<string, unknown>) => {
+    mocks.state.extensionSettingProps = props;
+    const permission = props['permission'] as { setting: { name: string } };
+    return <span>{`extension-setting:${permission.setting.name}`}</span>;
+  },
+}));
 vi.mock('../hooks/useMcpApproval.js', () => ({
   useMcpApproval: () => ({
     isMcpApprovalDialogOpen: mocks.state.mcpQueue.length > 0,
@@ -439,7 +456,11 @@ vi.mock('../hooks/useStatusLine.js', () => ({
   },
 }));
 
-const extensionManager = { setRequestConsent: vi.fn() };
+const extensionManager = {
+  setRequestConsent: vi.fn(),
+  setRequestSetting: vi.fn(),
+  setRequestChoicePlugin: vi.fn(),
+};
 const CONFIG = {
   getResumedSessionData: () => undefined,
   getAuthType: () => 'openai',
@@ -2897,6 +2918,384 @@ describe('OpenTuiApp shell wiring', () => {
     ).toBeTruthy();
   });
 
+  describe('direct marketplace choice owner', () => {
+    type Manager = ReturnType<Config['getExtensionManager']>;
+    type ChoiceRequest = Parameters<Manager['setRequestChoicePlugin']>[0];
+    type SettingRequest = NonNullable<
+      Parameters<Manager['setRequestSetting']>[0]
+    >;
+    type ConsentRequest = Parameters<Manager['setRequestConsent']>[0];
+    const marketplace: Parameters<ChoiceRequest>[0] = {
+      name: 'Owned marketplace',
+      owner: { name: 'Owned', email: 'owned@example.invalid' },
+      plugins: [
+        {
+          name: 'alpha',
+          version: '1.0.0',
+          source: './alpha',
+          description: 'Owned Alpha',
+        },
+        {
+          name: 'beta',
+          version: '1.0.0',
+          source: './beta',
+          description: 'Owned Beta',
+        },
+      ],
+    };
+    function owner() {
+      const register = vi.fn<(request: ChoiceRequest) => void>();
+      const setting = vi.fn<(request: SettingRequest) => void>();
+      const consent = vi.fn<(request: ConsentRequest) => void>();
+      const config = {
+        ...CONFIG,
+        getExtensionManager: () => ({
+          setRequestChoicePlugin: register,
+          setRequestSetting: setting,
+          setRequestConsent: consent,
+        }),
+      } as unknown as Config;
+      return {
+        config,
+        register,
+        request: () => register.mock.calls.at(-1)![0],
+        setting: () => setting.mock.calls.at(-1)![0],
+        consent: () => consent.mock.calls.at(-1)![0],
+      };
+    }
+    function shell(config: Config, streaming = false) {
+      return (
+        <OpenTuiApp
+          config={config}
+          settings={SETTINGS}
+          logger={null}
+          commands={[]}
+          getSessionStats={getSessionStats}
+          streaming={streaming}
+        />
+      );
+    }
+    function permission() {
+      return mocks.state.extensionChoiceProps!['permission'] as {
+        resolve: (name: string) => void;
+        cancel: () => void;
+      };
+    }
+    it('resolves the selected plugin and preserves pending choice across rerenders', async () => {
+      const o = owner();
+      const view = render(shell(o.config));
+      await settle();
+      let pending!: Promise<string>;
+      await act(async () => {
+        pending = o.request()(marketplace);
+      });
+      expect(
+        screen.getByText('extension-choice:Owned marketplace'),
+      ).toBeTruthy();
+      expect(screen.queryByText('input-prompt')).toBeNull();
+      view.rerender(shell(o.config, true));
+      await settle();
+      expect(o.register).toHaveBeenCalledTimes(1);
+      await act(async () => permission().resolve('beta'));
+      await expect(pending).resolves.toBe('beta');
+      expect(screen.getByText('input-prompt')).toBeTruthy();
+    });
+    it('rejects cancellation rather than supplying an empty plugin name', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let pending!: Promise<string>;
+      await act(async () => {
+        pending = o.request()(marketplace);
+      });
+      const rejected = pending.catch((error: unknown) => error);
+      await act(async () => permission().cancel());
+      await expect(rejected).resolves.toMatchObject({
+        message: 'Plugin selection cancelled.',
+      });
+      expect(screen.getByText('input-prompt')).toBeTruthy();
+    });
+    it('keeps consecutive choices independent and ignores a stale submit', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let first!: Promise<string>;
+      let second!: Promise<string>;
+      await act(async () => {
+        first = o.request()(marketplace);
+        second = o.request()({ ...marketplace, name: 'Second marketplace' });
+      });
+      const old = permission();
+      expect(
+        screen.queryByText('extension-choice:Second marketplace'),
+      ).toBeNull();
+      await act(async () => old.resolve('alpha'));
+      await expect(first).resolves.toBe('alpha');
+      expect(
+        screen.getByText('extension-choice:Second marketplace'),
+      ).toBeTruthy();
+      const next = permission();
+      expect(next).not.toBe(old);
+      await act(async () => old.resolve('stale'));
+      expect(
+        screen.getByText('extension-choice:Second marketplace'),
+      ).toBeTruthy();
+      await act(async () => next.resolve('beta'));
+      await expect(second).resolves.toBe('beta');
+    });
+    it('shares FIFO with consent and setting without mixing resolutions', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let consent!: Promise<void>;
+      let choice!: Promise<string>;
+      let setting!: Promise<string>;
+      await act(async () => {
+        consent = o.consent()({
+          extensionConfig: { name: 'consent-first', version: '1.0.0' },
+          originSource: 'QwenCode',
+        });
+        choice = o.request()(marketplace);
+        setting = o.setting()({
+          name: 'Final setting',
+          description: 'Owned',
+          envVar: 'OWNED_VALUE',
+        });
+      });
+      expect(
+        screen.getByText(/Installing extension "consent-first"/),
+      ).toBeTruthy();
+      expect(
+        screen.queryByText('extension-choice:Owned marketplace'),
+      ).toBeNull();
+      await act(async () =>
+        (
+          mocks.state.actionConfirmProps!['onResolve'] as (yes: boolean) => void
+        )(true),
+      );
+      await expect(consent).resolves.toBeUndefined();
+      expect(
+        screen.getByText('extension-choice:Owned marketplace'),
+      ).toBeTruthy();
+      expect(screen.queryByText('extension-setting:Final setting')).toBeNull();
+      await act(async () => permission().resolve('beta'));
+      await expect(choice).resolves.toBe('beta');
+      expect(screen.getByText('extension-setting:Final setting')).toBeTruthy();
+      await act(async () =>
+        (
+          mocks.state.extensionSettingProps!['permission'] as {
+            resolve: (value: string) => void;
+          }
+        ).resolve('value'),
+      );
+      await expect(setting).resolves.toBe('value');
+    });
+    it.each(['replacement', 'unmount'] as const)(
+      'rejects pending and captured choices on %s',
+      async (change) => {
+        const old = owner();
+        const next = owner();
+        const view = render(shell(old.config));
+        await settle();
+        const captured = old.request();
+        let pending!: Promise<string>;
+        await act(async () => {
+          pending = captured(marketplace);
+        });
+        const rejected = pending.catch((error: unknown) => error);
+        const late = permission().resolve;
+        await act(async () => {
+          if (change === 'replacement') view.rerender(shell(next.config));
+          else view.unmount();
+        });
+        await expect(rejected).resolves.toMatchObject({
+          message: 'Plugin selection cancelled.',
+        });
+        await expect(captured(marketplace)).rejects.toThrow(
+          'Plugin selection cancelled.',
+        );
+        await act(async () => late('stale'));
+        if (change === 'replacement') {
+          let fresh!: Promise<string>;
+          await act(async () => {
+            fresh = next.request()(marketplace);
+          });
+          await act(async () => permission().resolve('beta'));
+          await expect(fresh).resolves.toBe('beta');
+          expect(next.register).toHaveBeenCalledTimes(1);
+        }
+      },
+    );
+  });
+
+  describe('direct extension setting owner', () => {
+    type Manager = ReturnType<Config['getExtensionManager']>;
+    type SettingRequest = NonNullable<
+      Parameters<Manager['setRequestSetting']>[0]
+    >;
+    type ConsentRequest = Parameters<Manager['setRequestConsent']>[0];
+    const setting = {
+      name: 'Owned label',
+      description: 'Required label',
+      envVar: 'OWNED_LABEL',
+    };
+    function owner() {
+      const register = vi.fn<(request: SettingRequest) => void>();
+      const consent = vi.fn<(request: ConsentRequest) => void>();
+      const config = {
+        ...CONFIG,
+        getExtensionManager: () => ({
+          setRequestSetting: register,
+          setRequestChoicePlugin: vi.fn(),
+          setRequestConsent: consent,
+        }),
+      } as unknown as Config;
+      return {
+        config,
+        register,
+        request: () => register.mock.calls.at(-1)![0],
+        consent: () => consent.mock.calls.at(-1)![0],
+      };
+    }
+    function shell(config: Config, streaming = false) {
+      return (
+        <OpenTuiApp
+          config={config}
+          settings={SETTINGS}
+          logger={null}
+          commands={[]}
+          getSessionStats={getSessionStats}
+          streaming={streaming}
+        />
+      );
+    }
+    function permission() {
+      return mocks.state.extensionSettingProps!['permission'] as {
+        resolve: (value: string) => void;
+        cancel: () => void;
+      };
+    }
+    it('owns setting input instead of composer and keeps exact value across rerenders', async () => {
+      const o = owner();
+      const view = render(shell(o.config));
+      await settle();
+      let pending!: Promise<string>;
+      await act(async () => {
+        pending = o.request()(setting);
+      });
+      expect(screen.getByText('extension-setting:Owned label')).toBeTruthy();
+      expect(screen.queryByText('input-prompt')).toBeNull();
+      view.rerender(shell(o.config, true));
+      await settle();
+      expect(o.register).toHaveBeenCalledTimes(1);
+      await act(async () => permission().resolve('owned-value'));
+      await expect(pending).resolves.toBe('owned-value');
+      expect(screen.getByText('input-prompt')).toBeTruthy();
+    });
+    it('keeps settings and consent in one FIFO without sharing resolution', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let value!: Promise<string>;
+      let consent!: Promise<void>;
+      await act(async () => {
+        value = o.request()(setting);
+        consent = o.consent()({
+          extensionConfig: { name: 'queued', version: '1.0.0' },
+          originSource: 'QwenCode',
+        });
+      });
+      expect(screen.getByText('extension-setting:Owned label')).toBeTruthy();
+      expect(screen.queryByText(/Installing extension "queued"/)).toBeNull();
+      await act(async () => permission().resolve('exact'));
+      await expect(value).resolves.toBe('exact');
+      expect(screen.getByText(/Installing extension "queued"/)).toBeTruthy();
+      await act(async () =>
+        (
+          mocks.state.actionConfirmProps!['onResolve'] as (yes: boolean) => void
+        )(true),
+      );
+      await expect(consent).resolves.toBeUndefined();
+    });
+    it('keeps consecutive setting requests independent and ignores the old submit', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let first!: Promise<string>;
+      let second!: Promise<string>;
+      await act(async () => {
+        first = o.request()(setting);
+        second = o.request()({
+          ...setting,
+          name: 'Second label',
+          envVar: 'SECOND_LABEL',
+        });
+      });
+      const old = permission();
+      expect(screen.queryByText('extension-setting:Second label')).toBeNull();
+      await act(async () => old.resolve('first-value'));
+      await expect(first).resolves.toBe('first-value');
+      expect(screen.getByText('extension-setting:Second label')).toBeTruthy();
+      const next = permission();
+      expect(next).not.toBe(old);
+      await act(async () => old.resolve('stale-value'));
+      expect(screen.getByText('extension-setting:Second label')).toBeTruthy();
+      await act(async () => next.resolve('second-value'));
+      await expect(second).resolves.toBe('second-value');
+    });
+    it('rejects a cancelled setting without committing a value', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let pending!: Promise<string>;
+      await act(async () => {
+        pending = o.request()(setting);
+      });
+      const rejected = pending.catch((error: unknown) => error);
+      await act(async () => permission().cancel());
+      await expect(rejected).resolves.toMatchObject({
+        message: 'Setting input cancelled',
+      });
+      expect(screen.getByText('input-prompt')).toBeTruthy();
+    });
+    it.each(['replacement', 'unmount'] as const)(
+      'rejects stale setting ownership on %s',
+      async (change) => {
+        const old = owner();
+        const next = owner();
+        const view = render(shell(old.config));
+        await settle();
+        const captured = old.request();
+        let pending!: Promise<string>;
+        await act(async () => {
+          pending = captured(setting);
+        });
+        const rejected = pending.catch((error: unknown) => error);
+        const late = permission().resolve;
+        await act(async () => {
+          if (change === 'replacement') view.rerender(shell(next.config));
+          else view.unmount();
+        });
+        await expect(rejected).resolves.toMatchObject({
+          message: 'Setting input cancelled',
+        });
+        await expect(captured(setting)).rejects.toThrow(
+          'Setting input cancelled',
+        );
+        await act(async () => late('stale'));
+        if (change === 'replacement') {
+          let fresh!: Promise<string>;
+          await act(async () => {
+            fresh = next.request()(setting);
+          });
+          await act(async () => permission().resolve('new'));
+          await expect(fresh).resolves.toBe('new');
+          expect(next.register).toHaveBeenCalledTimes(1);
+        }
+      },
+    );
+  });
+
   describe('direct extension consent owner', () => {
     type Consent = Parameters<
       ReturnType<Config['getExtensionManager']>['setRequestConsent']
@@ -2909,7 +3308,11 @@ describe('OpenTuiApp shell wiring', () => {
       const register = vi.fn<(request: Consent) => void>();
       const config = {
         ...CONFIG,
-        getExtensionManager: () => ({ setRequestConsent: register }),
+        getExtensionManager: () => ({
+          setRequestConsent: register,
+          setRequestSetting: vi.fn(),
+          setRequestChoicePlugin: vi.fn(),
+        }),
       } as unknown as Config;
       return {
         config,
@@ -4050,6 +4453,342 @@ describe('OpenTuiApp shell wiring', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(mocks.state.handledTexts).toEqual(['/compress']);
+  });
+
+  describe("a Mod's own prompts", () => {
+    afterEach(() => {
+      vi.mocked(interactiveMods.getInteractiveModSession).mockRestore?.();
+    });
+    function installMods(waiting: number) {
+      const listeners = new Set<() => void>();
+      const mods = {
+        waiting,
+        notePersonPrompt: vi.fn(),
+        subscribePrompts: (listener: () => void) => {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+        get hasSubmittedPrompts() {
+          return mods.waiting > 0;
+        },
+      };
+      vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue(
+        mods as unknown as ReturnType<
+          typeof interactiveMods.getInteractiveModSession
+        >,
+      );
+      const queue = async (count = 1) => {
+        mods.waiting += count;
+        await act(async () => {
+          for (const listener of listeners) listener();
+          await Promise.resolve();
+        });
+      };
+      return { mods, queue };
+    }
+    const runner = (mods: { waiting: number }) =>
+      vi.fn(() => {
+        if (mods.waiting === 0) return false;
+        mods.waiting -= 1;
+        return true;
+      });
+
+    it('runs one once idle, and the next when it is queued', async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      const props = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [] as readonly SlashCommand[],
+        getSessionStats,
+        onRunModPrompt,
+        streaming: true,
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      await queue();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={false} />);
+        await Promise.resolve();
+      });
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+
+      await queue();
+      expect(onRunModPrompt).toHaveBeenCalledTimes(2);
+      expect(mods.waiting).toBe(0);
+      expect(mods.notePersonPrompt).not.toHaveBeenCalled();
+    });
+
+    // #7156: a subagent's progress update, made inside its agent frame, can
+    // batch into the commit that runs the drain, and the Mod's turn would
+    // then resolve the subagent's model.
+    it("starts the Mod's turn outside a subagent's frame", async () => {
+      const { mods, queue } = installMods(0);
+      let runtimeView: unknown = 'unset';
+      const onRunModPrompt = vi.fn(() => {
+        runtimeView = getRuntimeContentGenerator();
+        mods.waiting -= 1;
+        return true;
+      });
+      renderApp({ onRunModPrompt });
+      await settle();
+      const subagentView = {
+        contentGenerator: {},
+        contentGeneratorConfig: { model: 'small-default' },
+      } as never;
+      await runWithRuntimeContentGenerator(subagentView, () => queue());
+
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+      expect(runtimeView).toBeUndefined();
+    });
+
+    it('waits while a Goal owns the turns, and runs once it lets go', async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      const goalListeners = new Set<() => void>();
+      let goalStatus: 'active' | 'complete' = 'active';
+      const goalRuntime = {
+        getSnapshot: () => ({
+          v: 2,
+          goal: { status: goalStatus },
+          activity: 'idle',
+        }),
+        subscribe: (listener: () => void) => {
+          goalListeners.add(listener);
+          return () => goalListeners.delete(listener);
+        },
+      };
+      renderApp({
+        config: {
+          ...CONFIG,
+          getGoalRuntime: () => goalRuntime,
+        } as unknown as Config,
+        onRunModPrompt,
+      });
+      await settle();
+      await queue();
+      // Core would run it as the person's Goal turn.
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      goalStatus = 'complete';
+      await act(async () => {
+        for (const listener of goalListeners) listener();
+        await Promise.resolve();
+      });
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+      expect(mods.waiting).toBe(0);
+    });
+
+    it("waits for the person's command still being routed, which resets the count", async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      renderApp({ onRunModPrompt });
+      await settle();
+      mocks.state.holdHandleOn = '/slow';
+      await submit('/slow');
+      expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
+      await queue();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+      // Input refused while it runs is no prompt of the person's.
+      await submit('/other');
+      await submit('look', ['/tmp/a.png']);
+      expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        mocks.state.releaseHandle?.();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(mocks.state.handledTexts).toEqual(['/slow']);
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("leaves a plain prompt's count to its turn", async () => {
+      const { mods } = installMods(0);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const onSubmitPrompt = vi.fn(() => true);
+      renderApp({ onSubmitPrompt });
+      await settle();
+      await submit('hello');
+      expect(onSubmitPrompt).toHaveBeenCalledTimes(1);
+      // The live turn counts it when it starts, as ink's submitQuery does.
+      expect(mods.notePersonPrompt).not.toHaveBeenCalled();
+    });
+
+    it('waits for a command whose defer verdict is still out when the turn ends', async () => {
+      const { mods } = installMods(1);
+      const order: string[] = [];
+      const onRunModPrompt = vi.fn(() => {
+        order.push('mod');
+        mods.waiting = 0;
+        return true;
+      });
+      const gate: { release: (defer: boolean) => void } = {
+        release: () => {
+          throw new Error('the mid-turn gate never asked for a verdict');
+        },
+      };
+      mocks.state.deferGate = () =>
+        new Promise<boolean>((resolve) => {
+          gate.release = resolve;
+        });
+      mocks.state.onHandle = (text) => order.push(text);
+      const props = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [] as readonly SlashCommand[],
+        getSessionStats,
+        onRunModPrompt,
+        streaming: true,
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      await submit('/compress');
+      await act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={false} />);
+        await Promise.resolve();
+      });
+      // The person's command has not been queued or run yet; the Mod's
+      // prompt must not take the idle moment from it.
+      expect(order).toEqual([]);
+
+      await act(async () => {
+        gate.release(true);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(order).toEqual(['/compress', 'mod']);
+    });
+
+    it("runs after the person's commands held back by the turn", async () => {
+      const { mods } = installMods(1);
+      const order: string[] = [];
+      const onRunModPrompt = vi.fn(() => {
+        order.push('mod');
+        mods.waiting = 0;
+        return true;
+      });
+      mocks.state.deferDuringStreaming = true;
+      mocks.state.onHandle = (text) => order.push(text);
+      const props = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [] as readonly SlashCommand[],
+        getSessionStats,
+        onRunModPrompt,
+        streaming: true,
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      await submit('/compress');
+      expect(order).toEqual([]);
+
+      await act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={false} />);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(order).toEqual(['/compress', 'mod']);
+    });
+
+    it('waits while a dialog is open, and runs once it closes', async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      renderApp({ onRunModPrompt, initialDialog: { dialog: 'help' } });
+      await settle();
+      await queue();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        (mocks.state.dialogProps?.['onClose'] as () => void)();
+        await Promise.resolve();
+      });
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts the person's `!` command and waits while it runs", async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      let release!: () => void;
+      const shellDone = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mocks.state.executeUserShell.mockReturnValue(shellDone);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      renderApp({ onRunModPrompt, onTranscriptEvent: vi.fn() });
+      await settle();
+      await act(async () => {
+        (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+      });
+      await submit('sleep 1');
+      expect(mocks.state.executeUserShell).toHaveBeenCalledOnce();
+      expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
+      await queue();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        release();
+        await shellDone;
+      });
+      await settle();
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts the person's `!` command the turn held back when it runs", async () => {
+      const { mods } = installMods(0);
+      const props = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [] as readonly SlashCommand[],
+        getSessionStats,
+        streaming: true,
+        onTranscriptEvent: vi.fn(),
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      await act(async () => {
+        (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+      });
+      await submit('ls');
+      expect(mocks.state.executeUserShell).not.toHaveBeenCalled();
+      expect(mods.notePersonPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={false} />);
+        await Promise.resolve();
+      });
+      expect(mocks.state.executeUserShell).toHaveBeenCalledOnce();
+      expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("waits for the person's submission while the command stack loads", async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      let load!: () => void;
+      const loaded = new Promise<readonly unknown[]>((resolve) => {
+        load = () => resolve([]);
+      });
+      mocks.state.loadCommandsOverride = () => loaded;
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const onSubmitPrompt = vi.fn(() => true);
+      renderApp({ commands: undefined, onRunModPrompt, onSubmitPrompt });
+      await settle();
+      // The dispatch waits for the command stack before the gateway is busy.
+      await submit('hello');
+      await queue();
+      expect(onSubmitPrompt).not.toHaveBeenCalled();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        load();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(onSubmitPrompt).toHaveBeenCalledTimes(1);
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('replays held commands in submission order, pausing behind a submit_prompt', async () => {

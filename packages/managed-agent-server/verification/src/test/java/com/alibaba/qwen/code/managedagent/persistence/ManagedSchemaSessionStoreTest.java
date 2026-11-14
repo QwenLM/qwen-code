@@ -4,12 +4,17 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -52,7 +57,7 @@ public class ManagedSchemaSessionStoreTest {
                         new ObjectMapper(),
                         clock,
                         ignored -> {},
-                        new ManagedWorkspaceRegistry(jdbc),
+                        new JdbcManagedWorkspaceRegistry(jdbc),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         tenant = "tenant-" + UUID.randomUUID();
         session =
@@ -75,7 +80,7 @@ public class ManagedSchemaSessionStoreTest {
     @Test
     void executionFactsReadNullableUnsignedWorkspaceGenerations() {
         assertThat(store.sessionsWithExecutionRegistryFacts(tenant, List.of(session))).isEmpty();
-        byte[] actor = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, "actor");
+        byte[] actor = ManagedWorkspaceRegistry.actorKey(tenant, "actor");
         jdbc.update(
                 "INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state) VALUES"
@@ -195,7 +200,7 @@ public class ManagedSchemaSessionStoreTest {
                                 "SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind = 'MESSAGE'"
                                         + " AND session_scope_key = ?",
                                 Integer.class,
-                                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session)))
+                                ManagedSessionStore.sessionScopeKey(tenant, session)))
                 .isEqualTo(1);
     }
 
@@ -273,7 +278,7 @@ public class ManagedSchemaSessionStoreTest {
         event("big", "a".repeat(70_000));
         materialize();
         String original = messageBody("big");
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
                 scope, scope, original, tenant, session);
         event("big", "b");
@@ -292,7 +297,7 @@ public class ManagedSchemaSessionStoreTest {
         makeProjectionCandidatesDue();
         projectionCollector().runOnce();
         assertThat(resourceState(original)).isEqualTo("COLLECTED");
-        assertThat(resourceState(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, privateBody.resourceId()))).isEqualTo("PUBLISHED");
+        assertThat(resourceState(ManagedSessionStore.resourceKey(scope, privateBody.resourceId()))).isEqualTo("PUBLISHED");
     }
 
     private void alignProjectionClock() {
@@ -346,19 +351,20 @@ public class ManagedSchemaSessionStoreTest {
                                                             "SELECT COUNT(*) FROM ma_request_receipt"
                                                                     + " WHERE namespace = 'SESSION_COMMAND'",
                                                             Long.class);
-                                            winner.execute(ignored -> store.beginSessionRename(
-                                                    tenant, "shared", "digest", other, "theirs"));
-                                            store.beginSessionRename(tenant, "shared", "digest", session, "mine");
+                                            winner.execute(ignored -> store.settleRenameSync(
+                                                    tenant, "shared", "digest", other, "theirs", "actor"));
+                                            store.settleRenameSync(tenant, "shared", "digest", session, "mine", "actor");
                                         }))
                 .isInstanceOfSatisfying(
                         com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
         assertThat(store.requireSession(tenant, session).title()).isEqualTo("title");
+        // The synchronous settlement writes no delivery row at all.
         assertThat(jdbc.queryForObject(
                         "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ?",
                         Long.class,
                         tenant))
-                .isEqualTo(1);
+                .isZero();
     }
 
     @Test
@@ -370,75 +376,66 @@ public class ManagedSchemaSessionStoreTest {
             var start = new java.util.concurrent.CyclicBarrier(2);
             var first = threads.submit(() -> {
                 start.await(10, java.util.concurrent.TimeUnit.SECONDS);
-                return tx.execute(status -> store.beginSessionRename(
-                        tenant, "first", "first-digest", session, "first"));
+                return tx.execute(status -> store.settleRenameSync(
+                        tenant, "first", "first-digest", session, "first", "actor"));
             });
             var second = threads.submit(() -> {
                 start.await(10, java.util.concurrent.TimeUnit.SECONDS);
-                return tx.execute(status -> store.beginSessionRename(
-                        tenant, "second", "second-digest", other, "second"));
+                return tx.execute(status -> store.settleRenameSync(
+                        tenant, "second", "second-digest", other, "second", "actor"));
             });
-            assertThat(first.get(15, java.util.concurrent.TimeUnit.SECONDS).renameRevision())
+            assertThat(first.get(15, java.util.concurrent.TimeUnit.SECONDS).revision())
                     .isEqualTo(1);
-            assertThat(second.get(15, java.util.concurrent.TimeUnit.SECONDS).renameRevision())
+            assertThat(second.get(15, java.util.concurrent.TimeUnit.SECONDS).revision())
                     .isEqualTo(1);
         }
+        // Both titles settle synchronously; no delivery row is ever created.
+        assertThat(store.requireSession(tenant, session).title()).isEqualTo("first");
+        assertThat(store.requireSession(tenant, other).title()).isEqualTo("second");
         assertThat(jdbc.queryForObject(
-                "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND state = 'PENDING' AND tenant_id = ?",
-                Long.class, tenant)).isEqualTo(2);
+                "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ?",
+                Long.class, tenant)).isZero();
     }
 
-    @Test
-    void renameRevisionAndClaimGenerationFenceStaleWorkers() {
-        var command =
-                tx.execute(
-                        status ->
-                                store.beginSessionRename(tenant, "r1", "digest", session, "first"));
-        var candidate = store.deliverableRenames(clock.millis()).getFirst();
-        var old =
-                tx.execute(
-                                status ->
-                                        store.claimRename(
-                                                candidate, "same-owner", Duration.ofSeconds(1)))
-                        .orElseThrow();
-        jdbc.update(
-                "UPDATE ma_operation SET claim_until = 946684800000 WHERE"
-                        + " operation_kind = 'RENAME' AND tenant_id = ?",
-                tenant);
-        var current =
-                tx.execute(
-                                status ->
-                                        store.claimRename(
-                                                candidate, "same-owner", Duration.ofSeconds(1)))
-                        .orElseThrow();
-        store.retryRename(old, "same-owner", 0);
-        assertThatThrownBy(
-                        () ->
-                                tx.execute(
-                                        status ->
-                                                store.completeSessionRename(
-                                                        old, "same-owner", "boot")))
-                .hasMessageContaining("claim was lost");
-        tx.execute(status -> store.completeSessionRename(current, "same-owner", "boot"));
-        assertThat(store.requireSession(tenant, session).title()).isEqualTo("first");
-        var later =
-                tx.execute(
-                        status ->
-                                store.beginSessionRename(
-                                        tenant, "r2", "digest2", session, "second"));
-        assertThat(later.renameRevision()).isGreaterThan(command.renameRevision());
-        assertThatThrownBy(
-                        () ->
-                                tx.execute(
-                                        status ->
-                                                store.completeSessionRename(
-                                                        tenant,
-                                                        "r1",
-                                                        session,
-                                                        "first",
-                                                        "boot",
-                                                        command.renameRevision())))
-                .hasMessageContaining("later Session title");
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void anOpenFirstRenameDoesNotHoldBackAnotherSessionsFirstRename(boolean sameTenant) throws Exception {
+        // Synchronous settlement writes no delivery row, so the tenant placement guard was the
+        // only lock a first rename held across Sessions. Holding one rename's transaction open
+        // must not hold back another Session's first rename, in the same tenant or another.
+        String otherTenant = sameTenant ? tenant : tenant + "-other";
+        String other = tx.execute(status -> store.insertSessionCommand(
+                otherTenant, "actor", "CREATE_SESSION", "create-other", "other-digest",
+                "qwen-code", null, "other", List.of(), null)).sessionId();
+        var held = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        try (var threads = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var first = threads.submit(() -> tx.execute(status -> {
+                var rename = store.settleRenameSync(
+                        tenant, "first", "first-digest", session, "first", "actor");
+                held.countDown();
+                try {
+                    // The hold must outlast the second rename's bound below, or a restored
+                    // guard self-releases before that bound expires and the case passes.
+                    release.await(30, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                return rename;
+            }));
+            try {
+                if (!held.await(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                    first.get(1, java.util.concurrent.TimeUnit.SECONDS); // rethrows the settlement's cause
+                    throw new AssertionError("first rename did not reach the held point");
+                }
+                var second = threads.submit(() -> tx.execute(status -> store.settleRenameSync(
+                        otherTenant, "second", "second-digest", other, "second", "actor")));
+                assertThat(second.get(15, java.util.concurrent.TimeUnit.SECONDS).revision()).isEqualTo(1);
+            } finally {
+                release.countDown();
+            }
+            assertThat(first.get(10, java.util.concurrent.TimeUnit.SECONDS).revision()).isEqualTo(1);
+        }
     }
 
     @Test
@@ -470,7 +467,7 @@ public class ManagedSchemaSessionStoreTest {
         jdbc.update(
                 "UPDATE ma_resource SET session_scope_key = ? WHERE resource_key = (SELECT"
                     + " body_resource_key FROM ma_message WHERE tenant_id = ? AND item_id = ?)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, "another-session"),
+                ManagedSessionStore.sessionScopeKey(tenant, "another-session"),
                 tenant,
                 "big");
         assertThatThrownBy(() -> messages())
@@ -581,9 +578,9 @@ public class ManagedSchemaSessionStoreTest {
         String token = "a".repeat(32);
         jdbc.update(
                 "INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.harnessDrainKey(
+                RuntimeAdmissionFences.harnessDrainKey(
                         tenant),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.harnessDrainKey(
+                RuntimeAdmissionFences.harnessDrainKey(
                         session),
                 tenant,
                 session,
@@ -798,7 +795,7 @@ public class ManagedSchemaSessionStoreTest {
                         new ObjectMapper(),
                         clock,
                         ignored -> {},
-                        new ManagedWorkspaceRegistry(duplicate),
+                        new JdbcManagedWorkspaceRegistry(duplicate),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         event("big", "x".repeat(70_000));
         if ("none".equals(corruption)) {
@@ -901,7 +898,7 @@ public class ManagedSchemaSessionStoreTest {
                 }
             };
             subject = new ManagedAgentStore(paused, new ObjectMapper(), clock, ignored -> {},
-                    new ManagedWorkspaceRegistry(paused), new ManagedAgentProperties(),
+                    new JdbcManagedWorkspaceRegistry(paused), new ManagedAgentProperties(),
                     new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         }
 

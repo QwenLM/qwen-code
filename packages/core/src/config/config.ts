@@ -175,10 +175,6 @@ import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import {
-  AUTO_MEMORY_SKILL_NAME,
-  MainSessionAutoMemoryPolicy,
-} from '../skills/auto-memory-skill.js';
-import {
   authoredSkillName,
   skillRestrictionNames,
   type SkillLevel,
@@ -454,6 +450,7 @@ import {
 } from '../memory/metadata-migration.js';
 import {
   buildAutoMemoryIndexContext,
+  buildResidentAutoMemoryPrompt,
   buildStructuredAutoMemoryPrompt,
 } from '../memory/prompt.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
@@ -548,6 +545,7 @@ import {
   type ResolvedModelConfig,
   type RuntimeModelSnapshot,
 } from '../models/index.js';
+import type { ModelSwitchOptions } from '../models/modelsConfig.js';
 import { resolveModelId } from '../utils/modelId.js';
 import type { WebSearchSettings } from '../tools/web-search.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
@@ -1453,6 +1451,8 @@ export interface ConfigParameters {
   agentTeamEnabled?: boolean;
   /** Experimental: run migrated surfaces on the shared agent loop. */
   unifiedAgentLoopEnabled?: boolean;
+  /** Experimental: run the shared agent loop on the event bus. */
+  eventBusAgentLoopEnabled?: boolean;
   /**
    * Opt-in for persistent workspace Agents answering @-mentions in chat
    * sessions. Separate from `agentTeamEnabled`: neither implies the other.
@@ -1622,6 +1622,14 @@ export interface ConfigParameters {
   autoCompactThreshold?: number;
   interactive?: boolean;
   trustedFolder?: boolean;
+  /**
+   * The trust file's decision for `dir` when a rule set strictly inside the
+   * IDE workspace root `ideRoot` decides it; such a rule wins over the IDE.
+   */
+  trustFileDecisionBelowIdeRoot?: (
+    dir: string,
+    ideRoot: string,
+  ) => boolean | undefined;
   defaultFileEncoding?: FileEncodingType;
   useRipgrep?: boolean;
   useBuiltinRipgrep?: boolean;
@@ -3133,18 +3141,8 @@ export class Config {
   private promptToolSnapshot: ReadonlySet<string> | undefined;
   private promptAgentReachable = false;
 
-  /**
-   * Stable managed-memory policy, separate from the changing catalog. Empty
-   * while the legacy main-session policy below is in effect.
-   */
+  /** Stable managed-memory policy, separate from the changing catalog. */
   private autoMemoryPrompt = '';
-  /**
-   * The legacy main-session policy, resolved per reading Config: whether it
-   * points at the bundled `auto-memory` reference depends on the reader's
-   * route to the Skill tool (#16291). Set only by a legacy refresh, cleared by
-   * every path that sets `autoMemoryPrompt` instead.
-   */
-  private mainSessionAutoMemoryPolicy: MainSessionAutoMemoryPolicy | undefined;
   private autoMemoryContext = '';
   private memoryRecallMode: MemoryRecallMode = 'legacy';
   private memoryCorpusRevision = '';
@@ -3275,6 +3273,7 @@ export class Config {
   private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
   private readonly unifiedAgentLoopEnabled: boolean = false;
+  private readonly eventBusAgentLoopEnabled: boolean = false;
   private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private readonly artifactRecordingSupported: boolean = true;
@@ -3313,6 +3312,8 @@ export class Config {
    * lazily on first use, never persisted. */
   private omniMediaResourceRegistry?: MediaResourceRegistry;
   private workflowsEnabled: boolean | undefined;
+  /** Workflows are on because the bundled review skill turned them on. */
+  private workflowsEnabledByReviewSkill = false;
   private workflowKeywordTriggerEnabled: boolean;
   private readonly sessionWorkflowEnabled: boolean;
   private sessionWorkflowEnabledProvider?: () => boolean;
@@ -3343,6 +3344,9 @@ export class Config {
   private readonly autoCompactThreshold: number | undefined;
   private readonly interactive: boolean;
   private readonly trustedFolder: boolean | undefined;
+  private readonly trustFileDecisionBelowIdeRoot:
+    | ((dir: string, ideRoot: string) => boolean | undefined)
+    | undefined;
   private readonly useRipgrep: boolean;
   private readonly useBuiltinRipgrep: boolean;
   private readonly shouldUseNodePtyShell: boolean;
@@ -3738,6 +3742,7 @@ export class Config {
     this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled ?? false;
+    this.eventBusAgentLoopEnabled = params.eventBusAgentLoopEnabled ?? false;
     this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactRecordingSupported = params.artifactRecordingSupported ?? true;
@@ -3801,6 +3806,7 @@ export class Config {
     this.autoCompactThreshold = params.autoCompactThreshold;
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
+    this.trustFileDecisionBelowIdeRoot = params.trustFileDecisionBelowIdeRoot;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     // Embedders bypass the CLI's check; an unknown mode would act as `off`.
     this.loopProtection = isLoopProtectionMode(params.loopProtection)
@@ -5645,7 +5651,6 @@ export class Config {
     if (this.isSafeMode()) {
       this.setUserMemory('');
       this.autoMemoryPrompt = '';
-      this.mainSessionAutoMemoryPolicy = undefined;
       this.autoMemoryContext = '';
       this.setMemoryFileCount(0);
       this.setContextFilePaths([]);
@@ -5837,7 +5842,6 @@ export class Config {
           userSection.memoryDir,
           teamSection?.memoryDir,
         );
-        this.mainSessionAutoMemoryPolicy = undefined;
       } else {
         const catalog = buildAutoMemoryIndexContext(
           memoryDir,
@@ -5845,19 +5849,16 @@ export class Config {
           userSection,
           teamSection,
         );
-        this.autoMemoryPrompt = '';
-        this.mainSessionAutoMemoryPolicy = new MainSessionAutoMemoryPolicy({
+        this.autoMemoryPrompt = buildResidentAutoMemoryPrompt(
           memoryDir,
-          indexContent: managedAutoMemoryIndex,
           userSection,
           teamSection,
-        });
+        );
         this.autoMemoryContext = catalog;
       }
     } else {
       this.setUserMemory(memoryContent);
       this.autoMemoryPrompt = '';
-      this.mainSessionAutoMemoryPolicy = undefined;
       this.autoMemoryContext = '';
     }
     this.setMemoryFileCount(fileCount);
@@ -6159,7 +6160,10 @@ export class Config {
     const session = new QwenSubscriptionSession();
     const identity = session.getIdentity();
     this.subscriptionModelIdentity = undefined;
-    const result = await this.modelsConfig.refreshSubscriptionModels(signal);
+    const result = await this.modelsConfig.refreshSubscriptionModels(
+      signal,
+      this.getCliVersion(),
+    );
     if (identity && session.getIdentity() === identity) {
       this.subscriptionModelIdentity = identity;
     }
@@ -6173,14 +6177,27 @@ export class Config {
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */
-  async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
-    return this.rebuildContentGenerator(authMethod, isInitialAuth, true);
+  async refreshAuth(
+    authMethod: AuthType,
+    isInitialAuth?: boolean,
+    subscriptionFallbackModel?: string,
+    allowUnlistedSubscriptionModel?: boolean,
+  ) {
+    return this.rebuildContentGenerator(
+      authMethod,
+      isInitialAuth,
+      true,
+      subscriptionFallbackModel,
+      allowUnlistedSubscriptionModel,
+    );
   }
 
   private async rebuildContentGenerator(
     authMethod: AuthType,
     isInitialAuth: boolean | undefined,
     refreshSubscriptionModels: boolean,
+    subscriptionFallbackModel?: string,
+    allowUnlistedSubscriptionModel?: boolean,
   ) {
     const hookOwner = captureHookExecutionOwner(this, null);
     if (!this.contentGenerator && authMethod === this.initialAuthType) {
@@ -6206,6 +6223,7 @@ export class Config {
       ? priorReasoning.effort
       : undefined;
 
+    let fallbackModel: string | undefined;
     if (authMethod === AuthType.QWEN_SUBSCRIPTION) {
       const { models } = refreshSubscriptionModels
         ? await this.refreshSubscriptionModels()
@@ -6216,12 +6234,24 @@ export class Config {
           };
       const selected = this.modelsConfig.getModel();
       if (selected && !models.includes(selected)) {
-        throw new Error(subscriptionModelUnavailable(selected));
+        if (
+          isInitialAuth &&
+          subscriptionFallbackModel &&
+          models.includes(subscriptionFallbackModel)
+        ) {
+          fallbackModel = subscriptionFallbackModel;
+        } else if (
+          !isInitialAuth ||
+          !allowUnlistedSubscriptionModel ||
+          priorGeneration.authType !== authMethod
+        ) {
+          throw new Error(subscriptionModelUnavailable(selected));
+        }
       }
     }
 
-    // Sync modelsConfig state for this auth refresh.
-    const modelId = this.modelsConfig.getModel();
+    // The CLI's resolved subscription credentials preserve an unlisted model during sync.
+    const modelId = fallbackModel ?? this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
 
     // Check and consume cached credentials flag
@@ -7304,13 +7334,30 @@ export class Config {
    * model. Bare selectors stay bare and authType-qualified selectors keep their
    * authType prefix so selector-aware runtime paths can route cross-auth calls.
    */
-  getFastModel(): string | undefined {
+  getFastModel({ requirePinnedEndpoint = false } = {}): string | undefined {
     const selector = this.resolveFastModelSelector();
     if (!selector) return undefined;
 
     const available = selector.authType
       ? this.getAllConfiguredModels([selector.authType])
       : this.getAllConfiguredModels();
+    const pinnedEndpoint = this.fastModel?.trim().split('\0')[1];
+    if (
+      requirePinnedEndpoint &&
+      pinnedEndpoint !== undefined &&
+      !available.some(
+        (model) =>
+          model.id === selector.modelId &&
+          model.baseUrl === pinnedEndpoint &&
+          !model.voiceOnly &&
+          !model.imageOnly &&
+          !model.visionOnly,
+      )
+    ) {
+      throw new Error(
+        'Fast model is no longer configured at the selected endpoint',
+      );
+    }
     if (
       !available.some(
         (model) =>
@@ -7823,10 +7870,11 @@ export class Config {
   private async handleModelChange(
     authType: AuthType,
     requiresRefresh: boolean,
+    initializeIfNeeded?: boolean,
   ): Promise<void> {
     this.initialResolvedAuthType = undefined;
     if (!this.contentGeneratorConfig) {
-      if (authType === AuthType.QWEN_SUBSCRIPTION)
+      if (initializeIfNeeded || authType === AuthType.QWEN_SUBSCRIPTION)
         await this.refreshAuth(authType);
       return;
     }
@@ -8026,7 +8074,7 @@ export class Config {
   async switchModel(
     authType: AuthType,
     modelId: string,
-    options?: { requireCachedCredentials?: boolean; baseUrl?: string },
+    options?: ModelSwitchOptions,
   ): Promise<void> {
     await this.modelsConfig.switchModel(authType, modelId, options);
     this.notifyModelChangeListeners();
@@ -8317,7 +8365,6 @@ export class Config {
     // reassigns it, and the stale text keeps routing to search_memory while
     // the reset mode leaves that tool undeclared.
     this.autoMemoryPrompt = '';
-    this.mainSessionAutoMemoryPolicy = undefined;
     this.autoMemoryContext = '';
 
     let memoryRefreshError: unknown;
@@ -8781,18 +8828,6 @@ export class Config {
       skill.level === 'bundled' &&
       skill.name === 'generated-ui' &&
       !this.getBundledGeneratedUiStatus().enabled
-    ) {
-      return false;
-    }
-    // The auto-memory reference only serves the legacy managed auto-memory
-    // policy; without it, or under the structured protocol (`manage_memory`,
-    // no direct file access), the skill would be listed on every request for
-    // nothing.
-    if (
-      skill.level === 'bundled' &&
-      skill.name === AUTO_MEMORY_SKILL_NAME &&
-      (!this.getManagedAutoMemoryEnabled() ||
-        this.getMemoryRecallMode() !== 'legacy')
     ) {
       return false;
     }
@@ -9720,20 +9755,8 @@ export class Config {
     this.promptAgentReachable = reachable;
   }
 
-  /**
-   * Managed-memory policy for the system prompt, without legacy indexes.
-   *
-   * In legacy mode the main-session policy is resolved for the Config it is
-   * read through, so a subagent's derived Config with no route to the Skill
-   * tool gets the full policy rather than the session's pointer (#16291).
-   */
+  /** Managed-memory policy for the system prompt, without legacy indexes. */
   getAutoMemoryPrompt(): string {
-    if (
-      this.memoryRecallMode === 'legacy' &&
-      this.mainSessionAutoMemoryPolicy !== undefined
-    ) {
-      return this.mainSessionAutoMemoryPolicy.forConfig(this);
-    }
     return this.autoMemoryPrompt;
   }
 
@@ -10857,6 +10880,13 @@ export class Config {
     return this.unifiedAgentLoopEnabled;
   }
 
+  isEventBusAgentLoopEnabled(): boolean {
+    if (process.env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] === '1') {
+      return true;
+    }
+    return this.eventBusAgentLoopEnabled;
+  }
+
   /**
    * Whether persistent workspace Agents may answer @-mentions in chat
    * sessions.
@@ -11118,6 +11148,19 @@ export class Config {
     this.refreshWorkflowMode();
   }
 
+  /**
+   * Applies a reloaded `tools.workflowsEnabled`. When the settings leave it
+   * unset, workflows the bundled review skill turned on stay on: that enable
+   * never came from settings, and undoing it on an unrelated settings change
+   * would end the review's background runs. A value the settings do give
+   * replaces it.
+   */
+  applyWorkflowsEnabledSetting(enabled: boolean | undefined): void {
+    if (enabled === undefined && this.workflowsEnabledByReviewSkill) return;
+    this.workflowsEnabledByReviewSkill = false;
+    this.setWorkflowsEnabled(enabled);
+  }
+
   isWorkflowModeSupported(): boolean {
     return (
       !isDerivedConfig(this) &&
@@ -11336,6 +11379,7 @@ export class Config {
       return;
     }
     if (await this.registerWorkflowTool(this.getToolRegistry())) {
+      this.workflowsEnabledByReviewSkill ||= this.workflowsEnabled !== true;
       this.setWorkflowsEnabled(true);
       await this.getLlmClient().setTools();
     }
@@ -12361,17 +12405,24 @@ export class Config {
       : this.allowPrivateNetworkHooks;
   }
 
-  isTrustedFolder(): boolean {
-    const context = ideContextStore.get();
-    if (context?.workspaceState?.isTrusted !== undefined) {
-      return context.workspaceState.isTrusted;
-    }
+  private getIdeWorkspaceTrust(): boolean | undefined {
+    const dir = this.getTargetDir();
+    const scope = ideContextStore.getWorkspaceTrustScope(dir);
+    const isTrusted = this.experimentalZedIntegration
+      ? scope?.isTrusted
+      : ideContextStore.get()?.workspaceState?.isTrusted;
+    if (isTrusted === undefined || scope?.root === undefined) return isTrusted;
+    return this.trustFileDecisionBelowIdeRoot?.(dir, scope.root) ?? isTrusted;
+  }
 
-    return this.trustedFolder ?? !this.folderTrust;
+  isTrustedFolder(): boolean {
+    return (
+      this.getIdeWorkspaceTrust() ?? this.trustedFolder ?? !this.folderTrust
+    );
   }
 
   isExplicitlyTrustedFolder(): boolean {
-    const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+    const ideTrust = this.getIdeWorkspaceTrust();
     return (
       (this.folderTrust || ideTrust !== undefined) && this.isTrustedFolder()
     );
