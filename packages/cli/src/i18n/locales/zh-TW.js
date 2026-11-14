@@ -28,6 +28,8 @@ export default {
   'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
     '在支援的本機工作階段中啟用內建 Generated UI。重新建立所屬工作階段後生效。',
 
+  'Toggle the Superfast decision gate (local System One model)':
+    '切換 Superfast 決策閘（本地 System One 模型）',
   'Cannot disable an extension-provided MCP server here.':
     '無法在此處停用擴展提供的 MCP 伺服器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的認證資訊。',
